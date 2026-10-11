@@ -90,6 +90,21 @@ async def test_tenant_running_cap(migrated_db) -> None:  # noqa: ANN001
     assert await jobs.claim_jobs("w2", kinds=(JobKind.run,), batch=10) == []
 
 
+async def test_fencing_after_lease_expiry(migrated_db, queue_settings) -> None:  # noqa: ANN001
+    queue_settings(job_lease_seconds=1)
+    job = await _job()
+    [claimed] = await jobs.claim_jobs("w1", kinds=(JobKind.run,), batch=1)
+    assert (await jobs.heartbeat("w1", job_ids=[job.id], partition_ids=[]))[0] == [job.id]
+    await asyncio.sleep(1.3)
+    await jobs.reap(backoff_base=0.0, backoff_cap=0.0)  # Task 9; requeues
+    assert await jobs.heartbeat("w1", job_ids=[job.id], partition_ids=[]) == ([], [])
+    assert (
+        await jobs.advance_job("w1", job.id, phase=JobPhase.finalize, state=JobState.queued)
+        is False
+    )
+    assert claimed.attempts == 1
+
+
 async def test_advance_job_terminal_purges_key_and_sets_expiry(migrated_db) -> None:  # noqa: ANN001
     job = await _job(sealed_secret=b"\x01sealed")
     await jobs.claim_jobs("w1", kinds=(JobKind.run,), batch=1)

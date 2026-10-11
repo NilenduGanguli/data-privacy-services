@@ -22,7 +22,7 @@ import socket
 import time
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 from pydantic import BaseModel, Field
@@ -30,8 +30,8 @@ from pydantic import BaseModel, Field
 from dps import db
 from dps.ids import new_id
 from dps.jobs_models import JobProgress
-from dps.layers.connectors.base import EncodedKey
-from dps.observability import JOBS_CLAIMED, get_logger
+from dps.layers.connectors.base import EncodedKey, KeyRange, key_fingerprint
+from dps.observability import JOBS_CLAIMED, PARTITIONS_FINISHED, get_logger
 
 logger = get_logger(__name__)
 
@@ -751,3 +751,662 @@ async def ensure_retention_job(interval_hours: int) -> bool:
 def worker_id() -> str:
     """Unique per process start: ``<hostname>:<pid>:<6 hex>`` — the fencing identity."""
     return f"{socket.gethostname()}:{os.getpid()}:{random.randint(0, 0xFFFFFF):06x}"
+
+
+# --- partitions, the finalize transition, reaper, controls, stats (Task 9) -------------------
+
+_MAYBE_FINALIZE = """UPDATE {s}.dps_job j
+SET phase = 'finalize', state = 'queued', run_after = now(), attempts = 0, updated_at = now()
+WHERE j.id = $1 AND j.phase = 'partitions' AND j.state IN ('waiting', 'paused')
+  AND NOT EXISTS (SELECT 1 FROM {s}.dps_job_partition p
+                  WHERE p.job_id = j.id AND p.state IN ('queued', 'running'))
+RETURNING j.id"""
+
+
+async def _lock_job(conn: asyncpg.Connection, job_id: str) -> None:
+    """Lock the job row (always BEFORE touching its partitions in the same transaction)."""
+    await conn.execute(
+        f"SELECT 1 FROM {db.schema_ident()}.dps_job WHERE id = $1 FOR UPDATE", job_id
+    )
+
+
+async def _maybe_finalize(conn: asyncpg.Connection, job_id: str) -> bool:
+    """Move a partitions-phase job to finalize when no partition is queued/running.
+
+    Exactly once: every caller holds the job-row lock (:func:`_lock_job`) in the same
+    transaction, so the last finisher's ``NOT EXISTS`` sees every earlier finisher's commit.
+    """
+    row = await conn.fetchrow(_MAYBE_FINALIZE.format(s=db.schema_ident()), job_id)
+    if row is not None:
+        await conn.execute("SELECT pg_notify($1, 'finalize')", NOTIFY_CHANNEL)
+    return row is not None
+
+
+async def add_partitions(
+    worker_id: str,
+    job_id: str,
+    ranges: list[KeyRange],
+    *,
+    plan: dict[str, Any] | None = None,
+    progress: dict[str, Any] | None = None,
+) -> int:
+    """Atomically replace the job's partitions and move it to ``partitions/waiting`` (fenced).
+
+    Returns ``len(ranges)``, or 0 when the fence failed (the caller treats that as a lost lease).
+    Partitions left by an earlier, crashed prepare attempt are deleted first.
+    """
+    settings = db.active_settings()
+    s = db.schema_ident()
+    async with db.acquire_queue(None) as conn, conn.transaction():
+        tenant = await conn.fetchval(
+            f"SELECT tenant_id FROM {s}.dps_job WHERE id = $1 AND locked_by = $2 "
+            "AND state = 'running' FOR UPDATE",
+            job_id,
+            worker_id,
+        )
+        if tenant is None:
+            return 0
+        await conn.execute(f"DELETE FROM {s}.dps_job_partition WHERE job_id = $1", job_id)
+        await conn.executemany(
+            f"INSERT INTO {s}.dps_job_partition (job_id, tenant_id, partition_no, lower_key, "
+            "upper_key, max_attempts) VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)",
+            [
+                (job_id, tenant, i, r.lower, r.upper, settings.partition_max_attempts)
+                for i, r in enumerate(ranges)
+            ],
+        )
+        await conn.execute(
+            f"UPDATE {s}.dps_job SET phase = 'partitions', state = 'waiting', locked_by = NULL, "
+            "lease_expires_at = NULL, attempts = 0, plan = COALESCE($2::jsonb, plan), "
+            "progress = progress || $3::jsonb, updated_at = now() WHERE id = $1",
+            job_id,
+            plan,
+            {**(progress or {}), "partitions_total": len(ranges)},
+        )
+        await conn.execute("SELECT pg_notify($1, 'partition')", NOTIFY_CHANNEL)
+    return len(ranges)
+
+
+async def claim_partitions(worker_id: str, *, batch: int) -> list[ClaimedPartition]:
+    """Claim due partitions of ``waiting`` run jobs: per-job ``parallelism`` and per-tenant caps.
+
+    The tenant cap ranks only the partitions each job may still start (its ``parallelism`` minus
+    its running partitions), so an older job's queued backlog never starves a newer job of the
+    tenant's free slots; the inner locking select takes the eligible rows in FIFO order.
+    """
+    if batch <= 0:
+        return []
+    settings = db.active_settings()
+    s = db.schema_ident()
+    sql = f"""
+WITH running AS (
+    SELECT tenant_id, count(*) AS n FROM (
+        SELECT tenant_id FROM {s}.dps_job WHERE state = 'running'
+        UNION ALL
+        SELECT tenant_id FROM {s}.dps_job_partition WHERE state = 'running') r
+    GROUP BY tenant_id),
+job_running AS (
+    SELECT job_id, count(*) AS n FROM {s}.dps_job_partition
+    WHERE state = 'running' GROUP BY job_id),
+ranked AS (
+    SELECT p.id, p.tenant_id, p.job_id, p.partition_no, j.priority, j.created_at AS job_created,
+           COALESCE((j.spec #>> '{{source,parallelism}}')::int, 4) AS par,
+           row_number() OVER (PARTITION BY p.job_id ORDER BY p.run_after, p.partition_no) AS rn_job
+    FROM {s}.dps_job_partition p JOIN {s}.dps_job j ON j.id = p.job_id
+    WHERE p.state = 'queued' AND p.run_after <= now()
+      AND j.state = 'waiting' AND j.phase = 'partitions'),
+job_ok AS (
+    SELECT r.id, r.tenant_id, r.job_id, r.partition_no, r.priority, r.job_created,
+           row_number() OVER (PARTITION BY r.tenant_id
+                              ORDER BY r.priority, r.job_created, r.job_id, r.partition_no)
+               AS rn_tenant
+    FROM ranked r LEFT JOIN job_running jr ON jr.job_id = r.job_id
+    WHERE r.rn_job <= GREATEST(r.par - COALESCE(jr.n, 0), 0)),
+eligible AS (
+    SELECT o.id,
+           row_number() OVER (ORDER BY o.priority, o.job_created, o.job_id, o.partition_no) AS ord
+    FROM job_ok o
+    LEFT JOIN running tr ON tr.tenant_id = o.tenant_id
+    LEFT JOIN {s}.dps_tenant t ON t.tenant_id = o.tenant_id
+    WHERE o.rn_tenant <= GREATEST(COALESCE(t.max_running, $3) - COALESCE(tr.n, 0), 0)
+    ORDER BY o.priority, o.job_created, o.job_id, o.partition_no
+    LIMIT $4)
+UPDATE {s}.dps_job_partition p
+SET state = 'running', locked_by = $1, attempts = p.attempts + 1,
+    lease_expires_at = now() + make_interval(secs => $2),
+    started_at = COALESCE(p.started_at, now()), updated_at = now()
+FROM (SELECT q.id FROM {s}.dps_job_partition q JOIN eligible e ON e.id = q.id
+      WHERE q.state = 'queued'
+      ORDER BY e.ord
+      FOR UPDATE OF q SKIP LOCKED LIMIT $5) c
+WHERE p.id = c.id
+RETURNING p.id, p.job_id, p.tenant_id, p.partition_no, p.lower_key, p.upper_key, p.last_key,
+          p.batch_no, p.attempts, p.max_attempts, p.lease_expires_at, p.rows_written, p.resumed"""
+    async with db.acquire_queue(None) as conn, conn.transaction():
+        rows = await conn.fetch(
+            sql,
+            worker_id,
+            float(settings.partition_lease_seconds),
+            settings.job_tenant_max_running,
+            max(batch * 4, 50),
+            batch,
+        )
+    parts = [ClaimedPartition.model_validate(dict(r)) for r in rows]
+    return sorted(parts, key=lambda p: (p.job_id, p.partition_no))
+
+
+async def checkpoint(
+    worker_id: str,
+    partition_id: int,
+    *,
+    last_key: EncodedKey,
+    batch_no: int,
+    rows_read: int,
+    rows_written: int,
+    rows_skipped: int,
+    values_by_method: dict[str, int],
+    verify_checked: int,
+) -> bool:
+    """Record one committed batch (deltas) and renew the lease; fenced. ``False`` = stop now."""
+    settings = db.active_settings()
+    s = db.schema_ident()
+    async with db.acquire_queue(None) as conn:
+        tag = await conn.execute(
+            f"UPDATE {s}.dps_job_partition SET last_key = $3::jsonb, batch_no = $4, "
+            "rows_read = rows_read + $5, rows_written = rows_written + $6, "
+            "rows_skipped = rows_skipped + $7, "
+            f"values_by_method = {s}.dps_jsonb_add(values_by_method, $8::jsonb), "
+            "verify_checked = verify_checked + $9, "
+            "lease_expires_at = now() + make_interval(secs => $10), updated_at = now() "
+            "WHERE id = $1 AND locked_by = $2 AND state = 'running'",
+            partition_id,
+            worker_id,
+            last_key,
+            batch_no,
+            rows_read,
+            rows_written,
+            rows_skipped,
+            values_by_method,
+            verify_checked,
+            float(settings.partition_lease_seconds),
+        )
+    return db.rowcount(tag) > 0
+
+
+async def finish_partition(
+    worker_id: str,
+    partition_id: int,
+    state: PartitionState,
+    *,
+    error_code: str | None = None,
+    error: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> bool:
+    """Terminal partition state (fenced) + the exactly-once finalize transition of its job."""
+    s = db.schema_ident()
+    async with db.acquire_queue(None) as conn, conn.transaction():
+        job_id = await conn.fetchval(
+            f"SELECT job_id FROM {s}.dps_job_partition WHERE id = $1", partition_id
+        )
+        if job_id is None:
+            return False
+        await _lock_job(conn, job_id)
+        tag = await conn.execute(
+            f"UPDATE {s}.dps_job_partition SET state = $3, "
+            "error_code = COALESCE($4, error_code), error = COALESCE($5, error), "
+            "meta = meta || COALESCE($6::jsonb, '{}'::jsonb), locked_by = NULL, "
+            "lease_expires_at = NULL, finished_at = now(), updated_at = now() "
+            "WHERE id = $1 AND locked_by = $2 AND state = 'running'",
+            partition_id,
+            worker_id,
+            state.value,
+            error_code,
+            (error or "")[:500] or None,
+            meta,
+        )
+        if db.rowcount(tag) == 0:
+            return False
+        await _maybe_finalize(conn, job_id)
+    PARTITIONS_FINISHED.labels(state.value).inc()
+    return True
+
+
+async def retry_partition(
+    worker_id: str,
+    partition_id: int,
+    *,
+    error_code: str,
+    error: str,
+    backoff_base: float,
+    backoff_cap: float,
+) -> PartitionState | None:
+    """Requeue with backoff (counts as a resume), or dead-letter at ``max_attempts`` (fenced)."""
+    s = db.schema_ident()
+    async with db.acquire_queue(None) as conn, conn.transaction():
+        job_id = await conn.fetchval(
+            f"SELECT job_id FROM {s}.dps_job_partition WHERE id = $1", partition_id
+        )
+        if job_id is None:
+            return None
+        await _lock_job(conn, job_id)
+        row = await conn.fetchrow(
+            f"""UPDATE {s}.dps_job_partition SET
+                state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'queued' END,
+                resumed = resumed + CASE WHEN attempts >= max_attempts THEN 0 ELSE 1 END,
+                error_code = $3, error = $4, locked_by = NULL, lease_expires_at = NULL,
+                run_after = now() + least($5, $6 * 2 ^ attempts) * (0.5 + random())
+                            * interval '1 second',
+                finished_at = CASE WHEN attempts >= max_attempts THEN now() END,
+                updated_at = now()
+            WHERE id = $1 AND locked_by = $2 AND state = 'running' RETURNING state""",
+            partition_id,
+            worker_id,
+            error_code,
+            error[:500],
+            float(backoff_cap),
+            float(backoff_base),
+        )
+        if row is None:
+            return None
+        if row["state"] == PartitionState.dead.value:
+            await _maybe_finalize(conn, job_id)
+        else:
+            await conn.execute("SELECT pg_notify($1, 'partition')", NOTIFY_CHANNEL)
+    if row["state"] == PartitionState.dead.value:
+        PARTITIONS_FINISHED.labels(PartitionState.dead.value).inc()
+    return PartitionState(row["state"])
+
+
+async def reset_partition_progress(worker_id: str, partition_id: int) -> bool:
+    """Zero a partition's checkpoint (``files`` targets restart a partition from its lower bound)."""
+    async with db.acquire_queue(None) as conn:
+        tag = await conn.execute(
+            f"UPDATE {db.schema_ident()}.dps_job_partition SET last_key = NULL, batch_no = 0, "
+            "rows_read = 0, rows_written = 0, rows_skipped = 0, values_by_method = '{}'::jsonb, "
+            "verify_checked = 0, meta = '{}'::jsonb, updated_at = now() "
+            "WHERE id = $1 AND locked_by = $2 AND state = 'running'",
+            partition_id,
+            worker_id,
+        )
+    return db.rowcount(tag) > 0
+
+
+async def abandon_partition(worker_id: str, partition_id: int) -> None:
+    """Drop this worker's lock on a partition that was canceled under it (unblocks cleanup)."""
+    async with db.acquire_queue(None) as conn:
+        await conn.execute(
+            f"UPDATE {db.schema_ident()}.dps_job_partition SET locked_by = NULL, "
+            "lease_expires_at = NULL WHERE id = $1 AND locked_by = $2 AND state = 'canceled'",
+            partition_id,
+            worker_id,
+        )
+
+
+async def partition_control(
+    worker_id: str, partition_id: int
+) -> Literal["continue", "pause", "cancel", "lost"]:
+    """What a partition holder should do after a committed batch."""
+    s = db.schema_ident()
+    async with db.acquire_queue(None) as conn:
+        row = await conn.fetchrow(
+            f"SELECT p.state AS pstate, p.locked_by, j.state AS jstate "
+            f"FROM {s}.dps_job_partition p JOIN {s}.dps_job j ON j.id = p.job_id WHERE p.id = $1",
+            partition_id,
+        )
+    if row is None:
+        return "lost"
+    if row["pstate"] == "canceled" or row["jstate"] == "canceled":
+        return "cancel"
+    if row["locked_by"] != worker_id or row["pstate"] != "running":
+        return "lost"
+    return "pause" if row["jstate"] == "paused" else "continue"
+
+
+async def list_partitions(tenant_id: str, job_id: str) -> list[PartitionView]:
+    """Value-free partition rows for the console (checkpoint shown as a fingerprint only)."""
+    async with db.acquire(tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT partition_no, state, rows_read, rows_written, rows_skipped, batch_no, "
+            "attempts, resumed, last_key, started_at, finished_at, updated_at, error_code, "
+            "CASE WHEN started_at IS NOT NULL AND rows_written > 0 THEN rows_written / "
+            "GREATEST(extract(epoch FROM COALESCE(finished_at, updated_at) - started_at), 0.001) "
+            "END AS rps "
+            f"FROM {db.schema_ident()}.dps_job_partition WHERE job_id = $1 ORDER BY partition_no",
+            job_id,
+        )
+    return [
+        PartitionView(
+            partition_no=r["partition_no"],
+            state=PartitionState(r["state"]),
+            rows_read=r["rows_read"],
+            rows_written=r["rows_written"],
+            rows_skipped=r["rows_skipped"],
+            batch_no=r["batch_no"],
+            attempts=r["attempts"],
+            resumed=r["resumed"],
+            checkpoint_fp=key_fingerprint(r["last_key"]),
+            started_at=r["started_at"],
+            finished_at=r["finished_at"],
+            updated_at=r["updated_at"],
+            error_code=r["error_code"],
+            rows_per_second=float(r["rps"]) if r["rps"] is not None else None,
+        )
+        for r in rows
+    ]
+
+
+async def reap(*, backoff_base: float, backoff_cap: float) -> ReapResult:
+    """Requeue expired leases with backoff, dead-letter exhausted ones, prune offline workers.
+
+    Each statement is its own transaction; finalize transitions for jobs whose last partition was
+    dead-lettered run afterwards, one short transaction per job (job lock first), so the reaper
+    never holds a partition lock while it waits for a job lock and cannot deadlock a finisher.
+    """
+    settings = db.active_settings()
+    s = db.schema_ident()
+    backoff = "now() + least($1, $2 * 2 ^ attempts) * (0.5 + random()) * interval '1 second'"
+    result = ReapResult()
+    async with db.acquire_queue(None) as conn:
+        rows = await conn.fetch(
+            f"UPDATE {s}.dps_job SET state = 'queued', locked_by = NULL, lease_expires_at = NULL, "
+            f"run_after = {backoff}, updated_at = now() WHERE state = 'running' "
+            "AND lease_expires_at < now() AND attempts < max_attempts RETURNING id",
+            float(backoff_cap),
+            float(backoff_base),
+        )
+        result.jobs_requeued = len(rows)
+        rows = await conn.fetch(
+            f"UPDATE {s}.dps_job j SET state = 'dead', key_enc = NULL, "
+            "error_code = COALESCE(error_code, 'lease_lost'), "
+            "error = COALESCE(error, 'lease expired; max attempts reached'), locked_by = NULL, "
+            "lease_expires_at = NULL, finished_at = now(), "
+            "expires_at = now() + make_interval(days => COALESCE("
+            f"(SELECT t.retention_days FROM {s}.dps_tenant t WHERE t.tenant_id = j.tenant_id), "
+            "$1)), updated_at = now() "
+            "WHERE state = 'running' AND lease_expires_at < now() AND attempts >= max_attempts "
+            "RETURNING id",
+            settings.retention_days,
+        )
+        result.jobs_dead = len(rows)
+        rows = await conn.fetch(
+            f"UPDATE {s}.dps_job_partition SET state = 'queued', locked_by = NULL, "
+            f"lease_expires_at = NULL, resumed = resumed + 1, run_after = {backoff}, "
+            "updated_at = now() WHERE state = 'running' AND lease_expires_at < now() "
+            "AND attempts < max_attempts RETURNING job_id",
+            float(backoff_cap),
+            float(backoff_base),
+        )
+        result.partitions_requeued = len(rows)
+        dead_jobs = await conn.fetch(
+            f"UPDATE {s}.dps_job_partition SET state = 'dead', "
+            "error_code = COALESCE(error_code, 'lease_lost'), locked_by = NULL, "
+            "lease_expires_at = NULL, finished_at = now(), updated_at = now() "
+            "WHERE state = 'running' AND lease_expires_at < now() AND attempts >= max_attempts "
+            "RETURNING job_id"
+        )
+        result.partitions_dead = len(dead_jobs)
+        if dead_jobs:
+            PARTITIONS_FINISHED.labels(PartitionState.dead.value).inc(len(dead_jobs))
+        result.partitions_released = db.rowcount(
+            await conn.execute(
+                f"UPDATE {s}.dps_job_partition SET locked_by = NULL, lease_expires_at = NULL "
+                "WHERE state = 'canceled' AND locked_by IS NOT NULL AND lease_expires_at < now()"
+            )
+        )
+        for job_id in sorted({r["job_id"] for r in dead_jobs}):
+            async with conn.transaction():
+                await _lock_job(conn, job_id)
+                await _maybe_finalize(conn, job_id)
+        heartbeat_s = max(1.0, settings.partition_lease_seconds / 4)
+        result.workers_pruned = db.rowcount(
+            await conn.execute(
+                f"DELETE FROM {s}.dps_worker WHERE last_seen < now() - make_interval(secs => $1)",
+                3 * heartbeat_s,
+            )
+        )
+        if result.jobs_requeued or result.partitions_requeued:
+            await conn.execute("SELECT pg_notify($1, 'reaped')", NOTIFY_CHANNEL)
+    return result
+
+
+async def cancel(tenant_id: str, job_id: str) -> Job | None:
+    """Cancel (contract §3.1): run jobs get a cancel-finalize; other kinds become ``canceled`` now.
+
+    ``None`` when the tenant has no such job; :class:`JobStateError` (``job_terminal``,
+    ``job_finalizing``) when it can no longer be canceled.
+    """
+    settings = db.active_settings()
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn, conn.transaction():
+        row = await conn.fetchrow(
+            f"SELECT kind, state, phase FROM {s}.dps_job WHERE id = $1 FOR UPDATE", job_id
+        )
+        if row is None:
+            return None
+        if JobState(row["state"]) in TERMINAL_JOB_STATES:
+            raise JobStateError("job_terminal", "the job has already finished")
+        if row["phase"] == JobPhase.finalize.value:
+            raise JobStateError(
+                "job_finalizing", "the job is finalizing and can no longer be canceled"
+            )
+        # Running partitions keep locked_by: their holders' next fenced write fails and they
+        # abandon; the reaper releases the lock of a holder that never comes back.
+        await conn.execute(
+            f"UPDATE {s}.dps_job_partition SET state = 'canceled', finished_at = now(), "
+            "updated_at = now() WHERE job_id = $1 AND state IN ('queued', 'running')",
+            job_id,
+        )
+        if row["kind"] == JobKind.run.value:
+            await conn.execute(
+                f"UPDATE {s}.dps_job SET phase = 'finalize', state = 'queued', run_after = now(), "
+                "attempts = 0, locked_by = NULL, lease_expires_at = NULL, "
+                'progress = progress || \'{"outcome": "canceled"}\'::jsonb, updated_at = now() '
+                "WHERE id = $1",
+                job_id,
+            )
+            await conn.execute("SELECT pg_notify($1, 'finalize')", NOTIFY_CHANNEL)
+        else:
+            await conn.execute(
+                f"UPDATE {s}.dps_job j SET state = 'canceled', locked_by = NULL, "
+                "lease_expires_at = NULL, key_enc = NULL, finished_at = now(), "
+                'progress = progress || \'{"outcome": "canceled"}\'::jsonb, '
+                "expires_at = now() + make_interval(days => COALESCE((SELECT t.retention_days "
+                f"FROM {s}.dps_tenant t WHERE t.tenant_id = j.tenant_id), $2)), "
+                "updated_at = now() WHERE id = $1",
+                job_id,
+                settings.retention_days,
+            )
+    return await get_job(tenant_id, job_id)
+
+
+async def pause(tenant_id: str, job_id: str) -> Job | None:
+    """``waiting`` run job → ``paused`` (running partitions stop after their current batch)."""
+    return await _flip(
+        tenant_id,
+        job_id,
+        "waiting",
+        "paused",
+        "job_not_pausable",
+        "only a run job that is processing partitions can be paused",
+    )
+
+
+async def resume(tenant_id: str, job_id: str) -> Job | None:
+    """``paused`` → ``waiting`` (and finalize when every partition already finished)."""
+    return await _flip(
+        tenant_id, job_id, "paused", "waiting", "job_not_paused", "the job is not paused"
+    )
+
+
+async def _flip(
+    tenant_id: str, job_id: str, src: str, dst: str, code: str, detail: str
+) -> Job | None:
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn, conn.transaction():
+        row = await conn.fetchrow(
+            f"SELECT state, phase FROM {s}.dps_job WHERE id = $1 FOR UPDATE", job_id
+        )
+        if row is None:
+            return None
+        if row["state"] != src or row["phase"] != JobPhase.partitions.value:
+            raise JobStateError(code, detail)
+        await conn.execute(
+            f"UPDATE {s}.dps_job SET state = $2, updated_at = now() WHERE id = $1", job_id, dst
+        )
+        if dst == JobState.waiting.value:
+            await _maybe_finalize(conn, job_id)
+            await conn.execute("SELECT pg_notify($1, 'partition')", NOTIFY_CHANNEL)
+    return await get_job(tenant_id, job_id)
+
+
+async def retry(tenant_id: str, job_id: str, *, sealed_secret: bytes | None = None) -> Job | None:
+    """Requeue a ``failed``/``dead`` run job from its checkpoints (contract §3.1).
+
+    Failed, dead and canceled partitions go back to ``queued`` (attempts reset) and resume from
+    their checkpoints; a job without partitions restarts at ``prepare``. Raises
+    :class:`KeyMaterialRequired` when the key was purged and none is resubmitted.
+    """
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn, conn.transaction():
+        row = await conn.fetchrow(
+            f"SELECT kind, state, key_enc IS NOT NULL AS has_key FROM {s}.dps_job "
+            "WHERE id = $1 FOR UPDATE",
+            job_id,
+        )
+        if row is None:
+            return None
+        if row["kind"] != JobKind.run.value or row["state"] not in ("failed", "dead"):
+            raise JobStateError("job_not_retryable", "only failed or dead run jobs can be retried")
+        if not row["has_key"] and sealed_secret is None:
+            raise KeyMaterialRequired()
+        parts = await conn.fetchval(
+            f"SELECT count(*) FROM {s}.dps_job_partition WHERE job_id = $1", job_id
+        )
+        if parts:
+            await conn.execute(
+                f"UPDATE {s}.dps_job_partition SET state = 'queued', attempts = 0, "
+                "run_after = now(), error_code = NULL, error = NULL, locked_by = NULL, "
+                "lease_expires_at = NULL, finished_at = NULL, updated_at = now() "
+                "WHERE job_id = $1 AND state IN ('failed', 'dead', 'canceled')",
+                job_id,
+            )
+        phase, state = ("partitions", "waiting") if parts else ("prepare", "queued")
+        await conn.execute(
+            f"UPDATE {s}.dps_job SET phase = $2, state = $3, attempts = 0, run_after = now(), "
+            "error_code = NULL, error = NULL, finished_at = NULL, expires_at = NULL, "
+            'key_enc = COALESCE($4, key_enc), progress = progress || \'{"outcome": ""}\'::jsonb, '
+            "locked_by = NULL, lease_expires_at = NULL, updated_at = now() WHERE id = $1",
+            job_id,
+            phase,
+            state,
+            sealed_secret,
+        )
+        if parts:
+            # every partition was already done: go straight to finalize
+            await _maybe_finalize(conn, job_id)
+        await conn.execute("SELECT pg_notify($1, 'retry')", NOTIFY_CHANNEL)
+    return await get_job(tenant_id, job_id)
+
+
+async def queue_stats() -> list[dict[str, Any]]:
+    """Per-table, per-state counts and oldest age — the queue gauges (worker pool, cross-tenant)."""
+    s = db.schema_ident()
+    async with db.acquire_queue(None) as conn:
+        rows = await conn.fetch(
+            "SELECT 'dps_job' AS table, state, count(*) AS n, "
+            f"extract(epoch FROM now() - min(created_at)) AS oldest_s FROM {s}.dps_job "
+            "GROUP BY state UNION ALL "
+            "SELECT 'dps_job_partition', state, count(*), "
+            f"extract(epoch FROM now() - min(run_after)) FROM {s}.dps_job_partition "
+            "GROUP BY state"
+        )
+    return [dict(r) for r in rows]
+
+
+async def tenant_stats(tenant_id: str) -> JobStats:
+    """The Jobs page health strip (mockup 07) for one tenant (worker counts are global)."""
+    settings = db.active_settings()
+    s = db.schema_ident()
+    heartbeat_s = max(1.0, settings.partition_lease_seconds / 4)
+    async with db.acquire(tenant_id) as conn:
+        w = await conn.fetchrow(
+            "SELECT count(*) AS online, count(*) FILTER (WHERE busy > 0) AS busy, "
+            f"count(*) FILTER (WHERE draining) AS draining FROM {s}.dps_worker "
+            "WHERE role = 'worker' AND last_seen > now() - make_interval(secs => $1)",
+            3 * heartbeat_s,
+        )
+        waiting = await conn.fetchrow(
+            "SELECT count(*) AS n, extract(epoch FROM now() - min(p.run_after)) AS oldest "
+            f"FROM {s}.dps_job_partition p JOIN {s}.dps_job j ON j.id = p.job_id "
+            "WHERE p.state = 'queued' AND j.state = 'waiting'"
+        )
+        running = await conn.fetchval(
+            f"SELECT (SELECT count(*) FROM {s}.dps_job WHERE state = 'running') + "
+            f"(SELECT count(*) FROM {s}.dps_job_partition WHERE state = 'running')"
+        )
+        rps = await conn.fetchval(
+            f"SELECT COALESCE(sum((progress->>'rows_per_second')::float), 0) FROM {s}.dps_job "
+            "WHERE state IN ('waiting', 'paused') AND phase = 'partitions'"
+        )
+        by_state = {
+            r["state"]: int(r["n"])
+            for r in await conn.fetch(
+                f"SELECT state, count(*) AS n FROM {s}.dps_job "
+                "WHERE created_at > now() - interval '7 days' GROUP BY state"
+            )
+        }
+        cap = await conn.fetchval(
+            f"SELECT max_running FROM {s}.dps_tenant WHERE tenant_id = $1", tenant_id
+        )
+        reclaims = await conn.fetchval(
+            f"SELECT COALESCE(sum(resumed), 0) FROM {s}.dps_job_partition "
+            "WHERE updated_at > now() - interval '24 hours'"
+        )
+    return JobStats(
+        workers_online=w["online"],
+        workers_busy=w["busy"],
+        workers_draining=w["draining"],
+        partitions_waiting=waiting["n"],
+        oldest_waiting_s=float(waiting["oldest"]) if waiting["oldest"] is not None else None,
+        rows_per_s=float(rps or 0),
+        by_state=by_state,
+        running=int(running),
+        tenant_max_running=int(cap or settings.job_tenant_max_running),
+        lease_reclaims_24h=int(reclaims),
+    )
+
+
+async def sample_throughput(*, min_interval_s: float = 10.0) -> int:
+    """Append a ``(ts, rows/s)`` point (≤ 60 kept) to each processing run job; returns jobs sampled."""
+    s = db.schema_ident()
+    sampled = 0
+    async with db.acquire_queue(None) as conn, conn.transaction():
+        rows = await conn.fetch(
+            "SELECT j.id, j.progress, j.started_at, now() AS now, "
+            f"(SELECT COALESCE(sum(p.rows_written), 0) FROM {s}.dps_job_partition p "
+            f"WHERE p.job_id = j.id) AS written FROM {s}.dps_job j "
+            "WHERE j.kind = 'run' AND j.phase = 'partitions' AND j.state IN ('waiting', 'paused') "
+            "FOR UPDATE OF j SKIP LOCKED"
+        )
+        for r in rows:
+            progress = r["progress"] or {}
+            mark = progress.get("throughput_mark")
+            last_ts = datetime.fromisoformat(mark[0]) if mark else (r["started_at"] or r["now"])
+            last_rows = int(mark[1]) if mark else 0
+            elapsed = (r["now"] - last_ts).total_seconds()
+            if elapsed < min_interval_s or elapsed <= 0:
+                continue
+            rate = round(max(0, int(r["written"]) - last_rows) / elapsed, 1)
+            points = (progress.get("throughput") or [])[-59:] + [[r["now"].isoformat(), rate]]
+            await conn.execute(
+                f"UPDATE {s}.dps_job SET progress = progress || $2::jsonb, updated_at = now() "
+                "WHERE id = $1",
+                r["id"],
+                {
+                    "throughput": points,
+                    "throughput_mark": [r["now"].isoformat(), int(r["written"])],
+                    "rows_per_second": rate,
+                },
+            )
+            sampled += 1
+    return sampled

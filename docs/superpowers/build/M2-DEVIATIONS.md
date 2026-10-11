@@ -207,3 +207,33 @@ otherwise.
   gains `test_fields_the_m2_queue_logs_are_kept` (the module asks for the test to be kept in step).
 - New test `test_public_job_never_carries_sealed_blobs`. 15 tests in this commit (plan: 12 +
   the deferred fencing test).
+
+## Task 9 — Queue, part 2 (partitions, finalize transition, reaper, controls, stats)
+
+- `dps/jobs.py` `claim_partitions` — **plan SQL starved newer jobs under the tenant cap, fixed.**
+  The plan ranked every queued partition of a tenant (`rn_tenant`) before applying each job's
+  `parallelism`, so an older job's queued backlog occupied all of the tenant's ranks: with
+  `max_running = 3`, an older job at `parallelism = 1` with five queued partitions and a newer job
+  at `parallelism = 2`, one claim started 1 partition (the older job's) and the newer job got
+  none, although two tenant slots were free. The query now filters each job's startable
+  partitions first (`job_ok`: `rn_job <= parallelism - running`) and ranks only those per tenant
+  (contract §3.2 caps unchanged: per tenant running ≤ `max_running`, per job ≤ `parallelism`).
+  New test `test_tenant_cap_counts_only_partitions_a_job_may_run` (fails on the plan's SQL with
+  `{newer: 0}`, verified; passes now with 1 + 2). The inner locking select takes rows in FIFO
+  order, as in Task 8.
+- `tests/db/test_jobs_queue.py`: `test_fencing_after_lease_expiry` (from Task 8's listing) lands
+  here, with `reap`.
+- `finish_partition`, `retry_partition` (dead) and `reap` (dead) increment
+  `dps_partitions_finished_total{state}` (the metric Task 8 defines but the plan never
+  incremented). `JobStateError` carries `.detail`. `tenant_stats` keeps `oldest_waiting_s = 0.0`
+  instead of turning it into `None` (the plan's truthiness test dropped a zero age).
+- Docstrings state the lock order (job row first) and why the reaper's separate transactions
+  cannot deadlock a finisher; behaviour otherwise as planned.
+- New tests: `test_controls_refuse_states_they_do_not_apply_to` (pause/resume/retry codes and
+  409 status on a discover job, immediate cancel of a non-run job with key purge and expiry,
+  `job_terminal`, another tenant gets `None`) and
+  `test_canceling_a_paused_job_finalizes_and_releases_held_partitions` (the reaper's
+  `partitions_released` path and the cancel-finalize claim). 13 partition tests + 16 job-row
+  tests = 29 (plan: 10 + 13 = 23).
+- Concurrency-sensitive tests (`exactly_once`, concurrent claimers, FIFO, caps) were run five
+  times in a row: green every time.
