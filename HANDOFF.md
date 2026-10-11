@@ -114,6 +114,34 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_RATE_LIMIT_ENABLED` / `_RPS` / `_BURST` | `true` / 50 / 100 | token bucket per API key, per process; 429 + `Retry-After` |
 | `DPS_AUDIT_ENABLED` | `true` | `false` only locally; refused in staging/prod |
 
+**M2 settings (jobs + PostgreSQL; contract §10).** All default so Layer 1 runs without a database:
+an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture checks.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DPS_PG_HOST` / `_PORT` / `_DATABASE` / `_SCHEMA` | `""` / 5432 / `dps` / `dps` | schema must match `^[a-z_][a-z0-9_]{0,62}$` |
+| `DPS_PG_USER` / `_PASSWORD` | `dps_app` / — | API pool login |
+| `DPS_PG_WORKER_USER` / `_PASSWORD` | → `DPS_PG_USER` | worker pool login (`dps_worker_login` in compose) |
+| `DPS_PG_MIGRATION_USER` / `_PASSWORD` | → `DPS_PG_USER` | DDL login (`dps_owner` in compose) |
+| `DPS_PG_POOL_MIN` / `_MAX`, `DPS_PG_SSL_ROOT_CERT` | 2 / 16, — | the CA file turns on verified TLS (required in staging/prod) |
+| `DPS_RLS_ENABLED` | `true` | must stay `true` in staging/prod |
+| `DPS_MIGRATIONS_MODE` | `auto` | `auto` (apply at boot) \| `verify` (staging/prod) \| `off` (tests) |
+| `DPS_JOB_KEK` / `DPS_JOB_KEK_FILE`, `DPS_JOB_KEK_PREVIOUS` | — | base64 of exactly 32 bytes (`python -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())'`); staging/prod read it **only** from `_FILE` |
+| `DPS_JOB_LEASE_SECONDS`, `DPS_PARTITION_LEASE_SECONDS` | 300, 120 | queue leases |
+| `DPS_JOB_MAX_ATTEMPTS`, `DPS_PARTITION_MAX_ATTEMPTS` | 3, 5 | |
+| `DPS_JOB_RETRY_BASE_SECONDS` / `_MAX_SECONDS`, `DPS_JOB_POLL_INTERVAL_SECONDS`, `DPS_JOB_CLAIM_BATCH` | 30 / 3600, 2, 4 | |
+| `DPS_JOB_REAPER_INTERVAL_SECONDS`, `DPS_JOB_DRAIN_TIMEOUT_SECONDS` | 30, 30 | |
+| `DPS_JOB_TENANT_MAX_RUNNING` / `_MAX_QUEUED` | 8 / 1000 | per-tenant caps (a `dps_tenant` row overrides) |
+| `DPS_WORKER_CONCURRENCY`, `DPS_WORKER_METRICS_PORT`, `DPS_EMBEDDED_WORKER` | 4, 9400, `false` | metrics port 0 disables the worker's ops server; embedded worker refused in staging/prod |
+| `DPS_BATCH_ROWS`, `DPS_PARTITION_ROWS`, `DPS_MAX_PARTITIONS`, `DPS_DISCOVERY_SAMPLE_ROWS`, `DPS_PREFLIGHT_ROWS` | 1000, 50000, 256, 2000, 500 | |
+| `DPS_CONNECTOR_CONNECT_TIMEOUT_SECONDS` / `_STATEMENT_TIMEOUT_SECONDS` | 10 / 300 | |
+| `DPS_SECRET_DIR`, `DPS_INLINE_SECRETS_ALLOWED`, `DPS_INLINE_SECRET_TTL_HOURS` | `/var/run/secrets/dps`, `true`, 24 | inline credentials refused in staging/prod |
+| `DPS_RETENTION_DAYS`, `DPS_RETENTION_INTERVAL_HOURS`, `DPS_AUDIT_RETENTION_MONTHS` | 30, 6, 13 | |
+| `DPS_AUDIT_STRICT`, `DPS_AUDIT_QUEUE_MAX`, `DPS_AUDIT_FLUSH_BATCH`, `DPS_AUDIT_FLUSH_MS` | `false`, 10000, 200, 250 | strict audit required in staging/prod |
+| `DPS_ARTEFACT_STORE`, `DPS_ARTEFACT_DIR`, `DPS_EXPORT_ROOT` | `local`, `./var/artefacts`, `./var/exports` | `local` \| `s3`; `var/` is git-ignored |
+| `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
+| `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
+
 Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`.
 
@@ -143,6 +171,10 @@ services, §3 "Lane-safe stacks").
   violation): auth on, bootstrap key unset, `DPS_API_KEYS` set, provider not `stub`, `stellar` needs
   `DPS_SSL_CERT_FILE` and both URLs, Stellar/COIN URLs `https`, `DPS_COIN_TLS_INSECURE=true` only
   with `DPS_ALLOW_INSECURE_COIN_MINT=true`, audit on. Messages name the setting, never its value.
+  With `DPS_PG_HOST` set (M2) it also requires: the job KEK from `DPS_JOB_KEK_FILE` (a literal
+  `DPS_JOB_KEK` env var is refused), `DPS_INLINE_SECRETS_ALLOWED=false`, `DPS_RLS_ENABLED=true`,
+  `DPS_MIGRATIONS_MODE=verify`, `DPS_AUDIT_STRICT=true`, `DPS_PG_SSL_ROOT_CERT` set and
+  `DPS_EMBEDDED_WORKER=false`.
 - **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
   default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
@@ -162,7 +194,8 @@ services, §3 "Lane-safe stacks").
 ## 7. Secrets (names only)
 
 `DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`, `DPS_COIN_CLIENT_SECRET`, `DPS_COIN_SCOPE` — mount them and use
-the `_FILE` form. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
+the `_FILE` form. M2 adds `DPS_JOB_KEK` (`_FILE` only in staging/prod), `DPS_PG_PASSWORD`,
+`DPS_PG_WORKER_PASSWORD`, `DPS_PG_MIGRATION_PASSWORD` and `DPS_S3_SECRET_ACCESS_KEY`. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
 set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
 
 ## 8. Traps

@@ -25,5 +25,7 @@ application_default_credentials.json
 .vscode/
 # Local data
 data/
+# M2 artefacts, exports and local secret dirs (DPS_ARTEFACT_DIR, DPS_EXPORT_ROOT, DPS_SECRET_DIR)
+var/
 # Claude session config (local)
 .claude/

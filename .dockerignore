@@ -21,6 +21,7 @@ htmlcov
 service-account*.json
 application_default_credentials.json
 data
+var
 .claude
 .gstack
 .serena

@@ -7,7 +7,10 @@ sinks), with a literal ``DPS_<NAME>`` env var taking precedence.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,10 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 ENV_PREFIX = "DPS_"
 ENVIRONMENTS = ("local", "dev", "staging", "prod")
 LLM_PROVIDERS = ("", "stellar", "vertex", "stub")
+MIGRATIONS_MODES = ("auto", "verify", "off")
+ARTEFACT_STORES = ("local", "s3")
+_SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+_KEK_MESSAGE = "job KEK must be base64 of exactly 32 bytes"
 
 
 class _FileSecretSource(PydanticBaseSettingsSource):
@@ -128,6 +135,77 @@ class Settings(BaseSettings):
     # --- audit ---
     audit_enabled: bool = True
 
+    # --- metadata database (M2; empty pg_host = Layer 1 only, no database at all) ---
+    pg_host: str = ""
+    pg_port: int = 5432
+    pg_database: str = "dps"
+    pg_schema: str = "dps"
+    pg_user: str = "dps_app"
+    pg_password: str = ""
+    pg_worker_user: str = ""  # falls back to pg_user
+    pg_worker_password: str = ""
+    pg_migration_user: str = ""  # falls back to pg_user
+    pg_migration_password: str = ""
+    pg_pool_min: int = 2
+    pg_pool_max: int = 16
+    pg_ssl_root_cert: str = ""
+    rls_enabled: bool = True
+    migrations_mode: str = "auto"  # auto | verify | off
+
+    # --- job sealing (base64 of 32 bytes; production reads it from DPS_JOB_KEK_FILE) ---
+    job_kek: str = ""
+    job_kek_previous: str = ""  # M5 rotation
+
+    # --- queue ---
+    job_lease_seconds: int = 300
+    partition_lease_seconds: int = 120
+    job_max_attempts: int = 3
+    partition_max_attempts: int = 5
+    job_retry_base_seconds: float = 30.0
+    job_retry_max_seconds: float = 3600.0
+    job_poll_interval_seconds: float = 2.0
+    job_claim_batch: int = 4
+    job_reaper_interval_seconds: float = 30.0
+    job_drain_timeout_seconds: float = 30.0
+    job_tenant_max_running: int = 8
+    job_tenant_max_queued: int = 1000
+    worker_concurrency: int = 4
+    worker_metrics_port: int = 9400  # 0 disables the worker's health/metrics server (tests)
+    embedded_worker: bool = False  # local only; posture refuses it in staging/prod
+
+    # --- connectors ---
+    batch_rows: int = 1000
+    partition_rows: int = 50000
+    max_partitions: int = 256
+    discovery_sample_rows: int = 2000
+    preflight_rows: int = 500  # rows transformed at prepare before any write
+    connector_connect_timeout_seconds: float = 10.0
+    connector_statement_timeout_seconds: float = 300.0
+    secret_dir: str = "/var/run/secrets/dps"
+    inline_secrets_allowed: bool = True
+    inline_secret_ttl_hours: int = 24
+
+    # --- retention and audit ---
+    retention_days: int = 30
+    retention_interval_hours: int = 6
+    audit_retention_months: int = 13
+    audit_strict: bool = False
+    audit_queue_max: int = 10000  # DbAuditSink queue bound
+    audit_flush_batch: int = 200
+    audit_flush_ms: int = 250
+
+    # --- artefacts and exports ---
+    artefact_store: str = "local"  # local | s3
+    artefact_dir: str = "./var/artefacts"
+    s3_endpoint_url: str = ""
+    s3_region: str = "us-east-1"
+    s3_bucket: str = "dps-artefacts"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_force_path_style: bool = True
+    export_root: str = "./var/exports"
+    image_digest: str = ""
+
     @field_validator("env")
     @classmethod
     def _valid_env(cls, v: str) -> str:
@@ -154,6 +232,59 @@ class Settings(BaseSettings):
             # Do not echo the URL: it may carry userinfo credentials.
             raise ValueError("must be an http(s) URL with a host")
         return v
+
+    @field_validator("pg_schema")
+    @classmethod
+    def _valid_schema(cls, v: str) -> str:
+        if not _SCHEMA_RE.fullmatch(v):
+            raise ValueError("pg_schema must match ^[a-z_][a-z0-9_]{0,62}$")
+        return v
+
+    @field_validator("migrations_mode")
+    @classmethod
+    def _valid_migrations_mode(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in MIGRATIONS_MODES:
+            raise ValueError("migrations_mode must be auto, verify or off")
+        return v
+
+    @field_validator("artefact_store")
+    @classmethod
+    def _valid_store(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ARTEFACT_STORES:
+            raise ValueError("artefact_store must be local or s3")
+        return v
+
+    @field_validator("job_kek", "job_kek_previous")
+    @classmethod
+    def _valid_kek(cls, v: str) -> str:
+        # Key material: the messages below never interpolate the value.
+        v = v.strip()
+        if not v:
+            return v
+        altchars = b"-_" if ("-" in v or "_" in v) else None
+        try:
+            raw = base64.b64decode(v + "=" * (-len(v) % 4), altchars=altchars, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(_KEK_MESSAGE) from None
+        if len(raw) != 32:
+            raise ValueError(_KEK_MESSAGE)
+        return v
+
+    @property
+    def pg_worker_login(self) -> tuple[str, str]:
+        """``(user, password)`` for the worker pool, falling back to the API login."""
+        if self.pg_worker_user:
+            return self.pg_worker_user, self.pg_worker_password
+        return self.pg_user, self.pg_password
+
+    @property
+    def pg_migration_login(self) -> tuple[str, str]:
+        """``(user, password)`` for DDL, falling back to the API login."""
+        if self.pg_migration_user:
+            return self.pg_migration_user, self.pg_migration_password
+        return self.pg_user, self.pg_password
 
     @property
     def is_production(self) -> bool:
