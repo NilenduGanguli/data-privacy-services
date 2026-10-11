@@ -6,8 +6,12 @@ Error mapping (the engine's messages name rules, never values):
 - :class:`~dps.engine.service.VerificationFailed` → 422 (nothing is returned)
 - :class:`~dps.engine.service.EngineError` → 400
 - anything else → 500 ``internal error``; only the exception's class name is logged
+- a strict audit sink that cannot take the event (:class:`~dps.audit.AuditUnavailable`) → 503
+  ``audit unavailable``: nothing the engine produced is returned
 
-Every outcome, rejections included, is counted and audited (value-free).
+Every outcome, rejections included, is counted and audited (value-free). The audited and
+measured ``route`` is the route **template** (``/api/v1/jobs/{job_id}``), never the concrete path,
+and the audit event carries the HTTP status the request answers with.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from typing import Any, overload
 import structlog
 from fastapi import HTTPException, Request
 
-from dps.audit import AuditEvent
+from dps.audit import AuditEvent, AuditUnavailable
 from dps.engine.policy import preset_names
 from dps.engine.service import EngineError, Payload, VerificationFailed
 from dps.observability import LATENCY, REQUESTS, get_logger
@@ -39,6 +43,12 @@ MAX_DEPTH = 100
 _TRACE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 #: Policy names that may be audited verbatim (preset names, ``<preset>+overrides``, ids).
 _POLICY_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+
+
+def route_template(request: Request) -> str:
+    """The matched route's path template (``/api/v1/jobs/{job_id}``), else the request path."""
+    path = getattr(request.scope.get("route"), "path", None)
+    return path if isinstance(path, str) else request.url.path
 
 
 def trace_id(request: Request) -> str:
@@ -118,6 +128,7 @@ def _audit_event(
     duration_ms: float,
     outcome: str,
     tid: str,
+    status_code: int,
 ) -> AuditEvent:
     report = getattr(result, "report", None)
     findings = getattr(result, "findings", None) or []
@@ -140,22 +151,30 @@ def _audit_event(
     principal = getattr(request.state, "principal", None)
     return AuditEvent(
         trace_id=tid,
-        route=request.url.path,
+        route=route_template(request),
         tenant_id=getattr(request.state, "tenant_id", "default"),
         key_id=principal.key_id if principal is not None else "anonymous",
         mode=mode,
         policy=policy,
         duration_ms=round(duration_ms, 2),
         outcome=outcome,
+        status=status_code,
         **counts,
     )
 
 
 def _audit(request: Request, **fields: Any) -> None:
-    """Write the audit event; a failure is logged (type only) and never fails the request."""
+    """Write the audit event.
+
+    Raises:
+        HTTPException: 503 ``audit unavailable`` when a strict sink refuses the event. Any other
+            sink failure is logged (type only) and never fails the request.
+    """
     try:
         request.app.state.audit.write(_audit_event(request, **fields))
-    except Exception as exc:  # noqa: BLE001 - audit must not take the request down in M0 (strict mode arrives with M2)
+    except AuditUnavailable as exc:
+        raise HTTPException(status_code=503, detail="audit unavailable") from exc
+    except Exception as exc:  # noqa: BLE001 - a non-strict sink failure never takes the request down
         logger.warning("audit_write_failed", error=type(exc).__name__)
 
 
@@ -194,39 +213,44 @@ async def run_engine[T](
     """
     tid = trace_id(request)
     request.state.trace_id = tid
-    route = request.url.path
+    route = route_template(request)
     structlog.contextvars.bind_contextvars(trace_id=tid, route=route)
     start = time.perf_counter()
     outcome = "ok"
+    status_code = getattr(request.scope.get("route"), "status_code", None) or 200
     result: T | None = None
     try:
         raw = call()
         result = await raw if inspect.isawaitable(raw) else raw
         return result, tid
     except VerificationFailed as exc:
-        outcome = "verification_failed"
+        outcome, status_code = "verification_failed", 422
         raise HTTPException(status_code=422, detail=str(exc)) from None
     except EngineError as exc:
-        outcome = "bad_request"
+        outcome, status_code = "bad_request", 400
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    except HTTPException:
-        outcome = "rejected"
+    except HTTPException as exc:
+        outcome, status_code = "rejected", exc.status_code
         raise
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free 500
-        outcome = "error"
+        outcome, status_code = "error", 500
         logger.error("engine_error", error=type(exc).__name__)
         raise HTTPException(status_code=500, detail="internal error") from None
     finally:
-        duration = (time.perf_counter() - start) * 1000
-        REQUESTS.labels(route, outcome).inc()
-        LATENCY.labels(route).observe(duration / 1000)
-        _audit(
-            request,
-            mode=mode,
-            policy=policy_name,
-            result=result,
-            duration_ms=duration,
-            outcome=outcome,
-            tid=tid,
-        )
-        structlog.contextvars.unbind_contextvars("trace_id", "route")
+        try:
+            duration = (time.perf_counter() - start) * 1000
+            REQUESTS.labels(route, outcome).inc()
+            LATENCY.labels(route).observe(duration / 1000)
+            # A strict sink's 503 replaces the result (or the error) being returned.
+            _audit(
+                request,
+                mode=mode,
+                policy=policy_name,
+                result=result,
+                duration_ms=duration,
+                outcome=outcome,
+                tid=tid,
+                status_code=status_code,
+            )
+        finally:
+            structlog.contextvars.unbind_contextvars("trace_id", "route")

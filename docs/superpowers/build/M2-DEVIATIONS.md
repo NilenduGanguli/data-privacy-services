@@ -276,3 +276,40 @@ otherwise.
   before the lock as well (`test_concurrent_replays_at_the_cap_return_the_original` failed on the
   old code with 4 of 6 replays refused). Test `test_queue_cap_holds_under_concurrent_submissions`
   (two tenants, three rounds; failed before the fix with 9 of 12 accepted against a total cap of 4).
+
+## Task 10 — DB-backed audit (`DbAuditSink`)
+
+- `dps/audit.py` `DbAuditSink.stop` — **the plan's stop could not flush, fixed.** The plan
+  cancelled the writer task and drained the queue in its `except CancelledError` branch. A task
+  cancelled before its first step never enters its body (verified with a probe script), so the
+  plan's own DB test (`start()`, three `write()`s, `stop()` with no await in between) would have
+  inserted nothing. `stop()` now sets a closing flag and waits (`wait_for(shield(task))`) for the
+  writer to drain the queue and exit; only on `timeout` is the task cancelled, and whatever is
+  still queued is counted in `dps_audit_dropped_total` and logged as `audit_stop_timeout`
+  (count only). The writer loop is the plan's (wait up to `audit_flush_ms` for the first event,
+  then take what is queued up to `audit_flush_batch`).
+- `DbAuditSink._flush` inserts each tenant group separately, so one tenant's failure does not
+  skip the others; the sink is healthy after a batch only if every group landed. An event with an
+  empty `tenant_id` is filed under `-` (contract §8.3), so the row and the GUC agree under RLS.
+- The insert is schema-qualified (`<schema>.dps_audit_log`, from `dps.db.schema_ident`, imported
+  lazily so an L1-only deployment without the `db` extra can still import `dps.audit`). Plan:
+  unqualified name resolved through `search_path`; `dps/db.py` states all DPS SQL is qualified.
+- `AuditUnavailable` carries `code = "audit_unavailable"` and a fixed message.
+- `dps/layers/api/common.py`: the route template is also used for the `dps_requests_total` /
+  latency metric labels and the log context (plan: audit only). Why: a concrete path with ids
+  would make the metric labels unbounded once M2 routes use `run_engine`; for every M0 route the
+  template equals the path. The audit status is the route's declared `status_code` (default 200)
+  or the mapped error status. The context-var unbind runs in an inner `finally`, so a strict
+  503 raised by the audit write cannot leave `trace_id`/`route` bound.
+- `dps/observability.py`: `action` added to the log allow-list (the M2 `AuditEvent` field; without
+  it the synchronous audit line would silently lose it). `tests/test_observability.py` gains
+  `test_fields_the_m2_audit_line_logs_are_kept`.
+- `tests/test_audit_m2.py`: the strict test's acquire stub is a plain function raising
+  `AssertionError` (plan: an `async def` "never called"); with a draining `stop()` the writer does
+  reach it, and an un-awaited coroutine would only warn. The test now also asserts the dropped
+  counter and that the strict sink reports `last_error == "AssertionError"`. Added:
+  `test_sink_without_a_running_writer_only_logs`,
+  `test_audited_route_is_the_template_and_status_is_recorded` (a `{kind}` route; the concrete
+  path never reaches the event). `tests/db/test_audit_sink.py` also checks the stored columns,
+  that the writer flushes while running, and that the failure message never reaches the log.
+  5 offline + 3 db tests (plan: 3 + 2).

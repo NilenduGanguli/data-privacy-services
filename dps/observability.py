@@ -67,8 +67,9 @@ _SAFE_FIELDS = frozenset(
         "model",
         "env",
         "auth",
-        # audit events (dps.audit.AuditEvent)
+        # audit events (dps.audit.AuditEvent); action is a name such as job.cancel
         "ts",
+        "action",
         # metadata database (M2): migration file names (dps/db.py)
         "migration",
         # job queue and connectors (M2): ids, counts, phases, states and metadata names only;

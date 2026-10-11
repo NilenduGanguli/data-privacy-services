@@ -157,6 +157,19 @@ def test_fields_the_m2_queue_logs_are_kept() -> None:
     assert _drop_value_fields(None, "info", {"event": "x", "last_key": "[1]"}) == {"event": "x"}
 
 
+def test_fields_the_m2_audit_line_logs_are_kept() -> None:
+    # DbAuditSink's synchronous line carries the M2 AuditEvent fields (all value-free).
+    event = {
+        "event": "audit",
+        "route": "/api/v1/jobs/{job_id}/cancel",
+        "action": "job.cancel",
+        "status": 200,
+        "job_id": "j_01",
+        "counts": {"partitions": 4},
+    }
+    assert _drop_value_fields(None, "info", dict(event)) == event
+
+
 def test_free_text_event_messages_are_replaced() -> None:
     # Event names are snake_case identifiers; a message with an interpolated value is not one.
     for event in ("obfuscate", "verification_failed", "llm.call", "s3_upload"):
