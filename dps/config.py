@@ -8,12 +8,13 @@ sinks), with a literal ``DPS_<NAME>`` env var taking precedence.
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -128,6 +129,31 @@ class Settings(BaseSettings):
     # --- audit ---
     audit_enabled: bool = True
 
+    # --- documents and schema (M1, contract §10) ---
+    # "" | off (no OCR) | azure (Read v3.2: mock, org gateway, Azure) | tesseract (local CLI) |
+    # auto (azure if configured, else tesseract) — tesseract and auto arrive in M1 Task 19C and
+    # behave as off until then.
+    ocr_provider: str = ""
+    azure_vision_endpoint: str = ""  # http://azure-ocr-mock:5000 locally; the org gateway in prod
+    azure_vision_key: str = ""  # DPS_AZURE_VISION_KEY_FILE in prod; Ocp-Apim-Subscription-Key
+    ocr_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    ocr_poll_interval_seconds: float = Field(default=0.5, gt=0, le=10)
+    max_document_mb: int = Field(default=20, ge=1, le=512)
+    max_document_pages: int = Field(default=200, ge=1, le=5000)
+    pdf_render_dpi: int = Field(default=200, ge=72, le=600)
+    schema_max_rows: int = Field(default=10_000, ge=1, le=1_000_000)
+    # --- documents (M1, additive) ---
+    ocr_health_path: str = "/health"  # mock: /health · azure-gateway-api: /_gw/health · "" = none
+    ocr_probe_interval_seconds: float = Field(default=30.0, ge=0, le=3600)  # 0 = once at startup
+    ocr_max_concurrency: int = Field(default=4, ge=1, le=32)
+    ocr_min_text_chars: int = Field(default=20, ge=0, le=10_000)  # fewer text-layer chars → OCR
+    ocr_image_coverage: float = Field(default=0.25, ge=0.0, le=1.0)  # images this share → OCR
+    redact_image_format: str = "jpeg"  # jpeg | png — rasters inside the redacted PDF
+    redact_jpeg_quality: int = Field(default=85, ge=50, le=95)
+    redact_ocr_verify: bool = True  # re-read redacted pages with OCR when OCR is configured
+    preview_dpi: int = Field(default=72, ge=36, le=150)
+    max_preview_pages: int = Field(default=50, ge=0, le=500)
+
     @field_validator("env")
     @classmethod
     def _valid_env(cls, v: str) -> str:
@@ -144,7 +170,7 @@ class Settings(BaseSettings):
             raise ValueError(f"llm_provider must be one of {LLM_PROVIDERS}, got {v!r}")
         return v
 
-    @field_validator("stellar_base_url", "coin_url")
+    @field_validator("stellar_base_url", "coin_url", "azure_vision_endpoint")
     @classmethod
     def _sane_url(cls, v: str) -> str:
         if not v:
@@ -153,6 +179,29 @@ class Settings(BaseSettings):
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             # Do not echo the URL: it may carry userinfo credentials.
             raise ValueError("must be an http(s) URL with a host")
+        return v
+
+    @field_validator("ocr_provider")
+    @classmethod
+    def _valid_ocr_provider(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("", "off", "azure", "tesseract", "auto"):
+            raise ValueError("ocr_provider must be one of '', off, azure, tesseract, auto")
+        return v
+
+    @field_validator("redact_image_format")
+    @classmethod
+    def _valid_image_format(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("jpeg", "png"):
+            raise ValueError("redact_image_format must be 'jpeg' or 'png'")
+        return v
+
+    @field_validator("ocr_health_path")
+    @classmethod
+    def _valid_health_path(cls, v: str) -> str:
+        if v and not re.fullmatch(r"/[A-Za-z0-9_./-]*", v):
+            raise ValueError("ocr_health_path must be empty or an absolute path")
         return v
 
     @property
@@ -164,6 +213,18 @@ class Settings(BaseSettings):
     def max_payload_bytes(self) -> int:
         """``max_payload_mb`` in bytes."""
         return self.max_payload_mb * 1024 * 1024
+
+    @property
+    def max_document_bytes(self) -> int:
+        """``max_document_mb`` in bytes."""
+        return self.max_document_mb * 1024 * 1024
+
+    @property
+    def ocr_configured(self) -> bool:
+        """True when the azure provider has both an endpoint and a key."""
+        return self.ocr_provider == "azure" and bool(
+            self.azure_vision_endpoint and self.azure_vision_key
+        )
 
     @property
     def ner_languages_list(self) -> list[str]:

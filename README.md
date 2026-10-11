@@ -30,7 +30,7 @@ or Synthesize.
 ## Develop
 
 ```bash
-uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e ".[dev,fpe]"
+uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e ".[dev,fpe,docs]"
 pytest -q && ruff check dps tests tools && mypy dps
 DPS_AUTH_ENABLED=false DPS_LLM_PROVIDER=stub uvicorn dps.app:create_app --factory --port 8400
 cd frontend && npm ci && npm run dev             # console on :5174, API calls proxied to :8400
@@ -38,8 +38,9 @@ cd frontend && npm ci && npm run dev             # console on :5174, API calls p
 
 `npm run build` writes `frontend/dist`, which the API process serves at `/` when it exists.
 Optional extras: `ner` (Presidio + spaCy, higher recall on names and places), `fpe` (FF1
-format-preserving encryption, used only with `DPS_FPE_ENABLED=true`), `vertex` (laptop path to
-Gemini). Production goes through the Stellar gateway — see `HANDOFF.md`.
+format-preserving encryption, used only with `DPS_FPE_ENABLED=true`), `docs` (M1 documents:
+pypdf, pdfplumber, pypdfium2, reportlab, python-docx, Pillow), `uitest` (Playwright 1.55.0 for the
+console check), `vertex` (laptop path to Gemini). Production goes through the Stellar gateway — see `HANDOFF.md`.
 
 ## How it works
 

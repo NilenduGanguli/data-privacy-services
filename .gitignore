@@ -27,3 +27,7 @@ application_default_credentials.json
 data/
 # Claude session config (local)
 .claude/
+# Bank-labelled evaluation corpora never enter git (M1)
+tests/eval/private/
+# Local runtime data (artefacts, exports)
+var/

@@ -52,6 +52,15 @@ def posture_problems(settings: Settings) -> list[str]:
             problems.append(f"{env_name} must be https in staging/prod")
     if not settings.audit_enabled:
         problems.append("DPS_AUDIT_ENABLED must be true")
+    # M1 (contract §10): the OCR key travels in a header and the pages are customer documents,
+    # so azure OCR needs a key and TLS. The message names the setting, never the URL.
+    if settings.ocr_provider == "azure":
+        if not settings.azure_vision_key:
+            problems.append(
+                "DPS_AZURE_VISION_KEY (or DPS_AZURE_VISION_KEY_FILE) is required for azure OCR"
+            )
+        if urlparse(settings.azure_vision_endpoint).scheme != "https":
+            problems.append("DPS_AZURE_VISION_ENDPOINT must be an https URL")
     return problems
 
 
