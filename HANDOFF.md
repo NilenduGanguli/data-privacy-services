@@ -21,7 +21,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 ## 2. Build
 
 ```bash
-docker build -t data-privacy-services:local .                                      # what compose builds
+docker build -t data-privacy-services:local .                                      # what compose builds (tag = ${DPS_IMAGE_TAG:-local})
 docker build --platform linux/amd64 -t <registry>/data-privacy-services:<semver> .   # amd64 from a Mac
 docker build --build-arg WITH_NER=1 -t <registry>/data-privacy-services:<semver>-ner .
 ```
@@ -47,13 +47,33 @@ python tools/smoke_test.py            # waits for /health (DPS_SMOKE_WAIT_SECOND
 docker compose down
 ```
 
-One service, `app` (image `data-privacy-services:local`), port `127.0.0.1:${DPS_APP_PORT:-8400}:8400`.
+One service, `app` (image `data-privacy-services:${DPS_IMAGE_TAG:-local}`), port
+`127.0.0.1:${DPS_APP_PORT:-8400}:8400`.
 Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,
 `DPS_FPE_ENABLED=true`, `DPS_LLM_PROVIDER=stub` and passes the Stellar/COIN variables through (each
 overridable from the shell; `DPS_COIN_TLS_INSECURE` defaults to `false`). The smoke test reads `DPS_BASE_URL` or `DPS_TEST_APP_URL` (default
 `http://127.0.0.1:${DPS_APP_PORT:-8400}`) and `DPS_API_KEY` (default the local demo key).
+
+**Lane-safe stacks** (contract §0, amendment 2026-10-12). Parallel milestone lanes each run their own
+stack on this host, so `docker-compose.yml` fixes neither a host port nor an image tag:
+
+- every host port is `127.0.0.1:${DPS_<NAME>_PORT:-<contract port>}:<container port>`: `DPS_APP_PORT`
+  8400 today; as services arrive, `DPS_DB_PORT` 5441, `DPS_SOURCE_PG_PORT` 5442, `DPS_MINIO_PORT` 9010,
+  `DPS_MINIO_CONSOLE_PORT` 9011, `DPS_ORACLE_PORT` 1522, `DPS_MONGO_PORT` 27018, `DPS_OCR_PORT` 5016,
+  `DPS_DEMO_SITE_PORT` 8410, `DPS_TOKENIZER_MOCK_PORT` 8420 (worker metrics ports likewise if published);
+- every image compose builds is tagged `${DPS_IMAGE_TAG:-local}` (`data-privacy-services`, later
+  `data-privacy-services-browser`; the OCR mock `${DPS_IMAGE_TAG:-latest}`);
+- tests and tools read endpoints only from `DPS_TEST_*` (contract §12.2), whose defaults follow the same
+  port variables; `tools/smoke_test.py` reads `DPS_TEST_APP_URL` / `DPS_APP_PORT`;
+- give each lane its own `COMPOSE_PROJECT_NAME` so containers, networks and volumes stay apart:
+
+```bash
+COMPOSE_PROJECT_NAME=dps-m2 DPS_IMAGE_TAG=m2 DPS_APP_PORT=8401 docker compose up --build -d
+DPS_APP_PORT=8401 python tools/smoke_test.py
+COMPOSE_PROJECT_NAME=dps-m2 docker compose down
+```
 
 ## 4. Configuration (all `DPS_*`; `DPS_<NAME>_FILE` reads the value from a mounted file)
 
@@ -163,7 +183,8 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 - The root filesystem is read-only under compose: anything that writes must use `/tmp` (tmpfs) or a
   volume.
 - `/docs` loads Swagger UI from a public CDN; on an air-gapped network use `/api/v1/openapi.json`.
-- Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py`.
+- Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py` (see
+  "Lane-safe stacks", §3).
 
 ## 9. Next milestones
 

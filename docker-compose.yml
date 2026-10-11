@@ -8,6 +8,12 @@
 # Host ports bind 127.0.0.1 only. The key below is a local demo literal; staging/prod refuse
 # DPS_BOOTSTRAP_API_KEY and read DPS_API_KEYS_FILE instead.
 #
+# Lane-safe (contract §0 amendment 2026-10-12): every host port comes from a DPS_*_PORT variable
+# whose default is the contract port, and every image built here is tagged ${DPS_IMAGE_TAG:-local},
+# so a second stack can run beside this one:
+#   COMPOSE_PROJECT_NAME=dps-lane2 DPS_IMAGE_TAG=lane2 DPS_APP_PORT=8401 docker compose up --build -d
+#   DPS_APP_PORT=8401 python tools/smoke_test.py
+#
 # Detection runs offline: structural keys, the pattern catalogue and name cues (a name next to a
 # title, "name is" or contact details). NER is not in this image (build with
 # --build-arg WITH_NER=1 to add Presidio + spaCy); without it every report's
@@ -15,7 +21,7 @@
 services:
   app:
     build: .
-    image: data-privacy-services:local
+    image: data-privacy-services:${DPS_IMAGE_TAG:-local}
     ports:
       - "127.0.0.1:${DPS_APP_PORT:-8400}:8400"
     environment:
