@@ -36,6 +36,8 @@ services:
       DPS_COIN_CLIENT_SECRET: ${DPS_COIN_CLIENT_SECRET:-}
       DPS_COIN_SCOPE: ${DPS_COIN_SCOPE:-}
       DPS_SSL_CERT_FILE: ${DPS_SSL_CERT_FILE:-}
+      DPS_COIN_CA_FILE: ${DPS_COIN_CA_FILE:-}
+      DPS_COIN_TLS_INSECURE: ${DPS_COIN_TLS_INSECURE:-false}   # true only behind the VDI proxy
     # Hardening: read-only root filesystem (scratch space is a memory-backed /tmp), no Linux
     # capabilities, no privilege escalation, bounded memory.
     read_only: true

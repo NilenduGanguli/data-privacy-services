@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime
 import json
+import ssl
+from pathlib import Path
 
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from dps.config import Settings
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmResult, LlmUnavailable, get_gateway
@@ -226,3 +233,123 @@ def test_availability_per_provider() -> None:
     assert not LlmGateway(Settings(_env_file=None, llm_provider="vertex")).available()
     gw = get_gateway(Settings(_env_file=None, llm_provider="stub"))
     assert gw.provider == "stub" and gw.model == "gemini-2.5-flash"
+
+
+# --- SEC-1: the COIN token mint verifies TLS unless explicitly told not to ---------------------
+
+
+def _ca_file(tmp_path: Path, common_name: str) -> str:
+    """A self-signed CA certificate (PEM) whose subject names ``common_name``."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    path = tmp_path / f"{common_name}.pem"
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return str(path)
+
+
+def _trusted(verify: object) -> list[str]:
+    """The CA common names an SSL context passed as ``verify`` trusts (verification required)."""
+    assert isinstance(verify, ssl.SSLContext)
+    assert verify.verify_mode == ssl.CERT_REQUIRED and verify.check_hostname
+    return [
+        value
+        for cert in verify.get_ca_certs()
+        for rdn in cert["subject"]
+        for key, value in rdn
+        if key == "commonName"
+    ]
+
+
+def _ok(request: httpx.Request) -> httpx.Response:
+    if request.url.host == "coin.test":
+        return httpx.Response(200, json={"access_token": "t"})
+    return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+
+@pytest.fixture
+def clients(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
+    """Records ``(first request host, verify argument)`` for every client the gateway opens."""
+    seen: list[tuple[str, object]] = []
+    real = httpx.AsyncClient
+
+    class _Recording(real):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self._verify_arg = kwargs.get("verify", True)
+            super().__init__(*args, **kwargs)
+
+        async def post(self, url: object, *args: object, **kwargs: object) -> httpx.Response:
+            seen.append((httpx.URL(str(url)).host, self._verify_arg))
+            return await super().post(url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Recording)
+    return seen
+
+
+async def test_coin_mint_verifies_tls_with_the_default_trust_store(clients) -> None:  # noqa: ANN001
+    gw = LlmGateway(_stellar_settings(), transport=httpx.MockTransport(_ok))
+    await gw.complete([{"role": "user", "content": "x"}])
+    assert clients == [("coin.test", True), ("stellar.test", True)]
+    assert gw.coin_tls == "verified"
+
+
+async def test_coin_mint_trusts_the_coin_ca_file_then_the_ssl_cert_file(
+    clients,  # noqa: ANN001
+    tmp_path: Path,
+) -> None:
+    coin_ca, org_ca = _ca_file(tmp_path, "coin-ca"), _ca_file(tmp_path, "org-ca")
+    gw = LlmGateway(
+        _stellar_settings(coin_ca_file=coin_ca, ssl_cert_file=org_ca),
+        transport=httpx.MockTransport(_ok),
+    )
+    await gw.complete([{"role": "user", "content": "x"}])
+    (mint_host, mint_verify), (api_host, api_verify) = clients
+    assert mint_host == "coin.test" and _trusted(mint_verify) == ["coin-ca"]
+    assert api_host == "stellar.test" and _trusted(api_verify) == ["org-ca"]
+
+    clients.clear()
+    gw = LlmGateway(_stellar_settings(ssl_cert_file=org_ca), transport=httpx.MockTransport(_ok))
+    await gw.complete([{"role": "user", "content": "x"}])
+    assert [_trusted(verify) for _, verify in clients] == [["org-ca"], ["org-ca"]]
+
+
+async def test_coin_mint_skips_verification_only_with_the_explicit_opt_in(
+    clients,  # noqa: ANN001
+    tmp_path: Path,
+) -> None:
+    org_ca = _ca_file(tmp_path, "org-ca")
+    gw = LlmGateway(
+        _stellar_settings(coin_tls_insecure=True, ssl_cert_file=org_ca),
+        transport=httpx.MockTransport(_ok),
+    )
+    await gw.complete([{"role": "user", "content": "x"}])
+    (mint_host, mint_verify), (api_host, api_verify) = clients
+    assert mint_host == "coin.test" and mint_verify is False
+    # The opt-in covers the mint only: Stellar API calls still verify.
+    assert api_host == "stellar.test" and _trusted(api_verify) == ["org-ca"]
+    assert gw.coin_tls == "insecure"
+
+
+async def test_an_unreadable_ca_file_is_a_call_error_before_any_request(
+    clients,  # noqa: ANN001
+    tmp_path: Path,
+) -> None:
+    gw = LlmGateway(
+        _stellar_settings(coin_ca_file=str(tmp_path / "missing.pem")),
+        transport=httpx.MockTransport(_ok),
+    )
+    with pytest.raises(LlmCallError) as err:
+        await gw.complete([{"role": "user", "content": "x"}])
+    assert clients == [] and err.value.__cause__ is None
+    assert "missing.pem" not in str(err.value)

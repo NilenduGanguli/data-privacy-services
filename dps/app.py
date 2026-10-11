@@ -211,10 +211,28 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         llm_ok = gateway is not None and gateway.available()
         provider = (gateway.provider if gateway is not None else "") or "none"
+        coin_tls = (
+            gateway.coin_tls
+            if gateway is not None
+            else ("insecure" if settings.coin_tls_insecure else "verified")
+        )
         READINESS.set("api-core", True, "up", version=__version__)
         READINESS.set(
-            "llm-gateway", llm_ok, "configured" if llm_ok else "unconfigured", provider=provider
+            "llm-gateway",
+            llm_ok,
+            "configured" if llm_ok else "unconfigured",
+            provider=provider,
+            coin_tls=coin_tls,
         )
+        if coin_tls == "insecure":
+            # SEC-1: say so once per process, naming the settings only (posture.py gates prod).
+            logger.warning(
+                "coin_tls_insecure",
+                component="llm-gateway",
+                provider=provider,
+                env=settings.env,
+                reason="DPS_COIN_TLS_INSECURE=true: the COIN token mint skips TLS verification",
+            )
         READINESS.set(
             "ner", engine.ner is not None, "presidio" if engine.ner is not None else "patterns-only"
         )

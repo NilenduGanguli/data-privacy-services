@@ -54,6 +54,8 @@ def test_good_production_passes() -> None:
             ssl_cert_file="/etc/ca.pem",
         ),
         dict(audit_enabled=False),
+        # SEC-1: an unverified COIN mint needs the documented VDI exception as well.
+        dict(coin_tls_insecure=True),
     ],
 )
 def test_bad_production_is_refused(bad: dict) -> None:
@@ -98,3 +100,31 @@ def test_plain_http_egress_is_allowed_outside_production() -> None:
         coin_url="http://localhost:8081/token",
     )
     assert posture_problems(settings) == []
+
+
+_GOOD_STELLAR = dict(
+    llm_provider="stellar",
+    stellar_base_url="https://stellar.internal/v1",
+    coin_url="https://coin.internal/token",
+    ssl_cert_file="/etc/ca.pem",
+)
+
+
+@pytest.mark.parametrize("env", ["staging", "prod"])
+def test_insecure_coin_mint_is_refused_in_production_without_the_exception(env: str) -> None:
+    problems = posture_problems(_prod(env=env, coin_tls_insecure=True, **_GOOD_STELLAR))
+    assert problems == [
+        "DPS_COIN_TLS_INSECURE=true requires DPS_ALLOW_INSECURE_COIN_MINT=true in staging/prod "
+        "(the documented VDI exception)"
+    ]
+    # The exception flag alone changes nothing, and the two together pass.
+    assert posture_problems(_prod(env=env, allow_insecure_coin_mint=True, **_GOOD_STELLAR)) == []
+    assert_production_posture(
+        _prod(env=env, coin_tls_insecure=True, allow_insecure_coin_mint=True, **_GOOD_STELLAR)
+    )
+
+
+def test_insecure_coin_mint_is_allowed_outside_production() -> None:
+    for env in ("local", "dev"):
+        settings = Settings(_env_file=None, env=env, coin_tls_insecure=True, **_GOOD_STELLAR)
+        assert posture_problems(settings) == []

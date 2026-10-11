@@ -10,6 +10,18 @@ def test_defaults_are_local_and_safe() -> None:
     assert s.env == "local" and s.port == 8400 and s.auth_enabled is True
     assert s.fpe_enabled is False and s.llm_provider == ""
     assert s.is_production is False
+    # SEC-1: the COIN mint verifies TLS unless explicitly told otherwise.
+    assert s.coin_tls_insecure is False and s.allow_insecure_coin_mint is False
+    assert s.coin_ca_file == ""
+
+
+def test_coin_tls_settings_read_their_env_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DPS_COIN_CA_FILE", "/etc/dps/coin-ca.pem")
+    monkeypatch.setenv("DPS_COIN_TLS_INSECURE", "true")
+    monkeypatch.setenv("DPS_ALLOW_INSECURE_COIN_MINT", "true")
+    s = Settings(_env_file=None)
+    assert s.coin_ca_file == "/etc/dps/coin-ca.pem"
+    assert s.coin_tls_insecure is True and s.allow_insecure_coin_mint is True
 
 
 def test_env_prefix_and_file_indirection(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

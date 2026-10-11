@@ -33,6 +33,13 @@ def posture_problems(settings: Settings) -> list[str]:
             problems.append("DPS_SSL_CERT_FILE is required for the stellar provider")
         if not (settings.stellar_base_url and settings.coin_url):
             problems.append("DPS_STELLAR_BASE_URL and DPS_COIN_URL are required for stellar")
+    # SEC-1: the COIN mint verifies TLS unless DPS_COIN_TLS_INSECURE opts out; in staging/prod
+    # that opt-out is the documented VDI exception and must be acknowledged explicitly.
+    if settings.coin_tls_insecure and not settings.allow_insecure_coin_mint:
+        problems.append(
+            "DPS_COIN_TLS_INSECURE=true requires DPS_ALLOW_INSECURE_COIN_MINT=true in staging/prod "
+            "(the documented VDI exception)"
+        )
     # Spec §10: TLS-only egress. COIN receives the client id/secret and Stellar the bearer token,
     # so a plain-http endpoint would put credentials on the wire in cleartext. Checked whenever
     # the URL is set, whatever the provider. The message names the setting, never the URL

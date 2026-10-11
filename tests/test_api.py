@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -455,6 +456,25 @@ def test_readiness_reflects_the_injected_engine_and_posture_refuses_unsafe_confi
     with pytest.raises(ValueError) as err:
         create_app(_settings(api_keys='[{"name": "x", "key": "dps_leaky_secret"'))
     assert "dps_leaky_secret" not in str(err.value)
+
+
+def test_readiness_names_the_coin_tls_mode_and_insecure_mode_warns_once(capsys) -> None:  # noqa: ANN001
+    with TestClient(create_app(_settings())) as c:
+        assert c.get("/readyz").json()["components"]["llm-gateway"]["coin_tls"] == "verified"
+    assert "coin_tls_insecure" not in "".join(capsys.readouterr())
+
+    secret = base64.b64encode(b"s3nt1nel-coin-secret").decode()
+    settings = _settings(
+        coin_tls_insecure=True,
+        coin_url="https://svc-user:pa55word@coin.internal/token",
+        coin_client_secret=secret,
+    )
+    with TestClient(create_app(settings)) as c:
+        assert c.get("/readyz").json()["components"]["llm-gateway"]["coin_tls"] == "insecure"
+    out = "".join(capsys.readouterr())
+    assert out.count("coin_tls_insecure") == 1
+    for fragment in (secret, "s3nt1nel", "pa55word", "svc-user", "coin.internal"):
+        assert fragment not in out
 
 
 class _FailingSink:

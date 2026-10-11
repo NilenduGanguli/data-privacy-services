@@ -52,7 +52,7 @@ Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,
 `DPS_FPE_ENABLED=true`, `DPS_LLM_PROVIDER=stub` and passes the Stellar/COIN variables through (each
-overridable from the shell). The smoke test reads `DPS_BASE_URL` or `DPS_TEST_APP_URL` (default
+overridable from the shell; `DPS_COIN_TLS_INSECURE` defaults to `false`). The smoke test reads `DPS_BASE_URL` or `DPS_TEST_APP_URL` (default
 `http://127.0.0.1:${DPS_APP_PORT:-8400}`) and `DPS_API_KEY` (default the local demo key).
 
 ## 4. Configuration (all `DPS_*`; `DPS_<NAME>_FILE` reads the value from a mounted file)
@@ -78,7 +78,10 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_STELLAR_BASE_URL`, `DPS_COIN_URL` | — | Stellar calls `<base>/chat/completions`; both must be `https` in staging/prod |
 | `DPS_COIN_CLIENT_ID`, `DPS_COIN_CLIENT_SECRET`, `DPS_COIN_SCOPE` | — | **base64**-encoded (org convention), decoded at use; the scope is sent as `coinscope<scope>` |
 | `DPS_COIN_TOKEN_TTL_SECONDS` | 840 | COIN token reuse window |
-| `DPS_SSL_CERT_FILE` | — | CA bundle for Stellar calls; required for `stellar` in staging/prod |
+| `DPS_SSL_CERT_FILE` | — | CA bundle for Stellar calls (and the COIN mint when `DPS_COIN_CA_FILE` is unset); required for `stellar` in staging/prod |
+| `DPS_COIN_CA_FILE` | — | CA bundle (file or directory) for the COIN token mint; else `DPS_SSL_CERT_FILE`, else httpx's default store (certifi, or `SSL_CERT_FILE`/`SSL_CERT_DIR` from the environment) |
+| `DPS_COIN_TLS_INSECURE` | `false` | `true` skips TLS verification **on the COIN token mint only** (the VDI's intercepting proxy); logs one `coin_tls_insecure` warning at startup and `/readyz` reports `coin_tls: insecure`; Stellar API calls still verify |
+| `DPS_ALLOW_INSECURE_COIN_MINT` | `false` | the documented VDI exception: staging/prod refuse `DPS_COIN_TLS_INSECURE=true` unless this is `true` too |
 | `DPS_VERTEX_PROJECT` / `DPS_VERTEX_LOCATION` | — / `global` | laptop path; needs the `vertex` extra and ADC |
 | `DPS_MAX_PAYLOAD_MB` / `DPS_MAX_TEXT_CHARS` / `DPS_MAX_ITEMS` | 8 / 1,000,000 / 10,000 | 413 beyond (body bytes by header or while streaming; text characters; JSON leaf values) |
 | `DPS_RATE_LIMIT_ENABLED` / `_RPS` / `_BURST` | `true` / 50 / 100 | token bucket per API key, per process; 429 + `Retry-After` |
@@ -90,7 +93,8 @@ Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.
 ## 5. Probes and ops surfaces
 
 - `GET /health` — liveness, `{"status": "ok"}`.
-- `GET /readyz` — `{"ready", "components"}` with `api-core`, `llm-gateway` (`provider`), `ner`
+- `GET /readyz` — `{"ready", "components"}` with `api-core`, `llm-gateway` (`provider`, `coin_tls`
+  `verified` / `insecure`), `ner`
   (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`); **503** only when a required
   component is down, and only `api-core` is required in M0 (it turns false on shutdown).
 - `GET /metrics` — Prometheus: `dps_requests_total{route,outcome}`,
@@ -106,8 +110,13 @@ Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.
 
 - **Posture guard** (`DPS_ENV=staging|prod`, checked before the app is built, the process exits on a
   violation): auth on, bootstrap key unset, `DPS_API_KEYS` set, provider not `stub`, `stellar` needs
-  `DPS_SSL_CERT_FILE` and both URLs, Stellar/COIN URLs `https`, audit on. Messages name the setting,
-  never its value.
+  `DPS_SSL_CERT_FILE` and both URLs, Stellar/COIN URLs `https`, `DPS_COIN_TLS_INSECURE=true` only
+  with `DPS_ALLOW_INSECURE_COIN_MINT=true`, audit on. Messages name the setting, never its value.
+- **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
+  default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
+  certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
+  staging/prod, `DPS_ALLOW_INSECURE_COIN_MINT=true` (record the approval with the deployment).
+  Prefer `DPS_COIN_CA_FILE` with the proxy's CA whenever it can be obtained.
 - Every response: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`; HSTS outside `local`. The console HTML carries a strict CSP
   (`script-src 'self'`, `frame-ancestors 'none'`).
@@ -135,8 +144,10 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
   all three, one per value.
 - `gdpr-pseudonymise` keeps generic `DATE`s. A date in free text that equals the date-shifted DOB
   stays in clear: the leakage sweep allows a kept value in the leaf where the policy kept it.
-- The COIN token mint runs with TLS verification off on purpose (org handoff: VDI TLS
-  interception); Stellar calls verify against `DPS_SSL_CERT_FILE` (system CAs when unset).
+- The COIN token mint verifies TLS since SEC-1 (M0 skipped it). A VDI deployment that relied on
+  the old behaviour now fails the mint with `LlmCallError: coin mint failed: ConnectError` until it
+  sets `DPS_COIN_CA_FILE` (preferred) or `DPS_COIN_TLS_INSECURE=true` (+ the staging/prod exception
+  flag, §6). Stellar calls verify against `DPS_SSL_CERT_FILE` (httpx's default store when unset).
 - Presidio is recall-only; identifiers with checksums come from the pattern tier regardless.
   Without the `ner` image, names in free text are not detected (key names still are).
 - The access log is off (`--no-access-log`): it is stdlib logging and bypasses the allow-list.

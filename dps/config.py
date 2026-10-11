@@ -116,7 +116,12 @@ class Settings(BaseSettings):
     coin_client_secret: str = ""
     coin_scope: str = ""
     coin_token_ttl_seconds: int = 840
-    ssl_cert_file: str = ""
+    ssl_cert_file: str = ""  # CA bundle for Stellar calls (and the COIN mint without coin_ca_file)
+    coin_ca_file: str = ""  # CA bundle for the COIN token mint; falls back to ssl_cert_file
+    # Skip TLS verification on the COIN token mint only (the VDI's intercepting proxy). Off by
+    # default; staging/prod also need allow_insecure_coin_mint (the posture guard, dps/posture.py).
+    coin_tls_insecure: bool = False
+    allow_insecure_coin_mint: bool = False
     vertex_project: str = ""
     vertex_location: str = "global"
 

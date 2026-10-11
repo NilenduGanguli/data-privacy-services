@@ -5,9 +5,11 @@ Providers:
 * ``stellar`` — the OpenAI-compatible gateway behind COIN OAuth2 client-credentials. Client id,
   secret and scope arrive base64-encoded and are decoded at use; the effective scope is
   ``"coinscope" + scope``; the token is re-minted after the TTL on a **monotonic** clock (one
-  mint at a time, under a lock). The token mint deliberately skips TLS verification (VDI
-  intercepting proxy, per the org handoff); API calls verify against ``DPS_SSL_CERT_FILE`` when
-  set.
+  mint at a time, under a lock). The token mint verifies TLS against ``DPS_COIN_CA_FILE``, else
+  ``DPS_SSL_CERT_FILE``, else httpx's default trust store; ``DPS_COIN_TLS_INSECURE=true`` turns
+  verification off for the mint only (the VDI's intercepting proxy, per the org handoff), which
+  staging/prod refuse unless ``DPS_ALLOW_INSECURE_COIN_MINT=true`` acknowledges the exception.
+  API calls always verify, against ``DPS_SSL_CERT_FILE`` when set.
 * ``vertex`` — Gemini via ``google-genai`` (lazy import), the laptop path.
 * ``stub`` — deterministic echo for tests and offline demos.
 
@@ -21,9 +23,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import os
+import ssl
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field
@@ -65,6 +69,22 @@ def _http_failure(what: str, exc: httpx.HTTPError) -> LlmCallError:
     return LlmCallError(f"{what} failed: {type(exc).__name__}{status}")
 
 
+def _tls_verify(trust: str | bool, what: str) -> ssl.SSLContext | bool:
+    """httpx's ``verify`` for ``trust``: a CA bundle path (file or directory) or a bool.
+
+    A path becomes an SSL context here (httpx 0.28 deprecates ``verify=<str>``); a bundle that
+    cannot be loaded is a :class:`LlmCallError` naming the exception type only.
+    """
+    if isinstance(trust, bool):
+        return trust
+    try:
+        if os.path.isdir(trust):
+            return ssl.create_default_context(capath=trust)
+        return ssl.create_default_context(cafile=trust)
+    except OSError as exc:  # ssl.SSLError is an OSError
+        raise LlmCallError(f"{what} CA bundle could not be loaded: {type(exc).__name__}") from None
+
+
 def _count(raw: Any) -> int:
     try:
         return max(0, int(raw))
@@ -98,6 +118,18 @@ class LlmGateway:
     def model(self) -> str:
         """The configured model id."""
         return self._s.llm_model
+
+    @property
+    def coin_tls(self) -> Literal["verified", "insecure"]:
+        """``"insecure"`` when ``DPS_COIN_TLS_INSECURE`` turns off TLS verification on the mint."""
+        return "insecure" if self._s.coin_tls_insecure else "verified"
+
+    def _mint_trust(self) -> str | bool:
+        """The mint's TLS trust: off only by explicit opt-in, else the COIN CA, the org CA or
+        httpx's default store."""
+        if self._s.coin_tls_insecure:
+            return False
+        return self._s.coin_ca_file or self._s.ssl_cert_file or True
 
     def available(self) -> bool:
         """True when the provider is configured and its prerequisites are installed."""
@@ -181,10 +213,10 @@ class LlmGateway:
                 "client_secret": _b64(self._s.coin_client_secret),
                 "scope": "coinscope" + _b64(self._s.coin_scope),
             }
+            verify = _tls_verify(self._mint_trust(), "coin mint")
             try:
-                # verify=False is intentional for the mint only (org handoff: VDI TLS interception).
                 async with httpx.AsyncClient(
-                    timeout=_MINT_TIMEOUT_SECONDS, verify=False, transport=self._transport
+                    timeout=_MINT_TIMEOUT_SECONDS, verify=verify, transport=self._transport
                 ) as client:
                     response = await client.post(self._s.coin_url, data=data)
                     response.raise_for_status()
@@ -203,7 +235,7 @@ class LlmGateway:
         self, messages: list[dict[str, str]], temperature: float, max_tokens: int
     ) -> LlmResult:
         token = await self._coin_token()
-        verify: Any = self._s.ssl_cert_file or True
+        verify = _tls_verify(self._s.ssl_cert_file or True, "stellar")
         url = self._s.stellar_base_url.rstrip("/") + "/chat/completions"
         host = httpx.URL(url).host
         try:
