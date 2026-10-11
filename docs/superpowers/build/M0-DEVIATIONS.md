@@ -1266,3 +1266,58 @@ Still open:
   persona, and `PERSON_NAME` does not.
 - A short upper-case name inside a digit-dominated identifier (`RAVI 12345678`) still reads as
   a code and stays.
+
+## Task 23 — Auth, rate limiting and audit
+
+Public names as planned: `AuthError`, `Principal`, `KeyRecord`, `KeyStore`, `StaticKeyStore`
+(`from_settings`, `lookup`, `__len__`), `hash_key`, `new_api_key`, `authenticate`,
+`resolve_tenant`, `current_principal`, `require_scope`, `LOCAL_PRINCIPAL`, `API_KEY_HEADER`,
+`TENANT_HEADER`, `SCOPES`; `RateLimiter(rate, burst, *, enabled, clock)`, `enforce_rate_limit`;
+`AuditEvent`, `AuditSink`, `LogAuditSink`, `MemoryAuditSink`. The plan's 5 tests are unchanged
+(reformatted only). Changes:
+
+- `dps/auth.py` — **no implicit wildcard grants.** The plan defaulted a record's `tenant_ids`
+  and `scopes` to `["*"]` and ignored unknown fields, so a record with a typo
+  (`"scope": ["detect"]`) or without grants was silently granted every tenant and every scope,
+  including `reveal` and `admin`. `KeyRecord` now requires both (non-empty) and forbids extra
+  fields; the bootstrap key states its wildcard explicitly. The documented record shape
+  (`{name, key|key_sha256, tenant_ids, scopes}` in `config.py` and the plan's HANDOFF §3)
+  already lists both.
+- `dps/auth.py` — **errors never echo a key.** `KeyRecord` sets `hide_input_in_errors=True`
+  (a pydantic error on a record quoted `input_value={'key': 'dps_…'}`); `from_settings` maps a
+  JSON error to `DPS_API_KEYS is not valid JSON (<msg> at line L column C)` and a record error
+  to `DPS_API_KEYS record <i>: <field>: <rule>` (built from `errors(include_input=False)`),
+  both raised `from None`; a non-list is refused.
+- `dps/auth.py` — `key_sha256` must be 64 hex characters and is lower-cased (an upper-case
+  digest never matched, silently); unknown scopes are refused naming the scope (vocabulary, not
+  a secret); tenant ids in records must be identifiers; two records with the same key are
+  refused naming both records (the plan let the second silently replace the first).
+- `dps/auth.py` — **key ids** are `static-<first 12 hex of sha256(key)>` instead of
+  `static-<index>-<8 hex>`, so a key keeps its id (and its audit trail and rate-limit bucket)
+  when the record list is reordered or edited.
+- `dps/auth.py` — **tenant header shape.** `resolve_tenant` answers 400 when `X-DPS-Tenant` is
+  not an identifier (`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`), before the grant check. A wildcard key
+  previously accepted any string as its tenant, and that string went verbatim into the audit log
+  (a name, an account number or a newline could be smuggled into an id field). The detail does
+  not quote the header. An empty header counts as absent.
+- `dps/auth.py` — rejections are logged value-free (`auth_rejected` with status code, reason
+  `key|scope|tenant` and route; never the key); `require_scope` is typed
+  (`Callable[[Request], Principal]`) instead of `noqa: ANN201`, and refuses an unknown scope at
+  import time; `HTTPException`s are raised `from None`.
+- `dps/ratelimit.py` — an enabled limiter refuses `rate <= 0` or `burst < 1` (a zero rate
+  divided by zero / locked every key out forever); `Retry-After` is `ceil(1/rate)` (at least 1)
+  instead of a constant 1; buckets that have refilled are pruned once 10,000 keys are tracked
+  (the per-IP fallback could otherwise grow without bound); a backwards clock never adds
+  tokens; a rejection is logged (`rate_limited`, key id and route).
+- `dps/audit.py` — `AuditEvent` forbids extra fields (nothing value-bearing can be attached by
+  accident); new `NullAuditSink` so `create_app` can honour `DPS_AUDIT_ENABLED=false` (local
+  only — the posture guard refuses it in staging/prod).
+
+Tests added (8): `test_key_records_never_echo_a_key_in_errors` (7 bad records),
+`test_hashed_keys_are_normalised_and_unknown_scopes_listed`,
+`test_duplicate_keys_are_refused_naming_records_not_keys`,
+`test_api_keys_setting_errors_are_value_free`, `test_key_ids_are_stable_and_do_not_reveal_the_key`,
+`test_tenant_ids_from_headers_are_checked_for_shape`,
+`test_rate_limiter_isolates_keys_and_never_exceeds_burst`,
+`test_log_audit_sink_writes_every_field_and_no_value`. Against the plan's three modules, 6 of the
+8 fail; the plan's 5 pass on both. Count: 13 in the file; suite 415 passed, 1 skipped.
