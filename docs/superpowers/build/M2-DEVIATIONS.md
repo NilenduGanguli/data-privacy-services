@@ -28,3 +28,14 @@ otherwise.
   `test_bad_m2_production_is_refused` clear `DPS_JOB_KEK` first (`monkeypatch.delenv`), so a KEK
   exported in the developer's shell cannot flip their result; lines are wrapped to 100 characters.
   Assertions unchanged.
+
+## Task 2 — Ids and sealing
+
+- `dps/secrets.py`: `seal` refuses a KEK that is not 32 bytes (`ValueError("the job KEK must be 32
+  bytes")`, no detail). Why: `AESGCM` also accepts 16- and 24-byte keys, so a short key would have
+  sealed silently with AES-128/192 while `open_sealed` (which already checks 32 bytes) could never
+  open it. Test added: `test_seal_refuses_a_kek_that_is_not_32_bytes` (17 tests, plan: 16).
+- `dps/secrets.py`: `open_json` uses PEP 695 type parameters (`def open_json[M: BaseModel](…)`) instead of a
+  module-level `TypeVar` (ruff UP047 under `target-version = "py312"`); same signature for callers.
+- `dps/secrets.py`: `SECRET_FILES` is documented and laid out one name per line; slices formatted by
+  `ruff format`. Behaviour as planned.
