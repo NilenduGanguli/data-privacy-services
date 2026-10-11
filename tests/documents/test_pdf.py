@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -9,6 +10,7 @@ pytestmark = pytest.mark.docs
 pytest.importorskip("pdfplumber")
 pytest.importorskip("pypdfium2")
 
+import pypdfium2 as pdfium  # noqa: E402
 from pypdf import PdfReader, PdfWriter  # noqa: E402
 from pypdf.generic import NameObject  # noqa: E402
 
@@ -142,10 +144,8 @@ def _bogus_filter(data: bytes) -> bytes:
     return out.getvalue()
 
 
-def _one_page(page: bytes) -> bytes:
-    """A minimal one-page PDF whose page dictionary is ``page`` (a valid xref table)."""
-    objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"]
-    objects.append(page)
+def _raw_pdf(*objects: bytes) -> bytes:
+    """A PDF of the given objects, numbered from 1 (1 is the catalog), with a valid xref."""
     out, offsets = b"%PDF-1.7\n", []
     for number, body in enumerate(objects, start=1):
         offsets.append(len(out))
@@ -158,6 +158,13 @@ def _one_page(page: bytes) -> bytes:
         xref,
     )
     return out
+
+
+def _one_page(page: bytes) -> bytes:
+    """A minimal one-page PDF whose page dictionary is ``page``."""
+    return _raw_pdf(
+        b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", page
+    )
 
 
 @pytest.mark.parametrize(
@@ -216,3 +223,117 @@ def test_the_page_bound_follows_the_highest_render_resolution():
     with pytest.raises(DocumentError) as exc:  # a 150-dpi preview would be 15,000 px wide
         extract_pdf(wide, previews_finer, "auto")
     assert exc.value.code == "image_too_large"
+
+
+def _forged_count(data: bytes, count: int) -> bytes:
+    """``data`` with the page tree root's ``/Count`` replaced (same width, so the xref holds)."""
+    forged, n = re.subn(rb"/Count \d\b", b"/Count %d" % count, data, count=1)
+    assert n == 1 and len(forged) == len(data)
+    return forged
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        # PDFium trusts /Count (2) while pdfplumber walks /Kids (1): loading page 2 failed uncoded
+        lambda: _forged_count(_blank((612, 792)), 2),
+        # PDFium sees 1 page, pdfplumber 3, and the 3rd is too large to render
+        lambda: _forged_count(_blank((612, 792), (612, 792), (14_400, 14_400)), 1),
+    ],
+    ids=["count-above-the-tree", "count-below-the-tree"],
+)
+def test_a_page_count_that_contradicts_the_page_tree_is_a_corrupt_document(make):
+    with pytest.raises(DocumentError) as exc:
+        extract_pdf(make(), SET, "auto")
+    assert (exc.value.code, exc.value.status) == ("corrupt_document", 422)
+    assert exc.value.__cause__ is None  # no PDFium or pdfminer text kept
+    assert exc.value.__context__ is None or exc.value.__suppress_context__
+
+
+def test_renderer_page_loads_that_fail_are_corrupt_documents():
+    with PdfRenderer(_forged_count(_blank((612, 792)), 2)) as r:
+        assert len(r) == 2  # PDFium believes /Count; page 2 does not exist
+        calls = (lambda: r.page_size(1), lambda: r.image_coverage(1), lambda: r.render(1, 72))
+        for call in calls:
+            with pytest.raises(DocumentError) as exc:
+                call()
+            assert exc.value.code == "corrupt_document" and exc.value.__cause__ is None
+
+
+def test_a_closed_renderer_refuses_every_call():
+    r = PdfRenderer(_blank((612, 792)))
+    r.close()
+    r.close()  # idempotent
+    calls = (
+        lambda: len(r),
+        lambda: r.page_size(0),
+        lambda: r.image_coverage(0),
+        lambda: r.render(0, 72),
+    )
+    for call in calls:
+        with pytest.raises(DocumentError) as exc:
+            call()
+        assert exc.value.code == "corrupt_document"
+
+
+_FONT = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+
+def _text_page(contents: int, extra: bytes = b"") -> bytes:
+    return (
+        b"<< %s /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> "
+        b"/Contents %d 0 R >>" % (extra, contents)
+    )
+
+
+def _stream(text: bytes) -> bytes:
+    body = b"BT /F1 24 Tf 72 700 Td (" + text + b") Tj ET"
+    return b"<< /Length %d >>\nstream\n%s\nendstream" % (len(body), body)
+
+
+def _two_readings(count: int) -> bytes:
+    """Object 4 is a page without /Type (pypdf and PDFium: a page; pdfminer: skipped); object 5
+    is typed /Page but carries /Kids (pypdf and pdfminer: a page; PDFium: an empty intermediate
+    node). Unless normalisation settles the tree, PDFium renders object 4 while the text layer
+    reads object 5."""
+    return _raw_pdf(
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [4 0 R 5 0 R] /Count %d >>" % count,
+        _FONT,
+        _text_page(6),
+        _text_page(7, b"/Type /Page /Kids []"),
+        _stream(b"RASTER 123-45-6789"),
+        _stream(b"Only the text layer reads this harmless page"),
+    )
+
+
+def _pdfium_texts(data: bytes) -> list[str]:
+    doc = pdfium.PdfDocument(data)
+    try:
+        texts = []
+        for i in range(len(doc)):
+            page = doc[i]
+            texts.append(page.get_textpage().get_text_range())
+            page.close()
+        return texts
+    finally:
+        doc.close()
+
+
+def test_the_renderer_and_the_text_layer_read_the_same_pages():
+    # a tree that each parser reads differently is settled by normalisation: every page is
+    # rendered and its text layer scanned, page for page
+    doc = extract_pdf(_two_readings(2), SET, "auto")
+    assert ["123-45-6789" in p.text for p in doc.pages] == [True, False]
+    rendered = _pdfium_texts(doc.pdf)
+    assert len(rendered) == 2
+    for page, text in zip(doc.pages, rendered, strict=True):
+        assert page.text.split() == text.split()
+
+
+def test_a_page_rendered_but_never_read_is_refused():
+    # with /Count 1 this was accepted: PDFium rendered object 4 (the SSN) as the only page, while
+    # the text layer read only object 5
+    with pytest.raises(DocumentError) as exc:
+        extract_pdf(_two_readings(1), SET, "auto")
+    assert (exc.value.code, exc.value.status) == ("corrupt_document", 422)

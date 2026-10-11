@@ -19,7 +19,7 @@ from typing import Any
 import pdfplumber
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pypdf import PdfReader, PdfWriter, Transformation
-from pypdf.generic import RectangleObject
+from pypdf.generic import DictionaryObject, NameObject, RectangleObject
 
 from dps.config import Settings
 from dps.layers.documents.errors import DocumentError
@@ -41,6 +41,13 @@ def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
     """Rewrite a PDF so every page's crop box starts at the origin and its rotation lives in the
     content. Afterwards pdfplumber coordinates (points, top-left) and pypdfium2 rasters agree
     exactly, which the redaction boxes rely on. Returns the bytes and the annotation count.
+
+    The page tree is settled to pypdf's reading of it: the root lists every page directly, and
+    each page is typed ``/Page`` with no ``/Kids``. pypdf, pdfminer and PDFium decide what is a
+    page by different rules (``/Type`` first, ``/Type`` only, ``/Kids`` only), so an untyped page
+    or a ``/Page`` carrying ``/Kids`` would otherwise be rendered but never read, or read but
+    never rendered. The root's ``/Count`` is left as declared: a count that contradicts the tree
+    is refused by ``extract_pdf``, which compares the renderer with the text layer.
 
     Any failure inside pypdf is ``corrupt_document`` naming only the exception type: on malformed
     input pypdf raises far more than its own ``PyPdfError`` (``AttributeError``,
@@ -66,7 +73,15 @@ def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
         )
     annotations = 0
     try:
+        tree = writer.root_object["/Pages"].get_object()
+        if not isinstance(tree, DictionaryObject):  # pypdf has walked it, so this cannot happen
+            raise DocumentError("corrupt_document", "the PDF has no page tree")
+        tree[NameObject("/Type")] = NameObject("/Pages")
         for page in writer.pages:
+            page[NameObject("/Type")] = NameObject("/Page")
+            for key in ("/Kids", "/Count"):
+                if key in page:
+                    del page[key]
             annots = page.get("/Annots")
             annotations += len(annots.get_object()) if annots is not None else 0
             if page.rotation % 360:
@@ -149,7 +164,11 @@ def _check_page_sizes(renderer: PdfRenderer, settings: Settings) -> None:
 
 
 def extract_pdf(content: bytes, settings: Settings, ocr_mode: OcrMode) -> ExtractedDocument:
-    """Normalise, bound the page size, read the text layer, and flag pages that need OCR."""
+    """Normalise, bound the page size, read the text layer, and flag pages that need OCR.
+
+    The renderer and the text layer must agree on the page count: later stages index PDFium
+    renders by text-layer page numbers, and PDFium takes the count from ``/Count`` while
+    pdfplumber walks the page tree, so a disagreement is ``corrupt_document``."""
     normalised, annotations = normalise_pdf(content, max_pages=settings.max_document_pages)
     with PdfRenderer(normalised) as renderer:
         _check_page_sizes(renderer, settings)
@@ -157,6 +176,12 @@ def extract_pdf(content: bytes, settings: Settings, ocr_mode: OcrMode) -> Extrac
     pages: list[PageText] = []
     try:
         with pdfplumber.open(io.BytesIO(normalised)) as pdf:
+            if len(pdf.pages) != len(coverage):
+                raise DocumentError(
+                    "corrupt_document",
+                    "the renderer and the text layer disagree on the page count "
+                    f"({len(coverage)} and {len(pdf.pages)}): /Count contradicts the page tree",
+                )
             for i, plumber_page in enumerate(pdf.pages):
                 words = [] if ocr_mode == "always" else _text_layer_words(plumber_page)
                 chars = sum(len(w.text) for w in words)

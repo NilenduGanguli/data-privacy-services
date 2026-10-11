@@ -318,3 +318,65 @@ helpers named below are new or changed.
   above: the review measured `", ' "` at 1.0 s for 64 KB and 0.07 s for 16 KB, and could not
   reproduce "more than five minutes". The worst measured cases are about 6.5–7 s at 64 KB
   (quadratic). The reason for replacing the Sniffer still holds.
+
+## Fix round 2 for Tasks 5–7 (review `M1-G2-review-r2`)
+
+- **B1-r2: a forged `/Pages /Count` was an uncoded `PdfiumError` (HTTP 500).** pypdf keeps the
+  input's root `/Count` when it writes the normalised PDF. PDFium takes its page count from that
+  `/Count` (when it lies in 1..2^20−2), while pdfplumber walks `/Kids`. So a one-page PDF claiming
+  `/Count 2` made `_check_page_sizes` load PDFium page 2, which raised
+  `PdfiumError: Failed to load page.` uncoded. Three changes:
+  1. **`PdfRenderer` codes every PDFium failure** (`render.py`). A private `_page(index)` loads
+     each page and turns `PdfiumError` into `corrupt_document` ("a PDF page could not be loaded").
+     `page_size`, `render` and `image_coverage` all go through it. `render` also codes a failing
+     render ("a PDF page could not be rendered"). `image_coverage` also codes a failing
+     `get_bounds` ("the images on a PDF page could not be measured"). All are raised
+     `from None`.
+  2. **`extract_pdf` refuses a page-count disagreement.** When PDFium's count differs from
+     pdfplumber's, it raises `corrupt_document` with the message "the renderer and the text layer
+     disagree on the page count (R and T): /Count contradicts the page tree". The message holds
+     only the two counts. Before, a `/Count` below the tree was refused only by an incidental
+     `IndexError` on `coverage[i]`. The check runs after `_check_page_sizes`, so a `/Count` above
+     the tree is still refused there, by the guard in (1).
+  3. **Beyond the review: `normalise_pdf` settles the page tree** to pypdf's reading of it. On
+     clone, pypdf already lists every page it found directly under the root `/Kids`. Normalisation
+     now also does three things:
+     - it sets `/Type /Pages` on the root;
+     - it sets `/Type /Page` on every page;
+     - it deletes any `/Kids` or `/Count` that a page carries.
+
+     **Why.** The three parsers decide what a page is by different rules:
+     - pypdf reads `/Type` first, then the absence of `/Kids`;
+     - pdfminer reads `/Type` only;
+     - PDFium reads the absence of `/Kids` only.
+
+     **The attack this closes.** Build a tree of an untyped page X (holding an SSN) and a page Y
+     typed `/Page` but carrying `/Kids []`, with `/Count 1`. Before this fix it was *accepted*:
+     PDFium rendered X while the text layer read only Y, so the SSN was in the raster and was
+     never scanned. The count check in (2) did not catch it, because both sides counted 1. Now
+     every parser sees both pages:
+     - with `/Count 1` the PDF is refused by (2);
+     - with `/Count 2` it is accepted, and page by page PDFium's own text equals the text layer.
+
+     The root's `/Count` is deliberately *not* rewritten. A count that contradicts the tree is
+     refused, as the review asked. Repairing it would be the lenient alternative; it is safe once
+     the leaves are settled, if real traffic needs it. `/Count 0`, `-1` or out-of-range values
+     make PDFium walk the tree, so they are accepted as before when the tree is consistent.
+- **N7 (folded in): a closed renderer refuses every call.** `__len__`, `page_size`,
+  `image_coverage` and `render` all raise `corrupt_document` ("the renderer was already
+  closed"). Before, the first three reached pypdfium2 with a null handle and raised
+  `ctypes.ArgumentError`. `close()` now checks and sets `_closed` under `PDFIUM_LOCK`, so two
+  closing threads cannot double-close.
+- **Interfaces unchanged:** the `PdfRenderer` methods, `normalise_pdf` and `extract_pdf` keep
+  their names and signatures. `_page` and `_require_open` are private.
+- **Tests (`tests/documents/test_pdf.py`, +6):**
+  - `test_a_page_count_that_contradicts_the_page_tree_is_a_corrupt_document`:
+    - `count-above-the-tree` (1 page, `/Count 2`) failed uncoded before;
+    - `count-below-the-tree` (3 pages, `/Count 1`, the 3rd 14,400 pt) passed before only through
+      the `IndexError`.
+  - `test_renderer_page_loads_that_fail_are_corrupt_documents`
+  - `test_a_closed_renderer_refuses_every_call`
+  - `test_the_renderer_and_the_text_layer_read_the_same_pages` (uncoded `PdfiumError` before)
+  - `test_a_page_rendered_but_never_read_is_refused` (accepted before)
+
+  The helper `_one_page` now builds on a general `_raw_pdf(*objects)`.

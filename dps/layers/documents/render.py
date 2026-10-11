@@ -21,7 +21,12 @@ PDFIUM_LOCK = threading.RLock()
 
 
 class PdfRenderer:
-    """One open PDFium document; every call is serialised behind ``PDFIUM_LOCK``."""
+    """One open PDFium document; every call is serialised behind ``PDFIUM_LOCK``.
+
+    PDFium failures are ``corrupt_document``: a page that does not load (PDFium takes the page
+    count from ``/Count``, so a forged count names pages that do not exist), will not render, or
+    whose objects cannot be measured. The cause is never chained. Every call on a closed
+    renderer is refused the same way rather than reaching pypdfium2 with a closed handle."""
 
     def __init__(self, data: bytes) -> None:
         with PDFIUM_LOCK:
@@ -37,14 +42,27 @@ class PdfRenderer:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    def _require_open(self) -> None:
+        if self._closed:
+            raise DocumentError("corrupt_document", "the renderer was already closed")
+
+    def _page(self, index: int) -> pdfium.PdfPage:
+        """Load page ``index``; the caller holds ``PDFIUM_LOCK`` and closes the page."""
+        self._require_open()
+        try:
+            return self._doc[index]
+        except pdfium.PdfiumError:
+            raise DocumentError("corrupt_document", "a PDF page could not be loaded") from None
+
     def __len__(self) -> int:
         with PDFIUM_LOCK:
+            self._require_open()
             return len(self._doc)
 
     def page_size(self, index: int) -> tuple[float, float]:
         """Page ``index`` width and height in points."""
         with PDFIUM_LOCK:
-            page = self._doc[index]
+            page = self._page(index)
             try:
                 width, height = page.get_size()
                 return float(width), float(height)
@@ -55,19 +73,21 @@ class PdfRenderer:
         """Page ``index`` as an RGB image. Forms and annotations are not drawn: their content is
         never scanned, so it must never reach an output."""
         with PDFIUM_LOCK:
-            if self._closed:
-                raise DocumentError("corrupt_document", "the renderer was already closed")
-            page = self._doc[index]
+            page = self._page(index)
             try:
                 bitmap = page.render(scale=dpi / 72.0, may_draw_forms=False, draw_annots=False)
                 return bitmap.to_pil().convert("RGB")
+            except pdfium.PdfiumError:
+                raise DocumentError(
+                    "corrupt_document", "a PDF page could not be rendered"
+                ) from None
             finally:
                 page.close()
 
     def image_coverage(self, index: int) -> float:
         """Share of page ``index`` covered by image objects (0..1, overlaps not deduplicated)."""
         with PDFIUM_LOCK:
-            page = self._doc[index]
+            page = self._page(index)
             try:
                 width, height = page.get_size()
                 covered = 0.0
@@ -77,15 +97,19 @@ class PdfRenderer:
                         0.0, min(top, height) - max(bottom, 0.0)
                     )
                 return min(1.0, covered / max(width * height, 1.0))
+            except pdfium.PdfiumError:
+                raise DocumentError(
+                    "corrupt_document", "the images on a PDF page could not be measured"
+                ) from None
             finally:
                 page.close()
 
     def close(self) -> None:
         """Release the document (idempotent)."""
-        if not self._closed:
-            with PDFIUM_LOCK:
+        with PDFIUM_LOCK:
+            if not self._closed:
                 self._doc.close()
-            self._closed = True
+                self._closed = True
 
 
 def encode_png(image: Image.Image) -> bytes:
