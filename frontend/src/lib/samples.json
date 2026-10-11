@@ -1,0 +1,16 @@
+{
+  "json": {
+    "customer_id": "CUST-884120",
+    "full_name": "Ananya Krishnan",
+    "dob": "1988-03-14",
+    "aadhaar": "2341 2341 2346",
+    "pan": "ACUPA7085R",
+    "email": "ananya.k@example-mail.in",
+    "phone": "+91 98451 20377",
+    "card": { "pan": "4111 1111 1111 1111", "expiry": "09/28" },
+    "address": "14 Lavelle Road, Bengaluru 560001",
+    "risk_score": 712,
+    "notes": "Called on 2026-03-14 about card ending 1111; mail ananya.k@example-mail.in."
+  },
+  "text": "Ananya Krishnan (ananya.k@example-mail.in, +91 98451 20377) asked to update her Aadhaar 2341 2341 2346 before 2026-03-14."
+}

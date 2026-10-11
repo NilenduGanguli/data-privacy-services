@@ -7,6 +7,11 @@
 #
 # Host ports bind 127.0.0.1 only. The key below is a local demo literal; staging/prod refuse
 # DPS_BOOTSTRAP_API_KEY and read DPS_API_KEYS_FILE instead.
+#
+# Detection runs offline: structural keys, the pattern catalogue and name cues (a name next to a
+# title, "name is" or contact details). NER is not in this image (build with
+# --build-arg WITH_NER=1 to add Presidio + spaCy); without it every report's
+# verification.coverage says that free-text names without a cue are not detected or checked.
 services:
   app:
     build: .

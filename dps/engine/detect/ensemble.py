@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from dps.engine.detect.base import CustomDetector, NerAdapter
+from dps.engine.detect.names import scan_names
 from dps.engine.detect.patterns import (
     Hit,
     region_for_locale,
@@ -60,7 +61,7 @@ def _language(locale: str) -> str:
 
 
 class Detector:
-    """Composes T0 (structural), T1 (patterns + phones), T2 (NER) and T4 (custom)."""
+    """Composes T0 (structural), T1 (patterns, phones, name cues), T2 (NER) and T4 (custom)."""
 
     def __init__(
         self,
@@ -93,7 +94,11 @@ class Detector:
 
     # -- internals ----------------------------------------------------------------------------
     def _value_hits(self, text: str, key_hint: str | None) -> list[Hit]:
-        hits = scan_text(text, key_hint=key_hint) + scan_phones(text, region=self.region)
+        hits = (
+            scan_text(text, key_hint=key_hint)
+            + scan_phones(text, region=self.region)
+            + scan_names(text)
+        )
         if (
             self.ner is not None
             and self.config.ner_enabled

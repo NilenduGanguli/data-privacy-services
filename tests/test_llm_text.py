@@ -35,7 +35,9 @@ def _findings(text: str = TEXT) -> list[Finding]:
 def test_placeholders_are_typed_and_consistent() -> None:
     ph = to_placeholders(TEXT, _findings())
     assert ph.text.count("{EMAIL_1}") == 2 and "{DATE_1}" in ph.text
-    assert "example-mail" not in ph.text and len(ph.mapping) == 2
+    # the name before the contact details is found without NER (M0 verification r1, B1)
+    assert ph.text.startswith("{PERSON_NAME_1} ({EMAIL_1})") and "Ann Smith" not in ph.text
+    assert "example-mail" not in ph.text and len(ph.mapping) == 3
     assert_placeholder_safe(ph.text, [o for _, o in ph.mapping.values()])
     with pytest.raises(LeakToModelError):
         assert_placeholder_safe(ph.text + " ann.k@example-mail.in", ["ann.k@example-mail.in"])
@@ -69,7 +71,9 @@ class RewritingGateway(LlmGateway):
 
 async def test_llm_rewrite_keeps_placeholders_or_falls_back() -> None:
     before = LLM_RAW_PII._value.get()  # noqa: SLF001
-    good = RewritingGateway("{EMAIL_1} wrote and {EMAIL_1} asked for a reply before {DATE_1}.")
+    good = RewritingGateway(
+        "{PERSON_NAME_1} ({EMAIL_1}) wrote and {EMAIL_1} asked for a reply before {DATE_1}."
+    )
     out, info = await synthesize_text(
         TEXT,
         _findings(),
@@ -79,7 +83,8 @@ async def test_llm_rewrite_keeps_placeholders_or_falls_back() -> None:
         gateway=good,
         llm_rewrite=True,
     )
-    assert out.startswith("meera@example.com wrote") and info["llm_calls"] == 1 and info["llm_used"]
+    assert out.startswith("Meera V (meera@example.com) wrote")
+    assert info["llm_calls"] == 1 and info["llm_used"]
     bad = RewritingGateway("I dropped every placeholder.")
     out2, info2 = await synthesize_text(
         TEXT,
@@ -137,6 +142,7 @@ async def test_the_prompt_is_placeholders_only_with_the_spec_settings() -> None:
     assert [m["role"] for m in messages] == ["system", "user"]
     assert messages[1]["content"] == to_placeholders(TEXT, _findings()).text
     assert "example-mail" not in _all_sent(gw) and "2026-01-05" not in _all_sent(gw)
+    assert "Ann Smith" not in _all_sent(gw)
     assert gw.kwargs["temperature"] == 0.7 and gw.kwargs["purpose"] == "rewrite"
 
 
@@ -157,7 +163,8 @@ async def test_text_that_already_looks_like_a_placeholder_is_kept_and_never_reus
 
 
 async def test_the_leak_guard_skips_the_model_instead_of_sending() -> None:
-    findings = _findings()[:1]  # the second e-mail occurrence was "missed"
+    second_email = [f for f in _findings() if f.entity_type == "EMAIL"][1]
+    findings = [f for f in _findings() if f != second_email]  # that occurrence was "missed"
     gw = RewritingGateway("{EMAIL_1}")
     out, info = await synthesize_text(
         TEXT,
@@ -173,7 +180,9 @@ async def test_the_leak_guard_skips_the_model_instead_of_sending() -> None:
 
 
 async def test_a_rewrite_that_brings_an_original_back_fails_closed() -> None:
-    gw = RewritingGateway("{EMAIL_1} wrote ann.k@example-mail.in and {EMAIL_1} before {DATE_1}")
+    gw = RewritingGateway(
+        "{PERSON_NAME_1} {EMAIL_1} wrote ann.k@example-mail.in and {EMAIL_1} before {DATE_1}"
+    )
     out, info = await synthesize_text(
         TEXT,
         _findings(),
@@ -184,14 +193,16 @@ async def test_a_rewrite_that_brings_an_original_back_fails_closed() -> None:
         llm_rewrite=True,
     )
     assert "example-mail" not in out and info["llm_used"] is False
-    assert info["fallback"] == "verification" and out.startswith("Ann Smith (meera@example.com)")
+    assert info["fallback"] == "verification" and out.startswith("Meera V (meera@example.com)")
 
 
 async def test_a_rewrite_that_invents_new_values_fails_closed() -> None:
     def screen(text: str) -> int:
         return len(Detector(DetectorConfig()).detect(text=text).findings)
 
-    gw = RewritingGateway("{EMAIL_1} wrote; cc bob.lee@corp-mail.com and {EMAIL_1} by {DATE_1}.")
+    gw = RewritingGateway(
+        "{PERSON_NAME_1} {EMAIL_1} wrote; cc bob.lee@corp-mail.com and {EMAIL_1} by {DATE_1}."
+    )
     out, info = await synthesize_text(
         TEXT,
         _findings(),
@@ -223,8 +234,8 @@ async def test_gateway_failures_and_unavailability_fall_back() -> None:
         "llm_calls": 1,
         "llm_used": False,
         "fallback": "LlmCallError",
-        "placeholders": 2,
-        "methods_used": {"surrogate": 3},
+        "placeholders": 3,
+        "methods_used": {"surrogate": 4},
         "notes": {},
     }
     assert "meera@example.com" in out

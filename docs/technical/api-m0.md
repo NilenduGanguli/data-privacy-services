@@ -110,9 +110,21 @@ only), `report`, `trace_id`.
 `methods_used` (what actually ran, per value), `fallbacks` (one per value that did not get its
 policy method: `fallback:fpe_disabled`, `fallback:fpe_unavailable`,
 `fallback:fpe_domain_too_small`, `llm:<reason>`), `reversible_values`,
-`verification` (`{passed, checked, hits: [{path, entity_type}]}`, `null` for detect and reveal),
-`llm` (`{calls, raw_pii_sent: 0}`, plus `used` and `fallback` for synthesize), `duration_ms`.
-Under a `warn` policy a failed sweep returns the output with `verification.passed: false`.
+`verification` (`{passed, status, checked, hits: [{path, entity_type}], coverage}`, `null` for
+detect and reveal), `llm` (`{calls, raw_pii_sent: 0}`, plus `used` and `fallback` for synthesize),
+`duration_ms`. Under a `warn` policy a failed sweep returns the output with
+`verification.passed: false`.
+
+The leakage sweep looks for the originals of the values the detectors **found**; a value no
+detector found is never checked. `verification.coverage` says what the sweep could see:
+`{basis: "detected-values", detectors: ["structural", "patterns", "name_cues", "ner"?, "custom"?],
+ner: "on" | "off" | "unavailable", free_text_fields, complete, gaps: [...]}`. Free text is a text
+payload, or a JSON string of two or more words that was not replaced whole. With NER off (the
+compose image) or failed to load, names in free text are found only next to a cue — a title
+(`Mr`, `Smt`, `Sra.`…), a lead-in (`name is`, `Dear`, `s/o`, `account holder`…), contact details
+right after the name, or `<name>'s Aadhaar` — so free text is a gap. `status` is derived:
+`failed` (an original was found; `passed: false`), `partial` (none found, `gaps` not empty) or
+`passed` (none found, no gaps). A `strict` policy fails the request on `failed` only.
 
 ## Reveal
 
@@ -142,7 +154,7 @@ Under a `warn` policy a failed sweep returns the output with `verification.passe
 export DPS_API_KEY=dps_local_dev_key_change_me      # the compose stack's local demo key
 curl -s localhost:8400/api/v1/obfuscate -H "X-API-KEY: $DPS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"data":{"ssn":"123-45-6789","email":"ann@example.com"},"policy":"gdpr-pseudonymise"}' > obf.json
-jq '{result, methods: .report.methods_used, fallbacks: .report.fallbacks, verified: .report.verification.passed}' obf.json
+jq '{result, methods: .report.methods_used, fallbacks: .report.fallbacks, verification: .report.verification.status}' obf.json
 jq '{data: .result, key_material, reveal_hints}' obf.json \
   | curl -s localhost:8400/api/v1/reveal -H "X-API-KEY: $DPS_API_KEY" -H 'Content-Type: application/json' -d @- \
   | jq '{result, revealed}'

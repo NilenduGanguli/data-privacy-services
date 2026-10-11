@@ -97,6 +97,11 @@ class PresidioNer:
         )
         return analyzer, loaded
 
+    @property
+    def available(self) -> bool:
+        """False once building the analyzer failed (no spaCy model, broken install)."""
+        return not self._build_failed
+
     def _engine(self) -> Any:
         """The shared analyzer; a failed build is remembered, not retried for every value."""
         with self._lock:

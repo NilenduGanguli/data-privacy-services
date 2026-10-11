@@ -41,7 +41,13 @@ from dps.engine.transform.crypto import (
     wrap_key_material,
 )
 from dps.engine.transform.methods import CipherFactory, MethodError
-from dps.engine.verify import Verification, collect_originals, verify_output
+from dps.engine.verify import (
+    NerState,
+    Verification,
+    assess_coverage,
+    collect_originals,
+    verify_output,
+)
 from dps.llm.gateway import LlmGateway
 from dps.observability import FINDINGS, TRANSFORMS, VERIFY_FAIL, get_logger
 
@@ -219,6 +225,13 @@ class PrivacyEngine:
             locale=locale,
         )
 
+    @staticmethod
+    def _ner_state(detector: Detector) -> NerState:
+        """``on`` when NER ran for this request, ``unavailable`` when its model failed to load."""
+        if not detector.config.ner_enabled or detector.ner is None:
+            return "off"
+        return "on" if getattr(detector.ner, "available", True) else "unavailable"
+
     def _verify(
         self,
         findings: list[Finding],
@@ -227,9 +240,27 @@ class PrivacyEngine:
         plan: Plan,
         policy: Policy,
         mode: str,
+        detector: Detector,
     ) -> Verification:
         originals = collect_originals(findings, data=payload.data, text=payload.text)
-        verification = verify_output(originals, output, kept=_kept(plan))
+        ner = self._ner_state(detector)
+        detectors = [
+            *(["structural"] if payload.data is not None else []),
+            "patterns",
+            "name_cues",
+            *(["ner"] if ner == "on" else []),
+            *(["custom"] if detector.custom is not None else []),
+        ]
+        kept = _kept(plan)
+        coverage = assess_coverage(
+            data=payload.data,
+            text=payload.text,
+            findings=findings,
+            kept=kept,
+            detectors=detectors,
+            ner=ner,
+        )
+        verification = verify_output(originals, output, kept=kept, coverage=coverage)
         if not verification.passed:
             VERIFY_FAIL.labels(mode).inc()
             logger.warning("verification_failed", mode=mode, hits=len(verification.hits))
@@ -299,7 +330,8 @@ class PrivacyEngine:
         t0 = time.perf_counter()
         policy = self.policy(policy_ref)
         locale = self._locale(policy, options)
-        findings, _ = self._detect(payload, self._detector(policy, locale))
+        detector = self._detector(policy, locale)
+        findings, _ = self._detect(payload, detector)
         plan = self._plan(findings, policy, "obfuscate")
         scope = options.consistency.scope or policy.consistency.scope
         try:
@@ -322,7 +354,9 @@ class PrivacyEngine:
             raise EngineError(str(exc)) from None
         for method, count in applied.methods_used.items():
             TRANSFORMS.labels("obfuscate", method).inc(count)
-        verification = self._verify(findings, payload, applied.output, plan, policy, "obfuscate")
+        verification = self._verify(
+            findings, payload, applied.output, plan, policy, "obfuscate", detector
+        )
         key_out = key
         if wrap_pem is not None:
             try:
@@ -438,7 +472,7 @@ class PrivacyEngine:
             output, methods_used, notes = applied.output, applied.methods_used, applied.notes
         for method, count in methods_used.items():
             TRANSFORMS.labels("synthesize", method).inc(count)
-        verification = self._verify(findings, payload, output, plan, policy, "synthesize")
+        verification = self._verify(findings, payload, output, plan, policy, "synthesize", detector)
         report = build_report(
             mode="synthesize",
             policy_name=policy.name,

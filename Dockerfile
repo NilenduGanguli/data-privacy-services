@@ -29,6 +29,8 @@ COPY dps ./dps
 # /app/frontend/dist; a regular install would look under site-packages.
 # [fpe] is MIT-licensed fastfpe; FF1 is still gated at runtime by DPS_FPE_ENABLED (spec D8).
 # The [ner] extra (Presidio + spaCy models) is deliberately not baked in: pass --build-arg WITH_NER=1.
+# Without it, names in free text are found by their cues only, and reports state that gap
+# (report.verification.coverage, status "partial").
 ARG WITH_NER=0
 RUN if [ "$WITH_NER" = "1" ]; then \
       uv pip install --system --no-cache -e ".[fpe,ner]" && python -m spacy download en_core_web_sm; \

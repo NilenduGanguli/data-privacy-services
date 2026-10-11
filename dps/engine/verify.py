@@ -15,26 +15,77 @@ anywhere else (the birth-date field left untransformed, a copy in another field 
 object key) is still a leak; keys are never kept, so a kept value never excuses a key. The
 allowance is per leaf, not per span: inside the leaf that holds the kept span, the value is
 allowed wherever it occurs.
+
+**Coverage.** The sweep can only look for values the detectors found: a name nobody detected is
+never checked. :func:`assess_coverage` says what the sweep could see — the detectors that ran,
+whether NER was on, how many free-text fields there were — and names each gap. With NER off a
+name in free text is found only next to a cue (title, "name is", contact details), so free text
+swept without NER is reported as a gap and the verdict is ``partial``, not ``passed``.
+``status`` is ``failed`` (an original was found), ``partial`` (none found, coverage has gaps) or
+``passed`` (none found, no gaps); ``passed`` stays the plain "no hits" flag.
 """
 
 from __future__ import annotations
 
+import re
 import unicodedata
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Iterable, Iterator
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from dps.engine.findings import Finding
 from dps.engine.jsonpath import flatten, get_path
 
+NerState = Literal["on", "off", "unavailable"]
+
+#: The gap statement per NER state (constant text: a report never carries a value).
+NER_GAP: dict[str, str] = {
+    "off": (
+        "free-text names and places: NER is off; only names next to a cue (a title, "
+        "'name is', contact details) are detected and checked"
+    ),
+    "unavailable": (
+        "free-text names and places: NER is configured but its model did not load; only names "
+        "next to a cue (a title, 'name is', contact details) are detected and checked"
+    ),
+}
+#: A JSON string with at least this many words is free text (a name could hide in it); a
+#: shorter one is a code, a label or a value its key describes (the structural tier's domain).
+FREE_TEXT_MIN_WORDS = 2
+_WORD = re.compile(r"[^\W\d_]{2,}")
+
+
+class Coverage(BaseModel):
+    """What the sweep could see. It checks the values the detectors found, nothing else."""
+
+    basis: Literal["detected-values"] = "detected-values"
+    detectors: list[str]
+    ner: NerState
+    free_text_fields: int
+    complete: bool
+    gaps: list[str] = Field(default_factory=list)
+
 
 class Verification(BaseModel):
-    """Outcome of the sweep: how many originals were checked and where any were found."""
+    """Outcome of the sweep: how many originals were checked, where any were found, and what
+    the sweep could not see. ``status`` is derived (``failed`` / ``partial`` / ``passed``)."""
 
     passed: bool
+    status: Literal["passed", "partial", "failed"] = "passed"
     checked: int
     hits: list[dict[str, str]] = Field(default_factory=list)
+    coverage: Coverage | None = None
+
+    @model_validator(mode="after")
+    def _derive_status(self) -> Verification:
+        if not self.passed:
+            self.status = "failed"
+        elif self.coverage is not None and not self.coverage.complete:
+            self.status = "partial"
+        else:
+            self.status = "passed"
+        return self
 
 
 def _fold(ch: str) -> str:
@@ -79,17 +130,63 @@ def _strings(node: Any, path: str = "$") -> Iterator[tuple[str, bool, str]]:
         yield path, False, str(node)
 
 
+def _free_text(text: str, min_words: int) -> bool:
+    count = 0
+    for _ in _WORD.finditer(text):
+        count += 1
+        if count >= min_words:
+            return True
+    return False
+
+
+def assess_coverage(
+    *,
+    data: Any | None = None,
+    text: str | None = None,
+    findings: Iterable[Finding],
+    kept: set[tuple[str, int | None, int | None]],
+    detectors: list[str],
+    ner: NerState,
+) -> Coverage:
+    """What the sweep could see for this input (counts and fixed statements, never a value).
+
+    Free text is the text payload (when it has a word), or each JSON string leaf of at least
+    :data:`FREE_TEXT_MIN_WORDS` words that was not replaced whole (a leaf replaced whole hides
+    nothing; one kept in clear, or with span findings only, still could). Without NER (off or
+    failed to load), free text is a gap: a name there without a cue is never detected.
+    """
+    if text is not None:
+        free = 1 if _free_text(text, 1) else 0
+    else:
+        replaced = {
+            f.locator.path
+            for f in findings
+            if f.locator.whole and (f.locator.path, f.locator.start, f.locator.end) not in kept
+        }
+        free = sum(
+            1
+            for path, is_key, value in _strings(data)
+            if not is_key and path not in replaced and _free_text(value, FREE_TEXT_MIN_WORDS)
+        )
+    gaps = [NER_GAP[ner]] if free and ner != "on" else []
+    return Coverage(
+        detectors=detectors, ner=ner, free_text_fields=free, complete=not gaps, gaps=gaps
+    )
+
+
 def verify_output(
     originals: list[tuple[Finding, str]],
     output: Any,
     *,
     kept: set[tuple[str, int | None, int | None]] | None = None,
     min_len: int = 4,
+    coverage: Coverage | None = None,
 ) -> Verification:
     """Search every string in ``output`` for every original that was meant to be transformed.
 
     ``kept`` holds the ``(path, start, end)`` locators the plan kept on purpose. Their values are
     allowed only in the output leaf at that same path; a hit anywhere else still counts.
+    ``coverage`` (from :func:`assess_coverage`) is attached as is and decides ``partial``.
     """
     haystacks = [(path, is_key, normalise(s)) for path, is_key, s in _strings(output)]
     kept = kept or set()
@@ -118,4 +215,4 @@ def verify_output(
                 continue  # the value the policy kept in this very leaf
             seen.add((path, finding.entity_type))
             hits.append({"path": path, "entity_type": finding.entity_type})
-    return Verification(passed=not hits, checked=checked, hits=hits)
+    return Verification(passed=not hits, checked=checked, hits=hits, coverage=coverage)
