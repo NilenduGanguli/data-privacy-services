@@ -256,7 +256,8 @@ class PrivacyEngine:
             detectors=detectors,
             ner=ner,
         )
-        verification = verify_output(originals, output, kept=kept, coverage=coverage)
+        source = payload.text if payload.text is not None else payload.data
+        verification = verify_output(originals, output, kept=kept, coverage=coverage, source=source)
         if not verification.passed:
             VERIFY_FAIL.labels(mode).inc()
             logger.warning("verification_failed", mode=mode, hits=len(verification.hits))

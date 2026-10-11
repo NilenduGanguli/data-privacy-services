@@ -4,9 +4,10 @@
 ``(seed, entity type, canonical original)`` for value-level consistency (the canonical form is the
 verifier's normalisation, so ``2341 2341 2346`` and ``234123412346`` get the same digits, each in
 its own layout). Persona fields (name, e-mail, birth date, address, ...) also depend on the
-record's ``anchor`` so one record stays coherent. Nothing depends on request order or on what
-else the request holds: the same seed gives the same fake across fields, tables, requests and
-systems (spec §5.6, P3).
+record's ``anchor`` so one record stays coherent. Nothing depends on request order, and what else
+the record holds matters only when a draw would reuse a part of it ("Never a part of the record"
+below): the same seed gives the same fake across fields, tables, requests and systems (spec §5.6,
+P3).
 
 Generated identifiers are *valid in format* and *never issued* where an unissued range exists:
 SSNs in the 900 area, ITINs in groups 89/93, SINs starting with 0, Aadhaar numbers starting with
@@ -21,6 +22,18 @@ Guarantees beyond the plan's generators:
   where forcing a different value would itself reveal the original. Retries are salted with the
   canonical original only, so they stay pure; if every attempt reveals, the last resort is a
   seeded token of the original's length that cannot contain it (never ``original + suffix``).
+* **Never a part of the record.** A name surrogate shares no part with the name it replaces.
+  Once the record's detected values are declared (:meth:`SurrogateEngine.declare_record`, which
+  ``apply_plan`` and ``synthesize_text`` call before any field), the record's persona shares no
+  part with its names (name, e-mail, username, street, city, MRZ holder), and any surrogate that
+  would hold another of the record's values (the sweep's test: normalised, four characters or
+  more) or a part of its names is drawn again, so a coincidence such as a phone surrogate holding
+  a card expiry's four digits does not trip the leakage sweep. Under ``en_IN`` Faker otherwise
+  draws the customer's own surname (``Krishnan``), or a surname or street holding it, in about
+  one record in a hundred. If every draw of a value holds another of the record's values by
+  construction, the first that does not reveal its own original is kept and the sweep rules on
+  it. A record's declaration changes a surrogate only when a draw collides, so the same seed
+  still gives the same fake across records and requests everywhere else.
 * **Reshaped identifiers are a keyed derangement** (``reshape.py``): identifiers of unmapped
   types, CVVs, sort codes, IFSC branch codes, amounts, diagnosis codes and BICs keep their
   layout and have their digits and letters (every letter, in its own script) mapped by a
@@ -49,7 +62,8 @@ import random
 import re
 import secrets
 import unicodedata
-from collections.abc import Callable, Container
+from collections.abc import Callable, Container, Iterable
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -70,12 +84,13 @@ from dps.engine.synth.personas import (
     PersonaFactory,
     ascii_fold,
     faker_for,
+    holds_name_part,
     normalise_locale,
     seed_int,
 )
 from dps.engine.synth.reshape import Reshaper, code_letters
 from dps.engine.transform.crypto import b64u, unb64u
-from dps.engine.verify import normalise
+from dps.engine.verify import SWEEP_MIN_LEN, name_parts, normalise
 
 SEED_ALG = "dps.synth.v1"
 SEED_BYTES = 32
@@ -127,6 +142,39 @@ _YYMMDD = re.compile(r"[0-9]{6}")
 _REDACT = frozenset({"API_KEY", "PASSWORD", "JWT", "PRIVATE_KEY"})
 #: Low-cardinality attributes: forcing "different from the original" would reveal it.
 _IDENTITY_OK = _REDACT | {"GENDER", "NATIONALITY"}
+#: The entity whose parts a persona avoids.
+_NAME = "PERSON_NAME"
+#: Declared values shorter than this are not avoided (the leakage sweep skips them too).
+_MIN_DECLARED = SWEEP_MIN_LEN
+
+
+@dataclass(frozen=True)
+class _Record:
+    """What a record declared: its names' parts and its normalised values (no raw values), the
+    values indexed by their first ``_MIN_DECLARED`` characters so a check is linear in the
+    surrogate's length, not in the size of the record."""
+
+    parts: frozenset[str] = frozenset()
+    index: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, parts: frozenset[str], values: Iterable[str]) -> _Record:
+        index: dict[str, tuple[str, ...]] = {}
+        for value in set(values):
+            index[value[:_MIN_DECLARED]] = (*index.get(value[:_MIN_DECLARED], ()), value)
+        return cls(parts=parts, index=index)
+
+    def held_by(self, canon: str, value: str) -> bool:
+        """True when ``value`` holds another of the record's values or a part of its names."""
+        folded = normalise(value)
+        for i in range(len(folded) - _MIN_DECLARED + 1):
+            for declared in self.index.get(folded[i : i + _MIN_DECLARED], ()):
+                if declared != canon and folded.startswith(declared, i):
+                    return True
+        return holds_name_part(value, self.parts)
+
+
+_NOTHING = _Record()
 
 
 class SynthesisSeed(BaseModel):
@@ -274,7 +322,8 @@ class SurrogateEngine:
         self._seed = seed
         self._default_locale = normalise_locale(default_locale)
         self._personas = PersonaFactory(seed)
-        self._cache: dict[tuple[str, str], Persona] = {}
+        self._cache: dict[tuple[str, str, frozenset[str]], Persona] = {}
+        self._records: dict[str, _Record] = {}
         self._reshaper = Reshaper(seed)
         self._generators: dict[str, Callable[[str, str, str, random.Random], str]] = {
             "PERSON_NAME": self._person_name,
@@ -324,39 +373,86 @@ class SurrogateEngine:
             "SORT_CODE": lambda o, loc, a, r: self._reshape("SORT_CODE", o, r, False),
         }
 
-    def persona(self, anchor: str, locale: str) -> Persona:
-        """The record's persona (cached per anchor and locale)."""
-        key = (anchor, normalise_locale(locale))
+    def declare_record(self, anchor: str, originals: Iterable[tuple[str, str]]) -> None:
+        """Declare the record's detected values, as ``(entity_type, original)`` pairs.
+
+        Call it before synthesising any field of the record, so every field draws on the same
+        persona. It replaces what was declared for ``anchor`` before (a record's surrogates
+        depend on that record's values, never on another's); the engine's own retries of the
+        record (``anchor|retry1``, ``anchor|mrz2``) inherit it. Only normalised forms and name
+        parts are kept, and only in this engine.
+        """
+        pairs = list(originals)
+        record = _Record.of(
+            name_parts(original for entity, original in pairs if entity == _NAME),
+            (canon for _, original in pairs if len(canon := normalise(original)) >= _MIN_DECLARED),
+        )
+        if record.parts or record.index:
+            self._records[anchor] = record
+        else:
+            self._records.pop(anchor, None)
+
+    def _declared(self, anchor: str) -> _Record:
+        """What was declared for ``anchor``, or for the record it is a retry of."""
+        while True:
+            record = self._records.get(anchor)
+            if record is not None:
+                return record
+            if "|" not in anchor:
+                return _NOTHING
+            anchor = anchor.rsplit("|", 1)[0]
+
+    def persona(self, anchor: str, locale: str, avoid: Iterable[str] = ()) -> Persona:
+        """The record's persona (cached), sharing no part with the record's declared names or
+        with the names in ``avoid``."""
+        loc = normalise_locale(locale)
+        parts = self._declared(anchor).parts | name_parts(avoid)
+        key = (anchor, loc, parts)
         if key not in self._cache:
-            self._cache[key] = self._personas.for_anchor(anchor, key[1])
+            self._cache[key] = self._personas.for_anchor(anchor, loc, avoid=parts)
         return self._cache[key]
 
     def surrogate(self, entity_type: str, original: str, locale: str, anchor: str) -> str:
         """A synthetic stand-in for ``original`` (see the module docstring for the guarantees).
 
-        A pure function of the seed, the entity type, the canonical original and (for persona
-        fields) the anchor: it never depends on what this engine was asked before.
+        A pure function of the seed, the entity type, the canonical original, what the record
+        declared and (for persona fields) the anchor: it never depends on what this engine was
+        asked before.
         """
         if not original.strip():
             return original
         loc = normalise_locale(locale or self._default_locale)
         canon = normalise(original)
+        record = self._declared(anchor)
+        kept: str | None = None
         for attempt in range(_ATTEMPTS):
             salt = "" if attempt == 0 else f"|retry{attempt}"
             rng = random.Random(seed_int(self._seed, f"{entity_type}|{canon}{salt}"))
             value = self._generate(entity_type, original, loc, anchor + salt, rng)
-            if entity_type in _IDENTITY_OK or not _reveals(canon, value):
+            if entity_type in _IDENTITY_OK:
                 return value
-        return self._last_resort(entity_type, original, canon)
+            if _reveals(canon, value):
+                continue
+            if not record.held_by(canon, value):
+                return value
+            kept = kept if kept is not None else value
+        if kept is not None:
+            return kept  # every draw holds another value of the record: the sweep rules on it
+        return self._last_resort(entity_type, original, canon, record)
 
-    def _last_resort(self, entity_type: str, original: str, canon: str) -> str:
-        """A seeded token of the original's length that does not reveal it."""
+    def _last_resort(self, entity_type: str, original: str, canon: str, record: _Record) -> str:
+        """A seeded token of the original's length that does not reveal it (nor, if it can be
+        helped, hold another of the record's values)."""
+        kept: str | None = None
         for attempt in range(_TOKEN_ATTEMPTS):
             rng = random.Random(seed_int(self._seed, f"{entity_type}|{canon}|token{attempt}"))
             token = "".join(rng.choice(_HEX) for _ in original)
-            if not _reveals(canon, token):
+            if _reveals(canon, token):
+                continue
+            if not record.held_by(canon, token):
                 return token
-        return REDACTED  # unreachable in practice: 64 same-length hex draws all revealing
+            kept = kept if kept is not None else token
+        return kept if kept is not None else REDACTED  # 64 hex draws all revealing: unreachable
 
     def _reshape(
         self,
@@ -383,7 +479,9 @@ class SurrogateEngine:
         return self._reshape(entity, original, rng, True, keep=code_letters(original) or None)
 
     def _person_name(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        p = self.persona(anchor, loc)
+        # never a part of the name it replaces, even when the record's names were not declared
+        # (declared names include it, so this is then the record's persona)
+        p = self.persona(anchor, loc, avoid=(original,))
         name = p.first_name if len(original.split()) <= 1 else p.full_name
         return name.upper() if original.isupper() else name
 

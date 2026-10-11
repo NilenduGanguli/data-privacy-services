@@ -125,7 +125,12 @@ ner: "on" | "off" | "unavailable", free_text_fields, complete, gaps: [...]}`. Fr
 payload, or a JSON string of two or more words that was not replaced whole. With NER off (the
 compose image) or failed to load, names in free text are found only next to a cue — a title
 (`Mr`, `Smt`, `Sra.`…), a lead-in (`name is`, `Dear`, `s/o`, `account holder`…), contact details
-right after the name, or `<name>'s Aadhaar` — so free text is a gap. `status` is derived:
+right after the name, or `<name>'s Aadhaar` — so free text is a gap. A detected name is also
+checked part by part: a part of four or more characters that an output string holds more often than
+the input held it outside the detected names (`Krishnan` in a surrogate `Utkarsh Krishnan` for
+`Ananya Krishnan`) is a hit there, with entity type `PERSON_NAME`. Synthesis avoids such hits at the
+source: a record's persona never reuses a part of its names, and no surrogate holds another of the
+record's values when another draw can avoid it. `status` is derived:
 `failed` (an original was found; `passed: false`), `partial` (none found, `gaps` not empty) or
 `passed` (none found, no gaps). A `strict` policy fails the request on `failed` only.
 

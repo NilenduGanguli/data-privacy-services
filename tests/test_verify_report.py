@@ -232,3 +232,46 @@ def test_detect_reports_without_a_plan() -> None:
         and rep.findings_by_detector == {"t": 1}
     )
     assert rep.engine_version and rep.verification is None
+
+
+# --- a part of a detected name is a leak too (A-prepare review r1, B1) ------------------------
+NAME_TEXT = "Ananya Krishnan called about her card"
+NAME_ORIGINALS = [(_finding("$", "PERSON_NAME", 0, 15), "Ananya Krishnan")]
+
+
+def test_a_surviving_name_part_is_a_leak() -> None:
+    def sweep(output: str) -> Verification:
+        return verify_output(NAME_ORIGINALS, output, source=NAME_TEXT)
+
+    bad = sweep("Tanmayi Krishnan called about her card")
+    assert not bad.passed and bad.hits == [{"path": "$", "entity_type": "PERSON_NAME"}]
+    assert not sweep("Ayaan Ramakrishnan called about her card").passed  # inside a longer word
+    assert not sweep("Tara Shah (tara.krishnan12@example.org) called about her card").passed
+    assert not sweep("ANANYA Shah called about her card").passed
+    assert sweep("Tanmayi Mehta called about her card").passed
+
+
+def test_a_name_part_the_input_held_outside_the_name_is_not_a_leak() -> None:
+    text = "Rose Mehta said prices rose"
+    originals = [(_finding("$", "PERSON_NAME", 0, 10), "Rose Mehta")]
+    assert verify_output(originals, "Tara Shah said prices rose", source=text).passed
+    assert not verify_output(originals, "Rose Shah said prices rose", source=text).passed
+
+
+def test_name_parts_are_compared_leaf_by_leaf() -> None:
+    data = {"name": "Ravi Kumar", "shop": "Kumar Traders", "nick": "Ravi", "Kumar": 1}
+    originals = [(_finding("$.name", "PERSON_NAME"), "Ravi Kumar")]
+    clean = {**data, "name": "Arjun Mehta"}
+    assert verify_output(originals, clean, source=data).passed
+    bad = verify_output(originals, {**data, "name": "Arjun Kumar"}, source=data)
+    assert bad.hits == [{"path": "$.name", "entity_type": "PERSON_NAME"}]
+    moved = verify_output(originals, {**clean, "nick": "Ravi Kumar"}, source=data)
+    assert moved.hits == [{"path": "$.nick", "entity_type": "PERSON_NAME"}]
+
+
+def test_short_and_kept_name_parts_are_not_checked() -> None:
+    originals = [(_finding("$", "PERSON_NAME", 0, 5), "Jo Li")]
+    assert verify_output(originals, "Jo Wu wrote", source="Jo Li wrote").passed  # under min_len
+    data = {"name": "Ananya Krishnan", "copy": "Ananya"}
+    kept = [(_finding("$.name", "PERSON_NAME"), "Ananya Krishnan")]
+    assert verify_output(kept, data, kept={("$.name", None, None)}, source=data).passed

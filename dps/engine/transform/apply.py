@@ -8,6 +8,9 @@
   date shifting and persona choice, so every field of one record moves together. When key material
   is present the anchor is keyed (HMAC under a subkey) before use, because it travels in the reveal
   hints next to the output and a salt-free hash of a 6-digit customer id is no secret at all.
+* Before any field is transformed, the record's detected values are handed to the surrogate
+  engine (:func:`~dps.engine.transform.methods.declare_record`), so no surrogate reuses one of
+  them or a part of the record's names (a persona drawing the customer's own surname, say).
 
 Reveal hints carry locators, methods, types, the keyed anchor, the key id and the key check value
 — never a value or anything computed from a value without the key (spec §5.5). Reveal checks the
@@ -38,6 +41,7 @@ from dps.engine.transform.methods import (
     MethodError,
     SurrogateProvider,
     TransformContext,
+    declare_record,
     reverse_method,
     run_method,
 )
@@ -184,6 +188,21 @@ def _read(document: Any, path: str) -> Any:
         raise MethodError("path is not in the document") from None
 
 
+def _record_originals(document: Any, plan: Plan) -> list[tuple[str, str]]:
+    """The record's detected values as ``(entity_type, original)``, read from the input (they
+    are handed to the surrogate engine only, never logged or returned)."""
+    originals: list[tuple[str, str]] = []
+    for entry in plan.entries:
+        loc = entry.finding.locator
+        try:
+            value = str(_read(document, loc.path))
+        except MethodError:
+            continue  # the transform loop below reports a plan that does not fit
+        original = value if loc.whole else value[loc.start or 0 : loc.end]
+        originals.append((entry.finding.entity_type, original))
+    return originals
+
+
 def _write(document: Any, path: str, value: Any) -> Any:
     if path == "$":
         return value
@@ -205,6 +224,8 @@ def apply_plan(
         raise ValueError("pass exactly one of data or text")
     document: Any = copy.deepcopy(data) if text is None else text
     anchor = _keyed_anchor(anchor_for(document, plan), options.key)
+    if options.surrogates is not None:
+        declare_record(options.surrogates, anchor, _record_originals(document, plan))
     kid = options.key.kid if options.key is not None else None
     kcv = (
         options.key.kcv or crypto.key_check_value(options.key)

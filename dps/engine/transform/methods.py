@@ -19,10 +19,10 @@ import hashlib
 import math
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import phonenumbers
 from cryptography.exceptions import InvalidTag
@@ -36,6 +36,24 @@ class SurrogateProvider(Protocol):
     """Produces a synthetic stand-in for one value (implemented by the synthesis engine)."""
 
     def surrogate(self, entity_type: str, original: str, locale: str, anchor: str) -> str: ...
+
+
+@runtime_checkable
+class RecordAwareSurrogates(Protocol):
+    """A provider that takes the record's detected values first, so no surrogate reuses one of
+    them or a part of the record's names."""
+
+    def declare_record(self, anchor: str, originals: Iterable[tuple[str, str]]) -> None: ...
+
+
+def declare_record(
+    provider: SurrogateProvider | None, anchor: str, originals: Iterable[tuple[str, str]]
+) -> None:
+    """Hand the record's ``(entity_type, original)`` pairs to ``provider`` before any of its
+    fields is synthesised. A provider without ``declare_record`` (a test double) is left alone.
+    """
+    if isinstance(provider, RecordAwareSurrogates):
+        provider.declare_record(anchor, originals)
 
 
 CipherFactory = Callable[[bytes, str], fpe.Cipher]

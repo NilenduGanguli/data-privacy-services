@@ -283,3 +283,45 @@ async def test_the_plan_decides_each_placeholder_fill() -> None:
     )
     assert out2 == "Mail meera@example.com by 2026-02-01 via [REDACTED]"
     assert info2["methods_used"] == {"surrogate": 2, "redact": 1}
+
+
+async def test_a_rewrite_that_brings_a_name_part_back_fails_closed() -> None:
+    """The model never saw the name; a rewrite that holds a part of it anyway is not used."""
+    gw = RewritingGateway("{PERSON_NAME_1} ({EMAIL_1}) wrote to the Smith family before {DATE_1}.")
+    out, info = await synthesize_text(
+        TEXT,
+        _findings(),
+        surrogates=FakeSynth(),
+        locale="en_US",
+        anchor="r1",
+        gateway=gw,
+        llm_rewrite=True,
+    )
+    assert "Smith" not in out and info["llm_used"] is False and info["fallback"] == "verification"
+
+
+class DeclaringSynth(FakeSynth):
+    def __init__(self) -> None:
+        self.declared: list[tuple[str, list[tuple[str, str]]]] = []
+
+    def declare_record(self, anchor: str, originals: Any) -> None:
+        self.declared.append((anchor, list(originals)))
+
+
+async def test_the_record_values_are_declared_before_any_surrogate() -> None:
+    synth = DeclaringSynth()
+    await synthesize_text(
+        TEXT,
+        _findings(),
+        surrogates=synth,
+        locale="en_US",
+        anchor="r1",
+        gateway=None,
+        llm_rewrite=False,
+    )
+    assert len(synth.declared) == 1 and synth.declared[0][0] == "r1"
+    assert sorted(synth.declared[0][1]) == [
+        ("DATE", "2026-01-05"),
+        ("EMAIL", "ann.k@example-mail.in"),
+        ("PERSON_NAME", "Ann Smith"),
+    ]

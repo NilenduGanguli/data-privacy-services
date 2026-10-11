@@ -4,10 +4,12 @@ The model only ever sees ``{PERSON_NAME_1}``-style placeholders. Before any call
 ``assert_placeholder_safe`` proves that no detected original is left in the text; if it is not
 safe the model is skipped (never sent) and the deterministic path runs. A rewrite is accepted
 only if every placeholder survives, the rewrite introduces no new detectable values (when a
-``screen`` is given), and the filled result brings back no original that the deterministic fill
-had removed; any failure falls back to the deterministic fill (spec §5.6 step 5: "fails closed to
-the deterministic path"). DPS chooses the surrogates itself, so the output is consistent with
-the rest of the record whether or not the model ran.
+``screen`` is given), and the filled result brings back no original, and no part of a detected
+name, that the deterministic fill had removed; any failure falls back to the deterministic fill
+(spec §5.6 step 5: "fails closed to the deterministic path"). DPS chooses the surrogates itself
+(after declaring the text's detected values to the engine, so no surrogate reuses one of them
+or a part of a name), so the output is consistent with the rest of the record whether or not the
+model ran.
 
 Every detected value is replaced by a placeholder, including values the plan keeps: the model
 sees none of them, and the fill step puts a kept value back afterwards.
@@ -22,8 +24,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dps.engine.findings import Finding, Plan, PlanEntry
-from dps.engine.transform.methods import SurrogateProvider, TransformContext, run_method
-from dps.engine.verify import collect_originals, normalise
+from dps.engine.transform.methods import (
+    SurrogateProvider,
+    TransformContext,
+    declare_record,
+    run_method,
+)
+from dps.engine.verify import NAME_ENTITY, collect_originals, name_parts, normalise
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmUnavailable
 
 PLACEHOLDER_RE = re.compile(r"\{([A-Z][A-Z0-9_]*?)_(\d+)\}")
@@ -108,6 +115,13 @@ def assert_placeholder_safe(templated: str, originals: list[str], *, min_len: in
             raise LeakToModelError("refusing to send text that still contains an original value")
 
 
+def _names(ph: PlaceholderText) -> list[str]:
+    """The text's detected names (one per placeholder)."""
+    return [
+        original for finding, original in ph.mapping.values() if finding.entity_type == NAME_ENTITY
+    ]
+
+
 def _entry_key(f: Finding) -> tuple[str, int | None, int | None, str]:
     return (f.locator.path, f.locator.start, f.locator.end, f.entity_type)
 
@@ -130,6 +144,7 @@ def _resolve(
     entries: dict[tuple[str, int | None, int | None, str], PlanEntry] = (
         {_entry_key(e.finding): e for e in plan.entries} if plan is not None else {}
     )
+    declare_record(surrogates, anchor, [(f.entity_type, o) for f, o in ph.mapping.values()])
     fill = _Fill({}, Counter(), Counter())
     for label, (finding, original) in ph.mapping.items():
         entry = entries.get(_entry_key(finding))
@@ -194,14 +209,21 @@ async def rewrite_placeholders(
     return result.text
 
 
-def _brings_back(originals: list[str], deterministic: str, output: str, min_len: int = 4) -> bool:
-    """True when ``output`` holds an original that the deterministic fill had removed."""
+def _brings_back(
+    originals: list[str],
+    deterministic: str,
+    output: str,
+    min_len: int = 4,
+    names: list[str] | None = None,
+) -> bool:
+    """True when ``output`` holds an original that the deterministic fill had removed, or holds
+    a part of one of ``names`` more often than the deterministic fill does."""
     det, out = normalise(deterministic), normalise(output)
     for original in originals:
         needle = normalise(original)
         if len(needle) >= min_len and needle in out and needle not in det:
             return True
-    return False
+    return any(out.count(part) > det.count(part) for part in name_parts(names or [], min_len))
 
 
 async def synthesize_text(
@@ -262,7 +284,7 @@ async def synthesize_text(
         info["fallback"] = "llm_introduced_entities"
         return deterministic, info
     output = _substitute(rewritten, fill.replacements)
-    if _brings_back(originals, deterministic, output):
+    if _brings_back(originals, deterministic, output, names=_names(ph)):
         info["fallback"] = "verification"
         return deterministic, info
     info["llm_used"] = True

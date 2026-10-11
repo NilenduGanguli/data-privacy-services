@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Iterable
 
 import pytest
 
@@ -431,3 +432,22 @@ def test_whole_value_entries_must_point_at_a_scalar() -> None:
             plan=plan,
             options=_opts(load_preset("pci-dss"), generate_key_material()),
         )
+
+
+class DeclaringSynth(FakeSynth):
+    def __init__(self) -> None:
+        self.declared: list[tuple[str, list[tuple[str, str]]]] = []
+
+    def declare_record(self, anchor: str, originals: Iterable[tuple[str, str]]) -> None:
+        self.declared.append((anchor, list(originals)))
+
+
+def test_synthesis_declares_the_record_before_any_field() -> None:
+    """The persona must know the record's own names (A-prepare review r1, B1)."""
+    policy, plan = _plan(SAMPLE, "synthetic-realistic", "synthesize")
+    synth = DeclaringSynth()
+    res = apply_plan(data=SAMPLE, plan=plan, options=_opts(policy, None, surrogates=synth))
+    assert len(synth.declared) == 1 and synth.declared[0][0] == res.anchor
+    declared = synth.declared[0][1]
+    assert len(declared) == len(plan.entries) and ("PERSON_NAME", "Ananya Krishnan") in declared
+    assert ("EMAIL", "ananya.k@example-mail.in") in declared

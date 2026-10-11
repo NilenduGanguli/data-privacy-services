@@ -14,7 +14,12 @@ import pytest
 from stdnum import verhoeff
 
 from dps.engine.detect.checksums import luhn_valid, valid_aba, validate
-from dps.engine.synth.personas import PersonaFactory, ascii_fold
+from dps.engine.synth.personas import (
+    PersonaFactory,
+    ascii_fold,
+    holds_name_part,
+    shares_name_part,
+)
 from dps.engine.synth.reshape import Derangement
 from dps.engine.synth.surrogates import (
     SurrogateEngine,
@@ -22,7 +27,7 @@ from dps.engine.synth.surrogates import (
     seed_bytes,
     seed_from_caller,
 )
-from dps.engine.verify import normalise
+from dps.engine.verify import name_parts, normalise
 
 SEED = seed_bytes(generate_synthesis_seed())
 
@@ -49,6 +54,7 @@ def test_persona_is_coherent_and_deterministic() -> None:
 def test_surrogates_are_rule_valid_and_consistent() -> None:
     eng = SurrogateEngine(SEED, default_locale="en_IN")
     anchor = "CUSTOMER_ID:abc"
+    eng.declare_record(anchor, [("PERSON_NAME", "Ananya Krishnan")])  # as apply_plan does
     card = eng.surrogate("CARD_PAN", "4532 7811 2290 4417", "en_IN", anchor)
     assert card.startswith("4111 11") and card.count(" ") == 3 and luhn_valid(card)
     assert card != "4532 7811 2290 4417"
@@ -68,7 +74,7 @@ def test_surrogates_are_rule_valid_and_consistent() -> None:
     dob = eng.surrogate("DATE_OF_BIRTH", "1988-03-14", "en_IN", anchor)
     assert dob != "1988-03-14" and len(dob) == 10 and 1985 <= int(dob[:4]) <= 1989  # same band
     name = eng.surrogate("PERSON_NAME", "Ananya Krishnan", "en_IN", anchor)
-    assert " " in name and name != "Ananya Krishnan"
+    assert " " in name and not shares_name_part(name, name_parts(["Ananya Krishnan"]))
     assert name == eng.surrogate("PERSON_NAME", "Ananya Krishnan", "en_IN", anchor)  # same persona
     assert eng.surrogate("PERSON_NAME", "Ananya", "en_IN", anchor) == name.split(" ")[0]
     assert eng.surrogate("API_KEY", "AKIAIOSFODNN7EXAMPLE", "en_US", anchor) == "[REDACTED]"
@@ -566,3 +572,170 @@ def test_digit_bearing_values_keep_only_short_codes() -> None:
     ifsc = eng.surrogate("IFSC", "ABCD0EFGHIJ", "en_IN", "r1")  # an all-letter branch code
     assert ifsc[:5] == "ABCD0" and ifsc[5:].isalpha() and ifsc[5:] != "EFGHIJ"
     assert eng.surrogate("AMOUNT", "INR 12,500.00", "en_IN", "r1").startswith("INR ")
+
+
+# --- a persona never carries a part of the record's own names (A-prepare review r1, B1) -------
+# Under en_IN, Faker can draw the customer's own surname, or one that contains it. These seeds do
+# so for UNIT_ANCHOR: 147 draws "Krishnan" itself and 31 draws "Ramakrishnan". Each test first
+# checks that the bare persona really collides, so a Faker data change cannot make it vacuous.
+UNIT_ANCHOR = "CUSTOMER_ID:regression"
+NAME = "Ananya Krishnan"
+COLLIDING = (147, 31)
+
+
+def _collision_seed(i: int) -> bytes:
+    return hashlib.sha256(f"dps-en-in-collision-{i}".encode()).digest()
+
+
+def _no_name_part(text: str) -> bool:
+    folded = normalise(text)
+    return "ananya" not in folded and "krishnan" not in folded
+
+
+@pytest.mark.parametrize("i", COLLIDING)
+def test_an_en_in_persona_never_shares_a_name_part_with_the_record(i: int) -> None:
+    seed = _collision_seed(i)
+    bare = PersonaFactory(seed).for_anchor(UNIT_ANCHOR, "en_IN")
+    assert "krishnan" in ascii_fold(bare.last_name), "seed no longer collides: pick another"
+    eng = SurrogateEngine(seed, default_locale="en_IN")
+    eng.declare_record(UNIT_ANCHOR, [("PERSON_NAME", NAME)])
+    persona = eng.persona(UNIT_ANCHOR, "en_IN")
+    assert not shares_name_part(persona.full_name, name_parts([NAME]))
+    full = eng.surrogate("PERSON_NAME", NAME, "en_IN", UNIT_ANCHOR)
+    first = eng.surrogate("PERSON_NAME", "Ananya", "en_IN", UNIT_ANCHOR)
+    upper = eng.surrogate("PERSON_NAME", NAME.upper(), "en_IN", UNIT_ANCHOR)
+    email = eng.surrogate("EMAIL", "ananya.k@example-mail.in", "en_IN", UNIT_ANCHOR)
+    user = eng.surrogate("USERNAME", "@ananya_k", "en_IN", UNIT_ANCHOR)
+    for out in (full, first, upper, email, user):
+        assert _no_name_part(out), "a part of the customer's name survived"
+    # still one coherent persona, and the same one from a fresh engine
+    assert full == persona.full_name and first == persona.first_name and upper == full.upper()
+    assert email.startswith(persona.email_local) and user[1:].startswith(
+        persona.email_local.replace(".", "_")
+    )
+    fresh = SurrogateEngine(seed, default_locale="en_IN")
+    fresh.declare_record(UNIT_ANCHOR, [("PERSON_NAME", NAME)])
+    assert fresh.surrogate("EMAIL", "ananya.k@example-mail.in", "en_IN", UNIT_ANCHOR) == email
+    assert fresh.surrogate("PERSON_NAME", NAME, "en_IN", UNIT_ANCHOR) == full
+
+
+@pytest.mark.parametrize("i", COLLIDING)
+def test_a_name_surrogate_never_shares_a_part_with_the_name_it_replaces(i: int) -> None:
+    """Even when nobody declared the record's names, the name's own parts are avoided."""
+    eng = SurrogateEngine(_collision_seed(i), default_locale="en_IN")
+    assert _no_name_part(eng.surrogate("PERSON_NAME", NAME, "en_IN", UNIT_ANCHOR))
+    assert _no_name_part(eng.surrogate("PERSON_NAME", "Krishnan", "en_IN", UNIT_ANCHOR))
+
+
+def test_a_persona_that_does_not_collide_is_the_same_with_or_without_the_names() -> None:
+    seed = _collision_seed(0)
+    bare = PersonaFactory(seed).for_anchor(UNIT_ANCHOR, "en_IN")
+    assert not shares_name_part(bare.full_name, name_parts([NAME]))
+    assert PersonaFactory(seed).for_anchor(UNIT_ANCHOR, "en_IN", avoid=name_parts([NAME])) == bare
+    eng = SurrogateEngine(seed, default_locale="en_IN")
+    eng.declare_record(UNIT_ANCHOR, [("PERSON_NAME", NAME)])
+    assert eng.persona(UNIT_ANCHOR, "en_IN") == bare
+
+
+def test_a_declaration_replaces_the_earlier_one_and_reaches_the_retries() -> None:
+    seed = _collision_seed(COLLIDING[0])
+    eng = SurrogateEngine(seed, default_locale="en_IN")
+    eng.declare_record(UNIT_ANCHOR, [("PERSON_NAME", NAME)])
+    assert not shares_name_part(eng.persona(UNIT_ANCHOR, "en_IN").full_name, name_parts([NAME]))
+    retry = f"{UNIT_ANCHOR}|retry1"
+    assert eng.persona(retry, "en_IN") == PersonaFactory(seed).for_anchor(
+        retry, "en_IN", avoid=name_parts([NAME])
+    )
+    eng.declare_record(UNIT_ANCHOR, [])
+    assert eng.persona(UNIT_ANCHOR, "en_IN") == PersonaFactory(seed).for_anchor(
+        UNIT_ANCHOR, "en_IN"
+    )
+
+
+def test_the_name_part_rule() -> None:
+    parts = name_parts(["Ananya Krishnan", "A. Acuña"])
+    assert parts == {"ananya", "krishnan", "a", "acuna"}
+    assert shares_name_part("Krishnan", parts)  # equal
+    assert shares_name_part("Ramakrishnan", parts)  # contains a part
+    assert shares_name_part("Krish", parts) and shares_name_part("Anya", parts)  # inside a part
+    assert shares_name_part("ACUNA", parts) and shares_name_part("Acuña", parts)  # folded
+    assert shares_name_part("A", parts)  # an initial matches an equal part...
+    assert not shares_name_part("Arjun Mehta", parts)  # ...and nothing else
+    assert not shares_name_part("Kr", {"krishnan"})  # under three letters: equal only
+    assert not shares_name_part("Krishnan", frozenset())
+    # text that is not a name: a word holding a part, or the text run together holding one
+    assert holds_name_part("12 Krishnan Road", parts) and holds_name_part(
+        "Radhakrishnan Chowk", parts
+    )
+    assert holds_name_part("30, Krishna Nagar", parts)  # "krishnanagar"
+    assert not holds_name_part("Krishna Road", parts)  # a word inside a part is a name's test
+
+
+def test_a_name_draw_falls_back_deterministically() -> None:
+    from dps.engine.synth.personas import _draw_name
+
+    avoid = name_parts(["Krishnan"])
+    assert _draw_name(lambda: "Krishnan", ("Alex",), avoid) == "Alex"
+    # nor run together with the first name: "Sanan" + "Yash" holds "ananya"
+    assert _draw_name(lambda: "Yash", ("Alex",), name_parts(["Ananya"]), before="Sanan") == "Alex"
+    every = name_parts(["Krishnan Alex Robin"])
+    got = _draw_name(lambda: "Krishnan", ("Alex", "Robin"), every)
+    assert not shares_name_part(got, every) and got == _draw_name(
+        lambda: "Krishnan", ("Alex", "Robin"), every
+    )
+
+
+@pytest.mark.parametrize(
+    "i",
+    [
+        48,  # UNIT_ANCHOR's bare en_IN street: "03/03, Balakrishnan Street"
+        4113,  # "30, Krishna Nagar": no word holds "krishnan", the normalised text does
+    ],
+)
+def test_a_declared_record_moves_the_address_off_the_customer_s_name(i: int) -> None:
+    seed = _collision_seed(i)
+    bare = PersonaFactory(seed).for_anchor(UNIT_ANCHOR, "en_IN")
+    assert "krishnan" in normalise(bare.street), "seed no longer collides: pick another"
+    eng = SurrogateEngine(seed, default_locale="en_IN")
+    eng.declare_record(UNIT_ANCHOR, [("PERSON_NAME", NAME)])
+    persona = eng.persona(UNIT_ANCHOR, "en_IN")
+    assert (persona.first_name, persona.last_name) == (bare.first_name, bare.last_name)
+    street = eng.surrogate(
+        "STREET_ADDRESS", "14 Lavelle Road, Bengaluru 560001", "en_IN", UNIT_ANCHOR
+    )
+    assert _no_name_part(street) and street.startswith(persona.street)
+
+
+@pytest.mark.parametrize(
+    ("i", "entity", "original"),
+    [(2757, "PHONE", "+91 98451 20377"), (544, "CARD_PAN", "4111 1111 1111 1111")],
+)
+def test_a_surrogate_never_holds_another_value_of_the_record(
+    i: int, entity: str, original: str
+) -> None:
+    """A phone or card surrogate holding the card expiry's digits used to trip the sweep."""
+    seed = _collision_seed(i)
+    bare = SurrogateEngine(seed).surrogate(entity, original, "en_IN", UNIT_ANCHOR)
+    assert "0928" in normalise(bare), "seed no longer collides: pick another"
+    eng = SurrogateEngine(seed, default_locale="en_IN")
+    eng.declare_record(UNIT_ANCHOR, [("CARD_EXPIRY", "09/28"), (entity, original)])
+    fake = eng.surrogate(entity, original, "en_IN", UNIT_ANCHOR)
+    assert "0928" not in normalise(fake) and fake != bare
+    if entity == "PHONE":
+        assert phonenumbers.is_valid_number(phonenumbers.parse(fake, None))
+    else:
+        assert fake.startswith("4111 11") and luhn_valid(fake)
+    # the same record declared again gives the same surrogate
+    again = SurrogateEngine(seed, default_locale="en_IN")
+    again.declare_record(UNIT_ANCHOR, [("CARD_EXPIRY", "09/28"), (entity, original)])
+    assert again.surrogate(entity, original, "en_IN", UNIT_ANCHOR) == fake
+
+
+def test_a_value_held_by_construction_keeps_the_first_draw() -> None:
+    """Every card surrogate starts 411111: declaring "4111" cannot be avoided, and must not
+    push the card to the last-resort token. The sweep rules on it instead."""
+    original = "4532 7811 2290 4417"
+    bare = SurrogateEngine(SEED).surrogate("CARD_PAN", original, "en_US", "r1")
+    eng = SurrogateEngine(SEED)
+    eng.declare_record("r1", [("PIN", "4111"), ("CARD_PAN", original)])
+    assert eng.surrogate("CARD_PAN", original, "en_US", "r1") == bare and luhn_valid(bare)

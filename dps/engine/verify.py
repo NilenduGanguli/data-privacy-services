@@ -16,6 +16,15 @@ object key) is still a leak; keys are never kept, so a kept value never excuses 
 allowance is per leaf, not per span: inside the leaf that holds the kept span, the value is
 allowed wherever it occurs.
 
+**Name parts.** A name is also checked part by part, because a surrogate (or a rewrite) can bring
+back one part of it — ``Utkarsh Krishnan`` for ``Ananya Krishnan`` — while the whole name is gone.
+When the sweep is given the input, every part of a detected, transformed name with at least
+``min_len`` characters is counted in each output string, normalised like the whole values
+(``Krishnan``, ``Radhakrishnan``, ``krishnan12``, ``Krishna Nagar`` all hold ``krishnan``). A
+string whose output holds a part more often than its input did *outside* the detected names is a
+hit: a part that was already there for another reason (``prices rose`` next to ``Rose Mehta``) is
+not one, a part that appears from nowhere is.
+
 **Coverage.** The sweep can only look for values the detectors found: a name nobody detected is
 never checked. :func:`assess_coverage` says what the sweep could see — the detectors that ran,
 whether NER was on, how many free-text fields there were — and names each gap. With NER off a
@@ -54,6 +63,12 @@ NER_GAP: dict[str, str] = {
 #: shorter one is a code, a label or a value its key describes (the structural tier's domain).
 FREE_TEXT_MIN_WORDS = 2
 _WORD = re.compile(r"[^\W\d_]{2,}")
+#: Normalised values shorter than this are not checked (they would match by accident).
+SWEEP_MIN_LEN = 4
+#: The entity whose parts are checked one by one (see "Name parts" above).
+NAME_ENTITY = "PERSON_NAME"
+#: A part of a name: letters only, any script.
+_NAME_PART = re.compile(r"[^\W\d_]+")
 
 
 class Coverage(BaseModel):
@@ -98,6 +113,16 @@ def normalise(text: str) -> str:
     """Letters and digits only, compatibility-decomposed, case-folded, accents dropped."""
     folded = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", text).casefold())
     return "".join(_fold(ch) for ch in folded)
+
+
+def name_parts(names: Iterable[str], min_len: int = 1) -> frozenset[str]:
+    """The normalised parts of ``names`` with at least ``min_len`` characters."""
+    return frozenset(
+        part
+        for name in names
+        for word in _NAME_PART.findall(name)
+        if len(part := normalise(word)) >= min_len
+    )
 
 
 def collect_originals(
@@ -174,19 +199,70 @@ def assess_coverage(
     )
 
 
+def _outside(text: str, spans: list[tuple[int, int] | None]) -> list[str]:
+    """The pieces of ``text`` outside ``spans`` (``None``: the whole value), kept apart so that
+    removing a name never joins the words on either side of it."""
+    if any(span is None for span in spans):
+        return []
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in sorted(span for span in spans if span is not None):
+        pieces.append(text[cursor:start])
+        cursor = max(cursor, end)
+    pieces.append(text[cursor:])
+    return pieces
+
+
+def _name_part_hits(
+    originals: list[tuple[Finding, str]],
+    output: Any,
+    source: Any,
+    kept: set[tuple[str, int | None, int | None]],
+    min_len: int,
+) -> list[str]:
+    """Output locations holding a part of a transformed name more often than the input did
+    outside the detected names (see "Name parts" in the module docstring)."""
+    names: list[str] = []
+    name_spans: dict[str, list[tuple[int, int] | None]] = {}
+    for finding, original in originals:
+        loc = finding.locator
+        if finding.entity_type != NAME_ENTITY or (loc.path, loc.start, loc.end) in kept:
+            continue
+        names.append(original)
+        span = None if loc.whole else (loc.start or 0, loc.end or 0)
+        name_spans.setdefault(loc.path, []).append(span)
+    parts = name_parts(names, min_len)
+    if not parts:
+        return []
+    before: dict[tuple[str, bool], list[str]] = {}  # normalised input pieces per location
+    for path, is_key, value in _strings(source):
+        named = not is_key and path in name_spans
+        pieces = _outside(value, name_spans[path]) if named else [value]
+        before[(path, is_key)] = [normalise(piece) for piece in pieces]
+    hits: list[str] = []
+    for path, is_key, value in _strings(output):
+        after, held = normalise(value), before.get((path, is_key), [])
+        if any(after.count(part) > sum(h.count(part) for h in held) for part in parts):
+            hits.append(path)
+    return hits
+
+
 def verify_output(
     originals: list[tuple[Finding, str]],
     output: Any,
     *,
     kept: set[tuple[str, int | None, int | None]] | None = None,
-    min_len: int = 4,
+    min_len: int = SWEEP_MIN_LEN,
     coverage: Coverage | None = None,
+    source: Any | None = None,
 ) -> Verification:
     """Search every string in ``output`` for every original that was meant to be transformed.
 
     ``kept`` holds the ``(path, start, end)`` locators the plan kept on purpose. Their values are
     allowed only in the output leaf at that same path; a hit anywhere else still counts.
     ``coverage`` (from :func:`assess_coverage`) is attached as is and decides ``partial``.
+    ``source`` is the input (the JSON document or the text); with it, names are also checked
+    part by part (see "Name parts" in the module docstring).
     """
     haystacks = [(path, is_key, normalise(s)) for path, is_key, s in _strings(output)]
     kept = kept or set()
@@ -215,4 +291,9 @@ def verify_output(
                 continue  # the value the policy kept in this very leaf
             seen.add((path, finding.entity_type))
             hits.append({"path": path, "entity_type": finding.entity_type})
+    if source is not None:
+        for path in _name_part_hits(originals, output, source, kept, min_len):
+            if (path, NAME_ENTITY) not in seen:
+                seen.add((path, NAME_ENTITY))
+                hits.append({"path": path, "entity_type": NAME_ENTITY})
     return Verification(passed=not hits, checked=checked, hits=hits, coverage=coverage)

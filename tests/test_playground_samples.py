@@ -9,6 +9,7 @@ tested here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -20,8 +21,14 @@ from fastapi.testclient import TestClient
 
 from dps.app import create_app
 from dps.config import Settings
+from dps.engine.detect.ensemble import Detector, DetectorConfig
 from dps.engine.detect.ner_presidio import presidio_available
-from dps.engine.policy import preset_names
+from dps.engine.planner import build_plan
+from dps.engine.policy import preset_names, resolve_policy
+from dps.engine.synth.personas import PersonaFactory
+from dps.engine.synth.surrogates import SurrogateEngine, SynthesisSeed
+from dps.engine.transform.apply import anchor_for
+from dps.engine.transform.crypto import b64u
 from dps.engine.verify import NER_GAP, normalise
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,3 +120,64 @@ def test_text_sample_with_ner_on_still_never_returns_the_name() -> None:
     assert _no_name(body["result"])
     verification = body["report"]["verification"]
     assert verification["coverage"]["ner"] == "on" and verification["status"] == "passed"
+
+
+# --- seeds that used to put a part of the record into the output (A-prepare review r1, B1) -----
+# Under compose (DPS_DEFAULT_LOCALE=en_IN) the persona for the sample's record comes from Faker
+# en_IN, which can draw the customer's own surname, a surname holding it, or a street named after
+# it. Before the fix the output kept that part of the name while the report said the sweep passed
+# (or, for the street, the strict sweep refused the request). A coincidence of another kind made
+# the strict sweep refuse too: a phone or card surrogate holding the card expiry's digits "0928".
+# Each case first proves that the seed still collides for the samples as they are today.
+CASES = (
+    ("text", 443, "surname"),  # "Krishnan"
+    ("text", 163, "surname"),  # "Ramakrishnan"
+    ("json", 190, "surname"),  # "Krishnan"
+    ("json", 258, "surname"),  # "Balakrishnan"
+    ("json", 27, "street"),  # "04/90, Krishnan Ganj"
+    ("json", 1514, "street"),  # "76/87, Krishna Nagar": "krishnanagar" once normalised
+    ("json", 2757, "phone"),  # the phone surrogate holds 0928
+    ("json", 544, "card"),  # the card surrogate holds 0928
+)
+
+
+def _raw_seed(i: int) -> bytes:
+    return hashlib.sha256(f"dps-en-in-collision-{i}".encode()).digest()
+
+
+def _sample_anchor(kind: str) -> str:
+    payload = {"text": SAMPLES["text"]} if kind == "text" else {"data": SAMPLES["json"]}
+    policy = resolve_policy("synthetic-realistic", default_name="synthetic-realistic")
+    findings = Detector(DetectorConfig()).detect(**payload).findings
+    return anchor_for(SAMPLES[kind], build_plan(findings, policy, "synthesize", fpe_enabled=False))
+
+
+def _collides(kind: str, i: int, what: str) -> bool:
+    """The undeclared draw for this seed holds a part of the record."""
+    if what in ("surname", "street"):
+        bare = PersonaFactory(_raw_seed(i)).for_anchor(_sample_anchor(kind), "en_IN")
+        return "krishnan" in normalise(bare.last_name if what == "surname" else bare.street)
+    entity, original = {
+        "phone": ("PHONE", SAMPLES["json"]["phone"]),
+        "card": ("CARD_PAN", SAMPLES["json"]["card"]["pan"]),
+    }[what]
+    fake = SurrogateEngine(_raw_seed(i)).surrogate(entity, original, "en_IN", "any")
+    return normalise(SAMPLES["json"]["card"]["expiry"]) in normalise(fake)
+
+
+@pytest.mark.parametrize(("kind", "i", "what"), CASES)
+@pytest.mark.parametrize("policy", sorted(preset_names()))
+def test_a_colliding_en_in_seed_never_returns_a_part_of_the_record(
+    client: Any, policy: str, kind: str, i: int, what: str
+) -> None:
+    assert _collides(kind, i, what), "seed no longer collides: pick another"
+    seed = SynthesisSeed(seed=b64u(_raw_seed(i))).model_dump(mode="json")
+    payload = {"text": SAMPLES["text"]} if kind == "text" else {"data": SAMPLES["json"]}
+    r = client.post(
+        "/api/v1/synthesize",
+        json={**payload, "policy": policy, "options": {"consistency": {"synthesis_seed": seed}}},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert _no_name(body["result"]), f"{kind}/{policy}/{i}: a part of the name survived"
+    assert body["report"]["verification"]["passed"]

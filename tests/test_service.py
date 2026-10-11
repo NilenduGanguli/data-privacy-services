@@ -495,3 +495,19 @@ def test_report_counts_every_value_that_fell_back_with_fpe_off() -> None:
     assert planned == 3  # customer_id, full_name, aadhaar: fpe_* planned as det_token
     assert out.report.fallbacks == {"fallback:fpe_disabled": 3, "fallback:fpe_unavailable": 1}
     assert sum(out.report.fallbacks.values()) == out.report.methods_used["det_token"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [Payload(text="Ananya Krishnan (ananya.k@example-mail.in) called"), Payload(data=SAMPLE)],
+    ids=["text", "data"],
+)
+async def test_a_leaked_name_part_fails_the_strict_sweep(
+    engine: PrivacyEngine, monkeypatch: pytest.MonkeyPatch, payload: Payload
+) -> None:
+    """The sweep checks name parts, not just whole names (A-prepare review r1, B1)."""
+    from dps.engine.synth.surrogates import SurrogateEngine
+
+    monkeypatch.setattr(SurrogateEngine, "_person_name", lambda *a: "Tanmayi Krishnan")
+    with pytest.raises(VerificationFailed):
+        await engine.synthesize(payload, "synthetic-realistic", RequestOptions())
