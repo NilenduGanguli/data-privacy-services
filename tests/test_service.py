@@ -229,6 +229,45 @@ async def test_a_caller_held_seed_reproduces_synthesis(engine: PrivacyEngine) ->
     assert seed["seed"][:-2] not in str(err.value)
 
 
+async def test_a_caller_held_seed_maps_each_value_the_same_in_any_request(
+    engine: PrivacyEngine,
+) -> None:
+    """Spec §5.6/P3: same original → same fake whatever else a request holds, in any order."""
+    policy = {
+        "preset": "synthetic-realistic",
+        "detect": {"declared_fields": [{"path": "$[*].ref", "entity_type": "BRANCH_REF"}]},
+    }
+    records = [{"ref": f"{i:03d}"} for i in range(300)]  # dense in a 1,000-value space
+    first = await engine.synthesize(Payload(data=records), policy, RequestOptions())
+    seed = first.synthesis_seed.model_dump(mode="json")  # type: ignore[union-attr]
+    options = RequestOptions(consistency={"synthesis_seed": seed})
+    mapping = {r["ref"]: o["ref"] for r, o in zip(records, first.result, strict=True)}
+    assert len(set(mapping.values())) == len(records)  # distinct stays distinct (joins survive)
+    assert all(original != fake for original, fake in mapping.items())
+    backward = await engine.synthesize(Payload(data=records[::-1]), policy, options)
+    assert {r["ref"]: o["ref"] for r, o in zip(records[::-1], backward.result, strict=True)} == (
+        mapping
+    )
+    for record in records[-5:]:
+        alone = await engine.synthesize(Payload(data=[record]), policy, options)
+        assert alone.result[0]["ref"] == mapping[record["ref"]]
+
+
+async def test_strict_synthesis_replaces_values_in_any_script(engine: PrivacyEngine) -> None:
+    fields = {"maiden": "MOTHER_MAIDEN_NAME", "nid": "NATIONAL_ID", "emp": "EMPLOYEE_ID"}
+    policy = {
+        "preset": "synthetic-strict",
+        "detect": {
+            "declared_fields": [{"path": f"$.{k}", "entity_type": v} for k, v in fields.items()]
+        },
+    }
+    doc = {"maiden": "राम", "nid": "ПАСПОРТ", "emp": "Müller"}
+    out = await engine.synthesize(Payload(data=doc), policy, RequestOptions())
+    assert out.report.verification.passed  # type: ignore[union-attr]
+    for key, value in doc.items():
+        assert out.result[key] != value and value not in out.result[key], key
+
+
 async def test_text_synthesis_follows_the_plan(engine: PrivacyEngine) -> None:
     text = "Mail ann.k@example-mail.in by 2026-01-05 via https://portal.example-bank.in/x"
     realistic = await engine.synthesize(Payload(text=text), "synthetic-realistic", RequestOptions())

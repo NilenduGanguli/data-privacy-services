@@ -855,7 +855,8 @@ original_dob, gender_hint)`, `Persona`, `SynthesisSeed`, `generate_synthesis_see
   `issued` map so that, within one engine (one request), two different identifiers never share a
   surrogate: a collision is re-drawn with a retry salt. Persona attributes (name, birth date,
   address, city, postcode, age), dates, card expiry and amounts are exempt (they legitimately
-  repeat).
+  repeat). **Superseded by the G4 fix round 1 below:** the `issued` map made surrogates depend
+  on request order and was removed; reshaped identifiers use a keyed derangement instead.
 
 **Never issued (spec §5.6) where the plan generated issued-space numbers:**
 
@@ -1082,3 +1083,74 @@ synthesized span by span; the LLM rewrite applies to text payloads only.
   numbers; a large request would exhaust them and the distinctness map would start accepting
   collisions). Up to 6 trailing digits are now random (validity-checked, falling back to 4).
   `test_phone_keeps_the_original_country_and_format` pins it.
+
+### Task 19 — fix round 1 (G4 review r1: B1 order dependence, B2 non-ASCII originals)
+
+**B1 — surrogates depended on request order.** The `issued` map ("distinct stays distinct
+within one engine") gave the second of two colliding originals a retry value, so which original
+won depended on the order of the request and on what else it held: under one caller-held seed
+`CUST-3136000` came back as three different fakes, and 29 of 200 CVVs changed when the same
+values arrived reversed. That breaks spec §5.6 ("same original → same fake, across fields,
+tables and systems") and P3. Fix (the review's option b, with a for the rest):
+
+- The `issued` map, `_UNTRACKED` and the collision fallback are gone. `surrogate()` is a pure
+  function of `(seed, entity type, canonical original)` (plus the anchor for persona fields);
+  the never-equal / never-contain retries were already salted with the canonical original only.
+- New `dps/engine/synth/reshape.py`: identifiers whose surrogate keeps the original's shape —
+  unmapped entity types, `CVV` (3/4 digits), `SORT_CODE`, `IFSC` (bank letters and the reserved
+  fifth `0` kept), `AMOUNT` (now the generic path), `DIAGNOSIS_CODE`, `SWIFT_BIC` (country kept)
+  and the non-IBAN-shaped `IBAN` fallback — map their digits (and, for letter values, every
+  letter) through a **seed-keyed derangement** of the shape's value space: a permutation with no
+  fixed point, `x → P⁻¹(P(x)+1)`, where `P` is a 10-round FF1-style Feistel (keyed BLAKE2b
+  rounds, modular addition over the mixed-radix domain; cycle-walking for a single position).
+  The key is `HMAC(seed, "dps.synth.reshape.v1" ‖ entity type ‖ mode ‖ canonical shape)`, so
+  `CUST-884120` and `cust 884120` get the same digits. Result: collision-free within a shape,
+  order-free, never the original, and stable across requests — the whole 1,000-value CVV space
+  maps onto itself.
+- Generators with a fixed output space (SSN 9xx, ITIN, SIN, Aadhaar, test-IIN cards, fictional
+  phone ranges, e-mails, IBAN, ABA, IP/MAC, medications, ...) now *can* map two originals to one
+  fake, with probability ~n²/2N (documented in the module docstring; tight spaces: Ofcom's
+  1,000 UK numbers per format, ITIN ~2·10⁶, SIN 10⁷, 20 medications). A bijection there is
+  impossible: the input space is larger than the never-issued output space.
+- **Test change:** `test_distinct_identifiers_never_share_a_surrogate_within_an_engine` asserted
+  the order-dependent property (6 one-digit account numbers → 6 distinct fakes via retries) and
+  e-mail distinctness within a record. Replaced by
+  `test_surrogates_do_not_depend_on_request_order` (forward vs reversed vs alone, six entity
+  types incl. GB phones and medications; fails on the old code) and
+  `test_reshaped_identifiers_are_a_keyed_derangement` (full CVV / one-digit / two-letter spaces
+  are fixed-point-free permutations; CUST- ids and sort codes distinct). Two e-mails in one
+  record now collide with probability 1/29,997 (4-digit suffix × 3 domains), so
+  `test_value_consistency_and_never_identity`'s `x@y.co` ≠ `z@y.co` assertion can fail about
+  once in 30,000 runs (random seed per run).
+
+**B2 — non-ASCII originals came back verbatim.** The generic letter path replaced ASCII letters
+only, so `राम`, `ПАСПОРТ` reproduced themselves on every attempt and the fallback returned
+`राम1` / `ПАСПОРТ1` (strict presets: `VerificationFailed`; `leakage_check: warn`: the original
+in the output); `Müller` kept its `ü`. Fix:
+
+- Every letter is replaced, in its own script and case: the input is NFKD-decomposed, base
+  letters are mapped within their script's alphabet (ASCII Latin, Greek, Cyrillic, Armenian,
+  Georgian, Hebrew, Arabic incl. Persian/Urdu letters, Devanagari, Bengali, Gurmukhi, Gujarati,
+  Oriya, Tamil, Telugu, Kannada, Malayalam, Sinhala, Thai, Hiragana, Katakana, CJK, Hangul jamo),
+  combining marks (accents, vowel signs) are kept and the result is NFC-recomposed
+  (`Müller` → `Xäqwer`, Hangul jamo recompose into syllables). The alphabets are filtered with
+  the frozen `unicodedata.ucd_3_2_0`, so they do not shift with Python's Unicode version.
+  Letters outside them (`ß`, `ł`, other scripts) are drawn per value from the same script's
+  alphabet, or ASCII. `_reshape_hex` (device / cookie ids) now replaces non-ASCII letters too.
+- The exhausted fallback is a seeded hex token of the original's length that does not reveal
+  it (`_last_resort`); `original + "1"` (`_perturb`) is gone.
+- Tests: `test_non_ascii_letters_are_replaced_in_their_own_script` (10 originals: Devanagari,
+  Cyrillic, accented Latin, Greek, Arabic, CJK, Hangul, Tamil, Polish, a single `Ё`),
+  `test_accented_and_unindexed_latin_letters_are_replaced_not_kept`,
+  `test_the_last_resort_never_contains_the_original`,
+  `test_the_derangement_is_a_permutation_without_fixed_points` (8 radix shapes).
+
+Service level (`tests/test_service.py`): `test_a_caller_held_seed_maps_each_value_the_same_in_any_request`
+(300 declared 3-digit refs: same fake reversed and alone, all distinct) and
+`test_strict_synthesis_replaces_values_in_any_script` (`synthetic-strict` on `राम`, `ПАСПОРТ`,
+`Müller` passes verification and returns none of them). Both fail against the previous
+`surrogates.py`. Cost: ~20 µs per reshaped value (was ~10 µs; CVVs ~17 µs, was ~28 µs).
+
+Still open: N1 (a surrogate can equal *another* record's original in a dense space, so a large
+strict request can fail closed; a derangement does not change that rate, and an avoid-set would
+make the mapping request-dependent again) and N2 (persona-derived fields depend on the anchor).

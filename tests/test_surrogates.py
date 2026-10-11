@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import math
 import re
+import string
+import unicodedata
 from datetime import date
 
 import phonenumbers
@@ -9,12 +12,14 @@ from stdnum import verhoeff
 
 from dps.engine.detect.checksums import luhn_valid, valid_aba, validate
 from dps.engine.synth.personas import PersonaFactory
+from dps.engine.synth.reshape import Derangement
 from dps.engine.synth.surrogates import (
     SurrogateEngine,
     generate_synthesis_seed,
     seed_bytes,
     seed_from_caller,
 )
+from dps.engine.verify import normalise
 
 SEED = seed_bytes(generate_synthesis_seed())
 
@@ -128,18 +133,119 @@ def test_same_seed_same_surrogates_across_engines_and_formats() -> None:
     ) == one.surrogate("AADHAAR", "234123412346", "en_IN", "r1")
 
 
-def test_distinct_identifiers_never_share_a_surrogate_within_an_engine() -> None:
+def test_surrogates_do_not_depend_on_request_order() -> None:
+    """Spec §5.6: the same original gets the same fake whatever else is asked, and in any order."""
+    medications = ["Metformin", "Insulin", "Warfarin", "Digoxin", "Lithium", "Aspirin"] * 5
+    cases: tuple[tuple[str, list[str]], ...] = (
+        ("CVV", [f"{i:03d}" for i in range(300)]),  # a 1,000-value space
+        ("CUSTOMER_ID", [f"CUST-{i:06d}" for i in range(0, 3_000_000, 1000)]),
+        ("ACCOUNT_NUMBER", [str(i) for i in range(10)]),
+        ("PHONE", [f"07911 123{i:03d}" for i in range(150)]),  # Ofcom: 1,000 fictional numbers
+        ("MEDICATION", [f"{m}{'-XR' * (i % 2)}" for i, m in enumerate(medications)]),
+        ("EMAIL", [f"user{i}@corp.example" for i in range(20)]),
+    )
+    for entity, originals in cases:
+        forward, backward = SurrogateEngine(SEED), SurrogateEngine(SEED)
+        one = [forward.surrogate(entity, o, "en_GB", "r1") for o in originals]
+        two = [backward.surrogate(entity, o, "en_GB", "r1") for o in reversed(originals)][::-1]
+        assert one == two, entity
+        for original, fake in list(zip(originals, one, strict=True))[-5:]:  # asked alone
+            assert SurrogateEngine(SEED).surrogate(entity, original, "en_GB", "r1") == fake
+
+
+def test_reshaped_identifiers_are_a_keyed_derangement() -> None:
+    """Digit- and letter-reshaped identifiers: distinct stays distinct, nothing maps to itself."""
     eng = SurrogateEngine(SEED)
-    for entity, make, count in (
-        ("EMAIL", lambda i: f"user{i}@corp.example", 20),
-        ("ACCOUNT_NUMBER", lambda i: str(i), 6),  # a one-digit space: collisions are likely
-        ("CVV", lambda i: f"{i:03d}", 20),
+    letters = [a + b for a in string.ascii_uppercase for b in string.ascii_uppercase]
+    for entity, originals, whole_space in (
+        ("CVV", [f"{i:03d}" for i in range(1000)], True),
+        ("ACCOUNT_NUMBER", [str(i) for i in range(10)], True),  # a one-digit space
+        ("EMPLOYEE_CODE", letters, True),  # letters only: every letter is replaced
+        ("CUSTOMER_ID", [f"CUST-{i:06d}" for i in range(0, 3_000_000, 1000)], False),
+        ("SORT_CODE", [f"40-{i:02d}-{i * 7 % 100:02d}" for i in range(100)], False),
     ):
-        seen: dict[str, str] = {}
-        for i in range(count):
-            original = make(i)
-            out = eng.surrogate(entity, original, "en_US", "same-record")
-            assert seen.setdefault(out, original) == original, entity
+        out = [eng.surrogate(entity, o, "en_US", "r1") for o in originals]
+        assert len(set(out)) == len(originals), entity
+        assert all(o != s for o, s in zip(originals, out, strict=True)), entity
+        if whole_space:  # a permutation of the whole value space
+            assert set(out) == set(originals), entity
+    cust = eng.surrogate("CUSTOMER_ID", "CUST-884120", "en_US", "r1")
+    assert cust.startswith("CUST-") and len(cust) == 11 and cust[5:].isdigit()
+    other = SurrogateEngine(seed_bytes(generate_synthesis_seed()))
+    assert [other.surrogate("CVV", f"{i:03d}", "en_US", "r1") for i in range(50)] != [
+        eng.surrogate("CVV", f"{i:03d}", "en_US", "r1") for i in range(50)
+    ]
+
+
+@pytest.mark.parametrize(
+    "radices", [(2,), (10,), (26,), (500,), (2, 2), (3, 7), (10, 10, 10), (26, 10)]
+)
+def test_the_derangement_is_a_permutation_without_fixed_points(radices: tuple[int, ...]) -> None:
+    perm = Derangement(b"k" * 32, radices)
+    image = [perm(x) for x in range(perm.size)]
+    assert perm.size == math.prod(radices) and sorted(image) == list(range(perm.size))
+    assert all(x != y for x, y in enumerate(image))
+    assert image == [Derangement(b"k" * 32, radices)(x) for x in range(perm.size)]
+    assert image != [Derangement(b"j" * 32, radices)(x) for x in range(perm.size)] or perm.size < 4
+
+
+def _script(ch: str) -> str:
+    return unicodedata.name(ch).split(" ", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("entity", "original"),
+    [
+        ("MOTHER_MAIDEN_NAME", "राम"),
+        ("NATIONAL_ID", "ПАСПОРТ"),
+        ("EMPLOYEE_ID", "Müller"),
+        ("NATIONAL_ID", "Ελένη Παπαδοπούλου"),
+        ("MOTHER_MAIDEN_NAME", "محمد"),
+        ("MOTHER_MAIDEN_NAME", "山田太郎"),
+        ("MOTHER_MAIDEN_NAME", "김민준"),
+        ("MOTHER_MAIDEN_NAME", "தமிழ்செல்வி"),
+        ("MOTHER_MAIDEN_NAME", "Łukasz Żółć"),
+        ("EMPLOYEE_ID", "Ё"),
+    ],
+)
+def test_non_ascii_letters_are_replaced_in_their_own_script(entity: str, original: str) -> None:
+    """Every letter is replaced, in its own script and case; marks are rebuilt on new letters."""
+    eng = SurrogateEngine(SEED)
+    out = eng.surrogate(entity, original, "en_IN", "r1")
+    assert out != original and original not in out and not out.startswith(original)
+    assert normalise(out) != normalise(original) and normalise(original) not in normalise(out)
+    before = unicodedata.normalize("NFKD", original)
+    after = unicodedata.normalize("NFKD", out)
+    assert len(after) == len(before)
+    for a, b in zip(before, after, strict=True):
+        if a.isalpha():
+            assert b.isalpha() and _script(b) == _script(a) and b.isupper() == a.isupper()
+        else:  # separators and combining marks (accents, vowel signs) stay
+            assert b == a
+    assert out == SurrogateEngine(SEED).surrogate(entity, original, "en_IN", "r1")
+
+
+def test_accented_and_unindexed_latin_letters_are_replaced_not_kept() -> None:
+    eng = SurrogateEngine(SEED)
+    originals = [f"Mü{a}{b}er" for a in string.ascii_lowercase for b in "aeiouyrs"]
+    outs = [eng.surrogate("EMPLOYEE_ID", o, "en_US", "r1") for o in originals]
+    kept = sum(unicodedata.normalize("NFKD", out)[1] == "u" for out in outs)
+    assert kept < len(originals) // 4  # a replaced letter is "u" again ~1 time in 26, not always
+    for out in outs:  # the accent is rebuilt on the new base letter
+        assert "\u0308" in unicodedata.normalize("NFKD", out)
+    polish = eng.surrogate("MOTHER_MAIDEN_NAME", "Łukasz Łoś", "en_US", "r1")
+    assert "Ł" not in polish and "ł" not in polish  # no ASCII base: drawn afresh, never kept
+
+
+def test_the_last_resort_never_contains_the_original(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When every attempt reveals the original, the fallback is a token, never original + 1."""
+    eng = SurrogateEngine(SEED)
+    monkeypatch.setattr(eng, "_generate", lambda entity, original, *rest: original)
+    for original in ("राम", "ПАСПОРТ", "AB-1234", "7"):
+        out = eng.surrogate("NATIONAL_ID", original, "en_US", "r1")
+        assert len(out) == len(original) and out != original
+        assert normalise(original) not in normalise(out) or len(normalise(original)) < 4
+        assert not out.startswith(original)
 
 
 def test_never_issued_ranges() -> None:

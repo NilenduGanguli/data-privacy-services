@@ -1,10 +1,12 @@
 """Rule-valid, locale-aware, seeded surrogates (spec §5.6).
 
-``SurrogateEngine.surrogate(entity_type, original, locale, anchor)`` is deterministic in
+``SurrogateEngine.surrogate(entity_type, original, locale, anchor)`` is a pure function of
 ``(seed, entity type, canonical original)`` for value-level consistency (the canonical form is the
 verifier's normalisation, so ``2341 2341 2346`` and ``234123412346`` get the same digits, each in
-its own layout). Persona fields (name, e-mail, birth date, address, ...) come from
-``(seed, anchor)`` so one record stays coherent.
+its own layout). Persona fields (name, e-mail, birth date, address, ...) also depend on the
+record's ``anchor`` so one record stays coherent. Nothing depends on request order or on what
+else the request holds: the same seed gives the same fake across fields, tables, requests and
+systems (spec §5.6, P3).
 
 Generated identifiers are *valid in format* and *never issued* where an unissued range exists:
 SSNs in the 900 area, ITINs in groups 89/93, SINs starting with 0, Aadhaar numbers starting with
@@ -12,14 +14,24 @@ SSNs in the 900 area, ITINs in groups 89/93, SINs starting with 0, Aadhaar numbe
 domains, NANP 555-01xx and Ofcom 07700 900xxx phones, private / documentation IP ranges and
 locally administered MACs. Credentials are never synthesised; they are redacted.
 
-Two guarantees beyond the plan's generators:
+Guarantees beyond the plan's generators:
 
 * **Never revealing.** A surrogate never equals its original, nor contains it (the leakage
   sweep's own normalised test), except for low-cardinality attributes (gender, nationality)
-  where forcing a different value would itself reveal the original.
-* **Distinct stays distinct.** Within one engine (one request), two different identifiers never
-  share a surrogate, so joins and counts survive. Persona attributes are exempt: the record's
-  persona has one name and one address by design.
+  where forcing a different value would itself reveal the original. Retries are salted with the
+  canonical original only, so they stay pure; if every attempt reveals, the last resort is a
+  seeded token of the original's length that cannot contain it (never ``original + suffix``).
+* **Reshaped identifiers are a keyed derangement** (``reshape.py``): identifiers of unmapped
+  types, CVVs, sort codes, IFSC branch digits, amounts, diagnosis codes and BICs keep their
+  layout and have their digits (and, where the value is letters, every letter, in its own
+  script) mapped by a seed-keyed permutation of the shape's value space without fixed points.
+  Two different originals of the same shape never share a surrogate, so foreign keys, joins and
+  counts survive, in any order and across requests.
+* **Other generators** draw from a fixed output space (SSNs in the 900 area, ITINs, SINs,
+  Aadhaar, test-IIN cards, fictional phone ranges, e-mails, IBANs, ...), so two originals can
+  share a surrogate with a probability set by that space: about ``n²/2N`` for ``n`` originals
+  in a space of ``N``. The tight ones are UK numbers (Ofcom's drama range has 1,000 per format),
+  ITINs (~2·10⁶), SINs (10⁷) and medications (20 names).
 
 An engine is not thread-safe; create one per request (the service does).
 """
@@ -29,6 +41,7 @@ from __future__ import annotations
 import random
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -46,6 +59,7 @@ from dps.engine.synth.personas import (
     normalise_locale,
     seed_int,
 )
+from dps.engine.synth.reshape import Reshaper, has_digits
 from dps.engine.transform.crypto import b64u, unb64u
 from dps.engine.verify import normalise
 
@@ -91,24 +105,12 @@ _MEDICATIONS = (
     "Tamsulosin",
 )
 _ATTEMPTS = 32
+_TOKEN_ATTEMPTS = 64
 
 #: Credentials are never synthesised.
 _REDACT = frozenset({"API_KEY", "PASSWORD", "JWT", "PRIVATE_KEY"})
 #: Low-cardinality attributes: forcing "different from the original" would reveal it.
 _IDENTITY_OK = _REDACT | {"GENDER", "NATIONALITY"}
-#: Attributes that legitimately repeat across different originals (persona fields, dates).
-_UNTRACKED = _IDENTITY_OK | {
-    "PERSON_NAME",
-    "DATE_OF_BIRTH",
-    "DATE",
-    "AGE",
-    "STREET_ADDRESS",
-    "CITY",
-    "LOCATION",
-    "POSTAL_CODE",
-    "CARD_EXPIRY",
-    "AMOUNT",
-}
 
 
 class SynthesisSeed(BaseModel):
@@ -173,32 +175,14 @@ def _us_tin(original: str, digits: str) -> str:
     return f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
 
 
-def _letter(rng: random.Random, upper: bool) -> str:
-    ch = rng.choice(_UPPER)
-    return ch if upper else ch.lower()
-
-
-def _reshape_all(original: str, rng: random.Random, *, keep: range | None = None) -> str:
-    """Every ASCII letter and digit replaced (case kept); separators and ``keep`` positions kept."""
-    out = []
-    for i, ch in enumerate(original):
-        if keep is not None and i in keep:
-            out.append(ch)
-        elif ch.isdigit():
-            out.append(str(rng.randint(0, 9)))
-        elif ch.isascii() and ch.isalpha():
-            out.append(_letter(rng, ch.isupper()))
-        else:
-            out.append(ch)
-    return "".join(out)
-
-
 def _reshape_hex(original: str, rng: random.Random) -> str:
-    """Every letter or digit becomes a random hex digit (case kept); separators kept."""
+    """Every letter or digit (any script) becomes a random hex digit; separators kept."""
     upper = any(c.isupper() for c in original) and not any(c.islower() for c in original)
     out = []
-    for ch in original:
-        if ch.isascii() and ch.isalnum():
+    for ch in unicodedata.normalize("NFKD", original):
+        if unicodedata.combining(ch):
+            continue  # an accent on a replaced letter
+        if ch.isalnum():
             digit = rng.choice(_HEX)
             out.append(digit.upper() if upper else digit)
         else:
@@ -242,13 +226,6 @@ def _reveals(canon: str, value: str) -> bool:
     return folded == canon or (len(canon) >= 4 and canon in folded)
 
 
-def _perturb(original: str) -> str:
-    """Last resort for tiny value spaces: a value that differs from ``original``."""
-    if original[-1:].isdigit():
-        return original[:-1] + str((int(original[-1]) + 1) % 10)
-    return original + "1"
-
-
 class SurrogateEngine:
     """Implements ``SurrogateProvider`` for the ``surrogate`` method."""
 
@@ -257,7 +234,7 @@ class SurrogateEngine:
         self._default_locale = normalise_locale(default_locale)
         self._personas = PersonaFactory(seed)
         self._cache: dict[tuple[str, str], Persona] = {}
-        self._issued: dict[tuple[str, str], str] = {}
+        self._reshaper = Reshaper(seed)
         self._generators: dict[str, Callable[[str, str, str, random.Random], str]] = {
             "PERSON_NAME": self._person_name,
             "DATE_OF_BIRTH": self._date_of_birth,
@@ -291,11 +268,15 @@ class SurrogateEngine:
             "AGE": self._age,
             "ORG_NAME": lambda o, loc, a, r: str(faker_for(loc, r.getrandbits(64)).company()),
             "MEDICATION": lambda o, loc, a, r: r.choice(_MEDICATIONS),
-            "DIAGNOSIS_CODE": lambda o, loc, a, r: _reshape_all(o, r),
-            "SWIFT_BIC": lambda o, loc, a, r: _reshape_all(o, r, keep=range(4, 6)),
-            "AMOUNT": lambda o, loc, a, r: _reshape_digits(o, _digits(r, 32)),
-            "IFSC": lambda o, loc, a, r: _reshape_digits(o, _digits(r, 32)),
-            "SORT_CODE": lambda o, loc, a, r: _reshape_digits(o, _digits(r, 32)),
+            # letters and digits: the ICD chapter letter alone reveals the condition class
+            "DIAGNOSIS_CODE": lambda o, loc, a, r: self._reshape("DIAGNOSIS_CODE", o, r, True),
+            # the country code (positions 4-5) stays
+            "SWIFT_BIC": lambda o, loc, a, r: self._reshape(
+                "SWIFT_BIC", o, r, True, keep=range(4, 6)
+            ),
+            # the bank code letters and the reserved fifth character "0" stay
+            "IFSC": lambda o, loc, a, r: self._reshape("IFSC", o, r, False, keep=range(4, 5)),
+            "SORT_CODE": lambda o, loc, a, r: self._reshape("SORT_CODE", o, r, False),
         }
 
     def persona(self, anchor: str, locale: str) -> Persona:
@@ -306,27 +287,42 @@ class SurrogateEngine:
         return self._cache[key]
 
     def surrogate(self, entity_type: str, original: str, locale: str, anchor: str) -> str:
-        """A synthetic stand-in for ``original`` (see the module docstring for the guarantees)."""
+        """A synthetic stand-in for ``original`` (see the module docstring for the guarantees).
+
+        A pure function of the seed, the entity type, the canonical original and (for persona
+        fields) the anchor: it never depends on what this engine was asked before.
+        """
         if not original.strip():
             return original
         loc = normalise_locale(locale or self._default_locale)
         canon = normalise(original)
-        best: str | None = None
         for attempt in range(_ATTEMPTS):
             salt = "" if attempt == 0 else f"|retry{attempt}"
             rng = random.Random(seed_int(self._seed, f"{entity_type}|{canon}{salt}"))
             value = self._generate(entity_type, original, loc, anchor + salt, rng)
-            if entity_type in _IDENTITY_OK:
+            if entity_type in _IDENTITY_OK or not _reveals(canon, value):
                 return value
-            if _reveals(canon, value):
-                continue
-            if entity_type in _UNTRACKED:
-                return value
-            best = best if best is not None else value
-            if self._issued.setdefault((entity_type, value), canon) == canon:
-                return value
-        # Exhausted: a collision between two originals beats returning an original.
-        return best if best is not None else _perturb(original)
+        return self._last_resort(entity_type, original, canon)
+
+    def _last_resort(self, entity_type: str, original: str, canon: str) -> str:
+        """A seeded token of the original's length that does not reveal it."""
+        for attempt in range(_TOKEN_ATTEMPTS):
+            rng = random.Random(seed_int(self._seed, f"{entity_type}|{canon}|token{attempt}"))
+            token = "".join(rng.choice(_HEX) for _ in original)
+            if not _reveals(canon, token):
+                return token
+        return REDACTED  # unreachable in practice: 64 same-length hex draws all revealing
+
+    def _reshape(
+        self,
+        entity: str,
+        original: str,
+        rng: random.Random,
+        letters: bool,
+        *,
+        keep: range | None = None,
+    ) -> str:
+        return self._reshaper.reshape(entity, original, rng, letters=letters, keep=keep)
 
     # -- generators -----------------------------------------------------------------------------
     def _generate(
@@ -337,11 +333,9 @@ class SurrogateEngine:
         generator = self._generators.get(entity)
         if generator is not None:
             return generator(original, loc, anchor, rng)
-        # identifiers of any other kind: keep letters and separators, replace the digits
-        count = len(_DIGIT.findall(original))
-        if count == 0:
-            return _reshape_all(original, rng)
-        return _reshape_digits(original, _digits(rng, count))
+        # identifiers of any other kind (and amounts): keep the layout; replace the digits, or
+        # every letter (any script) when there are no digits
+        return self._reshape(entity, original, rng, not has_digits(original))
 
     def _person_name(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         p = self.persona(anchor, loc)
@@ -401,13 +395,14 @@ class SurrogateEngine:
         return f"{month:02d}{sep}{year % 100:02d}"
 
     def _cvv(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        count = len(_DIGIT.findall(original))
-        return _digits(rng, count if count in (3, 4) else 3)
+        if len(_DIGIT.findall(original)) in (3, 4):
+            return self._reshape("CVV", original, rng, False)
+        return _digits(rng, 3)
 
     def _iban(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         compact = re.sub(r"\s", "", original).upper()
         if not re.fullmatch(r"[A-Z]{2}[0-9]{2}[A-Z0-9]{8,30}", compact):
-            return _reshape_all(original, rng)
+            return self._reshape("IBAN", original, rng, True)
         country, shape = compact[:2], compact[4:]
         candidate = compact
         for _ in range(500):  # national check digits (BE, ES, NO, ME) hold ~1/97 of the time
@@ -457,7 +452,7 @@ class SurrogateEngine:
         return "@" + handle if original.startswith("@") else handle
 
     def _device_id(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        if not any(c.isascii() and c.isalnum() for c in original):
+        if not any(c.isalnum() for c in original):
             return "".join(rng.choice(_HEX) for _ in range(16))
         return _reshape_hex(original, rng)
 
