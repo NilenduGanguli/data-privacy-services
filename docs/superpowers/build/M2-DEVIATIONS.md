@@ -414,3 +414,54 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   ranges: every key in exactly one range) and `test_text_keys_follow_the_sample_order_not_python_order`
   (boundaries come from sample positions even when Python would order the keys differently).
   6 tests (plan: 4).
+
+## Task 14 — Connection registry and connector registry
+
+- `dps/layers/connectors/registry.py` — **the contract name `test_store` would break every test
+  module that imports it, fixed.** pytest collects any module-level callable named `test_*`,
+  imported ones included, so `from … import test_store` in `tests/test_registry.py` made pytest
+  run it as a test with fixtures `store`/`conn` (an error). The function sets
+  `test_store.__test__ = False` (name unchanged, contract §1). Test
+  `test_the_probe_helper_is_not_collected_as_a_test`.
+- `open_connector`'s `postgres` branch imports `dps.layers.connectors.postgres`, which Task 15
+  creates; until then that branch raises `ModuleNotFoundError` (nothing calls it before Task 15;
+  `mypy` passes through `ignore_missing_imports`). The oracle/mongo/s3/pvc branches are the plan's.
+- `dps/connections.py` `update_connection`: the merged connection is validated with
+  `ConnectionSpec` itself, a placeholder inline secret standing in when the stored secret is
+  inline (kept, re-sealed or already purged), instead of the plan's `model_construct` for that
+  case — `model_construct` skips every rule, so a patch could have tagged an inline connection
+  `production` (contract §5.1: production must use `secret_ref`), given a `pvc` connection a
+  secret, or made a file store a source. Such patches are now `connection_invalid` (422, the
+  rule's message). Changing `params` or the secret clears `last_test` and `capabilities` (the old
+  test describes another endpoint or login); a rename keeps them. `ConnectionPatch`, the engine
+  is immutable. Tests `test_patch_rules_secret_switch_and_stale_test`,
+  `test_a_pvc_connection_never_takes_a_secret` (failed before the placeholder covered patched
+  credentials).
+- `load_credentials` also refuses an **expired** inline secret (`secret_expires_at <= now()`,
+  contract §5.1: expired or purged → `SecretUnavailable`) even before retention nulls the blob,
+  and maps a blob that does not open with this KEK (`SealError`) to `SecretUnavailable`; it reads
+  the blob with `tenant_id = $1 AND id = $2` under the tenant GUC.
+- Every repository query also filters `tenant_id = $1` (defence in depth beside RLS); `delete`,
+  `record_test` and `get` likewise. `record_test` takes the optional `conn` too (workers).
+  `create_connection` returns the row it inserted (read back in the same transaction).
+- `_SealedCredentials` fields are `repr=False`; `Credentials` keeps `SecretStr`. Every model hides
+  input in validation errors.
+- `dps/storage.py`: `target_store` as planned. `LocalObjectStore.put/delete` map `OSError`
+  (unwritable root, a file in the way, disk full) to `StorageError("storage_error", <class>)`, so
+  `test_store` reports a broken `pvc` target as a failed check instead of raising (the plan's
+  `test_store` only catches `StorageError`). Test `test_a_failing_store_is_reported_by_code`.
+- `dps/jobs.py`: `_encode_cursor`/`_decode_cursor` renamed to `encode_cursor`/`decode_cursor`
+  (with docstrings) as the plan asks; the two call sites updated.
+- `dps/secrets.py`: `SECRET_FILES` gains `"ca.pem"`.
+- `HANDOFF.md` §7: the `secret_ref` file names and the inline-secret TTL, and the open issue below.
+- **Open issue (not changed, contract question):** a `secret_ref` is not scoped to the tenant.
+  Any tenant with the `jobs` scope can create a connection naming another tenant's mounted
+  reference (`dps/src/<other>`) and read through it. The contract and spec fix the path rule
+  (`DPS_SECRET_DIR/<ref>/`) without a tenant prefix and the plan's own test uses a shared
+  `dps/src/…` reference, so the fix (e.g. refs under `<tenant_id>/` or a per-tenant allow-list in
+  `dps_tenant`) needs a contract decision.
+- Tests: the plan's 3 + 5 plus `test_expired_inline_secret_and_missing_kek`,
+  `test_patch_rules_secret_switch_and_stale_test`, `test_a_pvc_connection_never_takes_a_secret`,
+  `test_creating_a_connection_registers_the_tenant` (db) and
+  `test_a_failing_store_is_reported_by_code`, `test_s3_store_takes_keys_from_the_credentials`,
+  `test_the_probe_helper_is_not_collected_as_a_test` (offline): 7 db + 8 offline = 15 (plan: 8).

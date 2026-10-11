@@ -245,12 +245,14 @@ def _clamp(limit: int) -> int:
     return max(_MIN_LIMIT, min(_MAX_LIMIT, limit))
 
 
-def _encode_cursor(created_at: datetime, job_id: str) -> str:
+def encode_cursor(created_at: datetime, job_id: str) -> str:
+    """Opaque keyset cursor for ``(created_at, id)`` pagination (jobs, connections)."""
     raw = f"{created_at.isoformat()}|{job_id}".encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+def decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """Inverse of :func:`encode_cursor`; ``ValueError("malformed cursor")`` otherwise."""
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("utf-8")
         ts, sep, job_id = raw.partition("|")
@@ -464,7 +466,7 @@ async def list_jobs(
             params.append(str(value))
             conds.append(f"j.{column} = ${len(params)}")
     if cursor:
-        ts, cid = _decode_cursor(cursor)
+        ts, cid = decode_cursor(cursor)
         params += [ts, cid]
         conds.append(f"(j.created_at, j.id) < (${len(params) - 1}::timestamptz, ${len(params)})")
     page = _clamp(limit)
@@ -475,7 +477,7 @@ async def list_jobs(
     async with db.acquire(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     items: list[Job] = [_row_job(r) for r in rows[:page]]
-    nxt = _encode_cursor(items[-1].created_at, items[-1].id) if len(rows) > page and items else None
+    nxt = encode_cursor(items[-1].created_at, items[-1].id) if len(rows) > page and items else None
     return items, nxt
 
 

@@ -1,0 +1,417 @@
+"""Connection registry (contract §5.1): ``dps_connection`` rows under the tenant GUC.
+
+A connection names *where* data lives (``params``) and *how to authenticate*: a ``secret_ref``
+(files under ``DPS_SECRET_DIR/<ref>/``, the production path) or inline credentials (dev only,
+``DPS_INLINE_SECRETS_ALLOWED``), sealed with the job KEK into ``secret_enc`` (AAD
+``dps_connection.secret:<id>``) and purged after ``DPS_INLINE_SECRET_TTL_HOURS``. ``pvc`` file
+targets take neither. Credentials are only ever opened by :func:`load_credentials`; the public
+:class:`Connection` carries ``has_secret`` and never ``secret_enc``.
+
+Every function takes an optional ``conn`` so workers can call it on ``db.acquire_queue(tenant)``;
+without one it uses ``db.acquire(tenant_id)``. Errors are :class:`ConnectionStoreError` (code,
+HTTP status, value-free detail) or :class:`~dps.secrets.SecretUnavailable`.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import asyncpg
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+
+from dps import db
+from dps.config import Settings
+from dps.ids import PREFIX_CONNECTION, new_id
+from dps.jobs import ACTIVE_JOB_STATES, decode_cursor, encode_cursor
+from dps.jobs_models import ConnectionParams, ConnectionSpec, ConnRole, InlineCredentials
+from dps.layers.connectors.base import ConnectionTestResult, ConnEngine
+from dps.secrets import (
+    SealError,
+    SecretUnavailable,
+    open_json,
+    resolve_secret_ref,
+    seal_json,
+)
+
+_HIDDEN = ConfigDict(hide_input_in_errors=True)
+_MIN_LIMIT, _MAX_LIMIT = 1, 200
+_COLS = (
+    "id, tenant_id, name, engine, params, secret_ref, secret_enc IS NOT NULL AS has_secret, "
+    "secret_expires_at, roles, tags, capabilities, last_test, created_by, created_at, updated_at"
+)
+
+
+def _aad(connection_id: str) -> str:
+    return f"dps_connection.secret:{connection_id}"
+
+
+class Credentials(BaseModel):
+    """Opened credentials of a connection (memory only; never stored, logged or returned)."""
+
+    model_config = _HIDDEN
+    username: str = ""
+    password: SecretStr = SecretStr("")
+    extra: dict[str, SecretStr] = Field(default_factory=dict)
+
+
+class _SealedCredentials(BaseModel):
+    """What ``secret_enc`` seals; exists only inside the sealed blob and in memory."""
+
+    model_config = _HIDDEN
+    username: str = Field(repr=False)
+    password: str = Field(repr=False)
+    extra: dict[str, str] = Field(default_factory=dict, repr=False)
+
+
+class Connection(BaseModel):
+    """A ``dps_connection`` row as the API and workers see it (no sealed secret)."""
+
+    model_config = _HIDDEN
+    id: str
+    tenant_id: str
+    name: str
+    engine: ConnEngine
+    params: ConnectionParams
+    secret_ref: str | None
+    has_secret: bool
+    secret_expires_at: datetime | None
+    roles: list[ConnRole]
+    tags: list[str]
+    capabilities: dict[str, bool]
+    last_test: ConnectionTestResult | None
+    created_by: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def production(self) -> bool:
+        """True when tagged ``production`` (in-place/append writes and re-tagging need admin)."""
+        return "production" in self.tags
+
+
+class ConnectionPatch(BaseModel):
+    """A partial update; omitted fields keep their stored value (the engine never changes)."""
+
+    model_config = _HIDDEN
+    name: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{1,62}$")
+    params: ConnectionParams | None = None
+    secret_ref: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9/_.-]{0,200}$")
+    credentials: InlineCredentials | None = None
+    roles: set[ConnRole] | None = None
+    tags: list[str] | None = None
+
+
+class ConnectionStoreError(Exception):
+    """A refused registry operation: ``code`` and ``status`` map to ``{"detail", "code"}``."""
+
+    def __init__(self, code: str, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.code, self.status, self.detail = code, status, detail
+
+
+@asynccontextmanager
+async def _using(
+    tenant_id: str, conn: asyncpg.Connection | None
+) -> AsyncIterator[asyncpg.Connection]:
+    if conn is not None:
+        yield conn
+    else:
+        async with db.acquire(tenant_id) as fresh:
+            yield fresh
+
+
+def _row(row: Mapping[str, Any]) -> Connection:
+    data = dict(row)
+    data["capabilities"] = data.get("capabilities") or {}
+    return Connection.model_validate(data)
+
+
+def _require_inline_allowed(settings: Settings, kek: bytes | None) -> bytes:
+    if not settings.inline_secrets_allowed:
+        raise ConnectionStoreError(
+            "inline_secrets_disabled", 422, "inline credentials are disabled; use secret_ref"
+        )
+    if kek is None:
+        raise ConnectionStoreError("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
+    return kek
+
+
+def _seal(
+    kek: bytes, credentials: InlineCredentials, connection_id: str, settings: Settings
+) -> tuple[bytes, datetime]:
+    plain = _SealedCredentials(
+        username=credentials.username,
+        password=credentials.password.get_secret_value(),
+        extra={k: v.get_secret_value() for k, v in credentials.extra.items()},
+    )
+    sealed = seal_json(kek, plain, aad=_aad(connection_id))
+    return sealed, datetime.now(UTC) + timedelta(hours=settings.inline_secret_ttl_hours)
+
+
+async def touch_tenant(tenant_id: str, *, conn: asyncpg.Connection | None = None) -> None:
+    """Insert the tenant's ``dps_tenant`` row when missing (retention enumerates tenants)."""
+    async with _using(tenant_id, conn) as c:
+        await c.execute(
+            f"INSERT INTO {db.schema_ident()}.dps_tenant (tenant_id) VALUES ($1) "
+            "ON CONFLICT (tenant_id) DO NOTHING",
+            tenant_id,
+        )
+
+
+async def create_connection(
+    tenant_id: str,
+    spec: ConnectionSpec,
+    *,
+    settings: Settings,
+    kek: bytes | None,
+    created_by: str | None,
+) -> Connection:
+    """Insert a connection (inline credentials sealed). Raises :class:`ConnectionStoreError`:
+    ``inline_secrets_disabled`` 422, ``kek_unconfigured`` 503, ``connection_name_taken`` 409."""
+    sealing_kek = _require_inline_allowed(settings, kek) if spec.credentials is not None else None
+    conn_id = new_id(PREFIX_CONNECTION)
+    sealed: bytes | None = None
+    expires: datetime | None = None
+    if spec.credentials is not None and sealing_kek is not None:
+        sealed, expires = _seal(sealing_kek, spec.credentials, conn_id, settings)
+    async with db.acquire(tenant_id) as conn, conn.transaction():
+        await touch_tenant(tenant_id, conn=conn)
+        try:
+            await conn.execute(
+                f"INSERT INTO {db.schema_ident()}.dps_connection (id, tenant_id, name, engine, "
+                "params, secret_ref, secret_enc, secret_expires_at, roles, tags, created_by) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)",
+                conn_id,
+                tenant_id,
+                spec.name,
+                spec.engine,
+                spec.params.model_dump(mode="json"),
+                spec.secret_ref,
+                sealed,
+                expires,
+                sorted(spec.roles),
+                spec.tags,
+                created_by,
+            )
+        except asyncpg.UniqueViolationError:
+            raise ConnectionStoreError(
+                "connection_name_taken", 409, "a connection with this name exists"
+            ) from None
+        row = await conn.fetchrow(
+            f"SELECT {_COLS} FROM {db.schema_ident()}.dps_connection WHERE id = $1", conn_id
+        )
+    if row is None:  # RLS hides a row we just inserted only if the GUC binding is broken
+        raise RuntimeError("created connection is not visible to its tenant")
+    return _row(row)
+
+
+async def get_connection(
+    tenant_id: str, connection_id: str, *, conn: asyncpg.Connection | None = None
+) -> Connection | None:
+    """The tenant's connection (RLS-scoped), or None."""
+    async with _using(tenant_id, conn) as c:
+        row = await c.fetchrow(
+            f"SELECT {_COLS} FROM {db.schema_ident()}.dps_connection "
+            "WHERE tenant_id = $1 AND id = $2",
+            tenant_id,
+            connection_id,
+        )
+    return _row(row) if row else None
+
+
+async def list_connections(
+    tenant_id: str, *, limit: int = 50, cursor: str | None = None
+) -> tuple[list[Connection], str | None]:
+    """Newest first; keyset pagination on ``(created_at, id)``. ``ValueError`` on a bad cursor."""
+    params: list[Any] = [tenant_id]
+    where = "tenant_id = $1"
+    if cursor:
+        ts, cid = decode_cursor(cursor)
+        params += [ts, cid]
+        where += " AND (created_at, id) < ($2::timestamptz, $3)"
+    page = max(_MIN_LIMIT, min(_MAX_LIMIT, limit))
+    async with db.acquire(tenant_id) as conn:
+        rows = await conn.fetch(
+            f"SELECT {_COLS} FROM {db.schema_ident()}.dps_connection WHERE {where} "
+            f"ORDER BY created_at DESC, id DESC LIMIT {page + 1}",
+            *params,
+        )
+    items = [_row(r) for r in rows[:page]]
+    nxt = encode_cursor(items[-1].created_at, items[-1].id) if len(rows) > page and items else None
+    return items, nxt
+
+
+async def update_connection(
+    tenant_id: str,
+    connection_id: str,
+    patch: ConnectionPatch,
+    *,
+    settings: Settings,
+    kek: bytes | None,
+) -> Connection | None:
+    """Apply ``patch`` (validated against the contract's connection rules); None if absent.
+
+    Secrets: ``credentials`` re-seals (and drops a ``secret_ref``), ``secret_ref`` drops the sealed
+    blob, neither keeps what is stored. Changing ``params`` or the secret clears ``last_test``
+    and ``capabilities`` (the old test no longer describes the connection). Raises
+    :class:`ConnectionStoreError` (``connection_invalid`` 422, ``inline_secrets_disabled`` 422,
+    ``kek_unconfigured`` 503, ``connection_name_taken`` 409).
+    """
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn, conn.transaction():
+        row = await conn.fetchrow(
+            f"SELECT {_COLS}, secret_enc FROM {s}.dps_connection "
+            "WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+            tenant_id,
+            connection_id,
+        )
+        if row is None:
+            return None
+        current = _row({k: v for k, v in dict(row).items() if k != "secret_enc"})
+        secret_ref = current.secret_ref
+        sealed: bytes | None = row["secret_enc"]
+        expires = current.secret_expires_at
+        secret_changed = False
+        if patch.credentials is not None:
+            sealing_kek = _require_inline_allowed(settings, kek)
+            sealed, expires = _seal(sealing_kek, patch.credentials, connection_id, settings)
+            secret_ref, secret_changed = None, True
+        elif patch.secret_ref is not None:
+            sealed, expires, secret_ref, secret_changed = None, None, patch.secret_ref, True
+        params = patch.params if patch.params is not None else current.params
+        merged: dict[str, Any] = {
+            "name": patch.name or current.name,
+            "engine": current.engine,
+            "params": params.model_dump(mode="json"),
+            "secret_ref": secret_ref,
+            "roles": set(patch.roles) if patch.roles is not None else set(current.roles),
+            "tags": patch.tags if patch.tags is not None else current.tags,
+        }
+        if patch.credentials is not None or (current.engine != "pvc" and secret_ref is None):
+            # an inline secret (new, kept or already purged) stands in for validation only
+            merged["credentials"] = {"username": "-", "password": "-"}
+        try:
+            spec = ConnectionSpec.model_validate(merged)
+        except ValidationError as exc:
+            first = exc.errors()[0].get("msg", "invalid") if exc.errors() else "invalid"
+            raise ConnectionStoreError("connection_invalid", 422, str(first)) from None
+        stale = secret_changed or patch.params is not None
+        try:
+            await conn.execute(
+                f"UPDATE {s}.dps_connection SET name = $2, params = $3::jsonb, secret_ref = $4, "
+                "secret_enc = $5, secret_expires_at = $6, roles = $7, tags = $8, "
+                "last_test = CASE WHEN $9 THEN NULL ELSE last_test END, "
+                "capabilities = CASE WHEN $9 THEN '{}'::jsonb ELSE capabilities END, "
+                "updated_at = now() WHERE id = $1",
+                connection_id,
+                spec.name,
+                spec.params.model_dump(mode="json"),
+                secret_ref,
+                sealed,
+                expires,
+                sorted(spec.roles),
+                spec.tags,
+                stale,
+            )
+        except asyncpg.UniqueViolationError:
+            raise ConnectionStoreError(
+                "connection_name_taken", 409, "a connection with this name exists"
+            ) from None
+        updated = await conn.fetchrow(
+            f"SELECT {_COLS} FROM {s}.dps_connection WHERE id = $1", connection_id
+        )
+    return _row(updated) if updated else None
+
+
+async def delete_connection(tenant_id: str, connection_id: str) -> bool:
+    """Delete the connection; ``connection_in_use`` (409) while a non-terminal job uses it."""
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn, conn.transaction():
+        busy = await conn.fetchval(
+            f"SELECT 1 FROM {s}.dps_job WHERE tenant_id = $1 "
+            "AND (connection_id = $2 OR target_connection_id = $2) "
+            "AND state = ANY($3::text[]) LIMIT 1",
+            tenant_id,
+            connection_id,
+            [x.value for x in ACTIVE_JOB_STATES],
+        )
+        if busy:
+            raise ConnectionStoreError(
+                "connection_in_use", 409, "a queued or running job uses this connection"
+            )
+        tag = await conn.execute(
+            f"DELETE FROM {s}.dps_connection WHERE tenant_id = $1 AND id = $2",
+            tenant_id,
+            connection_id,
+        )
+    return db.rowcount(tag) > 0
+
+
+async def record_test(
+    tenant_id: str,
+    connection_id: str,
+    result: ConnectionTestResult,
+    *,
+    conn: asyncpg.Connection | None = None,
+) -> None:
+    """Store the last connection test (value-free checks) and its capabilities."""
+    async with _using(tenant_id, conn) as c:
+        await c.execute(
+            f"UPDATE {db.schema_ident()}.dps_connection SET last_test = $3::jsonb, "
+            "capabilities = $4::jsonb, updated_at = now() WHERE tenant_id = $1 AND id = $2",
+            tenant_id,
+            connection_id,
+            result.model_dump(mode="json"),
+            result.capabilities,
+        )
+
+
+async def load_credentials(
+    c: Connection,
+    *,
+    settings: Settings,
+    kek: bytes | None,
+    conn: asyncpg.Connection | None = None,
+) -> Credentials:
+    """Open the connection's credentials (``pvc``: none).
+
+    Raises:
+        SecretUnavailable: the ``secret_ref`` does not resolve, or the inline secret is purged,
+            expired or cannot be opened with this KEK.
+        ConnectionStoreError: ``kek_unconfigured`` (503) for an inline secret without a KEK.
+    """
+    if c.engine == "pvc":
+        return Credentials()
+    if c.secret_ref:
+        files = resolve_secret_ref(c.secret_ref, settings)
+        return Credentials(
+            username=files.pop("username", ""),
+            password=SecretStr(files.pop("password", "")),
+            extra={k: SecretStr(v) for k, v in files.items()},
+        )
+    async with _using(c.tenant_id, conn) as cx:
+        row = await cx.fetchrow(
+            f"SELECT secret_enc, secret_expires_at FROM {db.schema_ident()}.dps_connection "
+            "WHERE tenant_id = $1 AND id = $2",
+            c.tenant_id,
+            c.id,
+        )
+    if row is None or row["secret_enc"] is None:
+        raise SecretUnavailable()
+    expires = row["secret_expires_at"]
+    if expires is not None and expires <= datetime.now(UTC):
+        raise SecretUnavailable()
+    if kek is None:
+        raise ConnectionStoreError("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
+    try:
+        plain = open_json(kek, row["secret_enc"], _SealedCredentials, aad=_aad(c.id))
+    except SealError:
+        raise SecretUnavailable() from None
+    return Credentials(
+        username=plain.username,
+        password=SecretStr(plain.password),
+        extra={k: SecretStr(v) for k, v in plain.extra.items()},
+    )

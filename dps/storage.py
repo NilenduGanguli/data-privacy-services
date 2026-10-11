@@ -22,12 +22,15 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Any, Literal, Protocol
+from typing import IO, TYPE_CHECKING, Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from dps.config import Settings
 from dps.ids import PREFIX_ARTEFACT, new_id
+
+if TYPE_CHECKING:
+    from dps.connections import Connection, Credentials
 
 #: A key is a relative path of DPS-generated segments: no leading "/", no "." / ".." / empty
 #: segments, no spaces or backslashes.
@@ -158,12 +161,17 @@ class LocalObjectStore:
     ) -> StoredObject:
         """Atomically write ``data`` at ``key`` (replacing an existing object)."""
         path = self._path(key)
-        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
-        tmp, size, sha = await _spool(data, path.parent)
+        try:
+            await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+            tmp, size, sha = await _spool(data, path.parent)
+        except OSError as exc:  # unwritable root, a file in the way, disk full …
+            raise StorageError("storage_error", type(exc).__name__) from None
         try:
             await asyncio.to_thread(os.replace, tmp, path)
-        except BaseException:
+        except BaseException as exc:
             tmp.unlink(missing_ok=True)
+            if isinstance(exc, OSError):
+                raise StorageError("storage_error", type(exc).__name__) from None
             raise
         return StoredObject(
             store="local", key=key, bytes=size, sha256=sha, content_type=content_type
@@ -194,7 +202,11 @@ class LocalObjectStore:
 
     async def delete(self, key: str) -> None:
         """Remove the object (no error when it is already gone)."""
-        await asyncio.to_thread(self._path(key).unlink, True)
+        path = self._path(key)
+        try:
+            await asyncio.to_thread(path.unlink, True)
+        except OSError as exc:
+            raise StorageError("storage_error", type(exc).__name__) from None
 
     async def exists(self, key: str) -> bool:
         """True when an object is stored at ``key``."""
@@ -352,6 +364,40 @@ def artefact_store(settings: Settings) -> ObjectStore:
             force_path_style=settings.s3_force_path_style,
         )
     return LocalObjectStore(Path(settings.artefact_dir))
+
+
+def target_store(
+    conn: Connection, settings: Settings, credentials: Credentials | None = None
+) -> ObjectStore:
+    """The object store behind a ``files`` target connection (``s3`` or ``pvc``).
+
+    A ``pvc`` connection is a directory under ``DPS_EXPORT_ROOT`` (``ValueError`` if its
+    ``base_path`` resolves outside it, symlinks included). An ``s3`` connection takes its keys
+    from the credentials' ``access_key_id``/``secret_access_key`` files (else username/password;
+    empty falls back to boto3's default chain) and its endpoint and region from the connection,
+    else the ``DPS_S3_*`` settings. ``ValueError`` for any other engine.
+    """
+    if conn.engine == "pvc":
+        root = Path(settings.export_root).resolve()
+        path = (root / (conn.params.base_path or "")).resolve()
+        if path != root and root not in path.parents:
+            raise ValueError("pvc base_path must stay under DPS_EXPORT_ROOT")
+        return LocalObjectStore(path)
+    if conn.engine == "s3":
+        from dps.connections import Credentials
+
+        creds = credentials or Credentials()
+        key_id = creds.extra.get("access_key_id") or SecretStr(creds.username)
+        secret = creds.extra.get("secret_access_key") or creds.password
+        return S3ObjectStore(
+            bucket=conn.params.bucket or "",
+            endpoint_url=conn.params.endpoint_url or settings.s3_endpoint_url or None,
+            region=conn.params.region or settings.s3_region,
+            access_key_id=key_id.get_secret_value(),
+            secret_access_key=secret.get_secret_value(),
+            force_path_style=settings.s3_force_path_style,
+        )
+    raise ValueError("only s3 and pvc connections are object stores")
 
 
 class Artefact(BaseModel):

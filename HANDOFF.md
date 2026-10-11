@@ -225,6 +225,14 @@ the `_FILE` form. M2 adds `DPS_JOB_KEK` (`_FILE` only in staging/prod), `DPS_PG_
 `DPS_PG_WORKER_PASSWORD`, `DPS_PG_MIGRATION_PASSWORD` and `DPS_S3_SECRET_ACCESS_KEY`. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
 set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
 
+Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
+`DPS_SECRET_DIR/<ref>/` from which only these files are read: `username`, `password`, `dsn`
+(Oracle), `uri` (Mongo), `access_key_id` + `secret_access_key` (S3), `storage_state.json` (M4) and
+`ca.pem` (a source's CA bundle). Inline credentials (dev only) are sealed with `DPS_JOB_KEK` into
+`dps_connection.secret_enc` and stop resolving after `DPS_INLINE_SECRET_TTL_HOURS`. A `secret_ref`
+is not tenant-scoped: any tenant with the `jobs` scope can name any mounted reference, so mount only
+the references the deployment's tenants may use (open issue, see the M2 build report).
+
 ## 8. Traps
 
 - `uvicorn dps.app:create_app --factory` — there is no module-level `app`.
