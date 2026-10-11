@@ -352,3 +352,54 @@ otherwise.
   `test_a_refused_row_leaves_no_orphan_object` (db): 13 local + 2 s3 + 2 db = 17 (plan: 10).
 - `HANDOFF.md` §3: `minio`/`minio-init` rows and the start command for the `s3` tests; §4: the two
   MinIO port variables.
+
+## Task 12 — Selection validation and `redact_spec`
+
+Installed sqlglot: **30.22.0** (recorded in HANDOFF §8). All 24 plan tests passed against the
+plan's design; the changes below close gaps the plan's code left open (each has a test).
+
+- **Oracle typed literals could not compile, fixed.** sqlglot parses Oracle `DATE '…'` as
+  `DateStrToDate` and `TIMESTAMP '…'` as `StrToTime`, which render as `TO_DATE(:l1,
+  'YYYY-MM-DD')` / `TO_TIMESTAMP(…, '…')`; re-parsing that template found the format string and
+  `compile_where` refused it as `selection_not_parameterized`. Literals that are SQL structure,
+  not values, are now kept and never counted: `ORDER BY`/`GROUP BY` positions (plan), type
+  parameters (`NUMERIC(10,2)`, which the plan would have turned into binds and broken), the
+  `format` argument of date/time functions, and the unit of an Oracle interval function.
+- **Oracle intervals** become `NUMTODSINTERVAL(:lN, 'DAY')` / `NUMTOYMINTERVAL(:lN, 'MONTH')` with
+  the number bound (plan: `CAST(CAST(:lN AS TEXT) AS INTERVAL)`, which renders as
+  `CAST(… AS CLOB)` and is not valid Oracle). Oracle's inner text cast is `VARCHAR2(4000)` (plan:
+  `TEXT` → `CLOB`). PostgreSQL output is exactly the plan's.
+- **String forms that are not `exp.Literal` leaked into templates, fixed.** `$$…$$` (RawString)
+  and `N'…'` (National) are bound like plain strings; `E'…'`, `B'…'`, `X'…'` and `U&'…'` (whose
+  text is not the value) are refused with the new code `selection_literal_unsupported` (mapped
+  to the `literals_bound` check). Before, `x = $$Ananya$$` rendered as `x = 'Ananya'` in the
+  "value-free" template.
+- A `where` must be one boolean expression: trailing `ORDER BY`, `LIMIT`, `GROUP BY` etc. are
+  refused (`selection_parse_error`) instead of being silently dropped by `_where_expr`.
+- Identifiers starting with `__dps_` are reserved (`selection_identifier_invalid`): a column
+  named `__dps_bind_x` would otherwise be rendered as a bind position.
+- The `dbms_*`/`utl_*`/`sys` package check applies to qualifiers (schema, package, table
+  qualifier), not to a column's own name (`utl_rate` is a valid PostgreSQL column); a package call
+  `dbms_lock.sleep(…)` and `sys.x` are still refused.
+- Deny-list additions (stricter): `pg_try_advisory*` (the plan's `pg_advisory*` prefix misses
+  them), `query_to_xml*` and `cursor_to_xml*` (they execute SQL from a string, which with bound
+  literals would run arbitrary statements past this validation, e.g. `set_config`), `pg_notify`,
+  `pg_logical_emit_message`, `pg_switch_wal`, `pg_create_restore_point`, `pg_file_*`,
+  `pg_stat_reset*`. Exported as `DENIED_FUNCTION_PREFIXES`.
+- `referenced_columns` ignores columns inside a subquery (they belong to the subquery's tables),
+  so `customer_id IN (SELECT a.customer_id FROM bank.accounts a …)` is not refused as an unknown
+  column. Projected `columns` are validated with `quote_ident` and folded for Oracle.
+- `_walk` casts sqlglot 30's `Expr` to `Expression` (mypy). `RecursionError` from a deeply
+  nested expression is a `selection_parse_error`. `selection_checks` maps
+  `selection_engine_mismatch` to `select_only` and `selection_operator_denied` to
+  `no_into_lock_procs`.
+- `redact_spec`: as planned, with type guards on the popped consistency dicts.
+- Tests: the plan's 22 + 2 and 17 more (`test_oracle_intervals_and_timestamps_…`,
+  `test_type_parameters_and_order_positions_…`, `test_comments_and_dollar_quoted_strings_…`,
+  `test_escaped_string_forms_are_refused_…` ×3, `test_more_rejections` ×8,
+  `test_column_names_are_not_package_names_…`, `test_projected_columns_…`,
+  `test_mongo_selections_refuse_sql_…`): 41.
+- Open for Task 15 (not changed here, plan decision): bare string literals are bound as `str`
+  and decimals as their text, so where PostgreSQL infers a non-text parameter type (`date_col >
+  $1`, `numeric_col > $1`) asyncpg will refuse the `str`; the connector must coerce bound values
+  by the prepared statement's parameter types (typed literals are already cast from text).

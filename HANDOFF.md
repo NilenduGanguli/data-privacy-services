@@ -254,6 +254,14 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 - The root filesystem is read-only under compose: anything that writes must use `/tmp` (tmpfs) or a
   volume.
 - `/docs` loads Swagger UI from a public CDN; on an air-gapped network use `/api/v1/openapi.json`.
+- Selections are validated with **sqlglot 30.22.0** (`connectors` extra, `sqlglot>=26`). Node class
+  names drift between sqlglot releases (`AlterTable` → `Alter`, `walk()` yielding tuples, `Expr`
+  as the base type): `dps/layers/connectors/selection.py` looks classes up by name and its tests
+  pin the rejection codes, so after an upgrade run `pytest tests/connectors/test_selection.py`
+  and add renamed classes to `_node_types(...)` — never loosen a test. Oracle renders `DATE '…'` as
+  `TO_DATE(:l1, 'YYYY-MM-DD')` and intervals as `NUMTODSINTERVAL(:l1, 'DAY')`; those format/unit
+  strings are the only literals left in a compiled selection (plus `ORDER BY` positions and type
+  parameters).
 - Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py` (see
   "Lane-safe stacks", §3).
 - Synthesis under a `strict` policy is still refused, rarely, when a reshaped identifier (a keyed

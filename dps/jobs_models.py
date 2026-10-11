@@ -371,5 +371,37 @@ class ClassificationSnapshot(BaseModel):
 
 
 def redact_spec(spec: RunSpec | DiscoverSpec, *, engine: Engine) -> dict[str, Any]:
-    """Value-free copy of ``spec`` for ``dps_job.spec`` — implemented in Task 12."""
-    raise NotImplementedError
+    """Value-free copy for ``dps_job.spec`` (contract §3.3).
+
+    Selection text becomes a template (literal values → ``:lN``), every bound parameter becomes
+    ``"<bound>"``, a Mongo filter keeps its structure with ``"?"`` for values, and consistency keeps
+    identifiers only (``kid``, a seed fingerprint, flags) — never key material, a seed or a wrap
+    key. The full selection travels sealed in ``spec_enc`` (:class:`SealedSelection`).
+    """
+    from dps.layers.connectors.selection import (
+        mongo_filter_template,
+        query_template,
+        where_template,
+    )
+    from dps.secrets import seed_fingerprint
+
+    data = spec.model_dump(mode="json")
+    sel = (data["source"] if isinstance(spec, RunSpec) else data)["selection"]
+    if sel.get("where"):
+        sel["where"] = where_template(sel["where"], engine)
+    if sel.get("query"):
+        sel["query"] = query_template(sel["query"], engine)
+    if sel.get("mongo_filter") is not None:
+        sel["mongo_filter"] = mongo_filter_template(sel["mongo_filter"])
+    sel["params"] = {name: "<bound>" for name in sel.get("params") or {}}
+    if isinstance(spec, RunSpec):
+        cons = data["consistency"]
+        km = cons.pop("key_material", None)
+        seed = cons.pop("synthesis_seed", None)
+        wrap = cons.pop("wrap_key", None)
+        cons["kid"] = km.get("kid") if isinstance(km, dict) else None
+        cons["caller_key"] = km is not None
+        seed_b64 = seed.get("seed") if isinstance(seed, dict) else None
+        cons["seed_fingerprint"] = seed_fingerprint(seed_b64) if seed_b64 else None
+        cons["wrapped"] = wrap is not None
+    return data
