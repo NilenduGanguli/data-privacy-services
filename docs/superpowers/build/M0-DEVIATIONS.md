@@ -473,3 +473,35 @@ are preserved unless a section says otherwise.
     yields AADHAAR plus PHONE, where before it yielded PHONE only.
   - `test_aadhaar_still_matches_on_its_own` (the comma case) is kept.
 - Count: suite 157 → 184 passed, 1 skipped (patterns +23, ensemble +4).
+
+## Task 12 — Crypto core
+
+- `KeyMaterial` sets `hide_input_in_errors=True` and `dek` is `Field(repr=False)`. Why: the
+  model validates caller-presented key material, and Task 22 turns a `ValueError` into
+  `EngineError(f"invalid key material: {exc}")`, which goes back to the caller and can reach logs.
+  Without the flag, pydantic echoes `input_value=` with the whole dict, DEK included, for any
+  field that fails (a bad `created_at`, a non-string `kid`). `repr(km)` / `str(km)` no longer show
+  the DEK either. `model_dump` is unchanged, so the response still returns it.
+- `unb64u` and `unb32` are strict: any character outside the alphabet, or an impossible length,
+  raises `ValueError`. Why: `base64.urlsafe_b64decode` silently drops characters outside the
+  alphabet, so `"!!!" + dek` was accepted as the same key. Valid encodings decode exactly as before.
+- `key_material_from_caller` error for a wrong `alg` no longer echoes the caller's value, and it
+  refuses an empty `kid` (the kid is the HKDF salt).
+- `subkey(km, info, length=SUBKEY_BYTES)` gained an optional `length`. A length other than 32 is
+  bound into the HKDF info (`…|L64`), because HKDF output of length 32 is a byte-for-byte prefix
+  of the 64-byte output for the same info. New constant `SIV_KEY_BYTES = 64`; Task 15 derives
+  `det_token` keys at that length, so tokens are AES-256-SIV. The plan's 32-byte key meant
+  AES-128 inside SIV, below the 256-bit DEK the spec promises. `det_encrypt` / `det_decrypt`
+  accept any AES-SIV key size, so the plan's tests are unchanged.
+- `wrap_key_material` refuses RSA keys below 2048 bits (`MIN_RSA_BITS`) and turns an unreadable
+  PEM (`ValueError`, `TypeError`, `UnsupportedAlgorithm`) into one `ValueError` with a fixed
+  message. Why: a 1024-bit wrap would protect the DEK far below its own strength, and
+  `UnsupportedAlgorithm` is not a `ValueError`, so Task 22's `except ValueError` would have let
+  it through as a 500.
+- Docstrings added to the public helpers.
+- Tests added: `test_key_material_errors_never_echo_the_key` (six malformed payloads),
+  `test_wrapped_only_material_is_refused_for_reveal`, `test_wrap_refuses_weak_or_unusable_public_keys`,
+  `test_longer_subkeys_are_domain_separated`, `test_key_material_repr_never_shows_the_dek`.
+  Against the plan's `crypto.py`, four of the five fail (the wrapped-only refusal was already
+  there).
+- Count: the plan's 7 + 5 added = 12 in the file; suite 196 passed, 1 skipped.
