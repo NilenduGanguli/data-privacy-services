@@ -310,3 +310,11 @@ helpers named below are new or changed.
   `test_pages_too_large_to_render_are_refused` (14,400 pt; 3,600 accepted; page 2 of 2 named; a
   rotated page) and `test_the_page_bound_follows_the_highest_render_resolution`. The fuzz re-run
   (3 × 3,000) still gives 0 uncoded failures with the new size walk.
+- **N1, `test_csv_delimiter_detection_is_linear_on_crafted_input` now tests its claim.** Its 16 KB
+  input (`", ' "` × 4096) takes 0.07 s with the plan's `csv.Sniffer().sniff(text[:65536],
+  delimiters=",;\t|")`, so the test passed against the code it was written to reject. The input is
+  now `",'"` × 32,768 (64 KB). The plan's call takes 6.7 s on it, and `_sniff_delimiter` takes about
+  6 ms, so the 1 s bound fails against the plan and passes now. A correction to the Task 6 entry
+  above: the review measured `", ' "` at 1.0 s for 64 KB and 0.07 s for 16 KB, and could not
+  reproduce "more than five minutes". The worst measured cases are about 6.5–7 s at 64 KB
+  (quadratic). The reason for replacing the Sniffer still holds.

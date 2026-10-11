@@ -176,9 +176,9 @@ def test_csv_delimiters_are_detected(delimiter: str) -> None:
 
 
 def test_csv_delimiter_detection_is_linear_on_crafted_input() -> None:
-    # csv.Sniffer's quote regexes backtrack quadratically on this sample (and cubically on
-    # others): tens of seconds here, minutes at 64 KB. Detection must not depend on them.
-    crafted = (", ' " * 4096).encode()
+    # csv.Sniffer's quote regexes backtrack quadratically on this 64 KB sample: 6.5 s on the
+    # build Mac (0.4 s at 16 KB), against about 6 ms for the linear detection used instead.
+    crafted = (",'" * 32_768).encode()
     started = time.perf_counter()
     with contextlib.suppress(DocumentError):
         extract_document(crafted, "csv", SET, "auto")
