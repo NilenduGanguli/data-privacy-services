@@ -274,3 +274,20 @@ helpers named below are new or changed.
   `test_throttled_submits_do_not_sleep_after_the_last_attempt`.
 - Live check against the lane's mock: a blank 800×600 PNG gives 0 words and `unit=pixel`, and three
   200-dpi KYC renders give 16 words each. The integration test `test_ocr_mock` passes.
+- **B2, `dps/layers/documents/extract.py` `normalise_pdf`: every pypdf failure is now
+  `corrupt_document` (422).** The plan's `_PDF_ERRORS` tuple let 116 of 3,000 fuzzed PDFs (3.9 %)
+  escape as uncoded 500s. They raised `AttributeError`, `NotImplementedError` ("Unsupported
+  filter") or `IndexError` at the clone, at `page.rotation`, at `transfer_rotation_to_content` and
+  at `add_transformation`. Both pypdf stages now catch `Exception` (after `DocumentError`), as the
+  pdfplumber stage already did, and name only the exception type:
+  `the PDF could not be parsed (AttributeError)`. The tuple is gone, and so is the `PyPdfError`
+  import. Re-running the review's fuzz probe on seeds 7, 1234 and 99 (3,000 PDFs each) gives
+  0 uncoded failures. Test: `test_malformed_pdfs_are_corrupt_documents_not_uncoded_errors` (3
+  deterministic inputs: an unsupported `/Filter` on a rotated page and on a cropped page, and a
+  `/Contents` that is a number). It also asserts that no cause is chained.
+- **N4 (same commit): `DocumentError` is raised `from None`** wherever `extract.py` and `render.py`
+  used `from exc`: the pypdf, pdfplumber, UTF-8, zip, python-docx, Pillow and PDFium paths. pypdf's
+  `PdfReadError`, Pillow's `SyntaxError` and `UnicodeDecodeError` quote file bytes in their
+  messages, and a chained cause would carry those bytes into any traceback that a future log
+  processor kept. Messages are unchanged apart from the type names added above. `render.py` thus
+  differs from the plan in that one `raise`.

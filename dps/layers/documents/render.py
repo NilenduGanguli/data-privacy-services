@@ -27,8 +27,8 @@ class PdfRenderer:
         with PDFIUM_LOCK:
             try:
                 self._doc = pdfium.PdfDocument(data)
-            except pdfium.PdfiumError as exc:
-                raise DocumentError("corrupt_document", "the PDF could not be rendered") from exc
+            except pdfium.PdfiumError:
+                raise DocumentError("corrupt_document", "the PDF could not be rendered") from None
         self._closed = False
 
     def __enter__(self) -> PdfRenderer:

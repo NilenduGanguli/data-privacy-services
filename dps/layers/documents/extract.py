@@ -18,7 +18,6 @@ from typing import Any
 import pdfplumber
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pypdf import PdfReader, PdfWriter, Transformation
-from pypdf.errors import PyPdfError
 from pypdf.generic import RectangleObject
 
 from dps.config import Settings
@@ -34,13 +33,16 @@ from dps.layers.documents.models import (
 )
 from dps.layers.documents.render import PdfRenderer
 
-_PDF_ERRORS = (PyPdfError, ValueError, KeyError, TypeError, OSError, AssertionError)
-
 
 def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
     """Rewrite a PDF so every page's crop box starts at the origin and its rotation lives in the
     content. Afterwards pdfplumber coordinates (points, top-left) and pypdfium2 rasters agree
-    exactly, which the redaction boxes rely on. Returns the bytes and the annotation count."""
+    exactly, which the redaction boxes rely on. Returns the bytes and the annotation count.
+
+    Any failure inside pypdf is ``corrupt_document`` naming only the exception type: on malformed
+    input pypdf raises far more than its own ``PyPdfError`` (``AttributeError``,
+    ``NotImplementedError`` for an unknown filter, ``IndexError``, ``RecursionError``, …), and its
+    messages can quote the file's bytes, so the cause is never chained."""
     try:
         reader = PdfReader(io.BytesIO(content))
         if reader.is_encrypted and not reader.decrypt(""):
@@ -49,8 +51,10 @@ def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
         count = len(writer.pages)
     except DocumentError:
         raise
-    except _PDF_ERRORS as exc:
-        raise DocumentError("corrupt_document", "the PDF could not be parsed") from exc
+    except Exception as exc:  # noqa: BLE001 - pypdf raises many types on garbage; name only
+        raise DocumentError(
+            "corrupt_document", f"the PDF could not be parsed ({type(exc).__name__})"
+        ) from None
     if count == 0:
         raise DocumentError("corrupt_document", "the PDF has no pages")
     if count > max_pages:
@@ -85,8 +89,10 @@ def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
         writer.write(out)
     except DocumentError:
         raise
-    except _PDF_ERRORS as exc:
-        raise DocumentError("corrupt_document", "the PDF could not be normalised") from exc
+    except Exception as exc:  # noqa: BLE001 - as above
+        raise DocumentError(
+            "corrupt_document", f"the PDF could not be normalised ({type(exc).__name__})"
+        ) from None
     return out.getvalue(), annotations
 
 
@@ -155,7 +161,7 @@ def extract_pdf(content: bytes, settings: Settings, ocr_mode: OcrMode) -> Extrac
     except Exception as exc:  # noqa: BLE001 - pdfminer raises many types; report the name only
         raise DocumentError(
             "corrupt_document", f"the PDF text layer could not be read ({type(exc).__name__})"
-        ) from exc
+        ) from None
     doc = ExtractedDocument(format="pdf", pages=pages, pdf=normalised)
     if annotations:
         doc.warnings.append("annotations_not_scanned_or_drawn")
@@ -227,8 +233,8 @@ def _looks_like_text(content: bytes) -> bool:
 def _decode_text(content: bytes) -> str:
     try:
         text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise DocumentError("unsupported_encoding", "text documents must be UTF-8") from exc
+    except UnicodeDecodeError:
+        raise DocumentError("unsupported_encoding", "text documents must be UTF-8") from None
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -241,8 +247,8 @@ def _check_zip(content: bytes, limit_bytes: int) -> None:
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             infos = archive.infolist()
-    except (zipfile.BadZipFile, OSError) as exc:
-        raise DocumentError("corrupt_document", "the .docx container could not be read") from exc
+    except (zipfile.BadZipFile, OSError):
+        raise DocumentError("corrupt_document", "the .docx container could not be read") from None
     if (
         len(infos) > ZIP_MAX_ENTRIES
         or sum(i.file_size for i in infos) > ZIP_RATIO_LIMIT * limit_bytes
@@ -299,7 +305,7 @@ def extract_docx(content: bytes, settings: Settings) -> ExtractedDocument:
     except Exception as exc:  # noqa: BLE001 - python-docx raises several types; name only
         raise DocumentError(
             "corrupt_document", f"the .docx could not be opened ({type(exc).__name__})"
-        ) from exc
+        ) from None
     parser = etree.XMLParser(
         resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False
     )
@@ -440,8 +446,8 @@ def extract_image(content: bytes) -> ExtractedDocument:
         SyntaxError,  # Pillow's PNG chunk reader raises it for broken chunks
         EOFError,
         Image.DecompressionBombError,
-    ) as exc:
-        raise DocumentError("corrupt_document", "the image could not be decoded") from exc
+    ):
+        raise DocumentError("corrupt_document", "the image could not be decoded") from None
     longest = max(image.size)
     if longest > MAX_IMAGE_SIDE:
         factor = MAX_IMAGE_SIDE / longest
