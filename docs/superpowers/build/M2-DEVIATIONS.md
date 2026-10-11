@@ -121,3 +121,26 @@ otherwise.
   logged in as `dps_worker_login`): an open `USING`, an open `WITH CHECK`, `NO FORCE`, an extra
   policy and a direct partition grant are each named. Role memberships are never altered (they are
   cluster-wide). 14 db tests (plan: 13); with the unit file 16 (plan: 15).
+
+## Task 6 — Connector base types and codecs
+
+- `dps/layers/connectors/base.py`: every model sets `hide_input_in_errors=True` (M0's `_HIDDEN`
+  pattern; `ObjectRef` keeps `frozen=True` as well). Why: `KeyRange`, `LedgerMark` and
+  `PrepareReport` carry encoded keys, which are customer data; pydantic's default error text quotes
+  the offending input (`input_value=…`), so a malformed key range would have echoed a key into an
+  exception message. New test `test_key_bearing_models_never_echo_keys_in_errors` (verified to fail
+  without the setting).
+- `encode_key` refuses a `None` key value with `UnsupportedKey("key columns cannot be NULL")`. Why:
+  the plan's code would have encoded it as the text `"None"`, which `decode_key` cannot read back
+  (an `int("None")` error at resume time). Key columns are NOT NULL by construction (PK or unique
+  NOT NULL index), so this only turns a late, confusing failure into an early, value-free one.
+  Byte keys accept `bytearray`/`memoryview` as well as `bytes` (same hex text).
+- `from_engine_text` for `decimal`: the quantize step runs in a `decimal.Context` whose precision
+  covers the declared column precision (`max(28, precision + 2)`), and a failing quantize raises
+  `IncompatibleValue(kind, "length_overflow")`. Why: the plan quantized in the default context
+  (28 digits), so a value that fits a `numeric(60,2)` column raised a bare
+  `decimal.InvalidOperation`. Covered by `test_null_key_and_huge_decimal_fail_without_values`.
+- `ConnectorError` also stores `.detail` (contract §4.1 names `.code .detail .retryable`; the
+  plan's code stored only `.code` and `.retryable`). `decode_key`'s unknown-tag error no longer
+  names the tag (it comes from a stored row). `Key = tuple[Any, ...]` is exported (contract §4.1).
+- Tests: the plan's 15 plus the two above (17).
