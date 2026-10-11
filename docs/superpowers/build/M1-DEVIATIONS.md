@@ -130,3 +130,14 @@ are preserved unless a section says otherwise.
   point (630 deselected).
 - Count: `tests/documents` 12 passed, `tests/test_observability.py` +2; suite 614 → 628 passed,
   2 skipped.
+
+## Task 5 — PDF normalisation, text layer and serialised rasterisation
+
+- No code deviation: `dps/layers/documents/render.py`, the PDF part of
+  `dps/layers/documents/extract.py`, `tests/documents/fixtures.py` and `tests/documents/test_pdf.py`
+  are the plan's code (ruff format leaves them unchanged).
+- Step 2's expected failure: the run fails with `ModuleNotFoundError: dps.layers.documents.extract`,
+  not `…render` as the plan says, because `test_pdf.py` imports `extract` before `render`. Same cause
+  (the modules do not exist yet).
+- Count: `tests/documents/test_pdf.py` 12 passed (also with `-W error::DeprecationWarning`);
+  suite 628 → 640 passed, 2 skipped; `-m "docs or ocr"` selects 12.
