@@ -403,3 +403,50 @@ strengthening of the inspection; names and signatures are the plan's.
   `test_only_pdf_and_image_documents_are_redacted` (`redaction_unsupported_format` for a DOCX).
 - Count: `tests/documents/test_redact.py` 11 passed (the pdftoppm cross-check runs: poppler is
   installed here); suite 741 → 752 passed, 3 skipped.
+
+## Task 9 — The DocumentPipeline
+
+The plan's `dps/layers/documents/__init__.py` and `tests/documents/test_pipeline.py` are used (all
+16 plan tests pass, including both reveal round trips, against the real M0 engine). Changes, each
+with a test that fails against the plan's module (checked by swapping the plan's module in: 6
+failed, 17 passed):
+
+- **Review N8 (owned by this task): the OCR page size is cross-checked against the image sent.**
+  New private `_check_ocr_size(result, size, dpi)`: a `pixel` page must be the PNG's size within
+  1 px; an `inch` page × the image's dpi within 1 % (≥ 1 px). Otherwise `OcrError("ocr_protocol",
+  "the OCR page size differs from the image sent")`, which the pipeline reports as it reports
+  every OCR failure: 503 `ocr_unavailable` naming the code (`… (ocr_protocol)`). Why: a gateway
+  that rescales images returns words in another pixel space and every box would land in the wrong
+  place while the report passed. Both the OCR stage and the OCR re-read check it.
+  `_page_png` returns the image size as a third element (private helper; `_png_size` reads a PNG
+  header for image uploads). Verified against the lane's mock: it reports exactly the PNG size
+  (1700 × 2200 for a 200-dpi letter page). Tests:
+  `test_an_ocr_page_size_other_than_the_image_sent_is_refused`,
+  `test_the_reread_refuses_a_page_size_other_than_the_image_sent`.
+- **Review §5 escalation (small-image PII on a text page) — provisional decision, flagged for
+  the owner.** The plan OCRs a text page only when images cover ≥ `ocr_image_coverage` (0.25), so
+  an ID photo or stamp on a KYC form page was rasterised verbatim into a "passed" redacted PDF.
+  Now, **only when a redacted PDF is requested** with `ocr=auto` and OCR configured, every page
+  with any image (`image_coverage > 0`) is OCR'd too (it becomes `hybrid`: text-layer words win,
+  OCR adds what lies in the image). When such a page is not OCR'd (OCR unconfigured, or
+  `ocr=never`) the response carries the new warning code `images_not_ocr_read` (the redaction is
+  still produced, as an unconfigured deployment already gets `redaction_not_ocr_verified`).
+  Detect, obfuscate and synthesize without `redacted_pdf` are unchanged (no extra OCR calls).
+  Cost: one OCR call per image-bearing page of a redaction request. The stricter alternative
+  (refuse `redacted_pdf` when an image-bearing page cannot be OCR'd) is a one-line change in
+  `_redact` if the owner prefers it. Tests: `test_a_redacted_pdf_reads_pages_with_small_images`,
+  `test_unread_images_in_a_redaction_are_a_warning` (2 cases), and the control
+  `test_small_images_are_not_ocr_read_without_a_redaction`. Fixture: `small_image_pdf()`.
+- `locate_findings` numbers CSV findings in row order: the plan sorted by the path string, which
+  puts `$[10]` before `$[2]` (new private `_document_order`: row index, path, offset). Test:
+  `test_csv_findings_are_numbered_in_row_order` (12 rows).
+- `_ocr_reread`: the OCR haystack skips words that normalise to nothing (`-`, `|`), so a blank
+  token cannot split a multi-word original and hide a hit (strictly more hits, never fewer).
+- `__all__` lists the module's public names.
+- `tests/documents/fixtures.py`: `FakeOcr.read` reports the size of the PNG it was sent (as
+  Read v3.2 does) instead of 0 × 0, which the N8 check refuses; `small_image_pdf()` added.
+  `FakeOcr` had no other user.
+- Count: `tests/documents/test_pipeline.py` 23 passed (the plan's 16 + 7); suite 752 → 776
+  passed, 2 skipped (lane OCR mock up). Live probe against the mock (not committed): scanned PDF,
+  PNG, small-image and hybrid PDFs all redact with `ocr_checked: true`, `ocr_hits: 0`; the hybrid
+  merge adds no duplicate words (16 = the text layer's 16).

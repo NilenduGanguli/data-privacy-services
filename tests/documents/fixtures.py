@@ -114,6 +114,20 @@ def hybrid_pdf(lines=KYC_LINES) -> bytes:
     return buf.getvalue()
 
 
+def small_image_pdf(lines=KYC_LINES) -> bytes:
+    """A text page with one small image (100 x 60 pt, under 2 % of the page): too little image
+    for ``ocr_image_coverage`` to make the page scan-suspect."""
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(612, 792), invariant=1)
+    c.setFont("Helvetica", 14)
+    for i, line in enumerate(lines):
+        c.drawString(72, 720 - i * 28, line)
+    c.drawImage(ImageReader(Image.new("RGB", (200, 120), "white")), 400, 100, width=100, height=60)
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
 def png_document(lines=KYC_LINES, *, dpi: int = 200) -> bytes:
     with PdfRenderer(text_pdf(lines)) as renderer:
         image = renderer.render(0, dpi)
@@ -185,7 +199,8 @@ CUSTOMERS = [
 class FakeOcr:
     """An ``OcrClient`` double: each ``read`` answers with the next prepared page of words.
 
-    Words are in pixels of the image DPS sends (``pdf_render_dpi`` for PDF pages)."""
+    Words are in pixels of the image DPS sends (``pdf_render_dpi`` for PDF pages); the page size
+    is that image's, as Read v3.2 reports it."""
 
     engine = "fake-ocr"
 
@@ -210,9 +225,11 @@ class FakeOcr:
         self.images.append(image)
         words = self.pages[min(self.calls, len(self.pages) - 1)] if self.pages else []
         self.calls += 1
+        with Image.open(io.BytesIO(image)) as sent:
+            width, height = sent.size
         return OcrPage(
-            width=0.0,
-            height=0.0,
+            width=float(width),
+            height=float(height),
             unit="pixel",
             angle=0.0,
             words=[
