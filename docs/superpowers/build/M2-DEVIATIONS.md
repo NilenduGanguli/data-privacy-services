@@ -403,3 +403,14 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   and decimals as their text, so where PostgreSQL infers a non-text parameter type (`date_col >
   $1`, `numeric_col > $1`) asyncpg will refuse the `str`; the connector must coerce bound values
   by the prepared statement's parameter types (typed literals are already cast from text).
+
+## Task 13 — Partition planning
+
+- `dps/layers/connectors/partitions.py`: as planned (the `lowers`/`uppers` lists are typed
+  `EncodedKey | None`, the contract alias). No behaviour change.
+- Tests: the plan's 4 (two extra assertions: a negative row count is 0 partitions,
+  `partition_rows=0` cannot divide by zero; `count=0` gives one range) plus
+  `test_every_key_falls_in_exactly_one_range` (5,000 keys, a 300-key DB-ordered sample, 16
+  ranges: every key in exactly one range) and `test_text_keys_follow_the_sample_order_not_python_order`
+  (boundaries come from sample positions even when Python would order the keys differently).
+  6 tests (plan: 4).
