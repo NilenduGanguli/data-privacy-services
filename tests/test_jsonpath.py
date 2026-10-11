@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 
 import pytest
 
@@ -48,6 +49,34 @@ def test_every_flattened_path_reads_back_including_odd_keys() -> None:
 
 
 def test_malformed_paths_are_refused() -> None:
-    for bad in ("card.pan", "$.", "$[x]", "$['unterminated]", "$.a..b"):
+    # "\u0663" is ARABIC-INDIC DIGIT THREE: ``\d`` would accept it and int() would read 3.
+    for bad in ("card.pan", "$.", "$[x]", "$['unterminated]", "$.a..b", "$[\u0663]"):
         with pytest.raises(ValueError):
             parse_path(bad)
+
+
+def test_keys_that_merely_look_like_identifiers_are_quoted() -> None:
+    # A trailing newline must not slip through the bare ``.ident`` form (``re.match`` with ``$``
+    # accepts "name\n"); such paths could not be parsed back.
+    for key in ("a\n", "\n", "name\n", "a]", "$", "0", "a b", "a.b", "[0]", "_ok"):
+        doc = {key: {"inner": [key]}}
+        for path, leaf in flatten(doc):
+            assert parse_path(path)[0] == key, repr(key)
+            assert get_path(doc, path) == leaf, repr(key)
+    assert flatten({"a\n": 1}) == [("$['a\n']", 1)]
+    assert flatten({"_ok": 1}) == [("$._ok", 1)]
+
+
+def test_brute_force_round_trip_over_awkward_alphabet() -> None:
+    alphabet = ["a", "_", "0", "\\", "'", ".", "\n", "]", "[", "$", " ", "\u00e9"]
+    for length in range(4):
+        for chars in itertools.product(alphabet, repeat=length):
+            key = "".join(chars)
+            doc = {key: [1, {key: 2}]}
+            pairs = flatten(doc)
+            assert [leaf for _, leaf in pairs] == [1, 2], repr(key)
+            for path, leaf in pairs:
+                assert get_path(doc, path) == leaf, repr(key)
+                copy_doc = copy.deepcopy(doc)
+                set_path(copy_doc, path, "x")
+                assert get_path(copy_doc, path) == "x", repr(key)

@@ -1,12 +1,14 @@
 """Structured logging, Prometheus metrics and the readiness registry.
 
-Logging rule (spec §10): no customer value, key or token is ever logged. A processor drops the
-field names that could carry one; code elsewhere logs counts, types, hashes and durations only.
+Logging rule (spec §10): no customer value, key or token is ever logged. Logging uses an
+allow-list: a processor keeps only the field names in ``_SAFE_FIELDS`` and drops every other key,
+whatever the call site passed. Code logs counts, types, ids, hashes and durations only.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 from collections.abc import Iterable
@@ -17,35 +19,82 @@ import structlog
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from structlog.typing import EventDict
 
-#: Keys that are dropped from every log event, whatever the call site passed.
-_VALUE_FIELDS = frozenset(
+#: The only keys a log event may carry; every other key is dropped (spec §10 allow-list).
+#: Each key holds a count, a duration, an id, an entity type / method / route name, a flag or an
+#: exception class name — never a customer value, key, token or secret. Extend it (never bypass
+#: it) when a new call site needs a field, and keep ``tests/test_observability.py`` in step.
+_SAFE_FIELDS = frozenset(
     {
-        "value",
-        "values",
-        "data",
-        "text",
-        "token",
-        "tokens",
-        "dek",
-        "key",
-        "api_key",
-        "password",
-        "secret",
-        "payload",
-        "result",
-        "original",
-        "originals",
-        "record",
-        "key_material",
+        # structlog's own keys
+        "event",
+        "level",
+        "timestamp",
+        "logger",
+        # correlation and identity (ids, never credentials)
+        "trace_id",
+        "request_id",
+        "tenant_id",
+        "key_id",
+        "route",
+        "component",
+        # outcome
+        "outcome",
+        "status",
+        "status_code",
+        "duration_ms",
+        "attempt",
+        "reason",
+        "error",
+        "error_code",
+        "version",
+        # engine vocabulary: modes, methods, entity types and counts
+        "mode",
+        "method",
+        "policy",
+        "entity_type",
+        "detector",
+        "count",
+        "counts",
+        "hits",
+        "findings_total",
+        "findings_by_type",
+        "methods_used",
+        "reversible_values",
+        "verification_passed",
+        # LLM gateway and startup
+        "provider",
+        "purpose",
+        "model",
+        "env",
+        "auth",
+        # audit events (dps.audit.AuditEvent)
+        "ts",
     }
 )
 
 
+#: Event names are snake_case identifiers (``verification_failed``, ``llm.call``). Anything else —
+#: free text, an f-string with a value in it, a run of 4+ digits — is replaced wholesale.
+_EVENT_NAME = re.compile(r"(?![a-z0-9_.]*[0-9]{4})[a-z][a-z0-9_.]{0,63}")
+_REDACTED_EVENT = "event_redacted"
+
+
 def _drop_value_fields(_logger: Any, _method: str, event_dict: EventDict) -> EventDict:
-    """structlog processor: remove any field that could carry a sensitive value."""
+    """structlog processor: keep only allow-listed fields (``_SAFE_FIELDS``), drop the rest.
+
+    An exception passed in an allowed field is reduced to its class name, because its message
+    may quote a value. ``exc_info``/``stack_info`` are not allow-listed, so tracebacks (which can
+    quote values too) never reach the log. An ``event`` that is not a snake_case name is replaced
+    by ``"event_redacted"``, since a free-text message may carry an interpolated value.
+    """
     for name in list(event_dict):
-        if name in _VALUE_FIELDS:
+        if name not in _SAFE_FIELDS:
             event_dict.pop(name)
+        elif isinstance(event_dict[name], BaseException):
+            event_dict[name] = type(event_dict[name]).__name__
+    event = event_dict.get("event")
+    if "event" in event_dict and not (isinstance(event, str) and _EVENT_NAME.fullmatch(event)):
+        event_dict["event"] = _REDACTED_EVENT
     return event_dict
 
 

@@ -55,3 +55,80 @@ def test_configured_pipeline_drops_values_end_to_end(capsys) -> None:  # noqa: A
     out = capsys.readouterr().out
     assert '"entity_type": "SSN"' in out
     assert "123-45-6789" not in out and "tok-abc" not in out
+
+
+# Synthetic stand-ins for a customer value or a secret, one per field name a call site might use.
+_PROBE = {
+    "ssn": "078-05-1120",
+    "email": "probe.person@example.test",
+    "access_token": "tok-probe-access",
+    "client_secret": "probe-client-secret",
+    "Value": "probe-capitalised-value",
+    "authorization": "Bearer probe-bearer",
+    "dek_b64": "cHJvYmUtZGVr",
+    "name": "Probe Person",
+    "exc_info": True,
+}
+
+
+def test_only_allow_listed_fields_survive() -> None:
+    event = {"event": "obfuscate", "entity_type": "SSN", "count": 2, **_PROBE}
+    out = _drop_value_fields(None, "info", event)
+    assert out == {"event": "obfuscate", "entity_type": "SSN", "count": 2}
+
+
+def test_configured_pipeline_drops_unknown_fields_end_to_end(capsys) -> None:  # noqa: ANN001
+    from dps.observability import get_logger
+
+    configure_logging("INFO", json_output=True)
+    get_logger("dps.test").info("probe", route="/v1/detect", **_PROBE)
+    out = capsys.readouterr().out
+    assert '"route": "/v1/detect"' in out and '"event": "probe"' in out
+    for value in _PROBE.values():
+        if isinstance(value, str):
+            assert value not in out
+
+
+def test_exceptions_in_allowed_fields_log_their_class_only() -> None:
+    exc = KeyError("078-05-1120")
+    out = _drop_value_fields(None, "warning", {"event": "x", "error": exc})
+    assert out == {"event": "x", "error": "KeyError"}
+
+
+def test_fields_the_m0_call_sites_log_are_kept() -> None:
+    # Keys logged by the startup banner, the NER adapter, verification and the audit sink.
+    event = {
+        "event": "audit",
+        "level": "info",
+        "timestamp": "2026-10-11T00:00:00Z",
+        "ts": "2026-10-11T00:00:00Z",
+        "trace_id": "t1",
+        "route": "/v1/obfuscate",
+        "tenant_id": "default",
+        "key_id": "k1",
+        "mode": "obfuscate",
+        "policy": "gdpr-pseudonymise",
+        "findings_total": 3,
+        "findings_by_type": {"SSN": 1},
+        "methods_used": {"fpe": 1},
+        "verification_passed": True,
+        "reversible_values": 1,
+        "duration_ms": 1.5,
+        "outcome": "ok",
+        "hits": 0,
+        "env": "local",
+        "auth": True,
+        "provider": "none",
+        "reason": "no dist",
+        "error": "ImportError",
+    }
+    assert _drop_value_fields(None, "info", dict(event)) == event
+
+
+def test_free_text_event_messages_are_replaced() -> None:
+    # Event names are snake_case identifiers; a message with an interpolated value is not one.
+    for event in ("obfuscate", "verification_failed", "llm.call", "s3_upload"):
+        assert _drop_value_fields(None, "info", {"event": event}) == {"event": event}
+    for event in ("customer 078-05-1120 processed", "Probe Person", "pan_4111111111111111", 42):
+        out = _drop_value_fields(None, "info", {"event": event})
+        assert out == {"event": "event_redacted"}, event

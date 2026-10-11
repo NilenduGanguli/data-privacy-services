@@ -2,13 +2,20 @@
 
 The registry is open: custom recognizers and declared fields may introduce entity names that are
 not listed here; they default to ``Family.OTHER`` / ``Sensitivity.MEDIUM`` unless registered.
+
+The registry is process-global and shared by every tenant, so it only ever raises protection:
+built-in entities cannot be replaced, and a custom entity's tier never drops below what every
+caller already sees for that name (fail closed, spec P8).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import dataclasses
+import threading
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 
 
 class Sensitivity(StrEnum):
@@ -135,7 +142,11 @@ _ENTRIES: tuple[EntityInfo, ...] = (
     EntityInfo("LOCATION", Family.LOCATION, _L, "a place name from NER"),
 )
 
-TAXONOMY: dict[str, EntityInfo] = {e.name: e for e in _ENTRIES}
+#: The built-in entries, read-only; ``entity_info`` consults these before the open registry.
+_BUILTIN: Mapping[str, EntityInfo] = MappingProxyType({e.name: e for e in _ENTRIES})
+
+TAXONOMY: dict[str, EntityInfo] = dict(_BUILTIN)
+_REGISTRY_LOCK = threading.Lock()
 
 #: Entities whose co-occurrence raises a record's sensitivity (spec §5.2).
 QUASI_IDENTIFIERS = frozenset(
@@ -143,16 +154,43 @@ QUASI_IDENTIFIERS = frozenset(
 )
 
 
+def is_builtin_entity(name: str) -> bool:
+    """True for the entity types defined by this module (they cannot be re-registered)."""
+    return name in _BUILTIN
+
+
 def entity_info(name: str) -> EntityInfo:
-    """Look up an entity type; unknown names are MEDIUM / OTHER."""
-    return TAXONOMY.get(name) or EntityInfo(
-        name, Family.OTHER, Sensitivity.MEDIUM, "custom or declared"
+    """Look up an entity type; unknown names are MEDIUM / OTHER.
+
+    Built-in entries always win, even if the ``TAXONOMY`` dict was mutated directly.
+    """
+    return (
+        _BUILTIN.get(name)
+        or TAXONOMY.get(name)
+        or EntityInfo(name, Family.OTHER, Sensitivity.MEDIUM, "custom or declared")
     )
 
 
 def register_entity(info: EntityInfo) -> None:
-    """Register (or replace) a custom entity type."""
-    TAXONOMY[info.name] = info
+    """Register a custom entity type, or raise the tier of one already registered.
+
+    The registry is shared by every caller in the process, so a registration can only raise
+    protection, never lower it:
+
+    * a built-in name (``SSN``, ``EMAIL`` …) is refused with ``ValueError`` — replacing it would
+      change the tier every other tenant gets;
+    * for a custom name the stored tier is the max of the requested tier and the tier the name
+      already has, which for a name nobody registered yet is the ``MEDIUM`` default.
+
+    Raises:
+        ValueError: when ``info.name`` is a built-in entity type.
+    """
+    if is_builtin_entity(info.name):
+        raise ValueError(f"built-in entity type {info.name!r} cannot be re-registered")
+    with _REGISTRY_LOCK:
+        current = entity_info(info.name).sensitivity
+        tier = Sensitivity.max_of([current, info.sensitivity])
+        TAXONOMY[info.name] = dataclasses.replace(info, sensitivity=tier)
 
 
 def record_sensitivity(entity_types: Iterable[str]) -> Sensitivity:

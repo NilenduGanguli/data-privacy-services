@@ -75,3 +75,89 @@ are preserved unless a section says otherwise.
   (jsonpath). Totals: the plan expected "27 passed"; the plan's own tests total 29 after Task 4
   (package 1 + config 7 + posture 8 + observability 3 + taxonomy 4 + findings 3 + jsonpath 3 —
   an arithmetic slip in the plan); with the 5 tests added in Tasks 2-4, 34.
+
+## Fix round 1 — review M0-G1-r1 (Tasks 1-4), blocking findings B1-B3
+
+- **B1, `dps/engine/jsonpath.py`:** `_segment` now uses `_IDENT.fullmatch(key)` (the pattern
+  lost its `^…$` anchors). Before, `re.match` with `$` accepted a trailing newline, so the key
+  `"name\n"` was written as the bare segment `.name\n` and `parse_path` could not read it back.
+  Such keys are now quoted (`$['name\n']`). Also, `_TOKEN` takes `[0-9]+` instead of `\d+` for
+  indices. `\d` accepted non-ASCII digits (`$[٣]` read as index 3), so one element had two
+  spellings. Paths that `flatten` emits are unchanged for every ASCII identifier key. Tests added:
+  `test_keys_that_merely_look_like_identifiers_are_quoted`, plus
+  `test_brute_force_round_trip_over_awkward_alphabet`. The second covers every key of length 0-3
+  over `a _ 0 \ ' . \n ] [ $ space é` and round-trips flatten → get_path → set_path. Also `$[٣]`
+  was added to `test_malformed_paths_are_refused`.
+- **B2, `dps/engine/taxonomy.py`:** the registry now only ever raises protection.
+  - Built-in entries sit in a read-only `_BUILTIN` mapping. `TAXONOMY` is still the public
+    `dict[str, EntityInfo]` (built-ins plus custom entries), and `entity_info` consults `_BUILTIN`
+    first. A direct write such as `TAXONOMY["SSN"] = …` therefore cannot downgrade a built-in.
+  - `register_entity(info)` keeps its signature but has new behaviour:
+    - For a built-in name it raises `ValueError("built-in entity type 'SSN' cannot be
+      re-registered")`. That includes a registration at a *higher* tier, because the review asked
+      to refuse replacement outright.
+    - For a custom name it stores `max(current effective tier, requested tier)`. Family and
+      description come from the latest call.
+  - **Interpretation:** the "current effective tier" of a name nobody has registered is the
+    `MEDIUM` default that `entity_info` returns to every caller. A first registration at `LOW` is
+    therefore held at `MEDIUM`. Otherwise, one tenant could register `LOAN_REF` at LOW and
+    downgrade every tenant that uses the default for `LOAN_REF`, which is the same cross-tenant
+    attack as B2. Nothing in the M0 plan registers a LOW custom entity. Allowing a LOW custom tier
+    needs request-scoped tiers (see the open item for Task 10 below).
+  - The read-modify-write runs under a lock.
+  - New additive helper `is_builtin_entity(name) -> bool`.
+  - Tests added:
+    - `test_builtin_entities_cannot_be_replaced_or_downgraded`: SSN at LOW raises and stays
+      CRITICAL, and `record_sensitivity(["SSN"])` stays CRITICAL. EMAIL at CRITICAL also raises.
+    - `test_builtins_survive_direct_registry_mutation`.
+    - `test_custom_tiers_only_ever_rise`.
+    - `test_custom_entity_cannot_go_below_the_unregistered_default`.
+  - A `restore_taxonomy` fixture now undoes registrations, and the existing
+    `test_register_custom_entity` uses it (review N9).
+  - **Impact on Task 10:** `PolicyCustomDetector.__init__` calls `register_entity` when a recognizer
+    or declared field carries `sensitivity`. A policy that sets `sensitivity` on a built-in entity
+    (`IBAN`, `EMPLOYEE_ID`, …) will now raise `ValueError`. Task 22's `_detector` does not wrap
+    `custom_detector_from`, so `run_engine` would map that `ValueError` to a 500. This fails
+    closed, but it is the wrong status. Task 10 should reject `sensitivity` on a built-in name at
+    validation time: add a `RecognizerSpec`/`DeclaredField` validator using `is_builtin_entity`,
+    which the policy loader already maps to "invalid policy" (400). Alternatively, Task 22 can
+    wrap `custom_detector_from` in `EngineError`. The plan's own Task 10 tests are unaffected:
+    EMPLOYEE_ID carries no sensitivity, and PROJECT_CODE at HIGH gives max(MEDIUM, HIGH) = HIGH.
+- **B3, `dps/observability.py`:** `_drop_value_fields` keeps its name and signature but is now an
+  **allow-list** processor (spec §10).
+  - It keeps only the keys in `_SAFE_FIELDS` and drops every other key. The deny-list
+    `_VALUE_FIELDS` is gone.
+  - `_SAFE_FIELDS` covers:
+    - structlog's own keys;
+    - correlation ids (`trace_id`, `request_id`, `tenant_id`, `key_id`, `route`, `component`);
+    - outcome fields (`outcome`, `status`, `status_code`, `duration_ms`, `attempt`, `reason`,
+      `error`, `error_code`, `version`);
+    - engine vocabulary (`mode`, `method`, `policy`, `entity_type`, `detector`, `count`, `counts`,
+      `hits`, `findings_total`, `findings_by_type`, `methods_used`, `reversible_values`,
+      `verification_passed`);
+    - gateway and startup fields (`provider`, `purpose`, `model`, `env`, `auth`);
+    - `ts`, from AuditEvent.
+
+    That set is every key the M0 plan's call sites log: `ner_unavailable`,
+    `verification_failed`, `audit` (all AuditEvent fields), `frontend_disabled`, `startup`,
+    `engine_error`, and the bound contextvars `trace_id`/`route`.
+  - Two hardenings go beyond the review's fix:
+    1. An exception object in an allowed field is reduced to its class name (`error=exc` →
+       `"KeyError"`), because the exception message may quote a value. `exc_info`/`stack_info` are
+       not allow-listed, so tracebacks never reach the log.
+    2. `event` must be a snake_case name (`[a-z][a-z0-9_.]{0,63}` with no run of 4+ digits).
+       Anything else, such as free text or an f-string with an interpolated value, becomes
+       `"event_redacted"`. The reviewer's probe also logged `info("customer 111-22-3333
+       processed")`, which no key filter can catch. All five plan event names conform.
+  - The plan's test (`value`/`dek` dropped, `event`/`entity_type`/`count` kept) passes unchanged.
+  - Tests added:
+    - `test_only_allow_listed_fields_survive`: the probe's field names `ssn`, `email`,
+      `access_token`, `client_secret`, `Value`, `authorization`, `dek_b64`, `name` and
+      `exc_info`.
+    - `test_configured_pipeline_drops_unknown_fields_end_to_end`.
+    - `test_exceptions_in_allowed_fields_log_their_class_only`.
+    - `test_fields_the_m0_call_sites_log_are_kept`: guards against the allow-list silently gutting
+      the audit sink.
+    - `test_free_text_event_messages_are_replaced`.
+  - Later milestones extend `_SAFE_FIELDS`, as the M1-M5 contract §0.1 already says.
+- Totals: 34 → 45 tests (jsonpath +2, taxonomy +4, observability +5).

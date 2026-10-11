@@ -9,14 +9,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_TOKEN = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]*)|\[(\d+)\]|\['((?:[^'\\]|\\.)*)'\]")
+# Used with ``fullmatch``: ``re.match`` with a ``$`` anchor also accepts a trailing newline
+# ("name\n"), which would emit a bare ``.name\n`` segment that ``parse_path`` cannot read back.
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_TOKEN = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]*)|\[([0-9]+)\]|\['((?:[^'\\]|\\.)*)'\]")
 
 Scalar = str | int | float | bool | None
 
 
 def _segment(key: str) -> str:
-    if _IDENT.match(key):
+    if _IDENT.fullmatch(key):
         return f".{key}"
     escaped = key.replace("\\", "\\\\").replace("'", "\\'")
     return f"['{escaped}']"
