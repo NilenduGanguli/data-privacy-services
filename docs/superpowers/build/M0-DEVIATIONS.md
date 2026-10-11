@@ -161,3 +161,33 @@ are preserved unless a section says otherwise.
     - `test_free_text_event_messages_are_replaced`.
   - Later milestones extend `_SAFE_FIELDS`, as the M1-M5 contract §0.1 already says.
 - Totals: 34 → 45 tests (jsonpath +2, taxonomy +4, observability +5).
+
+## Fix round 2 — review M0-G1-r2 (Tasks 1-4), blocking finding B1
+
+- **B1, `dps/posture.py`:** `posture_problems` now enforces spec §10 "TLS-only egress" in
+  staging/prod.
+  - For each non-empty `stellar_base_url` and `coin_url` whose `urlparse(v).scheme` is not
+    `https`, it adds `"DPS_STELLAR_BASE_URL must be https in staging/prod"` or
+    `"DPS_COIN_URL must be https in staging/prod"`. The message names the setting and never echoes
+    the URL, which may carry userinfo credentials.
+  - Why: Task 20 POSTs the COIN client id and secret to `coin_url` (mint with `verify=False` by
+    design) and calls Stellar with the bearer token. Over `http://`, both would cross the wire in
+    cleartext. The plan's own Task 2 code omitted this check; the gap came from the plan.
+  - The check runs whenever a URL is set, **whatever `llm_provider` is**. That is fail-closed: a
+    plain-http Stellar/COIN URL left in a prod config with provider `vertex` or `""` is refused
+    too. `local`/`dev` are unchanged (http stays allowed for local stubs). The scheme comparison is
+    case-insensitive because `urlparse` lowercases the scheme (`HTTPS://…` passes).
+  - `dps/config.py:_sane_url` is unchanged. It still accepts `http` and `https` in every
+    environment; TLS is enforced by the posture guard, which is the component that knows the
+    environment.
+  - Impact on later tasks: none. Every later plan test that builds stellar settings (Task 2 posture
+    case, Task 20 gateway `_settings`) already uses `https://` URLs.
+  - Tests added in `tests/test_posture.py`:
+    - two cases in `test_bad_production_is_refused`: an http `stellar_base_url`, and an http
+      `coin_url`, each with `ssl_cert_file` set and the other URL https;
+    - `test_good_stellar_production_passes` (https both, uppercase scheme on one);
+    - `test_plain_http_egress_names_the_setting_never_the_url` (parametrised over providers
+      `""`, `vertex`, `stellar`; asserts the userinfo, host and `http://` never reach the message);
+    - `test_plain_http_egress_is_allowed_outside_production`.
+  - Totals: 45 → 52 tests (posture +7: 2 parametrised refusal cases, 1 good case, 3 message
+    cases, 1 local case).

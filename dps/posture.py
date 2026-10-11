@@ -6,6 +6,8 @@ configuration fails the process instead of serving traffic.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from dps.config import Settings
 
 
@@ -31,6 +33,16 @@ def posture_problems(settings: Settings) -> list[str]:
             problems.append("DPS_SSL_CERT_FILE is required for the stellar provider")
         if not (settings.stellar_base_url and settings.coin_url):
             problems.append("DPS_STELLAR_BASE_URL and DPS_COIN_URL are required for stellar")
+    # Spec §10: TLS-only egress. COIN receives the client id/secret and Stellar the bearer token,
+    # so a plain-http endpoint would put credentials on the wire in cleartext. Checked whenever
+    # the URL is set, whatever the provider. The message names the setting, never the URL
+    # (it may carry userinfo credentials).
+    for env_name, url in (
+        ("DPS_STELLAR_BASE_URL", settings.stellar_base_url),
+        ("DPS_COIN_URL", settings.coin_url),
+    ):
+        if url and urlparse(url).scheme != "https":
+            problems.append(f"{env_name} must be https in staging/prod")
     if not settings.audit_enabled:
         problems.append("DPS_AUDIT_ENABLED must be true")
     return problems
