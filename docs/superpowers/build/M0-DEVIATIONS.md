@@ -827,3 +827,103 @@ Public names: `ApplyOptions`, `ApplyResult`, `RevealHint`, `apply_plan`, `reveal
     parametrised over `field_scoped` False/True: `DATE_OF_BIRTH` at `$.dob`, `DATE` at
     `$.opened`, `$.history[0].on` and a span in `$.notes` all shift by one offset, and
     `apply_plan` then `reveal` round-trips the record.
+
+## Task 19 — Surrogates and personas
+
+Public names as planned: `SurrogateEngine.surrogate(entity_type, original, locale, anchor)`,
+`SurrogateEngine.persona(anchor, locale)`, `PersonaFactory.for_anchor(anchor, locale, *,
+original_dob, gender_hint)`, `Persona`, `SynthesisSeed`, `generate_synthesis_seed`, `seed_bytes`,
+`seed_from_caller`, `seed_int`, `normalise_locale`. Added: `PersonaFactory.birth_date`,
+`personas.birth_date`, `personas.ascii_fold`, `personas.faker_for`.
+
+**The plan's own test fails against the plan's code.** Run against the plan's `personas.py` /
+`surrogates.py`, `test_surrogates_are_rule_valid_and_consistent` failed on 3 of 3 runs and
+`test_value_consistency_and_never_identity` fails about one run in three:
+
+- **DOB band (order dependence).** `SurrogateEngine.persona()` cached the persona per
+  `(anchor, locale)` on first use. The test asks for `EMAIL` before `DATE_OF_BIRTH`, so the
+  persona was cached *without* the original DOB and the surrogate DOB was a random 18-80-year-old
+  birth date, outside the 1985-1989 band (`2004-01-19`, `1963-02-28`, ...). Now each persona
+  attribute group (gender, first name, last name, birth date, address) is drawn from its own
+  HMAC sub-seed (`persona|anchor|locale|group`), so the persona built with the original DOB has
+  the same name and address as the cached one, and the DOB surrogate is computed per call from
+  `(seed, anchor, original DOB)`. The result no longer depends on which field was asked first.
+- **Two e-mails in one record got the same surrogate.** The plan built every e-mail from the
+  persona's local part plus one of three RFC 2606 domains, so `x@y.co` and `z@y.co` in record
+  `r1` collided with probability 1/3. E-mails now get a value-derived numeric suffix
+  (`meera.vyas4821@example.org`, still persona-coherent), and the engine keeps an
+  `issued` map so that, within one engine (one request), two different identifiers never share a
+  surrogate: a collision is re-drawn with a retry salt. Persona attributes (name, birth date,
+  address, city, postcode, age), dates, card expiry and amounts are exempt (they legitimately
+  repeat).
+
+**Never issued (spec §5.6) where the plan generated issued-space numbers:**
+
+- **Aadhaar** now starts with `1` (Verhoeff-valid, Aadhaar-shaped; UIDAI never issues 0/1). The
+  spec says "Verhoeff-valid Aadhaar-shaped numbers outside issued space"; the plan's
+  `[2-9]` prefix draws from the issued space (about 1.3 bn of ~8 bn possible numbers are real
+  people's). **Test change:** the plan asserted `validate("AADHAAR", aad)` (stdnum, which rejects
+  a leading 0/1). The test now asserts 12 digits, leading `1`, `verhoeff.is_valid`, and
+  `validate(...) is False` — the same trade the plan already made for SSNs (`9xx`,
+  `validate("SSN") is False`). No validator was changed.
+- **ITIN** groups are now `89` or `93`; the plan drew `70-88`, which is where the IRS issues
+  ITINs. **SIN** now starts with `0` (never assigned); the plan drew any Luhn-valid number.
+- **Phones:** NANP numbers use `NXX-555-01xx` (fictional in every area code; random valid area
+  code, so a batch is not limited to 100 numbers); +44 numbers (GB and the Crown Dependencies)
+  use Ofcom's drama range `07700 900xxx`. libphonenumber deliberately treats that range as
+  invalid; the spec names it, so it is used as is. Other countries (IN, MX, ...) have no
+  fictional range and get a valid number near the country's example number. The country now
+  comes from the *original* number when it parses (a `+91` number under an `en_US` policy stays
+  Indian); the plan always used the persona's country.
+
+**Values the plan returned unchanged** (then the never-identity fallback appended `1` or bumped a
+digit, e.g. `Metformin1`, `E11.0`, `HDFCINBBXXX1` — near-verbatim originals):
+`DIAGNOSIS_CODE` and `MEDICATION` (returned the original by design), `SWIFT_BIC` (no digits to
+replace) and unparseable `DATE` (returned the original). Now:
+diagnosis codes are reshaped letters *and* digits (the ICD chapter letter alone reveals the
+condition class), medications come from a list of common generics, BICs are reshaped keeping
+the country code, unreadable dates become a plausible ISO date.
+
+**Other changes:**
+
+- *Never revealing.* A surrogate must not equal its original **or contain it** under the
+  verifier's normalisation (`verify.normalise`, length ≥ 4), so a surrogate can never trip the
+  leakage sweep. GENDER and NATIONALITY are exempt: forcing "different" on a two-valued attribute
+  would reveal the original by inversion. The value seed's canonical form is also
+  `verify.normalise`, so `2341 2341 2346` and `234123412346` get the same digits.
+- *IBAN* keeps the original's country and BBAN shape and is mod-97 valid (stdnum
+  `calc_check_digits`, re-drawn until `stdnum.iban.is_valid` for countries with national check
+  digits). The plan used `Faker(...).iban()`, which produced a `GB` IBAN for every locale.
+- *Shapes follow the original:* CVV length (3/4), card-expiry year width and separator, a
+  leading `@` on usernames, UUID-shaped device ids (the plan emitted a 36-character hex run),
+  MAC separator and case, IPv6 → `2001:db8::/32` (RFC 3849), single-letter / lower-case gender,
+  ISO datetimes keep the time suffix, `AGE` stays in its five-year band, upper-case names stay
+  upper-case. `AADHAAR` without digits returned 11 digits (no check digit) — fixed.
+- *Determinism across days:* the persona's free birth date is drawn from 1950-2004 with the
+  seed; the plan used `Faker.date_of_birth`, which depends on today's date, so a caller-held
+  seed did not reproduce the same persona the next day.
+- *Names* are re-drawn until they are one token of letters (Faker `en_IN` has `D’Alia`, `en_GB`
+  `O'Brien`, `es_MX` `Ana María`), so "single-token original → first name" and the e-mail local
+  part work in every locale. E-mail local parts are accent-folded ASCII (`acuna`, not `acua`).
+- *Faker* instances are cached per thread and locale and re-seeded per draw (creating one costs
+  ~1.2 ms; a 10k-record request would otherwise spend seconds constructing them).
+- *Seed hygiene:* `SynthesisSeed` sets `hide_input_in_errors=True` and `seed` has `repr=False`;
+  `seed_bytes` errors name the rule only.
+- Empty / whitespace originals are returned as they are.
+
+Tests: the plan's 4 (one assertion changed, above) + 11 added:
+`test_the_birth_date_stays_in_its_band_whatever_was_asked_first`,
+`test_persona_fields_do_not_depend_on_the_original_dob`,
+`test_same_seed_same_surrogates_across_engines_and_formats`,
+`test_distinct_identifiers_never_share_a_surrogate_within_an_engine`,
+`test_never_issued_ranges`, `test_phone_keeps_the_original_country_and_format`,
+`test_iban_keeps_country_and_shape_and_is_valid`,
+`test_health_and_other_values_are_replaced_not_returned`, `test_shapes_follow_the_original`,
+`test_names_are_single_tokens_in_every_locale`, `test_the_seed_never_shows_in_repr_or_errors`.
+The test seed is random per run (as in the plan); the file was also run in-process against 500
+fresh seeds with no failure. Count: 15 in the file; suite 325 passed, 1 skipped.
+
+Open: two *different* people named in one record collapse onto the record's one persona (the
+plan's persona-per-anchor design); PAN_IN, ROUTING_ABA, IN/MX phones have no unissued range and
+may coincide with real values; NINO/NHS/CURP/RFC/passport fall back to digit/letter reshaping
+without check digits.
