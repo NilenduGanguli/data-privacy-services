@@ -20,3 +20,22 @@ are preserved unless a section says otherwise.
   green from Task 2 onward.
 - `ruff format` reformatted `tests/conftest.py` (blank line after the module docstring) —
   formatting only.
+
+## Task 2 — Settings and production posture
+
+- `dps/config.py`: `settings_customise_sources` is fully typed (`type[BaseSettings]`,
+  `PydanticBaseSettingsSource` x4 → `tuple[PydanticBaseSettingsSource, ...]`) instead of the plan's
+  untyped signature with `# type: ignore[override]`. Why: project rule "type hints on every
+  function"; the typed signature matches pydantic-settings 2.15 exactly, so no ignore is needed.
+- `dps/config.py`: added `hide_input_in_errors=True` to `model_config`. Why: settings carry
+  secrets (COIN client id/secret, API keys); pydantic's `ValidationError` otherwise echoes
+  `input_value=...` for any field that fails validation. Strengthens the "never put a secret in an
+  exception message" rule; no field, default or validator changed.
+- `dps/config.py`: `_sane_url` error message no longer echoes the URL (`got {v!r}` dropped) —
+  a URL may carry userinfo credentials. The validator itself is unchanged (still refuses
+  non-http(s) schemes and missing hosts).
+- `tests/test_config.py`: added `test_validation_errors_never_echo_the_input` (asserts a password
+  in a bad URL and a bad int field never appears in the error text; verified red with
+  `hide_input_in_errors=False`).
+- Count: the plan's expected "14 passed" is an arithmetic slip; the plan's own tests total 16
+  (1 package + 7 config + 8 posture); with the added test, 17.

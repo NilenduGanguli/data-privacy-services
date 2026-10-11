@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import pytest
+
+from dps.config import Settings
+
+
+def test_defaults_are_local_and_safe() -> None:
+    s = Settings(_env_file=None)
+    assert s.env == "local" and s.port == 8400 and s.auth_enabled is True
+    assert s.fpe_enabled is False and s.llm_provider == ""
+    assert s.is_production is False
+
+
+def test_env_prefix_and_file_indirection(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    secret = tmp_path / "coin_secret"
+    secret.write_text("c2VjcmV0\n", encoding="utf-8")
+    monkeypatch.setenv("DPS_ENV", "dev")
+    monkeypatch.setenv("DPS_COIN_CLIENT_SECRET_FILE", str(secret))
+    s = Settings(_env_file=None)
+    assert s.env == "dev"
+    assert s.coin_client_secret == "c2VjcmV0"  # stripped, from the file
+
+
+def test_explicit_env_var_beats_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    secret = tmp_path / "k"
+    secret.write_text("from-file", encoding="utf-8")
+    monkeypatch.setenv("DPS_COIN_SCOPE_FILE", str(secret))
+    monkeypatch.setenv("DPS_COIN_SCOPE", "from-env")
+    assert Settings(_env_file=None).coin_scope == "from-env"
+
+
+@pytest.mark.parametrize(
+    "field,value", [("env", "qa"), ("llm_provider", "openai"), ("stellar_base_url", "not a url")]
+)
+def test_invalid_values_are_refused(field: str, value: str) -> None:
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **{field: value})
+
+
+def test_derived_properties() -> None:
+    s = Settings(_env_file=None, env="prod", max_payload_mb=2, ner_languages="en, es")
+    assert s.is_production and s.max_payload_bytes == 2 * 1024 * 1024
+    assert s.ner_languages_list == ["en", "es"]
+
+
+def test_validation_errors_never_echo_the_input() -> None:
+    with pytest.raises(ValueError) as bad_url:
+        Settings(_env_file=None, coin_url="ftp://user:s3cr3t-pw@coin.example")
+    with pytest.raises(ValueError) as bad_int:
+        Settings(_env_file=None, max_payload_mb="s3cr3t-pw")
+    assert "s3cr3t-pw" not in str(bad_url.value) and "s3cr3t-pw" not in str(bad_int.value)
