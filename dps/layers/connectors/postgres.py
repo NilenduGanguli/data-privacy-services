@@ -32,6 +32,7 @@ import asyncpg
 
 from dps.config import Settings
 from dps.connections import Connection, Credentials
+from dps.engine.jsonpath import child_path
 from dps.jobs_models import Selection
 from dps.layers.connectors.base import (
     BatchWriter,
@@ -438,7 +439,7 @@ class PostgresConnector:
         )
         columns = [
             ColumnInfo(
-                path=f"$.{r['attname']}",
+                path=child_path("$", r["attname"]),
                 name=r["attname"],
                 data_type=r["data_type"],
                 kind=PG_KINDS.get(r["typname"], "other"),

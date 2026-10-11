@@ -609,3 +609,57 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   and `test()` reports it without raising): 18 offline + 9 integration = 27 (plan: 19).
 - `HANDOFF.md`: §3 `source-pg` row, start command and `DPS_TEST_SOURCE_PG_DSN`; §4
   `DPS_SOURCE_PG_PORT`; §8 the read-session rules and the advisory check.
+
+## Task 16 — Engine bridge (`dps/engine/batch.py`) and M0 touch points
+
+- `dps/engine/transform/apply.py` — **plan assertion that cannot hold against M0 as built,
+  corrected.** M0 keys the record anchor before use (`_keyed_anchor`: HMAC under the key's
+  `anchor` subkey whenever key material is present; it travels in reveal hints). The touch point
+  is therefore `anchor = _keyed_anchor(options.anchor or anchor_for(document, plan), options.key)`
+  (plan: `options.anchor or anchor_for(...)`, written against the pre-fix M0), and
+  `test_apply_plan_uses_the_given_anchor` asserts `b.anchor == _keyed_anchor("CUSTOMER_ID:abc",
+  key)` instead of the raw string; the raw anchor must never reach a hint. L1 and L2 still agree
+  (`test_l1_and_l2_agree_on_the_anchor_driven_date_shift` passes): both key the same raw anchor.
+  **Note for Task 22 (`reveal_row`):** the `date_shift` reverse parameter `anchor` is the keyed
+  anchor; recompute it as `_keyed_anchor(row_anchor(...), key)`, not the raw `row_anchor`.
+- `dps/engine/transform/methods.py`: **not modified.** M0 as built already draws `_dictionary`
+  without a key from `sha256` (its comment: "stable across processes"); the plan's
+  cross-process test passes unchanged.
+- `dps/engine/batch.py` `verify_row` / per-row verification (plan design kept: fixed points ≥ 4,
+  containment ≥ 8), with these corrections, each covered by a test:
+  - kept whole columns are not searched (the plan's text says so, but its code put every column
+    of the row document, kept ones included, into the haystack) and keep their driver value
+    (only transformed columns are converted back with `from_engine_text`);
+  - spans a synthesize-mode plan keeps (`keep_non_sensitive`, e.g. a `DATE` in notes) are not
+    originals (the plan counted them, so an 8-digit kept date failed the batch:
+    `test_synthesize_free_text_keeps_low_sensitivity_spans_without_a_hit`);
+  - each output is a haystack of its own (plan: one string joined with spaces, which
+    normalisation turns into one run, so a needle could match across two columns' outputs);
+  - `outputs` and the new keyword `inputs` are keyed by **path**, hits name the output path where
+    the original was found and carry the span's own entity type (plan: the original column's path
+    and `FREE_TEXT` for every span), at most one hit per (path, entity type) as in M0's sweep;
+  - **added the name-part rule** (contract §0 amendment 2026-10-12 leaves it to §6.4): a part of
+    at least 8 characters of a transformed name that appears in an output more often than the same
+    column's input held it outside the name is a `name_part` hit
+    (`test_a_name_part_that_appears_from_nowhere_is_a_leak`); 8, not M0's 4, by the cross-field
+    volume reasoning (a 4-letter part inside random FPE/token text is ~1e-4 per row).
+  - `checked` counts the originals a rule could check (plan: every original).
+- `BatchTransformer.transform`: a free-text value the detector finds as one **whole** value (the
+  notes are only an e-mail) is planned as a span over the whole text, so it still becomes an
+  envelope token (plan: the whole finding gave an empty original and no envelope). Free-text
+  columns are always searched, findings or not, so an undetected copy of another column's
+  original is a leak (`test_an_undetected_copy_in_free_text_is_a_leak`).
+- `BatchTransformer.__init__` refuses plans (or an anchor) naming a column the table does not
+  have (`ValueError`, value-free; plan: a `KeyError` mid-batch). `FINDINGS` (span findings) and
+  `VERIFY_FAIL` are incremented per batch beside `TRANSFORMS` (contract §6.4 names the engine
+  counters). `LeakageError.code = "leakage"`. `ColumnPlan`/`BatchResult` hide input in errors;
+  `ColumnPlan.output_column` casts `kind` instead of a `type: ignore`. Input rows are never
+  mutated (`dict(row)` copies; asserted).
+- `dps/layers/connectors/postgres.py` `describe`: `path=child_path("$", name)` as planned.
+- Tests: the plan's 4 + 9 plus `test_apply_options_keep_their_m0_positional_order`,
+  `test_a_text_column_that_is_one_whole_value_is_tokenized_as_a_span`, `test_mode_prerequisites`,
+  `test_an_undetected_copy_in_free_text_is_a_leak`,
+  `test_a_name_part_that_appears_from_nowhere_is_a_leak`, `test_kept_columns_are_not_searched`,
+  `test_verify_row_rules`, `test_plans_digest_is_stable`,
+  `test_synthesize_free_text_keeps_low_sensitivity_spans_without_a_hit` and extra assertions
+  (`values_by_column`, hit shape, child paths that need quoting): 5 + 17 = 22 (plan: 13).

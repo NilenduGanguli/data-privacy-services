@@ -108,6 +108,9 @@ class ApplyOptions:
     cipher_factory: CipherFactory | None = None
     token_style: str = "natural"
     locale: str = "en_US"
+    #: The record's raw anchor when the caller computes it (L2: one per row, contract §6.2);
+    #: ``None`` → :func:`anchor_for`. Either way it is keyed before use.
+    anchor: str | None = None
 
 
 def anchor_for(document: Any, plan: Plan) -> str:
@@ -223,7 +226,7 @@ def apply_plan(
     if (data is None) == (text is None):
         raise ValueError("pass exactly one of data or text")
     document: Any = copy.deepcopy(data) if text is None else text
-    anchor = _keyed_anchor(anchor_for(document, plan), options.key)
+    anchor = _keyed_anchor(options.anchor or anchor_for(document, plan), options.key)
     if options.surrogates is not None:
         declare_record(options.surrogates, anchor, _record_originals(document, plan))
     kid = options.key.kid if options.key is not None else None
