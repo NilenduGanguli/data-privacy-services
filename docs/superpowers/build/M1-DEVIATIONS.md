@@ -76,3 +76,39 @@ are preserved unless a section says otherwise.
 - `docs/technical/api-m0.md` (errors carry an additive `code`) and `HANDOFF.md` §5 (the audit
   policy label format) are updated in the same commit; not in the plan's file list.
 - Count: `tests/test_api_errors.py` 4 passed; suite 601 → 605 passed, 2 skipped.
+
+## Task 3 — Engine output segments (where each replacement landed)
+
+- `dps/engine/synth/llm_text.py` `placeholder_segments` takes the fill's own replacements and
+  per-label methods — `placeholder_segments(text, ph, output, replacements, methods)` — instead of
+  the plan's `(text, ph, output, surrogates, locale, anchor)`, which recomputed every slot with
+  `surrogates.surrogate(...)`. Why: M0 as built fills placeholders through `_resolve`, which applies
+  the **plan's** method per finding (`keep` puts the original back, `redact` writes the mask, a
+  surrogate otherwise), and the service always passes the plan. Recomputed surrogates would differ
+  from the output at every kept or redacted slot, the rebuild check would fail, and every
+  plan-driven synthesis (all document synthesis) would get no segments. `_Fill` gains
+  `label_methods` (each label's method) so a segment names the method that actually ran. The
+  rebuild safety check ("no segments rather than wrong ones") is kept as the plan wrote it.
+- `dps/engine/synth/llm_text.py` `synthesize_text`: M0 as built has several early returns of the
+  deterministic text (no rewrite, leak guard, rejected or failed rewrite, invented entities,
+  verification), so `info["segments"]` is computed once for the deterministic output and set to
+  `[]` only when the model's rewrite is used, instead of the plan's single `if not
+  info["llm_used"]` before one final return.
+- `tests/test_segments.py`: the plan's `test_ambiguous_templates_yield_no_segments` asserted `[]`
+  for `"Template {EMAIL_9} then a.b@example-mail.in"`. Impossible as M0 is built: `_substitute`
+  fills only this text's own labels and leaves any other placeholder-shaped string untouched (M0's
+  `test_text_that_already_looks_like_a_placeholder_is_kept_and_never_reused`), and labels never
+  reuse a placeholder-shaped string already in the text, so the deterministic output always
+  rebuilds and its segments are exact (observed: one correct `EMAIL` segment). Replaced by
+  `test_placeholder_shaped_text_keeps_exact_segments` (the segment is exact and `{EMAIL_9}`
+  survives) and `test_placeholder_segments_refuse_an_output_they_cannot_rebuild` (the safety check,
+  called directly with an output that differs → `[]`). Added `test_placeholder_segments_follow_the_plan`
+  (a `synthetic-realistic` plan: two `keep` and one `surrogate` segment, each slicing the output)
+  and `test_a_used_rewrite_has_no_segments`.
+- `tests/test_llm_text.py` (M0 test changed with its module, contract §0.7):
+  `test_gateway_failures_and_unavailability_fall_back` compared `info` with an exact dict; it now
+  pops and checks `segments` first, then compares the rest unchanged.
+- `docs/technical/api-m0.md`: documents `options.return_segments` and the additive `segments`
+  response field (M0 routes return `"segments": null` unless asked); not in the plan's file list.
+- Count: `tests/test_segments.py` 9 passed (the plan's 6, one replaced, three added); suite
+  605 → 614 passed, 2 skipped.

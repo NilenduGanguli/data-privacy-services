@@ -230,6 +230,11 @@ async def test_gateway_failures_and_unavailability_fall_back() -> None:
         gateway=Failing(""),
         llm_rewrite=True,
     )
+    # M1 (Task 3): the deterministic output's segments ride along; the service pops them.
+    segments = info.pop("segments")
+    assert len(segments) == 4 and all(
+        out[s.out_start : s.out_end] == s.replacement for s in segments
+    )
     assert info == {
         "llm_calls": 1,
         "llm_used": False,

@@ -70,7 +70,8 @@ Presets: `gdpr-pseudonymise` (the default), `dpdp-pseudonymise`, `pci-dss`, `ana
   instead of `dek`); `consistency.scope` (`request` | `key` | `entity`) with caller-held
   `key_material` (obfuscate: the same key gives the same tokens) or `synthesis_seed` (synthesize:
   the same seed gives the same surrogates); `llm_rewrite` (text synthesis only, and only when the
-  server's `DPS_LLM_TEXT_REWRITE` is on).
+  server's `DPS_LLM_TEXT_REWRITE` is on); `return_segments` (M1, default `false`: also return
+  `segments`, below).
 - `mode` is read by `/policies/plan` only.
 
 Methods a policy can name: reversible `det_token`, `fpe_digits`, `fpe_text`, `email`, `phone`,
@@ -109,6 +110,10 @@ only), `report`, `trace_id`.
 - `reveal_hints[]`: `{path, start, end, entity_type, method, params, reverse_params,
   original_type, anchor, kid, kcv, field_scoped}` — locations and methods, never values.
 - `synthesis_seed`: `{alg: "dps.synth.v1", seed, created_at}` — confidential (it links outputs).
+- `segments` (M1; `null` unless `options.return_segments` is `true`): where each replacement landed,
+  `{path, start, end, out_start, out_end, entity_type, method, replacement}` — the input span, the
+  output span within the same leaf (`null`s for a whole value) and the text written there (already
+  in `result`). A text synthesis whose LLM rewrite was used returns `[]`.
 
 **`report`** (every engine response): `mode`, `policy`, `policy_hash`, `engine_version`,
 `findings_total`, `findings_by_type`, `findings_by_detector`, `record_sensitivity`,

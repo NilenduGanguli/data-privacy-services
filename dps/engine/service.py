@@ -33,7 +33,14 @@ from dps.engine.synth.surrogates import (
 )
 from dps.engine.taxonomy import Sensitivity
 from dps.engine.transform import fpe
-from dps.engine.transform.apply import ApplyOptions, RevealHint, anchor_for, apply_plan, reveal
+from dps.engine.transform.apply import (
+    ApplyOptions,
+    OutputSegment,
+    RevealHint,
+    anchor_for,
+    apply_plan,
+    reveal,
+)
 from dps.engine.transform.crypto import (
     KeyMaterial,
     generate_key_material,
@@ -100,6 +107,8 @@ class RequestOptions(BaseModel):
     wrap_key: dict[str, str] | None = None
     consistency: ConsistencyOptions = Field(default_factory=ConsistencyOptions)
     llm_rewrite: bool | None = None
+    # Documents ask for it (M1); M0 callers never see segments unless they do.
+    return_segments: bool = False
 
 
 class DetectResponse(BaseModel):
@@ -127,6 +136,8 @@ class TransformResponse(BaseModel):
     key_material: KeyMaterial | None = None
     reveal_hints: list[RevealHint] = Field(default_factory=list)
     synthesis_seed: SynthesisSeed | None = None
+    # Where each replacement landed (``options.return_segments``); ``None`` unless asked.
+    segments: list[OutputSegment] | None = None
     report: Report
 
 
@@ -379,6 +390,7 @@ class PrivacyEngine:
             plan=explain_plan(plan),
             key_material=key_out,
             reveal_hints=applied.reveal_hints,
+            segments=applied.segments if options.return_segments else None,
             report=report,
         )
 
@@ -436,6 +448,7 @@ class PrivacyEngine:
         output: Any
         methods_used: dict[str, int]
         notes: dict[str, int]
+        segments: list[OutputSegment]
         if payload.text is not None:
             try:
                 output, info = await synthesize_text(
@@ -451,6 +464,7 @@ class PrivacyEngine:
                 )
             except MethodError as exc:
                 raise EngineError(str(exc)) from None
+            segments = info.pop("segments", [])  # replacement text: never logged with ``info``
             llm_calls = int(info["llm_calls"])
             llm = {"used": bool(info["llm_used"]), "fallback": info["fallback"]}
             methods_used = dict(info["methods_used"])
@@ -467,6 +481,7 @@ class PrivacyEngine:
             except MethodError as exc:
                 raise EngineError(str(exc)) from None
             output, methods_used, notes = applied.output, applied.methods_used, applied.notes
+            segments = applied.segments
         for method, count in methods_used.items():
             TRANSFORMS.labels("synthesize", method).inc(count)
         verification = self._verify(findings, payload, output, plan, policy, "synthesize", detector)
@@ -489,6 +504,7 @@ class PrivacyEngine:
             findings=findings,
             plan=explain_plan(plan),
             synthesis_seed=seed if scope != "request" else None,
+            segments=segments if options.return_segments else None,
             report=report,
         )
 
