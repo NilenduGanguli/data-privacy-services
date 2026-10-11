@@ -715,6 +715,56 @@ Public names: `ApplyOptions`, `ApplyResult`, `RevealHint`, `apply_plan`, `reveal
   - `test_reveal_hints_validate_and_never_echo_their_input`;
   - `test_whole_value_entries_must_point_at_a_scalar`.
 
-  Against the plan's `apply.py` (with `anchor_for` aliased), 15 of the 21 added cases fail, and
-  so does the plan's own first test.
+  Against the plan's `apply.py` (with `anchor_for` aliased), 15 of the first 21 added cases fail
+  (the 22nd was written after that run), and so does the plan's own first test.
 - Count: the plan's 3 + 22 = 25 in the file; suite 291 passed, 1 skipped.
+
+## Task 18 — Verifier and report
+
+- **Hit semantics (the plan's own test failed against the plan's code).**
+  `test_verify_passes_clean_output_and_catches_leaks` expects:
+  - `bad.hits == [{"path": "$.notes", …}]` for an output whose notes field leaks the e-mail;
+  - `verify_output(…, kept={("$.notes", 5, 26)}).passed`.
+
+  The plan searched one global haystack and reported each *finding's* path. The `$.email`
+  finding's value is found in the leaky notes, so it reported two hits (`$.email`, `$.notes`) and
+  still failed with the notes span kept. The rules are now:
+  - each output string is searched on its own, and a hit names **where in the output** the
+    original was found, once per (path, entity type);
+  - a kept locator is skipped, and its **value is allowed wherever it appears**.
+
+  The second rule matters in practice. The apply sample keeps a `DATE` in the notes that equals
+  the date-shifted DOB, and under the plan's rules that request would fail strict verification
+  every time.
+- **Normalisation is Unicode-aware.** The plan kept `[a-z0-9]` only, so every non-Latin original
+  normalised to `""` and was skipped as "too short": a Devanagari name leaked verbatim passed the
+  sweep. Accented letters were also dropped (`México` → `mxico`). `normalise` now:
+  1. applies NFKD;
+  2. case-folds;
+  3. drops combining marks (accents);
+  4. reads any Unicode decimal digit as its ASCII digit;
+  5. keeps letters and digits in every script.
+
+  Full-width or compatibility forms (`１２３-４５-６７８９`, `Ⅻ`) and accent-stripped copies
+  (`MEXICO`) are now caught. Every ASCII case behaves as before.
+- **JSON escaping no longer hides a leak.** The plan normalised `json.dumps(output)`. In that
+  serialisation a newline or tab inside a value becomes `\n` / `\t`, so `12 Main St\nSpringfield`
+  leaked verbatim normalised to `…stnspringfield` and did not match. The output is now walked:
+  every scalar leaf and every **object key** is searched separately. Keys were inside the plan's
+  dumped haystack too, so they stay covered. `None` and booleans are skipped.
+- `report.py` is as planned, plus docstrings.
+- Tests added:
+  - `test_non_latin_originals_are_checked_too`;
+  - `test_values_with_escaped_characters_are_still_found`;
+  - `test_full_width_and_compatibility_forms_are_folded`;
+  - `test_a_value_kept_on_purpose_is_not_a_leak_wherever_it_appears`;
+  - `test_originals_in_output_keys_are_found`;
+  - `test_text_output_and_numeric_leaves`;
+  - `test_hits_are_reported_once_per_output_location`;
+  - `test_detect_reports_without_a_plan`.
+
+  Against the plan's `verify.py`, 6 of them fail, as does the plan's own
+  `test_verify_passes_clean_output_and_catches_leaks`.
+- Not done (spec §5.7 also says "plus detectors re-run on the output"): the M0 plan's sweep is
+  match-based only. This is listed as an open issue for Task 22 / M1.
+- Count: the plan's 3 + 8 added = 11 in the file; suite 302 passed, 1 skipped.
