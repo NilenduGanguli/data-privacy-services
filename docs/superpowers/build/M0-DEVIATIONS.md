@@ -1017,3 +1017,60 @@ Against the plan's `llm_text.py`, 7 of the 8 fail: 4 on the behaviour above (who
 placeholder-shaped text, leak guard, a rewrite that brings an original back) and 3 because they
 use the new `plan` / `screen` parameters or `info` fields; the plan's own 3 pass on both.
 Count: 11 in the file; suite 353 passed, 1 skipped.
+
+## Task 22 — The engine façade
+
+Public names as planned: `PrivacyEngine(settings, *, gateway, cipher_factory)` with `.policy`,
+`.detect`, `.plan`, `.obfuscate`, `.synthesize` (async), `.reveal`, and the attributes Task 24
+reads (`settings`, `gateway`, `ner`, `fpe_enabled`); `Payload`, `ConsistencyOptions`,
+`RequestOptions`, `DetectResponse`, `PlanResponse`, `TransformResponse`, `RevealResponse`,
+`EngineError`, `VerificationFailed`. Step 3 (rename `_anchor_for` → `anchor_for`) was already
+done in Task 17, so `apply.py` is unchanged. Changes:
+
+- **Request models no longer echo customer data or keys in validation errors.** `Payload`,
+  `ConsistencyOptions` and `RequestOptions` set `hide_input_in_errors=True`. With the plan's
+  models, `Payload(data={...}, text="...")` raised a `ValidationError` whose message quoted the
+  whole input (`input_value={'ssn': '123-45-6789'}, ..., 'text': 'Ananya Krishnan'`), and Task
+  24's `payload_from` puts `str(exc)` into the HTTP 422 `detail`. `RequestOptions` carries
+  `key_material` (the DEK) and `synthesis_seed`, which the same path would have echoed.
+- **Enumerations are validated:** `consistency.scope` is `Literal["request", "key", "entity"]`
+  and `token_style` is `Literal["envelope", "natural"]` (the plan took any string; an unknown
+  token style silently meant `natural`, an unknown scope was copied into the key material).
+  `wrap_key.type` must be `rsa-oaep-256` (defaulted when absent) and `public_key_pem` is
+  required; both are checked before any work is done. The plan ignored `type`.
+- **Every caller-caused error is an `EngineError`, raised `from None`:** a bad `mode` in
+  `plan()` (the planner's `ValueError` escaped as a 500 in the plan), invalid custom
+  recognizers, and a synthesize-mode method that needs a key (`MethodError` from the text path,
+  which the plan did not catch). `from None` keeps a chained pydantic error (which can carry
+  input) out of tracebacks. `reveal` passes a `MethodError`'s message through (value-free by
+  contract: "reveal hints were produced under a different key (kid mismatch)"); other
+  exceptions still report their type only.
+- **Locale precedence works as the plan intended.** The plan's
+  `options.locale or policy.locale.default or settings.default_locale` never reached the
+  service default, because `LocaleConfig.default` always has a value (`en_US`). The policy's
+  locale now wins only when the policy sets one (`model_fields_set`); every preset does, so
+  presets behave as before, and inline policies without a locale use `DPS_DEFAULT_LOCALE`.
+- **Text synthesis follows the plan and reports it** (Task 21): the service passes `plan=` and
+  a `screen` built from the request's own detector, uses the methods that actually ran for
+  `methods_used`, records a model fallback as `fallbacks["llm:<reason>"]` (also for
+  `leak_guard`, when the model was never called), and adds `used` / `fallback` to
+  `report.llm`. The plan's `except LeakToModelError` is gone: `synthesize_text` no longer raises
+  it (the guard skips the model instead).
+- The synthesis seed is validated together with `seed_bytes` inside the `EngineError` mapping.
+
+Tests added: `test_text_obfuscation_reveals_with_and_without_hints`,
+`test_bad_keys_hints_and_wraps_are_engine_errors_that_echo_nothing` (10 cases),
+`test_request_models_never_echo_their_input`, `test_a_caller_held_seed_reproduces_synthesis`,
+`test_text_synthesis_follows_the_plan`,
+`test_llm_rewrite_needs_both_switches_and_sees_placeholders_only`,
+`test_an_inventive_rewrite_is_discarded`, `test_locale_precedence`,
+`test_warn_policies_return_output_and_report_the_failure`,
+`test_a_synthesize_method_that_needs_a_key_is_an_engine_error`, `test_reports_carry_no_values`.
+Against the plan's `service.py` (on top of Tasks 19-21 as built), 7 of the 11 fail; the plan's own
+5 pass on both. Count: 16 in the file; suite 369 passed, 1 skipped.
+
+Open (carried from Task 18): spec §5.7's "detectors re-run on the output" is still not part of
+the obfuscate/synthesize sweep — FPE and surrogate output is *meant* to look like the real thing,
+so a re-run cannot be a pass/fail signal as is; only the LLM rewrite is screened this way.
+`locale.by_country_field` (per-record locale) is not implemented. JSON free-text fields are
+synthesized span by span; the LLM rewrite applies to text payloads only.
