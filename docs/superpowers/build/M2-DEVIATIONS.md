@@ -86,3 +86,38 @@ otherwise.
 - Verified beyond the tests: against the lane's compose `dps` database (roles from
   `01_roles.sql`), `--verify` exits 1 naming all nine files pending, the plain run applies 9, then
   `--verify` and `--maintain` exit 0.
+
+## Task 5 — RLS posture and tenant-isolation tests
+
+- `tests/db/test_rls.py` — **plan assertions that contradict the contract's grants, corrected.**
+  Contract §2.4 / `009_grants.sql` give `dps_app_rw` only `SELECT, INSERT` on `dps_audit_log` and
+  `SELECT, INSERT, UPDATE` on `dps_evidence` (no DELETE on either; checked with
+  `has_table_privilege` against the migrated compose database). So:
+  - `test_each_tenant_table_is_isolated`: the plan skipped the cross-tenant `DELETE` only for
+    `dps_audit_log`; for `dps_evidence` it would raise `InsufficientPrivilegeError`, not return 0.
+    Both append-only tables now assert that the API role's `DELETE` is refused outright
+    (`InsufficientPrivilegeError`); the other six still assert 0 rows deleted. The test also
+    re-reads as `t1` to show t2's attempts left t1's row in place.
+  - `test_audit_log_and_evidence_are_append_only`: the plan expected the trigger's `RaiseError` for
+    the API role's `UPDATE`/`DELETE` on `dps_audit_log`, but the privilege check fires first
+    (`InsufficientPrivilegeError`). The test now proves both layers: the API role has no
+    `UPDATE`/`DELETE` privilege, and the owner (`dps_owner`, every privilege, `app.tenant_id`
+    bound because FORCE RLS applies to the owner too) is refused by the append-only trigger and
+    the row survives. The `dps_evidence` assertions are the plan's. No grant was widened.
+- `dps/db.py` `evaluate_rls_posture`: new keyword `worker_member: bool = False` (additive; existing
+  callers unaffected) → problem "runtime role is a member of dps_worker: worker_claim opens the
+  queue tables". `assert_rls_posture` observes it with `pg_has_role(current_user, 'dps_worker',
+  'MEMBER')`. Why: contract §2.3 "dps_app is never a member of dps_worker"; an API pool configured
+  with the worker login (an easy env copy-paste) would otherwise pass the posture while every
+  tenant's jobs became visible to API requests.
+- `dps/db.py` `assert_rls_posture`: `predicate_ok` requires `app.tenant_id` in the policy's
+  `WITH CHECK` as well as its `USING` (absent `WITH CHECK` = `USING` applies), and a partition leak
+  is any of `SELECT/INSERT/UPDATE/DELETE` (plan: `USING` and `SELECT` only). Why: a
+  `tenant_isolation` policy with `WITH CHECK (true)` lets a tenant write rows for another tenant,
+  and a direct `INSERT` grant on a partition bypasses the parent's RLS just as `SELECT` does.
+  Stricter, never weaker.
+- `tests/test_rls_posture_unit.py`: asserts `worker_member=True` is named (2 tests, as planned).
+- `tests/db/test_rls.py`: new `test_posture_names_each_tampered_fact` (fresh database, API pool
+  logged in as `dps_worker_login`): an open `USING`, an open `WITH CHECK`, `NO FORCE`, an extra
+  policy and a direct partition grant are each named. Role memberships are never altered (they are
+  cluster-wide). 14 db tests (plan: 13); with the unit file 16 (plan: 15).

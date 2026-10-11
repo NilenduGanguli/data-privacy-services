@@ -354,3 +354,111 @@ async def drop_expired_audit_partitions(conn: asyncpg.Connection, settings: Sett
             await conn.execute(f'DROP TABLE {schema}."{name}"')
             dropped.append(name)
     return dropped
+
+
+def evaluate_rls_posture(
+    *,
+    rls_enabled: bool,
+    rolsuper: bool,
+    rolbypassrls: bool,
+    policies_by_table: dict[str, list[str]],
+    predicate_ok: dict[str, bool],
+    forced: dict[str, bool],
+    partition_leaks: list[str],
+    worker_member: bool = False,
+) -> list[str]:
+    """Pure: observed RLS facts → violations (empty = sound).
+
+    ``predicate_ok[table]`` is true when ``tenant_isolation`` filters reads *and* checks writes on
+    ``app.tenant_id``; ``worker_member`` is true when the runtime (API) role is a member of
+    ``dps_worker``, whose ``worker_claim`` policies would open the queue tables across tenants.
+    """
+    problems: list[str] = []
+    if not rls_enabled:
+        problems.append("DPS_RLS_ENABLED is false")
+    if rolsuper:
+        problems.append("runtime role is a superuser: RLS is bypassed")
+    if rolbypassrls:
+        problems.append("runtime role has BYPASSRLS: RLS is bypassed")
+    if worker_member:
+        problems.append(
+            "runtime role is a member of dps_worker: worker_claim opens the queue tables"
+        )
+    for table in TENANT_TABLES:
+        names = policies_by_table.get(table, [])
+        if "tenant_isolation" not in names:
+            problems.append(f"{table}: missing tenant_isolation policy")
+        elif not predicate_ok.get(table, False):
+            problems.append(f"{table}: tenant_isolation does not reference app.tenant_id")
+        if not forced.get(table, False):
+            problems.append(f"{table}: row level security is not FORCE-enabled")
+        allowed = {"tenant_isolation", *ALLOWED_EXTRA_POLICIES.get(table, frozenset())}
+        extra = sorted(n for n in names if n not in allowed)
+        if extra:
+            problems.append(f"{table}: unexpected policies {extra}")
+    if partition_leaks:
+        problems.append(
+            "runtime role has direct privileges on audit partitions: "
+            + ", ".join(sorted(partition_leaks))
+        )
+    return problems
+
+
+def _guc_predicate(qual: str | None, with_check: str | None) -> bool:
+    """``USING`` names the GUC and ``WITH CHECK`` does too (absent = ``USING`` applies)."""
+    return TENANT_GUC in (qual or "") and (with_check is None or TENANT_GUC in with_check)
+
+
+async def assert_rls_posture(settings: Settings | None = None) -> list[str]:
+    """Observe the runtime role, policies, FORCE flags and partition grants; evaluate them."""
+    settings = settings or active_settings()
+    schema = settings.pg_schema
+    pool = await init_pool(settings)
+    async with pool.acquire() as conn:
+        role = await conn.fetchrow(
+            "SELECT rolsuper, rolbypassrls, pg_has_role(current_user, 'dps_worker', 'MEMBER') "
+            "AS worker_member FROM pg_roles WHERE rolname = current_user"
+        )
+        rows = await conn.fetch(
+            "SELECT tablename, policyname, qual, with_check FROM pg_policies WHERE schemaname = $1",
+            schema,
+        )
+        flags = await conn.fetch(
+            "SELECT c.relname, c.relforcerowsecurity AND c.relrowsecurity AS forced "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = $1 AND c.relname = ANY($2::text[])",
+            schema,
+            list(TENANT_TABLES),
+        )
+        parts = await conn.fetch(
+            "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
+            "WHERE i.inhparent = to_regclass($1)",
+            f'"{schema}".dps_audit_log',
+        )
+        leaks = [
+            f"{schema}.{p['relname']}"
+            for p in parts
+            if await conn.fetchval(
+                "SELECT has_table_privilege(current_user, $1, 'SELECT') "
+                "OR has_table_privilege(current_user, $1, 'INSERT') "
+                "OR has_table_privilege(current_user, $1, 'UPDATE') "
+                "OR has_table_privilege(current_user, $1, 'DELETE')",
+                f'"{schema}"."{p["relname"]}"',
+            )
+        ]
+    policies: dict[str, list[str]] = {}
+    predicate_ok: dict[str, bool] = {}
+    for r in rows:
+        policies.setdefault(r["tablename"], []).append(r["policyname"])
+        if r["policyname"] == "tenant_isolation":
+            predicate_ok[r["tablename"]] = _guc_predicate(r["qual"], r["with_check"])
+    return evaluate_rls_posture(
+        rls_enabled=settings.rls_enabled,
+        rolsuper=bool(role["rolsuper"]) if role else True,
+        rolbypassrls=bool(role["rolbypassrls"]) if role else True,
+        policies_by_table=policies,
+        predicate_ok=predicate_ok,
+        forced={r["relname"]: bool(r["forced"]) for r in flags},
+        partition_leaks=leaks,
+        worker_member=bool(role["worker_member"]) if role else True,
+    )
