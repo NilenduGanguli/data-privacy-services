@@ -219,3 +219,58 @@ failed against the plan's code for the reason named.
 - Count: `tests/documents/test_ocr_client.py` 24 passed; `test_ocr_mock.py` 1 passed with
   `DPS_TEST_REQUIRE_SERVICES=1`; `-m "docs or ocr"` 40 passed; suite 667 → 692 passed with the mock
   up (691 passed, 3 skipped without it).
+
+## Fix round 1 for Tasks 5–7 (review `M1-G2-review-r1`)
+
+Each fix has tests that failed before it. Public names and signatures are unchanged; the private
+helpers named below are new or changed.
+
+- **B1, `dps/layers/documents/ocr.py` `parse_read_result` fails closed on every unknown shape.** The
+  Task 7 version still read a `succeeded` body with no `analyzeResult`, `readResults: {}` or `[{}]`
+  (no `lines`), or a v4-style `readResult.blocks` body, as a page with **no words and no error**. It
+  also dropped a line whose text had no words. Such a page would reach the engine empty, its values
+  would stay visible in a redacted raster, and the report would pass. Now each of these raises
+  `ocr_protocol`:
+  - the result is not exactly one page: `analyzeResult.readResults` must be a one-element list
+    holding an object, because DPS sends one page image per call;
+  - that page has no `lines` list (a blank page is `"lines": []`, which the mock sends and which
+    was checked live), or its `unit` is not `pixel` or `inch`;
+  - a line or a word is not an object, or a line's `text` is not a string, or its `words` is not a
+    list;
+  - a word's `text` is not a string (a dict used to become its `repr`), or it is missing;
+  - a line's text is not carried by its words, compared with all whitespace removed. This covers
+    `words` that are missing, empty, only blank, or **partial** (`"SSN 123-45-6789"` with only the
+    word `SSN`). The partial case goes beyond the review: it is the same failure, a value that
+    could never be detected or boxed. Comparing without whitespace accepts scripts without spaces
+    (`株式会社` from `株式` + `会社`). Read v3.2 builds a line's text from its words, and so does
+    the mock. If a real deployment ever differs, every OCR'd page fails with `ocr_protocol`, which
+    is visible; values are never silently kept;
+  - `width`, `height` or `angle` is present but is not a finite JSON number. Strings such as
+    `"1700"` and `"nan"`, booleans, infinities and integers too large for a float are all refused.
+    A missing field still defaults to 0, and Task 9 (N8) cross-checks the size.
+
+  An integer too large for a float (`10**400`, which `json` accepts) no longer escapes as an uncoded
+  `OverflowError`. In a box it means "no usable box", which is `ocr_protocol`. In a page field it is
+  `ocr_protocol`. As a `confidence` it becomes `None`, like a non-finite confidence. `OverflowError`
+  is also in the parser's catch-all tuple. Tests:
+  `test_succeeded_results_without_exactly_one_page_fail_closed` (10 bodies),
+  `test_line_text_the_words_do_not_carry_fails_closed` (5),
+  `test_lines_and_words_that_agree_are_read`, `test_word_text_must_be_a_string` (4),
+  `test_page_fields_of_the_wrong_type_fail_closed` (12) and
+  `test_numbers_beyond_a_float_never_escape_uncoded`.
+- **B1 (optional part), `AzureReadClient._same_origin`.** An `Operation-Location` that the stdlib
+  cannot parse used to escape as an uncoded `ValueError`. Examples: port 99999, `:abc`, `[::1`, or a
+  tab that `urlsplit` strips so the port becomes `5000.evil.example`. These are now
+  `ocr_protocol: Operation-Location is not a valid URL`. The resolved URL is also parsed by httpx,
+  and the key is sent only when **both** parsers place it on the endpoint's origin. The method now
+  returns that `httpx.URL`, and the poll sends exactly the URL that was checked, so there is no
+  re-parse. The review's 19 location payloads give the same pinning: every request goes to the
+  configured origin, and the uncoded cases are now coded. The review's IDN full-width-dot case was
+  an artefact of its probe: `httpx.Response(headers=str)` cannot encode the header. Sent as raw
+  header bytes, as a server sends it, it is refused by the origin check, and the test sends it that
+  way. Test: `test_malformed_operation_locations_are_protocol_errors` (5).
+- **N5, `AzureReadClient._read`:** the submit loop no longer sleeps after its last attempt, which
+  only delayed the `ocr_throttled` error by up to 30 s. Test:
+  `test_throttled_submits_do_not_sleep_after_the_last_attempt`.
+- Live check against the lane's mock: a blank 800×600 PNG gives 0 words and `unit=pixel`, and three
+  200-dpi KYC renders give 16 words each. The integration test `test_ocr_mock` passes.

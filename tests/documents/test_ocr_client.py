@@ -279,3 +279,155 @@ def test_words_without_usable_geometry_fail_closed(box: list[object] | None) -> 
         parse_read_result(_one_word("123-45-6789", box))  # type: ignore[arg-type]
     assert exc.value.code == "ocr_protocol" and "123-45-6789" not in str(exc.value)
     assert parse_read_result(_one_word("  ", box)).words == []  # type: ignore[arg-type]
+
+
+def _page(**fields: object) -> dict[str, object]:
+    page: dict[str, object] = {"width": 10, "height": 10, "unit": "pixel", "lines": []}
+    page.update(fields)
+    return {"status": "succeeded", "analyzeResult": {"readResults": [page]}}
+
+
+def _line(text: object, words: object = None, **extra: object) -> dict[str, object]:
+    line: dict[str, object] = {"text": text, **extra}
+    if words is not None:
+        line["words"] = words
+    return line
+
+
+def _w(text: object, box: object = (0, 0, 1, 0, 1, 1, 0, 1)) -> dict[str, object]:
+    return {"text": text, "boundingBox": list(box) if isinstance(box, tuple) else box}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"status": "succeeded"},  # no analyzeResult at all
+        {"status": "succeeded", "analyzeResult": "x"},
+        {"status": "succeeded", "analyzeResult": {}},
+        {"status": "succeeded", "analyzeResult": {"readResults": {}}},
+        {"status": "succeeded", "analyzeResult": {"readResults": []}},
+        {"status": "succeeded", "analyzeResult": {"readResults": [{}]}},  # no lines
+        {"status": "succeeded", "analyzeResult": {"readResults": [{"lines": None}]}},
+        {"status": "succeeded", "analyzeResult": {"readResults": ["SSN 123-45-6789"]}},
+        # a v4-style body (another API version behind the gateway)
+        {
+            "status": "succeeded",
+            "readResult": {"blocks": [{"lines": [{"text": "SSN 123-45-6789"}]}]},
+        },
+        # DPS sends one page image: a second page is not a result for it
+        {"status": "succeeded", "analyzeResult": {"readResults": [{"lines": []}, {"lines": []}]}},
+    ],
+)
+async def test_succeeded_results_without_exactly_one_page_fail_closed(body: object) -> None:
+    # A shape the parser does not know must never read as "a page without words": that page's
+    # values would go undetected and stay visible in a redacted raster while the report passed.
+    with pytest.raises(OcrError) as exc:
+        await client(Script(accepted(), httpx.Response(200, json=body))).read(b"x")
+    assert exc.value.code == "ocr_protocol" and "123-45-6789" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        _line("SSN 123-45-6789", []),
+        _line("SSN 123-45-6789"),  # words missing
+        _line("SSN 123-45-6789", [_w("  ")]),  # only blank words
+        _line("SSN 123-45-6789", [_w("SSN")]),  # a word of the line is missing
+        _line("SSN 123-45-6789", [_w("SSN"), _w("123-45-678")]),
+    ],
+)
+def test_line_text_the_words_do_not_carry_fails_closed(line: dict[str, object]) -> None:
+    with pytest.raises(OcrError) as exc:
+        parse_read_result(_page(lines=[line]))
+    assert exc.value.code == "ocr_protocol" and "123-45-6789" not in str(exc.value)
+
+
+def test_lines_and_words_that_agree_are_read() -> None:
+    page = parse_read_result(
+        _page(
+            lines=[
+                _line("", []),  # a blank line without words is nothing to lose
+                _line("  "),
+                {"words": [_w("Ananya")]},  # no line text: the words are the text
+                _line("SSN 123-45-6789", [_w("SSN"), _w(" 123-45-6789 ")]),
+                _line("株式会社", [_w("株式"), _w("会社")]),  # scripts without spaces
+            ]
+        )
+    )
+    assert [w.text for w in page.words] == ["Ananya", "SSN", "123-45-6789", "株式", "会社"]
+    assert parse_read_result(_page()).words == []  # the mock's blank page: lines == []
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        _w({"v": "123-45-6789"}),
+        _w(123456789),
+        {"boundingBox": [0, 0, 1, 0, 1, 1, 0, 1]},  # no text
+        "123-45-6789",
+    ],
+)
+def test_word_text_must_be_a_string(word: object) -> None:
+    with pytest.raises(OcrError) as exc:
+        parse_read_result(_page(lines=[{"words": [word]}]))
+    assert exc.value.code == "ocr_protocol" and "123-45-6789" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"unit": "cm"},
+        {"unit": 1},
+        {"width": "1700"},
+        {"width": "nan"},
+        {"height": float("inf")},
+        {"angle": float("nan")},
+        {"width": True},
+        {"width": 10**400},  # an integer JSON accepts but no float holds
+        {"lines": "SSN"},
+        {"lines": ["SSN 123-45-6789"]},
+        {"lines": [{"text": 12, "words": []}]},
+        {"lines": [{"text": "x", "words": "x"}]},
+    ],
+)
+def test_page_fields_of_the_wrong_type_fail_closed(fields: dict[str, object]) -> None:
+    with pytest.raises(OcrError) as exc:
+        parse_read_result(_page(**fields))
+    assert exc.value.code == "ocr_protocol"
+
+
+def test_numbers_beyond_a_float_never_escape_uncoded() -> None:
+    with pytest.raises(OcrError) as box:
+        parse_read_result(_page(lines=[{"words": [_w("a", [10**400] + [0] * 7)]}]))
+    assert box.value.code == "ocr_protocol"
+    word = {**_w("a"), "confidence": 10**400}
+    assert parse_read_result(_page(lines=[{"words": [word]}])).words[0].confidence is None
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "http://ocr.test:99999/x",
+        "http://ocr.test:abc/x",
+        "http://[::1/x",
+        "http://ocr.test:5000\t.evil.example/x",
+        "http://ocr。test:5000/x",  # an IDN full-width dot
+    ],
+)
+async def test_malformed_operation_locations_are_protocol_errors(location: str) -> None:
+    # Raw header bytes, as a server sends them (httpx.Response(headers=str) refuses non-ASCII).
+    script = Script(
+        httpx.Response(202, headers=[(b"Operation-Location", location.encode("utf-8"))])
+    )
+    with pytest.raises(OcrError) as exc:
+        await client(script).read(b"x")
+    assert exc.value.code == "ocr_protocol" and len(script.requests) == 1
+
+
+async def test_throttled_submits_do_not_sleep_after_the_last_attempt() -> None:
+    script = Script(*[httpx.Response(429, headers={"Retry-After": "7"}) for _ in range(3)])
+    sleeps: list[float] = []
+    with pytest.raises(OcrError) as exc:
+        await client(script, sleeps=sleeps).read(b"x")
+    assert exc.value.code == "ocr_throttled" and len(script.requests) == 3
+    assert sleeps == [7.0, 7.0]

@@ -95,6 +95,11 @@ def _origin(url: str) -> tuple[str, str, int]:
     return parts.scheme, (parts.hostname or "").lower(), port
 
 
+def _httpx_origin(url: httpx.URL) -> tuple[str, str, int]:
+    port = url.port or (443 if url.scheme == "https" else 80)
+    return url.scheme, url.host.lower(), port
+
+
 def _status_error(stage: str, status: int) -> OcrError:
     if status in (401, 403):
         code = "ocr_auth"
@@ -119,64 +124,112 @@ def _retry_after(response: httpx.Response, default: float) -> float:
     return min(max(value, 0.0), 30.0)
 
 
+def _protocol(detail: str) -> OcrError:
+    return OcrError("ocr_protocol", detail)
+
+
 def _polygon(raw: object) -> tuple[float, ...] | None:
     """The first 8 numbers of a ``boundingBox`` when all are finite, else ``None``."""
     if not isinstance(raw, list | tuple) or len(raw) < 8:
         return None
     try:
         coords = tuple(float(v) for v in raw[:8])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return coords if all(math.isfinite(c) for c in coords) else None
+
+
+def _number(raw: object, default: float) -> float:
+    """A finite JSON number (``default`` when absent); anything else is a protocol error."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        raise _protocol("an OCR page field was not a number")
+    value = float(raw)  # OverflowError for an integer beyond a float: caught by the caller
+    if not math.isfinite(value):
+        raise _protocol("an OCR page field was not a finite number")
+    return value
+
+
+def _confidence(raw: object) -> float | None:
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    try:
+        value = float(raw)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _no_space(text: str) -> str:
+    return "".join(text.split())
 
 
 def parse_read_result(body: dict[str, Any]) -> OcrPage:
     """``analyzeResult.readResults[0]`` → :class:`OcrPage` (empty words for an empty page).
 
-    Fails closed with ``ocr_protocol``: a result of an unexpected shape, or a word with text but
-    no usable box (8 finite numbers), refuses the page. A word that cannot be placed could never
-    be boxed, so it is never silently dropped from what the engine sees.
+    Fails closed with ``ocr_protocol``: anything but exactly one page with a ``lines`` list, a
+    page field of the wrong type, a word without string text or without a usable box (8 finite
+    numbers), or a line whose text its words do not carry, refuses the page. A blank page is
+    ``"lines": []`` (what the mock and Azure send), so a shape this parser does not know never
+    reads as "a page without words" whose values would go undetected and stay visible.
     """
     try:
         return _parse_read_result(body)
     except OcrError:
         raise
-    except (AttributeError, TypeError, ValueError, KeyError, IndexError):
-        raise OcrError("ocr_protocol", "the OCR result had an unexpected shape") from None
+    except (AttributeError, TypeError, ValueError, KeyError, IndexError, OverflowError):
+        raise _protocol("the OCR result had an unexpected shape") from None
 
 
 def _parse_read_result(body: dict[str, Any]) -> OcrPage:
-    results = (body.get("analyzeResult") or {}).get("readResults") or []
-    if not results:
-        return OcrPage(width=0.0, height=0.0, unit="pixel", angle=0.0, words=[])
+    analyze = body.get("analyzeResult")
+    results = analyze.get("readResults") if isinstance(analyze, dict) else None
+    if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
+        # DPS sends one page image per call, so the result is exactly one page
+        raise _protocol("the OCR result did not hold exactly one page")
     first = results[0]
+    lines = first.get("lines")
+    if not isinstance(lines, list):
+        raise _protocol("the OCR page had no lines list")
+    unit = first.get("unit", "pixel")
+    if unit not in ("pixel", "inch"):
+        raise _protocol("the OCR page had an unknown unit")
     words: list[OcrWord] = []
-    for index, line in enumerate(first.get("lines") or []):
-        for word in line.get("words") or []:
-            text = str(word.get("text") or "").strip()
+    for index, line in enumerate(lines):
+        if not isinstance(line, dict):
+            raise _protocol("an OCR line was not an object")
+        line_text = line.get("text", "")
+        raw_words = line.get("words", [])
+        if not isinstance(line_text, str) or not isinstance(raw_words, list):
+            raise _protocol("an OCR line had a field of the wrong type")
+        carried: list[str] = []
+        for word in raw_words:
+            if not isinstance(word, dict) or not isinstance(word.get("text"), str):
+                raise _protocol("an OCR word had no text string")
+            text = word["text"].strip()
             if not text:
                 continue
             coords = _polygon(word.get("boundingBox"))
             if coords is None:
-                raise OcrError("ocr_protocol", "an OCR word had no usable bounding box")
-            conf = word.get("confidence")
+                raise _protocol("an OCR word had no usable bounding box")
+            carried.append(text)
             words.append(
                 OcrWord(
                     text=text,
                     polygon=coords,
-                    confidence=(
-                        float(conf)
-                        if isinstance(conf, int | float) and math.isfinite(conf)
-                        else None
-                    ),
+                    confidence=_confidence(word.get("confidence")),
                     line=index,
                 )
             )
+        if line_text.strip() and _no_space(line_text) != "".join(map(_no_space, carried)):
+            # text the words do not carry could never be detected or boxed
+            raise _protocol("an OCR line held text its words did not carry")
     return OcrPage(
-        width=float(first.get("width") or 0),
-        height=float(first.get("height") or 0),
-        unit=str(first.get("unit") or "pixel"),
-        angle=float(first.get("angle") or 0.0),
+        width=_number(first.get("width"), 0.0),
+        height=_number(first.get("height"), 0.0),
+        unit=unit,
+        angle=_number(first.get("angle"), 0.0),
         words=words,
     )
 
@@ -258,7 +311,7 @@ class AzureReadClient:
     async def _read(self, image: bytes, *, deadline: float) -> OcrPage:
         headers = {KEY_HEADER: self._key}
         response: httpx.Response | None = None
-        for _ in range(MAX_SUBMIT_ATTEMPTS):
+        for attempt in range(1, MAX_SUBMIT_ATTEMPTS + 1):
             try:
                 response = await self._client.post(
                     self._base + ANALYZE_PATH,
@@ -269,8 +322,12 @@ class AzureReadClient:
                 raise OcrError(
                     "ocr_unavailable", f"analyze request failed ({type(exc).__name__})"
                 ) from None
-            if response.status_code not in (429, 503) or self._clock() >= deadline:
-                break
+            if (
+                response.status_code not in (429, 503)
+                or attempt == MAX_SUBMIT_ATTEMPTS
+                or self._clock() >= deadline
+            ):
+                break  # no sleep after the last attempt: it would only delay the error
             await self._sleep(_retry_after(response, 1.0))
         assert response is not None
         if response.status_code != 202:
@@ -305,16 +362,26 @@ class AzureReadClient:
                 raise OcrError("ocr_protocol", "unexpected OCR status")
             delay = self._poll
 
-    def _same_origin(self, location: str) -> str:
+    def _same_origin(self, location: str) -> httpx.URL:
+        """The poll URL: ``location`` resolved against the endpoint. Refused unless the stdlib
+        parser and httpx (which sends the key) both place it on the endpoint's origin; a URL
+        either cannot parse (a bad port, an unclosed ``[``) is a protocol error."""
         if not location:
             raise OcrError("ocr_protocol", "analyze response had no Operation-Location")
-        url = urljoin(self._base + "/", location)
-        if _origin(url) != self._origin:
+        try:
+            url = urljoin(self._base + "/", location)
+            target = httpx.URL(url)
+            same = _origin(url) == self._origin and _httpx_origin(target) == _httpx_origin(
+                httpx.URL(self._base)
+            )
+        except (ValueError, httpx.InvalidURL):  # UnicodeError is a ValueError
+            raise OcrError("ocr_protocol", "Operation-Location is not a valid URL") from None
+        if not same:
             raise OcrError(
                 "ocr_protocol",
                 "Operation-Location points at another host; the key is not sent there",
             )
-        return url
+        return target
 
     async def probe(self) -> tuple[bool, str]:
         """``(ok, detail)`` for /readyz: GET the health path (``configured`` when there is none)."""
