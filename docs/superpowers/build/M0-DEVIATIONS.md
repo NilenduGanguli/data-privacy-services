@@ -72,5 +72,6 @@ are preserved unless a section says otherwise.
   `Family`, `Locator.whole`, `Plan.reversible_count`, `Plan.methods_used`) per the conventions.
 - Tests added: `test_identifiers_of_a_natural_person_are_critical` (taxonomy, fixed list),
   `test_every_flattened_path_reads_back_including_odd_keys` and `test_malformed_paths_are_refused`
-  (jsonpath). Totals: plan expected "27 passed"; the plan's own tests total 30 after Task 4
-  (1+7+8+3+4+3+3+... the plan's figure was an arithmetic slip); with the added tests, 34.
+  (jsonpath). Totals: the plan expected "27 passed"; the plan's own tests total 29 after Task 4
+  (package 1 + config 7 + posture 8 + observability 3 + taxonomy 4 + findings 3 + jsonpath 3 —
+  an arithmetic slip in the plan); with the 5 tests added in Tasks 2-4, 34.
