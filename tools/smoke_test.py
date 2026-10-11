@@ -18,9 +18,11 @@ reported by exception class only.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import httpx
 
@@ -48,7 +50,19 @@ SAMPLE = {
     "notes": "Mail ann.k@example-mail.in about 1988-03-14",
 }
 
+# The console Playground's own samples (the file the Playground imports).
+PLAYGROUND = json.loads(
+    (Path(__file__).resolve().parents[1] / "frontend/src/lib/samples.json").read_text("utf-8")
+)
+NAME_PARTS = ("ananya", "krishnan")
+
 results: list[tuple[str, bool, str]] = []
+
+
+def _flip(text: str) -> str:
+    """``text`` with its middle character changed (a mistyped key)."""
+    i = len(text) // 2
+    return text[:i] + ("A" if text[i] != "A" else "B") + text[i + 1 :]
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -131,6 +145,41 @@ def main() -> None:
             "reveal restores original",
             rev.status_code == 200 and rev.json()["result"] == SAMPLE,
             f"HTTP {rev.status_code}, {rev.json().get('revealed') if rev.status_code == 200 else '-'} values revealed",
+        )
+
+        wrong_key = {**body["key_material"], "dek": _flip(body["key_material"]["dek"])}
+        refused = c.post(
+            "/api/v1/reveal",
+            json={
+                "data": body["result"],
+                "key_material": wrong_key,
+                "reveal_hints": body["reveal_hints"],
+            },
+            headers=H,
+        )
+        check(
+            "reveal refuses a wrong key",
+            refused.status_code == 400
+            and "check value" in refused.json().get("detail", "")
+            and SAMPLE["aadhaar"] not in refused.text
+            and wrong_key["dek"] not in refused.text,
+            f"HTTP {refused.status_code}",
+        )
+
+        ptext = c.post("/api/v1/obfuscate", json={"text": PLAYGROUND["text"]}, headers=H)
+        pbody = ptext.json() if ptext.status_code == 200 else {}
+        pver = pbody.get("report", {}).get("verification") or {}
+        coverage = pver.get("coverage") or {}
+        check(
+            "playground text sample: no name in output, coverage stated",
+            ptext.status_code == 200
+            and not any(part in pbody["result"].lower() for part in NAME_PARTS)
+            and any(f["entity_type"] == "PERSON_NAME" for f in pbody["findings"])
+            and pver["passed"]
+            and (pver["status"] == "partial") == bool(coverage["gaps"])
+            and (coverage["ner"] == "on" or bool(coverage["gaps"])),
+            f"HTTP {ptext.status_code}, status={pver.get('status')}, ner={coverage.get('ner')}, "
+            f"gaps={len(coverage.get('gaps', []))}",
         )
 
         again = c.post(

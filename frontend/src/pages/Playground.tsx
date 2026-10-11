@@ -1,21 +1,41 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { EntityChip, Tone } from '../components/Chip';
 import { useSettings } from '../hooks/useSettings';
 import { api, ApiError, type Policy } from '../lib/api';
-import type { DetectOut, Finding, Preset, Report, TransformOut } from '../lib/types';
+import samples from '../lib/samples.json';
+import type { DetectOut, Finding, Preset, Report, TransformOut, Verification } from '../lib/types';
 
-const SAMPLE_JSON = JSON.stringify({
-  customer_id: 'CUST-884120', full_name: 'Ananya Krishnan', dob: '1988-03-14', aadhaar: '2341 2341 2346',
-  pan: 'ACUPA7085R', email: 'ananya.k@example-mail.in', phone: '+91 98451 20377',
-  card: { pan: '4111 1111 1111 1111', expiry: '09/28' }, address: '14 Lavelle Road, Bengaluru 560001',
-  risk_score: 712, notes: 'Called on 2026-03-14 about card ending 1111; mail ananya.k@example-mail.in.',
-}, null, 2);
-const SAMPLE_TEXT = 'Ananya Krishnan (ananya.k@example-mail.in, +91 98451 20377) asked to update her Aadhaar 2341 2341 2346 before 2026-03-14.';
+// The samples live in samples.json so the backend tests run these exact inputs
+// (tests/test_playground_samples.py): a fictional customer with checksum-valid identifiers.
+const SAMPLE_JSON = JSON.stringify(samples.json, null, 2);
+const SAMPLE_TEXT = samples.text;
 
 type Mode = 'detect' | 'obfuscate' | 'synthesize';
 type Kind = 'json' | 'text';
 
 function pretty(v: unknown): string { return typeof v === 'string' ? v : JSON.stringify(v, null, 2); }
+
+function plural(n: number, word: string): string { return `${n} ${word}${n === 1 ? '' : 's'}`; }
+
+/** The sweep only checks values the detectors found, so the verdict always says how many, and a
+ *  sweep with coverage gaps (free text without NER) is "partial", never an unqualified pass. */
+function VerificationRows({ v }: { v: Verification | null }): JSX.Element {
+  if (!v) return <><span className="k">verification</span><span>—</span></>;
+  const checked = `${plural(v.checked, 'detected value')} checked · none found in output`;
+  const verdict = v.status === 'failed'
+    ? <Tone tone="rose">failed · {plural(v.hits.length, 'original')} found in output</Tone>
+    : v.status === 'partial'
+      ? <><Tone tone="amber">partial coverage</Tone> {checked}</>
+      : <><Tone tone="emerald">passed</Tone> {checked}</>;
+  const cov = v.coverage;
+  return (
+    <>
+      <span className="k">verification</span><span>{verdict}</span>
+      {cov && <><span className="k">coverage</span><span>{cov.detectors.join(' + ')} · NER {cov.ner}{cov.free_text_fields > 0 ? ` · ${plural(cov.free_text_fields, 'free-text field')}` : ''}</span></>}
+      {cov?.gaps.map((gap) => <Fragment key={gap}><span className="k">not covered</span><span style={{ color: 'var(--amber)' }}>{gap}</span></Fragment>)}
+    </>
+  );
+}
 
 function ReportLine({ r }: { r: Report }): JSX.Element {
   return (
@@ -23,7 +43,7 @@ function ReportLine({ r }: { r: Report }): JSX.Element {
       <span className="k">findings</span><span>{r.findings_total} · {Object.entries(r.findings_by_type).map(([k, v]) => `${k} ${v}`).join(' · ')}</span>
       <span className="k">methods</span><span>{Object.entries(r.methods_used).map(([k, v]) => `${k} ×${v}`).join(' · ') || '—'}</span>
       {Object.keys(r.fallbacks).length > 0 && <><span className="k">fallbacks</span><span>{Object.entries(r.fallbacks).map(([k, v]) => `${k} ×${v}`).join(' · ')}</span></>}
-      <span className="k">verification</span><span>{r.verification ? (r.verification.passed ? <Tone tone="emerald">leakage sweep passed · 0 originals in output</Tone> : <Tone tone="rose">failed</Tone>) : '—'}</span>
+      <VerificationRows v={r.verification} />
       <span className="k">LLM</span><span>{r.llm.calls} calls · raw PII sent: <b style={{ color: 'var(--emerald)' }}>{r.llm.raw_pii_sent}</b></span>
       <span className="k">timing</span><span>{r.duration_ms} ms · policy {r.policy} · {r.policy_hash.slice(0, 12)}</span>
     </div>
@@ -134,7 +154,12 @@ export function Playground(): JSX.Element {
               {out.res.key_material && (
                 <div className="card keycard" style={{ marginTop: 12, padding: '12px 14px' }}>
                   <div className="card-head" style={{ marginBottom: 6 }}><div className="card-title">Key material · returned once, never stored</div><Tone tone="teal">{out.res.key_material.alg}</Tone></div>
-                  <div className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>kid {out.res.key_material.kid} · dek {out.res.key_material.dek ? `${out.res.key_material.dek.slice(0, 6)}…${out.res.key_material.dek.slice(-4)}` : 'wrapped'} · scope {out.res.key_material.consistency_scope}</div>
+                  <div className="mono" style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '2px 12px' }}>
+                    <span style={{ whiteSpace: 'nowrap' }}>kid {out.res.key_material.kid}</span>
+                    <span style={{ whiteSpace: 'nowrap' }}>dek {out.res.key_material.dek ? `${out.res.key_material.dek.slice(0, 6)}…${out.res.key_material.dek.slice(-4)}` : 'wrapped'}</span>
+                    {out.res.key_material.kcv && <span style={{ whiteSpace: 'nowrap' }} title="Key check value: reveal refuses a key that does not match it">check {out.res.key_material.kcv}</span>}
+                    <span style={{ whiteSpace: 'nowrap' }}>scope {out.res.key_material.consistency_scope}</span>
+                  </div>
                   <div className="row" style={{ marginTop: 8 }}>
                     <button className="btn btn-sm" onClick={() => navigator.clipboard?.writeText(JSON.stringify(out.res.key_material))}>Copy key material</button>
                     <button className="btn btn-sm" onClick={() => navigator.clipboard?.writeText(JSON.stringify(out.res.reveal_hints))}>Copy reveal hints</button>
