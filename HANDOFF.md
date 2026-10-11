@@ -1,10 +1,14 @@
 # HANDOFF — data-privacy-services (DPS)
 
-Last verified: 2026-10-11 at `4c86dc7` (code; the docs commit on top changes no code) · gates:
-`pytest -q` (434 passed, 1 skipped: the Presidio test without the `ner` extra), `ruff check dps tests tools`,
-`mypy dps`, `cd frontend && npm run build`, `docker compose up --build -d` + `python tools/smoke_test.py`
-(13/13). Also checked that day: the `WITH_NER=1` image (13/13, `ner=ok`), a `linux/amd64` build, and
-the stack with `DPS_FPE_ENABLED=false` (13/13, `det_token` fallbacks reported).
+Last verified: 2026-10-12 at `1bac79b` = tag `v0.1.0-m0` (`48d9425`) + the post-M0 fixes (SEC-1 COIN
+mint TLS, O1/O2 locale and phone evidence, O5 session-only console key, lane-safe compose, the D2
+idempotency amendment; this file's refresh on top changes no code) · gates: `ruff format dps tests`,
+`ruff check dps tests`, `mypy dps`, `pytest -q` (518 passed, 2 skipped: the two tests that need the `ner`
+extra), `cd frontend && npm run build`, `docker compose up --build -d` + `python tools/smoke_test.py`
+(15/15, `/readyz` `coin_tls: verified`), and a headless browser check of the console's "Remember key on
+this device" storage behaviour. Checked on 2026-10-11 during the M0 verification and not repeated
+since: the `WITH_NER=1` image (`ner=ok`), a `linux/amd64` build, and the stack with
+`DPS_FPE_ENABLED=false` (`det_token` fallbacks reported).
 
 **Update rule (the Wega rule):** update this file in the same change as anything that alters build or
 deploy facts — image, ports, env, extras, probes, labels.
@@ -109,6 +113,10 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 
 Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`.
+
+Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
+(default `local`) and the host-port variables `DPS_APP_PORT` (8400; the others arrive with their
+services, §3 "Lane-safe stacks").
 
 ## 5. Probes and ops surfaces
 
