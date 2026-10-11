@@ -768,3 +768,27 @@ Public names: `ApplyOptions`, `ApplyResult`, `RevealHint`, `apply_plan`, `reveal
 - Not done (spec §5.7 also says "plus detectors re-run on the output"): the M0 plan's sweep is
   match-based only. This is listed as an open issue for Task 22 / M1.
 - Count: the plan's 3 + 8 added = 11 in the file; suite 302 passed, 1 skipped.
+
+### Task 18 — fix round 1 (review G3 B1)
+
+- **The kept-value allowance is now per output leaf, not global.** The rule above ("a kept
+  value is allowed wherever it appears") failed open: with the `$.notes` e-mail span kept, an
+  untransformed `$.email` field holding the same address passed the sweep (`passed=True,
+  hits=[]`). An untransformed `$.dob` passed the same way whenever its date was kept in free
+  text (gdpr-pseudonymise has `DATE: keep`). That contradicts spec §5.7.
+- New rule in `verify_output`: a kept locator's value is allowed **only in the output leaf at
+  that locator's path** (output paths equal input paths, because apply rewrites leaves in place
+  and never renames keys). A hit at any other leaf, list element or object key still counts.
+  Object keys are never excused, even the key directly above the kept leaf. `kept`, the
+  signature and the `Verification` shape are unchanged.
+- Granularity is the leaf, not the span: inside the leaf that holds the kept span, the value is
+  allowed wherever it occurs. For a text payload (one leaf, `$`) this is the same as before.
+  Tightening it to an occurrence count would risk false strict-mode refusals once synthesize
+  rewrites text, so it is left as an open issue.
+- Tests: `test_a_value_kept_on_purpose_is_not_a_leak_wherever_it_appears` is renamed
+  `…_where_it_was_kept` (unchanged body, still passes). Added
+  `test_a_kept_span_does_not_excuse_the_same_value_left_in_another_field` (the review's
+  reproduction, plus the DOB case) and
+  `test_a_kept_span_does_not_excuse_the_value_reappearing_elsewhere` (a copy in a list, and the
+  value as an object key). Both fail against the previous `verify.py`.
+- Count: 13 tests in the file; suite 304 passed, 1 skipped.

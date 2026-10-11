@@ -130,7 +130,7 @@ def test_full_width_and_compatibility_forms_are_folded() -> None:
     assert normalise("Ⅻ ＡＢＣ") == normalise("XII abc")
 
 
-def test_a_value_kept_on_purpose_is_not_a_leak_wherever_it_appears() -> None:
+def test_a_value_kept_on_purpose_is_not_a_leak_where_it_was_kept() -> None:
     # DOB date-shifted in $.dob, but the same date kept (DATE: keep) inside the notes span
     data = {"dob": "1988-03-14", "notes": "seen 1988-03-14 at branch", "ssn": "123-45-6789"}
     findings = [
@@ -142,6 +142,41 @@ def test_a_value_kept_on_purpose_is_not_a_leak_wherever_it_appears() -> None:
     out = {"dob": "1988-07-02", "notes": "seen 1988-03-14 at branch", "ssn": "123-45-6789"}
     result = verify_output(originals, out, kept={("$.notes", 5, 15)})
     assert not result.passed and result.hits == [{"path": "$.ssn", "entity_type": "SSN"}]
+
+
+def test_a_kept_span_does_not_excuse_the_same_value_left_in_another_field() -> None:
+    # review G3 B1: $.email was meant to be transformed but came out untouched, while the same
+    # address was kept on purpose inside the notes span. The whole field is still a leak.
+    originals = collect_originals(FINDINGS, data=DATA)
+    out = {**DATA, "ssn": "987-65-4321"}  # $.email untransformed; notes span kept
+    result = verify_output(originals, out, kept={("$.notes", 5, 26)})
+    assert not result.passed and result.checked == 2
+    assert result.hits == [{"path": "$.email", "entity_type": "EMAIL"}]
+    # the same holds for an untransformed DOB whose date is kept in free text (DATE: keep)
+    data = {"dob": "1988-03-14", "notes": "seen 1988-03-14 at branch"}
+    findings = [_finding("$.dob", "DATE_OF_BIRTH"), _finding("$.notes", "DATE", 5, 15)]
+    dob_leak = verify_output(
+        collect_originals(findings, data=data), data, kept={("$.notes", 5, 15)}
+    )
+    assert not dob_leak.passed
+    assert dob_leak.hits == [{"path": "$.dob", "entity_type": "DATE_OF_BIRTH"}]
+
+
+def test_a_kept_span_does_not_excuse_the_value_reappearing_elsewhere() -> None:
+    # the kept value is allowed only in the leaf it was kept in: not in a copy at another path,
+    # a list element, or an object key (keys are never kept), even the key above the kept leaf
+    originals = collect_originals(FINDINGS, data=DATA)
+    clean = {"email": "x@example-mail.in", "ssn": "987-65-4321", "notes": DATA["notes"]}
+    kept = {("$.notes", 5, 26)}
+    assert verify_output(originals, clean, kept=kept).passed
+    copied = verify_output(originals, {**clean, "audit": ["ann.k@example-mail.in"]}, kept=kept)
+    assert copied.hits == [{"path": "$.audit[0]", "entity_type": "EMAIL"}]
+    email = "ann.k@example-mail.in"
+    path = f"$['{email}']"
+    keyed = [(_finding("$.email", "EMAIL"), email), (_finding(path, "EMAIL", 5, 26), email)]
+    out = {"email": "x@example-mail.in", email: f"mail {email}"}
+    as_key = verify_output(keyed, out, kept={(path, 5, 26)})
+    assert as_key.hits == [{"path": path, "entity_type": "EMAIL"}]
 
 
 def test_originals_in_output_keys_are_found() -> None:
