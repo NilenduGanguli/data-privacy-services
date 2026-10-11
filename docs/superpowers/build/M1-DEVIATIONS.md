@@ -612,3 +612,31 @@ changed; interfaces (names and signatures) are unchanged.
 - Review nits N1, N3–N8 are not addressed in this round. N2 is partly covered by (a): a value that
   a misplaced box leaves whole on the page is found. A value it leaves only in part is still not
   found.
+
+### Beyond the review: text outside a crop box crashed redaction (found by the B1 sweep)
+
+- **Symptom.** `cropped_pdf` keeps its first line in the text layer, above the crop box: it is
+  detected but never drawn. Its finding box came out *inverted* (`y1 < y0`), for two reasons:
+  - `BBox.padded` clamped each side on its own;
+  - the box lay wholly above the page.
+
+  Two failures followed:
+  - `/documents/detect` returned that inverted box;
+  - with `redacted_pdf`, `paint_boxes` raised an uncoded `ValueError` (HTTP 500).
+
+  This was present on HEAD before this round, with or without OCR (Tasks 4 and 8).
+- **Fix.**
+  - `BBox.padded` (`models.py`) clamps every coordinate to the page and never lets a far side pass
+    its near side. A box off the page becomes an empty box on the page's edge.
+  - `paint_boxes` (`redact.py`) skips boxes without area. They cover nothing that is drawn, while
+    PIL would have painted a 1-px line.
+  - `RedactedOutput.boxes`, and so `RedactionReport.boxes` and `dps_redacted_boxes_total`, counts
+    only the boxes actually burned in.
+  - The finding keeps its (empty) box, so it is "located" and `redaction_unlocated` does not fire.
+    The redacted raster cannot show text outside the crop box.
+- **Tests (each fails before the fix):**
+  - `test_models.py::test_a_box_off_the_page_pads_to_an_empty_box_on_its_edge`;
+  - `test_redact.py::test_empty_boxes_paint_nothing`;
+  - `test_pipeline.py::test_text_outside_a_cropped_page_does_not_break_redaction`.
+- **Count:** suite 803 → 806 passed, 2 skipped. `-m "docs or ocr"` gives 111 passed. The real-mock
+  sweep (12 fixtures × 7 policies × 2 modes) now passes 168 of 168.

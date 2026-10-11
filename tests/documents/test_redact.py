@@ -215,3 +215,12 @@ def test_only_pdf_and_image_documents_are_redacted() -> None:
     with pytest.raises(DocumentError) as exc:
         _redact(doc, plan)
     assert exc.value.code == "redaction_unsupported_format"
+
+
+def test_empty_boxes_paint_nothing() -> None:
+    """A box with no area (a finding outside the page) has nothing on the raster to cover."""
+    from dps.layers.documents.redact import paint_boxes
+
+    image = Image.new("RGB", (100, 100), "white")
+    paint_boxes(image, [BBox(x0=10, y0=0, x1=50, y1=0)], width_pt=100, height_pt=100)
+    assert image.getextrema() == ((255, 255),) * 3

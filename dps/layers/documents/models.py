@@ -54,12 +54,15 @@ class BBox(BaseModel):
         return w * h if w > 0 and h > 0 else 0.0
 
     def padded(self, pad: float, width: float, height: float) -> BBox:
-        """Grown by ``pad`` on every side, clamped to the page."""
+        """Grown by ``pad`` on every side, clamped to the page. A box off the page (text outside
+        a crop box) becomes an empty box on the page's edge, never an inverted one."""
+        x0 = min(max(0.0, self.x0 - pad), width)
+        y0 = min(max(0.0, self.y0 - pad), height)
         return BBox(
-            x0=max(0.0, self.x0 - pad),
-            y0=max(0.0, self.y0 - pad),
-            x1=min(width, self.x1 + pad),
-            y1=min(height, self.y1 + pad),
+            x0=x0,
+            y0=y0,
+            x1=max(min(width, self.x1 + pad), x0),
+            y1=max(min(height, self.y1 + pad), y0),
         )
 
 

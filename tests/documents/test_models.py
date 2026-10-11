@@ -35,6 +35,15 @@ def test_bbox_helpers() -> None:
     assert a.padded(3, 12, 12) == BBox(x0=0, y0=0, x1=12, y1=12)
 
 
+def test_a_box_off_the_page_pads_to_an_empty_box_on_its_edge() -> None:
+    """Text outside a cropped page's crop box keeps its findings but is never drawn: its padded
+    box is empty on the page's edge, never inverted (an inverted box failed redaction)."""
+    above = BBox(x0=117, y0=-33, x1=225, y1=-17).padded(1.5, 400, 600)
+    assert above == BBox(x0=115.5, y0=0, x1=226.5, y1=0) and above.area() == 0
+    beside = BBox(x0=410, y0=20, x1=450, y1=30).padded(1.5, 400, 600)
+    assert beside.x0 == beside.x1 == 400 and beside.area() == 0
+
+
 def test_request_validation_messages_never_echo_inputs() -> None:
     with pytest.raises(ValidationError) as exc:
         DocumentRequest.model_validate(

@@ -82,10 +82,13 @@ class OutputInspection:
 def paint_boxes(
     image: Image.Image, boxes: Iterable[BBox], *, width_pt: float, height_pt: float
 ) -> None:
-    """Fill every box (points) on ``image`` (pixels), rounding outward."""
+    """Fill every box (points) on ``image`` (pixels), rounding outward. A box without area (a
+    finding outside the page) covers nothing that is drawn, so it is skipped."""
     sx, sy = image.width / width_pt, image.height / height_pt
     draw = ImageDraw.Draw(image)
     for b in boxes:
+        if b.area() <= 0:
+            continue
         draw.rectangle(
             (
                 math.floor(b.x0 * sx),
@@ -158,7 +161,7 @@ def redact_document(
         raise DocumentError(
             "redaction_unsupported_format", "redacted PDFs are produced for PDF and image inputs"
         )
-    return RedactedOutput(pdf=data, boxes=sum(len(p.boxes) for p in plan))
+    return RedactedOutput(pdf=data, boxes=sum(1 for p in plan for b in p.boxes if b.area() > 0))
 
 
 def _form_text_operators(resources: Any, seen: set[int], depth: int = 0) -> int:

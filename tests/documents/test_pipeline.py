@@ -26,6 +26,7 @@ from tests.documents.fixtures import (  # noqa: E402
     FakeOcr,
     ScreenOcr,
     broken_tounicode_pdf,
+    cropped_pdf,
     csv_document,
     docx_document,
     hybrid_pdf,
@@ -584,3 +585,25 @@ async def test_a_redacted_value_another_page_shows_is_a_leak(
         )
     assert exc.value.code == "leakage" and "page(s) 2;" in exc.value.detail
     assert sorted(len(r) for r in ocr.reads) == [0, 2]  # page 1 boxed it, page 2 shows it
+
+
+async def test_text_outside_a_cropped_page_does_not_break_redaction(
+    engine: PrivacyEngine, settings: Settings
+) -> None:
+    """The first line of ``cropped_pdf`` lies above its crop box: in the text layer, never drawn.
+    Its finding keeps an empty box on the page's edge and the redaction paints nothing for it
+    (before: an inverted box, and an uncoded ValueError — HTTP 500 — from the painter)."""
+    out = await pipe(engine, settings).run(
+        mode="obfuscate",
+        content=cropped_pdf(),
+        filename=None,
+        content_type=None,
+        request=req(redacted_pdf=True),
+    )
+    boxes = [b for f in out.pages[0].findings for b in f.boxes]
+    assert all(b.x0 <= b.x1 and b.y0 <= b.y1 for b in boxes)
+    assert any(b.y0 == b.y1 == 0 for b in boxes)  # the name above the crop box
+    redaction = out.document.redaction
+    assert out.redacted_pdf is not None and redaction is not None and redaction.passed
+    painted = [b for f in out.pages[0].findings if f.redacted for b in f.boxes if b.y1 > b.y0]
+    assert redaction.boxes == len(painted)  # what was burned in
