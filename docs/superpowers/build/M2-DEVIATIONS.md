@@ -385,10 +385,12 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   them), `query_to_xml*` and `cursor_to_xml*` (they execute SQL from a string, which with bound
   literals would run arbitrary statements past this validation, e.g. `set_config`), `pg_notify`,
   `pg_logical_emit_message`, `pg_switch_wal`, `pg_create_restore_point`, `pg_file_*`,
-  `pg_stat_reset*`. Exported as `DENIED_FUNCTION_PREFIXES`. Review G3 r1 (B1) added the rest of
-  the SQL-from-a-string class: `ts_stat*` and `ts_rewrite*` (core PostgreSQL, executable by any
-  role), `crosstab*` and `connectby*` (tablefunc) and `pg_background*` (its session is not
-  read-only); see "Review G3 r1 fixes" below.
+  `pg_stat_reset*`. Exported as `DENIED_FUNCTION_PREFIXES`. Review G3 r1 (B1) and r2 (B1) added
+  the known core and contrib members of the SQL-from-a-string class: `ts_stat*` and
+  `ts_rewrite*` (core PostgreSQL, executable by any role), `crosstab*` and `connectby*`
+  (tablefunc), `xpath_table` (xml2) and `pg_background*` (its session is not read-only). A
+  deny-list cannot cover user-defined functions or third-party extensions; see "Review G3 r1
+  fixes" and "Review G3 r2 fixes" below for the residual.
 - `referenced_columns` ignores columns inside a subquery (they belong to the subquery's tables),
   so `customer_id IN (SELECT a.customer_id FROM bank.accounts a …)` is not refused as an unknown
   column. Projected `columns` are validated with `quote_ident` and folded for Oracle.
@@ -501,3 +503,48 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   string. The connector's source role must stay least-privilege (no `EXECUTE` on such functions,
   no `dblink`/`pg_background` installed for it); an allow-list of functions for selections would
   need a contract change (§5.2 specifies a deny-list).
+
+## Review G3 r2 fixes (Tasks 10–14)
+
+- **B1, `xpath_table` (PostgreSQL contrib `xml2`) executed a SQL string past the deny-list.**
+  `xpath_table(key, document, relation, xpaths, criteria)` builds
+  `SELECT <key>, <document> FROM <relation> WHERE <criteria>` from its text arguments and runs it
+  through SPI. xml2 ships in the lane's `postgres:16-alpine` image and, once installed, grants
+  `EXECUTE` to PUBLIC. Validation accepted it and literal binding turned the relation text into a
+  parameter, so `compile_where`/`compile_query` produced `XPATH_TABLE($1..$5)`; the reviewer lifted
+  `statement_timeout` to 0 through `set_config` and ran `pg_sleep(0.5)` as `dps_app` inside
+  `BEGIN READ ONLY` on the lane's PG16. Round 1's claim that it "added the rest of the
+  SQL-from-a-string class" was wrong; the wording above now says "the known core and contrib
+  members". `DENIED_FUNCTION_PREFIXES` now also holds `xpath_table` (xml2's other functions,
+  `xpath_string/number/bool/list/nodeset`, `xml_valid`, `xml_encode_special_chars` and
+  `xslt_process`, take a document, not SQL, and stay allowed, as do core `xpath`/`xpath_exists`).
+  Tests (all failed before the fix with `DID NOT RAISE`, except the document-function guard):
+  `test_functions_that_run_a_sql_string_are_denied_in_where_and_query_form` +8 spellings
+  (plain, upper-case, mixed-case, `public.`/`PUBLIC.`-qualified, quoted, quoted-qualified; each in
+  two where forms and four query forms, through `validate_selection` and `parameterize_literals`),
+  `test_a_bound_sql_string_never_compiles_into_a_sql_executing_function` +3 (the bound `:q`
+  attack through `compile_where` and `compile_query`), `xpath_table` added to
+  `test_the_sql_string_functions_are_on_the_exported_deny_list`, and
+  `test_the_xpath_table_relation_attack_is_refused_at_every_stage` (the reviewer's bound-`:rel`
+  reproduction through `validate_selection`, `parameterize_literals`, `compile_where` and
+  `compile_query`, value-free message), plus the guard
+  `test_xml_functions_that_take_a_document_are_not_mistaken_for_xpath_table`. No existing test
+  changed or loosened.
+- How "known core and contrib members" was checked: in a scratch database on the lane's PG16
+  (dropped afterwards), every extension in `pg_available_extensions` that the image can create
+  was created (46 of the 60 not installed by default; the other 14 are PL/Perl, PL/Python,
+  PL/Tcl and their transforms, whose libraries the alpine image lacks), and every extension
+  function taking a `text`/`varchar`/`name`/`regclass` argument that PUBLIC can execute was read
+  by hand. The only SQL-string executors are `dblink*`, `crosstab*`, `connectby` and
+  `xpath_table`, all now denied. In core PostgreSQL 16 the class is `query_to_xml*` (SQL text),
+  `cursor_to_xml*` (fetches from a named cursor), `ts_stat` and `ts_rewrite`, all denied.
+- Residual (not changed, recorded for the Task 15 connection test and the contract owner): a
+  function deny-list cannot be complete. It does not cover user-defined functions in a source
+  database (any PL/pgSQL `EXECUTE`, or a function in an untrusted PL), or third-party and
+  managed-service extensions such as `aws_s3.query_export_to_s3(query, …)` (Amazon RDS/Aurora:
+  runs a SQL string and writes the result to S3), pgTAP (`lives_ok`/`results_eq`/`throws_ok`)
+  or Oracle `CTXSYS` packages. The source role must stay least-privilege. Recommended, not done
+  here: the Task 15 PG connection test reports `has_function_privilege` for the source role on
+  known SQL-string or exfiltration functions (`dblink_exec`, `xpath_table`, `crosstab`,
+  `ts_stat`, `query_to_xml`, `pg_background_launch`, `aws_s3.query_export_to_s3`), and a contract
+  amendment could move §5.2 to a function allow-list for `where`/`query`.

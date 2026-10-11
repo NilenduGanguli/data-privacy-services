@@ -102,6 +102,7 @@ DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
     "ts_rewrite",  # core PostgreSQL ts_rewrite(query tsquery, select text)
     "crosstab",  # tablefunc crosstab, crosstab2/3/4 and custom crosstab_* wrappers
     "connectby",  # tablefunc connectby(relname, …) builds and runs a query from text
+    "xpath_table",  # xml2 xpath_table(key, doc, relation, xpaths, criteria) runs a built SELECT
     "pg_background",  # pg_background_launch(sql): a separate session, not read-only
 )
 _DENY_SCHEMAS = frozenset(

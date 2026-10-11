@@ -265,7 +265,8 @@ def test_more_rejections(where: str, code: str) -> None:
 
 
 #: Calls of functions that execute a SQL string: core PostgreSQL ``ts_stat``/``ts_rewrite``,
-#: tablefunc's ``crosstab*``/``connectby`` and pg_background. Binding the string as a parameter
+#: tablefunc's ``crosstab*``/``connectby``, xml2's ``xpath_table`` and pg_background. Binding the
+#: string as a parameter
 #: would run any statement (``set_config``, ``pg_sleep``, ``dblink_exec``…) past validation.
 _SQL_STRING_CALLS = [
     "ts_stat('select 1')",
@@ -291,6 +292,14 @@ _SQL_STRING_CALLS = [
     "public.\"connectby\"('t', 'a', 'b', '1', 0)",
     "pg_background_launch('select 1')",
     "PUBLIC.PG_BACKGROUND_LAUNCH('select 1')",
+    "xpath_table('k', 'd', '(select 1 as k) s', '/a', 'true')",
+    "XPATH_TABLE('k', 'd', '(select 1 as k) s', '/a', 'true')",
+    "Xpath_Table('k', 'd', 't', '/a', 'select 1')",
+    "public.xpath_table('k', 'd', '(select 1 as k) s', '/a', 'true')",
+    "PUBLIC.XPATH_TABLE('k', 'd', '(select 1 as k) s', '/a', 'true')",
+    "\"xpath_table\"('k', 'd', '(select 1 as k) s', '/a', 'true')",
+    "public.\"xpath_table\"('k', 'd', '(select 1 as k) s', '/a', 'true')",
+    "\"public\".\"xpath_table\"('k', 'd', '(select 1 as k) s', '/a', 'true')",
 ]
 
 
@@ -330,6 +339,9 @@ def test_functions_that_run_a_sql_string_are_denied_in_where_and_query_form(call
         "CROSSTAB4(:q)",
         "connectby(:q, :q, :q, :q, :q)",
         "pg_background_launch(:q)",
+        "xpath_table(:q, :q, :q, :q, :q)",
+        "public.XPATH_TABLE(:q, :q, :q, :q, :q)",
+        '"public"."xpath_table"(:q, :q, :q, :q, :q)',
     ],
 )
 def test_a_bound_sql_string_never_compiles_into_a_sql_executing_function(call: str) -> None:
@@ -345,8 +357,54 @@ def test_a_bound_sql_string_never_compiles_into_a_sql_executing_function(call: s
 
 
 def test_the_sql_string_functions_are_on_the_exported_deny_list() -> None:
-    for name in ("ts_stat", "ts_rewrite", "crosstab", "connectby", "pg_background_launch"):
+    for name in (
+        "ts_stat",
+        "ts_rewrite",
+        "crosstab",
+        "connectby",
+        "pg_background_launch",
+        "xpath_table",
+    ):
         assert name.startswith(DENIED_FUNCTION_PREFIXES)
+
+
+def test_the_xpath_table_relation_attack_is_refused_at_every_stage() -> None:
+    # The review G3 r2 reproduction: xpath_table builds 'SELECT key, doc FROM <relation> WHERE
+    # <criteria>' from its text arguments, so a bound relation runs set_config/pg_sleep.
+    params = {
+        "rel": "(select 1 as k, '<a>' || set_config('statement_timeout', '0', true) "
+        "|| '</a>' as d) s"
+    }
+    where = Selection(
+        where="EXISTS (SELECT 1 FROM xpath_table('k', 'd', :rel, '/a', 'true') "
+        "AS t(k int, a text))",
+        params=params,
+    )
+    query = Selection(
+        query="SELECT * FROM public.xpath_table('k', 'd', :rel, '/a', 'true') AS t(k int, a text)",
+        params=params,
+    )
+    for sel, compile_sel in ((where, compile_where), (query, compile_query)):
+        for check in (
+            lambda s=sel: validate_selection(s, "postgres", None),
+            lambda s=sel: parameterize_literals(s, "postgres"),
+            lambda s=sel, c=compile_sel: c(s, "postgres"),
+        ):
+            with pytest.raises(SelectionError) as err:
+                check()
+            assert err.value.code == "selection_function_denied"
+            assert "statement_timeout" not in str(err.value)
+
+
+def test_xml_functions_that_take_a_document_are_not_mistaken_for_xpath_table() -> None:
+    # Core xpath()/xpath_exists() and xml2's document functions read a document, not SQL.
+    for call in (
+        "xpath('/a', CAST(:d AS xml)) IS NOT NULL",
+        "xpath_exists('/a', CAST(:d AS xml))",
+        "xpath_string(:d, '/a') IS NOT NULL",
+        "xpath_bool(:d, '/a')",
+    ):
+        validate_selection(Selection(where=call, params={"d": "<a/>"}), "postgres", None)
 
 
 def test_oracle_hierarchical_queries_are_not_mistaken_for_connectby() -> None:
