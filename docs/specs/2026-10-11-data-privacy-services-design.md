@@ -1,6 +1,6 @@
 # Data Privacy Services — Design Brief
 
-**Date:** 2026-10-11 · **Status:** Draft for review — your answers to §12 turn this into the approved spec ·
+**Date:** 2026-10-11 · **Status:** Approved for planning — D1–D4 answered 2026-10-11 and folded in below; D5–D14 stand at their stated defaults until overridden ·
 **Owner:** Nilendu · **Repo:** `~/document_intelligence/data-privacy-services` (own git repo; upstream not yet created) ·
 **Mockups:** [`docs/design/mockups/index.html`](../design/mockups/index.html)
 
@@ -8,9 +8,9 @@
 
 ## 0. Read me first
 
-This document is three things in one: the research digest (§2), the proposed design (§3–§11), and the
-decision list I need from you before the implementation plan (§12). Every decision in §12 carries my
-default, so you can answer with "defaults everywhere" or override individual items.
+This document is three things in one: the research digest (§2), the design (§3–§11), and the decision
+record (§12). D1–D4 were answered on 2026-10-11 and are folded into the sections below; D5–D14 stand at their
+defaults until you override them. The implementation plan is derived from this document.
 
 The pitch in one line: **one Privacy Engine, three entry points (API, database connectors, UI scanner), two
 outcomes (reversible obfuscation, synthetic data), measurable privacy — and a hard rule that no LLM ever sees
@@ -32,7 +32,7 @@ Three layers feed the same engine:
 |---|---|---|---|
 | **L1 API** | JSON, text, documents (PDF/DOCX/images/CSV) | one HTTPS call | de-identify a payload before a vendor, an LLM or a lower environment sees it; redact a document; mint fixtures |
 | **L2 Connectors** | Oracle, PostgreSQL, MongoDB tables/collections | batch job: owner + table + selection → target | masked or synthetic copies of production data for dev/test/analytics; consistent masking across systems |
-| **L3 UI scanner** | Web front ends (forms, rendered data) | job: URL (+ auth) → crawl → inventory | what PII a UI collects and where; coherent synthetic personas and test submissions; demo-safe captures |
+| **L3 UI scanner** | Web front ends (forms, rendered data) | job: URL (+ auth) → crawl → inventory → parallel view | what PII a UI collects and where; a parallel view of every screen filled with synthetic or obfuscated data, **never submitted**; demo-safe captures |
 
 Three layers × two modes = six capabilities behind one policy model, one detector stack and one
 transformation engine. The console (§9) is the showcase surface over all of it.
@@ -43,12 +43,12 @@ transformation engine. The console (§9) is the showcase surface over all of it.
 2. Reversible obfuscation that preserves format and referential integrity, with keys held by the caller.
 3. Synthetic data that is realistic, consistent across fields/tables/systems, and provably free of originals.
 4. Batch masking of Oracle/Postgres/Mongo at scale: discover → review → run → evidence.
-5. UI form discovery and synthetic persona generation with safety rails.
+5. UI form discovery and classification, a parallel filled view of each screen (no submissions), and obfuscated captures.
 6. A console that makes all of the above visible and demonstrable in ten minutes.
 
 **v1 non-goals** — not a key-management system (keys are returned or brought by the caller; a KMS-backed
-mode is a later option); no database subsetting or virtualisation; no in-place masking of production by
-default; no differential-privacy *guarantee* claimed (available as an optional engine, §5.6); no redaction
+mode is a later option); no database subsetting or virtualisation; in-place writes are an explicit, confirmed
+mode and never a default; no differential-privacy *guarantee* claimed (available as an optional engine, §5.6); no redaction
 of images/figures beyond text; no entity resolution across tenants; no human-review workflow beyond
 accept/override in discovery.
 
@@ -380,10 +380,22 @@ CSV as records. A redacted PDF (true redaction: text removed, box drawn) uses `p
 Oracle identifier rule from the Wega orchestrator before they are ever interpolated. Mongo filters are JSON
 validated against an operator allow-list (`$where` and friends rejected).
 
-**Targets.** `table` in a destination database of the same engine (created from the source definition when
-missing; `truncate_insert` or `upsert` on the primary key), `files` (CSV / Parquet / JSONL to S3 or a PVC
-path, with a manifest), `in_place` (**gated**: explicit flag, `admin` scope, denied for connections tagged
-`production`; obfuscate-only, key returned). Default is `table`.
+**Write modes (decision D3).** Four, chosen per job:
+
+| `write_mode` | What happens | Notes |
+|---|---|---|
+| `in_place` | the selected rows are **updated in the source table** by primary key, column by column, in committed batches | obfuscate or synthesize; the key material is returned to the caller for obfuscate; requires `confirm_write: true` in the API and a confirmation step with row counts in the console; connections tagged `production` additionally require the `admin` scope |
+| `append` | transformed copies of the selected rows are **inserted as new rows** — into the same table or a named table | needs a primary-key strategy: `generate` (database identity/sequence/default, Mongo new `_id`), `offset` (add a configured offset or prefix), or `token` (the obfuscated key, with a pre-flight collision check that aborts the job on any clash); the evidence pack records which strategy ran; `confirm_write: true` as above |
+| `table` | load into a destination table/schema of the same engine (created from the source definition when missing); `truncate_insert` or `upsert` on the primary key | the classic masked-copy provisioning path |
+| `files` | CSV / Parquet / JSONL to S3 or a PVC path with a manifest | hand-off to other loaders and analytics |
+
+```json
+"target": { "write_mode": "in_place", "confirm_write": true }
+"target": { "write_mode": "append", "table": "CUSTOMERS", "pk_strategy": { "kind": "offset", "offset": 90000000 }, "confirm_write": true }
+```
+
+`in_place` and `append` run inside the source connection's transaction scope with the same checkpointing as
+the other modes, so a failed partition resumes from its last committed batch and never half-applies a row.
 
 **Discovery.** Sample `n` rows per column (`TABLESAMPLE` / Oracle `SAMPLE` / Mongo `$sample`), run the
 detectors, infer a semantic type per column from T0 names plus value evidence, and store a *classification
@@ -426,7 +438,8 @@ number from the simulator in M2 (`tools/bench_connector.py`), not a promise made
   "scope": { "same_origin": true, "max_pages": 50, "max_depth": 3, "deny": ["/logout", "/admin"] },
   "auth": { "storage_state_ref": "dps/ui/onboarding-uat" },
   "mode": "synthesize",
-  "synthesize": { "personas": 20, "locale": "en_IN", "submit": false, "environment_allowlist": ["*.uat.bank.internal"] },
+  "fill": { "personas": 20, "locale": "en_IN" },
+  "parallel_view": true,
   "capture": { "screenshots": true, "har": false } }
 ```
 
@@ -445,17 +458,22 @@ inventory** (page, form, field, label, inferred entity, sensitivity, confidence,
 autocomplete enabled on sensitive fields, password fields without `new-password`, PII in URL query strings, PII
 rendered in tables.
 
-**Synthesize.** Coherent personas from the surrogate engine fill the forms. Default is a **dry run**: fill,
-screenshot, record validation messages, never submit. Submission requires `submit: true` *and* a host matching
-the environment allow-list; production hosts are denied by configuration. Results export as CSV/JSON for QA
-automation, with the field→entity mapping that produced them.
+**Parallel view — no submissions, ever (decision D4).** DPS never submits a form: there is no submit option
+in the API or the console, and the browser worker installs a request interceptor that blocks any form POST
+or non-GET navigation originating from a filled page, as defence in depth. For each discovered page the worker
+fills the fields with the *corresponding modified data* — persona values from the surrogate engine in
+synthesize mode, reversible tokens in obfuscate mode — and captures the result. The console renders the
+**original screen beside the filled screen**, field by field, with the entity chip, the method and the value
+mapping, and records any client-side validation messages as evidence that generated values satisfy the UI's
+own format rules. Results export as CSV/JSON (the persona set and the field→entity→value mapping) for QA
+automation to replay in its own harness.
 
 **Obfuscate.** For pages that render data (profile pages, tables), DPS replaces PII in the extracted text and
 produces masked screenshots and DOM text with a reversible map — demo-safe captures and bug reports.
 
-**Safety rails.** Scope allow/deny lists, page and time budgets, credentials and storage state held only in
-worker memory for the job's duration, every navigation audited, no crawling outside the tenant's registered
-hosts.
+**Safety rails.** No submission path exists in code; scope allow/deny lists; page and time budgets;
+credentials and storage state held only in worker memory for the job's duration; every navigation audited;
+no crawling outside the tenant's registered hosts.
 
 ## 9. The console
 
@@ -467,7 +485,7 @@ hosts.
 | **Playground** (L1 hero) | show the engine in seconds | three panes: input (paste JSON/text, drop a file) → findings with entity chips and detector evidence → output with Obfuscated / Synthetic toggle, side-by-side diff, key-material card, **Reveal** demo, "copy as curl" |
 | **Policies** | the control surface | presets, per-entity action matrix, custom recognizer builder with live test, plan preview on a sample, versions |
 | **Data sources & jobs** (L2) | connector wizard and operations | connect → discover → review (column heat-map, accept/override) → target → run; job detail with partition progress, throughput sparkline, checkpoints, evidence pack; job groups for cross-system consistency |
-| **UI scanner** (L3) | crawl and inventory | URL + auth → crawl map → annotated screenshots with field chips → inventory table → persona generation and dry-run fill → export |
+| **UI scanner** (L3) | crawl, inventory, parallel view | URL + auth → crawl map → annotated screenshots with field chips → inventory table → **parallel view** (original screen beside the same screen filled with synthetic or obfuscated data, never submitted; toggle synthetic/obfuscated) → obfuscated captures → export |
 | **Reports & audit** | evidence | evidence packs, verification results, who ran what and when, exportable PDF |
 | **Admin** | tenancy | API keys and scopes, tenants and quotas, retention, health |
 
@@ -484,7 +502,7 @@ Mockups of the three headline screens are in `docs/design/mockups/` (static HTML
 up, obfuscate, copy the key, reveal; switch to synthetic; drop a scanned PDF and get a redacted one) → Data
 sources (connect Oracle CRM and Mongo profiles, discover, review the heat-map, run, watch partitions, open the
 evidence pack, run the three-way consistency join) → UI scanner (paste the onboarding URL, see the annotated
-form, generate twenty personas, dry-run fill, export) → Reports (evidence PDF, audit trail).
+form, open the parallel view with a synthetic persona filled in, flip it to obfuscated, export) → Reports (evidence PDF, audit trail).
 
 ## 10. Security and compliance posture
 
@@ -496,7 +514,7 @@ form, generate twenty personas, dry-run fill, export) → Reports (evidence PDF,
 | Value leakage in logs/metrics | structured logging with an allow-list of fields; counts and hashes only; a log-scan test fails CI if a value-bearing field is added |
 | Cross-tenant access | tenant id on every job row with RLS; API keys carry tenant grants and scopes (`detect`, `obfuscate`, `synthesize`, `reveal`, `jobs`, `scan`, `admin`) |
 | Connector credentials | secret references in production; inline credentials encrypted with a service KEK and purged; least-privilege connection test |
-| Writing to production | `in_place` gated, connections tagged `production` refuse write modes, allow-lists for UI submission |
+| Writing to production | `in_place` and `append` are explicit write modes: `confirm_write: true` in the API, a confirmation with row counts in the console, and the `admin` scope on connections tagged `production`; the UI scanner has no submission path at all |
 | Unsafe configuration | posture guard refuses to boot in staging/prod without TLS-only egress, strict verification, audit, and secret-backed KEK |
 | Audit | append-only, partitioned audit log; evidence packs hash the policy and software versions |
 | Retention | job metadata and reports expire per tenant policy; raw values are never stored, so there is nothing to purge beyond job rows |
@@ -510,9 +528,9 @@ endpoints configured per deployment.
 |---|---|---|---|
 | **M0 Foundation + engine core** | repo scaffold mirroring the siblings (config, auth, audit, rate limit, observability, posture); LLM gateway client (stellar / vertex / stub); taxonomy, detectors T0–T2, policy model, crypto core, reversible + irreversible methods, surrogate synthesis; L1 `detect` / `obfuscate` / `synthesize` / `reveal` for JSON and text; console shell + Playground; compose stack | Playground demo end to end, offline | ruff/mypy clean; unit tests for every method incl. round-trip and determinism; leakage sweep tests; smoke test |
 | **M1 L1 complete** | documents (PDF/DOCX/images, OCR adapter, redacted PDF), token styles, presets, policy plan endpoint, schema synthesis, evaluation harness, API reference | redact a scanned KYC PDF; synthesize from a schema | detector eval report committed; API docs |
-| **M2 Jobs + PostgreSQL** | durable queue + workers, discovery, review, run, targets (table/files), checkpoints, evidence pack, console Data sources & Jobs pages, benchmark tool | mask a 10-table Postgres schema into a UAT copy with evidence | resume-after-kill test; measured rows/s recorded |
+| **M2 Jobs + PostgreSQL** | durable queue + workers, discovery, review, run, all four write modes (in_place / append / table / files) with confirmation, checkpoints, evidence pack, console Data sources & Jobs pages, benchmark tool | mask a 10-table Postgres schema into a UAT copy, then mask one table in place and append to another, all with evidence | resume-after-kill test for every write mode; measured rows/s recorded |
 | **M3 Oracle + MongoDB** | both connectors with local Oracle Free and Mongo in compose; cross-system job groups; the three Oracle pitfalls as tests | three-way consistency join across Oracle, Mongo, Postgres | connector conformance suite green on real containers |
-| **M4 UI scanner** | browser worker, crawl, classify, inventory, personas, dry-run fill, captures, console pages | scan the demo onboarding app, generate personas, export | safety-rail tests (scope, submit gating) |
+| **M4 UI scanner** | browser worker, crawl, classify, inventory, parallel view (fill without submit, synthetic and obfuscated), obfuscated captures, console pages | scan the demo onboarding app, open the parallel view, flip modes, export | safety-rail tests (scope, request interception proves no POST ever leaves) |
 | **M5 Hardening + showcase** | copula engine + optional MOSTLY AI extra, LLM text synthesis with verifier, reports/PDF, admin, posture, OpenShift manifests, HANDOFF, demo script and deck | the ten-minute demo, rehearsed | smoke + flow report; security review; handoff doc |
 
 **Repo layout (mirrors the siblings):**
@@ -540,14 +558,14 @@ Tooling parity: Python 3.12, `uv`, `ruff`, `mypy`, `pytest` with the sibling mar
 `browser`, `integration`), multi-stage Docker image, `python tools/smoke_test.py`, `HANDOFF.md` kept current
 with every build/deploy change (the Wega rule).
 
-## 12. Decisions I need from you (defaults in bold)
+## 12. Decision record
 
 | # | Decision | Options | My default and why |
 |---|---|---|---|
-| D1 | Repo name and location | (a) **`data-privacy-services` under `~/document_intelligence/` as you asked** · (b) sibling `~/data-privacy-services` like the other repos · (c) another name | (a) follows your instruction; note the parent repo will show it as an untracked directory unless ignored. Easy to move later. |
-| D2 | Key custody | (a) **stateless: DEK returned (optionally wrapped with the caller's public key), caller passes it back for consistency, BYOK** · (b) service-managed keys with key ids (a vault — stateful) · (c) both | (a) is exactly your description and keeps DPS out of key custody; (b) can be added as a KMS mode later |
-| D3 | L2 write-back | (a) **target table/schema in a named destination + file export; in-place only behind a flag and admin scope, never on production-tagged connections** · (b) in-place allowed generally · (c) files only | (a) is how TDM is done in banks; in-place masking of a live source is unrecoverable if the key is lost |
-| D4 | L3 scope | (a) **inventory + classification, synthetic personas with dry-run fill, submission only in allow-listed environments, obfuscated captures** · (b) inventory only · (c) also a proxy/extension that masks live screens | (a) covers your description with safety rails; (c) is a different product |
+| D1 | Repo name and location | **Decided 2026-10-11:** `data-privacy-services` nested under `~/document_intelligence/`, own git repo | the parent repo shows it as an untracked directory; moving later is one command |
+| D2 | Key custody | **Decided 2026-10-11:** stateless — the DEK is returned (optionally wrapped with the caller's public key), the caller passes it back for consistency, BYOK supported, DPS stores no key | a KMS-backed mode can be added later without changing the API shape |
+| D3 | L2 write-back | **Decided 2026-10-11:** four write modes — `in_place`, `append` (same or named table, with a primary-key strategy), `table`, `files`; in-place and append are first-class options behind an explicit confirmation (§7) | your requirement: an option to write in place or append new rows |
+| D4 | L3 scope | **Decided 2026-10-11:** form inventory + classification; a **parallel view** that renders the original screen beside the same screen filled with the corresponding synthetic or obfuscated data; obfuscated captures of rendered PII; **no submissions of any kind** (no submit option exists; POSTs are intercepted) | your requirement: no submissions, a parallel screen with the modified data filled in |
 | D5 | Jurisdictions and locales for v1 | **US, CA, MX, IN, UK + EU core identifiers; NER in EN and ES** · narrower · wider | matches the sibling platform plus India (DPDP) and UK/EU; others arrive as pattern packs |
 | D6 | LLM path | **Stellar (OpenAI-compatible, COIN OAuth2) with `gemini-2.5-flash` as in DPC; Vertex service account on laptops; stub in CI** — and confirm that *de-identified* placeholder text and field metadata may go to Stellar | P1 holds regardless; the gateway client is the DPC pattern |
 | D7 | Synthesis engines in v1 | **surrogates + built-in copula; MOSTLY AI SDK as an optional extra** · add CTGAN/TVAE · LLM-only | evidence in §2.3; SDV's license excludes it |
@@ -558,6 +576,8 @@ with every build/deploy change (the Wega rule).
 | D12 | Tenancy and auth | **X-API-KEY with tenant grants and scopes (sibling pattern); SSO/OIDC for the console later** | consistent with the family; the bank's gateway fronts it |
 | D13 | Naming | **product "Data Privacy Services (DPS)", console "Privacy Console", design system "Vault"** · your names | rename is a find-and-replace at this stage |
 | D14 | Scale targets to design for | **set with you: typical L1 payload size, rows per job, concurrent jobs, docs per day** | the architecture is horizontal; numbers decide batch sizes, caps and the benchmark goals |
+
+D5–D14 were taken at their defaults on 2026-10-11; any of them can still be changed and the plan adjusted.
 
 **Inputs that would help (non-blocking):** a few anonymised DDLs of typical tables (Oracle, PG, Mongo); two
 or three de-identified documents and a demo onboarding form; whether Stellar/VDI is reachable for a live-LLM

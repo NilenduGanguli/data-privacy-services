@@ -19,7 +19,7 @@
   };
   const nav = [
     ['Operate', [['01-dashboard.html', 'Overview', 'overview'], ['02-playground.html', 'Playground', 'play'], ['#', 'Policies', 'policy']]],
-    ['Layers', [['03-data-sources.html', 'Data sources & jobs', 'db'], ['#', 'UI scanner', 'scan']]],
+    ['Layers', [['03-data-sources.html', 'Data sources & jobs', 'db'], ['04-ui-scanner.html', 'UI scanner', 'scan']]],
     ['Govern', [['#', 'Reports & audit', 'report'], ['#', 'Admin', 'admin']]]
   ];
   window.renderSidebar = function (active) {
