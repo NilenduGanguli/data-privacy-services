@@ -165,6 +165,9 @@ def test_phone_keeps_the_original_country_and_format() -> None:
     assert national.startswith("(") and "555-01" in national
     mx = eng.surrogate("PHONE", "+52 222 123 4567", "es_MX", "r1")
     assert mx.startswith("+52 ") and phonenumbers.is_valid_number(phonenumbers.parse(mx, None))
+    # countries without a fictional range draw from ~10^6 numbers, not 10^4 near one example
+    many = {eng.surrogate("PHONE", f"+91 98451 {20000 + i}", "en_IN", "r1") for i in range(40)}
+    assert len({p.replace(" ", "")[:8] for p in many}) > 1
 
 
 def test_iban_keeps_country_and_shape_and_is_valid() -> None:

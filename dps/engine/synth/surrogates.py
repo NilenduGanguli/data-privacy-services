@@ -521,8 +521,9 @@ class SurrogateEngine:
         ) or phonenumbers.example_number(region)
         if example is not None:
             base = str(example.national_number)
-            for _ in range(64):
-                candidate = base[:-4] + f"{rng.randint(0, 9999):04d}"
+            for attempt in range(64):
+                free = min(len(base) - 2, 6 if attempt < 48 else 4)  # keep the leading digits
+                candidate = base[:-free] + _digits(rng, free)
                 try:
                     number = phonenumbers.parse(f"+{example.country_code}{candidate}", None)
                 except phonenumbers.NumberParseException:

@@ -1074,3 +1074,11 @@ the obfuscate/synthesize sweep — FPE and surrogate output is *meant* to look l
 so a re-run cannot be a pass/fail signal as is; only the LLM rewrite is screened this way.
 `locale.by_country_field` (per-record locale) is not implemented. JSON free-text fields are
 synthesized span by span; the LLM rewrite applies to text payloads only.
+
+### Task 19 — follow-up (found in the end-to-end run after Task 22)
+
+- Phones in countries without a fictional range (IN, MX, ...) were drawn as the country's example
+  number with the last 4 digits random, so every Indian surrogate read `+91 81234 5xxxx` (10^4
+  numbers; a large request would exhaust them and the distinctness map would start accepting
+  collisions). Up to 6 trailing digits are now random (validity-checked, falling back to 4).
+  `test_phone_keeps_the_original_country_and_format` pins it.
