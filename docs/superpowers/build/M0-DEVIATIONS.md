@@ -927,3 +927,40 @@ Open: two *different* people named in one record collapse onto the record's one 
 plan's persona-per-anchor design); PAN_IN, ROUTING_ABA, IN/MX phones have no unissued range and
 may coincide with real values; NINO/NHS/CURP/RFC/passport fall back to digit/letter reshaping
 without check digits.
+
+## Task 20 — LLM gateway client
+
+Public names and signatures as planned: `LlmGateway(settings, *, transport, clock)`,
+`.provider`, `.model`, `.available()`, `.complete(messages, *, temperature, max_tokens,
+purpose)`, `LlmResult`, `LlmUnavailable`, `LlmCallError`, `get_gateway`. Changes:
+
+- **No chained exceptions.** Every `LlmCallError` is raised `from None`. The plan chained the
+  `httpx` exception (`from exc`), whose message quotes the full request URL — and `config.py`
+  already refuses to echo these URLs because they may carry userinfo credentials. The Vertex
+  path chained the SDK exception, which can quote the prompt. Messages carry provider, host,
+  HTTP status (`HTTPStatusError 503`) and exception type only.
+- **Malformed responses are `LlmCallError`s.** `response.json()` raises `ValueError` on a
+  non-JSON body (a proxy login page, an HTML error), and a list body made `.get` raise
+  `AttributeError`; both escaped the plan's `except httpx.HTTPError`, and Task 21 only catches
+  `LlmCallError` / `LlmUnavailable`, so a bad gateway response would have become a 500. Same for
+  the COIN mint. A `null` content became the text `"None"` via `str(...)`; it is now an error.
+- **Usage counts are tolerant:** `null` / non-numeric `prompt_tokens` gave `TypeError` /
+  `ValueError` from `int(...)`; they now count as 0.
+- `_b64` raises `from None` (the plan chained the `binascii.Error`).
+- One value-free `llm.call` log line per call (`provider`, `purpose`, `model`, `outcome`,
+  `error` type, `duration_ms` — all on the observability allow-list).
+- Docstrings; the mint timeout is a named constant.
+
+Kept from the plan, flagged for the M5 security review: the COIN token mint runs with
+`verify=False`. This is the org-mandated pattern (DPC `dpc/arrange/client.py` and
+`retrieval/get_llm.py` do the same, citing the Stellar onboarding handoff: the token endpoint is
+behind the VDI's TLS-intercepting proxy). It sends the COIN client secret over an unverified TLS
+channel; the posture guard should decide whether staging/prod may run that way.
+
+Tests added: `test_errors_never_chain_an_exception_that_could_quote_a_url_or_secret` (also
+checks the error metric), `test_malformed_completions_are_call_errors` (4 cases),
+`test_malformed_mints_are_call_errors` (3), `test_bad_base64_credentials_fail_without_echoing_them`,
+`test_usage_is_optional_and_tolerant`, `test_concurrent_calls_mint_one_token`,
+`test_api_calls_send_the_bearer_and_timeout_settings`, `test_availability_per_provider`.
+Against the plan's `gateway.py`, 7 of the 13 added cases fail; the plan's own 4 pass on both.
+Count: 17 in the file; suite 342 passed, 1 skipped.
