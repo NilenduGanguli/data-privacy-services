@@ -215,3 +215,24 @@ are preserved unless a section says otherwise.
 - Tests added: `test_validators_never_raise` (7 odd inputs x every validator; the module contract
   says a validator never raises) and `test_luhn_reads_unicode_decimal_digits_as_their_value`
   (red before the `int(ch)` change). Totals: the plan's 16 + 8 added = 24 in the file; suite 76.
+
+## Task 6 — Pattern catalogue (tier T1) and phone matching
+
+- `dps/engine/detect/patterns.py`, `in_aadhaar` regex: the boundaries are
+  `(?<!\d)(?<!\d[ -])(...)(?![ -]?\d)` (plan: `(?<!\d)(...)(?!\d)`). Why: in a grouped card
+  number (`4141 7058 6492 0836`) the plan's pattern matched the first or last three groups as an
+  Aadhaar. About 1 in 10 such 12-digit windows is Verhoeff-valid, and a validated Aadhaar at 0.98
+  beat the validated card at 0.95 in `resolve_overlaps`. The card hit was then dropped, so the last
+  four digits stayed in clear and the value was typed AADHAAR. A probe over 2,000 random
+  Luhn-valid 4-4-4-4 cards with no context lost 215 cards before the fix; after it, 0 of 1,500 per
+  region (US, IN, GB, MX) are lost, including with phones in the overlap pool. An Aadhaar on its
+  own (`Aadhaar 2341 2341 2346, issued 2019`) still matches.
+- Docstring added to `PatternSpec`.
+- Tests added:
+  - `test_grouped_card_numbers_are_never_split_into_an_aadhaar` (3 cases, space and dash
+    grouping; red before the regex change);
+  - `test_aadhaar_still_matches_on_its_own`;
+  - `test_evidence_never_carries_the_value` (hit evidence names the pattern or checksum, never
+    the digits or the address).
+- Count: the plan expected "22 passed"; its own tests total 19 (14 parametrised + 5). With the
+  5 added tests, 24 in the file; suite 100.
