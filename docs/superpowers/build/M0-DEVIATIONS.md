@@ -227,6 +227,9 @@ are preserved unless a section says otherwise.
   Luhn-valid 4-4-4-4 cards with no context lost 215 cards before the fix; after it, 0 of 1,500 per
   region (US, IN, GB, MX) are lost, including with phones in the overlap pool. An Aadhaar on its
   own (`Aadhaar 2341 2341 2346, issued 2019`) still matches.
+  **Superseded** by "Fix round 1 — review M0-G2-r1" below: these lookarounds dropped every
+  Aadhaar with a number next to it, so the plan's boundaries are back and the card case is
+  decided after matching.
 - Docstring added to `PatternSpec`.
 - Tests added:
   - `test_grouped_card_numbers_are_never_split_into_an_aadhaar` (3 cases, space and dash
@@ -393,3 +396,80 @@ are preserved unless a section says otherwise.
 - Presets: the six YAML files are verbatim from the plan; they ship in the wheel, verified with
   `uv build --wheel`.
 - Count: the plan's 4 + 6 added = 10 in the file; suite 157 passed, 1 skipped.
+
+## Fix round 1 — review M0-G2-r1 (Tasks 5-11), blocking finding B1
+
+- **B1, `dps/engine/detect/patterns.py`, `in_aadhaar`:** the plan's boundaries are back:
+  `(?<!\d)([2-9]\d{3}[ -]?\d{4}[ -]?\d{4})(?!\d)`. The Task 6 lookarounds
+  (`(?<!\d[ -])`, `(?![ -]?\d)`) rejected any Aadhaar with a space- or dash-separated number
+  next to it. In `Aadhaar 2341 2341 2346 9845120377`, `Aadhaar no 2341 2341 2346 2 copies`,
+  `Aadhaar 2341-2341-2346 12 Mar 2020` and `ref 1 2341 2341 2346` a validated CRITICAL
+  identifier was left in clear. A probe of 3,000 random Aadhaars with a 1-10 digit number before
+  or after them missed all 3,000.
+- The grouped-card problem that the Task 6 lookarounds solved is now handled after matching, by
+  a new private step `_settle_aadhaar_vs_card(text, hits)`. `scan_text` runs it before
+  `resolve_overlaps`. The step goes beyond the review's literal fix ("drop an AADHAAR strictly
+  inside a validated CARD_PAN") in two ways, because a probe of that fix found two leaks:
+  1. **The card's grouping decides, not containment alone.** When a validated AADHAAR overlaps a
+     validated CARD_PAN, the card wins only if it is printed in fours: 15+ digits, every group 4
+     long except a last group of 1-4 (4-4-4-3, 4-4-4-4, 4-4-4-4-1..3; helper
+     `_printed_in_fours`). Otherwise the card window is dropped.
+     - Why: an Aadhaar next to a short number forms a Luhn-valid 13-19 digit window about one
+       time in ten. Examples: `Aadhaar no 2341 2341 2346 7 copies`, `ref 7 2341 2341 2346`,
+       `Aadhaar 2341 2341 2346 100005` (a PIN code).
+     - Under the literal fix, those Aadhaars became CARD_PAN. The card presets
+       (`fpe_digits`, `keep_prefix: 6`, `keep_suffix: 4`) would then leave up to 9 of the 12
+       Aadhaar digits in clear.
+     - Even without the literal fix, a context tie (`Aadhaar card no …`: both hits score 1.0)
+       let the longer card window win in `resolve_overlaps`.
+     - Partial overlaps are decided the same way. In `Aadhaar card 44785794 5363 3875 0044`,
+       the Luhn-valid window `44785794 5363 3875` (8-4-4) used to win the tie and leave `0044`
+       in clear.
+  2. **`in_aadhaar` searches overlapping windows.** `PatternSpec` gained a defaulted field
+     `overlapping: bool = False`, set only on `in_aadhaar`. A private `_matches` helper restarts
+     the search one character after each match's start, instead of `finditer` resuming at its
+     end.
+     - Why: with `finditer`, a 4- or 8-digit number just before an Aadhaar consumed the
+       Aadhaar's first group. In `ref 2019 2341 2341 2346`, `2019 2341 2341` was tried
+       (invalid), and the real Aadhaar never was. This shadowing is also in the plan's regex.
+     - With overlapping windows, a Verhoeff-valid window that straddles two adjacent cards
+       printed in fours is now seen. The settle step drops it. Without that step it would
+       outscore both cards (0.98 vs 0.95) and leave 20 card digits in clear; a test covers this.
+  - Public interfaces are unchanged: `Hit`, `PatternSpec` (one additive defaulted field),
+    `scan_text`, `scan_phones`, `resolve_overlaps`, `CATALOGUE`.
+- Probe results (`scan_text`, 3,000 random Luhn-valid cards printed in fours, 15-19 digits,
+  space or dash, with and without context; 3,000 random Verhoeff-valid Aadhaars with a 1-10
+  digit number before or after them):
+
+  | Variant | Cards lost | Aadhaars missed |
+  |---|---|---|
+  | Task 6 lookarounds | 0 | 3,000 |
+  | Review's literal fix (plan regex, drop AADHAAR strictly inside a validated card) | 0 | 564 |
+  | This fix | 0 | 76 |
+
+  - The 76 remaining misses are genuinely ambiguous, and all involve a neighbour of 3 or 4
+    digits:
+    - In 56, the Aadhaar plus a 3- or 4-digit group is itself a Luhn-valid run printed in fours
+      (`2341 2341 2346 2019`). That is indistinguishable from a card, so it stays a card with
+      the whole run covered.
+    - In 20, a 4-digit number before the Aadhaar makes a second Verhoeff-valid 12-digit window
+      (`7030 4431-8009-3624`), and the earlier window wins.
+  - At the ensemble level (`Detector`, en_US / en_IN / en_GB / es_MX, 1,500 each), no card
+    printed in fours was lost, and no Aadhaar followed by a 1-2 digit number or a 10-digit phone
+    was missed.
+- Tests added. All were red at `2dedd02`, except the card tests, which guard the new code paths:
+  - `tests/test_patterns.py`:
+    - `test_aadhaar_next_to_another_number_is_still_found`: the review's four strings with no
+      comma; red at `2dedd02`.
+    - `test_aadhaar_beside_a_luhn_valid_window_stays_an_aadhaar` (7 cases): red at `2dedd02`, and
+      all 7 red under the review's literal fix.
+    - `test_random_aadhaars_next_to_short_numbers_are_always_found` (300 seeded Aadhaars, 1-, 2-,
+      6- and 8-digit neighbours on either side): red at `2dedd02` and under the literal fix.
+    - `test_cards_printed_in_fours_are_never_split_into_an_aadhaar` (15-19 digits x space/dash,
+      300 seeded cards each).
+    - `test_adjacent_cards_printed_in_fours_stay_two_cards`: red if the settle step is removed.
+  - `tests/test_ensemble.py`: `test_aadhaar_next_to_another_number_is_a_finding`, the four
+    strings through `Detector(locale="en_IN")`, with exact spans. For example, the first string
+    yields AADHAAR plus PHONE, where before it yielded PHONE only.
+  - `test_aadhaar_still_matches_on_its_own` (the comma case) is kept.
+- Count: suite 157 → 184 passed, 1 skipped (patterns +23, ensemble +4).

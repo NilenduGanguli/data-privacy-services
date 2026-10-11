@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import random
+
 import pytest
 
+from dps.engine.detect.checksums import luhn_check_digit, verhoeff_check_digit
 from dps.engine.detect.patterns import Hit, resolve_overlaps, scan_phones, scan_text
 
 
@@ -88,6 +91,91 @@ def test_grouped_card_numbers_are_never_split_into_an_aadhaar(text: str) -> None
 def test_aadhaar_still_matches_on_its_own() -> None:
     hits = scan_text("Aadhaar 2341 2341 2346, issued 2019")
     assert [h.entity_type for h in hits][:1] == ["AADHAAR"] and hits[0].validated
+
+
+def _digits(text: str, hit: Hit) -> str:
+    return "".join(c for c in text[hit.start : hit.end] if c.isdigit())
+
+
+@pytest.mark.parametrize(
+    "text,score",
+    [
+        # no comma after the number: another digit run follows (or precedes) it directly
+        ("Aadhaar 2341 2341 2346 9845120377", 1.0),
+        ("Aadhaar no 2341 2341 2346 2 copies attached", 1.0),
+        ("Aadhaar 2341-2341-2346 12 Mar 2020", 1.0),
+        ("ref 1 2341 2341 2346", 0.98),
+    ],
+)
+def test_aadhaar_next_to_another_number_is_still_found(text: str, score: float) -> None:
+    (hit,) = [h for h in scan_text(text) if h.entity_type == "AADHAAR"]
+    assert hit.validated and hit.score == score and _digits(text, hit) == "234123412346"
+
+
+@pytest.mark.parametrize(
+    "text,aadhaar",
+    [
+        # each Aadhaar plus its neighbour forms a Luhn-valid 13-19 digit window, i.e. a validated
+        # CARD_PAN over the Aadhaar; that window is not printed in fours, so it is no card
+        ("Aadhaar no 2341 2341 2346 7 copies attached", "234123412346"),
+        ("Aadhaar card no 2341 2341 2346 7 copies attached", "234123412346"),  # a score tie
+        ("ref 7 2341 2341 2346", "234123412346"),
+        ("Aadhaar 2341 2341 2346 15 Mar 2020", "234123412346"),
+        ("Aadhaar 2341 2341 2346 100005", "234123412346"),
+        # the Luhn-valid window covers only part of the Aadhaar
+        ("Aadhaar card 44785794 5363 3875 0044", "536338750044"),
+        # the 12 digits starting at 2019 must not shadow the Aadhaar that starts four digits later
+        ("ref 2019 2341 2341 2346", "234123412346"),
+    ],
+)
+def test_aadhaar_beside_a_luhn_valid_window_stays_an_aadhaar(text: str, aadhaar: str) -> None:
+    hits = scan_text(text)
+    assert "CARD_PAN" not in [h.entity_type for h in hits]
+    (hit,) = [h for h in hits if h.entity_type == "AADHAAR"]
+    assert hit.validated and _digits(text, hit) == aadhaar
+
+
+def test_adjacent_cards_printed_in_fours_stay_two_cards() -> None:
+    # the window "6838 7382 3695" straddles both cards and is Verhoeff-valid; left alone it
+    # would outscore both cards in resolve_overlaps and leave 20 card digits in clear
+    text = "paid 4062 0278 6838 7382 3695 6042 3041 1442 today"  # no card context: 0.95 < 0.98
+    hits = scan_text(text)
+    assert [(h.entity_type, _digits(text, h)) for h in hits] == [
+        ("CARD_PAN", "4062027868387382"),
+        ("CARD_PAN", "3695604230411442"),
+    ]
+
+
+def _random_card(rng: random.Random, length: int) -> str:
+    partial = str(rng.randint(3, 6)) + "".join(str(rng.randint(0, 9)) for _ in range(length - 2))
+    return partial + luhn_check_digit(partial)
+
+
+@pytest.mark.parametrize("length", [15, 16, 17, 18, 19])
+@pytest.mark.parametrize("sep", [" ", "-"])
+def test_cards_printed_in_fours_are_never_split_into_an_aadhaar(length: int, sep: str) -> None:
+    # about one 12-digit window in ten is Verhoeff-valid; 300 cards hit that case ~30 times
+    rng = random.Random(f"{length}{sep}")
+    for _ in range(300):
+        card = _random_card(rng, length)
+        printed = sep.join(card[i : i + 4] for i in range(0, length, 4))
+        text = f"paid with {printed} today"
+        hits = scan_text(text)
+        assert [h.entity_type for h in hits] == ["CARD_PAN"], printed
+        assert _digits(text, hits[0]) == card
+
+
+def test_random_aadhaars_next_to_short_numbers_are_always_found() -> None:
+    rng = random.Random(7)
+    for _ in range(300):
+        partial = str(rng.randint(2, 9)) + "".join(str(rng.randint(0, 9)) for _ in range(10))
+        aadhaar = partial + verhoeff_check_digit(partial)
+        grouped = " ".join(aadhaar[i : i + 4] for i in range(0, 12, 4))
+        size = rng.choice([1, 2, 6, 8])  # a count, a day, a PIN code, a reference
+        tail = str(rng.randint(10 ** (size - 1), 10**size - 1))
+        for text in (f"Aadhaar {grouped} {tail} noted", f"ref {tail} {grouped}"):
+            found = [h for h in scan_text(text) if h.entity_type == "AADHAAR"]
+            assert len(found) == 1 and _digits(text, found[0]) == aadhaar, text
 
 
 def test_evidence_never_carries_the_value() -> None:

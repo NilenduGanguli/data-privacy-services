@@ -9,6 +9,7 @@ non-overlapping :class:`Hit` objects; phones are matched by ``phonenumbers`` in 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import phonenumbers
@@ -48,6 +49,7 @@ class PatternSpec:
     needs_context: bool = False
     promote_to: str | None = None
     promote_context: tuple[str, ...] = ()
+    overlapping: bool = False  # try every start, so a number just before cannot shadow a match
 
 
 def _p(entity: str, name: str, pattern: str, base: float, **kw: object) -> PatternSpec:
@@ -124,11 +126,12 @@ CATALOGUE: tuple[PatternSpec, ...] = (
     _p(
         "AADHAAR",
         "in_aadhaar",
-        # never 12 digits of a longer grouped run (a 4-4-4-4 card number is not an Aadhaar)
-        r"(?<!\d)(?<!\d[ -])([2-9]\d{3}[ -]?\d{4}[ -]?\d{4})(?![ -]?\d)",
+        # 12 digits of a card printed in fours also match: ``_settle_aadhaar_vs_card`` decides
+        r"(?<!\d)([2-9]\d{3}[ -]?\d{4}[ -]?\d{4})(?!\d)",
         0.6,
         validator="AADHAAR",
         context=("aadhaar", "aadhar", "uidai", "uid"),
+        overlapping=True,  # in "2019 2341 2341 2346" the window starting at 2019 must not win
     ),
     _p(
         "PAN_IN",
@@ -342,11 +345,67 @@ def resolve_overlaps(hits: list[Hit]) -> list[Hit]:
     return sorted(kept, key=lambda h: h.start)
 
 
+_GROUP_SEPARATOR = re.compile(r"[ -]")
+
+
+def _printed_in_fours(value: str) -> bool:
+    """A card number as cards are printed: 15+ digits in fours, the last group 1-4 long.
+
+    4-4-4-3 (15), 4-4-4-4 (16) and 4-4-4-4-1..3 (17-19) qualify. An Aadhaar with a short number
+    beside it (4-4-4-1, 4-4-4-2, 1-4-4-4, 4-4-4-6, 8-4-4) does not.
+    """
+    groups = _GROUP_SEPARATOR.split(value)
+    return (
+        len(groups) >= 4
+        and all(len(g) == 4 for g in groups[:-1])
+        and 1 <= len(groups[-1]) <= 4
+        and sum(map(len, groups)) >= 15
+    )
+
+
+def _settle_aadhaar_vs_card(text: str, hits: list[Hit]) -> list[Hit]:
+    """Decide each validated AADHAAR that overlaps a validated CARD_PAN; drop the loser.
+
+    Two cases look alike. About one 12-digit window in ten is Verhoeff-valid, so a card printed
+    in fours (``4141 7058 6492 0836``) often holds a "valid Aadhaar"; that is still a card, and
+    an Aadhaar hit would leave its other digits in clear under the wrong type. An Aadhaar next to
+    another number (``2341 2341 2346 7 copies``) forms a Luhn-valid 13-19 digit window about one
+    time in ten; that is still an Aadhaar, and as a CARD_PAN its first six digits would stay in
+    clear under the card presets (``keep_prefix: 6``). The card's grouping decides, before
+    ``resolve_overlaps``, so a tie in the context scores can never flip it. An Aadhaar followed by
+    a 3- or 4-digit group stays ambiguous: when the run is Luhn-valid it counts as a card.
+    """
+    cards = [h for h in hits if h.entity_type == "CARD_PAN" and h.validated]
+    if not cards:
+        return hits
+
+    def overlaps(a: Hit, b: Hit) -> bool:
+        return a.start < b.end and b.start < a.end
+
+    printed = [c for c in cards if _printed_in_fours(text[c.start : c.end])]
+    aadhaars = [h for h in hits if h.entity_type == "AADHAAR" and h.validated]
+    losers = [a for a in aadhaars if any(overlaps(a, c) for c in printed)]
+    survivors = [a for a in aadhaars if a not in losers]
+    losers += [c for c in cards if c not in printed and any(overlaps(c, a) for a in survivors)]
+    return [h for h in hits if h not in losers]
+
+
+def _matches(spec: PatternSpec, text: str) -> Iterator[re.Match[str]]:
+    """``finditer``, or with ``overlapping`` a search from every start after the last match's."""
+    if not spec.overlapping:
+        yield from spec.regex.finditer(text)
+        return
+    pos = 0
+    while (match := spec.regex.search(text, pos)) is not None:
+        yield match
+        pos = match.start(1) + 1
+
+
 def scan_text(text: str, *, key_hint: str | None = None) -> list[Hit]:
     """Run the catalogue over ``text``; ``key_hint`` (a JSON key or column name) counts as context."""
     hits: list[Hit] = []
     for spec in CATALOGUE:
-        for match in spec.regex.finditer(text):
+        for match in _matches(spec, text):
             start, end = match.span(1)
             value = match.group(1)
             ctx = _context(text, start, end, key_hint)
@@ -374,7 +433,7 @@ def scan_text(text: str, *, key_hint: str | None = None) -> list[Hit]:
                     entity, start, end, round(score, 3), f"pattern:{spec.name}", evidence, validated
                 )
             )
-    return resolve_overlaps(hits)
+    return resolve_overlaps(_settle_aadhaar_vs_card(text, hits))
 
 
 def scan_phones(text: str, *, region: str = "US") -> list[Hit]:

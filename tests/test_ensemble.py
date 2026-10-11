@@ -133,3 +133,19 @@ def test_grouped_card_in_free_text_is_one_span() -> None:
         10,
         29,
     )
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Aadhaar 2341 2341 2346 9845120377", [("AADHAAR", 8, 22), ("PHONE", 23, 33)]),
+        ("Aadhaar no 2341 2341 2346 2 copies attached", [("AADHAAR", 11, 25)]),
+        ("Aadhaar 2341-2341-2346 12 Mar 2020", [("AADHAAR", 8, 22), ("DATE", 23, 34)]),
+        ("ref 1 2341 2341 2346", [("AADHAAR", 6, 20)]),
+    ],
+)
+def test_aadhaar_next_to_another_number_is_a_finding(
+    text: str, expected: list[tuple[str, int, int]]
+) -> None:
+    res = Detector(DetectorConfig(locale="en_IN")).detect(text=text)
+    assert [(f.entity_type, f.locator.start, f.locator.end) for f in res.findings] == expected
