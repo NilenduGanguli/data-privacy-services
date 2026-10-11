@@ -1,13 +1,16 @@
 # HANDOFF — data-privacy-services (DPS)
 
-Last verified: 2026-10-12 at `1bac79b` = tag `v0.1.0-m0` (`48d9425`) + the post-M0 fixes (SEC-1 COIN
+Last verified: 2026-10-12 at `629f4db` = tag `v0.1.0-m0` (`48d9425`) + the post-M0 fixes (SEC-1 COIN
 mint TLS, O1/O2 locale and phone evidence, O5 session-only console key, lane-safe compose, the D2
-idempotency amendment; this file's refresh on top changes no code) · gates: `ruff format dps tests`,
-`ruff check dps tests`, `mypy dps`, `pytest -q` (518 passed, 2 skipped: the two tests that need the `ner`
-extra), `cd frontend && npm run build`, `docker compose up --build -d` + `python tools/smoke_test.py`
-(15/15, `/readyz` `coin_tls: verified`), and a headless browser check of the console's "Remember key on
-this device" storage behaviour. Checked on 2026-10-11 during the M0 verification and not repeated
-since: the `WITH_NER=1` image (`ner=ok`), a `linux/amd64` build, and the stack with
+idempotency amendment) + the A-prepare review r1 fixes (B1: surrogates never reuse a part of the
+record and the sweep checks name parts; B2: lane-safe test endpoints in the plans; this file's refresh
+on top changes no code) · gates: `ruff format dps tests`, `ruff check dps tests`, `mypy dps`,
+`pytest -q` (588 passed, 2 skipped: the two tests that need the `ner` extra; 5 consecutive runs, plus
+40 runs of `pytest -q tests/test_playground_samples.py -k synthesize`, all green), `cd frontend && npm
+run build`, `docker compose up --build -d` + `python tools/smoke_test.py` (15/15). Checked at `1bac79b`
+and not repeated since: `/readyz` `coin_tls: verified` and a headless browser check of the console's
+"Remember key on this device" storage behaviour. Checked on 2026-10-11 during the M0 verification and
+not repeated since: the `WITH_NER=1` image (`ner=ok`), a `linux/amd64` build, and the stack with
 `DPS_FPE_ENABLED=false` (`det_token` fallbacks reported).
 
 **Update rule (the Wega rule):** update this file in the same change as anything that alters build or
@@ -193,6 +196,12 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 - `/docs` loads Swagger UI from a public CDN; on an air-gapped network use `/api/v1/openapi.json`.
 - Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py` (see
   "Lane-safe stacks", §3).
+- Synthesis under a `strict` policy is still refused, rarely, when a reshaped identifier (a keyed
+  derangement such as `CUSTOMER_ID`) holds another value of the same record by construction:
+  `CUST-xx0928` next to a card expiry `09/28`. The derangement cannot be re-drawn without breaking
+  joins, so the sweep fails closed (422). With the Playground JSON sample it happens for about one seed
+  in 3,000 to 5,000; retry without the seed (or with another one). Every other surrogate is re-drawn
+  when it would hold another value of the record or a part of its names.
 
 ## 9. Next milestones
 
