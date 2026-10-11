@@ -283,3 +283,28 @@ are preserved unless a section says otherwise.
   - `test_grouped_card_in_free_text_is_one_span`: end-to-end guard for the Task 6 Aadhaar fix.
 
   Count: the plan's 4 + 4 added = 8 in the file; suite 134.
+
+## Task 9 — Optional Presidio NER adapter (tier T2)
+
+- `dps/engine/detect/ner_presidio.py`: analyzer construction moved into a new private
+  `PresidioNer._build() -> (analyzer, loaded_languages)`. `_engine()` now remembers a failed
+  build and raises a fast `RuntimeError` afterwards instead of rebuilding. Why: the ensemble calls
+  `analyze` once per JSON leaf, and in auto mode (`enabled=None`) `build_ner` returns an adapter
+  whenever `presidio_analyzer` imports, even with no spaCy model installed. The plan's `_engine`
+  then retried the import plus three `spacy.util.is_package` probes for every leaf of every
+  request. The result is still `[]` and the warning is still logged once; a missing model is not
+  a transient condition. `_engine`, `analyze`, `PresidioNer(...)` and `build_ner` keep their
+  signatures.
+- `analyze` picks the requested language only if a model for it was actually loaded, and
+  otherwise the first loaded language. Why: with `languages=("en", "es")` and only an English
+  model installed, an `es_MX` request asked Presidio for `es`. Presidio raised (no `es` NLP
+  engine), so every Spanish text got no NER at all. Reading it with the English model recovers
+  some names; NER is recall-only, so more recall is the safe direction.
+- Docstring added to `presidio_available`.
+- Tests added: `test_build_failure_is_cached_and_never_raises` and
+  `test_language_falls_back_to_a_loaded_model`. Both use a fake analyzer; the second also asserts
+  the Presidio-to-DPS mapping, that unmapped Presidio types are dropped, and that evidence never
+  carries the text. Both were red before the change.
+- The real-Presidio test (`@pytest.mark.ner`) skips because the `[ner]` extra and spaCy models
+  are not installed in this venv; the plan expects that skip.
+- Count: the plan's "3 passed, 1 skipped" + 2 added = 5 passed, 1 skipped; suite 139 passed, 1 skipped.
