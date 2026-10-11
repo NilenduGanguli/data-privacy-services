@@ -792,3 +792,38 @@ Public names: `ApplyOptions`, `ApplyResult`, `RevealHint`, `apply_plan`, `reveal
   `test_a_kept_span_does_not_excuse_the_value_reappearing_elsewhere` (a copy in a list, and the
   value as an object key). Both fail against the previous `verify.py`.
 - Count: 13 tests in the file; suite 304 passed, 1 skipped.
+
+## Fix round 2 — review M0-G3-r2 (Tasks 12-18), blocking finding B2
+
+- **`date_shift` now uses one offset per record, not one per entity type or path.** The plan's
+  `_offset_days` (carried into Task 15) keyed the offset HMAC with `ctx.subkey("date_shift")`.
+  That subkey's HKDF info is `date_shift|<ENTITY_TYPE>`, plus `|<path>` when the policy is
+  field-scoped. So one record's `DATE_OF_BIRTH` and `DATE` shifted by different amounts, and
+  under `consistency.field_scoped: true` so did two fields of the same type. Intervals, order
+  and age bands broke, contradicting spec §5.5 ("all dates in the record shift equally"). The
+  shipped presets only date-shift `DATE_OF_BIRTH`, so they never showed it; custom and
+  field-scoped policies did.
+- New derivation: `HMAC(record_subkey, anchor) mod (2W+1) − W`, never 0. `record_subkey` is
+  HKDF info `date_shift|record`, salted by the kid like every subkey. It depends on neither the
+  entity type nor the path. It goes through the new `TransformContext.record_subkey(method)`,
+  which shares `subkey`'s guard: no key, a wrapped-only key or a malformed DEK raises
+  `MethodError`. `subkey` itself is unchanged (signature and output). No method derives a
+  per-type `date_shift` subkey any more, so `date_shift|record` cannot collide.
+- Apply and reverse both go through `_offset_days`, so reveal stays exact. This is a wire change
+  for any date shifted before it, but no key material has been issued yet (Tasks 22/24 are not
+  built), which is why the review asked for it now.
+- **Limit, documented in `_offset_days`:** equal shifts also need an equal `window_days`. The
+  offset is drawn modulo `2W+1`, so dates treated with different windows shift differently. A
+  policy that wants intervals preserved must give every date-shifted type the same window.
+  Warning about mixed windows in the planner is left as an open issue.
+- Tests: six new cases. The five that test the fix fail against the previous `methods.py`; the
+  window-bound one passes on both and pins the documented limit. Suite: 310 passed, 1 skipped.
+  - `tests/test_methods.py`: `test_date_shift_offset_is_one_per_record_whatever_the_entity_type`
+    (also: offsets still vary by anchor and by key),
+    `test_date_shift_offset_does_not_depend_on_the_path_when_field_scoped`,
+    `test_date_shift_keeps_order_and_intervals_across_entity_types` (dates 100 days apart stay
+    100 days apart), `test_date_shift_offset_is_bounded_by_the_window`.
+  - `tests/test_apply.py`: `test_all_dates_in_a_record_shift_by_the_same_days_and_reveal`,
+    parametrised over `field_scoped` False/True: `DATE_OF_BIRTH` at `$.dob`, `DATE` at
+    `$.opened`, `$.history[0].on` and a span in `$.notes` all shift by one offset, and
+    `apply_plan` then `reveal` round-trips the record.

@@ -63,9 +63,21 @@ class TransformContext:
 
     def subkey(self, method: str, length: int = crypto.SUBKEY_BYTES) -> bytes:
         """The HKDF subkey for ``method`` and this entity type (and path when field-scoped)."""
+        info = f"{method}|{self.entity_type}" + (f"|{self.path}" if self.field_scoped else "")
+        return self._derive(method, info, length)
+
+    def record_subkey(self, method: str, length: int = crypto.SUBKEY_BYTES) -> bytes:
+        """The HKDF subkey for ``method`` shared by every field of every type in the record.
+
+        For values that must agree across a record whatever the entity type or path - the
+        ``date_shift`` offset (spec §5.5: "all dates in the record shift equally"). The info is
+        ``<method>|record``; no method derives a per-type subkey under the same method name.
+        """
+        return self._derive(method, f"{method}|record", length)
+
+    def _derive(self, method: str, info: str, length: int) -> bytes:
         if self.key is None or not self.key.has_dek():
             raise MethodError(f"method {method!r} needs key material with a plaintext dek")
-        info = f"{method}|{self.entity_type}" + (f"|{self.path}" if self.field_scoped else "")
         try:
             return crypto.subkey(self.key, info, length)
         except ValueError:
@@ -370,7 +382,16 @@ def _window(ctx: TransformContext) -> int:
 
 
 def _offset_days(ctx: TransformContext, anchor: str, window: int) -> int:
-    offset = crypto.derive_int(ctx.subkey("date_shift"), anchor, 2 * window + 1) - window
+    """The record's date offset in ``[-window, window]``, never 0 (spec §5.5).
+
+    Keyed by the record-wide subkey and the record anchor only - not by entity type or path, so
+    every date in a record shifts by the same number of days, field-scoped or not, and order,
+    intervals and age bands survive. Equal shifts also need an equal ``window_days``: the
+    offset is drawn modulo ``2 * window + 1``, so dates treated with different windows shift
+    differently. Both apply and reverse go through here; changing the derivation breaks the
+    reveal of anything already shifted under a caller-held key.
+    """
+    offset = crypto.derive_int(ctx.record_subkey("date_shift"), anchor, 2 * window + 1) - window
     return offset if offset != 0 else 1
 
 

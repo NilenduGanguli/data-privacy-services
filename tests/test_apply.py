@@ -318,6 +318,56 @@ def _span_plan(
     return Plan(mode="obfuscate", record_sensitivity=Sensitivity.HIGH, entries=[entry])
 
 
+def _whole_entry(path: str, entity: str, method: str, params: dict) -> PlanEntry:
+    finding = Finding(
+        locator=Locator(path=path),
+        entity_type=entity,
+        score=0.9,
+        detectors=["t"],
+        sensitivity=Sensitivity.HIGH,
+    )
+    return PlanEntry(finding=finding, method=method, params=params, reason="t", reversible=True)
+
+
+@pytest.mark.parametrize("field_scoped", [False, True])
+def test_all_dates_in_a_record_shift_by_the_same_days_and_reveal(field_scoped: bool) -> None:
+    from datetime import date
+
+    data = {
+        "dob": "1988-03-14",
+        "opened": "2019-07-01",
+        "history": [{"on": "2020-01-15"}],
+        "notes": "Opened on 2019-07-01 at the branch",
+    }
+    window = {"window_days": 365}
+    entries = [
+        _whole_entry("$.dob", "DATE_OF_BIRTH", "date_shift", window),
+        _whole_entry("$.opened", "DATE", "date_shift", window),
+        _whole_entry("$.history[0].on", "DATE", "date_shift", window),
+    ]
+    entries += _span_plan("$.notes", 10, 20, "DATE", "date_shift", window).entries
+    plan = Plan(mode="obfuscate", record_sensitivity=Sensitivity.HIGH, entries=entries)
+    policy = _envelope_policy(field_scoped=field_scoped).model_copy(
+        update={"output": load_preset("gdpr-pseudonymise").output}
+    )
+    key = generate_key_material("key")
+    res = apply_plan(data=data, plan=plan, options=_opts(policy, key))
+    out = res.output
+    assert res.methods_used["date_shift"] == 4
+    shifts = {
+        (date.fromisoformat(out["dob"]) - date.fromisoformat(data["dob"])).days,
+        (date.fromisoformat(out["opened"]) - date.fromisoformat(data["opened"])).days,
+        (
+            date.fromisoformat(out["history"][0]["on"])
+            - date.fromisoformat(data["history"][0]["on"])
+        ).days,
+        (date.fromisoformat(out["notes"][10:20]) - date.fromisoformat("2019-07-01")).days,
+    }
+    assert len(shifts) == 1 and 0 not in shifts  # one offset for the whole record
+    assert out["notes"].startswith("Opened on ") and out["notes"].endswith(" at the branch")
+    assert reveal(output=out, key=key, hints=res.reveal_hints, options=_opts(policy, key)) == data
+
+
 def test_spans_on_numeric_leaves_are_transformed_not_skipped() -> None:
     data = {"ref": 99912345678900042}
     plan = _span_plan("$.ref", 3, 14, "ACCOUNT_NUMBER", "fpe_digits")

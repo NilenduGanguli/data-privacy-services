@@ -311,6 +311,54 @@ def test_date_shift_reverse_uses_the_recorded_format_not_the_reveal_locale() -> 
     assert back == "03/04/1988"
 
 
+def _shift_days(entity: str, value: str, window: int = 365, **kw) -> int:  # noqa: ANN003
+    out = run_method("date_shift", value, ctx(entity, {"window_days": window}, **kw))
+    assert out.method == "date_shift" and out.value
+    return (date.fromisoformat(out.value) - date.fromisoformat(value)).days
+
+
+ANCHORS = ("rec-1", "rec-2", "rec-3", "rec-4")
+
+
+def test_date_shift_offset_is_one_per_record_whatever_the_entity_type() -> None:
+    # spec §5.5: "all dates in the record shift equally" - order, intervals and age bands survive
+    for anchor in ANCHORS:
+        dob = _shift_days("DATE_OF_BIRTH", "1988-03-14", anchor=anchor)
+        assert _shift_days("DATE", "2019-07-01", anchor=anchor) == dob
+        assert _shift_days("ACCOUNT_OPENED", "2004-11-30", anchor=anchor) == dob
+    # still one offset per record and per key, not one global constant
+    assert len({_shift_days("DATE", "2019-07-01", anchor=a) for a in ANCHORS}) > 1
+    other_key = generate_key_material("key")
+    assert {_shift_days("DATE", "2019-07-01", anchor=a, key=other_key) for a in ANCHORS} != {
+        _shift_days("DATE", "2019-07-01", anchor=a) for a in ANCHORS
+    }
+
+
+def test_date_shift_offset_does_not_depend_on_the_path_when_field_scoped() -> None:
+    for anchor in ANCHORS:
+        scoped = {"anchor": anchor, "field_scoped": True}
+        a = _shift_days("DATE_OF_BIRTH", "1988-03-14", path="$.a", **scoped)
+        b = _shift_days("DATE_OF_BIRTH", "1988-03-14", path="$.b", **scoped)
+        c = _shift_days("DATE", "2019-07-01", path="$.c[0].opened", **scoped)
+        assert a == b == c == _shift_days("DATE", "2019-07-01", anchor=anchor)
+
+
+def test_date_shift_keeps_order_and_intervals_across_entity_types() -> None:
+    for anchor in ANCHORS:
+        birth = run_method("date_shift", "1988-03-14", ctx("DATE_OF_BIRTH", anchor=anchor))
+        opened = run_method("date_shift", "1988-06-22", ctx("DATE", anchor=anchor))
+        assert birth.value and opened.value
+        gap = date.fromisoformat(opened.value) - date.fromisoformat(birth.value)
+        assert gap.days == 100
+
+
+def test_date_shift_offset_is_bounded_by_the_window() -> None:
+    # equal shifts need equal windows: the offset is drawn from [-window, window], never 0
+    for anchor in ANCHORS:
+        assert _shift_days("DATE", "2019-07-01", window=1, anchor=anchor) in (-1, 1)
+        assert 0 < abs(_shift_days("DATE", "2019-07-01", window=30, anchor=anchor)) <= 30
+
+
 def test_mask_partial_never_shows_a_whole_short_value() -> None:
     assert run_method("mask_partial", "123", ctx("CVV", {"keep_last": 4})).value == "***"
     assert run_method("mask_partial", "4417", ctx("CARD_PAN", {"keep_last": 4})).value == "****"
