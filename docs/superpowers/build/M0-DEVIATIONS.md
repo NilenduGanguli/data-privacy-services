@@ -260,3 +260,26 @@ are preserved unless a section says otherwise.
 - Tests added: `test_normalize_key_edge_cases` (10 cases), `test_acronyms_and_accents_reach_the_rules`,
   `test_evidence_names_the_rule_never_the_key_value`. Count: the plan's 14 + 12 added = 26 in
   the file; suite 126.
+
+## Task 8 — Detector ensemble over JSON and text
+
+- `tests/test_ensemble.py`: the `SAMPLE["pan"]` card is `4532 7811 2297 4417` (plan:
+  `4532 7811 2290 4417`). Why: the plan's number fails Luhn, so its card hit scored
+  `0.45 x 0.45 + 0.1 = 0.30`. The ambiguous `pan` key (PAN_IN 0.5) is below the structural floor,
+  so the field produced no finding at all and the test hit `KeyError: '$.pan'`. Real card numbers
+  always pass Luhn. One digit changed, and the `4417` ending the `notes` field mentions is kept.
+  The validator and the scoring are unchanged.
+- `dps/engine/detect/ensemble.py`: the whole-value branch assigns `entity`/`score`/`detectors`/
+  `evidence` in each arm instead of setting `hit = None` under two `# type: ignore`s. `_dedupe`
+  takes `Iterable[Finding]` instead of `Any`. The behaviour is identical. Why: the project rule is
+  "no `Any` unless unavoidable", and the ignores hid a real `None` dereference path from mypy.
+- Docstrings added to `DetectorConfig` and `DetectionResult`.
+- Tests added:
+  - `test_custom_tier_declares_fields_and_adds_hits`: a fake `CustomDetector`; a declared path
+    wins as a whole-leaf finding, and custom scan hits become spans;
+  - `test_exactly_one_input_is_required`;
+  - `test_results_never_carry_the_values`: the serialised `DetectionResult` for the sample
+    contains none of its names, numbers, domain or dates;
+  - `test_grouped_card_in_free_text_is_one_span`: end-to-end guard for the Task 6 Aadhaar fix.
+
+  Count: the plan's 4 + 4 added = 8 in the file; suite 134.
