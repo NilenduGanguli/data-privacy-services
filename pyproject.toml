@@ -1,0 +1,60 @@
+[project]
+name = "data-privacy-services"
+version = "0.1.0"
+description = "Data Privacy Services: obfuscation and synthetic data for JSON, text, documents, databases and UIs."
+requires-python = ">=3.12"
+readme = "README.md"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "structlog>=24.1",
+    "prometheus-client>=0.20",
+    "python-stdnum>=1.20",      # SSN/SIN/CURP/RFC/Aadhaar/PAN/IBAN/BIC/NHS checksums
+    "cryptography>=42",         # HKDF, AES-SIV, RSA-OAEP
+    "faker>=26",                # locale-aware surrogates
+    "phonenumbers>=8.13",       # phone validation + valid synthetic numbers
+    "pyyaml>=6.0",              # policy presets and custom recognizers
+    "python-multipart>=0.0.9",  # multipart uploads (documents, M1)
+]
+
+[project.optional-dependencies]
+ner = ["presidio-analyzer>=2.2.355", "spacy>=3.7"]
+fpe = ["fastfpe>=0.2.1"]        # FF1 (NIST SP 800-38G); enabled only with DPS_FPE_ENABLED=true
+vertex = ["google-genai>=1.0"]  # laptop path to Gemini; production goes through Stellar
+dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10", "types-PyYAML"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dps"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dps"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "ner: needs the optional [ner] extra and spaCy models",
+    "fpe: needs the optional [fpe] extra",
+    "network: needs a live LLM gateway",
+    "browser: needs Playwright (M4)",
+    "integration: needs live databases (M2+)",
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
