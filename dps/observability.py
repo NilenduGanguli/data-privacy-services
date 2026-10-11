@@ -69,6 +69,8 @@ _SAFE_FIELDS = frozenset(
         "auth",
         # audit events (dps.audit.AuditEvent)
         "ts",
+        # metadata database (M2): migration file names (dps/db.py)
+        "migration",
     }
 )
 

@@ -68,6 +68,16 @@ Without Docker, `tools/scratch_pg.sh start meta` runs a Homebrew PostgreSQL 16 c
 tests find the server through `DPS_TEST_PG_DSN` (default
 `postgresql://postgres:postgres@127.0.0.1:${DPS_DB_PORT:-5441}/postgres`); without it they skip,
 and with `DPS_TEST_REQUIRE_SERVICES=1` they fail.
+
+**Migrations (M2).** `python -m dps.migrate` applies `dps/migrations/NNN_*.sql` in order as the
+migration login (`DPS_PG_MIGRATION_USER`, `dps_owner` locally) under a per-schema advisory lock,
+records each file's sha256 in `<schema>.dps_migration_ledger`, then creates the audit-log partitions
+for this month and the next three. `--verify` only checks (runtime login, no DDL) and names every
+pending or changed file; `--maintain` also drops audit partitions older than
+`DPS_AUDIT_RETENTION_MONTHS`. Exit codes: 0 ok, 1 drift/pending or a failed run (class name and
+SQLSTATE only), 2 `DPS_PG_HOST` unset. Applied files are never edited: fix forward with a new number
+(M2 owns 001–019). Against the compose database:
+`DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
 Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,

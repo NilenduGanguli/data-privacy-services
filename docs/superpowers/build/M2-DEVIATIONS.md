@@ -63,3 +63,26 @@ otherwise.
   precedence; contract ports are asserted only with both variables unset.
 - `HANDOFF.md` §3: services table with `dps-db`, the scratch-cluster command and the `db` test
   variables; §4 compose-only variables gain `DPS_DB_PORT`.
+
+## Task 4 — Migrations 001–009 and the runner
+
+- `dps/migrate.py`: driver failures (`asyncpg.PostgresError`, `asyncpg.InterfaceError`, `OSError`)
+  are caught and printed as `migrations: failed (<ExceptionClass> sqlstate=<code>)`, exit 1. Why:
+  the plan's docstring promises exit 1 for a failed migration and output limited to file names and
+  counts, but its `_run` only caught `MigrationDrift`, so a wrong password or a failing statement
+  ended in a Python traceback (source lines plus the server message). New test
+  `test_migrate_cli_failures_exit_cleanly_without_secrets`: a wrong migration password exits 1 with
+  neither the password nor a traceback in the output; an empty `DPS_PG_HOST` exits 2.
+- `tests/db/test_migrations.py`: the CLI tests run the subprocess with `cwd=tmp_path`, so a `.env`
+  in the working directory cannot change the settings the CLI reads (the lane's `.env` sits in the
+  worktree root). `test_fresh_database_applies_every_file_once` also pins
+  `set(db.GLOBAL_TABLES)` to the four contract names. 9 tests (plan: 8).
+- `tests/fixtures/db.py`: the role bootstrap creates the NOLOGIN groups `NOSUPERUSER NOBYPASSRLS`
+  (as `01_roles.sql` does) and runs the two `GRANT`s after the `DO` block; the `queue` fixture is
+  annotated `ModuleType`; docstrings added. Same roles, memberships and fixtures as planned.
+- `dps/db.py`: as planned, plus docstrings and a `lock_key` local. `dps/migrations/009_grants.sql`
+  carries the plan's note about the ledger in its header comment.
+- `HANDOFF.md` §3: the migration CLI (apply, `--verify`, `--maintain`, exit codes, fix-forward rule).
+- Verified beyond the tests: against the lane's compose `dps` database (roles from
+  `01_roles.sql`), `--verify` exits 1 naming all nine files pending, the plain run applies 9, then
+  `--verify` and `--maintain` exit 0.
