@@ -186,3 +186,36 @@ plan's 15) that failed against the plan's code for the reason named.
 - Count: `tests/documents/test_extract.py` 27 passed (the plan says `15`; its tests are 15 cases
   with the parametrisation); `tests/documents` 51 passed (also with `-W error::DeprecationWarning`);
   suite 640 → 667 passed, 2 skipped; `-m "docs or ocr"` selects 39.
+
+## Task 7 — OCR client (Azure Read v3.2 contract), readiness, mock integration test
+
+The plan's `dps/layers/documents/ocr.py` and its two test files are used, with three fixes that keep
+every name and signature; 10 tests added to `tests/documents/test_ocr_client.py` (the plan's 14 → 24)
+failed against the plan's code for the reason named.
+
+- `parse_read_result` **fails closed**. The plan skipped a word whose `boundingBox` was missing,
+  short or non-numeric. Such a word never reaches the engine, so a value in it is neither detected
+  nor boxed, and the rasterised page keeps showing it while the redaction report passes (the OCR
+  re-read only looks for detected originals). Now a word with text but no usable box (8 finite
+  numbers, `_polygon`) raises `OcrError("ocr_protocol")` for the page, and so does a result of an
+  unexpected shape (`readResults` not a list, `lines`/`words` not lists of objects, a non-numeric
+  `width`…) — the plan let those escape as `AttributeError`/`KeyError`/`ValueError` (a 500).
+  Words with blank text are still skipped (nothing to box). A non-finite `confidence` becomes
+  `None`. Messages are fixed text (no OCR body). Tests:
+  `test_results_of_an_unexpected_shape_are_protocol_errors` (5 shapes),
+  `test_words_without_usable_geometry_fail_closed` (4 boxes, incl. NaN — Python's `json` accepts
+  `NaN`).
+- `AzureReadClient._read`: a poll body that is JSON but not an object (a list) raised
+  `AttributeError`; now `ocr_protocol` ("poll response was not a JSON object").
+- `_retry_after`: `Retry-After: nan` parsed to NaN and reached `asyncio.sleep(nan)`, whose timer
+  handle breaks the event loop's heap ordering for every other task; a non-finite value now falls
+  back to the default (`inf` too, previously capped to 30). Test:
+  `test_non_finite_retry_after_falls_back_to_the_default`.
+- Mock container: compose has no `azure-ocr-mock` until Task 19, so the plan's pre-Task-19 command
+  ran it, in the lane-safe form: `docker run -d --rm --name "dps-ocr-${COMPOSE_PROJECT_NAME:-dps}"`
+  (here `dps-ocr-dps-wt-m1`) `-p "127.0.0.1:${DPS_OCR_PORT:-5016}:5000"
+  document_intelligence-azure-ocr-mock:latest` (the cached image; `${DPS_IMAGE_TAG}` names images
+  compose builds), then stopped. The test reads the endpoint from `DPS_TEST_OCR_URL` (`ocr_url`).
+- Count: `tests/documents/test_ocr_client.py` 24 passed; `test_ocr_mock.py` 1 passed with
+  `DPS_TEST_REQUIRE_SERVICES=1`; `-m "docs or ocr"` 40 passed; suite 667 → 692 passed with the mock
+  up (691 passed, 3 skipped without it).
