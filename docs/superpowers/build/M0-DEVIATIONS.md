@@ -544,3 +544,82 @@ are preserved unless a section says otherwise.
   the negative-keep test fail.
 - With `uv pip install -e ".[dev,fpe]"` (fastfpe 0.2.1) the FF1 tests run for real: 10 passed in
   the file; suite 214 passed, 1 skipped (the Presidio test).
+
+## Task 15 — The method registry
+
+Public names and signatures are as planned (`METHODS`, `MethodError`, `TransformContext`,
+`Outcome`, `SurrogateProvider`, `CipherFactory`, `run_method`, `reverse_method`).
+`TransformContext.subkey(method, length=32)` gained an optional `length`. Changes:
+
+- **`det_token` is AES-256-SIV.** Its subkey is derived at `crypto.SIV_KEY_BYTES` (64). The plan
+  used 32 bytes, which is AES-128 inside SIV (see Task 12).
+- **Exact reversal of `date_shift`.** The plan's version did not round-trip for several real
+  inputs and in one case revealed a *different* date without any error:
+  - Reverse re-detected the format from the reveal-time locale. `03/04/1988` shifted under
+    `en_US` and revealed under `en_IN` (Task 22 reveals with the service's default locale) came
+    back as another date. Reverse now parses with the format recorded in `reverse_params["fmt"]`;
+    only a known format is accepted.
+  - `datetime.fromisoformat` accepts many spellings (`19880314`, `1988-03-14 10:30`, a trailing
+    `Z`) and `isoformat()` rewrote them (`1988-03-14T10:30:00`). `strptime` also accepts
+    `4 Mar 1988` and `14 MAR 1988`, which `strftime` re-renders padded / title case. Reveal then
+    returned a different string from the original.
+  - New rule: a value is shifted only if rendering it back reproduces it exactly. ISO dates must
+    be `YYYY-MM-DD`; ISO datetimes shift the date part and keep the time and zone text verbatim;
+    surrounding whitespace is kept. After shifting, the method reverses its own output and
+    compares. Anything that fails these checks falls back to `det_token`, which is exactly
+    reversible.
+  - `9999-12-31` / `0001-01-01` (common sentinel dates in bank data) raised `OverflowError` for
+    about half of all anchors. `OverflowError` is not a `ValueError`, so Task 22 would have
+    returned a 500. They now fall back to `det_token` with the note `fallback:date_out_of_range`.
+- **Bad method parameters are `MethodError`s.** Params come from the policy, which can be inline
+  in a request body, or from caller-supplied reveal hints. The plan used bare
+  `int(ctx.params.get(...))`, so `{"length": "twelve"}`, `{"keep_suffix": [4]}`, `{"ranges": 7}`
+  and `{"window_days": 10**12}` raised `ValueError`, `TypeError` or `OverflowError`. Task 22 only
+  catches `MethodError` around `apply_plan`, so these became 500s. Now each param is checked
+  against a range (`length` 4-52, keeps 0-64, `window_days` 1-36500, `percent` 0-100,
+  `ranges` ascending finite numbers, `values` a list, `granularity` year/month,
+  `keep_country_code` a bool). The message names the method, the parameter and the rule, never
+  the value. An unknown method name is also a `MethodError` (it was a `KeyError`).
+- **`email` domain modes.** The spec lists `keep / generalize / encrypt`. The plan treated every
+  mode other than `generalize` as `keep`, so `domain: encrypt` silently left the domain in clear.
+  `encrypt` is now implemented: the domain becomes an AES-SIV token under the RFC 2606 `.invalid`
+  TLD, with associated data `<TYPE>|domain`, and it is reversible. Any other mode is a
+  `MethodError`.
+- **Reversing an FPE sub-method needs FPE.** `phone` (sub `fpe_digits`) and `email` (sub
+  `fpe_text`) now raise `MethodError` when FPE is off at reveal time, like `fpe_digits` /
+  `fpe_text` already did. Before, they constructed `Ff1` directly, which raises `ImportError`
+  without the extra.
+- **`det_token` reversal** catches `InvalidTag` and `ValueError` only, and raises
+  `MethodError(...) from None` (no chained exception that could carry bytes).
+  `TransformContext.subkey` refuses wrapped-only key material with a `MethodError`; before, a
+  `KeyError` escaped.
+- **`mask_partial`** masks the whole value when `keep_first + keep_last` would cover all of it.
+  The plan's slice went negative: `"123"` with `keep_last: 4` became `"**3"` by accident, and
+  `"4417"` with `keep_last: 4` was returned in clear.
+- **`noise`** fails closed. An unparseable amount becomes `[REDACTED]` (the plan passed it
+  through unchanged). `1,000` is read as 1000. The output never equals the input: if rounding
+  gives the original back, it moves one unit in the last place. Without a key (synthesize mode)
+  the noise is random; the plan used zero noise, which returned every amount in clear.
+- **`dictionary`** without a key picks the entry by SHA-256 of the value. The plan used `hash()`,
+  which is salted per process, so the choice was not stable across workers or restarts.
+- The registry check is `if … raise RuntimeError` instead of `assert`, so it still holds under
+  `python -O`. No `# type: ignore` was needed.
+- Tests added (all after the plan's 8):
+  - `test_det_token_is_aes256_siv_under_a_64_byte_subkey`;
+  - `test_field_scoped_tokens_differ_per_path_and_reverse_only_there`;
+  - `test_wrong_key_or_garbage_tokens_are_method_errors_without_values`;
+  - `test_unknown_methods_are_method_errors`;
+  - `test_bad_method_params_are_method_errors_that_never_echo_the_value` (13 cases);
+  - `test_email_domain_encrypt_hides_the_domain_and_reverses`;
+  - `test_reversing_an_fpe_sub_method_needs_fpe`;
+  - `test_date_shift_reverses_exactly_whatever_the_input` (13 inputs x 4 anchors);
+  - `test_date_shift_keeps_the_time_part_verbatim`;
+  - `test_date_shift_reverse_uses_the_recorded_format_not_the_reveal_locale`;
+  - `test_mask_partial_never_shows_a_whole_short_value`;
+  - `test_noise_never_returns_the_original_and_works_without_a_key`;
+  - `test_dictionary_without_a_key_is_stable_across_processes`;
+  - `test_methods_tolerate_empty_values`.
+
+  Against the plan's `methods.py`, 29 of these 37 test cases fail. The plan's own 8 tests pass
+  unchanged.
+- Count: 45 in the file; suite 259 passed, 1 skipped.
