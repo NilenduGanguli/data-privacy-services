@@ -11,6 +11,7 @@ from __future__ import annotations
 import codecs
 import csv
 import io
+import math
 import re
 import zipfile
 from typing import Any
@@ -32,6 +33,8 @@ from dps.layers.documents.models import (
     Word,
 )
 from dps.layers.documents.render import PdfRenderer
+
+MAX_IMAGE_SIDE = 10_000  # Read v3.2 accepts at most 10000 x 10000 (images scale, PDF pages refuse)
 
 
 def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
@@ -128,10 +131,28 @@ def _text_layer_words(plumber_page: Any) -> list[Word]:
     return words
 
 
+def _check_page_sizes(renderer: PdfRenderer, settings: Settings) -> None:
+    """Refuse a page that any DPS render (OCR and redaction at ``pdf_render_dpi``, previews at
+    ``preview_dpi``) would make more than ``MAX_IMAGE_SIDE`` pixels a side: Read v3.2 cannot read
+    it, and the bitmap is unbounded (a 433-byte, 14,400 pt page is 40,000 px at 200 dpi, ~17 GB).
+    Pixels are counted as pypdfium2 sizes its bitmap: ``ceil(points * dpi / 72)``."""
+    dpi = max(settings.pdf_render_dpi, settings.preview_dpi)
+    scale = dpi / 72.0
+    for index in range(len(renderer)):
+        if max(math.ceil(side * scale) for side in renderer.page_size(index)) > MAX_IMAGE_SIDE:
+            raise DocumentError(
+                "image_too_large",
+                f"page {index + 1} would render over {MAX_IMAGE_SIDE} px a side at {dpi} dpi; "
+                f"pages are limited to {math.floor(MAX_IMAGE_SIDE / scale)} pt a side",
+                status=413,
+            )
+
+
 def extract_pdf(content: bytes, settings: Settings, ocr_mode: OcrMode) -> ExtractedDocument:
-    """Normalise, read the text layer, and flag pages that need OCR."""
+    """Normalise, bound the page size, read the text layer, and flag pages that need OCR."""
     normalised, annotations = normalise_pdf(content, max_pages=settings.max_document_pages)
     with PdfRenderer(normalised) as renderer:
+        _check_page_sizes(renderer, settings)
         coverage = [renderer.image_coverage(i) for i in range(len(renderer))]
     pages: list[PageText] = []
     try:
@@ -170,7 +191,6 @@ def extract_pdf(content: bytes, settings: Settings, ocr_mode: OcrMode) -> Extrac
 
 # --- other formats ----------------------------------------------------------------------
 MAX_IMAGE_PIXELS = 40_000_000  # refuse before decoding (Pillow's own bomb guard is 89M)
-MAX_IMAGE_SIDE = 10_000  # Read v3.2 accepts at most 10000 x 10000
 DEFAULT_IMAGE_DPI = 200.0
 ZIP_RATIO_LIMIT = 10.0  # a DOCX may inflate to at most 10x the upload limit
 ZIP_MAX_ENTRIES = 5_000

@@ -177,3 +177,42 @@ def test_malformed_pdfs_are_corrupt_documents_not_uncoded_errors(make):
         extract_pdf(make(), SET, "auto")
     assert (exc.value.code, exc.value.status) == ("corrupt_document", 422)
     assert exc.value.__cause__ is None and exc.value.__suppress_context__  # no pypdf text kept
+
+
+def _blank(*sizes: tuple[float, float], rotate: int = 0) -> bytes:
+    writer = PdfWriter()
+    for width, height in sizes:
+        page = writer.add_blank_page(width=width, height=height)
+        if rotate:
+            page.rotation = rotate
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def test_pages_too_large_to_render_are_refused():
+    # 433 bytes that would render (blank pages are scan-suspect, so OCR'd) at 200 dpi as a
+    # 40,000 x 40,000 px bitmap, about 17 GB; Read v3.2 also refuses more than 10,000 px a side
+    huge = _blank((14_400, 14_400))
+    assert len(huge) < 1_000
+    with pytest.raises(DocumentError) as exc:
+        extract_pdf(huge, SET, "auto")
+    assert (exc.value.code, exc.value.status) == ("image_too_large", 413)
+    assert str(exc.value).startswith("page 1 ")
+    # the bound is the rendered side, so 3,600 pt is the limit at the default 200 dpi
+    assert extract_pdf(_blank((3_600, 100)), SET, "auto").pages[0].width == 3_600
+    with pytest.raises(DocumentError) as second:
+        extract_pdf(_blank((612, 792), (100, 3_601)), SET, "auto")
+    assert second.value.code == "image_too_large" and str(second.value).startswith("page 2 ")
+    with pytest.raises(DocumentError):  # and on a rotated page
+        extract_pdf(_blank((3_601, 100), rotate=90), SET, "auto")
+
+
+def test_the_page_bound_follows_the_highest_render_resolution():
+    wide = _blank((7_200, 100))
+    assert extract_pdf(wide, Settings(_env_file=None, pdf_render_dpi=100), "auto").pages
+    previews_finer = Settings(_env_file=None, pdf_render_dpi=72, preview_dpi=150)
+    assert extract_pdf(_blank((4_700, 100)), previews_finer, "auto").pages
+    with pytest.raises(DocumentError) as exc:  # a 150-dpi preview would be 15,000 px wide
+        extract_pdf(wide, previews_finer, "auto")
+    assert exc.value.code == "image_too_large"

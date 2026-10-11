@@ -291,3 +291,22 @@ helpers named below are new or changed.
   messages, and a chained cause would carry those bytes into any traceback that a future log
   processor kept. Messages are unchanged apart from the type names added above. `render.py` thus
   differs from the plan in that one `raise`.
+- **B3, `extract_pdf` bounds the page size (new private `_check_page_sizes`).** A 433-byte PDF with
+  one blank 14,400 pt page used to be accepted with `needs_ocr=True`, because blank pages are
+  scan-suspect. At 200 dpi it would be rendered at 40,000 × 40,000 px, about 17 GB. Read v3.2 also
+  refuses more than 10,000 px a side, so such a page could never be OCR'd. After normalising,
+  `extract_pdf` now refuses any page whose pypdfium2 bitmap, `ceil(points × dpi / 72)`, would
+  exceed `MAX_IMAGE_SIDE` (10,000). It refuses with `image_too_large` (413), naming the page
+  number, the limit and the dpi:
+  `page 1 would render over 10000 px a side at 200 dpi; pages are limited to 3600 pt a side`.
+  The dpi used is `max(pdf_render_dpi, preview_dpi)`. This goes beyond the review's formula
+  (`pdf_render_dpi`), because previews (Task 10) render the same pages at `preview_dpi`, which the
+  settings allow up to 150 while `pdf_render_dpi` may be as low as 72. With the defaults (200/72)
+  the bound is the review's: 3,600 pt is accepted and 3,601 pt is refused. The refusal takes under
+  1 ms and renders nothing. A 3,600 pt page still renders at the full 10,000 px (the review
+  measured about 1.1 GB peak RSS). That is the Read limit, and renders stay serialised by
+  `PDFIUM_LOCK`. `MAX_IMAGE_SIDE` moves up to the PDF section of the module, with the same name
+  and value. HANDOFF.md §4 (the `DPS_PDF_RENDER_DPI` row) states the bound. Tests:
+  `test_pages_too_large_to_render_are_refused` (14,400 pt; 3,600 accepted; page 2 of 2 named; a
+  rotated page) and `test_the_page_bound_follows_the_highest_render_resolution`. The fuzz re-run
+  (3 × 3,000) still gives 0 uncoded failures with the new size walk.
