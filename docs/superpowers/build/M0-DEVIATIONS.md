@@ -236,3 +236,27 @@ are preserved unless a section says otherwise.
     the digits or the address).
 - Count: the plan expected "22 passed"; its own tests total 19 (14 parametrised + 5). With the
   5 added tests, 24 in the file; suite 100.
+
+## Task 7 — Structural detector (tier T0)
+
+- `dps/engine/detect/structural.py`, `normalize_key`: the last segment now comes from
+  `dps.engine.jsonpath.parse_path` (new private helper `_last_segment`) instead of the plan's
+  hand-rolled split. Why: the plan's own test case `$.card.tags[1]['cc-number']` came out as
+  `tags 1 cc number` (its split regex never isolated the bracketed segment), so `cc_number`-style
+  keys inside arrays were classified by their parent's name. Parsing with the same grammar
+  `flatten` writes keeps quoted keys whole (`$.a['b.c']` → `b c`), skips indices
+  (`$.tags[3]` → `tags`), and treats a bare column name as a one-segment path
+  (`customer.email` → `email`). Anything unparseable falls back to the text after the last
+  `.`/`[`/`]`/`'`.
+- `normalize_key`: camelCase splitting also separates an acronym from the next word
+  (`userIPAddress` → `user ip address`, `customerSSNLast4` → `customer ssn last4`). With the
+  plan's single rule these became `useripaddress` and `customer ssnlast4`, so `ip address` and
+  `ssn` never matched as whole words. This is a recall fix only; every plan case is unchanged.
+- `normalize_key`: accents are folded (NFKD, combining marks dropped) before lower-casing. Why:
+  the Spanish rule phrases are accent-free (`telefono`, `direccion`, `genero`, `codigo postal`),
+  but MX payloads use `teléfono` / `dirección`, which the plan split into `tel fono` /
+  `direcci n` and lost. This is a recall fix only.
+- Docstring added to `KeyCandidate`.
+- Tests added: `test_normalize_key_edge_cases` (10 cases), `test_acronyms_and_accents_reach_the_rules`,
+  `test_evidence_names_the_rule_never_the_key_value`. Count: the plan's 14 + 12 added = 26 in
+  the file; suite 126.
