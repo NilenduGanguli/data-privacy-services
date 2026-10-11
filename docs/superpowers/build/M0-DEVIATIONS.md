@@ -50,3 +50,27 @@ are preserved unless a section says otherwise.
   configures the real structlog pipeline, logs `value=` and `token=` fields and asserts neither
   reaches stdout while `entity_type` does. Why: the plan only unit-tested the processor; this proves
   it is wired into `configure_logging`.
+
+## Task 4 — Taxonomy, findings model, JSON path helpers
+
+- `dps/engine/taxonomy.py`: `DRIVER_LICENSE` and `VOTER_ID` are `CRITICAL` (plan: `HIGH`).
+  Why: the spec (§5.2) says "any government or card identifier CRITICAL"; both identify a natural
+  person. `EIN` and `BN` stay `HIGH` because they identify businesses (open question for the
+  privacy office, see the report). No later M0 test depends on these two tiers — sensitivity only
+  drives `keep_non_sensitive` (LOW) and the reported record tier, both unaffected. This raises
+  protection; it never lowers it. `DRIVER_LICENSE` also gained a description.
+- `dps/engine/jsonpath.py`: `parse_path` declares `out: list[str | int] = []` instead of the
+  plan's `rest, out, pos = path[1:], [], 0` + `out_list` alias. Why: mypy rejects the plan's line
+  (`var-annotated: Need type annotation for "out"`). Behaviour is identical; the plan's quoted-key
+  unescape is kept verbatim (a brute-force round trip over every key of length 1-5 drawn from
+  `a \ ' .` confirms `_segment` → `parse_path` is lossless).
+- `dps/engine/findings.py`: the `hash_value` docstring now states plainly that the salt-free hash
+  does not hide low-entropy values (an SSN can be recovered by enumerating 10^9 candidates), so it
+  must only travel where the caller is entitled to the finding. Code unchanged. Flagged as an open
+  issue in the report.
+- Docstrings added to public properties/methods (`Sensitivity.rank`, `Sensitivity.max_of`,
+  `Family`, `Locator.whole`, `Plan.reversible_count`, `Plan.methods_used`) per the conventions.
+- Tests added: `test_identifiers_of_a_natural_person_are_critical` (taxonomy, fixed list),
+  `test_every_flattened_path_reads_back_including_odd_keys` and `test_malformed_paths_are_refused`
+  (jsonpath). Totals: plan expected "27 passed"; the plan's own tests total 30 after Task 4
+  (1+7+8+3+4+3+3+... the plan's figure was an arithmetic slip); with the added tests, 34.
