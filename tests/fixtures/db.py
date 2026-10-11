@@ -162,6 +162,20 @@ def tenant_conn(migrated_db: Settings) -> Callable[..., object]:
 
 
 @pytest.fixture
+def queue_settings(
+    migrated_db: Settings, monkeypatch: pytest.MonkeyPatch
+) -> Callable[..., Settings]:
+    """Override queue timings for one test: ``queue_settings(job_lease_seconds=1)``."""
+
+    def apply(**overrides: object) -> Settings:
+        updated = db.active_settings().model_copy(update=overrides)
+        monkeypatch.setattr(db, "_settings", updated)
+        return updated
+
+    return apply
+
+
+@pytest.fixture
 def queue(migrated_db: Settings) -> ModuleType:
     """The ``dps.jobs`` module (Task 8) bound to the test database."""
     import dps.jobs

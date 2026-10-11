@@ -125,6 +125,38 @@ def test_fields_the_m0_call_sites_log_are_kept() -> None:
     assert _drop_value_fields(None, "info", dict(event)) == event
 
 
+def test_fields_the_m2_queue_logs_are_kept() -> None:
+    # Ids, counts, phases and metadata names the job queue and connectors log (M2).
+    event = {
+        "event": "partition_done",
+        "job_id": "j_01",
+        "partition_id": 7,
+        "partition_no": 3,
+        "phase": "partitions",
+        "state": "done",
+        "kind": "run",
+        "worker_id": "host:1:abcdef",
+        "rows": 1000,
+        "batch_no": 4,
+        "attempts": 1,
+        "engine": "postgres",
+        "write_mode": "table",
+        "connection_id": "c_01",
+        "snapshot_id": "snap_01",
+        "evidence_id": "ev_01",
+        "group_id": "grp_01",
+        "partitions": 8,
+        "elapsed_s": 1.5,
+        "rows_per_s": 6600.0,
+        "object_ref": "bank.customers",
+        "code": "lease_lost",
+        "checks": 3,
+        "lease_lost": True,
+    }
+    assert _drop_value_fields(None, "info", dict(event)) == event
+    assert _drop_value_fields(None, "info", {"event": "x", "last_key": "[1]"}) == {"event": "x"}
+
+
 def test_free_text_event_messages_are_replaced() -> None:
     # Event names are snake_case identifiers; a message with an interpolated value is not one.
     for event in ("obfuscate", "verification_failed", "llm.call", "s3_upload"):

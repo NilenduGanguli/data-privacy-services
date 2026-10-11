@@ -175,3 +175,35 @@ otherwise.
   `"b"`, which already fails the bucket pattern, so the role rule itself was untested),
   `test_spec_validation_errors_never_echo_values`, `test_resolved_target_defaults`. 9 tests
   (plan: 6).
+
+## Task 8 — Queue, part 1 (job rows, claims, leases, workers registry)
+
+- `tests/db/test_jobs_queue.py` — **plan assertion that could never pass, corrected.**
+  `test_create_get_list_with_cursor_and_filters` listed four jobs in pages of two and then asked
+  for a third page with `cursor=cursor2`; but the second page is the last one, so `cursor2` is
+  `None` and the "third page" call restarted from the newest job (six ids against four). The test
+  now asserts `cursor is not None and cursor2 is None` and that the two pages hold all four jobs
+  newest first — the intent (keyset paging covers everything once and then stops).
+- `tests/db/test_jobs_queue.py`: `test_fencing_after_lease_expiry` calls `jobs.reap` (Task 9), so
+  it is committed with Task 9 (the plan already lists this file as "append" there) instead of
+  being deselected here — every commit runs a green `pytest -q`.
+- `dps/jobs.py` `claim_jobs`: the inner locking select joins the candidate CTE and takes rows
+  `ORDER BY` the candidate's FIFO ordinal (`FOR UPDATE OF q SKIP LOCKED LIMIT batch`). Why: the
+  plan's `WHERE id IN (SELECT id FROM eligible) … FOR UPDATE SKIP LOCKED LIMIT batch` has no
+  `ORDER BY`, so when the eligible window (≥ 50 rows) is larger than the batch, which rows are
+  locked is up to the plan chosen by Postgres, not FIFO (contract §3.2 "FIFO by (priority,
+  run_after, created_at, id)"). New regression test
+  `test_claims_are_fifo_when_the_batch_is_smaller_than_the_eligible_set` (it passes with either
+  form on today's planner; the `ORDER BY` makes the order a guarantee rather than an accident).
+- `create_job` looks the idempotency key up **before** the queue cap check, so a replay of an
+  accepted request returns the original job instead of `queue_full` (the unique-violation path
+  is kept for concurrent duplicates). New test `test_idempotent_replay_is_not_refused_by_a_full_queue`.
+  A job that is not visible after insert raises `RuntimeError` (value-free) instead of `assert`.
+- `QueueFull` / `KeyMaterialRequired` carry `status` (429 / 409) beside `code`, and
+  `JobStateError` keeps `.detail` (the API mapping in Task 24 uses both); additive.
+- `advance_job` truncates `error` to 500 characters like `retry_job` does; `retry_job` sends a
+  `pg_notify` when it requeues (workers otherwise wait for the poll interval).
+- `dps/observability.py`: as planned (24 safe fields, six metrics). `tests/test_observability.py`
+  gains `test_fields_the_m2_queue_logs_are_kept` (the module asks for the test to be kept in step).
+- New test `test_public_job_never_carries_sealed_blobs`. 15 tests in this commit (plan: 12 +
+  the deferred fencing test).
