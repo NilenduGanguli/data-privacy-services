@@ -1321,3 +1321,89 @@ Tests added (8): `test_key_records_never_echo_a_key_in_errors` (7 bad records),
 `test_rate_limiter_isolates_keys_and_never_exceeds_burst`,
 `test_log_audit_sink_writes_every_field_and_no_value`. Against the plan's three modules, 6 of the
 8 fail; the plan's 5 pass on both. Count: 13 in the file; suite 415 passed, 1 skipped.
+
+## Task 24 — Layer 1 API, routers, app factory
+
+Public names as planned: `create_app(settings=None, *, engine=None, audit_sink=None)`, `CSP`,
+`FRONTEND_DIST`; `dps/layers/api/schemas.py` (`EngineRequest`, `PlanRequest`, `RevealRequest`,
+`ValidatePolicyRequest`, `DetectOut`, `PlanOut`, `TransformOut`, `RevealOut`, `PolicyOut`);
+`dps/layers/api/common.py` (`trace_id`, `payload_from`, `run_engine`, `TRACE_HEADER`); routers
+`ops`, `detect`, `transform`, `policies` with the planned paths, scopes and response models.
+Endpoints: `GET /health`, `/readyz`, `/metrics`; `POST /api/v1/{detect,obfuscate,synthesize,
+reveal}`; `GET /api/v1/policies/presets`; `POST /api/v1/policies/{validate,plan}`;
+`/api/v1/openapi.json`, `/docs`; SPA at `/`. Changes:
+
+- `tests/test_api.py` — the fixture enters `with TestClient(app) as c:` and yields (the plan's
+  own Step 6 note: Starlette runs the lifespan, and so sets readiness, only in a context
+  manager). The plan's 5 tests are otherwise unchanged (reformatted).
+- **422 bodies never echo the request.** FastAPI's default handler returns every error's
+  `input` (and `ctx`): a reveal without `key_material` answered with the whole document, and a
+  bad `options.consistency` echoed the caller's DEK. `create_app` installs a handler that
+  returns `{type, loc, msg}` per error only; request schemas also set `hide_input_in_errors`.
+- **Unexpected exceptions never reach the server log with their message.** Starlette's error
+  middleware answers 500 and re-raises, and uvicorn then logs the traceback — e.g. a
+  `ResponseValidationError`, whose text quotes the response (on `/reveal`: the revealed
+  originals). New innermost middleware `_ValueFreeErrors` answers `{"detail": "internal
+  error"}` and logs `unhandled_error` with the class name and route template only.
+- **Body limit also applies to streamed bodies.** The plan checked `Content-Length` only, so a
+  chunked request of any size reached the JSON parser. `_BodyLimit` is now pure ASGI: 413 up
+  front by header, or while receiving (it raises `HTTPException(413)`, which FastAPI re-raises
+  from body parsing). `_SecurityHeaders` is pure ASGI too (headers also land on 401/404/413/500).
+- `common.run_engine(request, *, mode, policy, call)` — the plan's `policy_name` is `policy`
+  and takes a **value-free label** from new `policy_label()`: a preset name, `unknown`,
+  `<preset>+overrides` or `inline` (a successful inline policy's own name is used when it is an
+  identifier). The plan audited `str(body.policy)`: an inline policy's whole dict (deny lists,
+  dictionary values) or any string the caller sent as a preset name went into the audit log.
+- `run_engine` takes `call: Callable[[], Awaitable[T]]` (PEP 695 generic; the plan's
+  `Awaitable[T] | T` union did not type-check cleanly). Each router's `call` validates the
+  payload and runs the engine, so 413/422 **rejections are counted and audited**
+  (`outcome="rejected"`); in the plan `payload_from` ran before `run_engine` and the
+  `except HTTPException` branch was dead. Mapped exceptions are raised `from None`; the 500
+  path logs the class name; `locals().get("result")` became an explicit variable; building or
+  writing the audit event can never fail the request (`audit_write_failed`, type only).
+- **Sync engine calls run in Starlette's threadpool** (`detect`, `obfuscate`, `reveal`,
+  `plan`). The plan ran CPU-bound engine work on the event loop, so one large request stalled
+  `/health` and `/readyz` (liveness restarts under load). The engine is thread-safe for this
+  (per-request detectors and surrogate engines, per-thread Faker, NER lock); structlog
+  contextvars are copied into the worker (anyio 4). `synthesize` stays on the loop (async).
+- `payload_from` — a fixed 422 message instead of `str(ValidationError)`; values are counted
+  iteratively with an early exit at `max_items + 1` (the plan built the whole `flatten` list);
+  documents nesting deeper than `MAX_DEPTH = 100` are a 422. Measured: the engine's `obfuscate`
+  and `synthesize` raise `RecursionError` between 400 and 600 levels (a 500 in the plan).
+- `X-Request-ID` is used as the trace id only when it is an identifier
+  (`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`); otherwise a fresh id (it is logged and audited).
+- The `plan:` audit record counts findings from the result (it has no report).
+- `presets` and `validate` also take the rate-limit dependency.
+- `create_app`: readiness reports **the engine's gateway** (the plan built a second gateway from
+  settings, so an injected engine's gateway was misreported); `api-core` turns false on
+  shutdown; the key store is parsed before the app is built (bad `DPS_API_KEYS` fails the boot,
+  value-free); `auth_no_keys` warning when auth is on and no key is configured;
+  `NullAuditSink` when `DPS_AUDIT_ENABLED=false` and no sink is injected; ReDoc disabled; the
+  SPA catch-all uses `Path.is_relative_to` on the resolved dist and is typed
+  (`FileResponse | JSONResponse`) instead of `noqa: ANN202`.
+
+Tests added (12): `test_request_validation_errors_never_echo_the_body`,
+`test_trace_ids_are_taken_from_the_header_only_when_safe`,
+`test_rejections_and_engine_errors_are_audited_value_free`, `test_tenant_header_rules_over_http`,
+`test_rate_limit_answers_429_with_retry_after`, `test_body_limit_by_header_and_by_stream`,
+`test_deep_documents_are_refused_not_crashed`,
+`test_unexpected_errors_are_500_and_never_reach_the_log_with_values`,
+`test_spa_mount_serves_index_with_csp_and_refuses_traversal`,
+`test_hsts_outside_local_audit_switch_and_openapi`,
+`test_readiness_reflects_the_injected_engine_and_posture_refuses_unsafe_config`,
+`test_a_failing_audit_sink_never_fails_the_request`. Against the plan's Task 24 code (with
+Task 23 as built) 8 of the first 11 fail; the tenant, rate-limit and SPA tests pass on both
+(regression guards). Count: 17 in the file; suite 432 passed, 1 skipped.
+
+Live check (uvicorn `--factory`, `DPS_ENV=dev`, bootstrap key, stub LLM): every endpoint
+answered as expected (JSON and text obfuscate → reveal round trips, synthesize, plan, validate,
+401, 404, 413 at 9 MB, 422 without input, 53 × 429 after the burst), HSTS present; 105 audit
+lines and the whole server log contain no sample value and no key. With `DPS_FPE_ENABLED=true`
+the FF1 presets round-trip over HTTP.
+
+Open: CORS stays `allow_origins=["*"]` as planned (keys are headers, not ambient cookies;
+restrict with a setting in M5). Uvicorn's access log and httpx's `HTTP Request:` lines are
+stdlib logging and bypass the structlog allow-list (no values today: the API takes none in
+paths or queries) — Task 27 should run uvicorn with `--no-access-log` or route stdlib records
+through the allow-list. Auth failures are logged (`auth_rejected`) but not audit events (no
+tenant yet; M2's audit table). Spec §6's `Idempotency-Key` and NDJSON streaming are not in M0.
