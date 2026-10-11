@@ -95,5 +95,52 @@ services:
       component: metadata-db
       env: local
 
+  # Object storage for artefacts and `files` exports (M2, contract §11/§13), profile `sources` (and
+  # `full`). minio-init is a one-shot that creates the buckets and exits 0. minioadmin/minioadmin is
+  # a local-only demo literal; the console listens on ${DPS_MINIO_CONSOLE_PORT:-9011}.
+  #   docker compose --profile sources up -d minio minio-init
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "127.0.0.1:${DPS_MINIO_PORT:-9010}:9000"
+      - "127.0.0.1:${DPS_MINIO_CONSOLE_PORT:-9011}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 512m
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: object-store
+      env: local
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/dps-artefacts &&
+        mc mb --ignore-existing local/dps-exports
+    mem_limit: 128m
+    restart: "no"
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: object-store-init
+      env: local
+
 volumes:
   dps-db-data: {}
+  minio-data: {}

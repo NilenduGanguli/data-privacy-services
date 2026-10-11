@@ -60,8 +60,12 @@ Services (host ports bind `127.0.0.1` only):
 |---|---|---|---|
 | `app` | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | `${DPS_APP_PORT:-8400}` → 8400 | console + API |
 | `dps-db` (M2) | `postgres:16-alpine` | `${DPS_DB_PORT:-5441}` → 5432 | metadata DB; `docker/dps-db/initdb/01_roles.sql` creates the contract roles (`dps_owner`, `dps_app_rw`, `dps_worker`, `dps_app`, `dps_worker_login`; local passwords = role name) and the `dps` database (owner `dps_owner`, timezone UTC) on first start; volume `dps-db-data`; superuser `postgres`/`postgres` (local only); healthy once `pg_isready -h 127.0.0.1 -d dps` answers |
+| `minio` (M2, profiles `sources`/`full`) | `minio/minio:latest` | `${DPS_MINIO_PORT:-9010}` → 9000, `${DPS_MINIO_CONSOLE_PORT:-9011}` → 9001 (console) | artefacts and `files` exports (`DPS_ARTEFACT_STORE=s3`); root user `minioadmin`/`minioadmin` (local only); volume `minio-data`; healthcheck `curl /minio/health/live` (the cached image ships curl) |
+| `minio-init` (M2, profiles `sources`/`full`) | `minio/mc:latest` | — | one-shot after `minio` is healthy: creates buckets `dps-artefacts` and `dps-exports`, exits 0 |
 
 `docker compose up -d dps-db` starts the metadata database alone (the `db` tests need nothing else).
+`docker compose --profile sources up -d minio minio-init` starts object storage for the `s3` tests
+(`DPS_TEST_S3_ENDPOINT`, default `http://127.0.0.1:${DPS_MINIO_PORT:-9010}`, bucket `dps-artefacts`).
 Without Docker, `tools/scratch_pg.sh start meta` runs a Homebrew PostgreSQL 16 cluster on
 `${DPS_DB_PORT:-5441}` with the same roles (trust auth, timezone UTC, data under
 `${DPS_SCRATCH_DIR:-~/.cache/dps-scratch-pg}/meta-<port>`); `stop` and `status` likewise. `db`
@@ -168,8 +172,9 @@ Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`.
 
 Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
-(default `local`) and the host-port variables `DPS_APP_PORT` (8400), `DPS_DB_PORT` (5441; the others
-arrive with their services, §3 "Lane-safe stacks").
+(default `local`) and the host-port variables `DPS_APP_PORT` (8400), `DPS_DB_PORT` (5441),
+`DPS_MINIO_PORT` (9010), `DPS_MINIO_CONSOLE_PORT` (9011; the others arrive with their services, §3
+"Lane-safe stacks").
 
 ## 5. Probes and ops surfaces
 

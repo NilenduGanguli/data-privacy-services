@@ -313,3 +313,42 @@ otherwise.
   path never reaches the event). `tests/db/test_audit_sink.py` also checks the stored columns,
   that the writer flushes while running, and that the failure message never reaches the log.
   5 offline + 3 db tests (plan: 3 + 2).
+
+## Task 11 — Object storage and artefacts + MinIO
+
+- `docker-compose.yml`: `minio` publishes `127.0.0.1:${DPS_MINIO_PORT:-9010}:9000` and
+  `127.0.0.1:${DPS_MINIO_CONSOLE_PORT:-9011}:9001` (plan: literal ports; contract §0 amendment
+  2026-10-12). `minio-init` gets `mem_limit: 128m` and `restart: "no"`; both carry the stack's
+  labels. The cached `minio/minio:latest` (RELEASE.2025-09-07) ships `curl`, so the contract's
+  healthcheck is used unchanged. `minio-init`'s command is the plan's, folded over three lines.
+- `dps/storage.py` `LocalObjectStore.put` — **the plan's atomic write could fail across
+  filesystems, fixed.** The plan spooled into the system temp directory and `os.replace`d the file
+  into the store; under compose `/tmp` is a tmpfs and the store a volume/PVC, so the rename would
+  fail with `EXDEV`. The spool file is now created in the target directory (`.dps-spool-*`),
+  fsynced and renamed; a failing source iterator removes it (test
+  `test_overwrite_is_atomic_and_a_failed_stream_leaves_nothing`). Spool writes run in a thread
+  (the plan wrote synchronously on the event loop).
+- Keys: besides the plan's rules, empty, `.` and trailing-slash segments are refused (`a//b`,
+  `a/./b`, `a/`), so a local path and an S3 key always name the same object. The checker is public
+  as `check_key` (Task 20's files writer validates its keys with it).
+- `S3ObjectStore`: a private `boto3.session.Session()` per store (the default session is not
+  thread-safe to create clients from); bytes up to 16 MiB go up with one `put_object` (plan: always
+  spooled to disk); `get`/`stream`/`delete`/`exists` map every botocore error to `StorageError`
+  (`storage_not_found` for `NoSuchKey`/`404`, else `storage_error` with the S3 error code or the
+  class name — never the message). The plan let non-`NoSuchKey` errors through raw and reported
+  any `ClientError` (e.g. `AccessDenied`) from `exists` as "absent". `connect_timeout=10`,
+  `read_timeout=60`.
+- `LocalObjectStore.get/stream` map a missing file to `storage_not_found` on the first read (no
+  separate `is_file` race); `exists` runs in a thread.
+- `ArtefactService.save` deletes the object again when the row insert fails (no orphan objects;
+  test `test_a_refused_row_leaves_no_orphan_object`). `delete_for_job` deletes exactly the rows
+  whose objects it removed (`id = ANY(...)`), so a concurrent `save` is never left as an object
+  without a row. SQL is schema-qualified; `dps.db` is imported lazily (needs the `db` extra).
+- `StorageError` also keeps `.detail`. `tests/fixtures/sources.py`: the `s3_store` fixture skips
+  via `importorskip("boto3")` without the `connectors` extra.
+- Tests: the plan's 10 plus three more key cases, `test_missing_object` also covers `stream`,
+  `test_overwrite_is_atomic_and_a_failed_stream_leaves_nothing`,
+  `test_artefact_store_follows_the_settings`, `test_missing_object_and_bad_keys` (s3) and
+  `test_a_refused_row_leaves_no_orphan_object` (db): 13 local + 2 s3 + 2 db = 17 (plan: 10).
+- `HANDOFF.md` §3: `minio`/`minio-init` rows and the start command for the `s3` tests; §4: the two
+  MinIO port variables.
