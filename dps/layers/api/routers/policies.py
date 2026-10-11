@@ -56,7 +56,7 @@ async def plan(body: PlanRequest, request: Request) -> PlanOut:
     result, tid = await run_engine(
         request,
         mode=f"plan:{body.mode}",
-        policy=policy_label(body.policy, engine.settings.default_policy),
+        policy_name=policy_label(body.policy, engine.settings.default_policy),
         call=call,
     )
     return PlanOut(**result.model_dump(), trace_id=tid)

@@ -12,12 +12,13 @@ Every outcome, rejections included, is counted and audited (value-free).
 
 from __future__ import annotations
 
+import inspect
 import re
 import time
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, overload
 
 import structlog
 from fastapi import HTTPException, Request
@@ -158,20 +159,35 @@ def _audit(request: Request, **fields: Any) -> None:
         logger.warning("audit_write_failed", error=type(exc).__name__)
 
 
+@overload
+async def run_engine[T](
+    request: Request, *, mode: str, policy_name: str, call: Callable[[], Awaitable[T]]
+) -> tuple[T, str]: ...
+
+
+@overload
+async def run_engine[T](
+    request: Request, *, mode: str, policy_name: str, call: Callable[[], T]
+) -> tuple[T, str]: ...
+
+
 async def run_engine[T](
     request: Request,
     *,
     mode: str,
-    policy: str,
-    call: Callable[[], Awaitable[T]],
+    policy_name: str,
+    call: Callable[[], Awaitable[T] | T],
 ) -> tuple[T, str]:
     """Run an engine operation with tracing, error mapping, metrics and audit.
 
     Args:
         request: the current request (auth dependencies have set principal and tenant).
         mode: the audited mode (``detect``, ``obfuscate``, ``plan:synthesize``, ...).
-        policy: the value-free policy label (see :func:`policy_label`).
-        call: validates the payload and runs the engine; may raise ``HTTPException``.
+        policy_name: the value-free policy label to audit — pass :func:`policy_label`'s
+            result (or ``"-"``), never the caller's raw policy.
+        call: validates the payload and runs the engine; may raise ``HTTPException``. It may
+            return a value or an awaitable (a sync ``call`` runs on the event loop, so routers
+            push CPU-bound engine work to the threadpool inside an async ``call``).
 
     Returns:
         The engine's result and the trace id.
@@ -184,7 +200,8 @@ async def run_engine[T](
     outcome = "ok"
     result: T | None = None
     try:
-        result = await call()
+        raw = call()
+        result = await raw if inspect.isawaitable(raw) else raw
         return result, tid
     except VerificationFailed as exc:
         outcome = "verification_failed"
@@ -206,7 +223,7 @@ async def run_engine[T](
         _audit(
             request,
             mode=mode,
-            policy=policy,
+            policy=policy_name,
             result=result,
             duration_ms=duration,
             outcome=outcome,

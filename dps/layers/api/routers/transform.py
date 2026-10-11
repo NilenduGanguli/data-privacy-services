@@ -30,7 +30,7 @@ async def obfuscate(body: EngineRequest, request: Request) -> TransformOut:
     result, tid = await run_engine(
         request,
         mode="obfuscate",
-        policy=policy_label(body.policy, engine.settings.default_policy),
+        policy_name=policy_label(body.policy, engine.settings.default_policy),
         call=call,
     )
     return TransformOut(**result.model_dump(), trace_id=tid)
@@ -52,7 +52,7 @@ async def synthesize(body: EngineRequest, request: Request) -> TransformOut:
     result, tid = await run_engine(
         request,
         mode="synthesize",
-        policy=policy_label(body.policy, engine.settings.default_policy),
+        policy_name=policy_label(body.policy, engine.settings.default_policy),
         call=call,
     )
     return TransformOut(**result.model_dump(), trace_id=tid)
@@ -71,5 +71,5 @@ async def reveal(body: RevealRequest, request: Request) -> RevealOut:
         payload = payload_from(request, body.data, body.text)
         return await run_in_threadpool(engine.reveal, payload, body.key_material, body.reveal_hints)
 
-    result, tid = await run_engine(request, mode="reveal", policy="-", call=call)
+    result, tid = await run_engine(request, mode="reveal", policy_name="-", call=call)
     return RevealOut(**result.model_dump(), trace_id=tid)

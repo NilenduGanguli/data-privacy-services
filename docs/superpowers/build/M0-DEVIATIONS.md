@@ -1349,13 +1349,18 @@ reveal}`; `GET /api/v1/policies/presets`; `POST /api/v1/policies/{validate,plan}
   chunked request of any size reached the JSON parser. `_BodyLimit` is now pure ASGI: 413 up
   front by header, or while receiving (it raises `HTTPException(413)`, which FastAPI re-raises
   from body parsing). `_SecurityHeaders` is pure ASGI too (headers also land on 401/404/413/500).
-- `common.run_engine(request, *, mode, policy, call)` — the plan's `policy_name` is `policy`
-  and takes a **value-free label** from new `policy_label()`: a preset name, `unknown`,
-  `<preset>+overrides` or `inline` (a successful inline policy's own name is used when it is an
-  identifier). The plan audited `str(body.policy)`: an inline policy's whole dict (deny lists,
-  dictionary values) or any string the caller sent as a preset name went into the audit log.
-- `run_engine` takes `call: Callable[[], Awaitable[T]]` (PEP 695 generic; the plan's
-  `Awaitable[T] | T` union did not type-check cleanly). Each router's `call` validates the
+- `common.run_engine(request, *, mode, policy_name, call)` keeps the plan's signature (fix
+  round 1 restored the keyword: an earlier rename to `policy` broke M1's
+  `run_engine(..., policy_name=...)` call sites). Routers pass a **value-free label** from new
+  `policy_label()`: a preset name, `unknown`, `<preset>+overrides` or `inline` (a successful
+  inline policy's own name is used when it is an identifier). The plan audited
+  `str(body.policy)`: an inline policy's whole dict (deny lists, dictionary values) or any
+  string the caller sent as a preset name went into the audit log.
+- `run_engine` is a PEP 695 generic and, as planned, accepts a `call` that returns a value or
+  an awaitable (awaited when `inspect.isawaitable`). Two `@overload`s (`Callable[[],
+  Awaitable[T]]`, then `Callable[[], T]`) type both forms: with the plan's single
+  `Awaitable[T] | T` parameter mypy cannot infer `T` from a coroutine function. A sync `call`
+  runs on the event loop. Each router's `call` validates the
   payload and runs the engine, so 413/422 **rejections are counted and audited**
   (`outcome="rejected"`); in the plan `payload_from` ran before `run_engine` and the
   `except HTTPException` branch was dead. Mapped exceptions are raised `from None`; the 500
@@ -1394,6 +1399,16 @@ Tests added (12): `test_request_validation_errors_never_echo_the_body`,
 `test_a_failing_audit_sink_never_fails_the_request`. Against the plan's Task 24 code (with
 Task 23 as built) 8 of the first 11 fail; the tenant, rate-limit and SPA tests pass on both
 (regression guards). Count: 17 in the file; suite 432 passed, 1 skipped.
+
+Fix round 1 (review G5 B1): `run_engine`'s keyword is `policy_name` again, and a sync `call`
+works. New `test_run_engine_takes_policy_name_and_sync_or_async_calls` mounts a probe route
+that calls `run_engine(..., policy_name=..., call=...)` with a sync, an async and a sync-raising
+`call`, as M1 Tasks 2, 9 and the schema routers do (before the fix: `TypeError`, answered 500).
+Count: 18 in the file; suite 433 passed, 1 skipped. Notes for later milestones: `_BodyLimit`
+and `_SecurityHeaders` are pure ASGI, so M1's `document_max_bytes` and M5's
+`Cache-Control: no-store` must be written against that shape, not `BaseHTTPMiddleware`; and
+`resolve_tenant` answers 400 for any non-identifier tenant (including `_`-prefixed ids) before
+the grant check, so M2's 403 `tenant_reserved` check must run before it.
 
 Live check (uvicorn `--factory`, `DPS_ENV=dev`, bootstrap key, stub LLM): every endpoint
 answered as expected (JSON and text obfuscate → reveal round trips, synthesize, plan, validate,

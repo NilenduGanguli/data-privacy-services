@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 import dps.app as app_module
@@ -14,11 +15,13 @@ from dps.audit import MemoryAuditSink, NullAuditSink
 from dps.config import Settings
 from dps.engine.service import (
     DetectResponse,
+    EngineError,
     Payload,
     PrivacyEngine,
     RequestOptions,
     RevealResponse,
 )
+from dps.layers.api.common import run_engine
 from dps.llm.gateway import get_gateway
 from dps.posture import PostureError
 
@@ -466,3 +469,39 @@ def test_a_failing_audit_sink_never_fails_the_request(capsys) -> None:  # noqa: 
     captured = capsys.readouterr()
     assert "audit_write_failed" in captured.out + captured.err
     assert "Ananya" not in captured.out + captured.err
+
+
+def test_run_engine_takes_policy_name_and_sync_or_async_calls() -> None:
+    # Later milestones call ``run_engine(request, mode=..., policy_name=..., call=...)`` with
+    # sync callables (M1's CodedError test) and coroutines (the documents and schema routers).
+    sink = MemoryAuditSink()
+    app = create_app(_settings(), audit_sink=sink)
+
+    def sync_ok() -> dict[str, str]:
+        return {"via": "sync"}
+
+    async def async_ok() -> dict[str, str]:
+        return {"via": "async"}
+
+    def sync_fail() -> dict[str, str]:
+        raise EngineError("unknown preset")
+
+    calls = {"sync": sync_ok, "async": async_ok, "fail": sync_fail}
+
+    async def probe(request: Request, kind: str) -> dict[str, str]:
+        result, tid = await run_engine(
+            request, mode=f"test:{kind}", policy_name="gdpr-pseudonymise", call=calls[kind]
+        )
+        return {**result, "trace_id": tid}
+
+    app.add_api_route("/api/v1/_probe/{kind}", probe, methods=["POST"])
+    with TestClient(app) as c:
+        assert c.post("/api/v1/_probe/sync").json()["via"] == "sync"
+        assert c.post("/api/v1/_probe/async").json()["via"] == "async"
+        failed = c.post("/api/v1/_probe/fail")
+        assert failed.status_code == 400 and failed.json() == {"detail": "unknown preset"}
+    assert [(e.mode, e.outcome, e.policy) for e in sink.events] == [
+        ("test:sync", "ok", "gdpr-pseudonymise"),
+        ("test:async", "ok", "gdpr-pseudonymise"),
+        ("test:fail", "bad_request", "gdpr-pseudonymise"),
+    ]

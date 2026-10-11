@@ -31,7 +31,7 @@ async def detect(body: EngineRequest, request: Request) -> DetectOut:
     result, tid = await run_engine(
         request,
         mode="detect",
-        policy=policy_label(body.policy, engine.settings.default_policy),
+        policy_name=policy_label(body.policy, engine.settings.default_policy),
         call=call,
     )
     return DetectOut(**result.model_dump(), trace_id=tid)
