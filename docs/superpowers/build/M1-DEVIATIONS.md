@@ -380,3 +380,26 @@ helpers named below are new or changed.
   - `test_a_page_rendered_but_never_read_is_refused` (accepted before)
 
   The helper `_one_page` now builds on a general `_raw_pdf(*objects)`.
+
+## Task 8 — True redaction: burned-in boxes, image-only rebuild, output inspection
+
+The plan's `dps/layers/documents/redact.py` and `tests/documents/test_redact.py` are used, with one
+strengthening of the inspection; names and signatures are the plan's.
+
+- `inspect_output_pdf` also counts text-showing operators inside **Form XObjects** that a page's
+  resources name (new private `_form_text_operators`: recursive through each form's own
+  resources, each object read once, depth ≤ 8). Why: the plan scanned only each page's content
+  stream, so text drawn by a Form XObject that the page merely calls with `Do` was invisible to
+  it, and pypdf's `extract_text` also misses such text when the form carries no font resource
+  (checked: a form drawing `(hidden) Tj` passed the plan's inspection as `clean`). DPS's own
+  output has image XObjects only, so this costs nothing for it and makes the structural check
+  prove what its docstring claims. Test:
+  `test_inspection_reads_text_operators_inside_form_xobjects` (fails against the plan's code).
+- `PageRedaction`, `RedactedOutput` and `OutputInspection` gained one-line class docstrings
+  (project rule: Google-style docstrings on public names).
+- Tests added beyond the plan's 8: `test_inspection_flags_a_text_layer_and_annotations` (the
+  inspection is not vacuous: a reportlab text PDF has text characters and operators, the annotated
+  fixture has one annotation), the Form XObject test above, and
+  `test_only_pdf_and_image_documents_are_redacted` (`redaction_unsupported_format` for a DOCX).
+- Count: `tests/documents/test_redact.py` 11 passed (the pdftoppm cross-check runs: poppler is
+  installed here); suite 741 → 752 passed, 3 skipped.
