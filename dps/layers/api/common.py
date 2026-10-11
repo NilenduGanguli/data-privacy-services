@@ -3,8 +3,10 @@
 Error mapping (the engine's messages name rules, never values):
 
 - payload too large (characters, values) → 413; malformed payload or nesting too deep → 422
-- :class:`~dps.engine.service.VerificationFailed` → 422 (nothing is returned)
-- :class:`~dps.engine.service.EngineError` → 400
+- :class:`~dps.engine.service.VerificationFailed` → 422 ``{"detail", "code": "leakage"}``
+  (nothing is returned)
+- :class:`~dps.engine.service.EngineError` → 400 ``{"detail", "code": "bad_request"}``
+- :class:`~dps.errors.CodedError` → its own status and ``{"detail", "code"}`` (M1)
 - anything else → 500 ``internal error``; only the exception's class name is logged
 
 Every outcome, rejections included, is counted and audited (value-free).
@@ -12,7 +14,9 @@ Every outcome, rejections included, is counted and audited (value-free).
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import re
 import time
 import uuid
@@ -22,10 +26,12 @@ from typing import Any, overload
 
 import structlog
 from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from dps.audit import AuditEvent
 from dps.engine.policy import preset_names
 from dps.engine.service import EngineError, Payload, VerificationFailed
+from dps.errors import CodedError
 from dps.observability import LATENCY, REQUESTS, get_logger
 
 logger = get_logger(__name__)
@@ -37,8 +43,8 @@ MAX_DEPTH = 100
 #: A caller's request id is echoed (and logged) only when it is an identifier; anything else —
 #: free text, a value, a control character — is replaced by a generated id.
 _TRACE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-#: Policy names that may be audited verbatim (preset names, ``<preset>+overrides``, ids).
-_POLICY_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+#: The shape of a preset name; a string policy of this shape that names no preset is ``unknown``.
+_PRESET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
 def trace_id(request: Request) -> str:
@@ -47,20 +53,52 @@ def trace_id(request: Request) -> str:
     return given if _TRACE_ID.fullmatch(given) else uuid.uuid4().hex[:16]
 
 
-def policy_label(ref: str | dict[str, Any] | None, default: str) -> str:
-    """A value-free name for the requested policy (for audit and metrics).
+class CodedHTTPException(HTTPException):
+    """An HTTPException rendered as ``{"detail", "code"}``.
 
-    Preset names pass through; an unknown name becomes ``unknown`` (it could be anything the
-    caller typed); an inline policy is ``<preset>+overrides`` or ``inline``.
+    M2's ``DpsHttpError`` (contract §8.2) has the same wire shape and should subclass this class.
     """
-    if ref is None:
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        detail: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.code = code
+
+
+async def coded_http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Registered in ``create_app`` for :class:`CodedHTTPException`."""
+    assert isinstance(exc, CodedHTTPException)
+    return JSONResponse(
+        {"detail": exc.detail, "code": exc.code},
+        status_code=exc.status_code,
+        headers=exc.headers,
+    )
+
+
+def policy_label(policy: str | dict[str, Any] | None, default: str) -> str:
+    """What audit and logs record for a policy: a preset name or ``<preset>+inline:<hash12>``.
+
+    Never the inline body (an inline policy may hold deny-list values or declared paths) and
+    never a name the caller typed: a string that names no preset is ``unknown`` when it has a
+    preset name's shape and ``invalid`` otherwise; an inline policy is labelled by its preset
+    when that is a shipped preset, else ``custom``, plus a 12-hex hash of its canonical JSON so
+    two calls with the same inline policy correlate.
+    """
+    if policy is None:
         return default
-    if isinstance(ref, str):
-        return ref if ref in preset_names() else "unknown"
-    preset = ref.get("preset")
-    if "name" not in ref and isinstance(preset, str) and preset in preset_names():
-        return f"{preset}+overrides"
-    return "inline"
+    if isinstance(policy, str):
+        if policy in preset_names():
+            return policy
+        return "unknown" if _PRESET_NAME.fullmatch(policy) else "invalid"
+    canon = json.dumps(policy, sort_keys=True, separators=(",", ":"), default=str)
+    preset = policy.get("preset")
+    base = preset if isinstance(preset, str) and preset in preset_names() else "custom"
+    return f"{base}+inline:{hashlib.sha256(canon.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _measure(data: Any, max_items: int, max_depth: int) -> tuple[int, bool]:
@@ -122,8 +160,6 @@ def _audit_event(
     report = getattr(result, "report", None)
     findings = getattr(result, "findings", None) or []
     if report is not None:
-        if policy == "inline" and _POLICY_LABEL.fullmatch(report.policy):
-            policy = report.policy
         verification = report.verification
         counts: dict[str, Any] = {
             "findings_total": report.findings_total,
@@ -203,12 +239,15 @@ async def run_engine[T](
         raw = call()
         result = await raw if inspect.isawaitable(raw) else raw
         return result, tid
-    except VerificationFailed as exc:
+    except VerificationFailed as exc:  # before EngineError, which it subclasses
         outcome = "verification_failed"
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+        raise CodedHTTPException(422, "leakage", str(exc)) from None
     except EngineError as exc:
         outcome = "bad_request"
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+        raise CodedHTTPException(400, "bad_request", str(exc)) from None
+    except CodedError as exc:
+        outcome = exc.code
+        raise CodedHTTPException(exc.status, exc.code, exc.detail) from None
     except HTTPException:
         outcome = "rejected"
         raise

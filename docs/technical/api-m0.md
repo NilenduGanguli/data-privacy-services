@@ -7,7 +7,9 @@ Base path `/api/v1`. The live schema is at `/api/v1/openapi.json` (Swagger UI at
 `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`); `X-Request-ID` (optional; echoed as `trace_id` when it matches
 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, otherwise a fresh 16-hex id is used).
 
-**Errors** are `{"detail": "..."}` and never quote the request:
+**Errors** are `{"detail": "..."}` and never quote the request. From M1 the engine's errors also
+carry a stable machine `code` (additive): `{"detail", "code": "bad_request"}` for a 400 from the
+engine and `{"detail", "code": "leakage"}` for the 422 leakage-sweep failure (contract §8.2):
 
 | Status | When |
 |---|---|

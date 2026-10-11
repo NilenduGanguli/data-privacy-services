@@ -259,18 +259,26 @@ def test_rejections_and_engine_errors_are_audited_value_free(client) -> None:  #
         ).status_code
         == 400
     )
-    assert (sink.events[-1].outcome, sink.events[-1].policy) == ("bad_request", "unknown")
-    inline = {"name": "Ananya Krishnan", "treat": {"EMAIL": {"method": "redact"}}}
+    # M1 (Task 2): a typed name that is no preset is never audited verbatim; an inline policy
+    # is labelled by its shipped preset (else ``custom``) plus a hash of its body, never its
+    # ``name`` or any other part of the body.
+    assert (sink.events[-1].outcome, sink.events[-1].policy) == ("bad_request", "invalid")
+    assert (
+        c.post("/api/v1/detect", json={"data": SAMPLE, "policy": "ananya"}, headers=RO).status_code
+        == 400
+        and sink.events[-1].policy == "unknown"
+    )
+    inline = {"name": "ananya", "treat": {"EMAIL": {"method": "redact"}}}
     r = c.post("/api/v1/obfuscate", json={"data": SAMPLE, "policy": inline}, headers=FULL)
     assert (
         r.status_code == 200
-        and sink.events[-1].policy == "inline"
+        and sink.events[-1].policy.startswith("custom+inline:")
         and sink.events[-1].findings_total > 0
     )
     preset = c.post(
         "/api/v1/obfuscate", json={"data": SAMPLE, "policy": {"preset": "pci-dss"}}, headers=FULL
     )
-    assert preset.status_code == 200 and sink.events[-1].policy == "pci-dss+overrides"
+    assert preset.status_code == 200 and sink.events[-1].policy.startswith("pci-dss+inline:")
     plan = c.post("/api/v1/policies/plan", json={"data": SAMPLE, "mode": "synthesize"}, headers=RO)
     assert plan.status_code == 200 and sink.events[-1].mode == "plan:synthesize"
     assert sink.events[-1].findings_total == len(plan.json()["findings"]) > 0
@@ -519,7 +527,10 @@ def test_run_engine_takes_policy_name_and_sync_or_async_calls() -> None:
         assert c.post("/api/v1/_probe/sync").json()["via"] == "sync"
         assert c.post("/api/v1/_probe/async").json()["via"] == "async"
         failed = c.post("/api/v1/_probe/fail")
-        assert failed.status_code == 400 and failed.json() == {"detail": "unknown preset"}
+        assert failed.status_code == 400 and failed.json() == {
+            "detail": "unknown preset",
+            "code": "bad_request",  # M1 (Task 2): additive machine code
+        }
     assert [(e.mode, e.outcome, e.policy) for e in sink.events] == [
         ("test:sync", "ok", "gdpr-pseudonymise"),
         ("test:async", "ok", "gdpr-pseudonymise"),

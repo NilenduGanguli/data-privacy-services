@@ -145,6 +145,8 @@ services, §3 "Lane-safe stacks").
   `dps_verification_failures_total{mode}` and **`dps_llm_raw_pii_sent_total`, which must stay 0**.
 - Audit: one `audit` log line per engine request, rejections included (trace id, route, tenant, key
   id, mode, policy label, outcome, counts, methods, verification, duration — never a value or a key).
+  The policy label is a shipped preset name, `unknown`/`invalid` for any other string, or
+  `<preset|custom>+inline:<hash12>` for an inline policy (M1; never the inline body).
   Logs go to stdout through an allow-list of field names; outside `local` they are JSON.
 - `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json`. Probe and metrics routes are not in the schema.
 

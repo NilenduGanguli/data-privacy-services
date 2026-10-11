@@ -29,7 +29,11 @@ from dps.audit import AuditSink, LogAuditSink, NullAuditSink
 from dps.auth import API_KEY_HEADER, TENANT_HEADER, StaticKeyStore
 from dps.config import Settings, get_settings
 from dps.engine.service import PrivacyEngine
-from dps.layers.api.common import TRACE_HEADER
+from dps.layers.api.common import (
+    TRACE_HEADER,
+    CodedHTTPException,
+    coded_http_exception_handler,
+)
 from dps.layers.api.routers import detect, ops, policies, transform
 from dps.llm.gateway import get_gateway
 from dps.observability import READINESS, configure_logging, get_logger
@@ -258,6 +262,7 @@ def create_app(
         settings.rate_limit_rps, settings.rate_limit_burst, enabled=settings.rate_limit_enabled
     )
     app.state.audit = audit_sink or (LogAuditSink() if settings.audit_enabled else NullAuditSink())
+    app.add_exception_handler(CodedHTTPException, coded_http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_error)
 
     # add_middleware prepends: the last one added is the outermost.
