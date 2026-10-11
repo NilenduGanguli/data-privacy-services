@@ -191,3 +191,27 @@ are preserved unless a section says otherwise.
     - `test_plain_http_egress_is_allowed_outside_production`.
   - Totals: 45 → 52 tests (posture +7: 2 parametrised refusal cases, 1 good case, 3 message
     cases, 1 local case).
+
+## Task 5 — Checksum validators
+
+- `tests/test_checksums.py`: the SIN sample is `123 456 782` / `123 456 783` (plan:
+  `046 454 286` / `046 454 287`). Why: python-stdnum 2.2 refuses SINs whose first digit is `0`
+  (never issued; reserved for fictitious numbers) or `8` (business numbers) with
+  `InvalidComponent`, so the plan's "good" sample was rejected. The replacement is the sample in
+  `stdnum.ca.sin`'s own docstring, as the plan instructs. The validator is unchanged.
+- `dps/engine/detect/checksums.py`: the RFC validator calls
+  `stdnum.mx.rfc.is_valid(v, validate_check_digits=True)`; `_stdnum` gained `**kwargs` to pass it.
+  Why: stdnum skips the RFC check digit by default, so the plan's "bad" sample `GODE561231GR0`
+  was accepted as validated. The test's intent (a wrong check digit is not "validated") is kept by
+  strengthening the validator, not by changing the sample. Trade-off: stdnum notes about 1.5% of
+  RFCs in the wild carry a wrong check digit; those now score as unvalidated pattern hits
+  (`0.5 x 0.45`) and still pass the threshold under an `rfc` key (noisy-OR with the 0.9 structural
+  candidate in Task 8). Free-text recall for them is an open item (see the report).
+- `dps/engine/detect/checksums.py`: `luhn_valid` reads digits with `int(ch)` instead of
+  `ord(ch) - 48`. Why: the catalogue's `\d` matches every Unicode decimal digit, and
+  `ord - 48` turned an Arabic-Indic card number into garbage sums. `int()` reads any `Nd` digit by
+  value, so the same card number validates in either script. ASCII behaviour is identical.
+- Docstrings added to `valid_card_pan` and `valid_nino` (public functions).
+- Tests added: `test_validators_never_raise` (7 odd inputs x every validator; the module contract
+  says a validator never raises) and `test_luhn_reads_unicode_decimal_digits_as_their_value`
+  (red before the `int(ch)` change). Totals: the plan's 16 + 8 added = 24 in the file; suite 76.
