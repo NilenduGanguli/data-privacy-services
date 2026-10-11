@@ -120,6 +120,9 @@ Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.
 - Every response: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`; HSTS outside `local`. The console HTML carries a strict CSP
   (`script-src 'self'`, `frame-ancestors 'none'`).
+- Console API key: kept in `sessionStorage` (gone with the tab); the header's "Remember key on this
+  device" moves it to `localStorage` and unticking removes it again. A key left in `localStorage` by
+  the M0 console is moved into the tab's session on first load.
 - CORS: any origin, methods `GET POST OPTIONS`, headers `Content-Type X-API-KEY X-DPS-Tenant
   X-Request-ID` (keys travel in headers, not cookies; to be narrowed in M5).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a

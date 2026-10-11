@@ -144,11 +144,15 @@ select.input { appearance: auto; }
 .key-peek { position: absolute; right: 6px; background: transparent; border: 0; color: var(--ink-3); cursor: pointer; font-size: 11px; }
 .field { display: flex; flex-direction: column; gap: 2px; }
 .field-label { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+/* sits on the input row of the neighbouring .field (label 14px + 2px gap above it) */
+.field-inline { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; margin-top: 16px; }
+.field-inline input { accent-color: var(--teal); margin: 0; }
 .input-inline { padding: 6px 10px; font-size: 12.5px; width: 220px; }
 @media (max-width: 640px) {
   .topbar { height: auto; flex-wrap: wrap; padding: 10px 16px; gap: 10px; }
   .topbar .field { flex: 1 1 140px; }
   .topbar .key-wrap, .input-inline { width: 100%; }
+  .topbar .field-inline { margin-top: 0; }
   .page { padding: 16px 16px 32px; }
   .page-head { flex-wrap: wrap; align-items: flex-start; }
 }

@@ -26,7 +26,7 @@ const NAV: { label: string; items: { to: string; text: string; icon: IconName }[
 ];
 
 export function Layout(): JSX.Element {
-  const { apiKey, setApiKey, tenant, setTenant, theme, toggleTheme } = useSettings();
+  const { apiKey, setApiKey, rememberKey, setRememberKey, tenant, setTenant, theme, toggleTheme } = useSettings();
   const [show, setShow] = useState(false);
   return (
     <div className="shell">
@@ -56,6 +56,9 @@ export function Layout(): JSX.Element {
               <input className="input input-inline" type={show ? 'text' : 'password'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="X-API-KEY" spellCheck={false} autoComplete="off" />
               <button type="button" className="key-peek" onClick={() => setShow((v) => !v)} aria-label={show ? 'Hide key' : 'Show key'}>{show ? 'hide' : 'show'}</button>
             </span></label>
+          <label className="field-inline" title="Keep the key in this browser's local storage after the tab closes. Unticked, it lives only as long as this tab.">
+            <input type="checkbox" checked={rememberKey} onChange={(e) => setRememberKey(e.target.checked)} />
+            <span className="field-label">Remember key on this device</span></label>
           <span className="topbar-spacer" />
           <button type="button" className="btn btn-sm" onClick={toggleTheme}>{theme === 'dark' ? 'Light' : 'Dark'} theme</button>
         </header>
