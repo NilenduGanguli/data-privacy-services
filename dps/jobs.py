@@ -32,6 +32,7 @@ from dps.ids import new_id
 from dps.jobs_models import JobProgress
 from dps.layers.connectors.base import EncodedKey, KeyRange, key_fingerprint
 from dps.observability import JOBS_CLAIMED, PARTITIONS_FINISHED, get_logger
+from dps.secrets import load_kek
 
 logger = get_logger(__name__)
 
@@ -303,6 +304,14 @@ def _select(cols: str, where: str) -> str:
     )
 
 
+#: Advisory-lock namespace serialising one tenant's job admissions (cap check + insert).
+_ADMIT_LOCK = "dps_job_admit"
+
+
+class _Replayed(Exception):
+    """Internal: the idempotency key was admitted by a concurrent request (ends the transaction)."""
+
+
 async def _touch_tenant(conn: asyncpg.Connection, tenant_id: str) -> None:
     await conn.execute(
         f"INSERT INTO {db.schema_ident()}.dps_tenant (tenant_id) VALUES ($1) "
@@ -335,8 +344,11 @@ async def create_job(
     """Insert a queued job (cap-checked) and notify workers.
 
     An idempotent replay (same ``idempotency_key``) returns the original job — before the queue
-    cap is checked, so a replay is never refused as ``queue_full``. ``job_id`` lets a caller that
-    seals with the id in the AAD mint it first. Raises :class:`QueueFull`.
+    cap is checked, so a replay is never refused as ``queue_full``. Admission is serialised per
+    tenant (a transaction-scoped advisory lock taken before the count), so concurrent submissions
+    cannot all pass the cap on the same count; a replay that waited behind the lock finds the
+    original there. ``job_id`` lets a caller that seals with the id in the AAD mint it first.
+    Raises :class:`QueueFull`.
     """
     if idempotency_key is not None:
         existing = await find_by_idempotency(tenant_id, idempotency_key)
@@ -347,6 +359,19 @@ async def create_job(
     job_id = job_id or new_id("s" if kind == JobKind.scan else "j")
     try:
         async with db.acquire(tenant_id) as conn, conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                f"{_ADMIT_LOCK}:{settings.pg_schema}:{tenant_id}",
+            )
+            if idempotency_key is not None:
+                winner_id = await conn.fetchval(
+                    f"SELECT id FROM {s}.dps_job WHERE tenant_id = $1 AND idempotency_key = $2",
+                    tenant_id,
+                    idempotency_key,
+                )
+                if winner_id is not None:
+                    job_id = winner_id
+                    raise _Replayed()
             await _touch_tenant(conn, tenant_id)
             cap = await conn.fetchval(
                 f"SELECT COALESCE((SELECT max_queued FROM {s}.dps_tenant WHERE tenant_id = $1), $2)",
@@ -388,6 +413,8 @@ async def create_job(
                 created_by,
             )
             await conn.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, kind.value)
+    except _Replayed:
+        pass  # a concurrent request with the same key was admitted first: return its job
     except asyncpg.UniqueViolationError:
         # A concurrent request with the same idempotency key won the insert.
         if idempotency_key is None:
@@ -762,6 +789,13 @@ WHERE j.id = $1 AND j.phase = 'partitions' AND j.state IN ('waiting', 'paused')
                   WHERE p.job_id = j.id AND p.state IN ('queued', 'running'))
 RETURNING j.id"""
 
+#: Jobs the finalize transition is owed to: the reaper re-checks each under its job lock.
+_FINISHABLE_JOBS = """SELECT j.id FROM {s}.dps_job j
+WHERE j.phase = 'partitions' AND j.state IN ('waiting', 'paused')
+  AND NOT EXISTS (SELECT 1 FROM {s}.dps_job_partition p
+                  WHERE p.job_id = j.id AND p.state IN ('queued', 'running'))
+ORDER BY j.id"""
+
 
 async def _lock_job(conn: asyncpg.Connection, job_id: str) -> None:
     """Lock the job row (always BEFORE touching its partitions in the same transaction)."""
@@ -1063,7 +1097,12 @@ async def partition_control(
 
 
 async def list_partitions(tenant_id: str, job_id: str) -> list[PartitionView]:
-    """Value-free partition rows for the console (checkpoint shown as a fingerprint only)."""
+    """Value-free partition rows for the console (checkpoint shown as a fingerprint only).
+
+    The fingerprint is keyed under the job KEK and salted with the job id
+    (:func:`~dps.layers.connectors.base.key_fingerprint`); without a KEK there is none.
+    """
+    kek = load_kek(db.active_settings())
     async with db.acquire(tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT partition_no, state, rows_read, rows_written, rows_skipped, batch_no, "
@@ -1084,7 +1123,9 @@ async def list_partitions(tenant_id: str, job_id: str) -> list[PartitionView]:
             batch_no=r["batch_no"],
             attempts=r["attempts"],
             resumed=r["resumed"],
-            checkpoint_fp=key_fingerprint(r["last_key"]),
+            checkpoint_fp=(
+                key_fingerprint(r["last_key"], kek=kek, job_id=job_id) if kek is not None else None
+            ),
             started_at=r["started_at"],
             finished_at=r["finished_at"],
             updated_at=r["updated_at"],
@@ -1098,9 +1139,12 @@ async def list_partitions(tenant_id: str, job_id: str) -> list[PartitionView]:
 async def reap(*, backoff_base: float, backoff_cap: float) -> ReapResult:
     """Requeue expired leases with backoff, dead-letter exhausted ones, prune offline workers.
 
-    Each statement is its own transaction; finalize transitions for jobs whose last partition was
-    dead-lettered run afterwards, one short transaction per job (job lock first), so the reaper
-    never holds a partition lock while it waits for a job lock and cannot deadlock a finisher.
+    Each statement is its own transaction. Last, every pass finalizes each ``partitions``-phase
+    job (waiting or paused) that has no queued or running partition left, one short transaction
+    per job (job lock first), so the reaper never holds a partition lock while it waits for a job
+    lock and cannot deadlock a finisher. Sweeping all such jobs, not just those dead-lettered in
+    this pass, makes the pass self-healing: a pass interrupted after its dead-letter committed
+    (SIGTERM, a kill, a reset connection) is finalized by the next one (contract §3.1).
     """
     settings = db.active_settings()
     s = db.schema_ident()
@@ -1137,26 +1181,23 @@ async def reap(*, backoff_base: float, backoff_cap: float) -> ReapResult:
             float(backoff_base),
         )
         result.partitions_requeued = len(rows)
-        dead_jobs = await conn.fetch(
-            f"UPDATE {s}.dps_job_partition SET state = 'dead', "
-            "error_code = COALESCE(error_code, 'lease_lost'), locked_by = NULL, "
-            "lease_expires_at = NULL, finished_at = now(), updated_at = now() "
-            "WHERE state = 'running' AND lease_expires_at < now() AND attempts >= max_attempts "
-            "RETURNING job_id"
+        result.partitions_dead = db.rowcount(
+            await conn.execute(
+                f"UPDATE {s}.dps_job_partition SET state = 'dead', "
+                "error_code = COALESCE(error_code, 'lease_lost'), locked_by = NULL, "
+                "lease_expires_at = NULL, finished_at = now(), updated_at = now() "
+                "WHERE state = 'running' AND lease_expires_at < now() "
+                "AND attempts >= max_attempts"
+            )
         )
-        result.partitions_dead = len(dead_jobs)
-        if dead_jobs:
-            PARTITIONS_FINISHED.labels(PartitionState.dead.value).inc(len(dead_jobs))
+        if result.partitions_dead:
+            PARTITIONS_FINISHED.labels(PartitionState.dead.value).inc(result.partitions_dead)
         result.partitions_released = db.rowcount(
             await conn.execute(
                 f"UPDATE {s}.dps_job_partition SET locked_by = NULL, lease_expires_at = NULL "
                 "WHERE state = 'canceled' AND locked_by IS NOT NULL AND lease_expires_at < now()"
             )
         )
-        for job_id in sorted({r["job_id"] for r in dead_jobs}):
-            async with conn.transaction():
-                await _lock_job(conn, job_id)
-                await _maybe_finalize(conn, job_id)
         heartbeat_s = max(1.0, settings.partition_lease_seconds / 4)
         result.workers_pruned = db.rowcount(
             await conn.execute(
@@ -1166,6 +1207,11 @@ async def reap(*, backoff_base: float, backoff_cap: float) -> ReapResult:
         )
         if result.jobs_requeued or result.partitions_requeued:
             await conn.execute("SELECT pg_notify($1, 'reaped')", NOTIFY_CHANNEL)
+        finishable = await conn.fetch(_FINISHABLE_JOBS.format(s=s))
+        for job_id in [r["id"] for r in finishable]:
+            async with conn.transaction():
+                await _lock_job(conn, job_id)
+                await _maybe_finalize(conn, job_id)
     return result
 
 

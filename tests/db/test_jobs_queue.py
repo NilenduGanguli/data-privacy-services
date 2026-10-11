@@ -211,3 +211,37 @@ async def test_public_job_never_carries_sealed_blobs(migrated_db) -> None:  # no
     assert "key_enc" not in dumped and "spec_enc" not in dumped and "locked_by" not in dumped
     internal = await jobs.load_job_internal(job.id)
     assert internal.key_enc == b"\x01key" and internal.spec_enc == b"\x01sel"
+
+
+# --- review G2 r1 fixes -----------------------------------------------------------------------
+
+
+async def _admit(**kw) -> str | None:  # noqa: ANN003
+    try:
+        return (await _job(kind=JobKind.discover, phase=JobPhase.discover, **kw)).id
+    except jobs.QueueFull:
+        return None
+
+
+async def test_queue_cap_holds_under_concurrent_submissions(migrated_db) -> None:  # noqa: ANN001
+    """B3: admission is serialised per tenant, so a burst cannot pass the count together."""
+    async with db.acquire_queue(None) as conn:
+        await conn.execute(
+            "INSERT INTO dps.dps_tenant (tenant_id, max_queued) VALUES ('t1', 2), ('t2', 2)"
+        )
+    for _ in range(3):  # a race that loses only sometimes would still show over three rounds
+        got = await asyncio.gather(*(_admit(tenant=t) for t in ("t1", "t2") for _ in range(6)))
+        assert sum(x is not None for x in got) == 4  # two per tenant, never more
+        listed = {t: len((await jobs.list_jobs(t, state=JobState.queued))[0]) for t in ("t1", "t2")}
+        assert listed == {"t1": 2, "t2": 2}
+        async with db.acquire_queue(None) as conn:
+            await conn.execute("UPDATE dps.dps_job SET state = 'succeeded' WHERE state = 'queued'")
+
+
+async def test_concurrent_replays_at_the_cap_return_the_original(migrated_db) -> None:  # noqa: ANN001
+    """Replays that waited behind the admission lock see the winner, not a full queue."""
+    async with db.acquire_queue(None) as conn:
+        await conn.execute("INSERT INTO dps.dps_tenant (tenant_id, max_queued) VALUES ('t1', 1)")
+    got = await asyncio.gather(*(_admit(idempotency_key="req-burst") for _ in range(6)))
+    assert None not in got and len(set(got)) == 1
+    assert await _admit(idempotency_key="req-other") is None

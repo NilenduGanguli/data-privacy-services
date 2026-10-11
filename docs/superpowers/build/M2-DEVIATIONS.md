@@ -237,3 +237,42 @@ otherwise.
   tests = 29 (plan: 10 + 13 = 23).
 - Concurrency-sensitive tests (`exactly_once`, concurrent claimers, FIFO, caps) were run five
   times in a row: green every time.
+
+## Review G2 r1 fixes (Tasks 6–9)
+
+- **B1, `checkpoint_fp` was reversible.** `key_fingerprint` was the first 8 hex of an unkeyed
+  SHA-256 of the encoded key, so enumerating a small key space (integer ids) recovered the key
+  from `PartitionView.checkpoint_fp`. It is now keyed:
+  `key_fingerprint(encoded, *, kek, job_id)` = first 8 hex of
+  `HMAC-SHA256(HKDF-SHA256(kek, salt=job id, info="dps.checkpoint_fp"), canonical JSON)`. The
+  HMAC and HKDF live in the new `dps.secrets.keyed_fingerprint` (contract §0.3: only
+  `secrets.py`/`crypto.py` handle key bytes; the subkey never leaves it). `list_partitions` reads
+  the KEK from the active settings (signature unchanged) and returns `checkpoint_fp = None` when
+  none is configured (a run job cannot exist without one: `validate_run` refuses with
+  `kek_unconfigured`). The same key shows different fingerprints in two jobs; a KEK rotation (M5)
+  changes the fingerprints of running jobs, which only label a checkpoint in the console. Plan
+  interface `key_fingerprint(encoded)` is superseded; contract §3.2 amended in the same commit.
+  Tests: `test_key_fingerprint_is_keyed_and_salted_by_the_job`,
+  `test_keyed_fingerprint_depends_on_kek_salt_info_and_data`,
+  `test_checkpoint_fingerprint_is_keyed_per_job` (db; failed before the fix with two equal
+  fingerprints).
+- **B2, an interrupted reaper stranded a job.** `reap` finalized only the jobs whose partitions
+  it dead-lettered in the same pass, after that autocommit statement, so a pass interrupted in
+  between left the job in `partitions/waiting` with its `key_enc` forever. Each pass now ends
+  with a sweep (`_FINISHABLE_JOBS`): every `partitions`-phase job in `waiting`/`paused` with no
+  `queued`/`running` partition gets `_lock_job` + `_maybe_finalize` in its own short
+  transaction (exactly-once is unchanged: the finalize `UPDATE` re-checks under the job lock).
+  The sweep runs after pruning and the notify, so a failure in one job's finalize does not skip
+  the rest of the pass. The dead-letter statement no longer returns job ids (it counts rows).
+  The sweep reads `dps_job` without an index on `(phase, state)`; at the 30 s reaper interval
+  that is cheap, and a partial index can go into a spare 010–019 migration if `dps_job` grows
+  large. Test `test_an_interrupted_reaper_pass_is_finalized_by_the_next` (fails before the fix:
+  the job stayed `partitions/waiting`) also covers a paused job and leaves a busy job alone.
+- **B3, `max_queued` passed by concurrent submissions.** `create_job` now takes
+  `pg_advisory_xact_lock(hashtextextended('dps_job_admit:<schema>:<tenant>', 0))` first in its
+  transaction (no grant needed), so a tenant's count-and-insert runs one at a time. Inside the
+  lock it re-checks the idempotency key and returns the original job: without that, replays that
+  queued behind the lock saw the original counted and got `queue_full`. That replay race existed
+  before the lock as well (`test_concurrent_replays_at_the_cap_return_the_original` failed on the
+  old code with 4 of 6 replays refused). Test `test_queue_cap_holds_under_concurrent_submissions`
+  (two tenants, three rounds; failed before the fix with 9 of 12 accepted against a total cap of 4).

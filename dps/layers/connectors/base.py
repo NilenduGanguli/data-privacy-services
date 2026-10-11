@@ -8,7 +8,6 @@ a key range or ledger mark that fails validation would otherwise echo a key.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import uuid
@@ -18,6 +17,8 @@ from decimal import Context, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from dps.secrets import keyed_fingerprint
 
 if TYPE_CHECKING:
     from dps.jobs_models import Selection
@@ -309,12 +310,20 @@ def key_tuple(row: Row, shape: TableShape) -> tuple[Any, ...]:
     return tuple(row[k] for k in shape.key)
 
 
-def key_fingerprint(encoded: EncodedKey | None) -> str | None:
-    """A short, non-reversible handle for a checkpoint (shown in the console instead of the key)."""
+#: HKDF info of the checkpoint fingerprint subkey (the job id is the salt).
+CHECKPOINT_FP_INFO = "dps.checkpoint_fp"
+
+
+def key_fingerprint(encoded: EncodedKey | None, *, kek: bytes, job_id: str) -> str | None:
+    """8 hex chars identifying a checkpoint in the console, never the key itself (contract §3.2).
+
+    Keyed under the job KEK and salted with the job id: an unkeyed digest of a key from a small
+    space (integer customer ids) is reversed by enumerating candidates, and keys are customer data.
+    """
     if encoded is None:
         return None
-    digest = hashlib.sha256(json.dumps(encoded, sort_keys=True).encode("utf-8")).hexdigest()
-    return digest[:8]
+    data = json.dumps(encoded, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return keyed_fingerprint(kek, info=CHECKPOINT_FP_INFO, salt=job_id, data=data)
 
 
 def to_engine_text(value: Any, column: ColumnInfo) -> str | None:

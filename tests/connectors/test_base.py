@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -22,6 +25,8 @@ from dps.layers.connectors.base import (
     key_tuple,
     to_engine_text,
 )
+
+KEK = bytes(range(32))  # test-only constant
 
 
 def col(name: str, kind: str, **kw) -> ColumnInfo:  # noqa: ANN003
@@ -101,10 +106,29 @@ def test_key_tuple_and_fingerprint() -> None:
         key_source="primary_key",
     )
     assert key_tuple({"b": "x", "a": 1, "z": 0}, shape) == (1, "x")
-    fp = key_fingerprint(encode_key((10000001,), [col("a", "int")]))
-    assert (
-        fp is not None and len(fp) == 8 and "10000001" not in fp and key_fingerprint(None) is None
-    )
+    fp = key_fingerprint(encode_key((10000001,), [col("a", "int")]), kek=KEK, job_id="j_1")
+    assert fp is not None and len(fp) == 8 and "10000001" not in fp
+    assert key_fingerprint(None, kek=KEK, job_id="j_1") is None
+
+
+def test_key_fingerprint_is_keyed_and_salted_by_the_job() -> None:
+    """Review G2 r1 B1: an unkeyed hash of a small key space is reversed by enumeration."""
+    cols = [col("a", "int")]
+    key = encode_key((10000001,), cols)
+    fp = key_fingerprint(key, kek=KEK, job_id="j_1")
+    assert fp is not None and re.fullmatch(r"[0-9a-f]{8}", fp)
+    assert key_fingerprint(key, kek=KEK, job_id="j_1") == fp  # stable within a job
+    assert key_fingerprint(key, kek=KEK, job_id="j_2") != fp  # same key, another job
+    assert key_fingerprint(encode_key((10000002,), cols), kek=KEK, job_id="j_1") != fp
+    assert key_fingerprint(key, kek=bytes(range(1, 33)), job_id="j_1") != fp  # another KEK
+    # Whoever reads the job cannot test candidate keys: no digest computable without the KEK
+    # matches, so enumerating the id space finds nothing.
+    for candidate in range(10_000_000, 10_000_050):
+        encoded = encode_key((candidate,), cols)
+        for text in (json.dumps(encoded, sort_keys=True), json.dumps(encoded)):
+            assert hashlib.sha256(text.encode("utf-8")).hexdigest()[:8] != fp
+    with pytest.raises(ValueError):
+        key_fingerprint(key, kek=KEK[:16], job_id="j_1")
 
 
 def test_pk_offset_exactly_one() -> None:

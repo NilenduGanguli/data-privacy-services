@@ -10,6 +10,7 @@ from dps.config import Settings
 from dps.secrets import (
     SealError,
     SecretUnavailable,
+    keyed_fingerprint,
     load_kek,
     open_json,
     open_sealed,
@@ -85,3 +86,19 @@ def test_seal_refuses_a_kek_that_is_not_32_bytes() -> None:
     with pytest.raises(ValueError) as err:
         seal(KEK[:16], b"payload", aad="x:1")  # AES-128 would silently weaken the sealing
     assert "32 bytes" in str(err.value)
+
+
+def test_keyed_fingerprint_depends_on_kek_salt_info_and_data() -> None:
+    base = keyed_fingerprint(KEK, info="dps.checkpoint_fp", salt="j_1", data=b"k")
+    assert len(base) == 8 and int(base, 16) >= 0
+    assert keyed_fingerprint(KEK, info="dps.checkpoint_fp", salt="j_1", data=b"k") == base
+    for variant in (
+        keyed_fingerprint(os.urandom(32), info="dps.checkpoint_fp", salt="j_1", data=b"k"),
+        keyed_fingerprint(KEK, info="dps.other", salt="j_1", data=b"k"),
+        keyed_fingerprint(KEK, info="dps.checkpoint_fp", salt="j_2", data=b"k"),
+        keyed_fingerprint(KEK, info="dps.checkpoint_fp", salt="j_1", data=b"l"),
+    ):
+        assert variant != base
+    assert len(keyed_fingerprint(KEK, info="i", salt="s", data=b"", hex_chars=16)) == 16
+    with pytest.raises(ValueError):
+        keyed_fingerprint(KEK[:16], info="i", salt="s", data=b"k")

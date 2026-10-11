@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import os
 from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pydantic import BaseModel, ValidationError
 
 from dps.config import Settings
@@ -116,6 +119,24 @@ def resolve_secret_ref(ref: str, settings: Settings) -> dict[str, str]:
     if not out:
         raise SecretUnavailable()
     return out
+
+
+def keyed_fingerprint(kek: bytes, *, info: str, salt: str, data: bytes, hex_chars: int = 8) -> str:
+    """``hex_chars`` hex digits of ``HMAC-SHA256(HKDF-SHA256(kek, salt, info), data)``.
+
+    A handle for a customer value (a checkpoint key) that nobody without the KEK can compute, so
+    enumerating a small value space (integer ids) cannot test candidates against it; the salt
+    (a job id) keeps one value from correlating across jobs. The subkey never leaves here.
+    """
+    if len(kek) != _KEK_BYTES:
+        raise ValueError("the job KEK must be 32 bytes")
+    subkey = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt.encode("utf-8"),
+        info=info.encode("utf-8"),
+    ).derive(kek)
+    return hmac.new(subkey, data, hashlib.sha256).hexdigest()[:hex_chars]
 
 
 def seed_fingerprint(seed_b64: str) -> str:

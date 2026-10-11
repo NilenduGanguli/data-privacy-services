@@ -312,3 +312,91 @@ async def test_canceling_a_paused_job_finalizes_and_releases_held_partitions(
     assert (
         fin.id == job_id and fin.phase == JobPhase.finalize and fin.progress.outcome == "canceled"
     )
+
+
+# --- review G2 r1 fixes -----------------------------------------------------------------------
+
+
+async def _checkpointed(key: list[dict[str, str]]) -> str:
+    job_id = await _prepared(1)
+    [p] = await jobs.claim_partitions(f"w-{job_id}", batch=1)
+    assert p.job_id == job_id
+    assert await jobs.checkpoint(
+        f"w-{job_id}",
+        p.id,
+        last_key=key,
+        batch_no=1,
+        rows_read=1,
+        rows_written=1,
+        rows_skipped=0,
+        values_by_method={},
+        verify_checked=0,
+    )
+    return job_id
+
+
+async def test_checkpoint_fingerprint_is_keyed_per_job(migrated_db, queue_settings) -> None:  # noqa: ANN001
+    """B1: the same checkpoint key shows a different fingerprint in two jobs; none without a KEK."""
+    queue_settings(job_tenant_max_running=100)
+    key = [{"t": "int", "v": "10000500"}]
+    first, second = await _checkpointed(key), await _checkpointed(key)
+    [a] = await jobs.list_partitions("t1", first)
+    [b] = await jobs.list_partitions("t1", second)
+    assert a.checkpoint_fp is not None and b.checkpoint_fp is not None
+    assert a.checkpoint_fp != b.checkpoint_fp
+    assert [v.checkpoint_fp for v in await jobs.list_partitions("t1", first)] == [a.checkpoint_fp]
+    queue_settings(job_kek="")  # no KEK: no handle at all rather than a reversible one
+    [unkeyed] = await jobs.list_partitions("t1", first)
+    assert unkeyed.checkpoint_fp is None and unkeyed.batch_no == 1
+
+
+async def test_an_interrupted_reaper_pass_is_finalized_by_the_next(  # noqa: ANN001
+    migrated_db, queue_settings, monkeypatch
+) -> None:
+    """B2: the dead-letter commits, the pass dies before finalize; the next pass finalizes."""
+    queue_settings(partition_lease_seconds=1)
+    job_id = await _prepared(2)
+    async with db.acquire_queue(None) as conn:
+        await conn.execute(
+            "UPDATE dps.dps_job_partition SET max_attempts = 1 WHERE job_id = $1", job_id
+        )
+    a, b = await jobs.claim_partitions("w1", batch=2)
+    assert await jobs.finish_partition("w1", a.id, PartitionState.done)
+    await asyncio.sleep(1.3)  # b's lease expires at its last attempt
+    finalize = jobs._maybe_finalize
+
+    async def interrupted(conn, job_id):  # noqa: ANN001, ANN202
+        raise RuntimeError("reaper interrupted")  # SIGTERM, a kill, a reset connection
+
+    monkeypatch.setattr(jobs, "_maybe_finalize", interrupted)
+    with pytest.raises(RuntimeError):
+        await jobs.reap(backoff_base=0.0, backoff_cap=0.0)
+    monkeypatch.setattr(jobs, "_maybe_finalize", finalize)
+    [dead] = [
+        v for v in await jobs.list_partitions("t1", job_id) if v.partition_no == b.partition_no
+    ]
+    stranded = await jobs.get_job("t1", job_id)
+    assert dead.state == PartitionState.dead
+    assert (stranded.phase, stranded.state) == (JobPhase.partitions, JobState.waiting)
+    # A busy job is left alone; a paused one whose last partition died is healed too.
+    busy = await _prepared(2)
+    paused = await _prepared(1)
+    [p] = await jobs.claim_partitions("w2", batch=1)  # one running, one still queued
+    assert p.job_id == busy
+    await jobs.pause("t1", paused)
+    async with db.acquire_queue(None) as conn:  # its last partition died the same way
+        await conn.execute(
+            "UPDATE dps.dps_job_partition SET state = 'dead', error_code = 'lease_lost', "
+            "finished_at = now() WHERE job_id = $1",
+            paused,
+        )
+    result = await jobs.reap(backoff_base=0.0, backoff_cap=0.0)
+    assert result.partitions_dead == 0  # nothing new died in this pass
+    for healed in (job_id, paused):
+        job = await jobs.get_job("t1", healed)
+        assert (job.phase, job.state) == (JobPhase.finalize, JobState.queued), healed
+    still = await jobs.get_job("t1", busy)
+    assert (still.phase, still.state) == (JobPhase.partitions, JobState.waiting)
+    claimed = await jobs.claim_jobs("w9", kinds=(JobKind.run,), batch=5)
+    assert sorted(c.id for c in claimed) == sorted([job_id, paused])
+    assert all(c.key_enc is not None for c in claimed)  # finalize will purge it
