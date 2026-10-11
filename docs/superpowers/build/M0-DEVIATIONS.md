@@ -636,3 +636,85 @@ Public names and signatures are as planned (`METHODS`, `MethodError`, `Transform
   synthesize mode falls back without FPE; an explicit override beats `keep_non_sensitive`; the
   `reversible` flag comes from the registry), and `test_empty_findings_give_an_empty_low_plan`.
 - Count: the plan's 3 + 4 added = 7 in the file; suite 266 passed, 1 skipped.
+
+## Task 17 — Apply a plan; reveal hints; reveal
+
+Public names: `ApplyOptions`, `ApplyResult`, `RevealHint`, `apply_plan`, `reveal` as planned.
+`anchor_for(document, plan)` is **public already**. Task 22's step 3 ("rename `_anchor_for` →
+`anchor_for`") is therefore already done; there is no `_anchor_for`.
+
+- **Reveal hints no longer leak the anchor.** In the plan, every hint carried
+  `anchor = "CUSTOMER_ID:" + sha256(customer_id)[:16]`, or a salt-free hash of the whole record,
+  and `date_shift` repeated it in `reverse_params`. Hints are meant to travel with the obfuscated
+  output, and spec §5.5 says they contain "locators, methods and types but never originals".
+  A 6-digit customer id falls to a 10^6-candidate enumeration of that hash, which undoes the
+  customer-id pseudonymisation; a small record's hash falls the same way. Spec §5.5 also says
+  "the anchor is the record's own token".
+  - `apply_plan` now uses `a_` + base32(HMAC(subkey(key, "anchor"), anchor_for(...)))[:26]`
+    whenever key material is present.
+  - The anchor stays stable per (key, business key), so `consistency: key` still shifts the same
+    customer's dates the same way across requests.
+  - In synthesize mode (no key) the raw anchor is used, but it only feeds the surrogate engine
+    and no hint is emitted.
+- **`RevealHint` gained `kid` and `field_scoped`** (additive, defaulted). `original_type` is now
+  `Literal["str", "int", "float"]`, and the model sets `hide_input_in_errors=True`.
+  - `reveal` refuses hints whose `kid` differs from the presented key. Why: FPE has no
+    authentication, so a wrong key silently decrypted FPE values to garbage.
+  - The reveal context takes `field_scoped` from the hint. Why: Task 22 reveals with the
+    *default* policy, so a field-scoped obfuscation could not be revealed.
+- **Numbers stay numbers only when exact.** A reversible output becomes an int or float only if
+  `str(number)` gives the emitted token back. Why: `_typed("0735…", "int")` returned `735…`, which
+  lost a digit, and reveal then failed. FF1 output starts with `0` about 10% of the time, so this
+  broke roughly one int field in ten. Irreversible outputs (`noise`, `bucket`) convert leniently,
+  as before.
+- **`tests/test_apply.py` sample and assertion.** The plan's
+  `isinstance(out["ssn_int"], int)` cannot hold. `gdpr-pseudonymise` gives `SSN` `fpe_digits`
+  with `keep_suffix: 4`, which leaves 5 free digits of a 9-digit SSN. That is below the 10^6
+  domain guard, so the value falls back to a `det_token` string. The plan's own test fails
+  against the plan's own code. The intent ("numbers stay numbers", plus a reversible SSN) is now
+  tested by two things:
+  - a new field `account_number: 50100234567812` (ACCOUNT_NUMBER, `fpe_digits`, 14 free digits),
+    asserted to stay an int;
+  - `ssn_int`, asserted to be a string token, with the note `fallback:fpe_domain_too_small`
+    counted once and reveal restoring the int.
+
+  The validator and the guard are unchanged. The policy question of keeping the SSN last 4 is
+  listed as an open issue.
+- **Reveal robustness** (caller-supplied hints):
+  - a missing path, a path into a string (`TypeError` before), a malformed path, a span outside
+    its value, a non-scalar target, and an unknown or irreversible method are all
+    `MethodError`s. `TypeError` used to escape Task 22's `except` clause as a 500.
+  - `reveal` no longer mutates the caller's `ApplyOptions` (`dataclasses.replace`).
+- **Envelope walk.**
+  - It runs over `flatten(document)`, so each envelope is decrypted with its real JSON path. The
+    plan used `"$"`, which broke field-scoped envelopes inside JSON.
+  - Without hints, every envelope must decrypt, so a wrong key fails loudly. With hints, an
+    envelope that does not authenticate is left untouched. Why: input that already held envelopes
+    from another key (re-obfuscating tokenised data) made every reveal fail.
+  - `make_envelope` refusals (Task 13) keep the bare token; the hint still covers it.
+- **Apply robustness.**
+  - A span on a numeric leaf is transformed on `str(value)` and typed back. The plan skipped it
+    silently, leaving the value in clear.
+  - A plan span outside its value, or a whole-value entry on a non-scalar, raises `MethodError`.
+- Test edit: the envelope test's first `model_copy(update={"treat": <dicts>})` line is dropped.
+  It made pydantic emit a serializer warning, and the next statement overwrote it anyway.
+- Tests added:
+  - `test_reveal_hints_carry_no_value_derived_data`;
+  - `test_the_anchor_is_keyed_and_stable_per_key_and_business_key`;
+  - `test_int_tokens_that_would_lose_a_leading_zero_stay_strings`;
+  - `test_reveal_refuses_hints_from_another_key`;
+  - `test_malformed_hints_are_method_errors` (8 cases);
+  - `test_whole_value_hints_must_point_at_a_scalar`;
+  - `test_reveal_does_not_mutate_the_callers_options`;
+  - `test_foreign_envelopes_survive_with_hints_and_fail_loudly_without`;
+  - `test_field_scoped_tokens_reveal_by_hint_whatever_the_reveal_policy`;
+  - `test_envelope_walk_reads_field_scoped_tokens_at_their_json_path`;
+  - `test_spans_on_numeric_leaves_are_transformed_not_skipped`;
+  - `test_plan_spans_that_do_not_fit_the_document_are_refused`;
+  - `test_envelopes_are_only_made_for_names_the_parser_can_read`;
+  - `test_reveal_hints_validate_and_never_echo_their_input`;
+  - `test_whole_value_entries_must_point_at_a_scalar`.
+
+  Against the plan's `apply.py` (with `anchor_for` aliased), 15 of the 21 added cases fail, and
+  so does the plan's own first test.
+- Count: the plan's 3 + 22 = 25 in the file; suite 291 passed, 1 skipped.
