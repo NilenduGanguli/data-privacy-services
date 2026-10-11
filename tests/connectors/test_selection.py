@@ -7,6 +7,7 @@ import pytest
 from dps.jobs_models import ObjectRef, Selection
 from dps.layers.connectors.base import ColumnInfo, TableShape
 from dps.layers.connectors.selection import (
+    DENIED_FUNCTION_PREFIXES,
     SelectionError,
     compile_query,
     compile_where,
@@ -261,6 +262,104 @@ def test_more_rejections(where: str, code: str) -> None:
     with pytest.raises(SelectionError) as err:
         validate_selection(Selection(where=where, params={"a": 1}), "postgres", None)
     assert err.value.code == code
+
+
+#: Calls of functions that execute a SQL string: core PostgreSQL ``ts_stat``/``ts_rewrite``,
+#: tablefunc's ``crosstab*``/``connectby`` and pg_background. Binding the string as a parameter
+#: would run any statement (``set_config``, ``pg_sleep``, ``dblink_exec``…) past validation.
+_SQL_STRING_CALLS = [
+    "ts_stat('select 1')",
+    "TS_STAT('select 1')",
+    "Ts_Stat('select 1', 'ab')",
+    "pg_catalog.ts_stat('select 1')",
+    "PG_CATALOG.TS_STAT('select 1')",
+    "\"ts_stat\"('select 1')",
+    "pg_catalog.\"ts_stat\"('select 1')",
+    '"pg_catalog"."ts_stat"(\'select 1\')',
+    "ts_stat(sqlquery => 'select 1')",
+    "ts_rewrite('a'::tsquery, 'select 1')",
+    "TS_REWRITE('a'::tsquery, 'select 1')",
+    "pg_catalog.ts_rewrite('a'::tsquery, 'select 1')",
+    "\"pg_catalog\".\"ts_rewrite\"('a'::tsquery, 'select 1')",
+    "crosstab('select 1')",
+    "CROSSTAB('select 1', 'select 2')",
+    "crosstab2('select 1')",
+    "public.crosstab('select 1', 2)",
+    '"public"."crosstab"(\'select 1\')',
+    "connectby('t', 'a', 'b', '1', 0)",
+    "CONNECTBY('t', 'a', 'b', 'o', '1', 0, '~')",
+    "public.\"connectby\"('t', 'a', 'b', '1', 0)",
+    "pg_background_launch('select 1')",
+    "PUBLIC.PG_BACKGROUND_LAUNCH('select 1')",
+]
+
+
+@pytest.mark.parametrize("call", _SQL_STRING_CALLS)
+def test_functions_that_run_a_sql_string_are_denied_in_where_and_query_form(call: str) -> None:
+    selections = [
+        Selection(where=f"{call} IS NOT NULL"),
+        Selection(where=f"EXISTS (SELECT 1 FROM {call} AS f)"),
+        Selection(query=f"SELECT * FROM {call} AS f(a text)"),
+        Selection(query=f"SELECT * FROM ROWS FROM ({call}) AS f"),
+        Selection(query=f"SELECT customer_id, {call} AS v FROM bank.customers"),
+        Selection(
+            query=f"SELECT c.customer_id FROM bank.customers c, LATERAL {call} AS f "
+            "WHERE c.country_code = 'IN'"
+        ),
+    ]
+    for sel in selections:
+        for check in (
+            lambda s=sel: validate_selection(s, "postgres", None),
+            lambda s=sel: parameterize_literals(s, "postgres"),
+        ):
+            with pytest.raises(SelectionError) as err:
+                check()
+            assert err.value.code == "selection_function_denied", (sel, err.value.code)
+            assert "select 1" not in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "ts_stat(:q)",
+        "pg_catalog.TS_STAT(:q, :q)",
+        '"ts_stat"(:q)',
+        "ts_rewrite(CAST(:q AS tsquery), :q)",
+        'pg_catalog."ts_rewrite"(CAST(:q AS tsquery), :q)',
+        "crosstab(:q)",
+        "CROSSTAB4(:q)",
+        "connectby(:q, :q, :q, :q, :q)",
+        "pg_background_launch(:q)",
+    ],
+)
+def test_a_bound_sql_string_never_compiles_into_a_sql_executing_function(call: str) -> None:
+    params = {"q": "select set_config('statement_timeout', '0', true)::tsvector"}
+    for compile_sel, sel in (
+        (compile_where, Selection(where=f"{call} IS NOT NULL", params=params)),
+        (compile_query, Selection(query=f"SELECT * FROM {call} AS f(a text)", params=params)),
+    ):
+        with pytest.raises(SelectionError) as err:
+            compile_sel(sel, "postgres")
+        assert err.value.code == "selection_function_denied"
+        assert "statement_timeout" not in str(err.value)
+
+
+def test_the_sql_string_functions_are_on_the_exported_deny_list() -> None:
+    for name in ("ts_stat", "ts_rewrite", "crosstab", "connectby", "pg_background_launch"):
+        assert name.startswith(DENIED_FUNCTION_PREFIXES)
+
+
+def test_oracle_hierarchical_queries_are_not_mistaken_for_connectby() -> None:
+    validate_selection(
+        Selection(
+            query="SELECT customer_id, SYS_CONNECT_BY_PATH(full_name, '/') AS p "
+            "FROM bank.customers START WITH customer_id = :r "
+            "CONNECT BY PRIOR customer_id = parent_id",
+            params={"r": 1},
+        ),
+        "oracle",
+        None,
+    )
 
 
 def test_column_names_are_not_package_names_and_subqueries_have_their_own_scope() -> None:

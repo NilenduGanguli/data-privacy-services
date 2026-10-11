@@ -385,7 +385,10 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   them), `query_to_xml*` and `cursor_to_xml*` (they execute SQL from a string, which with bound
   literals would run arbitrary statements past this validation, e.g. `set_config`), `pg_notify`,
   `pg_logical_emit_message`, `pg_switch_wal`, `pg_create_restore_point`, `pg_file_*`,
-  `pg_stat_reset*`. Exported as `DENIED_FUNCTION_PREFIXES`.
+  `pg_stat_reset*`. Exported as `DENIED_FUNCTION_PREFIXES`. Review G3 r1 (B1) added the rest of
+  the SQL-from-a-string class: `ts_stat*` and `ts_rewrite*` (core PostgreSQL, executable by any
+  role), `crosstab*` and `connectby*` (tablefunc) and `pg_background*` (its session is not
+  read-only); see "Review G3 r1 fixes" below.
 - `referenced_columns` ignores columns inside a subquery (they belong to the subquery's tables),
   so `customer_id IN (SELECT a.customer_id FROM bank.accounts a …)` is not refused as an unknown
   column. Projected `columns` are validated with `quote_ident` and folded for Oracle.
@@ -465,3 +468,36 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   `test_creating_a_connection_registers_the_tenant` (db) and
   `test_a_failing_store_is_reported_by_code`, `test_s3_store_takes_keys_from_the_credentials`,
   `test_the_probe_helper_is_not_collected_as_a_test` (offline): 7 db + 8 offline = 15 (plan: 8).
+
+## Review G3 r1 fixes (Tasks 10–14)
+
+- **B1, the selection deny-list could be bypassed through functions that execute a SQL
+  string.** `ts_stat(sqlquery text [, weights])` and `ts_rewrite(query tsquery, select text)`
+  (core PostgreSQL, `EXECUTE` granted to PUBLIC) and tablefunc's `crosstab(text …)` /
+  `connectby(relname, …)` run the text they are given. Validation did not refuse them and
+  literal binding turned the SQL text into a parameter, so a selection that passed
+  `validate_selection`, `parameterize_literals` and `compile_where`/`compile_query` could run any
+  SELECT, including the denied functions (the reviewer lifted `statement_timeout` to 0 with
+  `ts_stat('select set_config(…)::tsvector')` inside `BEGIN READ ONLY` on the lane's PG16, and
+  ran `pg_sleep`). `DENIED_FUNCTION_PREFIXES` now also holds `ts_stat`, `ts_rewrite`,
+  `crosstab` (covers `crosstab2/3/4` and the documented `crosstab_*` wrappers), `connectby`, and
+  `pg_background` (stricter than the finding: `pg_background_launch(sql)` runs SQL in a separate
+  session that is not read-only). The check matches the lower-cased bare function name, so the
+  `pg_catalog.`/`public.`-qualified, double-quoted, upper/mixed-case, named-argument
+  (`sqlquery => …`), `ROWS FROM (…)`, `LATERAL`, scalar-subquery and `EXISTS` spellings are all
+  refused with `selection_function_denied` and a value-free message; `U&"…"` identifiers were
+  already refused (`selection_identifier_invalid`). Oracle `CONNECT BY PRIOR` and
+  `SYS_CONNECT_BY_PATH` are syntax/other names and still validate.
+  Tests (all failed before the fix with `DID NOT RAISE`, except the Oracle guard):
+  `test_functions_that_run_a_sql_string_are_denied_in_where_and_query_form` ×23 spellings (each
+  in two where forms and four query forms, through `validate_selection` and
+  `parameterize_literals`), `test_a_bound_sql_string_never_compiles_into_a_sql_executing_function`
+  ×9 (the bound-parameter attack through `compile_where` and `compile_query`),
+  `test_the_sql_string_functions_are_on_the_exported_deny_list`,
+  `test_oracle_hierarchical_queries_are_not_mistaken_for_connectby`. No existing test changed.
+- Residual (not changed, recorded for the M5 hardening owner): a function deny-list cannot be
+  complete. User-defined functions in a source database, or other extensions (pgTAP's
+  `lives_ok`/`results_eq`/`throws_ok`, Oracle `CTXSYS`-owned packages), can also execute a SQL
+  string. The connector's source role must stay least-privilege (no `EXECUTE` on such functions,
+  no `dblink`/`pg_background` installed for it); an allow-list of functions for selections would
+  need a contract change (§5.2 specifies a deny-list).

@@ -66,7 +66,8 @@ MONGO_OPERATORS = frozenset(
 )
 #: Function-name prefixes refused anywhere in a selection: the contract's deny-list, M2's
 #: additions, and functions that run SQL from a string or signal other sessions (they would
-#: escape this validation or the read-only transaction's intent).
+#: escape this validation or the read-only transaction's intent). Matched on the lower-cased
+#: bare name, so schema-qualified, quoted and upper-case spellings are refused alike.
 DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
     "pg_sleep",
     "pg_read_file",
@@ -93,8 +94,15 @@ DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
     "pg_create_restore_point",
     "pg_file_",
     "pg_stat_reset",
+    # Functions that execute a SQL string: a bound literal would run any statement, including
+    # the denied functions above, inside the connector's transaction.
     "query_to_xml",
     "cursor_to_xml",
+    "ts_stat",  # core PostgreSQL ts_stat(sqlquery text [, weights text])
+    "ts_rewrite",  # core PostgreSQL ts_rewrite(query tsquery, select text)
+    "crosstab",  # tablefunc crosstab, crosstab2/3/4 and custom crosstab_* wrappers
+    "connectby",  # tablefunc connectby(relname, …) builds and runs a query from text
+    "pg_background",  # pg_background_launch(sql): a separate session, not read-only
 )
 _DENY_SCHEMAS = frozenset(
     {"sys", "dbms_lock", "dbms_pipe", "dbms_scheduler", "utl_http", "utl_file"}
