@@ -1,0 +1,57 @@
+name: gdpr-pseudonymise
+version: 1
+description: Reversible pseudonymisation that keeps formats and joins. Output remains personal data (GDPR Art. 4(5)).
+locale: { default: en_US }
+detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
+treat:
+  default_sensitive: { method: det_token }
+  SSN: { method: fpe_digits, keep_suffix: 4 }
+  ITIN: { method: fpe_digits }
+  EIN: { method: fpe_digits }
+  SIN: { method: fpe_digits }
+  AADHAAR: { method: fpe_digits, keep_suffix: 4 }
+  PAN_IN: { method: fpe_text }
+  CURP: { method: fpe_text }
+  RFC: { method: fpe_text }
+  NINO: { method: fpe_text }
+  NHS_NUMBER: { method: fpe_digits }
+  PASSPORT: { method: fpe_text }
+  DRIVER_LICENSE: { method: fpe_text }
+  CARD_PAN: { method: fpe_digits, keep_prefix: 6, keep_suffix: 4 }
+  CARD_EXPIRY: { method: keep }
+  CVV: { method: redact }
+  IBAN: { method: fpe_text }
+  ACCOUNT_NUMBER: { method: fpe_digits }
+  PHONE: { method: phone, keep_country_code: true }
+  EMAIL: { method: email, domain: keep }
+  PERSON_NAME: { method: fpe_text }
+  USERNAME: { method: fpe_text }
+  DATE_OF_BIRTH: { method: date_shift, window_days: 365 }
+  DATE: { method: keep }
+  STREET_ADDRESS: { method: det_token }
+  POSTAL_CODE: { method: generalize, keep_chars: 3 }
+  CITY: { method: keep }
+  LOCATION: { method: keep }
+  GEO_COORDINATE: { method: det_token }
+  IP_ADDRESS: { method: det_token }
+  MAC_ADDRESS: { method: det_token }
+  URL: { method: keep }
+  DEVICE_ID: { method: det_token }
+  COOKIE_ID: { method: det_token }
+  CUSTOMER_ID: { method: fpe_digits }
+  EMPLOYEE_ID: { method: fpe_text }
+  CASE_ID: { method: keep }
+  ORG_NAME: { method: keep }
+  GENDER: { method: keep }
+  NATIONALITY: { method: keep }
+  AGE: { method: keep }
+  AMOUNT: { method: keep }
+  API_KEY: { method: redact }
+  PASSWORD: { method: redact }
+  JWT: { method: redact }
+  PRIVATE_KEY: { method: redact }
+synthesize:
+  default: { method: surrogate }
+consistency: { scope: key }
+output: { token_style: natural }
+verify: { leakage_check: strict }

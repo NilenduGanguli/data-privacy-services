@@ -1,0 +1,19 @@
+name: synthetic-strict
+version: 1
+description: Synthetic with maximum privacy. Lower detection threshold, every date and location replaced, no cross-request linkage.
+locale: { default: en_US }
+detect: { tiers: [structural, patterns, ner], min_score: 0.5 }
+treat:
+  default_sensitive: { method: det_token }
+synthesize:
+  default: { method: surrogate }
+  overrides:
+    DATE: { method: surrogate }
+    LOCATION: { method: surrogate }
+    CITY: { method: surrogate }
+    URL: { method: redact }
+  keep_non_sensitive: true
+  llm_rewrite_text: false
+consistency: { scope: request }
+output: { token_style: natural }
+verify: { leakage_check: strict }

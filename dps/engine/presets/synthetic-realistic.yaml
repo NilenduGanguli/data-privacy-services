@@ -1,0 +1,18 @@
+name: synthetic-realistic
+version: 1
+description: Synthetic surrogates that look real, agree with each other (one persona per record) and keep non-sensitive values.
+locale: { default: en_US }
+detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
+treat:
+  default_sensitive: { method: det_token }
+synthesize:
+  default: { method: surrogate }
+  overrides:
+    DATE: { method: keep }
+    AMOUNT: { method: keep }
+    URL: { method: keep }
+  keep_non_sensitive: true
+  llm_rewrite_text: false
+consistency: { scope: key }
+output: { token_style: natural }
+verify: { leakage_check: strict }

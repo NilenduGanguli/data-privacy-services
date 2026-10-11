@@ -346,3 +346,50 @@ are preserved unless a section says otherwise.
 
   All four were red before the change.
 - Count: the plan's 4 + 4 added = 8 in the file; suite 147 passed, 1 skipped.
+
+## Task 11 — Policy model and presets
+
+- `dps/engine/policy.py`: `@functools.cache` replaces `@lru_cache(maxsize=None)`. Why: ruff's
+  `UP033` fails the plan's code at the lint gate.
+- `load_preset(name)` accepts only the names of the bundled preset files: `preset_names()` is a
+  new public helper, and a name must match `[a-z0-9][a-z0-9-]{0,63}`. Why: the plan joined the
+  name straight into a path (`PRESET_DIR / f"{name}.yaml"`), and the name comes from the request
+  body (`"policy": "<name>"`). With it, `../../<anything>` read any `.yaml` on the image.
+  `EngineError(f"invalid policy: {exc}")` in Task 22 would then send the pydantic error, which
+  echoes the file's content, back to the caller. A malformed name is not echoed in the
+  `KeyError`; a well-formed unknown name still is (`unknown policy preset 'no-such-preset'`).
+  `KeyError` stays the error type, as the plan's test and Task 22 expect.
+- `load_preset` returns a deep copy of a cached, validated policy (cache in
+  `_load_preset_cached`). Why: the plan cached and returned the same mutable `Policy` to every
+  caller, and `resolve_policy(None)` handed it out directly. One request editing its policy
+  (`policy.treat[...] = ...`) would change the treatment for every later request and tenant.
+  `list_presets` reads the cache directly, since it only reads.
+- `_deep_merge` replaces method specs whole: entries of `treat` and `synthesize.overrides`, and
+  `synthesize.default`. Why: the plan merged an override's dict into the preset's dict. So
+  `{"preset": "gdpr-pseudonymise", "treat": {"SSN": {"method": "fpe_digits"}}}`, which means
+  "encrypt every digit", silently inherited `keep_suffix: 4`, and the last four SSN digits stayed
+  in clear. A method swap (`mask_partial`) also carried the old method's params. Other sections
+  still deep-merge.
+- `resolve_policy` names a merged policy `<preset>+overrides` unless the override sets `name`.
+  Why: the plan's `merged.setdefault("name", ...)` never fired, because the preset dump always
+  has a `name`. An overridden policy was therefore reported and audited under the preset's own
+  name (`report.policy`, audit `policy`). The config hash already differed; now the name does too.
+- Every policy model uses `ConfigDict(extra="forbid", hide_input_in_errors=True)`. Why: inline
+  policies arrive in request bodies and can carry deny lists, declared paths and dictionary
+  values, and a validation error goes back to the caller and the logs. The Task 24 expectation
+  (`"teleport"` appears in the 400 detail) still holds, because the method name is in the
+  validator's own message.
+- Docstrings added to the section models.
+- Tests added:
+  - `test_preset_names_cannot_reach_other_files`;
+  - `test_an_override_replaces_a_method_spec_whole`;
+  - `test_overridden_presets_are_named_as_such`;
+  - `test_cached_presets_are_not_shared_mutable_state`;
+  - `test_policy_validation_errors_never_echo_inline_values`;
+  - `test_preset_entity_keys_are_known_types`, a typo guard: every `treat` and `overrides` key
+    in every preset is a built-in type or `default_sensitive`.
+
+  The first five were red before the change.
+- Presets: the six YAML files are verbatim from the plan; they ship in the wheel, verified with
+  `uv build --wheel`.
+- Count: the plan's 4 + 6 added = 10 in the file; suite 157 passed, 1 skipped.

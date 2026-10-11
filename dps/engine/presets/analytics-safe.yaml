@@ -1,0 +1,32 @@
+name: analytics-safe
+version: 1
+description: Irreversible. Keyed pseudonyms keep joins, dates generalised to year, addresses removed, amounts lightly perturbed.
+locale: { default: en_US }
+detect: { tiers: [structural, patterns, ner], min_score: 0.55 }
+treat:
+  default_sensitive: { method: hmac_pseudonym }
+  PERSON_NAME: { method: hmac_pseudonym }
+  EMAIL: { method: hmac_pseudonym }
+  PHONE: { method: hmac_pseudonym }
+  DATE_OF_BIRTH: { method: generalize, granularity: year }
+  DATE: { method: keep }
+  STREET_ADDRESS: { method: redact }
+  POSTAL_CODE: { method: generalize, keep_chars: 3 }
+  CITY: { method: keep }
+  CARD_PAN: { method: mask_partial, keep_last: 4 }
+  CARD_EXPIRY: { method: redact }
+  CVV: { method: redact }
+  AMOUNT: { method: noise, percent: 5 }
+  CUSTOMER_ID: { method: hmac_pseudonym }
+  GENDER: { method: keep }
+  NATIONALITY: { method: keep }
+  AGE: { method: bucket, ranges: [0, 18, 25, 35, 45, 55, 65, 120] }
+  API_KEY: { method: redact }
+  PASSWORD: { method: redact }
+  JWT: { method: redact }
+  PRIVATE_KEY: { method: redact }
+synthesize:
+  default: { method: surrogate }
+consistency: { scope: key }
+output: { token_style: envelope }
+verify: { leakage_check: strict }

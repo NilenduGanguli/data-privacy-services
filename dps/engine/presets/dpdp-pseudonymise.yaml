@@ -1,0 +1,35 @@
+name: dpdp-pseudonymise
+version: 1
+description: India DPDP pseudonymisation. Aadhaar masked to last 4 (UIDAI style), PAN/voter id format-preserving, Indian locale.
+locale: { default: en_IN }
+detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
+treat:
+  default_sensitive: { method: det_token }
+  AADHAAR: { method: fpe_digits, keep_suffix: 4 }
+  PAN_IN: { method: fpe_text }
+  VOTER_ID: { method: fpe_text }
+  PASSPORT: { method: fpe_text }
+  CARD_PAN: { method: fpe_digits, keep_prefix: 6, keep_suffix: 4 }
+  CARD_EXPIRY: { method: keep }
+  CVV: { method: redact }
+  IFSC: { method: keep }
+  ACCOUNT_NUMBER: { method: fpe_digits }
+  PHONE: { method: phone, keep_country_code: true }
+  EMAIL: { method: email, domain: keep }
+  PERSON_NAME: { method: fpe_text }
+  DATE_OF_BIRTH: { method: date_shift, window_days: 365 }
+  DATE: { method: keep }
+  STREET_ADDRESS: { method: det_token }
+  POSTAL_CODE: { method: generalize, keep_chars: 3 }
+  CITY: { method: keep }
+  CUSTOMER_ID: { method: fpe_digits }
+  AMOUNT: { method: keep }
+  API_KEY: { method: redact }
+  PASSWORD: { method: redact }
+  JWT: { method: redact }
+  PRIVATE_KEY: { method: redact }
+synthesize:
+  default: { method: surrogate }
+consistency: { scope: key }
+output: { token_style: natural }
+verify: { leakage_check: strict }

@@ -1,0 +1,28 @@
+name: pci-dss
+version: 1
+description: Cardholder-data focus. PAN format-preserving with first-6/last-4 kept, CVV never retained, everything else tokenised.
+locale: { default: en_US }
+detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
+treat:
+  default_sensitive: { method: det_token }
+  CARD_PAN: { method: fpe_digits, keep_prefix: 6, keep_suffix: 4 }
+  CARD_EXPIRY: { method: keep }
+  CVV: { method: redact }
+  PERSON_NAME: { method: fpe_text }
+  EMAIL: { method: email, domain: keep }
+  PHONE: { method: phone, keep_country_code: true }
+  STREET_ADDRESS: { method: det_token }
+  POSTAL_CODE: { method: generalize, keep_chars: 3 }
+  DATE_OF_BIRTH: { method: date_shift, window_days: 365 }
+  DATE: { method: keep }
+  AMOUNT: { method: keep }
+  CUSTOMER_ID: { method: fpe_digits }
+  API_KEY: { method: redact }
+  PASSWORD: { method: redact }
+  JWT: { method: redact }
+  PRIVATE_KEY: { method: redact }
+synthesize:
+  default: { method: surrogate }
+consistency: { scope: key }
+output: { token_style: natural }
+verify: { leakage_check: strict }
