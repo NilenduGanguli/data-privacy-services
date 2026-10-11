@@ -122,3 +122,88 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .mock-banner { position: fixed; right: 16px; bottom: 16px; z-index: 9; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 999px; padding: 6px 12px; font-size: 11.5px; color: var(--ink-2); box-shadow: var(--shadow-lg); display: flex; gap: 10px; align-items: center; }
 .mock-banner a { color: var(--teal); font-weight: 700; }
 @media (max-width: 1100px) { .cols-4 { grid-template-columns: repeat(2, minmax(0,1fr)); } .cols-3 { grid-template-columns: 1fr; } .cols-2 { grid-template-columns: 1fr; } .shell { grid-template-columns: 1fr; } .sidebar { display: none; } }
+
+/* ==========================================================================
+   Shared components and responsive shell — appended in the integration pass.
+   Nothing above this line was changed. Pages 05–12 used to repeat these rules
+   in their own <style> blocks; they now rely on the copies here.
+   ========================================================================== */
+
+/* utilities */
+.hidden, [hidden] { display: none !important; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.nw { white-space: nowrap; }
+.btn { white-space: nowrap; }
+
+/* keyboard focus: one teal ring everywhere; inputs keep their own box-shadow ring */
+:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.input:focus-visible { outline: none; }
+.seg button:focus-visible, .seg a:focus-visible { outline-offset: -2px; }
+
+/* buttons */
+.btn-danger { background: var(--rose); border-color: transparent; color: var(--ink-on-brand); }
+.btn-danger:hover { background: var(--rose); filter: brightness(1.06); }
+.linkbtn { background: none; border: 0; color: var(--teal); font-weight: 600; font-size: 12.5px; cursor: pointer; padding: 2px 4px; border-radius: 6px; font-family: var(--font); }
+.linkbtn:hover { text-decoration: underline; }
+
+/* segmented control: a link inside it is a tab that opens another screen */
+.seg a { display: inline-flex; align-items: center; color: var(--ink-2); padding: 7px 14px; font-weight: 600; font-size: 13px; white-space: nowrap; }
+.seg a:hover { color: var(--ink); background: var(--surface-2); }
+.seg a.on { background: var(--teal-soft); color: var(--teal); box-shadow: inset 0 0 0 1px var(--teal-border); }
+
+/* selects: one chevron, drawn inside the field, so no wrapper element is needed */
+select.input { appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 30px; font-family: var(--font);
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 52%, calc(100% - 11px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
+select.input.mono { font-family: var(--mono); }
+
+/* layout helpers */
+.head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.page-head > .head-actions { flex: none; }
+.tbl-scroll { overflow-x: auto; }
+.tbl .s2 { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+.stepper { flex-wrap: wrap; row-gap: 8px; }
+.sidebar-foot a:hover { color: var(--teal); }
+.page [id] { scroll-margin-top: calc(var(--topbar-h) + 16px); }
+.main > .mock-banner { position: static; align-self: center; margin: -16px 24px 24px; box-shadow: none; }
+
+/* navigation below 1100px: the sidebar opens as a drawer from a menu button in the topbar */
+.nav-toggle, .nav-scrim { display: none; }
+@media screen and (max-width: 1100px) {
+  .nav-toggle { display: inline-grid; place-items: center; flex: none; width: 34px; height: 34px; margin-left: -4px; padding: 0; border-radius: var(--r-md); border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink); cursor: pointer; }
+  .nav-toggle:hover { background: var(--surface-2); }
+  .nav-toggle svg { width: 18px; height: 18px; }
+  .shell.nav-open .sidebar { display: flex; position: fixed; top: 0; left: 0; bottom: 0; z-index: 40; width: min(280px, 86vw); height: auto; overflow-y: auto; box-shadow: var(--shadow-lg); }
+  .shell.nav-open .nav-scrim { display: block; position: fixed; inset: 0; z-index: 39; background: rgba(5, 8, 15, .55); }
+}
+
+/* phones and small tablets: a compact shell */
+@media screen and (max-width: 760px) {
+  .topbar { padding: 0 16px; gap: 10px; }
+  .topbar .crumb, .topbar .sep { flex: none; white-space: nowrap; }
+  .topbar .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar .pill, .hide-sm { display: none; }
+  .page { padding: 16px 16px 28px; }
+  .page-head { flex-direction: column; align-items: stretch; gap: 12px; }
+  .page-head .seg { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .page-head .seg button, .page-head .seg a { white-space: normal; justify-content: center; text-align: center; }
+  .card { padding: 14px; }
+  .kpi .value { font-size: 24px; }
+  .stepper { gap: 10px 16px; }
+  .stepper .step-sep { display: none; }
+  .main > .mock-banner { margin: -8px 16px 20px; justify-content: center; flex-wrap: wrap; border-radius: var(--r-md); }
+}
+
+/* tables that turn into labelled cards on phones; labelCells() in vault.js writes the labels */
+@media screen and (max-width: 720px) {
+  table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; }
+  table.stack { min-width: 0 !important; }
+  table.stack thead { display: none; }
+  table.stack tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 12px; padding: 12px 2px; border-bottom: 1px solid var(--border); }
+  table.stack tr:last-child { border-bottom: 0; }
+  table.stack td { border: 0; padding: 0 !important; min-width: 0; }
+  table.stack td::before { content: attr(data-l); display: block; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 3px; }
+  table.stack td:first-child, table.stack td[colspan] { grid-column: 1 / -1; }
+  table.stack td:first-child::before, table.stack td[colspan]::before { display: none; }
+  table.stack tr:hover td { background: transparent; }
+}

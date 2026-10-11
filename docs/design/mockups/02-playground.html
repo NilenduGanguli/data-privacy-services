@@ -1,47 +1,51 @@
 <!doctype html>
 <html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Playground — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
 <style>
   .play { display: grid; grid-template-columns: 1fr 300px 1fr; gap: 16px; align-items: start; }
   .finding { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .finding .chip { justify-self: start; }
   .finding:last-child { border-bottom: 0; }
   .finding .path { font-family: var(--mono); color: var(--ink-2); font-size: 11.5px; }
   .finding .why { color: var(--ink-3); font-size: 11.5px; grid-column: 1 / -1; }
   .score { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
   .keycard { background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--teal) 10%, var(--surface))); border: 1px solid var(--teal-border); }
-  .hidden { display: none; }
-  .diffrow { display: grid; grid-template-columns: 150px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--border); font-family: var(--mono); font-size: 12.5px; align-items: center; }
+  .diffrow { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px dashed var(--border); font-family: var(--mono); font-size: 12.5px; align-items: baseline; }
   .diffrow:last-child { border-bottom: 0; } .diffrow .k { color: var(--ink-3); }
   @media (max-width: 1200px) { .play { grid-template-columns: 1fr; } }
 </style></head>
 <body><div class="shell"><nav class="sidebar"></nav><div class="main">
 <header class="topbar"><span class="crumb">Playground</span><span class="sep">/</span><span class="muted">Layer 1 · stateless API</span><span class="topbar-spacer"></span>
-  <span class="pill mono">POST /api/v1/obfuscate</span><button class="btn btn-sm">Copy as curl</button><button class="btn btn-sm" onclick="toggleTheme()">Theme</button></header>
+  <span class="pill mono">POST /api/v1/obfuscate</span><button class="btn btn-sm hide-sm">Copy as curl</button><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
 <main class="page">
-  <div class="page-head"><div><h1>Try the engine</h1><p>Paste JSON or text, or drop a document. Detection and transformation run locally; the LLM only ever sees placeholders.</p></div>
+  <div class="page-head"><div><h1>Try the engine</h1><p>Paste JSON or text, or <a href="08-documents.html" style="color:var(--teal);font-weight:600">drop a document</a>. Detection and transformation run locally; the LLM only ever sees placeholders.</p></div>
     <div style="display:flex;gap:10px;align-items:center">
       <span class="muted" style="font-size:12.5px">Policy</span><span class="seg"><button class="on">gdpr-pseudonymise</button><button>pci-dss</button><button>analytics-safe</button><button>custom…</button></span>
     </div></div>
 
   <div class="play">
     <!-- INPUT -->
-    <div class="card"><div class="card-head"><div class="card-title">Input</div><div class="seg"><button class="on">JSON</button><button>Text</button><button>Document</button></div></div>
+    <div class="card"><div class="card-head"><div class="card-title">Input</div><div class="seg" role="group" aria-label="Input kind"><button class="on" aria-pressed="true">JSON</button><button>Text</button><a href="08-documents.html">Document</a></div></div>
 <div class="pane" style="min-height:360px">{
   <span class="k">"customer_id"</span>: <span class="s">"CUST-884120"</span>,
   <span class="k">"full_name"</span>: <span class="hl">"Ananya Krishnan"</span>,
   <span class="k">"dob"</span>: <span class="hl">"1988-03-14"</span>,
   <span class="k">"aadhaar"</span>: <span class="hl">"4921 7731 0066"</span>,
-  <span class="k">"pan"</span>: <span class="hl">"BQPKR4432L"</span>,
+  <span class="k">"pan"</span>: <span class="hl">"BQPPK4432L"</span>,
   <span class="k">"email"</span>: <span class="hl">"ananya.k@example-mail.in"</span>,
   <span class="k">"phone"</span>: <span class="hl">"+91 98451 20377"</span>,
-  <span class="k">"card"</span>: { <span class="k">"pan"</span>: <span class="hl">"4532 7811 2290 4417"</span>, <span class="k">"expiry"</span>: <span class="hl">"09/28"</span> },
+  <span class="k">"card"</span>: {
+    <span class="k">"pan"</span>: <span class="hl">"4532 7811 2290 4417"</span>,
+    <span class="k">"expiry"</span>: <span class="hl">"09/28"</span>
+  },
   <span class="k">"address"</span>: <span class="hl">"14 Lavelle Road, Bengaluru 560001"</span>,
   <span class="k">"risk_score"</span>: 712,
   <span class="k">"notes"</span>: <span class="s">"Called on </span><span class="hl">14 Mar</span><span class="s"> about card ending </span><span class="hl">4417</span><span class="s">; spoke to </span><span class="hl">Ananya</span><span class="s">."</span>
 }</div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px">
         <span class="faint" style="font-size:12px">1.1 KB · 12 fields · consistency: <b>key</b> · token style: <b>natural</b></span>
-        <div style="display:flex;gap:8px"><button class="btn">Detect only</button><button class="btn btn-primary" onclick="setMode('obf')">Obfuscate</button><button class="btn" onclick="setMode('syn')">Synthesize</button></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn">Detect only</button><button class="btn btn-primary" onclick="setMode('obf')">Obfuscate</button><button class="btn" onclick="setMode('syn')">Synthesize</button></div>
       </div>
     </div>
 
@@ -49,7 +53,7 @@
     <div class="card"><div class="card-head"><div class="card-title">Findings <span class="faint">· 10</span></div><span class="chip rose">CRITICAL</span></div>
       <div class="finding"><span class="chip rose">AADHAAR</span><span class="score">0.99</span><span class="path">$.aadhaar</span><span class="why">pattern + Verhoeff checksum · context "aadhaar"</span></div>
       <div class="finding"><span class="chip rose">CARD_PAN</span><span class="score">0.99</span><span class="path">$.card.pan</span><span class="why">Luhn valid · IIN 453278 (Visa)</span></div>
-      <div class="finding"><span class="chip rose">PAN_IN</span><span class="score">0.98</span><span class="path">$.pan</span><span class="why">pattern AAAAA9999A · 4th char P (individual)</span></div>
+      <div class="finding"><span class="chip rose">PAN_IN</span><span class="score">0.98</span><span class="path">$.pan</span><span class="why">pattern AAAAA9999A · 4th char P (individual) · 5th = surname initial</span></div>
       <div class="finding"><span class="chip amber">PERSON_NAME</span><span class="score">0.93</span><span class="path">$.full_name</span><span class="why">structural (key) + NER PERSON</span></div>
       <div class="finding"><span class="chip amber">PERSON_NAME</span><span class="score">0.81</span><span class="path">$.notes[52:58]</span><span class="why">NER PERSON · matches $.full_name token</span></div>
       <div class="finding"><span class="chip amber">EMAIL</span><span class="score">0.99</span><span class="path">$.email</span><span class="why">pattern · offline TLD list</span></div>
@@ -57,7 +61,7 @@
       <div class="finding"><span class="chip amber">DATE_OF_BIRTH</span><span class="score">0.95</span><span class="path">$.dob</span><span class="why">structural (key "dob") + date</span></div>
       <div class="finding"><span class="chip amber">STREET_ADDRESS</span><span class="score">0.88</span><span class="path">$.address</span><span class="why">NER LOCATION + postal code 560001</span></div>
       <div class="finding"><span class="chip slate">CARD_EXPIRY</span><span class="score">0.90</span><span class="path">$.card.expiry</span><span class="why">MM/YY adjacent to CARD_PAN</span></div>
-      <div class="callout" style="margin-top:12px;font-size:12px">Not flagged: <span class="mono">customer_id</span> (declared business key, kept), <span class="mono">risk_score</span> (numeric, kept by policy). Change in <b>Policies</b>.</div>
+      <div class="callout" style="margin-top:12px;font-size:12px">Not flagged: <span class="mono">customer_id</span> (declared business key, kept), <span class="mono">risk_score</span> (numeric, kept by policy). Change in <a href="05-policies.html#declared" style="color:var(--teal);font-weight:700">Policies</a>.</div>
     </div>
 
     <!-- OUTPUT -->
@@ -72,7 +76,10 @@
   <span class="k">"pan"</span>: <span class="tok">"XKDPQ8810T"</span>,
   <span class="k">"email"</span>: <span class="tok">"vqzmra.p@example-mail.in"</span>,
   <span class="k">"phone"</span>: <span class="tok">"+91 93117 84062"</span>,
-  <span class="k">"card"</span>: { <span class="k">"pan"</span>: <span class="tok">"4532 78<b>61 0375</b> 4417"</span>, <span class="k">"expiry"</span>: <span class="tok">"09/28"</span> },
+  <span class="k">"card"</span>: {
+    <span class="k">"pan"</span>: <span class="tok">"4532 78<b>61 0375</b> 4417"</span>,
+    <span class="k">"expiry"</span>: <span class="tok">"09/28"</span>
+  },
   <span class="k">"address"</span>: <span class="tok">"[[PII:STREET_ADDRESS:m4q7t2…]]"</span>,
   <span class="k">"risk_score"</span>: 712,
   <span class="k">"notes"</span>: <span class="s">"Called on </span><span class="tok">02 Nov</span><span class="s"> about card ending </span><span class="tok">4417</span><span class="s">; spoke to </span><span class="tok">Tilqoe</span><span class="s">."</span>
@@ -94,10 +101,13 @@
   <span class="k">"full_name"</span>: <span class="tok syn">"Meera Venkatesan"</span>,
   <span class="k">"dob"</span>: <span class="tok syn">"1988-07-29"</span>,
   <span class="k">"aadhaar"</span>: <span class="tok syn">"9173 2206 4418"</span>,
-  <span class="k">"pan"</span>: <span class="tok syn">"MVPKV7210R"</span>,
+  <span class="k">"pan"</span>: <span class="tok syn">"MVPPV7210R"</span>,
   <span class="k">"email"</span>: <span class="tok syn">"meera.venkatesan@example.com"</span>,
   <span class="k">"phone"</span>: <span class="tok syn">"+91 90000 15627"</span>,
-  <span class="k">"card"</span>: { <span class="k">"pan"</span>: <span class="tok syn">"4111 1111 4733 0092"</span>, <span class="k">"expiry"</span>: <span class="tok syn">"03/29"</span> },
+  <span class="k">"card"</span>: {
+    <span class="k">"pan"</span>: <span class="tok syn">"4111 1111 4733 0092"</span>,
+    <span class="k">"expiry"</span>: <span class="tok syn">"03/29"</span>
+  },
   <span class="k">"address"</span>: <span class="tok syn">"22 Cunningham Road, Bengaluru 560052"</span>,
   <span class="k">"risk_score"</span>: 712,
   <span class="k">"notes"</span>: <span class="s">"Called on </span><span class="tok syn">29 Jul</span><span class="s"> about card ending </span><span class="tok syn">0092</span><span class="s">; spoke to </span><span class="tok syn">Meera</span><span class="s">."</span>

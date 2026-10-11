@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Policies — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+  .pol { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; }
+  .pol-side > .card:first-child { padding: 14px 12px; }
+  .pol-cell { grid-column: 1; grid-row: 1; min-width: 0; }
+  .pol-side { position: sticky; top: calc(var(--topbar-h) + 16px); display: flex; flex-direction: column; gap: 16px; }
+  .pol-main { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .pol-rest { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .ph-name .chip { font-family: var(--font); }
+  .card-sub { font-size: 12.5px; color: var(--ink-2); margin: -6px 0 14px; }
+
+  /* preset list */
+  .preset { display: block; padding: 9px 10px; border-radius: var(--r-md); border: 1px solid transparent; }
+  .preset + .preset { margin-top: 3px; }
+  .preset:hover { background: var(--surface-2); }
+  .preset.on { background: var(--teal-soft); border-color: var(--teal-border); }
+  .preset .p-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .preset .p-name { font-family: var(--mono); font-weight: 600; font-size: 12.5px; color: var(--ink); }
+  .preset.on .p-name { color: var(--teal); }
+  .preset .p-ver { font-size: 11.5px; color: var(--ink-2); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .preset .p-hash { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+  .preset .p-meta { display: flex; gap: 6px; align-items: center; margin-top: 6px; font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .toc a { display: flex; justify-content: space-between; padding: 6px 10px; border-radius: 6px; color: var(--ink-2); font-size: 12.5px; }
+  .toc a:hover { background: var(--surface-2); color: var(--ink); }
+  .toc a span { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+  /* policy header */
+  .ph-top { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .ph-name { font-family: var(--mono); font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .ph-desc { color: var(--ink-2); margin-top: 4px; font-size: 13px; }
+  .ph-hash { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-3); margin-top: 8px; flex-wrap: wrap; }
+  .ph-hash .mono { color: var(--ink-2); font-size: 12px; }
+  .ph-pub { font-size: 12px; color: var(--ink-3); }
+  .facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; margin-top: 14px; }
+  .facts > div { background: var(--surface); padding: 9px 12px; min-width: 0; }
+  .facts .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); font-weight: 700; }
+  .facts .v { font-size: 12.5px; margin-top: 3px; }
+  .facts .v small { display: block; color: var(--ink-3); font-size: 11.5px; }
+
+  /* tables */
+  .tbl-scroll { margin: 0 -4px; padding: 0 4px; }
+  .tbl-scroll > table.tbl { min-width: 760px; }
+  #mx td, #mx th { padding-left: 8px; padding-right: 8px; }
+  #mx .fam { white-space: nowrap; }
+  #mx .prm { margin: 2px 4px 2px 0; }
+  #mx .m { margin-right: 4px; }
+  .m { font-family: var(--mono); font-size: 12px; color: var(--ink); white-space: nowrap; }
+  .prm { font-family: var(--mono); font-size: 11px; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; margin-left: 4px; white-space: nowrap; display: inline-block; line-height: 17px; }
+  .syn-note { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; }
+  .rev { font-size: 12.5px; white-space: nowrap; }
+  .rev.no { color: var(--ink-3); }
+  .drafted td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+  .tbl td.ent { white-space: nowrap; }
+  .fam { color: var(--ink-2); font-size: 12.5px; }
+  .tbl-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; font-size: 12px; color: var(--ink-3); flex-wrap: wrap; }
+  .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .tools .input { width: 200px; padding: 6px 10px; }
+
+  /* recognizer builder */
+  .rb { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 18px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: 5px; }
+  .field .hint { font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
+  .row2 { display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 10px; }
+  .input.mono { font-family: var(--mono); font-size: 12.5px; }
+  textarea.input { resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+  .test-out { background: var(--bg-tint); border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 12px; font-family: var(--mono); font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; min-height: 64px; }
+  mark.hit { background: var(--amber-soft); box-shadow: inset 0 -2px 0 var(--amber); color: inherit; border-radius: 3px; padding: 0 2px; }
+  mark.deny { background: var(--surface-3); color: var(--ink-3); text-decoration: line-through; border-radius: 3px; padding: 0 2px; }
+  .matches { margin-top: 10px; }
+  .match { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; align-items: center; }
+  .match:last-child { border-bottom: 0; }
+  .match .why { grid-column: 1 / -1; color: var(--ink-3); font-size: 11.5px; }
+  .test-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 12px 0 6px; font-size: 12px; font-weight: 600; color: var(--ink-2); flex-wrap: wrap; }
+  .rx-err { display: none; margin-top: 8px; }
+  .rx-err.show { display: block; }
+
+  /* plan preview */
+  .plan { display: grid; grid-template-columns: 336px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .plan .pane { font-size: 11px; line-height: 1.6; }
+  .plan-sum { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .plan .tbl td { padding: 8px 5px; vertical-align: top; }
+  .plan .tbl th { padding: 8px 5px; }
+  .loc { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); white-space: nowrap; }
+  .score { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); display: block; margin-top: 3px; }
+  .rsn { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); overflow-wrap: break-word; }
+  .fb { font-family: var(--mono); font-size: 11px; color: var(--amber); background: var(--amber-soft); border: 1px solid var(--amber-border); border-radius: 5px; padding: 0 5px; display: inline-block; margin-top: 3px; line-height: 17px; white-space: nowrap; }
+  .fb-why { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 3px; }
+  .fb-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+  .fb-legend > div { border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 12px; font-size: 12.5px; background: var(--surface-2); }
+  .fb-legend b.mono { font-size: 12px; }
+  .fb-legend p { margin: 4px 0 0; color: var(--ink-2); }
+
+  /* versions */
+  .ver { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .vlist button { display: block; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--r-md); padding: 9px 10px; color: var(--ink); cursor: pointer; font: inherit; }
+  .vlist button + button { margin-top: 3px; }
+  .vlist button:hover { background: var(--surface-2); }
+  .vlist button[aria-pressed="true"] { background: var(--surface-2); border-color: var(--border-strong); }
+  .vlist .v-top { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .vlist .v-n { font-weight: 700; font-size: 13px; }
+  .vlist .v-by { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+  .vlist .v-hash { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+  .diff { font-family: var(--mono); font-size: 12px; line-height: 1.65; background: var(--bg-tint); border: 1px solid var(--border); border-radius: var(--r-md); padding: 8px 0; overflow-x: auto; }
+  .diff div { padding: 0 14px 0 30px; white-space: pre; position: relative; color: var(--ink-2); }
+  .diff div::before { position: absolute; left: 12px; color: var(--ink-3); content: " "; }
+  .diff .add { background: var(--surface-3); color: var(--ink); box-shadow: inset 3px 0 0 var(--ink-2); }
+  .diff .add::before { content: "+"; color: var(--ink); }
+  .diff .del { color: var(--ink-3); text-decoration: line-through; }
+  .diff .del::before { content: "\2212"; text-decoration: none; }
+  .diff-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; }
+  .diff-head .t { font-weight: 700; font-size: 13px; }
+  .diff-head .s { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+  .effects { margin: 12px 0 0; padding: 0; list-style: none; font-size: 12.5px; }
+  .effects li { padding: 6px 0; border-bottom: 1px dashed var(--border); color: var(--ink-2); }
+  .effects li:last-child { border-bottom: 0; }
+
+  /* dialog + toast */
+  dialog.dlg { border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink); border-radius: var(--r-lg); padding: 0; width: min(540px, calc(100vw - 32px)); box-shadow: var(--shadow-lg); }
+  dialog.dlg::backdrop { background: rgba(5, 8, 15, .62); }
+  .dlg-body { padding: 20px 22px 6px; }
+  .dlg-body h2 { margin: 0 0 6px; font-size: 17px; }
+  .dlg-body p { margin: 0 0 10px; color: var(--ink-2); font-size: 13px; }
+  .dlg-body ul { margin: 0 0 12px; padding-left: 18px; font-size: 13px; }
+  .dlg-body li { margin: 4px 0; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px 18px; flex-wrap: wrap; }
+  .toast { position: fixed; top: calc(var(--topbar-h) + 14px); right: 20px; z-index: 20; background: var(--surface); border: 1px solid var(--emerald-border); border-radius: var(--r-md); padding: 10px 14px; box-shadow: var(--shadow-lg); font-size: 13px; display: none; align-items: center; gap: 10px; max-width: calc(100vw - 40px); }
+  .toast.show { display: flex; }
+
+  @media (max-width: 1340px) {
+    .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 1240px) { .plan { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 1200px) {
+    .pol { grid-template-columns: minmax(0, 1fr); }
+    .pol-cell, .pol-main, .pol-rest { grid-column: 1; grid-row: auto; }
+    .pol-side { position: static; }
+    .toc-card { display: none; }
+    .rb, .ver { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 720px) {
+    .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .fb-legend { grid-template-columns: 1fr; }
+    .tools .input { width: 100%; }
+    .plist { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 6px; }
+    .plist .preset { flex: 0 0 200px; scroll-snap-align: start; border-color: var(--border); }
+    .plist .preset + .preset { margin-top: 0; }
+    .tools { width: 100%; }
+    table.stack td { white-space: normal; }
+    table.stack tr.drafted { box-shadow: inset 3px 0 0 var(--amber); padding-left: 12px; }
+    table.stack tr.drafted td:first-child { box-shadow: none; }
+    #mx .fam, .syn-note { white-space: normal; }
+    #mx.stack td:nth-child(1) { grid-column: 1; grid-row: 1; align-self: center; }
+    #mx.stack td:nth-child(3) { grid-column: 2; grid-row: 1; justify-self: end; align-self: center; }
+    #mx.stack td:nth-child(2) { grid-column: 1 / -1; grid-row: 2; margin-top: -6px; }
+    #mx.stack td:nth-child(2)::before, #mx.stack td:nth-child(3)::before { display: none; }
+    #mx.stack td:nth-child(4) { grid-column: 1; grid-row: 3; }
+    #mx.stack td:nth-child(5) { grid-column: 2; grid-row: 3; }
+    #mx.stack td:nth-child(6) { grid-column: 1 / -1; grid-row: 4; display: flex; gap: 8px; align-items: baseline; }
+    #mx.stack td:nth-child(6)::before { margin: 0; }
+    table.stack td[data-l="Since"], table.stack td[data-l="Reversible"] { grid-column: 1 / -1; display: flex; gap: 8px; align-items: baseline; }
+    #plan-tbl.stack td:nth-child(4) { grid-column: 1 / -1; }
+    table.stack td[data-l="Since"]::before, table.stack td[data-l="Reversible"]::before { margin: 0; }
+  }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><span class="crumb">Policies</span><span class="sep">/</span><span class="muted mono">gdpr-pseudonymise</span><span class="topbar-spacer"></span>
+  <span class="pill"><span class="dot" style="background:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)"></span>Draft v4 · 3 changes not published</span>
+  <span class="pill mono">FF1 on · ap-south-1</span><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>Policies</h1><p>A policy decides what is detected and what happens to each entity type. Every published version gets its own hash; jobs, API responses and evidence packs record the hash they ran with.</p></div>
+    <div class="head-actions"><button class="btn btn-ghost" type="button" onclick="document.getElementById('discard').showModal()">Discard draft</button><button class="btn" type="button" onclick="document.getElementById('plan').scrollIntoView({behavior:'smooth'})">Preview plan</button><button class="btn btn-primary" type="button" onclick="document.getElementById('publish').showModal()">Publish v4</button></div></div>
+
+  <div class="pol">
+    <!-- LEFT: presets -->
+    <div class="pol-cell"><aside class="pol-side">
+      <div class="card">
+        <div class="card-head"><div class="card-title">Presets</div><span class="chip slate">6</span></div>
+        <div class="plist">
+        <a class="preset on" href="#" aria-current="true">
+          <div class="p-top"><span class="p-name">gdpr-pseudonymise</span><span class="p-ver">v3</span></div>
+          <div class="p-hash" title="sha256:18d2493121bae95d38598115b80269bd6c86088a59562dd9b7d0b34b1c5e3a66">sha256:18d24931…3a66</div>
+          <div class="p-meta"><span class="chip teal">obfuscate</span>reversible · 14 jobs</div>
+        </a>
+        <a class="preset" href="#">
+          <div class="p-top"><span class="p-name">pci-dss</span><span class="p-ver">v2</span></div>
+          <div class="p-hash" title="sha256:eab8ad7310faa2d7b75f54badc755031a67f64b092c4492c30fd728a346e3567">sha256:eab8ad73…3567</div>
+          <div class="p-meta"><span class="chip teal">obfuscate</span>reversible · 6 jobs</div>
+        </a>
+        <a class="preset" href="#">
+          <div class="p-top"><span class="p-name">dpdp-pseudonymise</span><span class="p-ver">v1</span></div>
+          <div class="p-hash" title="sha256:aca7e3078bb444860d9369d1d78cd0181335231d985250a343e41adb523ebbdb">sha256:aca7e307…bbdb</div>
+          <div class="p-meta"><span class="chip teal">obfuscate</span>reversible · 4 jobs</div>
+        </a>
+        <a class="preset" href="#">
+          <div class="p-top"><span class="p-name">analytics-safe</span><span class="p-ver">v1</span></div>
+          <div class="p-hash" title="sha256:3c0b1e4f42ee5138112374bd2f2757bcd2923b09e5485f48206e6b223e6dda0b">sha256:3c0b1e4f…da0b</div>
+          <div class="p-meta"><span class="chip teal">obfuscate</span>irreversible · 2 jobs</div>
+        </a>
+        <a class="preset" href="#">
+          <div class="p-top"><span class="p-name">synthetic-realistic</span><span class="p-ver">v1</span></div>
+          <div class="p-hash" title="sha256:7c152f805644305ded5ad65e2b01e46f15444b7c7c8d14578660f11b5ec47bd6">sha256:7c152f80…7bd6</div>
+          <div class="p-meta"><span class="chip violet">synthesize</span>one-way · 3 jobs</div>
+        </a>
+        <a class="preset" href="#">
+          <div class="p-top"><span class="p-name">synthetic-strict</span><span class="p-ver">v1</span></div>
+          <div class="p-hash" title="sha256:8dd3d85d5754e7442bb8aff11913a81f77a0a34b20dd8182aca0636e84c4e88f">sha256:8dd3d85d…e88f</div>
+          <div class="p-meta"><span class="chip violet">synthesize</span>one-way · 1 job</div>
+        </a>
+        </div>
+        <button class="btn btn-sm" type="button" style="margin-top:12px;width:100%;justify-content:center">New policy from a preset</button>
+      </div>
+      <div class="card toc-card" style="padding:12px 10px">
+        <div class="nav-label" style="padding-top:2px">On this page</div>
+        <nav class="toc">
+          <a href="#matrix">Treatment per entity <span>18</span></a>
+          <a href="#declared">Declared fields <span>5</span></a>
+          <a href="#recognizers">Custom recognizers <span>1</span></a>
+          <a href="#plan">Plan preview <span>13</span></a>
+          <a href="#versions">Versions <span>4</span></a>
+        </nav>
+      </div>
+    </aside></div>
+
+    <!-- RIGHT: selected policy -->
+    <div class="pol-main">
+      <section class="card" aria-labelledby="ph">
+        <div class="ph-top">
+          <div style="min-width:0">
+            <div class="ph-name" id="ph">gdpr-pseudonymise <span class="chip teal">obfuscate · reversible</span><span class="chip emerald">v3 active</span><span class="chip amber">draft v4 · 3 changes</span></div>
+            <div class="ph-desc">Reversible pseudonymisation that keeps formats and joins. Based on the shipped preset; tenant <b>retail-banking-apac</b>.</div>
+            <div class="ph-hash">Active hash <span class="mono">sha256:18d2493121bae95d…b34b1c5e3a66</span><button class="btn btn-sm btn-ghost" type="button">Copy hash</button></div>
+            <div class="ph-pub">Published 2 Oct 2026 by James Whitfield · 14 jobs and 6 API keys use it</div>
+          </div>
+        </div>
+        <div class="facts">
+          <div><div class="l">Locale</div><div class="v">en_US<small>by address.country</small></div></div>
+          <div><div class="l">Detection tiers</div><div class="v">structural, patterns, NER<small>LLM labelling off</small></div></div>
+          <div><div class="l">Minimum score</div><div class="v">0.60<small>noisy-OR per locator</small></div></div>
+          <div><div class="l">Consistency</div><div class="v">key<small>caller holds the key</small></div></div>
+          <div><div class="l">Token style</div><div class="v">natural<small>reveal uses hints</small></div></div>
+          <div><div class="l">Leakage check</div><div class="v">strict<small>fails closed</small></div></div>
+        </div>
+        <div class="callout" style="margin-top:14px">Obfuscated output is <b>pseudonymised and still personal data</b> under GDPR Art. 4(5) and India's DPDP Act. Store and share it under the same controls as the source. Only the holder of the key can reverse it; DPS keeps no copy.</div>
+      </section>
+
+      <!-- MATRIX -->
+      <section class="card" id="matrix" aria-labelledby="matrix-t">
+        <div class="card-head"><div class="card-title" id="matrix-t">Treatment per entity type <span class="faint">· draft v4</span></div>
+          <div class="tools">
+            <div class="seg" role="group" aria-label="Filter entity types"><button type="button" class="on" data-f="all">All</button><button type="button" data-f="critical">Critical</button><button type="button" data-f="draft">Changed in draft</button></div>
+            <input class="input" id="mx-q" type="search" placeholder="Find an entity type" aria-label="Find an entity type">
+          </div></div>
+        <div class="tbl-scroll"><table class="tbl stack" id="mx"><thead><tr><th>Entity type</th><th>Family</th><th>Sensitivity</th><th>Obfuscate</th><th>Synthesize</th><th>Reversible</th></tr></thead><tbody>
+          <tr data-s="critical"><td class="ent"><span class="mono">SSN</span></td><td class="fam">Government ID · US</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">fpe_digits</span><span class="prm">keep_suffix 4</span></td><td><span class="m">surrogate</span><span class="syn-note">area 900–999, never issued</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="critical"><td class="ent"><span class="mono">AADHAAR</span></td><td class="fam">Government ID · IN</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">fpe_digits</span><span class="prm">keep_suffix 4</span></td><td><span class="m">surrogate</span><span class="syn-note">Verhoeff-valid, unissued</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="critical"><td class="ent"><span class="mono">PAN_IN</span></td><td class="fam">Government ID · IN</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">fpe_text</span></td><td><span class="m">surrogate</span><span class="syn-note">4th char P, valid shape</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="critical"><td class="ent"><span class="mono">CURP</span></td><td class="fam">Government ID · MX</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">fpe_text</span></td><td><span class="m">surrogate</span><span class="syn-note">valid check digit</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="critical"><td class="ent"><span class="mono">NINO</span></td><td class="fam">Government ID · UK</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">fpe_text</span></td><td><span class="m">surrogate</span><span class="syn-note">QQ prefix, never allocated</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="critical"><td class="ent"><span class="mono">CARD_PAN</span></td><td class="fam">Financial</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">fpe_digits</span><span class="prm">keep_prefix 6</span><span class="prm">keep_suffix 4</span></td><td><span class="m">surrogate</span><span class="syn-note">test IIN, Luhn-valid</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="critical"><td class="ent"><span class="mono">CVV</span></td><td class="fam">Financial</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">redact</span></td><td><span class="m">redact</span><span class="syn-note">never generated</span></td><td class="rev no">No</td></tr>
+          <tr data-s="high"><td class="ent"><span class="mono">IBAN</span></td><td class="fam">Financial</td><td><span class="chip amber">HIGH</span></td><td><span class="m">fpe_text</span></td><td><span class="m">surrogate</span><span class="syn-note">mod-97 valid</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="high"><td class="ent"><span class="mono">ACCOUNT_NUMBER</span></td><td class="fam">Financial</td><td><span class="chip amber">HIGH</span></td><td><span class="m">fpe_digits</span></td><td><span class="m">surrogate</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="high"><td class="ent"><span class="mono">PERSON_NAME</span></td><td class="fam">Identity</td><td><span class="chip amber">HIGH</span></td><td><span class="m">fpe_text</span></td><td><span class="m">surrogate</span><span class="syn-note">record persona</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="high"><td class="ent"><span class="mono">DATE_OF_BIRTH</span></td><td class="fam">Identity</td><td><span class="chip amber">HIGH</span></td><td><span class="m">date_shift</span><span class="prm">window_days 365</span><span class="prm">anchor $.customer_id</span></td><td><span class="m">surrogate</span><span class="syn-note">age band kept</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="high"><td class="ent"><span class="mono">STREET_ADDRESS</span></td><td class="fam">Contact</td><td><span class="chip amber">HIGH</span></td><td><span class="m">det_token</span></td><td><span class="m">surrogate</span><span class="syn-note">unregistered street</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="medium"><td class="ent"><span class="mono">EMAIL</span></td><td class="fam">Contact</td><td><span class="chip slate">MEDIUM</span></td><td><span class="m">email</span><span class="prm">domain keep</span></td><td><span class="m">surrogate</span><span class="syn-note">RFC 2606 domains</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="medium"><td class="ent"><span class="mono">PHONE</span></td><td class="fam">Contact</td><td><span class="chip slate">MEDIUM</span></td><td><span class="m">phone</span><span class="prm">keep_country_code</span></td><td><span class="m">surrogate</span><span class="syn-note">555-01xx, Ofcom drama</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="medium"><td class="ent"><span class="mono">POSTAL_CODE</span></td><td class="fam">Contact</td><td><span class="chip slate">MEDIUM</span></td><td><span class="m">generalize</span><span class="prm">keep_chars 3</span></td><td><span class="m">surrogate</span></td><td class="rev no">No</td></tr>
+          <tr data-s="critical"><td class="ent"><span class="mono">API_KEY</span></td><td class="fam">Secrets</td><td><span class="chip rose">CRITICAL</span></td><td><span class="m">redact</span></td><td><span class="m">redact</span></td><td class="rev no">No</td></tr>
+          <tr data-s="medium" data-d="1" class="drafted"><td class="ent"><span class="mono">EMPLOYEE_ID</span> <span class="chip amber" style="margin-left:4px">new in v4</span></td><td class="fam">Organisation · custom</td><td><span class="chip slate">MEDIUM</span></td><td><span class="m">fpe_text</span></td><td><span class="m">surrogate</span><span class="syn-note">EMP- prefix kept</span></td><td class="rev">Yes</td></tr>
+          <tr data-s="medium" data-d="1" class="drafted"><td class="ent"><span class="mono">ORG_NAME</span> <span class="chip amber" style="margin-left:4px">changed in v4</span></td><td class="fam">Organisation</td><td><span class="chip slate">MEDIUM</span></td><td><span class="m">det_token</span><span class="syn-note">was keep in v3</span></td><td><span class="m">surrogate</span></td><td class="rev">Yes</td></tr>
+          <tr class="hidden" id="mx-empty"><td colspan="6" class="faint" style="text-align:center;padding:22px">No entity type matches. Clear the search to see all 46.</td></tr>
+        </tbody></table></div>
+        <div class="tbl-foot"><span id="mx-count">Showing 18 of 46 entity types. The other 28 (CITY, GENDER, AMOUNT, URL…) are kept, or tokenised by <span class="mono">default_sensitive → det_token</span>.</span><button class="btn btn-sm" type="button">Show all 46</button></div>
+        <div class="faint" style="font-size:12px;margin-top:8px"><span class="mono">fpe_*</span> methods need at least 10⁶ free values. A value with fewer free digits or characters runs as <span class="mono">det_token</span> and the plan records <span class="mono">fallback:fpe_domain_too_small</span>.</div>
+      </section>
+    </div>
+
+    <div class="pol-rest">
+      <!-- DECLARED FIELDS -->
+      <section class="card" id="declared" aria-labelledby="declared-t">
+        <div class="card-head"><div class="card-title" id="declared-t">Declared fields <span class="faint">· more than PII</span></div><button class="btn btn-sm" type="button">Declare a field</button></div>
+        <p class="card-sub">Owners name the paths and columns that detectors cannot know about: internal scores, counterparties, employer names. Declarations apply before detection and win over inferred types; the plan records <span class="mono">declared:&lt;path&gt;</span> as the reason.</p>
+        <div class="tbl-scroll"><table class="tbl stack"><thead><tr><th>Path or column</th><th>System · owner</th><th>Declared as</th><th>Treatment</th><th>Declared by</th><th>Since</th></tr></thead><tbody>
+          <tr><td class="mono">$.loan.internal_score</td><td class="fam">Loans API · LOANS</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td><span class="m">bucket</span><span class="prm">0 · 300 · 600 · 900</span></td><td>Sanjay Iyer <span class="faint">· LOANS data owner</span></td><td>v2</td></tr>
+          <tr><td class="mono">CRM.CUSTOMERS.RISK_SCORE</td><td class="fam">Oracle · CRM</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td><span class="m">bucket</span><span class="prm">0 · 300 · 600 · 900</span></td><td>Priya Raman <span class="faint">· CRM data owner</span></td><td>v3</td></tr>
+          <tr><td class="mono">LEDGER.TRANSACTIONS.COUNTERPARTY_REF</td><td class="fam">PostgreSQL · LEDGER</td><td><span class="chip teal">ACCOUNT_NUMBER</span></td><td><span class="m">fpe_digits</span></td><td>Tom Hargreaves <span class="faint">· LEDGER data owner</span></td><td>v3</td></tr>
+          <tr><td class="mono">profiles.$.relationship.wallet_share_pct</td><td class="fam">MongoDB · CRM profiles</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td><span class="m">noise</span><span class="prm">percent 5</span></td><td>Priya Raman <span class="faint">· CRM data owner</span></td><td>v3</td></tr>
+          <tr class="drafted"><td class="mono">LOANS.APPLICANTS.EMPLOYER_NAME</td><td class="fam">Oracle · LOANS</td><td><span class="chip teal">ORG_NAME</span></td><td><span class="m">det_token</span></td><td>Arjun Mehta <span class="faint">· privacy engineering</span></td><td><span class="chip amber">draft v4</span></td></tr>
+        </tbody></table></div>
+        <div class="faint" style="font-size:12px;margin-top:10px">Declared after job <span class="mono">j_01K7…F2</span> failed its leakage sweep on Oct 9: sole proprietors trade under their own name, so 2 applicant names survived in EMPLOYER_NAME, which v3 keeps.</div>
+      </section>
+
+      <!-- RECOGNIZER BUILDER -->
+      <section class="card" id="recognizers" aria-labelledby="rec-t">
+        <div class="card-head"><div class="card-title" id="rec-t">Custom recognizer <span class="faint">· employee-id</span></div><span class="chip amber">new in draft v4</span></div>
+        <div class="rb">
+          <div>
+            <div class="row2">
+              <div class="field"><label for="r-name">Name</label><input class="input mono" id="r-name" value="employee-id"></div>
+              <div class="field"><label for="r-score">Score</label><input class="input mono" id="r-score" value="0.90" inputmode="decimal"></div>
+            </div>
+            <div class="field"><label for="r-ent">Entity type</label>
+              <select class="input" id="r-ent"><option>EMPLOYEE_ID</option><option>CASE_ID</option><option>CUSTOMER_ID</option><option>BUSINESS_SENSITIVE</option></select></div>
+            <div class="field"><label for="r-rx">Pattern (regular expression)</label><input class="input mono" id="r-rx" value="\bEMP-\d{6}\b" spellcheck="false" autocomplete="off">
+              <div class="hint">Python <span class="mono">re</span> syntax, as in Presidio recognizers. Matching is case-sensitive.</div>
+              <div class="callout amber rx-err" id="rx-err" role="alert"></div></div>
+            <div class="field"><label for="r-ctx">Context words</label><input class="input" id="r-ctx" value="employee, staff id, emp no, empleado, karmachari">
+              <div class="hint">A context word within 40 characters raises the score by 0.05. English, Spanish and Hindi transliterations.</div></div>
+            <div class="field"><label for="r-deny">Deny list</label><input class="input mono" id="r-deny" value="EMP-000000, EMP-999999">
+              <div class="hint">Exact values that never match, such as test fixtures.</div></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary" type="button">Add recognizer to draft v4</button><button class="btn" type="button">Copy as Presidio YAML</button></div>
+          </div>
+          <div>
+            <div class="field" style="margin-bottom:0"><label for="r-test">Test text <span class="faint" style="font-weight:500">· runs as you type, nothing is sent or stored</span></label>
+              <textarea class="input" id="r-test" rows="4" spellcheck="false">Escalated by EMP-204417 (staff id) to the Pune branch on 3 Oct. Fixture EMP-000000 is seeded test data. CHG-48213 also cites EMP-31882, which has five digits.</textarea></div>
+            <div class="test-head"><span>Result</span><span id="r-sum" class="faint" aria-live="polite"></span></div>
+            <div class="test-out" id="r-out" aria-live="polite"></div>
+            <div class="matches" id="r-list"></div>
+            <div class="test-head"><span>Presidio recognizer YAML</span></div>
+            <div class="pane" id="r-yaml" style="font-size:12px"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PLAN PREVIEW -->
+      <section class="card" id="plan" aria-labelledby="plan-t">
+        <div class="card-head"><div class="card-title" id="plan-t">Plan preview <span class="faint">· draft v4 on a pasted sample</span></div>
+          <div class="tools"><span class="faint" style="font-size:12px">FF1 engine</span><div class="seg" role="group" aria-label="FF1 engine"><button type="button" class="on" data-ff="on">On · this deployment</button><button type="button" data-ff="off">Off</button></div><button class="btn btn-sm" type="button">Re-run plan</button></div></div>
+        <p class="card-sub">The plan is the resolved method per finding, with the reason. Nothing is transformed and the sample is not stored. <span class="mono">POST /api/v1/policies/plan</span></p>
+        <div class="plan">
+<div class="pane" aria-label="Sample record">{
+  <span class="k">"customer_id"</span>: <span class="hl">"884120"</span>,
+  <span class="k">"full_name"</span>: <span class="hl">"Rohan Desai"</span>,
+  <span class="k">"dob"</span>: <span class="hl">"1984-02-09"</span>,
+  <span class="k">"tax_ids"</span>: {
+    <span class="k">"in_pan"</span>: <span class="hl">"AGLPD7316K"</span>,
+    <span class="k">"uk_nino"</span>: <span class="hl">"QQ 12 34 56 C"</span>,
+    <span class="k">"us_ssn"</span>: <span class="hl">"078-05-1120"</span> },
+  <span class="k">"email"</span>: <span class="hl">"rohan.desai@example-mail.co.uk"</span>,
+  <span class="k">"cards"</span>: [
+    { <span class="k">"pan"</span>: <span class="hl">"4111 1111 1111 1111"</span>,
+      <span class="k">"cvv"</span>: <span class="hl">"737"</span> },
+    { <span class="k">"pan"</span>: <span class="hl">"3782 822463 10005"</span> } ],
+  <span class="k">"loan"</span>: {
+    <span class="k">"internal_score"</span>: <span class="hl">712</span>,
+    <span class="k">"product"</span>: <span class="s">"HL-FLOAT-20Y"</span> },
+  <span class="k">"branch_city"</span>: <span class="hl">"London"</span>,
+  <span class="k">"notes"</span>: <span class="s">"Escalated by </span><span class="hl">EMP-204417</span><span class="s"> (staff id) under CHG-48213"</span>
+}</div>
+          <div style="min-width:0">
+            <div class="plan-sum" id="plan-sum"></div>
+            <div class="tbl-scroll"><table class="tbl stack" id="plan-tbl" style="min-width:620px"><thead><tr><th>Locator</th><th>Entity · score</th><th>Method</th><th>Reason</th><th>Reversible</th></tr></thead><tbody id="plan-rows"></tbody></table></div>
+          </div>
+        </div>
+        <div class="fb-legend">
+          <div><b class="mono">fallback:fpe_domain_too_small</b><p>FF1 needs at least 10⁶ free values. Keeping the last 4 of a 9-digit SSN leaves 5 digits; a 15-digit Amex with first 6 and last 4 kept leaves 5. Those values run as <span class="mono">det_token</span>, still reversible. To keep format-preserving output, drop <span class="mono">keep_suffix</span> for SSN.</p></div>
+          <div><b class="mono">fallback:fpe_disabled</b><p>Every <span class="mono">fpe_*</span> method runs as <span class="mono">det_token</span> on a deployment where FF1 is off (<span class="mono">DPS_FPE_ENABLED=false</span> until the licence review signs it off). Switch the FF1 engine to Off above to see that plan.</p></div>
+        </div>
+      </section>
+
+      <!-- VERSIONS -->
+      <section class="card" id="versions" aria-labelledby="ver-t">
+        <div class="card-head"><div class="card-title" id="ver-t">Version history</div><span class="faint" style="font-size:12px">Published versions are immutable. Jobs pin a version or follow the latest.</span></div>
+        <div class="ver">
+          <div class="vlist" role="group" aria-label="Versions">
+            <button type="button" data-v="v4" aria-pressed="false"><div class="v-top"><span class="v-n">v4</span><span class="chip amber">draft</span></div><div class="v-by">Arjun Mehta · today 11:20 UTC · 3 changes</div><div class="v-hash">hash on publish</div></button>
+            <button type="button" data-v="v3" aria-pressed="true"><div class="v-top"><span class="v-n">v3</span><span class="chip emerald">active</span></div><div class="v-by">James Whitfield · 2 Oct 2026 · CHG-47950</div><div class="v-hash">sha256:18d24931…3a66 · 11 jobs follow latest</div></button>
+            <button type="button" data-v="v2" aria-pressed="false"><div class="v-top"><span class="v-n">v2</span><span class="faint" style="font-size:12px">3 jobs pinned</span></div><div class="v-by">Sanjay Iyer · 12 Sep 2026 · CHG-47102</div><div class="v-hash">sha256:7275ea41…1a73</div></button>
+            <button type="button" data-v="v1" aria-pressed="false"><div class="v-top"><span class="v-n">v1</span><span class="faint" style="font-size:12px">shipped preset</span></div><div class="v-by">DPS 0.1.0 · 4 Aug 2026</div><div class="v-hash">sha256:e8fe058a…a1fb</div></button>
+            <div class="callout amber" style="margin-top:12px;font-size:12px">3 jobs are pinned to v2 and still tokenise CVV reversibly. Re-run them on v3 to redact it.</div>
+          </div>
+
+          <div id="diff-v3">
+            <div class="diff-head"><div><div class="t">v2 → v3 · last published change</div><div class="s">3 edits, 2 declarations · approved by Priya Raman (CRM data owner) for CHG-47950</div></div><button class="btn btn-sm" type="button">Download v3 YAML</button></div>
+            <div class="diff" role="region" aria-label="Diff v2 to v3" tabindex="0">
+<div>detect:</div>
+<div class="del">  min_score: 0.55</div>
+<div class="add">  min_score: 0.6</div>
+<div>  declared_fields:</div>
+<div>    - { path: "$.loan.internal_score", entity_type: BUSINESS_SENSITIVE }</div>
+<div class="add">    - { path: "CRM.CUSTOMERS.RISK_SCORE", entity_type: BUSINESS_SENSITIVE }</div>
+<div class="add">    - { path: "LEDGER.TRANSACTIONS.COUNTERPARTY_REF", entity_type: ACCOUNT_NUMBER }</div>
+<div>treat:</div>
+<div class="del">  POSTAL_CODE: { method: fpe_digits }</div>
+<div class="add">  POSTAL_CODE: { method: generalize, keep_chars: 3 }</div>
+<div class="del">  CVV: { method: det_token }</div>
+<div class="add">  CVV: { method: redact }</div>
+            </div>
+            <ul class="effects">
+              <li>PIN codes no longer hit <span class="mono">fallback:fpe_domain_too_small</span> on every row; they are generalised to the first 3 digits.</li>
+              <li>CVV is removed instead of tokenised. It cannot be revealed, which PCI DSS requires.</li>
+              <li>Fewer low-confidence name findings in RM notes (min score 0.55 → 0.6); recall checked on the IN and UK labelled corpus.</li>
+            </ul>
+          </div>
+
+          <div id="diff-v4" class="hidden">
+            <div class="diff-head"><div><div class="t">v3 → v4 draft · not published</div><div class="s">1 recognizer, 1 declaration, 1 treatment change · Arjun Mehta</div></div><button class="btn btn-sm btn-primary" type="button" onclick="document.getElementById('publish').showModal()">Publish v4</button></div>
+            <div class="diff" role="region" aria-label="Diff v3 to draft v4" tabindex="0">
+<div>detect:</div>
+<div>  custom_recognizers:</div>
+<div class="add">    - { name: employee-id, supported_entity: EMPLOYEE_ID,</div>
+<div class="add">        patterns: [ { regex: "\\bEMP-\\d{6}\\b", score: 0.9 } ] }</div>
+<div>  declared_fields:</div>
+<div class="add">    - { path: "LOANS.APPLICANTS.EMPLOYER_NAME", entity_type: ORG_NAME }</div>
+<div>treat:</div>
+<div class="add">  EMPLOYEE_ID: { method: fpe_text }</div>
+<div class="del">  ORG_NAME: { method: keep }</div>
+<div class="add">  ORG_NAME: { method: det_token }</div>
+            </div>
+            <ul class="effects">
+              <li>Staff ids in free text are found and replaced reversibly; the plan preview shows one in <span class="mono">$.notes</span>.</li>
+              <li>Organisation names are tokenised everywhere, not only in LOANS.APPLICANTS. Reports that group by employer will see tokens.</li>
+            </ul>
+          </div>
+
+          <div id="diff-v2" class="hidden">
+            <div class="diff-head"><div><div class="t">v1 → v2</div><div class="s">1 declaration · Sanjay Iyer for CHG-47102</div></div><button class="btn btn-sm" type="button">Download v2 YAML</button></div>
+            <div class="diff" role="region" aria-label="Diff v1 to v2" tabindex="0">
+<div>detect:</div>
+<div class="add">  declared_fields:</div>
+<div class="add">    - { path: "$.loan.internal_score", entity_type: BUSINESS_SENSITIVE }</div>
+<div>treat:</div>
+<div class="add">  BUSINESS_SENSITIVE: { method: bucket, ranges: [0, 300, 600, 900] }</div>
+            </div>
+          </div>
+
+          <div id="diff-v1" class="hidden">
+            <div class="diff-head"><div><div class="t">v1 · shipped preset</div><div class="s">Copied from <span class="mono">dps/engine/presets/gdpr-pseudonymise.yaml</span> in DPS 0.1.0. No earlier version to compare.</div></div><button class="btn btn-sm" type="button">Download v1 YAML</button></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</main></div></div>
+
+<dialog class="dlg" id="publish" aria-labelledby="pub-t">
+  <form method="dialog">
+    <div class="dlg-body">
+      <h2 id="pub-t">Publish gdpr-pseudonymise v4?</h2>
+      <p>v4 becomes the active version for tenant retail-banking-apac. Published versions cannot be edited.</p>
+      <ul>
+        <li>Adds the <span class="mono">employee-id</span> recognizer (EMPLOYEE_ID → fpe_text).</li>
+        <li>Declares <span class="mono">LOANS.APPLICANTS.EMPLOYER_NAME</span> as ORG_NAME.</li>
+        <li>Tokenises ORG_NAME everywhere; v3 kept it.</li>
+      </ul>
+      <p>11 jobs that follow the latest version use v4 from their next run. 3 jobs pinned to v2 and v3 are not changed. Evidence packs record the new hash.</p>
+    </div>
+    <div class="dlg-foot"><button class="btn" value="cancel">Keep editing</button><button class="btn btn-primary" value="publish" id="pub-go">Publish v4</button></div>
+  </form>
+</dialog>
+<dialog class="dlg" id="discard" aria-labelledby="dis-t">
+  <form method="dialog">
+    <div class="dlg-body">
+      <h2 id="dis-t">Discard draft v4?</h2>
+      <p>The 3 unpublished changes are deleted: the employee-id recognizer, the EMPLOYER_NAME declaration and the ORG_NAME change. v3 stays active and no job is affected. This cannot be undone.</p>
+    </div>
+    <div class="dlg-foot"><button class="btn" value="cancel">Keep draft</button><button class="btn btn-danger" value="discard">Discard 3 changes</button></div>
+  </form>
+</dialog>
+<div class="toast" id="toast" role="status"><span class="chip emerald">published</span><span>gdpr-pseudonymise v4 is active · <span class="mono">sha256:6ca4e5a8…0582</span></span></div>
+
+<script>
+  renderSidebar('Policies');
+
+  /* table cells are labelled for phone layouts by labelCells() in vault.js */
+
+  /* --- treatment matrix filter --- */
+  (function () {
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#mx tbody tr[data-s]'));
+    var mode = 'all', q = document.getElementById('mx-q');
+    function apply() {
+      var term = q.value.trim().toUpperCase(), shown = 0;
+      rows.forEach(function (r) {
+        var ok = (mode === 'all') || (mode === 'critical' && r.getAttribute('data-s') === 'critical') || (mode === 'draft' && r.getAttribute('data-d') === '1');
+        if (ok && term) ok = r.textContent.toUpperCase().indexOf(term) > -1;
+        r.classList.toggle('hidden', !ok); if (ok) shown++;
+      });
+      document.getElementById('mx-empty').classList.toggle('hidden', shown > 0);
+      var c = document.getElementById('mx-count');
+      if (mode === 'all' && !term) c.innerHTML = 'Showing 18 of 46 entity types. The other 28 (CITY, GENDER, AMOUNT, URL…) are kept, or tokenised by <span class="mono">default_sensitive → det_token</span>.';
+      else c.textContent = 'Showing ' + shown + ' of 46 entity types' + (mode === 'draft' ? ' · changed in draft v4' : mode === 'critical' ? ' · critical only' : '') + '.';
+    }
+    document.querySelectorAll('#matrix .seg button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        mode = b.getAttribute('data-f');
+        document.querySelectorAll('#matrix .seg button').forEach(function (x) { x.classList.toggle('on', x === b); });
+        apply();
+      });
+    });
+    q.addEventListener('input', apply);
+  })();
+
+  /* --- custom recognizer live test (sample text never leaves the page) --- */
+  (function () {
+    var ids = ['r-name', 'r-ent', 'r-rx', 'r-score', 'r-ctx', 'r-deny', 'r-test'];
+    function el(id) { return document.getElementById(id); }
+    function esc(s) { return s.replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function list(s) { return s.split(',').map(function (x) { return x.trim(); }).filter(Boolean); }
+    function run() {
+      var src = el('r-rx').value, text = el('r-test').value, err = el('rx-err');
+      var score = parseFloat(el('r-score').value); if (isNaN(score)) score = 0;
+      var ctx = list(el('r-ctx').value).map(function (w) { return w.toLowerCase(); });
+      var deny = list(el('r-deny').value);
+      var yamlCtx = list(el('r-ctx').value).join(', '), yamlDeny = deny.join(', ');
+      el('r-yaml').textContent = '- name: ' + el('r-name').value + '\n  supported_entity: ' + el('r-ent').value +
+        '\n  patterns:\n    - { name: ' + el('r-name').value + ', regex: "' + src.replace(/\\/g, '\\\\') + '", score: ' + score.toFixed(2) + ' }' +
+        '\n  context: [' + yamlCtx + ']\n  deny_list: [' + yamlDeny + ']';
+      var rx;
+      try {
+        if (!src) throw new Error('empty');
+        rx = new RegExp(src, 'g');
+        err.classList.remove('show');
+      } catch (e) {
+        err.textContent = src ? 'This pattern does not compile, so it matches nothing. Check for an unclosed bracket or a stray backslash; the test runs again as you type.' : 'Enter a pattern to test it.';
+        err.classList.add('show');
+        el('r-out').textContent = text; el('r-list').innerHTML = ''; el('r-sum').textContent = '';
+        return;
+      }
+      var out = '', last = 0, m, hits = 0, denied = 0, rows = '';
+      while ((m = rx.exec(text)) !== null) {
+        if (m[0] === '') { rx.lastIndex++; continue; }
+        var v = m[0], isDeny = deny.indexOf(v) > -1;
+        var win = text.slice(Math.max(0, m.index - 40), m.index + v.length + 40).toLowerCase();
+        var word = ctx.filter(function (w) { return win.indexOf(w) > -1; })[0];
+        var s = Math.min(1, score + (word ? 0.05 : 0));
+        out += esc(text.slice(last, m.index)) + '<mark class="' + (isDeny ? 'deny' : 'hit') + '">' + esc(v) + '</mark>';
+        last = m.index + v.length;
+        if (isDeny) { denied++; rows += '<div class="match"><span class="mono">' + esc(v) + '</span><span class="chip slate">deny list</span><span class="why">Exact value on the deny list. Not reported.</span></div>'; }
+        else { hits++; rows += '<div class="match"><span class="mono">' + esc(v) + '</span><span class="chip amber">' + esc(el('r-ent').value) + ' · ' + s.toFixed(2) + '</span><span class="why">' + (word ? 'pattern ' + score.toFixed(2) + ' + context word “' + esc(word) + '” 0.05' : 'pattern only, no context word nearby') + ' · offsets ' + m.index + '–' + (m.index + v.length) + '</span></div>'; }
+      }
+      out += esc(text.slice(last));
+      el('r-out').innerHTML = out || '<span class="faint">Type or paste text to test the pattern.</span>';
+      el('r-list').innerHTML = rows || '<div class="faint" style="font-size:12.5px;padding:6px 0">No matches. Paste a line that contains a staff id to check the pattern.</div>';
+      el('r-sum').textContent = hits + (hits === 1 ? ' match' : ' matches') + (denied ? ' · ' + denied + ' skipped by deny list' : '');
+    }
+    ids.forEach(function (id) { el(id).addEventListener('input', run); el(id).addEventListener('change', run); });
+    run();
+  })();
+
+  /* --- plan preview, FF1 on/off --- */
+  (function () {
+    // [locator, entity, score, chipColour, method, params, reason, fpe?, reversible, fallbackWhenOn, fallbackWhy]
+    var P = [
+      ['$.customer_id', 'CUSTOMER_ID', '1.00', 'teal', 'fpe_digits', '', 'policy:CUSTOMER_ID', 1, 'Yes', '', ''],
+      ['$.full_name', 'PERSON_NAME', '0.93', 'amber', 'fpe_text', '', 'policy:PERSON_NAME', 1, 'Yes', '', ''],
+      ['$.dob', 'DATE_OF_BIRTH', '0.95', 'amber', 'date_shift', 'window 365', 'policy:DATE_OF_BIRTH', 0, 'Yes', '', ''],
+      ['$.tax_ids.in_pan', 'PAN_IN', '0.98', 'rose', 'fpe_text', '', 'policy:PAN_IN', 1, 'Yes', '', ''],
+      ['$.tax_ids.uk_nino', 'NINO', '0.97', 'rose', 'fpe_text', '', 'policy:NINO', 1, 'Yes', '', ''],
+      ['$.tax_ids.us_ssn', 'SSN', '0.99', 'rose', 'fpe_digits', 'keep_suffix 4', 'policy:SSN', 1, 'Yes', 'fallback:fpe_domain_too_small', '5 free digits = 10⁵ values'],
+      ['$.email', 'EMAIL', '0.99', 'amber', 'email', 'domain keep', 'policy:EMAIL', 0, 'Yes', '', ''],
+      ['$.cards[0].pan', 'CARD_PAN', '0.99', 'rose', 'fpe_digits', 'keep 6 + 4', 'policy:CARD_PAN', 1, 'Yes', '', ''],
+      ['$.cards[0].cvv', 'CVV', '0.90', 'rose', 'redact', '', 'policy:CVV', 0, 'No', '', ''],
+      ['$.cards[1].pan', 'CARD_PAN', '0.99', 'rose', 'fpe_digits', 'keep 6 + 4', 'policy:CARD_PAN', 1, 'Yes', 'fallback:fpe_domain_too_small', '15-digit Amex leaves 5 free digits'],
+      ['$.loan.internal_score', 'BUSINESS_SENSITIVE', '1.00', 'teal', 'bucket', '0 · 300 · 600 · 900', 'declared:<wbr>$.loan.internal_score', 0, 'No', '', ''],
+      ['$.branch_city', 'CITY', '0.85', 'slate', 'keep', '', 'policy:keep_non_sensitive', 0, '—', '', ''],
+      ['$.notes[13:23]', 'EMPLOYEE_ID', '0.95', 'amber', 'fpe_text', '', 'policy:EMPLOYEE_ID', 1, 'Yes', '', '']
+    ];
+    function render(ff) {
+      var html = '', fb = 0, rev = 0, irr = 0, kept = 0;
+      P.forEach(function (r) {
+        var method = r[4], params = r[5], reason = '<span class="rsn">' + r[6] + '</span>', fbHtml = '';
+        if (r[7] && ff === 'off') { method = 'det_token'; params = ''; fbHtml = '<br><span class="fb">fallback:fpe_disabled</span>'; fb++; }
+        else if (r[9]) { method = 'det_token'; params = ''; fbHtml = '<br><span class="fb">' + r[9] + '</span><span class="fb-why">' + r[10] + '</span>'; fb++; }
+        if (r[8] === 'Yes') rev++; else if (r[8] === 'No') irr++; else kept++;
+        html += '<tr><td class="loc">' + r[0] + '</td><td><span class="chip ' + r[3] + '">' + r[1] + '</span><span class="score">score ' + r[2] + '</span></td>' +
+          '<td><span class="m">' + method + '</span>' + (params ? '<br><span class="prm" style="margin:3px 0 0">' + params + '</span>' : '') + '</td>' +
+          '<td>' + reason + fbHtml + '</td><td class="rev' + (r[8] === 'Yes' ? '' : ' no') + '">' + r[8] + '</td></tr>';
+      });
+      document.getElementById('plan-rows').innerHTML = html;
+      labelCells(document.getElementById('plan-tbl'));
+      document.getElementById('plan-sum').innerHTML = '<span class="chip slate">13 findings</span><span class="chip amber">' + fb + ' fallbacks to det_token</span>' +
+        '<span class="chip teal">' + rev + ' reversible</span><span class="chip slate">' + irr + ' irreversible</span><span class="chip slate">' + kept + ' kept</span>';
+    }
+    document.querySelectorAll('#plan .seg button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        document.querySelectorAll('#plan .seg button').forEach(function (x) { x.classList.toggle('on', x === b); });
+        render(b.getAttribute('data-ff'));
+      });
+    });
+    render('on');
+  })();
+
+  /* --- version history --- */
+  document.querySelectorAll('.vlist button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var v = b.getAttribute('data-v');
+      document.querySelectorAll('.vlist button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+      ['v1', 'v2', 'v3', 'v4'].forEach(function (k) { document.getElementById('diff-' + k).classList.toggle('hidden', k !== v); });
+    });
+  });
+
+  /* --- publish confirmation --- */
+  document.getElementById('publish').addEventListener('close', function () {
+    if (this.returnValue === 'publish') {
+      var t = document.getElementById('toast'); t.classList.add('show');
+      setTimeout(function () { t.classList.remove('show'); }, 4000);
+    }
+  });
+</script>
+</body></html>

@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Jobs — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+  .sm { font-size: 11.5px; } .rowx { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .bar.violet > i { background: var(--violet); }
+
+  /* health strip */
+  .hgrid { display: grid; grid-template-columns: 1.05fr 1.5fr .85fr 1.5fr 1fr 1.15fr; }
+  .ht { padding: 2px 16px; border-left: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .ht:first-child { border-left: 0; padding-left: 0; } .ht:last-child { padding-right: 0; }
+  .ht .l { font-size: 12px; color: var(--ink-2); font-weight: 600; }
+  .ht .v { font-size: 24px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .ht .v .u { font-size: 13px; font-weight: 600; color: var(--ink-3); letter-spacing: 0; }
+  .ht .s { font-size: 11.5px; color: var(--ink-3); }
+  .wk { display: flex; gap: 4px; margin: 4px 0 2px; }
+  .wk i { width: 14px; height: 22px; border-radius: 4px; background: var(--emerald-soft); border: 1px solid var(--emerald-border); position: relative; }
+  .wk i::after { content: ""; position: absolute; left: 3px; right: 3px; bottom: 3px; height: 9px; border-radius: 2px; background: var(--emerald); }
+  .wk i.drain { background: var(--amber-soft); border-color: var(--amber-border); }
+  .wk i.drain::after { background: var(--amber); height: 4px; }
+  .spark { position: relative; height: 48px; margin-top: 2px; cursor: crosshair; }
+  .spark svg { display: block; width: 100%; height: 48px; overflow: visible; }
+  .spark .cross { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border-strong); opacity: 0; pointer-events: none; }
+  .spark .dot, .spark .end { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; border: 2px solid var(--surface); pointer-events: none; }
+  .spark .dot { opacity: 0; }
+  .spark .tip { position: absolute; top: -30px; transform: translateX(-50%); background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--ink); font-size: 11px; font-family: var(--mono); padding: 2px 7px; border-radius: 6px; white-space: nowrap; opacity: 0; pointer-events: none; box-shadow: var(--shadow-md); z-index: 2; }
+  .spark.on .cross, .spark.on .dot, .spark.on .tip { opacity: 1; }
+  .axis { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-3); font-family: var(--mono); }
+  .cap { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin-top: 6px; display: flex; gap: 2px; }
+  .cap i { display: block; height: 100%; background: var(--ink-3); border-radius: 999px; }
+
+  /* filters */
+  .filters { display: grid; grid-template-columns: minmax(170px, 1.4fr) repeat(5, minmax(0, 1fr)) auto; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .search { position: relative; }
+  .search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--ink-3); pointer-events: none; }
+  .search .input { padding-left: 32px; }
+  .sel { position: relative; min-width: 0; }
+  .sel select { text-overflow: ellipsis; }
+  .sel select.set { border-color: var(--teal-border); color: var(--ink); background-color: var(--teal-soft); }
+
+  /* jobs table */
+  .jobs td { padding: 10px 10px; }
+  .jobs th:first-child, .jobs td:first-child { padding-left: 4px; }
+  .jobs .jid { font-weight: 700; color: var(--ink); }
+  .jobs a.jid:hover { color: var(--teal); text-decoration: underline; }
+  .src { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
+  .eb { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .04em; padding: 2px 0; width: 34px; text-align: center; border-radius: 5px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--ink-2); flex: none; margin-top: 1px; }
+  .obj { font-family: var(--mono); font-size: 12.5px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+  .to { font-family: var(--mono); font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; margin-top: 1px; }
+  .sys .to { margin-top: -4px; }
+  .mw { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .twrap { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
+  .jobs { table-layout: fixed; min-width: 1080px; }
+  .w-job { width: 150px; } .w-mw { width: 132px; } .w-own { width: 78px; } .w-prog { width: 184px; } .w-st { width: 178px; } .w-act { width: 140px; }
+  .c-job .jid, .c-job .sm { white-space: nowrap; }
+  .grp { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 11px; color: var(--ink-2); font-family: var(--mono); }
+  .grp svg { width: 11px; height: 11px; color: var(--teal); }
+  .c-prog { min-width: 150px; } .c-prog .bar { min-width: 0; }
+  .c-prog .sm { margin-top: 5px; }
+  .pg { display: flex; align-items: center; gap: 8px; }
+  .pg .bar { flex: 1; }
+  .pct { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); width: 34px; text-align: right; flex: none; }
+  .c-status .sm { margin-top: 4px; }
+  .c-act { text-align: right; white-space: nowrap; }
+  .jobs tr.err td { padding: 0 10px 12px 4px; background: transparent; }
+  .jobs tr.err:hover td { background: transparent; }
+  .errbox { border: 1px solid var(--rose-border); background: var(--rose-soft); border-radius: var(--r-md); padding: 10px 14px; font-size: 12.5px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; align-items: center; }
+  .errbox .what { color: var(--ink); } .errbox .fix { color: var(--ink-2); grid-column: 1; }
+  .errbox .btn { grid-column: 2; grid-row: 1 / span 2; }
+  .empty { text-align: center; padding: 36px 16px !important; }
+  .empty .t { font-weight: 700; font-size: 14px; } .empty p { color: var(--ink-2); margin: 4px 0 12px; }
+  .tfoot { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--ink-3); flex-wrap: wrap; }
+
+  /* job group */
+  .ghead { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 14px; }
+  .ghead h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  .ghead p { margin: 3px 0 0; color: var(--ink-2); font-size: 12.5px; }
+  .keynode { display: flex; align-items: center; gap: 12px; margin: 0 auto; width: fit-content; max-width: 100%; padding: 10px 16px; border-radius: var(--r-lg); border: 1px solid var(--teal-border); background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--teal) 12%, var(--surface))); flex-wrap: wrap; justify-content: center; }
+  .keynode .ki { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: var(--teal-soft); color: var(--teal); border: 1px solid var(--teal-border); flex: none; }
+  .keynode .ki svg { width: 17px; height: 17px; }
+  .keynode .kt { font-weight: 700; font-size: 13px; }
+  .keynode .chip { white-space: normal; text-align: left; line-height: 1.35; padding: 3px 9px; } .keynode .ks { font-size: 11.5px; color: var(--ink-3); }
+  .wires { display: block; width: 100%; height: 26px; }
+  .sys3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .sys { border: 1px solid var(--border); background: var(--surface-2); border-radius: var(--r-lg); padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .sys .hd { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .sys .hd b { font-size: 13px; }
+  .flds { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .fl { font-family: var(--mono); font-size: 10.5px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border-strong); color: var(--ink-2); background: var(--surface); }
+  .gsplit { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(0, 2fr); gap: 16px; margin-top: 16px; align-items: start; }
+  .verdict { border: 1px solid var(--emerald-border); background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--emerald) 9%, var(--surface))); border-radius: var(--r-lg); padding: 14px 16px; }
+  .verdict .big { font-size: 34px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .verdict .big span { font-size: 15px; font-weight: 700; color: var(--emerald); letter-spacing: 0; margin-left: 4px; }
+  .pair { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .pair:last-of-type { border-bottom: 0; }
+  .pair .on { color: var(--ink-3); font-family: var(--mono); font-size: 11px; grid-column: 1; }
+  .pair .ok { grid-row: 1 / span 2; grid-column: 2; align-self: center; display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink); }
+  .pair .ok i { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; background: var(--emerald-soft); color: var(--emerald); border: 1px solid var(--emerald-border); font-style: normal; font-size: 10px; font-weight: 800; }
+  .jwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-lg); }
+  .join { min-width: 720px; }
+  .join th { background: var(--surface-2); }
+  .join th .eb { display: inline-block; margin-right: 6px; vertical-align: 1px; }
+  .join td { vertical-align: top; }
+  .join .stack { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+  .join .stack .k { font-size: 10.5px; color: var(--ink-3); font-family: var(--mono); }
+  .join .tok { white-space: nowrap; }
+  .join th:last-child, .join td:last-child { white-space: nowrap; }
+  .yes { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; white-space: nowrap; }
+  .yes i { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; background: var(--emerald-soft); color: var(--emerald); border: 1px solid var(--emerald-border); font-style: normal; font-size: 10.5px; font-weight: 800; }
+
+  @media (max-width: 1360px) { .hgrid { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 16px; } .ht:nth-child(3n+1) { border-left: 0; padding-left: 0; } .ht:nth-child(3n) { padding-right: 0; }
+  }
+  @media (max-width: 1240px) { .filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } .filters .search { grid-column: 1 / -1; } }
+  @media (max-width: 1360px) { .jobs { min-width: 0; } .w-job { width: 128px; } .w-mw { width: 116px; } .w-own { width: 62px; } .w-prog { width: 150px; } .w-st { width: 154px; } .w-act { width: 132px; } .jobs td { padding-left: 8px; padding-right: 8px; } }
+  @media (max-width: 1200px) { .gsplit { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 1240px) {
+    .jobs thead { display: none; }
+    .jobs, .jobs tbody { display: block; min-width: 0; } .jobs colgroup { display: none; }
+    .jobs tbody { display: flex; flex-direction: column; gap: 10px; }
+    .jobs tr.job { display: grid; gap: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; background: var(--surface-2); }
+    .jobs tr.job td { border: 0; padding: 0 !important; background: transparent !important; }
+    .jobs .c-job, .jobs .c-src, .jobs .c-prog, .jobs .c-status, .jobs .c-act { grid-column: 1 / -1; }
+    .jobs tr.job { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+    .jobs .mw { flex-direction: row; flex-wrap: wrap; }
+    .jobs .c-act { text-align: left; }
+    .jobs td[data-l]::before { content: attr(data-l); display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); font-weight: 700; margin-bottom: 3px; }
+    .jobs tr.err, .jobs tr.err td, .jobs tr.emptyrow, .jobs tr.emptyrow td { display: block; padding: 0 !important; border: 0; }
+    .jobs tr.err { margin-top: -6px; }
+  }
+  @media (max-width: 980px) {
+    .sys3 { grid-template-columns: minmax(0, 1fr); } .wires { display: none; }
+    .keynode { margin-bottom: 12px; }
+  }
+  @media (max-width: 760px) {
+    .hgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; }
+    .ht, .ht:nth-child(3n+1), .ht:nth-child(3n) { border-left: 0; padding: 0; }
+    .ht.wide { grid-column: 1 / -1; }
+    .ht:nth-child(1) { order: 1; } .ht:nth-child(3) { order: 2; } .ht:nth-child(5) { order: 3; } .ht:nth-child(6) { order: 4; } .ht:nth-child(2) { order: 5; } .ht:nth-child(4) { order: 6; }
+    .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .errbox { grid-template-columns: minmax(0, 1fr); } .errbox .btn { grid-column: 1; grid-row: auto; justify-self: start; }
+    .keynode { justify-content: flex-start; }
+  }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><span class="crumb">Data sources &amp; jobs</span><span class="sep">/</span><span class="muted">Jobs</span><span class="muted hide-sm">· tenant retail-banking-apac</span><span class="topbar-spacer"></span>
+  <span class="pill hide-sm"><span class="dot"></span>7 workers · queue depth 23</span><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>Jobs</h1><p>Batch jobs over Oracle, PostgreSQL and MongoDB in the last 7 days. Keys go back to the requester when a job finishes; DPS keeps none.</p></div>
+    <div style="display:flex;gap:8px"><button class="btn" type="button">Export list (CSV)</button><a class="btn btn-primary" href="06-connect-wizard.html">New job</a></div></div>
+
+  <!-- ============ QUEUE AND WORKER HEALTH ============ -->
+  <section class="card" aria-labelledby="hq">
+    <div class="card-head"><div class="card-title" id="hq">Queue and workers</div><div class="rowx"><span class="chip emerald">healthy</span><span class="faint sm" id="hq-time">updated 15:16:47 · refreshes every 10 s</span></div></div>
+    <div class="hgrid">
+      <div class="ht">
+        <div class="l">Workers</div>
+        <div class="v">7 <span class="u">online</span></div>
+        <div class="wk" role="img" aria-label="w-01 to w-04 busy, w-05 draining, w-06 and w-07 busy"><i title="w-01 · busy"></i><i title="w-02 · busy"></i><i title="w-03 · busy"></i><i title="w-04 · busy"></i><i class="drain" title="w-05 · draining"></i><i title="w-06 · busy"></i><i title="w-07 · busy"></i></div>
+        <div class="s">6 busy · w-05 draining for node rotation</div>
+      </div>
+      <div class="ht wide">
+        <div class="l">Queue depth</div>
+        <div class="v">23 <span class="u">partitions waiting</span></div>
+        <div class="spark" id="sp-queue" data-max="40" data-c="var(--ink-2)" data-u=" partitions" data-v="31,29,30,34,38,36,33,30,28,27,29,26,24,25,27,30,28,26,24,22,23,25,24,22,21,23,24,22,23,23" aria-label="Queue depth over the last 60 minutes, between 21 and 38 partitions, now 23" role="img"></div>
+        <div class="axis"><span>−60 min</span><span>scale 0–40</span><span>now</span></div>
+      </div>
+      <div class="ht">
+        <div class="l">Oldest waiting</div>
+        <div class="v">41 <span class="u">s</span></div>
+        <div class="s">Alert at 5 min</div>
+      </div>
+      <div class="ht wide">
+        <div class="l">Throughput</div>
+        <div class="v">70.4k <span class="u">rows protected / s</span></div>
+        <div class="spark" id="sp-tput" data-max="80" data-c="var(--teal)" data-u="k rows/s" data-v="61,63,62,66,64,67,68,66,69,70,68,71,69,72,70,68,66,69,71,72,70,69,71,70,72,71,70,69,70,70.4" aria-label="Rows protected per second over the last 60 minutes, between 61 and 72 thousand, now 70.4 thousand" role="img"></div>
+        <div class="axis"><span>−60 min</span><span>scale 0–80k</span><span>now</span></div>
+      </div>
+      <div class="ht">
+        <div class="l">Running jobs</div>
+        <div class="v">4 <span class="u">of 6</span></div>
+        <div class="cap" role="img" aria-label="4 of 6 slots used"><i style="flex:1"></i><i style="flex:1"></i><i style="flex:1"></i><i style="flex:1"></i><i style="flex:1;background:transparent"></i><i style="flex:1;background:transparent"></i></div>
+        <div class="s">Tenant cap · 2 slots free</div>
+      </div>
+      <div class="ht">
+        <div class="l">Lease reclaims · 24 h</div>
+        <div class="v">2</div>
+        <div class="s">Both resumed from their checkpoint. No row was written twice.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ JOBS LIST ============ -->
+  <section class="card" aria-labelledby="hj">
+    <div class="card-head"><div class="card-title" id="hj">All jobs</div><span class="faint sm" id="count">Showing 13 of 13 jobs</span></div>
+    <div class="filters" role="search" aria-label="Filter jobs">
+      <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><label class="sr" for="q">Search jobs</label><input class="input" id="q" type="search" placeholder="Search job, table, ticket" autocomplete="off"></div>
+      <div class="sel"><label class="sr" for="f-status">Status</label><select class="input" id="f-status" name="status"><option value="">Status: all</option><option value="running">Running (4)</option><option value="review">Awaiting review (2)</option><option value="completed">Completed (5)</option><option value="failed">Failed (2)</option></select></div>
+      <div class="sel"><label class="sr" for="f-engine">Engine</label><select class="input" id="f-engine" name="engine"><option value="">Engine: all</option><option value="oracle">Oracle (5)</option><option value="postgres">PostgreSQL (5)</option><option value="mongo">MongoDB (3)</option></select></div>
+      <div class="sel"><label class="sr" for="f-mode">Mode</label><select class="input" id="f-mode" name="mode"><option value="">Mode: all</option><option value="obfuscate">Obfuscate (9)</option><option value="synthesize">Synthesize (4)</option></select></div>
+      <div class="sel"><label class="sr" for="f-wm">Write mode</label><select class="input" id="f-wm" name="wm"><option value="">Write mode: all</option><option value="in_place">In place (2)</option><option value="append">Append (2)</option><option value="table">Copy to a table (6)</option><option value="files">Export files (3)</option></select></div>
+      <div class="sel"><label class="sr" for="f-owner">Owner</label><select class="input" id="f-owner" name="owner"><option value="">Owner: all</option><option>CRM</option><option>LOANS</option><option>LEDGER</option><option>CARDS</option><option>KYC</option></select></div>
+      <button class="btn btn-ghost btn-sm" type="button" id="clear" hidden>Clear filters</button>
+    </div>
+
+    <div class="twrap"><table class="tbl jobs" id="jobs">
+      <thead><tr><th class="w-job">Job</th><th>Source → target</th><th class="w-mw">Mode · write</th><th class="w-own c-own">Owner</th><th class="w-prog">Progress</th><th class="w-st">Status</th><th class="w-act"><span class="sr">Actions</span></th></tr></thead>
+      <tbody>
+        <tr class="job" data-status="running" data-engine="oracle" data-mode="obfuscate" data-wm="in_place" data-owner="CRM" data-q="chg-48230 crm-uat-clone">
+          <td class="c-job"><a class="mono jid" href="03-data-sources.html">j_01K8C2…7Q</a><div class="faint sm">CHG-48230 · today 14:02</div></td>
+          <td class="c-src"><div class="src"><span class="eb">ORA</span><div><div class="obj">CRM.CUSTOMERS</div><div class="faint sm">crm-uat-clone · rewritten in place</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip rose">in place</span></div></td>
+          <td class="c-own" data-l="Owner">CRM</td>
+          <td class="c-prog"><div class="pg"><div class="bar"><i style="width:41%"></i></div><span class="pct">41%</span></div><div class="faint sm mono">986,508 / 2,406,118</div></td>
+          <td class="c-status"><span class="chip teal">running</span><div class="faint sm">8 partitions · about 6 min left</div></td>
+          <td class="c-act"><a class="btn btn-sm" href="03-data-sources.html">Open</a></td>
+        </tr>
+        <tr class="job" data-status="running" data-engine="oracle" data-mode="obfuscate" data-wm="table" data-owner="CRM" data-q="chg-48213 crm-uat-refresh crm_masked">
+          <td class="c-job"><a class="mono jid" href="03-data-sources.html">j_01K7ZQ…9Q</a><div class="faint sm">CHG-48213 · today 15:11</div></td>
+          <td class="c-src"><div class="src"><span class="eb">ORA</span><div><div class="obj">CRM.CUSTOMERS</div><div class="to">→ CRM_MASKED.CUSTOMERS</div><div class="grp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/></svg>crm-uat-refresh</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip slate">copy to table</span></div><div class="faint sm">truncate + insert</div></td>
+          <td class="c-own" data-l="Owner">CRM</td>
+          <td class="c-prog"><div class="pg"><div class="bar"><i style="width:72%"></i></div><span class="pct">72%</span></div><div class="faint sm mono">1,948,210 / 2,706,118</div></td>
+          <td class="c-status"><span class="chip teal">running</span><div class="faint sm">p6 lease reclaimed, resumed</div></td>
+          <td class="c-act"><a class="btn btn-sm" href="03-data-sources.html">Open</a></td>
+        </tr>
+        <tr class="job" data-status="running" data-engine="postgres" data-mode="synthesize" data-wm="append" data-owner="LEDGER" data-q="chg-48241 ledger_perf volume">
+          <td class="c-job"><span class="mono jid">j_01K8B7…4K</span><div class="faint sm">CHG-48241 · today 13:55</div></td>
+          <td class="c-src"><div class="src"><span class="eb">PG</span><div><div class="obj">ledger_perf.transactions</div><div class="faint sm">5,000,000 synthetic rows for volume tests · keys from sequence</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip violet">synthesize</span><span class="chip slate">append</span></div></td>
+          <td class="c-own" data-l="Owner">LEDGER</td>
+          <td class="c-prog"><div class="pg"><div class="bar violet"><i style="width:18%"></i></div><span class="pct">18%</span></div><div class="faint sm mono">900,000 / 5,000,000</div></td>
+          <td class="c-status"><span class="chip teal">running</span><div class="faint sm">4 partitions · about 22 min left</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Open</button></td>
+        </tr>
+        <tr class="job" data-status="running" data-engine="mongo" data-mode="synthesize" data-wm="files" data-owner="KYC" data-q="chg-48236 documents_meta s3 jsonl">
+          <td class="c-job"><span class="mono jid">j_01K8A9…3C</span><div class="faint sm">CHG-48236 · today 12:48</div></td>
+          <td class="c-src"><div class="src"><span class="eb">MDB</span><div><div class="obj">kyc.documents_meta</div><div class="to">→ JSONL on S3</div><div class="faint sm">s3://dps-exports-apac/kyc/</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip violet">synthesize</span><span class="chip slate">files</span></div></td>
+          <td class="c-own" data-l="Owner">KYC</td>
+          <td class="c-prog"><div class="pg"><div class="bar violet"><i style="width:63%"></i></div><span class="pct">63%</span></div><div class="faint sm mono">1,134,000 / 1,800,000</div></td>
+          <td class="c-status"><span class="chip teal">running</span><div class="faint sm">4 partitions · about 9 min left</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Open</button></td>
+        </tr>
+        <tr class="job" data-status="review" data-engine="oracle" data-mode="obfuscate" data-wm="table" data-owner="LOANS" data-q="chg-48190 applicants loans_masked">
+          <td class="c-job"><span class="mono jid">j_01K6…ZT</span><div class="faint sm">CHG-48190 · today 11:20</div></td>
+          <td class="c-src"><div class="src"><span class="eb">ORA</span><div><div class="obj">LOANS.APPLICANTS</div><div class="to">→ LOANS_MASKED.APPLICANTS</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip slate">copy to table</span></div><div class="faint sm">upsert</div></td>
+          <td class="c-own" data-l="Owner">LOANS</td>
+          <td class="c-prog"><div class="pg"><div class="bar amber"><i style="width:0%"></i></div><span class="pct">—</span></div><div class="faint sm">not started · 2,000 rows sampled</div></td>
+          <td class="c-status"><span class="chip amber">awaiting review</span><div class="faint sm">3 columns need a decision</div></td>
+          <td class="c-act"><a class="btn btn-sm" href="03-data-sources.html">Review 3 columns</a></td>
+        </tr>
+        <tr class="job" data-status="review" data-engine="mongo" data-mode="obfuscate" data-wm="table" data-owner="CARDS" data-q="chg-48222 disputes cards_uat">
+          <td class="c-job"><span class="mono jid">j_01K8A1…6P</span><div class="faint sm">CHG-48222 · today 10:05</div></td>
+          <td class="c-src"><div class="src"><span class="eb">MDB</span><div><div class="obj">cards.disputes</div><div class="to">→ cards_uat.disputes</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip slate">copy to table</span></div><div class="faint sm">upsert</div></td>
+          <td class="c-own" data-l="Owner">CARDS</td>
+          <td class="c-prog"><div class="pg"><div class="bar amber"><i style="width:0%"></i></div><span class="pct">—</span></div><div class="faint sm">not started · 2,000 documents sampled</div></td>
+          <td class="c-status"><span class="chip amber">awaiting review</span><div class="faint sm">5 fields inside nested arrays</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Review 5 fields</button></td>
+        </tr>
+        <tr class="job" data-status="completed" data-engine="mongo" data-mode="obfuscate" data-wm="table" data-owner="CRM" data-q="chg-48213 crm-uat-refresh profiles profiles_uat">
+          <td class="c-job"><span class="mono jid">j_01K7…4D</span><div class="faint sm">CHG-48213 · Oct 9, 18:12</div></td>
+          <td class="c-src"><div class="src"><span class="eb">MDB</span><div><div class="obj">crm.profiles</div><div class="to">→ crm_uat.profiles_uat</div><div class="grp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/></svg>crm-uat-refresh</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip slate">copy to table</span></div><div class="faint sm">upsert</div></td>
+          <td class="c-own" data-l="Owner">CRM</td>
+          <td class="c-prog"><div class="pg"><div class="bar emerald"><i style="width:100%"></i></div><span class="pct">100%</span></div><div class="faint sm mono">2,698,402 documents</div></td>
+          <td class="c-status"><span class="chip emerald">evidence ready</span><div class="faint sm">leakage sweep 0 hits</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Evidence pack</button></td>
+        </tr>
+        <tr class="job" data-status="completed" data-engine="postgres" data-mode="obfuscate" data-wm="table" data-owner="LEDGER" data-q="chg-48213 crm-uat-refresh ledger_uat transactions">
+          <td class="c-job"><span class="mono jid">j_01K7…8H</span><div class="faint sm">CHG-48213 · Oct 9, 21:40</div></td>
+          <td class="c-src"><div class="src"><span class="eb">PG</span><div><div class="obj">ledger.transactions</div><div class="to">→ ledger_uat.transactions</div><div class="grp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/></svg>crm-uat-refresh</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip slate">copy to table</span></div><div class="faint sm">truncate + insert</div></td>
+          <td class="c-own" data-l="Owner">LEDGER</td>
+          <td class="c-prog"><div class="pg"><div class="bar emerald"><i style="width:100%"></i></div><span class="pct">100%</span></div><div class="faint sm mono">48,211,930 rows</div></td>
+          <td class="c-status"><span class="chip emerald">evidence ready</span><div class="faint sm">leakage sweep 0 hits</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Evidence pack</button></td>
+        </tr>
+        <tr class="job" data-status="completed" data-engine="postgres" data-mode="synthesize" data-wm="files" data-owner="LEDGER" data-q="chg-48177 parquet s3 analytics">
+          <td class="c-job"><span class="mono jid">j_01K7…1A</span><div class="faint sm">CHG-48177 · Oct 10, 09:15</div></td>
+          <td class="c-src"><div class="src"><span class="eb">PG</span><div><div class="obj">ledger.transactions</div><div class="to">→ Parquet on S3</div><div class="faint sm">analytics sandbox · 24 files with manifest</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip violet">synthesize</span><span class="chip slate">files</span></div></td>
+          <td class="c-own" data-l="Owner">LEDGER</td>
+          <td class="c-prog"><div class="pg"><div class="bar emerald"><i style="width:100%"></i></div><span class="pct">100%</span></div><div class="faint sm mono">12,000,000 rows</div></td>
+          <td class="c-status"><span class="chip emerald">fidelity 0.97</span><div class="faint sm">0 exact-row matches</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Evidence pack</button></td>
+        </tr>
+        <tr class="job" data-status="completed" data-engine="postgres" data-mode="obfuscate" data-wm="in_place" data-owner="CARDS" data-q="chg-48160 cardholders cards_uat restore">
+          <td class="c-job"><span class="mono jid">j_01K7…6W</span><div class="faint sm">CHG-48160 · Oct 8, 23:02</div></td>
+          <td class="c-src"><div class="src"><span class="eb">PG</span><div><div class="obj">cards_uat.cardholders</div><div class="faint sm">restored backup · rewritten in place</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip rose">in place</span></div></td>
+          <td class="c-own" data-l="Owner">CARDS</td>
+          <td class="c-prog"><div class="pg"><div class="bar emerald"><i style="width:100%"></i></div><span class="pct">100%</span></div><div class="faint sm mono">611,240 rows</div></td>
+          <td class="c-status"><span class="chip emerald">evidence ready</span><div class="faint sm">key returned once · kid k_01K7X2…</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Evidence pack</button></td>
+        </tr>
+        <tr class="job" data-status="failed" data-engine="oracle" data-mode="obfuscate" data-wm="append" data-owner="CARDS" data-q="chg-48151 card_accounts token collision" data-err="err-1">
+          <td class="c-job"><span class="mono jid">j_01K7…X3</span><div class="faint sm">CHG-48151 · Oct 9, 16:20</div></td>
+          <td class="c-src"><div class="src"><span class="eb">ORA</span><div><div class="obj">CARDS.CARD_ACCOUNTS</div><div class="faint sm">append · token keys</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip slate">append</span></div></td>
+          <td class="c-own" data-l="Owner">CARDS</td>
+          <td class="c-prog"><div class="pg"><div class="bar rose"><i style="width:0%"></i></div><span class="pct">—</span></div><div class="faint sm">stopped in pre-check · 0 rows written</div></td>
+          <td class="c-status"><span class="chip rose">failed</span><div class="faint sm">key collision pre-check</div></td>
+          <td class="c-act"><button class="linkbtn" type="button" data-toggle="err-1" aria-expanded="true" aria-controls="err-1">Hide error</button></td>
+        </tr>
+        <tr class="err open" id="err-1"><td colspan="7"><div class="errbox">
+          <div class="what"><b>14 of 1,120,554 token keys already exist in CARD_ACCOUNT_ID.</b> The job stopped before writing, so CARDS.CARD_ACCOUNTS is unchanged.</div>
+          <div class="fix">Rerun with Offset keys (new key = original + 900,000,000) or Database-generated keys. Token keys only work when the table has no rows in the token range.</div>
+          <a class="btn btn-sm" href="06-connect-wizard.html?step=4&amp;write=append&amp;pk=offset">Rerun with offset keys</a>
+        </div></td></tr>
+        <tr class="job" data-status="failed" data-engine="postgres" data-mode="synthesize" data-wm="table" data-owner="LOANS" data-q="chg-48149 repayments loans_uat create grant" data-err="err-2">
+          <td class="c-job"><span class="mono jid">j_01K7…P9</span><div class="faint sm">CHG-48149 · Oct 8, 11:47</div></td>
+          <td class="c-src"><div class="src"><span class="eb">PG</span><div><div class="obj">loans.repayments</div><div class="to">→ loans_uat.repayments</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip violet">synthesize</span><span class="chip slate">copy to table</span></div><div class="faint sm">create</div></td>
+          <td class="c-own" data-l="Owner">LOANS</td>
+          <td class="c-prog"><div class="pg"><div class="bar rose"><i style="width:0%"></i></div><span class="pct">—</span></div><div class="faint sm">stopped at connect · 0 rows written</div></td>
+          <td class="c-status"><span class="chip rose">failed</span><div class="faint sm">no CREATE on target schema</div></td>
+          <td class="c-act"><button class="linkbtn" type="button" data-toggle="err-2" aria-expanded="false" aria-controls="err-2">Show error</button></td>
+        </tr>
+        <tr class="err" id="err-2" hidden><td colspan="7"><div class="errbox">
+          <div class="what"><b>The target connection dps/tgt/loans-uat has no CREATE privilege on schema loans_uat</b>, and loans_uat.repayments does not exist yet.</div>
+          <div class="fix">Ask the LOANS DBA to grant CREATE on loans_uat to dps_writer, or create the table first, then retry. Nothing was read or written.</div>
+          <button class="btn btn-sm" type="button">Retry</button>
+        </div></td></tr>
+        <tr class="job" data-status="completed" data-engine="oracle" data-mode="obfuscate" data-wm="files" data-owner="LOANS" data-q="chg-48140 collateral csv pvc">
+          <td class="c-job"><span class="mono jid">j_01K7…2B</span><div class="faint sm">CHG-48140 · Oct 7, 15:30</div></td>
+          <td class="c-src"><div class="src"><span class="eb">ORA</span><div><div class="obj">LOANS.COLLATERAL</div><div class="to">→ CSV on PVC</div><div class="faint sm">/exports/loans/collateral/ · 8 files with manifest</div></div></div></td>
+          <td data-l="Mode · write"><div class="mw"><span class="chip teal">obfuscate</span><span class="chip slate">files</span></div></td>
+          <td class="c-own" data-l="Owner">LOANS</td>
+          <td class="c-prog"><div class="pg"><div class="bar emerald"><i style="width:100%"></i></div><span class="pct">100%</span></div><div class="faint sm mono">384,906 rows</div></td>
+          <td class="c-status"><span class="chip emerald">evidence ready</span><div class="faint sm">SHA-256 checked on 8 files</div></td>
+          <td class="c-act"><button class="btn btn-sm" type="button">Evidence pack</button></td>
+        </tr>
+        <tr class="emptyrow" id="empty" hidden><td colspan="7" class="empty"><div class="t">No jobs match these filters</div><p>Try a different status or owner, or start a job for the data you are looking for.</p><div class="rowx" style="justify-content:center"><button class="btn btn-sm" type="button" id="clear2">Clear filters</button><a class="btn btn-sm btn-primary" href="06-connect-wizard.html">New job</a></div></td></tr>
+      </tbody>
+    </table></div>
+    <div class="tfoot"><span>Times are in IST. Jobs and their evidence are kept for 30 days.</span><span>Running jobs pause at the next committed batch.</span></div>
+  </section>
+
+  <!-- ============ JOB GROUP ============ -->
+  <section class="card" id="group" aria-labelledby="hg">
+    <div class="ghead">
+      <div style="flex:1 1 520px"><h2 id="hg">Job group · <span class="mono">crm-uat-refresh</span></h2>
+        <p>Three systems protected with one consistency key, so the same customer gets the same token everywhere. Purpose CHG-48213 · UAT provisioning.</p></div>
+      <div class="rowx"><a class="btn btn-sm" href="06-connect-wizard.html?step=5">Add a job to this group</a><button class="btn btn-sm btn-primary" type="button" id="recheck">Run consistency check</button></div>
+    </div>
+
+    <div class="keynode">
+      <span class="ki"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg></span>
+      <span><span class="kt">Key <span class="mono">k_01K7ZQ4M8V</span></span><br><span class="ks">Held by the CRM platform team since Oct 9. DPS keeps no copy.</span></span>
+      <span class="chip teal">entity-scoped: CUSTOMER_ID · PERSON_NAME · EMAIL · NATIONAL_ID</span>
+    </div>
+    <svg class="wires" viewBox="0 0 300 26" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M150 0 V13 M49 26 V13 H251 V26 M150 13 V26" fill="none" stroke="var(--teal-border)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="sys3">
+      <div class="sys">
+        <div class="hd"><span class="rowx"><span class="eb">ORA</span><b>Oracle · CRM</b></span><span class="chip teal">running · 72%</span></div>
+        <div class="obj">CRM.CUSTOMERS</div><div class="to">→ CRM_MASKED.CUSTOMERS</div>
+        <div class="faint sm">j_01K7ZQ…9Q · 1,948,210 of 2,706,118 rows</div>
+        <div class="flds"><span class="fl">CUSTOMER_ID</span><span class="fl">FULL_NAME</span><span class="fl">EMAIL</span><span class="fl">NATIONAL_ID</span></div>
+      </div>
+      <div class="sys">
+        <div class="hd"><span class="rowx"><span class="eb">MDB</span><b>MongoDB · crm</b></span><span class="chip emerald">completed</span></div>
+        <div class="obj">crm.profiles</div><div class="to">→ crm_uat.profiles_uat</div>
+        <div class="faint sm">j_01K7…4D · 2,698,402 documents</div>
+        <div class="flds"><span class="fl">customerId</span><span class="fl">profile.fullName</span><span class="fl">contact.email</span><span class="fl">kyc.nationalId</span></div>
+      </div>
+      <div class="sys">
+        <div class="hd"><span class="rowx"><span class="eb">PG</span><b>PostgreSQL · ledger</b></span><span class="chip emerald">completed</span></div>
+        <div class="obj">ledger.transactions</div><div class="to">→ ledger_uat.transactions</div>
+        <div class="faint sm">j_01K7…8H · 48,211,930 rows</div>
+        <div class="flds"><span class="fl">customer_id</span><span class="fl">payer_name</span><span class="fl">payer_email</span></div>
+      </div>
+    </div>
+
+    <div class="gsplit">
+      <div class="verdict" aria-live="polite">
+        <div class="rowx" style="justify-content:space-between"><span class="faint sm" style="font-weight:700;letter-spacing:.08em;text-transform:uppercase">Cross-system consistency</span><span class="chip emerald">passed</span></div>
+        <div class="big" style="margin-top:6px">3 / 3<span>consistent</span></div>
+        <div class="faint sm" id="chk-time" style="margin:2px 0 8px">500 customers sampled from CRM_MASKED.CUSTOMERS · checked today 14:22</div>
+        <div class="pair"><span>Oracle ↔ MongoDB</span><span class="on">CUSTOMER_ID = customerId</span><span class="ok"><i>✓</i>500 / 500</span></div>
+        <div class="pair"><span>MongoDB ↔ PostgreSQL</span><span class="on">customerId = customer_id</span><span class="ok"><i>✓</i>500 / 500</span></div>
+        <div class="pair"><span>Oracle ↔ PostgreSQL</span><span class="on">CUSTOMER_ID = customer_id</span><span class="ok"><i>✓</i>500 / 500</span></div>
+        <div class="faint sm" style="margin-top:8px">The check reads the masked copies only. It needs no key and sees no original value.</div>
+      </div>
+
+      <div>
+        <div class="rowx" style="justify-content:space-between;margin-bottom:8px"><span class="card-title">Three-way join · sample</span><span class="faint sm">masked values only · 5 of 500 shown</span></div>
+        <div class="jwrap"><table class="tbl join">
+          <thead><tr><th>Customer token</th><th><span class="eb">ORA</span>CRM_MASKED.CUSTOMERS</th><th><span class="eb">MDB</span>profiles_uat</th><th><span class="eb">PG</span>ledger_uat.transactions</th><th>In all 3</th></tr></thead>
+          <tbody>
+            <tr><td><div class="stack"><span class="tok">73104482</span><span class="k">IN</span></div></td>
+              <td><div class="stack"><span class="tok">73104482</span><span class="tok">Tilqoe Mzvhrpkat</span></div></td>
+              <td><div class="stack"><span class="tok">CUST-73104482</span><span class="tok">Tilqoe Mzvhrpkat</span></div></td>
+              <td><div class="stack"><span class="tok">73104482</span><span class="tok">Tilqoe Mzvhrpkat</span><span class="k">214 transactions</span></div></td>
+              <td><span class="yes"><i>✓</i>3 / 3</span></td></tr>
+            <tr><td><div class="stack"><span class="tok">50881237</span><span class="k">US</span></div></td>
+              <td><div class="stack"><span class="tok">50881237</span><span class="tok">Brelan Okvusti</span></div></td>
+              <td><div class="stack"><span class="tok">CUST-50881237</span><span class="tok">Brelan Okvusti</span></div></td>
+              <td><div class="stack"><span class="tok">50881237</span><span class="tok">Brelan Okvusti</span><span class="k">96 transactions</span></div></td>
+              <td><span class="yes"><i>✓</i>3 / 3</span></td></tr>
+            <tr><td><div class="stack"><span class="tok">29660415</span><span class="k">GB</span></div></td>
+              <td><div class="stack"><span class="tok">29660415</span><span class="tok">Hevra Pwilmott</span></div></td>
+              <td><div class="stack"><span class="tok">CUST-29660415</span><span class="tok">Hevra Pwilmott</span></div></td>
+              <td><div class="stack"><span class="tok">29660415</span><span class="tok">Hevra Pwilmott</span><span class="k">133 transactions</span></div></td>
+              <td><span class="yes"><i>✓</i>3 / 3</span></td></tr>
+            <tr><td><div class="stack"><span class="tok">94021773</span><span class="k">MX</span></div></td>
+              <td><div class="stack"><span class="tok">94021773</span><span class="tok">Xoriel Batmuz Qeña</span></div></td>
+              <td><div class="stack"><span class="tok">CUST-94021773</span><span class="tok">Xoriel Batmuz Qeña</span></div></td>
+              <td><div class="stack"><span class="tok">94021773</span><span class="tok">Xoriel Batmuz Qeña</span><span class="k">58 transactions</span></div></td>
+              <td><span class="yes"><i>✓</i>3 / 3</span></td></tr>
+            <tr><td><div class="stack"><span class="tok">61377090</span><span class="k">IN</span></div></td>
+              <td><div class="stack"><span class="tok">61377090</span><span class="tok">Ruvashi Delkoran</span></div></td>
+              <td><div class="stack"><span class="tok">CUST-61377090</span><span class="tok">Ruvashi Delkoran</span></div></td>
+              <td><div class="stack"><span class="tok">61377090</span><span class="tok">Ruvashi Delkoran</span><span class="k">301 transactions</span></div></td>
+              <td><span class="yes"><i>✓</i>3 / 3</span></td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout" style="margin-top:10px;font-size:12px">MongoDB stores the id as <span class="mono">CUST-</span> plus digits. Format-preserving encryption changes only the digits, so the token still joins to the numeric columns in Oracle and PostgreSQL.</div>
+      </div>
+    </div>
+  </section>
+</main></div></div>
+<script>
+renderSidebar('Data sources & jobs');
+(function () {
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var params = new URLSearchParams(location.search);
+
+  // let long identifiers wrap at dots and underscores before breaking mid-word
+  $$('.jobs .obj, .jobs .to').forEach(function (el) { el.innerHTML = el.innerHTML.replace(/([._])(?=[A-Za-z0-9])/g, '$1<wbr>'); });
+
+  // sparklines with a hover read-out
+  $$('.spark').forEach(function (el) {
+    var d = el.dataset.v.split(',').map(Number), max = +el.dataset.max, n = d.length, W = 240, H = 48, pad = 3;
+    var x = function (i) { return i / (n - 1) * W; }, y = function (v) { return H - pad - v / max * (H - 2 * pad); };
+    var pts = d.map(function (v, i) { return x(i).toFixed(1) + ',' + y(v).toFixed(1); }).join(' ');
+    el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
+      '<line x1="0" x2="' + W + '" y1="' + y(max / 2) + '" y2="' + y(max / 2) + '" stroke="var(--border)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>' +
+      '<line x1="0" x2="' + W + '" y1="' + (H - pad) + '" y2="' + (H - pad) + '" stroke="var(--border-strong)" vector-effect="non-scaling-stroke"/>' +
+      '<polyline fill="none" stroke="' + el.dataset.c + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" points="' + pts + '"/></svg>' +
+      '<span class="cross"></span><span class="end"></span><span class="dot"></span><span class="tip"></span>';
+    var end = $('.end', el), dot = $('.dot', el), cross = $('.cross', el), tip = $('.tip', el);
+    [end, dot].forEach(function (m) { m.style.background = el.dataset.c; });
+    end.style.left = '100%'; end.style.top = (y(d[n - 1]) / H * 100) + '%';
+    function show(i) {
+      var lx = (i / (n - 1) * 100) + '%';
+      cross.style.left = lx; dot.style.left = lx; dot.style.top = (y(d[i]) / H * 100) + '%';
+      tip.style.left = lx; var mins = Math.round((n - 1 - i) * 60 / (n - 1));
+      tip.textContent = (mins ? '−' + mins + ' min · ' : 'now · ') + d[i] + el.dataset.u;
+      el.classList.add('on');
+    }
+    el.addEventListener('mousemove', function (e) { var r = el.getBoundingClientRect(); show(Math.max(0, Math.min(n - 1, Math.round((e.clientX - r.left) / r.width * (n - 1))))); });
+    el.addEventListener('mouseleave', function () { el.classList.remove('on'); });
+  });
+
+  // filters
+  var sels = $$('.filters select'), q = $('#q'), total = $$('#jobs tr.job').length;
+  function apply() {
+    var f = {}; sels.forEach(function (s) { f[s.name] = s.value; s.classList.toggle('set', !!s.value); });
+    var term = q.value.trim().toLowerCase(), n = 0;
+    $$('#jobs tr.job').forEach(function (tr) {
+      var ok = Object.keys(f).every(function (k) { return !f[k] || tr.dataset[k] === f[k]; }) &&
+        (!term || (tr.dataset.q + ' ' + tr.textContent).toLowerCase().indexOf(term) > -1);
+      tr.hidden = !ok; if (ok) n++;
+      var e = tr.dataset.err && document.getElementById(tr.dataset.err);
+      if (e) e.hidden = !ok || !e.classList.contains('open');
+    });
+    $('#count').textContent = 'Showing ' + n + ' of ' + total + ' jobs';
+    $('#empty').hidden = n > 0;
+    $('#clear').hidden = !(term || sels.some(function (s) { return s.value; }));
+  }
+  sels.forEach(function (s) { s.addEventListener('change', apply); });
+  q.addEventListener('input', apply);
+  function clear() { sels.forEach(function (s) { s.value = ''; }); q.value = ''; apply(); q.focus(); }
+  $('#clear').addEventListener('click', clear); $('#clear2').addEventListener('click', clear);
+
+  // error rows
+  $$('[data-toggle]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var e = document.getElementById(b.dataset.toggle), open = !e.classList.contains('open');
+      e.classList.toggle('open', open); e.hidden = !open;
+      b.textContent = open ? 'Hide error' : 'Show error'; b.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  });
+
+  // consistency re-check
+  $('#recheck').addEventListener('click', function () {
+    var b = this, t = $('#chk-time'); b.disabled = true; b.textContent = 'Checking 500 customers…';
+    setTimeout(function () {
+      var d = new Date(), p = function (x) { return (x < 10 ? '0' : '') + x; };
+      t.textContent = '500 customers sampled from CRM_MASKED.CUSTOMERS · checked today ' + p(d.getHours()) + ':' + p(d.getMinutes());
+      b.disabled = false; b.textContent = 'Run consistency check';
+    }, 900);
+  });
+
+  // deep links: ?status=failed&engine=oracle&mode=obfuscate&wm=append&owner=CARDS&q=text
+  sels.forEach(function (s) { if (params.get(s.name)) s.value = params.get(s.name); });
+  if (params.get('q')) q.value = params.get('q');
+  apply();
+})();
+</script>
+</body></html>

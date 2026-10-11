@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Playground · Document — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+  /* scanned paper is always light; its signal colours use the light-theme values so they read on paper */
+  :root { --paper: #e7e5dd; --paper-edge: #c9c6bb; --paper-ink: #22252c; --paper-ink-2: #565b66; --paper-rule: #c4c0b5; --redact: #0a0b0d;
+    --p-rose: #be123c; --p-amber: #b45309; --p-slate: #64748b; --p-teal: #0f766e; --p-violet: #6d28d9; --p-emerald: #047857; }
+  [data-theme="light"] { --paper: #fdfcf8; --paper-edge: #dedad0; }
+
+  /* input card */
+  .inrow { display: flex; flex-wrap: wrap; gap: 16px 22px; align-items: flex-end; }
+  .file { display: flex; gap: 12px; align-items: center; flex: 1 1 280px; min-width: 0; }
+  .fileicon { width: 38px; height: 46px; flex: none; border-radius: 4px 12px 4px 4px; background: var(--surface-3); border: 1px solid var(--border-strong); display: grid; place-items: end center; padding-bottom: 6px; font: 800 9.5px var(--mono); color: var(--ink-2); letter-spacing: .06em; }
+  .file .name { font-weight: 700; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+  .file .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+  .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 0; max-width: 100%; }
+  .ctl .lbl { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .ctl .seg { max-width: 100%; overflow-x: auto; }
+  .seg.sm button, .seg.sm a { padding: 6px 11px; font-size: 12.5px; }
+  .runrow { display: flex; gap: 10px; align-items: center; }
+  .stepwrap { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .step-sep { width: 28px; margin: 0 8px; }
+  .timing { font-size: 12px; color: var(--ink-3); font-family: var(--mono); margin-left: auto; }
+
+  /* three columns: source · findings · output */
+  .docgrid { display: grid; grid-template-columns: minmax(0, 1fr) 312px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .pcard { padding: 14px 14px 16px; }
+  .pcard .card-head { padding: 0 4px; }
+  .paper-wrap { container-type: inline-size; max-width: 560px; margin: 0 auto; }
+  .paper { aspect-ratio: 1 / 1.4142; background-color: var(--paper); color: var(--paper-ink); border-radius: 2px; overflow: hidden; position: relative;
+    box-shadow: 0 0 0 1px var(--paper-edge), 0 14px 30px -16px rgba(0,0,0,.6);
+    background-image: radial-gradient(rgba(0,0,0,.035) 0.6px, transparent 0.8px), linear-gradient(180deg, rgba(0,0,0,.025), transparent 18%, transparent 82%, rgba(0,0,0,.035));
+    background-size: 3px 3px, 100% 100%; font-family: "Helvetica Neue", Arial, sans-serif; font-size: 2.62cqw; line-height: 1.42; }
+  .paper .in { padding: 6.2cqw 6.8cqw; transform: rotate(-.28deg); transform-origin: 50% 0; }
+  .paper .ln { min-height: 1.42em; }
+  .pii { position: relative; white-space: nowrap; border-radius: .3cqw; --c: var(--p-amber);
+    box-shadow: 0 0 0 .32cqw var(--c); background: color-mix(in srgb, var(--c) 13%, transparent); transition: box-shadow .12s; }
+  .pii.r { --c: var(--p-rose); } .pii.a { --c: var(--p-amber); } .pii.k { --c: var(--p-slate); }
+  .pii.hot { box-shadow: 0 0 0 .6cqw var(--c), 0 0 0 1.8cqw color-mix(in srgb, var(--c) 22%, transparent); }
+  .pii .fb { position: absolute; top: -2.3cqw; right: -2.5cqw; min-width: 2.8cqw; height: 2.8cqw; padding: 0 .5cqw; border-radius: 99px; background: var(--c); color: #fff;
+    font: 700 1.8cqw/2.8cqw var(--font); text-align: center; letter-spacing: 0; z-index: 1; }
+  .pii.redacted { background: var(--redact); box-shadow: none; color: transparent; display: inline-block; height: 1.08em; vertical-align: -0.18em; border-radius: 0; }
+  .pii.ptok { --c: var(--p-teal); color: #0d5c56; font-family: var(--mono); font-size: .9em; letter-spacing: -.01em; box-shadow: 0 0 0 .28cqw color-mix(in srgb, var(--c) 60%, transparent); }
+  .pii.ptok.syn { --c: var(--p-violet); color: #5b21b6; }
+  .pii.ptok.rev { --c: var(--p-emerald); color: #065f46; }
+  .kept { white-space: nowrap; }
+
+  /* aadhaar letter */
+  .p-band { display: flex; justify-content: space-between; align-items: baseline; border-bottom: .4cqw solid #2f3540; padding-bottom: 1.4cqw; margin-bottom: 3cqw; color: var(--paper-ink-2); font-size: 2.3cqw; letter-spacing: .03em; }
+  .p-band b { font-size: 3.7cqw; color: var(--paper-ink); letter-spacing: .05em; }
+  .p-small { font-size: 2.15cqw; color: var(--paper-ink-2); }
+  .p-to { margin: 3.6cqw 0 4.4cqw; line-height: 1.55; }
+  .p-lbl { text-align: center; font-size: 2.3cqw; color: var(--paper-ink-2); }
+  .p-big { text-align: center; font-size: 5.6cqw; font-weight: 700; letter-spacing: .12em; margin: 1.2cqw 0 4cqw; line-height: 1.3; }
+  .p-body { font-size: 2.2cqw; color: var(--paper-ink-2); border-top: .2cqw solid var(--paper-rule); padding-top: 2.4cqw; line-height: 1.6; }
+  .p-cut { margin: 5.4cqw -2cqw 5.4cqw; border-top: .3cqw dashed #9a968c; position: relative; }
+  .p-cut::before { content: "\2702"; position: absolute; left: 1cqw; top: -2.1cqw; font-size: 2.8cqw; line-height: 1; background: var(--paper); color: #6b675e; padding-right: 1cqw; }
+  .p-card { border: .3cqw solid #aeaa9f; border-radius: 2.2cqw; padding: 3cqw 3.8cqw 3.2cqw; width: 76%; margin: 0 auto; line-height: 1.6; }
+  .p-card-head { font-size: 2.1cqw; color: var(--paper-ink-2); border-bottom: .2cqw solid var(--paper-rule); padding-bottom: 1cqw; margin-bottom: 1.4cqw; display: flex; justify-content: space-between; }
+  .p-big2 { font-size: 3.9cqw; font-weight: 700; letter-spacing: .1em; text-align: center; margin-top: 1.6cqw; border-top: .2cqw solid var(--paper-rule); padding-top: 1.4cqw; }
+  .p-foot { font-size: 2cqw; color: var(--paper-ink-2); text-align: center; margin-top: 2.6cqw; }
+
+  /* bank statement */
+  .s-head { display: grid; grid-template-columns: auto 1fr auto; gap: 2.2cqw; align-items: center; border-bottom: .45cqw solid #2f3540; padding-bottom: 1.6cqw; margin-bottom: 2.6cqw; }
+  .s-mark { width: 6.4cqw; height: 6.4cqw; border-radius: 1.4cqw; background: #2f3540; color: #e7e5dd; display: grid; place-items: center; font-size: 3cqw; font-weight: 800; }
+  .s-head b { font-size: 3.05cqw; display: block; }
+  .s-cust { display: grid; grid-template-columns: 1.1fr 1fr; gap: 3cqw; margin-bottom: 3.4cqw; font-size: 2.5cqw; line-height: 1.55; }
+  .s-cust .ttl { font-size: 1.9cqw; letter-spacing: .1em; text-transform: uppercase; color: var(--paper-ink-2); margin-bottom: .6cqw; font-weight: 700; }
+  .s-kv .ln { display: flex; gap: 1.6cqw; } .s-kv .k { color: var(--paper-ink-2); min-width: 13.5cqw; }
+  .s-tbl { width: 100%; border-collapse: collapse; font-size: 2.3cqw; font-variant-numeric: tabular-nums; }
+  .s-tbl th { text-align: left; font-weight: 700; border-bottom: .3cqw solid #2f3540; border-top: .3cqw solid #2f3540; padding: 1.2cqw .7cqw; background: rgba(0,0,0,.045); }
+  .s-tbl td { padding: 1.55cqw .7cqw; border-bottom: .15cqw solid var(--paper-rule); white-space: nowrap; vertical-align: top; }
+  .s-tbl .n { text-align: right; } .s-tbl .nar { white-space: normal; }
+  .s-tbl tr.sum td { font-weight: 700; border-bottom: .3cqw solid #2f3540; }
+  .s-note { font-size: 2.05cqw; color: var(--paper-ink-2); margin-top: 3cqw; }
+  .hand { font-family: "Bradley Hand", "Segoe Print", "Noteworthy", "Comic Sans MS", cursive; color: #1e3a8a; font-size: 3.1cqw; transform: rotate(-3.5deg); margin: 3.4cqw 0 0 34%; line-height: 1.5; }
+  .stamp { display: inline-block; border: .35cqw solid rgba(30,58,138,.55); color: rgba(30,58,138,.7); border-radius: 1cqw; padding: .6cqw 1.6cqw; font-size: 2cqw; font-weight: 800; letter-spacing: .12em; transform: rotate(-6deg); margin: 1.5cqw 0 0 6cqw; }
+
+  /* page strip */
+  .strip { display: flex; gap: 12px; margin-top: 14px; padding: 0 4px; align-items: flex-end; }
+  .thumb { background: none; border: 0; padding: 0; cursor: pointer; display: flex; flex-direction: column; gap: 6px; align-items: center; color: var(--ink-2); font: 600 11.5px var(--font); border-radius: 6px; }
+  .thumb-paper { width: 58px; container-type: inline-size; border-radius: 3px; box-shadow: 0 0 0 1px var(--border-strong); transition: box-shadow .12s; pointer-events: none; }
+  .thumb-paper .paper { box-shadow: none; }
+  .thumb.on .thumb-paper { box-shadow: 0 0 0 2px var(--teal); }
+  .thumb.on { color: var(--ink); }
+  .thumb b { color: var(--ink); }
+  .strip-meta { margin-left: auto; text-align: right; font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+
+  /* findings */
+  .fhead-sub { font-size: 12px; color: var(--ink-3); margin: -6px 0 8px; }
+  .grp { border-top: 1px solid var(--border); }
+  .grp-h { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; align-items: center; padding: 9px 4px; background: none; border: 0; color: var(--ink); cursor: pointer; text-align: left; font: inherit; border-radius: 8px; }
+  .grp-h:hover { background: var(--surface-2); }
+  .grp-h .t { font-weight: 700; font-size: 13px; }
+  .grp-h .chev { color: var(--ink-3); font-size: 11px; transition: transform .15s; display: inline-block; }
+  .grp.open .grp-h .chev { transform: rotate(90deg); }
+  .ocr { grid-column: 1 / -1; font-size: 11.5px; color: var(--ink-3); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding-left: 14px; }
+  .ocr .eng { color: var(--ink-2); font-weight: 600; }
+  .ocr i { width: 6px; height: 6px; border-radius: 50%; background: var(--emerald); display: inline-block; flex: none; }
+  .grp-b { display: none; padding: 0 0 8px; } .grp.open .grp-b { display: block; }
+  .fd { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 8px; padding: 5px 6px; border-radius: 8px; align-items: center; font-size: 12.5px; cursor: default; }
+  .fd:hover, .fd.hot { background: var(--surface-2); }
+  .fn { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font: 700 10.5px var(--font); border: 1px solid; }
+  .fn.r { color: var(--rose); border-color: var(--rose-border); background: var(--rose-soft); }
+  .fn.a { color: var(--amber); border-color: var(--amber-border); background: var(--amber-soft); }
+  .fn.k { color: var(--ink-2); border-color: var(--border-strong); background: var(--surface-2); }
+  .fd .chip { justify-self: start; font-size: 11px; }
+  .fd .sc { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .fd .why { grid-column: 2 / -1; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-3); line-height: 1.35; }
+  .fd .why .mono { font-size: 11px; color: var(--ink-2); }
+  .fd.missed .chip, .fd.missed .sc { opacity: .45; text-decoration: line-through; }
+  .grp-sum { font-size: 11.5px; color: var(--ink-3); grid-column: 1 / -1; padding-left: 14px; }
+  .grp.open .grp-sum { display: none; }
+  .notflag { margin-top: 10px; font-size: 12px; }
+
+  /* output */
+  .out-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 14px; padding: 0 4px; flex-wrap: wrap; }
+  .out-foot .meta { font-size: 12px; color: var(--ink-3); min-width: 0; }
+  .out-foot .meta .mono { font-size: 11.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .out-note { font-size: 12px; color: var(--ink-2); margin: 10px 4px 0; line-height: 1.5; }
+
+  /* text + key row */
+  .two { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  .textpane { max-height: 430px; min-height: 300px; }
+  .textpane .pg { color: var(--ink-3); }
+  .tok.rev { background: var(--emerald-soft); color: var(--emerald); border-color: var(--emerald-border); }
+  .keycard { background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--teal) 10%, var(--surface))); border: 1px solid var(--teal-border); border-radius: var(--r-md); padding: 12px 14px; }
+  .diffrow { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 12.5px; align-items: baseline; }
+  .diffrow:last-child { border-bottom: 0; } .diffrow .k { color: var(--ink-3); font-family: var(--mono); font-size: 12px; }
+  .verify { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border: 1px solid var(--emerald-border); background: var(--emerald-soft); border-radius: var(--r-md); font-size: 12.5px; line-height: 1.5; }
+  .verify svg { flex: none; width: 18px; height: 18px; color: var(--emerald); margin-top: 1px; }
+  .verify b { color: var(--emerald); }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+  @media (max-width: 1200px) { .docgrid, .two { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 720px) {
+    .page-head .head-actions { flex-direction: column; align-items: stretch; gap: 6px; }
+    .ctl { width: 100%; }
+    .ctl .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; width: 100%; }
+    .ctl .seg button { white-space: normal; line-height: 1.25; }
+    .runrow { flex-direction: column; align-items: stretch; }
+    .runrow .btn-primary { justify-content: center; }
+    .strip-meta { display: none; }
+    .diffrow { grid-template-columns: 1fr; gap: 2px; }
+  }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><a class="crumb" href="02-playground.html">Playground</a><span class="sep">/</span><span class="muted">Layer 1 · documents</span><span class="topbar-spacer"></span>
+  <span class="pill mono hide-sm" id="ep">POST /api/v1/documents/obfuscate</span><button class="btn btn-sm hide-sm" type="button">Copy as curl</button><button class="btn btn-sm hide-sm" type="button" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>Try the engine</h1><p>Drop a scanned document. OCR runs through the org gateway; detection, redaction and tokens run inside DPS. The LLM only ever sees placeholders.</p></div>
+    <div class="head-actions"><span class="muted" style="font-size:12.5px">Policy</span><span class="seg"><button type="button" class="on">dpdp-pseudonymise</button><button type="button">gdpr-pseudonymise</button><button type="button">pci-dss</button><button type="button">custom…</button></span></div></div>
+
+  <!-- INPUT -->
+  <section class="card" aria-label="Input document">
+    <div class="card-head"><div class="card-title">Input</div><div class="head-actions"><button class="btn btn-sm btn-ghost" type="button">Replace file</button><div class="seg sm" role="group" aria-label="Input kind"><a href="02-playground.html">JSON</a><a href="02-playground.html">Text</a><button type="button" class="on" aria-pressed="true">Document</button></div></div></div>
+    <div class="inrow">
+      <div class="file"><div class="fileicon">PDF</div><div style="min-width:0"><div class="name">KYC-IN-0098812.pdf</div><div class="sub">3 pages · 2.4 MB · scanned · no text layer</div><div class="sub">Aadhaar letter + savings account statement</div></div></div>
+      <div class="ctl"><span class="lbl">OCR engine</span><div class="seg sm" id="ocrSeg"><button type="button" class="on" data-ocr="azure">Azure Read v3.2 via org gateway</button><button type="button" data-ocr="tess">Local Tesseract</button></div></div>
+      <div class="ctl"><span class="lbl">Output</span><div class="runrow"><div class="seg sm" id="modeSeg"><button type="button" class="on" data-mode="red">Redact</button><button type="button" data-mode="obf">Obfuscate text</button><button type="button" data-mode="syn">Synthesize text</button></div>
+        <button class="btn btn-primary" type="button" id="runBtn">Redact 3 pages</button></div></div>
+    </div>
+    <div class="stepwrap">
+      <div class="stepper">
+        <div class="step done"><span class="n">✓</span>Upload</div><div class="step-sep"></div>
+        <div class="step done"><span class="n">✓</span>OCR <span class="faint" id="stOcr">· 701 words</span></div><div class="step-sep"></div>
+        <div class="step done"><span class="n">✓</span>Detect <span class="faint">· 24 findings</span></div><div class="step-sep"></div>
+        <div class="step done"><span class="n">✓</span><span id="stMode">Redact</span> <span class="faint" id="stModeSub">· 25 boxes</span></div><div class="step-sep"></div>
+        <div class="step done"><span class="n">✓</span>Verify <span class="faint">· 0 leaks</span></div>
+      </div>
+      <span class="timing" id="timing">6.1 s total · OCR 4.7 s · engine 0.9 s · PDF 0.5 s</span>
+    </div>
+  </section>
+
+  <div class="docgrid">
+    <!-- SOURCE -->
+    <section class="card pcard" aria-label="Source page with detections">
+      <div class="card-head"><div class="card-title">Source · page <span id="pgNo">1</span> of 3</div>
+        <div class="legend"><span><i style="background:var(--rose)"></i>critical</span><span><i style="background:var(--amber)"></i>sensitive</span><span><i style="background:var(--ink-3)"></i>kept</span></div></div>
+      <div class="paper-wrap" id="srcWrap">
+        <!-- page 1 · Aadhaar letter -->
+        <div class="paper" data-title="Aadhaar letter"><div class="in">
+          <div class="p-band"><span>Government of India</span><b>Aadhaar</b></div>
+          <div class="ln p-small">Enrolment No.: <span class="pii a" data-f="1" data-x="[[PII:CASE_ID:q3m8xw…]]" data-s="2207/41862/90315">1093/20114/55871</span></div>
+          <div class="p-to">
+            <div class="ln">To,</div>
+            <div class="ln"><span class="pii a" data-f="2" data-x="Tilqoe Mzvhrpkat" data-s="Meera Venkatesan">Ananya Krishnan</span></div>
+            <div class="ln">D/O: <span class="pii a" data-f="3" data-x="V Ojtwnqzr" data-s="R Venkatesan">S Krishnan</span></div>
+            <div class="ln"><span class="pii a" data-f="4" data-x="[[PII:STREET_ADDRESS:r8k2vd…]]" data-s="22 Cunningham Road, Vasanth Nagar">14 Lavelle Road, Ashok Nagar</span></div>
+            <div class="ln"><span class="pii a" data-f="4" data-cont="1" data-x="" data-s="Bengaluru, Karnataka 560052">Bengaluru, Karnataka 560001</span></div>
+            <div class="ln">Mobile: <span class="pii a" data-f="5" data-x="93117 84062" data-s="90000 15627">98451 20377</span></div>
+          </div>
+          <div class="ln p-lbl">Your Aadhaar No.:</div>
+          <div class="ln p-big"><span class="pii r" data-f="6" data-x="8036 1194 7721" data-s="9173 2206 4418">4921 7731 0066</span></div>
+          <div class="p-body"><div class="ln">Aadhaar is proof of identity, not of citizenship.</div><div class="ln">Verify identity using the secure QR code or offline XML.</div></div>
+          <div class="p-cut"></div>
+          <div class="p-card">
+            <div class="p-card-head"><span>Government of India</span><span>Aadhaar</span></div>
+            <div class="ln"><span class="pii a" data-f="7" data-x="Tilqoe Mzvhrpkat" data-s="Meera Venkatesan">Ananya Krishnan</span></div>
+            <div class="ln">DOB: <span class="pii a" data-f="8" data-x="02/11/1987" data-s="29/07/1988">14/03/1988</span></div>
+            <div class="ln"><span class="pii k" data-f="9" data-x="Female" data-s="Female">Female</span></div>
+            <div class="ln p-big2"><span class="pii r" data-f="10" data-x="8036 1194 7721" data-s="9173 2206 4418">4921 7731 0066</span></div>
+          </div>
+          <div class="ln p-foot">Issue date: 02/06/2019</div>
+        </div></div>
+
+        <!-- page 2 · statement p1 -->
+        <div class="paper" data-title="Statement p1" hidden><div class="in">
+          <div class="s-head"><div class="s-mark">▲</div><div><b>Savings account statement</b><span class="p-small">Lavelle Road branch, Bengaluru · IFSC GLBK0000417</span></div><div class="p-small">Page 1 of 2</div></div>
+          <div class="s-cust">
+            <div><div class="ttl">Customer</div>
+              <div class="ln">Ms <span class="pii a" data-f="11" data-x="Tilqoe Mzvhrpkat" data-s="Meera Venkatesan">Ananya Krishnan</span></div>
+              <div class="ln"><span class="pii a" data-f="12" data-x="[[PII:STREET_ADDRESS:r8k2vd…]]" data-s="22 Cunningham Road, Vasanth Nagar">14 Lavelle Road, Ashok Nagar</span></div>
+              <div class="ln"><span class="pii a" data-f="12" data-cont="1" data-x="" data-s="Bengaluru, Karnataka 560052">Bengaluru, Karnataka 560001</span></div>
+              <div class="ln"><span class="pii a" data-f="13" data-x="vqzmra.p@example-mail.in" data-s="meera.venkatesan@example.com">ananya.k@example-mail.in</span></div>
+              <div class="ln"><span class="pii a" data-f="14" data-x="+91 93117 84062" data-s="+91 90000 15627">+91 98451 20377</span></div>
+            </div>
+            <div class="s-kv"><div class="ttl">Account</div>
+              <div class="ln"><span class="k">Account no.</span><span class="pii r" data-f="15" data-x="7731 4058 2290 16" data-s="6020 0117 4433 58">5010 0284 6117 73</span></div>
+              <div class="ln"><span class="k">Customer ID</span><span>CUST-884120</span></div>
+              <div class="ln"><span class="k">PAN</span><span class="pii r" data-f="16" data-x="XKDPQ8810T" data-s="MVPPV7210R">BQPPK4432L</span></div>
+              <div class="ln"><span class="k">Period</span><span>01–30 Sep 2026</span></div>
+              <div class="ln"><span class="k">Currency</span><span>INR</span></div>
+            </div>
+          </div>
+          <table class="s-tbl"><thead><tr><th>Date</th><th>Narration</th><th class="n">Debit</th><th class="n">Credit</th><th class="n">Balance</th></tr></thead><tbody>
+            <tr class="ln"><td>01 Sep</td><td class="nar">Opening balance</td><td class="n"></td><td class="n"></td><td class="n">1,84,220.50</td></tr>
+            <tr class="ln"><td>02 Sep</td><td class="nar">NEFT/<span class="pii a" data-f="17" data-x="OWQSTV KZTL" data-s="ARJUN MEHTA">RAJESH IYER</span>/SALARY ADV</td><td class="n"></td><td class="n">45,000.00</td><td class="n">2,29,220.50</td></tr>
+            <tr class="ln"><td>04 Sep</td><td class="nar">UPI/<span class="pii a" data-f="18" data-x="[[PII:UPI_VPA:t6n2c9…]]" data-s="meera.v@okbank">ananya.k@okbank</span>/GROCERY</td><td class="n">2,340.00</td><td class="n"></td><td class="n">2,26,880.50</td></tr>
+            <tr class="ln"><td>07 Sep</td><td class="nar">POS <span class="pii r" data-f="19" data-x="[[PII:CARD_PAN:w2h5k1…]]" data-s="411111XXXXXX0092">453278XXXXXX4417</span> BLR</td><td class="n">6,120.00</td><td class="n"></td><td class="n">2,20,760.50</td></tr>
+            <tr class="ln"><td>11 Sep</td><td class="nar">ACH/HOME LOAN EMI</td><td class="n">38,450.00</td><td class="n"></td><td class="n">1,82,310.50</td></tr>
+            <tr class="ln"><td>12 Sep</td><td class="nar">ATM WDL/LAVELLE RD</td><td class="n">5,000.00</td><td class="n"></td><td class="n">1,77,310.50</td></tr>
+            <tr class="ln"><td>15 Sep</td><td class="nar">IMPS/<span class="pii a" data-f="20" data-x="9311784062" data-s="9000015627">9845120377</span>/RENT</td><td class="n">25,000.00</td><td class="n"></td><td class="n">1,52,310.50</td></tr>
+            <tr class="ln sum"><td></td><td class="nar">Carried forward</td><td class="n"></td><td class="n"></td><td class="n">1,52,310.50</td></tr>
+          </tbody></table>
+          <div class="s-note">Amounts in INR. Report discrepancies within 30 days of the statement date.</div>
+        </div></div>
+
+        <!-- page 3 · statement p2 -->
+        <div class="paper" data-title="Statement p2" hidden><div class="in">
+          <div class="s-head"><div class="s-mark">▲</div><div><b>Savings account statement</b><span class="p-small">01–30 Sep 2026 · account ending ••73</span></div><div class="p-small">Page 2 of 2</div></div>
+          <table class="s-tbl"><thead><tr><th>Date</th><th>Narration</th><th class="n">Debit</th><th class="n">Credit</th><th class="n">Balance</th></tr></thead><tbody>
+            <tr class="ln"><td></td><td class="nar">Brought forward</td><td class="n"></td><td class="n"></td><td class="n">1,52,310.50</td></tr>
+            <tr class="ln"><td>18 Sep</td><td class="nar">NEFT/<span class="pii a" data-f="21" data-x="MXRLA JQZB" data-s="KAVYA REDDY">PRIYA NAIR</span>/SCHOOL FEES</td><td class="n">18,500.00</td><td class="n"></td><td class="n">1,33,810.50</td></tr>
+            <tr class="ln"><td>19 Sep</td><td class="nar">POS PHARMACY BLR</td><td class="n">1,240.00</td><td class="n"></td><td class="n">1,32,570.50</td></tr>
+            <tr class="ln"><td>21 Sep</td><td class="nar">UPI/<span class="pii a" data-f="22" data-x="[[PII:UPI_VPA:a9d4e7…]]" data-s="kavya.reddy@okbank">priya.nair@okbank</span>/REFUND</td><td class="n"></td><td class="n">1,200.00</td><td class="n">1,33,770.50</td></tr>
+            <tr class="ln"><td>24 Sep</td><td class="nar">NACH/INSURANCE PREMIUM</td><td class="n">12,400.00</td><td class="n"></td><td class="n">1,21,370.50</td></tr>
+            <tr class="ln"><td>25 Sep</td><td class="nar">ATM WDL/MG ROAD</td><td class="n">3,000.00</td><td class="n"></td><td class="n">1,18,370.50</td></tr>
+            <tr class="ln"><td>27 Sep</td><td class="nar">BILLPAY/ELECTRICITY</td><td class="n">2,860.00</td><td class="n"></td><td class="n">1,15,510.50</td></tr>
+            <tr class="ln"><td>30 Sep</td><td class="nar">INT CREDIT</td><td class="n"></td><td class="n">1,436.00</td><td class="n">1,16,946.50</td></tr>
+            <tr class="ln sum"><td>30 Sep</td><td class="nar">Closing balance</td><td class="n"></td><td class="n"></td><td class="n">1,16,946.50</td></tr>
+          </tbody></table>
+          <table class="s-tbl" style="margin-top:3cqw;width:62%"><tbody>
+            <tr class="ln"><td>Total debits</td><td class="n">1,14,910.00</td></tr>
+            <tr class="ln"><td>Total credits</td><td class="n">47,636.00</td></tr>
+          </tbody></table>
+          <div class="stamp">KYC VERIFIED</div>
+          <div class="hand"><div class="ln">call <span class="pii a" data-f="23" data-x="Tilqoe" data-s="Meera">Ananya</span> re KYC —</div><div class="ln"><span class="pii a" data-f="24" data-x="93117 84062" data-s="90000 15627">98451 20377</span></div></div>
+          <div class="s-note" style="margin-top:5cqw">This is a system-generated statement and does not need a signature.</div>
+        </div></div>
+      </div>
+      <div class="strip" id="strip"><div class="strip-meta">300 dpi · deskewed 0.3°<br>25 boxes on 3 pages</div></div>
+    </section>
+
+    <!-- FINDINGS -->
+    <section class="card" aria-label="Findings by page">
+      <div class="card-head"><div class="card-title">Findings <span class="faint">· 24</span></div><span class="chip rose">5 critical</span></div>
+      <div class="fhead-sub">Grouped by page. Numbers match the boxes on the page.</div>
+
+      <div class="grp open" data-page="0">
+        <button class="grp-h" type="button" aria-expanded="true"><span class="t"><span class="chev">▶</span> Page 1 · Aadhaar letter</span><span class="chip slate">10</span>
+          <span class="ocr"><i></i><span class="eng ocr-name">Azure Read v3.2 via org gateway</span><span class="ocr-stat" data-p="0">OCR conf 0.98</span></span></button>
+        <div class="grp-b">
+          <div class="fd" tabindex="0" data-f="1"><span class="fn a">1</span><span class="chip amber">CASE_ID</span><span class="sc">0.90</span><span class="why"><span class="mono">l.2</span> · recognizer aadhaar-eid (T4)</span></div>
+          <div class="fd" tabindex="0" data-f="2"><span class="fn a">2</span><span class="chip amber">PERSON_NAME</span><span class="sc">0.96</span><span class="why"><span class="mono">l.4</span> · NER PERSON · after "To,"</span></div>
+          <div class="fd" tabindex="0" data-f="3"><span class="fn a">3</span><span class="chip amber">PERSON_NAME</span><span class="sc">0.84</span><span class="why"><span class="mono">l.5</span> · NER PERSON · prefix "D/O"</span></div>
+          <div class="fd" tabindex="0" data-f="4"><span class="fn a">4</span><span class="chip amber">STREET_ADDRESS</span><span class="sc">0.91</span><span class="why"><span class="mono">l.6–7</span> · LOCATION + PIN · 2 boxes</span></div>
+          <div class="fd" tabindex="0" data-f="5"><span class="fn a">5</span><span class="chip amber">PHONE</span><span class="sc">0.97</span><span class="why"><span class="mono">l.8</span> · IN mobile · label "Mobile"</span></div>
+          <div class="fd" tabindex="0" data-f="6"><span class="fn r">6</span><span class="chip rose">AADHAAR</span><span class="sc">0.99</span><span class="why"><span class="mono">l.10</span> · Verhoeff · "Aadhaar No."</span></div>
+          <div class="fd" tabindex="0" data-f="7"><span class="fn a">7</span><span class="chip amber">PERSON_NAME</span><span class="sc">0.95</span><span class="why"><span class="mono">l.14</span> · same value as 2</span></div>
+          <div class="fd" tabindex="0" data-f="8"><span class="fn a">8</span><span class="chip amber">DATE_OF_BIRTH</span><span class="sc">0.97</span><span class="why"><span class="mono">l.15</span> · label "DOB" + date</span></div>
+          <div class="fd" tabindex="0" data-f="9"><span class="fn k">9</span><span class="chip slate">GENDER</span><span class="sc">0.92</span><span class="why"><span class="mono">l.16</span> · LOW · kept by policy</span></div>
+          <div class="fd" tabindex="0" data-f="10"><span class="fn r">10</span><span class="chip rose">AADHAAR</span><span class="sc">0.99</span><span class="why"><span class="mono">l.17</span> · Verhoeff · same value as 6</span></div>
+        </div>
+      </div>
+
+      <div class="grp" data-page="1">
+        <button class="grp-h" type="button" aria-expanded="false"><span class="t"><span class="chev">▶</span> Page 2 · Statement p1</span><span class="chip slate">10</span>
+          <span class="ocr"><i></i><span class="eng ocr-name">Azure Read v3.2 via org gateway</span><span class="ocr-stat" data-p="1">OCR conf 0.97</span></span>
+          <span class="grp-sum">3 critical · account no., PAN, card number</span></button>
+        <div class="grp-b">
+          <div class="fd" tabindex="0" data-f="11"><span class="fn a">11</span><span class="chip amber">PERSON_NAME</span><span class="sc">0.95</span><span class="why"><span class="mono">l.4</span> · NER PERSON · "Ms"</span></div>
+          <div class="fd" tabindex="0" data-f="12"><span class="fn a">12</span><span class="chip amber">STREET_ADDRESS</span><span class="sc">0.92</span><span class="why"><span class="mono">l.5–6</span> · same value as 4</span></div>
+          <div class="fd" tabindex="0" data-f="13"><span class="fn a">13</span><span class="chip amber">EMAIL</span><span class="sc">0.99</span><span class="why"><span class="mono">l.7</span> · pattern · offline TLD list</span></div>
+          <div class="fd" tabindex="0" data-f="14"><span class="fn a">14</span><span class="chip amber">PHONE</span><span class="sc">0.98</span><span class="why"><span class="mono">l.8</span> · E.164 IN mobile</span></div>
+          <div class="fd" tabindex="0" data-f="15"><span class="fn r">15</span><span class="chip rose">ACCOUNT_NUMBER</span><span class="sc">0.93</span><span class="why"><span class="mono">l.4</span> · "Account no." · 14 digits</span></div>
+          <div class="fd" tabindex="0" data-f="16"><span class="fn r">16</span><span class="chip rose">PAN_IN</span><span class="sc">0.98</span><span class="why"><span class="mono">l.6</span> · AAAAA9999A · 4th char P</span></div>
+          <div class="fd" tabindex="0" data-f="17"><span class="fn a">17</span><span class="chip amber">PERSON_NAME</span><span class="sc">0.88</span><span class="why"><span class="mono">row 2</span> · NER PERSON in NEFT</span></div>
+          <div class="fd" tabindex="0" data-f="18"><span class="fn a">18</span><span class="chip amber">UPI_VPA</span><span class="sc">0.94</span><span class="why"><span class="mono">row 3</span> · recognizer upi-vpa (T4)</span></div>
+          <div class="fd" tabindex="0" data-f="19"><span class="fn r">19</span><span class="chip rose">CARD_PAN</span><span class="sc">0.86</span><span class="why"><span class="mono">row 4</span> · masked 6+4 → det_token</span></div>
+          <div class="fd" tabindex="0" data-f="20"><span class="fn a">20</span><span class="chip amber">PHONE</span><span class="sc">0.81</span><span class="why"><span class="mono">row 7</span> · same digits as 14</span></div>
+        </div>
+      </div>
+
+      <div class="grp" data-page="2">
+        <button class="grp-h" type="button" aria-expanded="false"><span class="t"><span class="chev">▶</span> Page 3 · Statement p2</span><span class="chip slate">4</span>
+          <span class="ocr"><i></i><span class="eng ocr-name">Azure Read v3.2 via org gateway</span><span class="ocr-stat" data-p="2">OCR conf 0.93</span></span>
+          <span class="grp-sum">2 need review · 2 handwritten lines</span></button>
+        <div class="grp-b">
+          <div class="fd" tabindex="0" data-f="21"><span class="fn a">21</span><span class="chip amber">PERSON_NAME</span><span class="sc">0.88</span><span class="why"><span class="mono">row 2</span> · NER PERSON in NEFT</span></div>
+          <div class="fd" tabindex="0" data-f="22"><span class="fn a">22</span><span class="chip amber">UPI_VPA</span><span class="sc">0.94</span><span class="why"><span class="mono">row 3</span> · recognizer upi-vpa (T4)</span></div>
+          <div class="fd" tabindex="0" data-f="23"><span class="fn a">23</span><span class="chip amber">PERSON_NAME</span><span class="sc">0.74</span><span class="why"><span class="mono">hand</span> · OCR conf 0.71 · <b style="color:var(--amber)">review</b></span></div>
+          <div class="fd" tabindex="0" data-f="24"><span class="fn a">24</span><span class="chip amber">PHONE</span><span class="sc">0.68</span><span class="why"><span class="mono">hand</span> · same digits as 5 · <b style="color:var(--amber)">review</b></span></div>
+        </div>
+      </div>
+      <div class="callout amber notflag hidden" id="tessWarn">Local Tesseract did not read the handwritten note on page 3, so findings 23 and 24 would be missed. Keep Azure Read for scanned KYC packs.</div>
+    </section>
+
+    <!-- OUTPUT -->
+    <section class="card pcard" aria-label="Output">
+      <div class="card-head"><div class="card-title" id="outTitle">Output · redacted PDF</div><span class="chip teal" id="outChip">flattened</span></div>
+      <div class="paper-wrap" id="outWrap"></div>
+      <div class="out-foot">
+        <div class="meta" id="outMeta"><span class="mono">KYC-IN-0098812.redacted.pdf</span><br>3 pages · 1.1 MB · page <span class="pgNo2">1</span> shown</div>
+        <button class="btn btn-primary" type="button" id="outBtn">Download redacted PDF</button>
+      </div>
+      <p class="out-note" id="outNote">25 boxes are burned into the page images and the redacted words are removed from the text layer. No key can bring them back.</p>
+    </section>
+  </div>
+
+  <div class="two">
+    <!-- TEXT EXTRACTION -->
+    <section class="card" aria-label="Text extraction">
+      <div class="card-head"><div class="card-title"><span id="txtTitle">Text extraction · obfuscated</span> <span class="chip teal" id="txtChip" style="margin-left:6px">reversible with key</span></div>
+        <div class="btnrow"><span class="faint" style="font-size:12px">3 pages · token style <b>natural</b></span><button class="btn btn-sm" type="button" id="copyTxt">Copy obfuscated text</button></div></div>
+      <div class="pane textpane" id="txt" tabindex="0" aria-label="Extracted text"></div>
+    </section>
+
+    <!-- KEY + PLAN + VERIFY -->
+    <section class="card" aria-label="Key material and verification">
+      <div class="keycard" id="keyCard">
+        <div class="card-head" style="margin-bottom:6px"><div class="card-title">Key material · returned once, never stored</div><span class="chip teal">dps.v1</span></div>
+        <div class="mono" style="font-size:12px;overflow-wrap:anywhere;line-height:1.6">kid: k_01K7ZT2N4R · dek: b64u:9mVb…Q2xc · wrap: rsa-oaep-256 (caller key)<br><span class="faint">reveal hints: 23 spans · locators, methods and types, no originals</span></div>
+        <div class="btnrow" style="margin-top:10px"><button class="btn btn-sm" type="button" id="copyKey">Copy key</button><button class="btn btn-sm btn-primary" type="button" id="revealBtn">Reveal text with key</button><span id="revealed" class="chip emerald hidden">original text restored · POST /api/v1/reveal</span></div>
+        <div class="faint" style="font-size:12px;margin-top:8px" id="keyNote">Applies to the text extraction only. The redacted PDF has no key.</div>
+      </div>
+      <div class="callout hidden" id="seedCard" style="border-color:var(--violet);background:var(--violet-soft)">Synthesis seed <span class="mono">s_01K7ZT…</span> is echoed for cross-call consistency on request. It is not a reveal key: generation is one-way.</div>
+
+      <div style="margin-top:12px" id="planObf">
+        <div class="diffrow"><span class="k">method</span><span>fpe_text (names) · fpe_digits (Aadhaar, account, phones) · det_token (address, UPI, masked card, enrolment no.) · date_shift ±365 · email (keep domain)</span></div>
+        <div class="diffrow"><span class="k">consistency</span><span>one token per value across pages: name ×3, address ×2, mobile ×4 · IMPS digits match the mobile token</span></div>
+      </div>
+      <div style="margin-top:12px" class="hidden" id="planSyn">
+        <div class="diffrow"><span class="k">persona</span><span>one persona per document: Indian female name ↔ father's surname ↔ e-mail ↔ locale en_IN ↔ age band 35–39 kept</span></div>
+        <div class="diffrow"><span class="k">validity</span><span>Aadhaar Verhoeff-valid outside issued space · PAN format valid · card on test IIN 411111 · RFC 2606 e-mail domain</span></div>
+      </div>
+      <div class="diffrow"><span class="k">ocr</span><span><span class="ocr-name">Azure Read v3.2 via org gateway</span> · 3 pages · <span id="ocrWords">701 words</span> · 4.7&nbsp;s</span></div>
+      <div class="diffrow"><span class="k">not flagged</span><span><span class="mono">CUST-884120</span> (declared business key) · IFSC (branch code) · amounts and balances (kept by <b>dpdp-pseudonymise</b>) · change in <b>Policies</b></span></div>
+      <div class="diffrow"><span class="k">llm</span><span>not called for this document · raw values sent: <b style="color:var(--emerald)">0</b></span></div>
+
+      <div class="verify" style="margin-top:12px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
+        <span id="verifyTxt"><b>Verified.</b> Leakage sweep passed: 0 of 23 originals in the text output. The produced PDF was re-extracted and read again with OCR: 0 characters recovered under 25 boxes.</span></div>
+    </section>
+  </div>
+</main></div></div>
+<script>
+  renderSidebar('Playground');
+  (function () {
+    var state = { page: 0, mode: 'red', ocr: 'azure', revealed: false };
+    var srcWrap = document.getElementById('srcWrap'), outWrap = document.getElementById('outWrap');
+    var papers = Array.prototype.slice.call(srcWrap.querySelectorAll('.paper'));
+    var counts = [10, 10, 4];
+    function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+    // badges + remember originals
+    papers.forEach(function (p) {
+      p.querySelectorAll('.pii').forEach(function (s) {
+        s.setAttribute('data-o', s.textContent);
+        if (!s.hasAttribute('data-cont')) { var b = document.createElement('b'); b.className = 'fb'; b.textContent = s.getAttribute('data-f'); b.setAttribute('aria-hidden', 'true'); s.appendChild(b); }
+      });
+    });
+
+    // page strip
+    var strip = document.getElementById('strip'), meta = strip.querySelector('.strip-meta');
+    papers.forEach(function (p, i) {
+      var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'thumb'; btn.setAttribute('aria-label', 'Show page ' + (i + 1));
+      var w = document.createElement('div'); w.className = 'thumb-paper';
+      var c = p.cloneNode(true); c.hidden = false; c.querySelectorAll('.fb').forEach(function (b) { b.remove(); }); w.appendChild(c);
+      var lab = document.createElement('span'); lab.innerHTML = 'p' + (i + 1) + ' · <b>' + counts[i] + '</b>';
+      btn.appendChild(w); btn.appendChild(lab); btn.addEventListener('click', function () { show(i); });
+      strip.insertBefore(btn, meta);
+    });
+
+    function show(i) {
+      state.page = i;
+      papers.forEach(function (p, j) { p.hidden = j !== i; });
+      strip.querySelectorAll('.thumb').forEach(function (t, j) { t.classList.toggle('on', j === i); });
+      document.getElementById('pgNo').textContent = i + 1;
+      document.querySelectorAll('.pgNo2').forEach(function (e) { e.textContent = i + 1; });
+      document.querySelectorAll('.grp').forEach(function (g) { var on = +g.getAttribute('data-page') === i; g.classList.toggle('open', on); g.querySelector('.grp-h').setAttribute('aria-expanded', on ? 'true' : 'false'); });
+      renderOut();
+    }
+
+    function renderOut() {
+      var src = papers[state.page], wrapW = srcWrap.clientWidth;
+      var c = src.cloneNode(true); c.hidden = false;
+      var srcSpans = src.querySelectorAll('.pii'), outSpans = c.querySelectorAll('.pii');
+      outSpans.forEach(function (s, i) {
+        s.querySelectorAll('.fb').forEach(function (b) { b.remove(); });
+        if (s.classList.contains('k')) { s.className = 'kept'; return; }
+        if (state.mode === 'red') {
+          var w = srcSpans[i].offsetWidth;
+          s.textContent = ' '; s.className = 'pii redacted'; s.setAttribute('aria-label', 'redacted');
+          s.style.width = wrapW ? (w / wrapW * 100).toFixed(2) + 'cqw' : (s.getAttribute('data-o').length * 0.6) + 'em';
+        } else if (state.mode === 'obf') {
+          var v = state.revealed ? s.getAttribute('data-o') : s.getAttribute('data-x');
+          if (!v) { s.remove(); return; }
+          s.textContent = v; s.className = 'pii ptok' + (state.revealed ? ' rev' : '');
+        } else { s.textContent = s.getAttribute('data-s'); s.className = 'pii ptok syn'; }
+      });
+      outWrap.innerHTML = ''; outWrap.appendChild(c);
+    }
+
+    function tokHTML(s) {
+      if (s.classList.contains('k')) return esc(s.getAttribute('data-o'));
+      if (state.mode === 'syn') return '<span class="tok syn">' + esc(s.getAttribute('data-s')) + '</span>';
+      if (state.revealed) return s.hasAttribute('data-cont') ? ' ' + esc(s.getAttribute('data-o')) : '<span class="tok rev">' + esc(s.getAttribute('data-o')) + '</span>';
+      var x = s.getAttribute('data-x'); return x ? '<span class="tok">' + esc(x) + '</span>' : '';
+    }
+    function lineHTML(el) {
+      var out = '';
+      el.childNodes.forEach(function (n) {
+        if (n.nodeType === 3) out += esc(n.textContent);
+        else if (n.nodeType === 1) {
+          if (n.classList.contains('fb')) return;
+          if (n.classList.contains('pii')) out += tokHTML(n);
+          else out += ' ' + lineHTML(n) + ' ';
+        }
+      });
+      return out;
+    }
+    function buildText() {
+      var html = [], eng = state.ocr === 'azure' ? 'Azure Read v3.2' : 'local Tesseract';
+      papers.forEach(function (p, i) {
+        html.push('<span class="pg">— page ' + (i + 1) + ' · ' + p.getAttribute('data-title') + ' · ' + eng + ' —</span>');
+        p.querySelectorAll('.ln').forEach(function (ln) {
+          if (state.ocr === 'tess' && ln.closest('.hand')) return;
+          var t = lineHTML(ln).replace(/\s+/g, ' ').trim(); if (t) html.push(t);
+        });
+        html.push('');
+      });
+      document.getElementById('txt').innerHTML = html.join('\n').trim();
+    }
+
+    var MODES = {
+      red: { ep: 'POST /api/v1/documents/obfuscate', run: 'Redact 3 pages', st: 'Redact', stSub: '· 25 boxes', title: 'Output · redacted PDF', chip: ['teal', 'flattened'],
+        meta: '<span class="mono">KYC-IN-0098812.redacted.pdf</span><br>3 pages · 1.1 MB · page <span class="pgNo2">1</span> shown', btn: 'Download redacted PDF',
+        note: '25 boxes are burned into the page images and the redacted words are removed from the text layer. No key can bring them back.',
+        txt: ['Text extraction · obfuscated', 'teal', 'reversible with key'], copy: 'Copy obfuscated text',
+        verify: '<b>Verified.</b> Leakage sweep passed: 0 of 23 originals in the text output. The produced PDF was re-extracted and read again with OCR: 0 characters recovered under 25 boxes.', timing: '6.1 s total · OCR 4.7 s · engine 0.9 s · PDF 0.5 s' },
+      obf: { ep: 'POST /api/v1/documents/obfuscate', run: 'Obfuscate text', st: 'Obfuscate', stSub: '· 23 values', title: 'Output · obfuscated text, page view', chip: ['teal', 'reversible'],
+        meta: 'Text layer laid over page <span class="pgNo2">1</span> · no PDF is produced in this mode', btn: 'Copy obfuscated text',
+        note: 'Tokens keep the format of each value, so downstream parsers still work. Reveal restores the originals with the key below.',
+        txt: ['Text extraction · obfuscated', 'teal', 'reversible with key'], copy: 'Copy obfuscated text',
+        verify: '<b>Verified.</b> Leakage sweep passed: 0 of 23 originals in the text output. Detectors re-run on the output found no personal data outside tokens.', timing: '5.6 s total · OCR 4.7 s · engine 0.9 s' },
+      syn: { ep: 'POST /api/v1/documents/synthesize', run: 'Synthesize text', st: 'Synthesize', stSub: '· 23 values', title: 'Output · synthetic text, page view', chip: ['violet', 'no path back'],
+        meta: 'Text layer laid over page <span class="pgNo2">1</span> · persona 1 of 1', btn: 'Copy synthetic text',
+        note: 'Every value is replaced by a rule-valid fake from one persona, so the name, father’s surname, address and phone agree with each other.',
+        txt: ['Text extraction · synthetic', 'violet', 'no path back'], copy: 'Copy synthetic text',
+        verify: '<b>Verified.</b> Leakage sweep passed: fuzzy match against the 23 originals found nothing. All 23 synthetic values pass their format and checksum rules.', timing: '5.8 s total · OCR 4.7 s · engine 1.1 s' }
+    };
+    function applyMode() {
+      var m = MODES[state.mode];
+      if (state.mode === 'syn') state.revealed = false;
+      document.getElementById('ep').textContent = m.ep;
+      document.getElementById('runBtn').textContent = m.run;
+      document.getElementById('stMode').textContent = m.st; document.getElementById('stModeSub').textContent = m.stSub;
+      document.getElementById('outTitle').textContent = m.title;
+      var oc = document.getElementById('outChip'); oc.className = 'chip ' + m.chip[0]; oc.textContent = m.chip[1];
+      document.getElementById('outMeta').innerHTML = m.meta; document.querySelectorAll('.pgNo2').forEach(function (e) { e.textContent = state.page + 1; });
+      document.getElementById('outBtn').textContent = m.btn; document.getElementById('outNote').textContent = m.note;
+      document.getElementById('txtTitle').textContent = m.txt[0]; var tc = document.getElementById('txtChip'); tc.className = 'chip ' + m.txt[1]; tc.textContent = m.txt[2];
+      document.getElementById('copyTxt').textContent = m.copy;
+      document.getElementById('verifyTxt').innerHTML = m.verify; document.getElementById('timing').textContent = m.timing;
+      document.getElementById('keyCard').classList.toggle('hidden', state.mode === 'syn');
+      document.getElementById('seedCard').classList.toggle('hidden', state.mode !== 'syn');
+      document.getElementById('planObf').classList.toggle('hidden', state.mode === 'syn');
+      document.getElementById('planSyn').classList.toggle('hidden', state.mode !== 'syn');
+      document.getElementById('keyNote').textContent = state.mode === 'red' ? 'Applies to the text extraction only. The redacted PDF has no key.' : 'Pass the same key back on the next call to get the same tokens.';
+      document.getElementById('revealed').classList.toggle('hidden', !state.revealed);
+      document.getElementById('revealBtn').classList.toggle('hidden', state.revealed);
+      document.querySelectorAll('#modeSeg button').forEach(function (b) { var on = b.getAttribute('data-mode') === state.mode; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+      renderOut(); buildText();
+    }
+
+    var OCR = {
+      azure: { name: 'Azure Read v3.2 via org gateway', words: '701 words', stat: ['OCR conf 0.98', 'OCR conf 0.97', 'OCR conf 0.93'] },
+      tess: { name: 'local Tesseract 5', words: '676 words', stat: ['OCR conf 0.91', 'OCR conf 0.89', 'OCR conf 0.84 · handwriting not read'] }
+    };
+    function applyOcr() {
+      var o = OCR[state.ocr];
+      document.querySelectorAll('.ocr-name').forEach(function (e) { e.textContent = o.name; });
+      document.querySelectorAll('.ocr-stat').forEach(function (e) { e.textContent = o.stat[+e.getAttribute('data-p')]; });
+      document.getElementById('ocrWords').textContent = o.words;
+      document.getElementById('stOcr').textContent = '· ' + o.words;
+      document.getElementById('tessWarn').classList.toggle('hidden', state.ocr !== 'tess');
+      ['23', '24'].forEach(function (f) { var el = document.querySelector('.fd[data-f="' + f + '"]'); el.classList.toggle('missed', state.ocr === 'tess'); });
+      document.querySelectorAll('#ocrSeg button').forEach(function (b) { var on = b.getAttribute('data-ocr') === state.ocr; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+      buildText();
+    }
+
+    // wiring
+    document.querySelectorAll('#modeSeg button').forEach(function (b) { b.addEventListener('click', function () { state.mode = b.getAttribute('data-mode'); applyMode(); }); });
+    document.querySelectorAll('#ocrSeg button').forEach(function (b) { b.addEventListener('click', function () { state.ocr = b.getAttribute('data-ocr'); applyOcr(); }); });
+    document.querySelectorAll('.grp-h').forEach(function (h) { h.addEventListener('click', function () { show(+h.parentNode.getAttribute('data-page')); }); });
+    function hot(f, v) {
+      srcWrap.querySelectorAll('.pii[data-f="' + f + '"]').forEach(function (s) { s.classList.toggle('hot', v); });
+      document.querySelectorAll('.fd[data-f="' + f + '"]').forEach(function (x) { x.classList.toggle('hot', v); });
+    }
+    document.querySelectorAll('.fd').forEach(function (fd) {
+      var f = fd.getAttribute('data-f');
+      ['mouseenter', 'focus'].forEach(function (e) { fd.addEventListener(e, function () { hot(f, true); }); });
+      ['mouseleave', 'blur'].forEach(function (e) { fd.addEventListener(e, function () { hot(f, false); }); });
+    });
+    srcWrap.querySelectorAll('.pii').forEach(function (s) {
+      var f = s.getAttribute('data-f');
+      s.addEventListener('mouseenter', function () { hot(f, true); }); s.addEventListener('mouseleave', function () { hot(f, false); });
+    });
+    document.getElementById('revealBtn').addEventListener('click', function () { state.revealed = true; applyMode(); });
+    function flash(btn, label) { var t = btn.textContent; btn.textContent = label; setTimeout(function () { btn.textContent = t; }, 1400); }
+    document.getElementById('copyTxt').addEventListener('click', function (e) { flash(e.currentTarget, 'Copied'); });
+    document.getElementById('copyKey').addEventListener('click', function (e) { flash(e.currentTarget, 'Key copied'); });
+    var rt; window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(renderOut, 120); });
+
+    var q = location.search; var mp = /page=(\d)/.exec(q), mm = /mode=(red|obf|syn)/.exec(q), mo = /ocr=tess/.test(q);
+    if (mm) state.mode = mm[1]; if (mo) state.ocr = 'tess';
+    show(mp ? (+mp[1] - 1) : 0); applyMode(); applyOcr();
+  })();
+</script>
+</body></html>

@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>New job — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+  .page h2:focus { outline: none; }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; }
+  .btn-warn { background: var(--amber); border-color: transparent; color: var(--ink-on-brand); }
+  .btn-warn:hover { background: var(--amber); filter: brightness(1.06); }
+  .callout.emerald { border-color: var(--emerald); background: var(--emerald-soft); }
+  .callout.rose { border-color: var(--rose); background: var(--rose-soft); }
+
+  /* layout */
+  .wiz { display: grid; grid-template-columns: minmax(0, 1fr) 392px; gap: 16px; align-items: start; }
+  .rail { align-self: stretch; display: flex; flex-direction: column; gap: 16px; }
+  .rail .spec-card { position: sticky; top: calc(var(--topbar-h) + 16px); }
+
+  /* stepper */
+  .wsteps { display: flex; align-items: center; }
+  .wsteps .step { background: transparent; border: 0; font-family: var(--font); cursor: pointer; padding: 6px 8px; border-radius: var(--r-md); text-align: left; flex: none; }
+  .wsteps .step:hover { background: var(--surface-2); color: var(--ink); }
+  .wsteps .step .t { display: block; line-height: 1.25; }
+  .wsteps .step .sub { display: block; font-weight: 500; font-size: 11.5px; color: var(--ink-3); margin-top: 1px; white-space: nowrap; }
+  .wsteps .step-sep { flex: 1 1 12px; width: auto; min-width: 10px; margin: 0 4px; }
+
+  /* panels and forms */
+  .panel { display: none; } .panel.on { display: flex; flex-direction: column; gap: 16px; }
+  .panel-head h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; } .panel-head p { margin: 4px 0 0; color: var(--ink-2); font-size: 13px; max-width: 760px; }
+  .lbl { display: block; font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: 6px; }
+  .help { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
+  .fgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+  .fgrid.c3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .fgrid .full { grid-column: 1 / -1; }
+  textarea.input { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; resize: vertical; min-height: 88px; }
+  .input[disabled] { opacity: .6; }
+  .sel { position: relative; }
+  .rowx { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .between { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .sub-title { font-size: 12px; font-weight: 700; color: var(--ink-2); text-transform: uppercase; letter-spacing: .08em; }
+  .kv { font-size: 12.5px; color: var(--ink-2); } .kv b { color: var(--ink); font-weight: 600; }
+
+  /* choice cards */
+  .choices { display: grid; gap: 12px; }
+  .choices.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .choices.c3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .choice { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); cursor: pointer; transition: border-color .12s, background .12s; min-width: 0; }
+  .choice:hover { border-color: var(--border-strong); }
+  .choice input { position: absolute; opacity: 0; pointer-events: none; }
+  .choice:has(input:focus-visible) { outline: 2px solid var(--teal); outline-offset: 2px; }
+  .choice .radio { position: absolute; top: 15px; right: 15px; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
+  .choice:has(input:checked) { border-color: var(--teal-border); background: var(--teal-soft); box-shadow: inset 0 0 0 1px var(--teal-border); }
+  .choice:has(input:checked) .radio { border-color: var(--teal); background: radial-gradient(circle, var(--teal) 0 3.5px, transparent 4px); }
+  .choice.syn:has(input:checked) { border-color: var(--violet); background: var(--violet-soft); box-shadow: inset 0 0 0 1px var(--violet); }
+  .choice.syn:has(input:checked) .radio { border-color: var(--violet); background: radial-gradient(circle, var(--violet) 0 3.5px, transparent 4px); }
+  .choice .ct { font-weight: 700; font-size: 13.5px; display: flex; align-items: center; gap: 8px; padding-right: 26px; flex-wrap: wrap; }
+  .choice .cd { font-size: 12.5px; color: var(--ink-2); }
+  .choice .cm { font-size: 11.5px; color: var(--ink-3); margin-top: auto; padding-top: 4px; }
+  .choice.sm { padding: 11px 14px; } .choice.sm .radio { top: 12px; right: 12px; }
+  .eng { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--surface-3); color: var(--ink-2); border: 1px solid var(--border); }
+  .eng svg { width: 18px; height: 18px; }
+
+  /* switch */
+  .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; font-weight: 600; position: relative; }
+  .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .switch .track { width: 34px; height: 20px; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--border-strong); position: relative; transition: background .12s; flex: none; }
+  .switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ink-3); transition: transform .12s, background .12s; }
+  .switch input:checked + .track { background: var(--amber-soft); border-color: var(--amber-border); }
+  .switch input:checked + .track::after { transform: translateX(14px); background: var(--amber); }
+  .switch.plain input:checked + .track { background: var(--teal-soft); border-color: var(--teal-border); }
+  .switch.plain input:checked + .track::after { background: var(--teal); }
+  .switch:has(input:focus-visible) .track { outline: 2px solid var(--teal); outline-offset: 2px; }
+
+  /* checks */
+  .checks { display: flex; flex-direction: column; }
+  .ck { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .ck:last-child { border-bottom: 0; }
+  .ck .ic { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 10.5px; font-weight: 800; margin-top: 1px; border: 1px solid; }
+  .ck.ok .ic { background: var(--emerald-soft); color: var(--emerald); border-color: var(--emerald-border); }
+  .ck.bad .ic { background: var(--rose-soft); color: var(--rose); border-color: var(--rose-border); }
+  .ck.warn .ic { background: var(--amber-soft); color: var(--amber); border-color: var(--amber-border); }
+  .ck b { font-weight: 600; } .ck .d { color: var(--ink-3); font-size: 12px; display: block; margin-top: 1px; }
+  .ck .meta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+  .cgroup { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 0 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+  .cgroup:first-child { padding-top: 0; }
+
+  /* column picker */
+  .cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
+  .colpick { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); font-size: 12px; cursor: pointer; min-width: 0; }
+  .colpick input { accent-color: var(--teal); width: 14px; height: 14px; margin: 0; flex: none; }
+  .colpick .mono { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .colpick .ty { margin-left: auto; color: var(--ink-3); font-size: 11px; white-space: nowrap; }
+
+  /* discovery */
+  .counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .cbox { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 12px; }
+  .cbox .l { font-size: 12px; color: var(--ink-2); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .cbox .l i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .cbox .v { font-size: 26px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .cbox .s { font-size: 11.5px; color: var(--ink-3); }
+  .dist { display: flex; height: 10px; gap: 2px; border-radius: 999px; overflow: hidden; margin: 14px 0 8px; }
+  .dist i { display: block; height: 100%; }
+  .hm { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 8px; }
+  .cell { border: 1px solid var(--border); border-radius: var(--r-md); padding: 8px 10px 8px 12px; background: var(--surface-2); box-shadow: inset 3px 0 0 var(--border-strong); min-width: 0; }
+  .cell.crit { background: var(--rose-soft); border-color: var(--rose-border); box-shadow: inset 3px 0 0 var(--rose); }
+  .cell.sens { background: var(--amber-soft); border-color: var(--amber-border); box-shadow: inset 3px 0 0 var(--amber); }
+  .cell.decl { background: var(--teal-soft); border-color: var(--teal-border); box-shadow: inset 3px 0 0 var(--teal); }
+  .cell .cn { font-family: var(--mono); font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell .ce { font-size: 11px; color: var(--ink-2); display: flex; justify-content: space-between; gap: 6px; margin-top: 3px; }
+  .cell .ce span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell .ce span:last-child { font-family: var(--mono); color: var(--ink-3); flex: none; }
+  .decide { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .decide:last-child { border-bottom: 0; padding-bottom: 0; }
+  .decide .why { color: var(--ink-2); } .decide .sug { color: var(--ink-3); margin-top: 4px; }
+
+  /* write modes */
+  .opts { border: 1px solid var(--border); border-radius: var(--r-lg); padding: 16px 18px; background: var(--surface); }
+  .confirm { border: 1px solid var(--rose-border); border-radius: var(--r-lg); padding: 18px; background: linear-gradient(180deg, var(--rose-soft), transparent 140px), var(--surface); box-shadow: var(--shadow-lg); }
+  .confirm.append { border-color: var(--amber-border); background: linear-gradient(180deg, var(--amber-soft), transparent 140px), var(--surface); }
+  .confirm h3 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  .confirm .lead { color: var(--ink-2); margin: 4px 0 12px; font-size: 13px; }
+  .conseq { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+  .conseq li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; }
+  .conseq li::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); margin: 7px 0 0 6px; }
+  .conseq li.r::before { background: var(--rose); } .conseq li.a::before { background: var(--amber); } .conseq li.t::before { background: var(--teal); }
+  .typebox { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: end; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .typebox .input { font-family: var(--mono); }
+
+  /* review */
+  .summ { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; align-items: baseline; }
+  .summ:last-child { border-bottom: 0; }
+  .summ .k { color: var(--ink-3); font-size: 12px; font-weight: 600; }
+  .plan { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 18px; font-size: 12.5px; }
+  .plan div { display: grid; grid-template-columns: 152px minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--border); align-items: baseline; }
+  .plan .mono { font-size: 12px; }
+  .drop { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px dashed var(--border-strong); border-radius: var(--r-md); background: var(--surface-2); font-size: 12.5px; margin-top: 10px; flex-wrap: wrap; }
+  body.mode-syn .only-obf, body:not(.mode-syn) .only-syn { display: none !important; }
+  .runbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 18px; border-radius: var(--r-lg); border: 1px solid var(--teal-border); background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--teal) 10%, var(--surface))); }
+
+  .wfoot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .wfoot .hint { font-size: 12px; color: var(--ink-3); }
+
+  /* rail */
+  .spec { font-size: 11px; line-height: 1.6; white-space: normal; max-height: calc(100vh - 210px); min-height: 240px; }
+  .spec .ln { display: block; white-space: pre-wrap; padding: 0 6px; margin: 0 -6px; border-radius: 4px; transition: background .15s; }
+  .spec .ln .s { color: var(--ink); } .spec .ln .k { color: var(--ink-3); }
+  .spec[data-s="1"] .s1, .spec[data-s="2"] .s2, .spec[data-s="3"] .s3, .spec[data-s="4"] .s4, .spec[data-s="5"] .s5 { background: var(--surface-3); box-shadow: inset 2px 0 0 var(--teal); }
+  .guard { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
+  .guard div { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; }
+  .guard svg { width: 14px; height: 14px; color: var(--emerald); margin-top: 2px; }
+
+  @media (max-width: 1360px) { .wsteps .step .sub { display: none; } }
+  @media (max-width: 1240px) { .wiz { grid-template-columns: minmax(0, 1fr); } .rail .spec-card { position: static; } .spec { max-height: none; } }
+  @media (max-width: 860px) {
+    .choices.c2, .choices.c3, .fgrid, .fgrid.c3, .plan { grid-template-columns: minmax(0, 1fr); }
+    .counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .decide { grid-template-columns: minmax(0, 1fr); gap: 6px; } .decide .btn { justify-self: start; }
+    .hm { grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); }
+    .summ { grid-template-columns: minmax(0, 1fr) auto; } .summ .k { grid-column: 1 / -1; }
+    .typebox { grid-template-columns: minmax(0, 1fr); } .typebox .btn { justify-content: center; }
+  }
+  @media (max-width: 760px) {
+    .wsteps .step:not(.on) .lbl { display: none; }
+    .wsteps .step { padding: 4px; } .wsteps .step-sep { margin: 0 2px; min-width: 6px; }
+    .opts, .confirm { padding: 14px; }
+  }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><a class="crumb" href="07-jobs.html">Data sources &amp; jobs</a><span class="sep">/</span><span class="muted">New job</span><span class="muted mono hide-sm" style="font-size:12px">draft d_01K8C4M2V7</span><span class="topbar-spacer"></span>
+  <span class="pill hide-sm"><span class="dot"></span>Draft saved 14:38</span><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>New job</h1><p>Protect a table or collection in five steps. DPS reads only the discovery sample until you press Run job, and writes nothing before then.</p></div>
+    <div class="head-actions"><a class="btn btn-ghost" href="07-jobs.html">Cancel</a><button class="btn" type="button">Save draft</button></div></div>
+
+  <div class="card" style="padding:12px 14px"><nav class="wsteps" aria-label="Job steps">
+    <button class="step on" type="button" data-go="1" aria-current="step"><span class="n">1</span><span class="lbl"><span class="t">Connect</span><span class="sub">Oracle · crm-prod-ro</span></span></button><div class="step-sep"></div>
+    <button class="step" type="button" data-go="2"><span class="n">2</span><span class="lbl"><span class="t">Select data</span><span class="sub">1,948,210 rows · 22 columns</span></span></button><div class="step-sep"></div>
+    <button class="step" type="button" data-go="3"><span class="n">3</span><span class="lbl"><span class="t">Discover</span><span class="sub">2,000 sampled · 3 to decide</span></span></button><div class="step-sep"></div>
+    <button class="step" type="button" data-go="4"><span class="n">4</span><span class="lbl"><span class="t">Target and write mode</span><span class="sub" id="sub4">Copy to CRM_MASKED</span></span></button><div class="step-sep"></div>
+    <button class="step" type="button" data-go="5"><span class="n">5</span><span class="lbl"><span class="t">Review and run</span><span class="sub" id="sub5">obfuscate · CHG-48213</span></span></button>
+  </nav></div>
+
+  <div class="wiz">
+  <div>
+  <!-- ============ STEP 1 · CONNECT ============ -->
+  <section class="panel on" data-step="1" aria-labelledby="h1s">
+    <div class="panel-head"><h2 id="h1s">1 · Connect to the source</h2><p>Pick the engine and how DPS reaches it. The source is always read through a read-only session, and the job stores a secret name, never a password.</p></div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Engine</div></div>
+      <div class="choices c3" role="radiogroup" aria-label="Database engine">
+        <label class="choice"><input type="radio" name="engine" value="oracle" checked><span class="radio"></span>
+          <span class="ct"><span class="eng"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span>Oracle Database</span>
+          <span class="cd">19c and 23ai. Thin-mode driver, no client install. Sessions are tagged so the DBA audit trail shows DPS.</span>
+          <span class="cm">Owners and tables · key-range or ROWID partitions</span></label>
+        <label class="choice"><input type="radio" name="engine" value="postgres"><span class="radio"></span>
+          <span class="ct"><span class="eng"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M9 9v11"/></svg></span>PostgreSQL</span>
+          <span class="cd">14 to 16. Reads in read-only transactions with a statement timeout; loads with COPY.</span>
+          <span class="cm">Schemas and tables · keyset on the primary key</span></label>
+        <label class="choice"><input type="radio" name="engine" value="mongo"><span class="radio"></span>
+          <span class="ct"><span class="eng"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 4C6 4 5 5 5 7v2c0 1.5-1 2.5-2 3 1 .5 2 1.5 2 3v2c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2c0 1.5 1 2.5 2 3-1 .5-2 1.5-2 3v2c0 2-1 3-3 3"/></svg></span>MongoDB</span>
+          <span class="cd">6 and 7. Every document goes through the JSON engine, nested paths and arrays included.</span>
+          <span class="cm">Databases and collections · keyset on _id</span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Source connection</div>
+        <div class="seg" role="group" aria-label="How DPS connects"><button type="button" class="on" aria-pressed="true" data-show="cred-ref" data-hide="cred-inline">Secret reference</button><button type="button" aria-pressed="false" data-show="cred-inline" data-hide="cred-ref">Inline credentials (dev only)</button></div></div>
+      <div id="cred-ref">
+        <label class="lbl" for="secret">Secret name</label>
+        <input class="input mono" id="secret" value="dps/src/crm-prod-ro" spellcheck="false">
+        <div class="help">The job stores only this name. Workers read the secret from the mounted store when they start; it never appears in the console, the logs or the evidence pack.</div>
+      </div>
+      <div id="cred-inline" hidden>
+        <div class="fgrid">
+          <div><label class="lbl" for="ihost">Host</label><input class="input mono" id="ihost" value="crm-dev-db.bank.internal" spellcheck="false"></div>
+          <div class="fgrid" style="grid-template-columns:110px minmax(0,1fr);gap:12px"><div><label class="lbl" for="iport">Port</label><input class="input mono" id="iport" value="2484"></div><div><label class="lbl" for="isvc">Service name</label><input class="input mono" id="isvc" value="CRMDEV" spellcheck="false"></div></div>
+          <div><label class="lbl" for="iuser">Username</label><input class="input mono" id="iuser" value="dps_reader" spellcheck="false"></div>
+          <div><label class="lbl" for="ipass">Password</label><input class="input mono" id="ipass" type="password" placeholder="Enter the password for dps_reader" autocomplete="off"></div>
+        </div>
+        <div class="callout amber" style="margin-top:12px;font-size:12.5px">Inline credentials are for dev and UAT connections. They travel over TLS, are encrypted with the service key while the job runs, and are purged when it finishes.</div>
+        <div class="callout rose prod-only" id="inline-prod-err" style="margin-top:10px;font-size:12.5px"><b>A production-tagged connection can't use inline credentials.</b> Switch to a secret reference, or turn off the production tag if this database is not production.</div>
+      </div>
+      <div class="between" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+        <label class="switch"><input type="checkbox" id="prod" role="switch" checked><span class="track"></span>Tagged production</label>
+        <span class="chip amber prod-only">production · writes need the admin scope</span>
+      </div>
+      <div class="help">Reads are unaffected. Writing back to a production-tagged connection (In place or Append) also needs the admin scope.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Target connection</div><span class="faint" style="font-size:12px">used by Copy to a table</span></div>
+      <label class="lbl" for="tsecret">Secret name</label>
+      <input class="input mono" id="tsecret" value="dps/tgt/crm-uat" spellcheck="false">
+      <div class="help">In place and Append write through a connection to the source database instead; you choose it in step 4.</div>
+    </div>
+
+    <div class="card" id="testcard">
+      <div class="card-head"><div class="card-title">Test connection</div>
+        <div class="rowx"><span class="chip emerald" id="test-chip">6 of 6 checks passed</span><button class="btn btn-sm" type="button" id="test-btn">Test again</button></div></div>
+      <div class="checks" id="test-body">
+        <div class="cgroup"><span class="rowx"><span class="sub-title">Source</span><span class="mono">dps/src/crm-prod-ro</span></span><span class="faint" style="font-size:12px">Oracle Database 19c (19.21) · CRMPRD</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>Reachable over TLS</b><span class="d">TCPS to crm-prod-scan.bank.internal, service CRMPRD</span></span><span class="meta">38 ms</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>SELECT on CRM.CUSTOMERS</b><span class="d">4,102,377 rows by optimizer statistics (gathered Oct 10)</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>No DML on source</b><span class="d">The account has no INSERT, UPDATE, DELETE or MERGE grants, so the read path cannot change source data</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>Session tagged for audit</b><span class="d">module DPS, action discover, client id d_01K8C4M2V7</span></span><span class="meta">ok</span></div>
+        <div class="cgroup"><span class="rowx"><span class="sub-title">Target</span><span class="mono">dps/tgt/crm-uat</span></span><span class="faint" style="font-size:12px">Oracle Database 19c (19.21) · CRMUAT</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>CREATE TABLE in CRM_MASKED</b><span class="d">Needed when the target table is missing</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>INSERT on CRM_MASKED</b><span class="d">38 GB free in tablespace CRM_MASKED_DATA</span></span><span class="meta">ok</span></div>
+      </div>
+      <div class="faint" style="font-size:12px;margin-top:8px" id="test-time">Tested at 14:31:07 · 412 ms · no rows were read</div>
+    </div>
+
+    <div class="wfoot"><span class="hint">Step 1 of 5</span><button class="btn btn-primary" type="button" data-go="2">Next: Select data</button></div>
+  </section>
+
+  <!-- ============ STEP 2 · SELECT DATA ============ -->
+  <section class="panel" data-step="2" aria-labelledby="h2s">
+    <div class="panel-head"><h2 id="h2s">2 · Select data</h2><p>Choose the table and the rows to read. What you type is parsed and checked before it reaches the database; literals are sent as bound parameters.</p></div>
+
+    <div class="card">
+      <div class="fgrid">
+        <div><label class="lbl" for="owner">Owner</label><div class="sel"><select class="input" id="owner"><option>CRM</option><option>CRM_ARCHIVE</option><option>LOANS</option></select></div></div>
+        <div><label class="lbl" for="table">Table</label><div class="sel"><select class="input" id="table"><option>CUSTOMERS</option><option>CUSTOMER_ADDRESSES</option><option>KYC_REVIEWS</option><option>RM_INTERACTIONS</option></select></div></div>
+        <div class="full kv">4,102,377 rows · 22 columns · primary key <b class="mono">CUSTOMER_ID NUMBER(12)</b> · 3.1 GB<div class="help">For MongoDB you pick a database and a collection here.</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Which rows</div>
+        <div class="seg" role="group" aria-label="Selection type"><button type="button" class="on" aria-pressed="true" data-show="sel-where" data-hide="sel-query">WHERE expression</button><button type="button" aria-pressed="false" data-show="sel-query" data-hide="sel-where">Read-only SELECT</button></div></div>
+
+      <div id="sel-where">
+        <label class="lbl" for="where">WHERE expression on CRM.CUSTOMERS</label>
+        <textarea class="input" id="where" rows="3" spellcheck="false">CREATED_AT &gt;= DATE '2025-01-01'
+AND COUNTRY_CODE IN ('IN', 'US', 'GB', 'MX')</textarea>
+        <div class="between" style="margin-top:12px"><span class="chip emerald">Valid · 6 of 6 checks</span><button class="btn btn-sm" type="button">Check again</button></div>
+        <div class="checks" style="margin-top:6px">
+          <div class="ck ok"><span class="ic">✓</span><span><b>One statement</b></span><span class="meta">ok</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>SELECT only</b><span class="d">No INSERT, UPDATE, DELETE, MERGE or DDL</span></span><span class="meta">ok</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>No INTO, procedure calls, database links or FOR UPDATE</b></span><span class="meta">ok</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Identifiers validated</b><span class="d mono">CRM · CUSTOMERS · CREATED_AT · COUNTRY_CODE</span></span><span class="meta">4</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Literals bound as parameters</b><span class="d">5 values become :p1 to :p5</span></span><span class="meta">5</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Keyset-able</b><span class="d">Reads page by CUSTOMER_ID, so a restart resumes where it stopped</span></span><span class="meta">ok</span></div>
+        </div>
+        <div class="lbl" style="margin-top:12px">Runs as</div>
+        <div class="pane">SELECT … FROM "CRM"."CUSTOMERS"
+WHERE "CREATED_AT" &gt;= :p1 AND "COUNTRY_CODE" IN (:p2, :p3, :p4, :p5)
+ORDER BY "CUSTOMER_ID"</div>
+        <div class="kv" style="margin-top:10px"><b>1,948,210 rows</b> match · IN 1,186,402 · US 421,775 · GB 230,118 · MX 109,915 <span class="faint">· counted at 14:33 in 1.8 s</span></div>
+      </div>
+
+      <div id="sel-query" hidden>
+        <label class="lbl" for="query">Read-only SELECT</label>
+        <textarea class="input" id="query" rows="7" spellcheck="false">SELECT c.CUSTOMER_ID, c.FULL_NAME, c.NATIONAL_ID, c.EMAIL, c.MOBILE
+FROM CRM.CUSTOMERS c
+JOIN CRM.KYC_REVIEWS k ON k.CUSTOMER_ID = c.CUSTOMER_ID
+WHERE k.REVIEW_STATUS = 'PENDING'
+FOR UPDATE</textarea>
+        <div class="between" style="margin-top:12px"><span class="chip rose">Not accepted · 1 problem</span><button class="btn btn-sm" type="button">Check again</button></div>
+        <div class="callout rose" style="margin-top:10px;font-size:12.5px"><b>FOR UPDATE is not allowed (line 5).</b> DPS never locks source rows, so it would block your application's writes for the length of the job. Delete line 5 and check again.</div>
+        <div class="checks" style="margin-top:6px">
+          <div class="ck ok"><span class="ic">✓</span><span><b>One statement</b></span><span class="meta">ok</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>SELECT only</b></span><span class="meta">ok</span></div>
+          <div class="ck bad"><span class="ic">✕</span><span><b>No INTO, procedure calls, database links or FOR UPDATE</b><span class="d">FOR UPDATE found on line 5</span></span><span class="meta">failed</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Identifiers validated</b><span class="d mono">CRM · CUSTOMERS · KYC_REVIEWS · 6 columns</span></span><span class="meta">8</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Keyset-able</b><span class="d">on c.CUSTOMER_ID</span></span><span class="meta">ok</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Columns <span class="faint" id="colcount">· 22 of 22</span></div><div class="rowx"><button class="btn btn-sm" type="button" id="cols-all">Select all</button><button class="btn btn-sm btn-ghost" type="button" id="cols-none">Clear</button></div></div>
+      <div class="cols" id="cols">
+        <label class="colpick"><input type="checkbox" checked disabled><span class="mono">CUSTOMER_ID</span><span class="ty">key · always read</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">FULL_NAME</span><span class="ty">VARCHAR2(120)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">NATIONAL_ID</span><span class="ty">VARCHAR2(18)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">TAX_ID</span><span class="ty">CHAR(10)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">EMAIL</span><span class="ty">VARCHAR2(254)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">MOBILE</span><span class="ty">VARCHAR2(20)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">DOB</span><span class="ty">DATE</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">ADDR_LINE1</span><span class="ty">VARCHAR2(200)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">PIN_CODE</span><span class="ty">VARCHAR2(10)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">COUNTRY_CODE</span><span class="ty">CHAR(2)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">STATE_CODE</span><span class="ty">VARCHAR2(8)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">RISK_SCORE</span><span class="ty">NUMBER(4)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">SEGMENT</span><span class="ty">VARCHAR2(16)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">KYC_STATUS</span><span class="ty">VARCHAR2(12)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">BRANCH_CODE</span><span class="ty">VARCHAR2(11)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">RM_NOTES</span><span class="ty">CLOB</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">PREF_LANG</span><span class="ty">VARCHAR2(5)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">CHANNEL</span><span class="ty">VARCHAR2(12)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">ACCOUNT_COUNT</span><span class="ty">NUMBER(3)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">CUSTOMER_STATUS</span><span class="ty">VARCHAR2(10)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">CREATED_AT</span><span class="ty">TIMESTAMP(6)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">UPDATED_AT</span><span class="ty">TIMESTAMP(6)</span></label>
+      </div>
+      <div class="help">Columns you leave out are not read. For In place, columns you leave out keep their current values.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Limits</div></div>
+      <div class="fgrid c3">
+        <div><label class="lbl" for="maxrows">Max rows</label><input class="input mono" id="maxrows" placeholder="No limit" inputmode="numeric"><div class="help">Leave empty to read all 1,948,210 matching rows.</div></div>
+        <div><label class="lbl" for="sample">Discovery sample</label><input class="input mono" id="sample" value="2,000" inputmode="numeric"><div class="help">Drawn with Oracle SAMPLE. Values stay inside the worker.</div></div>
+        <div><label class="lbl" for="par">Parallelism</label><div class="sel"><select class="input" id="par"><option>8 partitions by CUSTOMER_ID range</option><option>4 partitions by CUSTOMER_ID range</option><option>16 partitions by ROWID range</option></select></div><div class="help">Checkpoint after every 50,000 committed rows.</div></div>
+      </div>
+    </div>
+
+    <div class="wfoot"><button class="btn" type="button" data-go="1">Back</button><button class="btn btn-primary" type="button" data-go="3">Next: Discover</button></div>
+  </section>
+
+  <!-- ============ STEP 3 · DISCOVER ============ -->
+  <section class="panel" data-step="3" aria-labelledby="h3s">
+    <div class="panel-head"><h2 id="h3s">3 · Discover</h2><p>DPS sampled the selection, ran the detectors and suggests a method for every column. You accept or change each suggestion in the review table; the accepted result becomes the run policy.</p></div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Sampled 2,000 of 1,948,210 rows in 3.4 s</div><span class="chip emerald">sample complete</span></div>
+      <div class="kv">Detectors: <b>structural</b> · <b>patterns and checksums</b> · <b>NER</b> on 2 text columns · LLM labelling <b>off</b> · <b style="color:var(--emerald)">0</b> raw values sent to the LLM</div>
+      <div class="dist" role="img" aria-label="22 columns: 2 critical, 7 sensitive, 2 declared, 11 kept">
+        <i style="flex:2;background:var(--rose)"></i><i style="flex:7;background:var(--amber)"></i><i style="flex:2;background:var(--teal)"></i><i style="flex:11;background:var(--surface-3)"></i>
+      </div>
+      <div class="counts">
+        <div class="cbox"><div class="l"><i style="background:var(--rose)"></i>Critical</div><div class="v">2</div><div class="s">government IDs</div></div>
+        <div class="cbox"><div class="l"><i style="background:var(--amber)"></i>Sensitive</div><div class="v">7</div><div class="s">contact, identity, free text</div></div>
+        <div class="cbox"><div class="l"><i style="background:var(--teal)"></i>Declared</div><div class="v">2</div><div class="s">named by the CRM owner</div></div>
+        <div class="cbox"><div class="l"><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>Kept</div><div class="v">11</div><div class="s">not personal data</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Column heat-map · CRM.CUSTOMERS</div><div class="legend"><span><i style="background:var(--rose)"></i>critical</span><span><i style="background:var(--amber)"></i>sensitive</span><span><i style="background:var(--teal)"></i>declared</span><span><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>kept</span></div></div>
+      <div class="hm">
+        <div class="cell decl"><div class="cn">CUSTOMER_ID</div><div class="ce"><span>CUSTOMER_ID · key</span><span>1.00</span></div></div>
+        <div class="cell sens"><div class="cn">FULL_NAME</div><div class="ce"><span>PERSON_NAME</span><span>0.96</span></div></div>
+        <div class="cell crit"><div class="cn">NATIONAL_ID</div><div class="ce"><span>4 ID types</span><span>0.99</span></div></div>
+        <div class="cell crit"><div class="cn">TAX_ID</div><div class="ce"><span>PAN_IN · IN rows</span><span>0.98</span></div></div>
+        <div class="cell sens"><div class="cn">EMAIL</div><div class="ce"><span>EMAIL</span><span>0.99</span></div></div>
+        <div class="cell sens"><div class="cn">MOBILE</div><div class="ce"><span>PHONE · 4 regions</span><span>0.97</span></div></div>
+        <div class="cell sens"><div class="cn">DOB</div><div class="ce"><span>DATE_OF_BIRTH</span><span>0.95</span></div></div>
+        <div class="cell sens"><div class="cn">ADDR_LINE1</div><div class="ce"><span>STREET_ADDRESS</span><span>0.90</span></div></div>
+        <div class="cell sens"><div class="cn">PIN_CODE</div><div class="ce"><span>POSTAL_CODE</span><span>0.93</span></div></div>
+        <div class="cell"><div class="cn">COUNTRY_CODE</div><div class="ce"><span>kept · 4 values</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">STATE_CODE</div><div class="ce"><span>kept · 61 values</span><span>—</span></div></div>
+        <div class="cell decl"><div class="cn">RISK_SCORE</div><div class="ce"><span>BUSINESS_SENSITIVE</span><span></span></div></div>
+        <div class="cell"><div class="cn">SEGMENT</div><div class="ce"><span>kept · 4 values</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">KYC_STATUS</div><div class="ce"><span>kept · 5 values</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">BRANCH_CODE</div><div class="ce"><span>kept · bank branch</span><span>—</span></div></div>
+        <div class="cell sens"><div class="cn">RM_NOTES</div><div class="ce"><span>FREE_TEXT · mixed</span><span>0.84</span></div></div>
+        <div class="cell"><div class="cn">PREF_LANG</div><div class="ce"><span>kept · 7 values</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">CHANNEL</div><div class="ce"><span>kept · 5 values</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">ACCOUNT_COUNT</div><div class="ce"><span>kept · numeric</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">CUSTOMER_STATUS</div><div class="ce"><span>kept · 3 values</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">CREATED_AT</div><div class="ce"><span>kept · timestamp</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">UPDATED_AT</div><div class="ce"><span>kept · timestamp</span><span>—</span></div></div>
+      </div>
+      <div class="between" style="margin-top:14px">
+        <span class="faint" style="font-size:12px">Confidence is the combined detector score on the sample. Examples in the review table are masked.</span>
+        <a class="btn btn-sm" href="03-data-sources.html">Open the full review table (22 columns)</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Needs a decision</div><span class="chip amber">3 columns</span></div>
+      <div class="decide">
+        <span class="mono">NATIONAL_ID</span>
+        <div><div class="why">Four ID types in one column: AADHAAR 1,214 · SSN 431 · CURP 236 · NINO 119 of 2,000 sampled rows.</div><div class="sug">Suggested: detect the type per value; fpe_digits for Aadhaar and SSN, fpe_text for CURP and NINO.</div></div>
+        <button class="btn btn-sm" type="button" data-accept>Accept</button>
+      </div>
+      <div class="decide">
+        <span class="mono">PIN_CODE</span>
+        <div><div class="why">Indian PIN and US ZIP codes have fewer than 10⁶ possible values, so format-preserving encryption would be easy to reverse.</div><div class="sug">Suggested: generalize to the first 3 characters (one-way).</div></div>
+        <button class="btn btn-sm" type="button" data-accept>Accept</button>
+      </div>
+      <div class="decide">
+        <span class="mono">RM_NOTES</span>
+        <div><div class="why">Free text with names, phone numbers or card last-4 in 38% of sampled rows.</div><div class="sug">Suggested: text pipeline with NER on the CLOB; offsets counted in UTF-16 units.</div></div>
+        <button class="btn btn-sm" type="button" data-accept>Accept</button>
+      </div>
+      <div class="callout" style="margin-top:12px;font-size:12px">Accepted choices are saved as classification snapshot <span class="mono">snap_01K8C4WQ9T</span>. It becomes the run policy and goes into the evidence pack.</div>
+    </div>
+
+    <div class="wfoot"><button class="btn" type="button" data-go="2">Back</button><button class="btn btn-primary" type="button" data-go="4">Next: Target and write mode</button></div>
+  </section>
+
+  <!-- ============ STEP 4 · TARGET AND WRITE MODE ============ -->
+  <section class="panel" data-step="4" aria-labelledby="h4s">
+    <div class="panel-head"><h2 id="h4s">4 · Target and write mode</h2><p>Choose where protected rows go. Copy to a table and Export files leave the source untouched. In place and Append change CRM.CUSTOMERS and ask you to confirm first.</p></div>
+
+    <div class="choices c2" role="radiogroup" aria-label="Write mode">
+      <label class="choice"><input type="radio" name="wm" value="in_place"><span class="radio"></span>
+        <span class="ct">In place <span class="chip rose">changes source rows</span></span>
+        <span class="cd">Updates the 1,948,210 selected rows in CRM.CUSTOMERS by primary key, column by column, in committed batches.</span>
+        <span class="cm">For masking a restored copy of production where it sits</span></label>
+      <label class="choice"><input type="radio" name="wm" value="append"><span class="radio"></span>
+        <span class="ct">Append new rows <span class="chip slate">adds rows to source</span></span>
+        <span class="cd">Inserts transformed copies of the selected rows into CRM.CUSTOMERS or a table you name. Existing rows are not changed.</span>
+        <span class="cm">Needs a primary-key strategy</span></label>
+      <label class="choice"><input type="radio" name="wm" value="table" checked><span class="radio"></span>
+        <span class="ct">Copy to a table <span class="chip slate">source unchanged</span></span>
+        <span class="cd">Loads protected rows into a table in another schema, created from the source definition if it is missing.</span>
+        <span class="cm">Truncate and insert, or upsert on the primary key</span></label>
+      <label class="choice"><input type="radio" name="wm" value="files"><span class="radio"></span>
+        <span class="ct">Export files <span class="chip slate">source unchanged</span></span>
+        <span class="cd">Writes CSV, Parquet or JSONL to S3 or a PVC path, with a manifest of files, row counts and checksums.</span>
+        <span class="cm">For other loaders and analytics</span></label>
+    </div>
+
+    <!-- options: copy to a table -->
+    <div class="opts" id="opt-table">
+      <div class="card-head"><div class="card-title">Copy to a table</div><span class="faint" style="font-size:12px">target connection dps/tgt/crm-uat</span></div>
+      <div class="fgrid">
+        <div><label class="lbl" for="tschema">Destination schema</label><input class="input mono" id="tschema" value="CRM_MASKED" spellcheck="false"></div>
+        <div><label class="lbl" for="ttable">Destination table</label><input class="input mono" id="ttable" value="CUSTOMERS" spellcheck="false"></div>
+        <div><span class="lbl">Load</span><div class="seg" role="group" aria-label="Load method"><button type="button" class="on" aria-pressed="true" data-show="load-ti" data-hide="load-up">Truncate and insert</button><button type="button" aria-pressed="false" data-show="load-up" data-hide="load-ti">Upsert on CUSTOMER_ID</button></div></div>
+        <div style="align-self:end"><label class="switch plain"><input type="checkbox" checked role="switch"><span class="track"></span>Create the table if it is missing</label></div>
+      </div>
+      <div class="checks" style="margin-top:12px">
+        <div class="ck ok"><span class="ic">✓</span><span><b>CRM_MASKED.CUSTOMERS exists and matches the source definition</b><span class="d">22 columns, same types and primary key</span></span><span class="meta">ok</span></div>
+        <div class="ck warn" id="load-ti"><span class="ic">!</span><span><b>Truncate removes the 1,912,004 rows now in CRM_MASKED.CUSTOMERS</b><span class="d">They were loaded by job j_01K7XN…8F on Oct 4. Choose Upsert to keep them.</span></span><span class="meta">check</span></div>
+        <div class="ck ok" id="load-up" hidden><span class="ic">✓</span><span><b>Upsert keeps rows that are not in this selection</b><span class="d">Matching CUSTOMER_IDs are replaced; 1,912,004 existing rows stay otherwise</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>Space</b><span class="d">About 2.9 GB needed, 38 GB free</span></span><span class="meta">ok</span></div>
+      </div>
+    </div>
+
+    <!-- options: export files -->
+    <div class="opts" id="opt-files" hidden>
+      <div class="card-head"><div class="card-title">Export files</div></div>
+      <div class="fgrid">
+        <div><span class="lbl">Format</span><div class="seg" role="group" aria-label="File format"><button type="button" aria-pressed="false">CSV</button><button type="button" class="on" aria-pressed="true">Parquet</button><button type="button" aria-pressed="false">JSONL</button></div></div>
+        <div><span class="lbl">Destination</span><div class="seg" role="group" aria-label="File destination"><button type="button" class="on" aria-pressed="true">S3</button><button type="button" aria-pressed="false">PVC path</button></div></div>
+        <div class="full"><label class="lbl" for="furi">Location</label><input class="input mono" id="furi" value="s3://dps-exports-apac/crm/customers/2026-10-11/" spellcheck="false"><div class="help">Written with the secret <span class="mono">dps/s3/exports-apac</span>. One file per partition (8), Snappy compression.</div></div>
+      </div>
+      <div class="checks" style="margin-top:12px">
+        <div class="ck ok"><span class="ic">✓</span><span><b>PutObject allowed on the prefix; bucket encryption on (SSE-KMS)</b></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>manifest.json lists each file with its row count and SHA-256</b><span class="d">Written last, so a loader that sees the manifest sees complete files</span></span><span class="meta">ok</span></div>
+      </div>
+    </div>
+
+    <!-- options: in place -->
+    <div class="opts" id="opt-in_place" hidden>
+      <div class="card-head"><div class="card-title">In place</div></div>
+      <div class="fgrid">
+        <div><label class="lbl" for="wconn">Write connection</label><div class="sel"><select class="input mono" id="wconn"><option>dps/src/crm-prod-rw</option><option>dps/src/crm-uat-clone-rw</option></select></div>
+          <div class="help">dps/src/crm-prod-ro is read-only by design, so writes go through a separate connection.</div></div>
+        <div><label class="lbl" for="batch">Commit every</label><div class="sel"><select class="input" id="batch"><option>5,000 rows per partition</option><option>1,000 rows per partition</option><option>20,000 rows per partition</option></select></div></div>
+      </div>
+      <div class="checks" style="margin-top:12px">
+        <div class="ck ok"><span class="ic">✓</span><span><b>UPDATE on CRM.CUSTOMERS</b><span class="d">Tested 14:36 on dps/src/crm-prod-rw</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>CUSTOMER_ID is the update key and is not changed</b><span class="d">10 columns are rewritten; foreign keys that point at CUSTOMER_ID keep working</span></span><span class="meta">ok</span></div>
+      </div>
+    </div>
+
+    <!-- options: append -->
+    <div class="opts" id="opt-append" hidden>
+      <div class="card-head"><div class="card-title">Append new rows</div></div>
+      <div class="fgrid">
+        <div><span class="lbl">Insert into</span><div class="seg" role="group" aria-label="Append destination"><button type="button" class="on" aria-pressed="true" data-show="" data-hide="ap-named">Same table · CRM.CUSTOMERS</button><button type="button" aria-pressed="false" data-show="ap-named">Named table</button></div></div>
+        <div id="ap-named" hidden><label class="lbl" for="apname">Table name</label><input class="input mono" id="apname" value="CRM.CUSTOMERS_SYNTH" spellcheck="false"></div>
+      </div>
+      <div class="lbl" style="margin-top:14px">Primary-key strategy</div>
+      <div class="choices c3" role="radiogroup" aria-label="Primary-key strategy">
+        <label class="choice sm"><input type="radio" name="pk" value="generate"><span class="radio"></span><span class="ct">Database-generated</span><span class="cd">Sequence CRM.CUSTOMERS_SEQ assigns new keys.</span></label>
+        <label class="choice sm"><input type="radio" name="pk" value="offset" checked><span class="radio"></span><span class="ct">Offset</span><span class="cd">New key = original + 90,000,000.</span></label>
+        <label class="choice sm"><input type="radio" name="pk" value="token"><span class="radio"></span><span class="ct">Token</span><span class="cd">Use the obfuscated key; checked for clashes before any write.</span></label>
+      </div>
+      <div class="checks" style="margin-top:10px">
+        <div class="ck ok pk-d" data-pk="generate" hidden><span class="ic">✓</span><span><b>Next value 41,882,908</b><span class="d">New rows will not join to the masked MongoDB and PostgreSQL copies by customer id. The evidence pack records this.</span></span><span class="meta">ok</span></div>
+        <div class="ck ok pk-d" data-pk="offset"><span class="ic">✓</span><span><b>No overlap with existing keys</b><span class="d">Current maximum CUSTOMER_ID is 41,882,907, so new keys fall between 90,000,001 and 131,882,907 and fit NUMBER(12).</span></span><span class="meta">ok</span></div>
+        <div class="ck bad pk-d" data-pk="token" hidden><span class="ic">✕</span><span><b>Collision pre-check failed: 79,903 of 1,948,210 token keys already exist</b><span class="d">The job would stop before writing anything. Choose Offset or Database-generated instead.</span></span><span class="meta">14:37</span></div>
+      </div>
+    </div>
+
+    <!-- confirmation -->
+    <div class="confirm" id="confirm" hidden tabindex="-1" role="region" aria-labelledby="cf-title">
+      <div class="between"><h3 id="cf-title">Confirm: overwrite 1,948,210 rows in CRM.CUSTOMERS</h3><span class="chip amber prod-only">production</span></div>
+      <p class="lead" id="cf-lead">This job changes the source table. Read what happens before you confirm.</p>
+      <ul class="conseq cf-in_place">
+        <li class="r"><span><b>1,948,210 rows</b> in CRM.CUSTOMERS are updated by CUSTOMER_ID: 10 columns each, in batches of 5,000 per partition across 8 partitions.</span></li>
+        <li class="a"><span>Applications and reports that read CRM.CUSTOMERS see protected values as each batch commits.</span></li>
+        <li class="t only-obf"><span>The originals can be restored only with the key returned when the job finishes. <b>The key is shown once and DPS keeps no copy</b>; if it is lost, the original values cannot be recovered.</span></li>
+        <li class="r only-syn"><span>Synthetic values have no path back. <b>After the write, the original values in these 10 columns are gone.</b></span></li>
+        <li class="a only-obf"><span>PIN_CODE and RISK_SCORE use one-way methods (generalize, bucket). Those two columns cannot be restored, even with the key.</span></li>
+        <li><span>If a partition fails it resumes from its last committed batch. No row is left half-written.</span></li>
+      </ul>
+      <ul class="conseq cf-append" hidden>
+        <li class="a"><span>CRM.CUSTOMERS grows from <b>4,102,377 to 6,050,587 rows</b>. Existing rows are not changed.</span></li>
+        <li class="a" id="cf-pk"><span>New rows get CUSTOMER_ID = original + 90,000,000 (90,000,001 to 131,882,907). The evidence pack records the range.</span></li>
+        <li><span>Reports and jobs that read CRM.CUSTOMERS will count the new rows until you remove them.</span></li>
+        <li class="t only-obf"><span>The key that reverses the new rows is returned once when the job finishes. <b>DPS keeps no copy.</b></span></li>
+        <li class="only-syn"><span>The new rows are synthetic and have no path back to real customers.</span></li>
+      </ul>
+      <div class="callout amber prod-only" style="margin-top:14px;font-size:12.5px"><b>dps/src/crm-prod-rw is tagged production</b>, so this job also needs the admin scope. You have it through the role <span class="mono">dps-tenant-admin</span>; the confirmation is written to the audit log with your name and the time.</div>
+      <div class="callout rose" id="cf-blocked" hidden style="margin-top:10px;font-size:12.5px"><b>You can't confirm yet.</b> The collision pre-check failed for Token keys. Choose Offset or Database-generated above.</div>
+      <div class="typebox" id="cf-type">
+        <div><label class="lbl" for="cf-input">Type <span class="mono" style="color:var(--ink)">CRM.CUSTOMERS</span> to confirm</label><input class="input" id="cf-input" autocomplete="off" spellcheck="false" placeholder="CRM.CUSTOMERS"></div>
+        <button class="btn" type="button" id="cf-cancel">Choose another write mode</button>
+        <button class="btn btn-danger" type="button" id="cf-go" disabled>Write 1,948,210 rows in place</button>
+      </div>
+      <div class="callout emerald" id="cf-done" hidden style="margin-top:14px;font-size:12.5px"><b>Confirmed at 14:38.</b> Nothing is written yet. The job writes to CRM.CUSTOMERS only after you press Run job in step 5. <button class="linkbtn" type="button" id="cf-undo">Undo</button></div>
+    </div>
+
+    <div class="wfoot"><button class="btn" type="button" data-go="3">Back</button><span class="rowx"><span class="hint" id="next4-hint" hidden>Confirm the write to continue</span><button class="btn btn-primary" type="button" data-go="5" id="next4">Next: Review and run</button></span></div>
+  </section>
+
+  <!-- ============ STEP 5 · REVIEW AND RUN ============ -->
+  <section class="panel" data-step="5" aria-labelledby="h5s">
+    <div class="panel-head"><h2 id="h5s">5 · Review and run</h2><p>Choose the mode, the policy, the key and the purpose. Everything here is recorded in the evidence pack.</p></div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Mode</div></div>
+      <div class="choices c2" role="radiogroup" aria-label="Mode">
+        <label class="choice"><input type="radio" name="mode" value="obfuscate" checked><span class="radio"></span>
+          <span class="ct">Obfuscate <span class="chip teal">reversible with the key</span></span>
+          <span class="cd">Replaces values with format-preserving tokens. Whoever holds the key can restore them; the same key gives the same tokens in every system.</span></label>
+        <label class="choice syn"><input type="radio" name="mode" value="synthesize"><span class="radio"></span>
+          <span class="ct">Synthesize <span class="chip violet">one-way</span></span>
+          <span class="cd">Replaces values with realistic fakes that pass each value's own rules (Luhn, Verhoeff, CURP check digit). There is no path back.</span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Policy</div><span class="chip amber">3 overrides from discovery</span></div>
+      <div class="fgrid">
+        <div><label class="lbl" for="policy">Preset</label><div class="sel"><select class="input" id="policy">
+          <option value="gdpr-pseudonymise">gdpr-pseudonymise v3</option><option value="dpdp-pseudonymise">dpdp-pseudonymise v2</option><option value="pci-dss">pci-dss v4</option><option value="analytics-safe">analytics-safe v2 (one-way)</option><option value="synthetic-realistic">synthetic-realistic v1</option><option value="synthetic-strict">synthetic-strict v1</option></select></div></div>
+        <div class="kv" style="align-self:end">Overrides: <b class="mono">NATIONAL_ID</b> per-value type · <b class="mono">PIN_CODE</b> generalize(3) · <b class="mono">RM_NOTES</b> text pipeline</div>
+      </div>
+      <div class="lbl" style="margin-top:14px">Plan · 11 columns protected, 11 kept</div>
+      <div class="plan only-obf">
+        <div><span class="mono">fpe_digits</span><span class="faint">CUSTOMER_ID · NATIONAL_ID (Aadhaar, SSN)</span></div>
+        <div><span class="mono">fpe_text</span><span class="faint">FULL_NAME · TAX_ID · NATIONAL_ID (CURP, NINO)</span></div>
+        <div><span class="mono">email · phone</span><span class="faint">EMAIL (domain kept) · MOBILE (country code kept)</span></div>
+        <div><span class="mono">date_shift ±365</span><span class="faint">DOB, anchored on CUSTOMER_ID</span></div>
+        <div><span class="mono">det_token</span><span class="faint">ADDR_LINE1</span></div>
+        <div><span class="mono">generalize · bucket</span><span class="faint">PIN_CODE · RISK_SCORE (one-way)</span></div>
+        <div><span class="mono">text pipeline</span><span class="faint">RM_NOTES</span></div>
+        <div><span class="mono">keep</span><span class="faint">11 columns</span></div>
+      </div>
+      <div class="plan only-syn">
+        <div><span class="mono">persona</span><span class="faint">FULL_NAME · EMAIL · MOBILE · DOB · ADDR_LINE1 agree per row</span></div>
+        <div><span class="mono">rule-valid surrogate</span><span class="faint">NATIONAL_ID · TAX_ID by detected type</span></div>
+        <div><span class="mono">surrogate key</span><span class="faint">CUSTOMER_ID, same fake in every system</span></div>
+        <div><span class="mono">copula</span><span class="faint">RISK_SCORE · PIN_CODE region shape kept</span></div>
+        <div><span class="mono">placeholder rewrite</span><span class="faint">RM_NOTES, LLM sees placeholders only</span></div>
+        <div><span class="mono">keep</span><span class="faint">11 columns</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title"><span class="only-obf">Consistency key</span><span class="only-syn">Synthesis seed</span></div></div>
+      <div class="choices c2" role="radiogroup" aria-label="Consistency">
+        <label class="choice"><input type="radio" name="key" value="new"><span class="radio"></span>
+          <span class="ct only-obf">New key for this job</span><span class="ct only-syn">New seed for this job</span>
+          <span class="cd only-obf">A new 256-bit key is generated and shown once when the job finishes. Tokens will not match earlier jobs.</span>
+          <span class="cd only-syn">A new seed is generated. Fakes will not match earlier synthetic copies.</span></label>
+        <label class="choice"><input type="radio" name="key" value="group" checked><span class="radio"></span>
+          <span class="ct"><span>Reuse <span class="only-obf">the key</span><span class="only-syn">the seed</span> from job group <span class="mono">crm-uat-refresh</span></span></span>
+          <span class="cd only-obf">Customer ids, e-mails and national ids will match the masked Oracle, MongoDB and PostgreSQL copies already in the group.</span>
+          <span class="cd only-syn">The same customer gets the same fake name, e-mail and id as in the synthetic Oracle, MongoDB and PostgreSQL copies already in the group.</span></label>
+      </div>
+      <div class="drop" id="keydrop">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" style="color:var(--teal);flex:none"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>
+        <span style="flex:1;min-width:200px" class="only-obf"><b class="mono">crm-uat-refresh.dpskey</b> <span class="faint">· wrapped with your team's RSA key</span><br><span class="faint">Key id k_01K7ZQ4M8V matches the group. DPS uses it for this run and does not store it.</span></span>
+        <span style="flex:1;min-width:200px" class="only-syn"><b class="mono">crm-uat-refresh.dpsseed</b> <span class="faint">· wrapped with your team's RSA key</span><br><span class="faint">Seed id s_01K7ZQ5R2D matches the group. It is not a reveal key; DPS does not store it.</span></span>
+        <span class="chip emerald">matched</span><button class="btn btn-sm" type="button">Use another file</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Purpose</div><span class="faint" style="font-size:12px">required for every run</span></div>
+      <div class="fgrid">
+        <div><label class="lbl" for="ticket">Ticket</label><input class="input mono" id="ticket" value="CHG-48213" spellcheck="false"></div>
+        <div><label class="lbl" for="basis">Legal basis</label><div class="sel"><select class="input" id="basis"><option>Legitimate interest — UAT provisioning</option><option>Legitimate interest — fraud model testing</option><option>Legal obligation — regulatory reporting</option><option>Consent — customer research panel</option></select></div></div>
+        <div class="full"><label class="lbl" for="why">What the data is for</label><input class="input" id="why" value="Refresh CRM UAT for the Q4 onboarding release; masked copies only, no production write-back" spellcheck="false"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div class="card-title">Ready to run</div><span class="chip emerald" id="ready-chip">all checks passed</span></div>
+      <div class="summ"><span class="k">Source</span><span>Oracle · <span class="mono">CRM.CUSTOMERS</span> via <span class="mono">dps/src/crm-prod-ro</span> <span class="chip amber prod-only" style="margin-left:4px">production</span></span><button class="linkbtn" type="button" data-go="1">Edit</button></div>
+      <div class="summ"><span class="k">Rows</span><span>1,948,210 rows · 22 columns · 8 partitions</span><button class="linkbtn" type="button" data-go="2">Edit</button></div>
+      <div class="summ"><span class="k">Discovery</span><span>2 critical · 7 sensitive · 2 declared · 11 kept · 3 overrides</span><button class="linkbtn" type="button" data-go="3">Edit</button></div>
+      <div class="summ"><span class="k">Write</span><span id="sum-wm">Copy to <span class="mono">CRM_MASKED.CUSTOMERS</span> · truncate and insert</span><button class="linkbtn" type="button" data-go="4">Edit</button></div>
+      <div class="summ"><span class="k">Key</span><span><span class="only-obf">Reuse key from <span class="mono">crm-uat-refresh</span> · <span class="mono">k_01K7ZQ4M8V</span></span><span class="only-syn">Reuse seed from <span class="mono">crm-uat-refresh</span> · <span class="mono">s_01K7ZQ5R2D</span></span></span><span></span></div>
+      <div class="summ"><span class="k">Purpose</span><span><span class="mono">CHG-48213</span> · legitimate interest — UAT provisioning</span><span></span></div>
+      <div class="callout rose" id="run-blocked" hidden style="margin-top:12px;font-size:12.5px"><b>Run job is off until you confirm the write.</b> In place and Append change CRM.CUSTOMERS. <button class="linkbtn" type="button" data-go="4">Go to step 4 to confirm</button></div>
+    </div>
+
+    <div class="runbar">
+      <div style="flex:1 1 340px"><div style="font-weight:700">Estimated 4 to 6 minutes</div><div class="faint" style="font-size:12px">From the last three runs against CRM.CUSTOMERS. You can pause from Jobs; a paused job resumes from its last checkpoint.</div></div>
+      <div class="rowx"><button class="btn" type="button" id="dry">Dry run (no writes)</button><button class="btn btn-primary" type="button" id="run">Run job</button></div>
+    </div>
+    <div class="callout emerald" id="run-done" hidden tabindex="-1" style="font-size:13px"><b>Job j_01K8C4M2V7 queued.</b> 8 partitions are waiting; worker w-03 claimed the first one. <a href="07-jobs.html" style="color:var(--teal);font-weight:700">Open in Jobs</a></div>
+    <div class="callout" id="dry-done" hidden style="font-size:13px"><b>Dry run started.</b> DPS reads and transforms 2,000 rows, runs the leakage sweep and writes nothing. The result appears in Jobs in about a minute.</div>
+
+    <div class="wfoot"><button class="btn" type="button" data-go="4">Back</button><span class="hint">Step 5 of 5</span></div>
+  </section>
+  </div>
+
+  <!-- ============ RAIL ============ -->
+  <aside class="rail" aria-label="Job specification">
+    <div class="card">
+      <div class="card-head"><div class="card-title">What DPS guarantees</div></div>
+      <div class="guard">
+        <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>The source is read in a read-only session and never locked.</span></div>
+        <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>The job stores secret names, not credentials.</span></div>
+        <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>Values are transformed inside the worker. The LLM sees placeholders only: raw PII sent is 0.</span></div>
+        <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>A leakage sweep checks the output before the job is marked complete, and every run ends with an evidence pack.</span></div>
+      </div>
+    </div>
+    <div class="card spec-card">
+      <div class="card-head"><div class="card-title">Job specification</div><div class="rowx"><span class="pill mono" style="font-size:11px">POST /api/v1/jobs</span><button class="btn btn-sm" type="button" id="copyjson">Copy JSON</button></div></div>
+      <div class="pane spec" id="spec" data-s="1" tabindex="0" aria-label="Job specification JSON"><span class="ln">{</span>
+<span class="ln s5">  <span class="k">"mode"</span>: <span class="s" id="spec-mode">"obfuscate"</span>,</span>
+<span class="ln s1">  <span class="k">"source"</span>: {</span>
+<span class="ln s1">    <span class="k">"engine"</span>: <span class="s">"oracle"</span>,</span>
+<span class="ln s1">    <span class="k">"connection"</span>: {</span>
+<span class="ln s1">      <span class="k">"secret_ref"</span>: <span class="s">"dps/src/crm-prod-ro"</span> },</span>
+<span class="ln s2">    <span class="k">"owner"</span>: <span class="s">"CRM"</span>,</span>
+<span class="ln s2">    <span class="k">"table"</span>: <span class="s">"CUSTOMERS"</span>,</span>
+<span class="ln s2">    <span class="k">"selection"</span>: {</span>
+<span class="ln s2">      <span class="k">"where"</span>: <span class="s">"CREATED_AT &gt;= :p1 AND</span></span>
+<span class="ln s2"><span class="s">        COUNTRY_CODE IN (:p2, …, :p5)"</span>,</span>
+<span class="ln s2">      <span class="k">"columns"</span>: null,</span>
+<span class="ln s2">      <span class="k">"max_rows"</span>: null,</span>
+<span class="ln s3">      <span class="k">"sample"</span>: 2000 },</span>
+<span class="ln s2">    <span class="k">"parallelism"</span>: 8 },</span>
+<span class="ln s4 tg tg-table">  <span class="k">"target"</span>: {</span>
+<span class="ln s4 tg tg-table">    <span class="k">"kind"</span>: <span class="s">"table"</span>,</span>
+<span class="ln s4 tg tg-table">    <span class="k">"connection"</span>: {</span>
+<span class="ln s4 tg tg-table">      <span class="k">"secret_ref"</span>: <span class="s">"dps/tgt/crm-uat"</span> },</span>
+<span class="ln s4 tg tg-table">    <span class="k">"owner"</span>: <span class="s">"CRM_MASKED"</span>,</span>
+<span class="ln s4 tg tg-table">    <span class="k">"table"</span>: <span class="s">"CUSTOMERS"</span>,</span>
+<span class="ln s4 tg tg-table">    <span class="k">"create_if_missing"</span>: true,</span>
+<span class="ln s4 tg tg-table">    <span class="k">"write_mode"</span>: <span class="s">"truncate_insert"</span> },</span>
+<span class="ln s4 tg tg-in_place" hidden>  <span class="k">"target"</span>: {</span>
+<span class="ln s4 tg tg-in_place" hidden>    <span class="k">"write_mode"</span>: <span class="s">"in_place"</span>,</span>
+<span class="ln s4 tg tg-in_place" hidden>    <span class="k">"connection"</span>: {</span>
+<span class="ln s4 tg tg-in_place" hidden>      <span class="k">"secret_ref"</span>: <span class="s">"dps/src/crm-prod-rw"</span> },</span>
+<span class="ln s4 tg tg-in_place" hidden>    <span class="k">"confirm_write"</span>: <span class="s" id="spec-cw1">false</span> },</span>
+<span class="ln s4 tg tg-append" hidden>  <span class="k">"target"</span>: {</span>
+<span class="ln s4 tg tg-append" hidden>    <span class="k">"write_mode"</span>: <span class="s">"append"</span>,</span>
+<span class="ln s4 tg tg-append" hidden>    <span class="k">"table"</span>: <span class="s">"CUSTOMERS"</span>,</span>
+<span class="ln s4 tg tg-append" hidden>    <span class="k">"pk_strategy"</span>:</span>
+<span class="ln s4 tg tg-append" hidden>      <span class="s" id="spec-pk">{ "kind": "offset", "offset": 90000000 }</span>,</span>
+<span class="ln s4 tg tg-append" hidden>    <span class="k">"confirm_write"</span>: <span class="s" id="spec-cw2">false</span> },</span>
+<span class="ln s4 tg tg-files" hidden>  <span class="k">"target"</span>: {</span>
+<span class="ln s4 tg tg-files" hidden>    <span class="k">"kind"</span>: <span class="s">"files"</span>,</span>
+<span class="ln s4 tg tg-files" hidden>    <span class="k">"format"</span>: <span class="s">"parquet"</span>,</span>
+<span class="ln s4 tg tg-files" hidden>    <span class="k">"uri"</span>: <span class="s">"s3://dps-exports-apac/crm/</span></span>
+<span class="ln s4 tg tg-files" hidden><span class="s">      customers/2026-10-11/"</span>,</span>
+<span class="ln s4 tg tg-files" hidden>    <span class="k">"manifest"</span>: true },</span>
+<span class="ln s5">  <span class="k">"policy"</span>: {</span>
+<span class="ln s5">    <span class="k">"preset"</span>: <span class="s" id="spec-policy">"gdpr-pseudonymise"</span>,</span>
+<span class="ln s3">    <span class="k">"snapshot"</span>: <span class="s">"snap_01K8C4WQ9T"</span>,</span>
+<span class="ln s3">    <span class="k">"overrides"</span>: 3 },</span>
+<span class="ln s5">  <span class="k">"consistency"</span>: {</span>
+<span class="ln s5">    <span class="k">"scope"</span>: <span class="s">"key"</span>,</span>
+<span class="ln s5">    <span class="k">"group"</span>: <span class="s">"crm-uat-refresh"</span> },</span>
+<span class="ln s5">  <span class="k">"purpose"</span>: {</span>
+<span class="ln s5">    <span class="k">"ticket"</span>: <span class="s">"CHG-48213"</span>,</span>
+<span class="ln s5">    <span class="k">"legal_basis"</span>:</span>
+<span class="ln s5">      <span class="s">"legitimate interest — UAT provisioning"</span> }</span>
+<span class="ln">}</span></div>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">Highlighted lines belong to the current step. Key material is never part of the specification.</div>
+    </div>
+  </aside>
+  </div>
+</main></div></div>
+<script>
+renderSidebar('Data sources & jobs');
+(function () {
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var params = new URLSearchParams(location.search);
+  var cur = 1, wm = 'table', pk = 'offset', confirmed = false;
+  var TABLE = 'CRM.CUSTOMERS';
+
+  function needsConfirm() { return wm === 'in_place' || wm === 'append'; }
+  function blocked() { return wm === 'append' && pk === 'token'; }
+
+  function go(n, focus) {
+    cur = n;
+    $$('.wsteps .step').forEach(function (b, i) {
+      var k = i + 1;
+      b.classList.toggle('on', k === n); b.classList.toggle('done', k < n);
+      if (k === n) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current');
+      $('.n', b).textContent = k < n ? '✓' : String(k);
+    });
+    $$('.panel').forEach(function (p) { p.classList.toggle('on', +p.dataset.step === n); });
+    var sp = $('#spec'); sp.dataset.s = n;
+    var first = $('.s' + n + ':not([hidden])', sp);
+    if (first && sp.scrollHeight > sp.clientHeight) sp.scrollTo({ top: Math.max(0, first.offsetTop - sp.offsetTop - 40), behavior: focus ? 'smooth' : 'auto' });
+    if (focus) {
+      var h = $('.panel.on h2'); h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-go]');
+    if (t && !t.disabled) { go(+t.dataset.go, true); }
+  });
+
+  // segmented controls: show/hide by id
+  $$('.seg').forEach(function (seg) {
+    $$('button', seg).forEach(function (b) {
+      b.addEventListener('click', function () {
+        $$('button', seg).forEach(function (o) { o.classList.toggle('on', o === b); o.setAttribute('aria-pressed', o === b ? 'true' : 'false'); });
+        (b.dataset.hide || '').split(' ').forEach(function (id) { if (id) $('#' + id).hidden = true; });
+        (b.dataset.show || '').split(' ').forEach(function (id) { if (id) $('#' + id).hidden = false; });
+        syncProd();
+      });
+    });
+  });
+
+  // production tag
+  function syncProd() {
+    var on = $('#prod').checked;
+    $$('.prod-only').forEach(function (el) { el.hidden = !on; });
+    if ($('#cred-inline').hidden) $('#inline-prod-err').hidden = true;
+  }
+  $('#prod').addEventListener('change', syncProd);
+
+  // test connection
+  $('#test-btn').addEventListener('click', function () {
+    var chip = $('#test-chip'), body = $('#test-body');
+    chip.className = 'chip slate'; chip.textContent = 'Testing…'; body.style.opacity = '.45';
+    setTimeout(function () {
+      chip.className = 'chip emerald'; chip.textContent = '6 of 6 checks passed'; body.style.opacity = '';
+      var d = new Date(); var pad = function (x) { return (x < 10 ? '0' : '') + x; };
+      $('#test-time').textContent = 'Tested at ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + ' · 398 ms · no rows were read';
+    }, 700);
+  });
+
+  // columns
+  function countCols() { var n = $$('#cols input:checked').length; $('#colcount').textContent = '· ' + n + ' of 22'; }
+  $('#cols').addEventListener('change', countCols);
+  $('#cols-all').addEventListener('click', function () { $$('#cols input').forEach(function (c) { c.checked = true; }); countCols(); });
+  $('#cols-none').addEventListener('click', function () { $$('#cols input:not([disabled])').forEach(function (c) { c.checked = false; }); countCols(); });
+
+  // discovery accept buttons
+  $$('[data-accept]').forEach(function (b) { b.addEventListener('click', function () { b.textContent = 'Accepted'; b.disabled = true; }); });
+
+  // write mode
+  var subs = { in_place: 'In place · CRM.CUSTOMERS', append: 'Append to CRM.CUSTOMERS', table: 'Copy to CRM_MASKED', files: 'Parquet to S3' };
+  var sums = {
+    in_place: 'In place on <span class="mono">CRM.CUSTOMERS</span> · 10 columns rewritten · via <span class="mono">dps/src/crm-prod-rw</span>',
+    append: 'Append 1,948,210 rows to <span class="mono">CRM.CUSTOMERS</span> · keys by offset',
+    table: 'Copy to <span class="mono">CRM_MASKED.CUSTOMERS</span> · truncate and insert',
+    files: 'Parquet files to <span class="mono">s3://dps-exports-apac/crm/customers/2026-10-11/</span> · manifest'
+  };
+  function setWM(v, keepConfirm) {
+    wm = v;
+    if (!keepConfirm) setConfirmed(false);
+    ['table', 'files', 'in_place', 'append'].forEach(function (k) { $('#opt-' + k).hidden = k !== v; });
+    $$('.tg').forEach(function (l) { l.hidden = !l.classList.contains('tg-' + v); });
+    var cf = $('#confirm');
+    cf.hidden = !needsConfirm();
+    cf.classList.toggle('append', v === 'append');
+    $('.cf-in_place').hidden = v !== 'in_place';
+    $('.cf-append').hidden = v !== 'append';
+    $('#cf-title').textContent = v === 'append' ? 'Confirm: insert 1,948,210 new rows into CRM.CUSTOMERS' : 'Confirm: overwrite 1,948,210 rows in CRM.CUSTOMERS';
+    $('#cf-lead').textContent = v === 'append' ? 'This job adds rows to the source table. Read what happens before you confirm.' : 'This job changes the source table. Read what happens before you confirm.';
+    $('#cf-go').textContent = v === 'append' ? 'Insert 1,948,210 rows' : 'Write 1,948,210 rows in place';
+    $('#cf-go').className = 'btn ' + (v === 'append' ? 'btn-warn' : 'btn-danger');
+    $('#sub4').textContent = subs[v];
+    $('#sum-wm').innerHTML = sums[v];
+    $$('input[name=wm]').forEach(function (r) { r.checked = r.value === v; });
+    syncGate();
+  }
+  $$('input[name=wm]').forEach(function (r) {
+    r.addEventListener('change', function () {
+      setWM(r.value);
+      if (needsConfirm()) { var c = $('#confirm'); c.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    });
+  });
+
+  // pk strategy
+  var pkText = {
+    generate: '<span>New rows get CUSTOMER_ID from sequence CRM.CUSTOMERS_SEQ, starting at 41,882,908. They will not join to the masked MongoDB and PostgreSQL copies by customer id.</span>',
+    offset: '<span>New rows get CUSTOMER_ID = original + 90,000,000 (90,000,001 to 131,882,907). The evidence pack records the range.</span>',
+    token: '<span>New rows would use the obfuscated CUSTOMER_ID, but 79,903 of those keys already exist.</span>'
+  };
+  var pkSpec = { generate: '{ "kind": "generate" }', offset: '{ "kind": "offset", "offset": 90000000 }', token: '{ "kind": "token" }' };
+  function setPK(v) {
+    pk = v;
+    $$('.pk-d').forEach(function (d) { d.hidden = d.dataset.pk !== v; });
+    $('#cf-pk').innerHTML = pkText[v];
+    $('#spec-pk').textContent = pkSpec[v];
+    $$('input[name=pk]').forEach(function (r) { r.checked = r.value === v; });
+    if (blocked()) setConfirmed(false);
+    syncGate();
+  }
+  $$('input[name=pk]').forEach(function (r) { r.addEventListener('change', function () { setPK(r.value); }); });
+
+  // confirmation
+  function syncGate() {
+    var typed = $('#cf-input').value.trim() === TABLE;
+    $('#cf-blocked').hidden = !blocked();
+    $('#cf-input').disabled = blocked() || confirmed;
+    $('#cf-go').disabled = !typed || blocked() || confirmed;
+    var gate = needsConfirm() && !confirmed;
+    $('#next4').disabled = gate; $('#next4-hint').hidden = !gate;
+    $('#run').disabled = gate; $('#dry').disabled = false;
+    $('#run-blocked').hidden = !gate;
+    var rc = $('#ready-chip');
+    rc.className = 'chip ' + (gate ? 'amber' : 'emerald'); rc.textContent = gate ? 'write not confirmed' : 'all checks passed';
+    $('#spec-cw1').textContent = confirmed ? 'true' : 'false'; $('#spec-cw2').textContent = confirmed ? 'true' : 'false';
+  }
+  function setConfirmed(v) {
+    confirmed = v;
+    $('#cf-done').hidden = !v; $('#cf-type').hidden = v;
+    if (!v) $('#cf-input').value = '';
+    syncGate();
+  }
+  $('#cf-input').addEventListener('input', syncGate);
+  $('#cf-input').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !$('#cf-go').disabled) $('#cf-go').click(); });
+  $('#cf-go').addEventListener('click', function () { setConfirmed(true); $('#cf-done').focus && $('#cf-undo').focus(); });
+  $('#cf-undo').addEventListener('click', function () { setConfirmed(false); $('#cf-input').focus(); });
+  $('#cf-cancel').addEventListener('click', function () { setWM('table'); $('input[name=wm][value=table]').focus(); });
+
+  // mode
+  function setMode(v) {
+    document.body.classList.toggle('mode-syn', v === 'synthesize');
+    $('#spec-mode').textContent = '"' + v + '"';
+    var pol = v === 'synthesize' ? 'synthetic-realistic' : 'gdpr-pseudonymise';
+    $('#policy').value = pol; $('#spec-policy').textContent = '"' + pol + '"';
+    $('#sub5').textContent = v + ' · CHG-48213';
+    $$('input[name=mode]').forEach(function (r) { r.checked = r.value === v; });
+  }
+  $$('input[name=mode]').forEach(function (r) { r.addEventListener('change', function () { setMode(r.value); }); });
+  $('#policy').addEventListener('change', function () { $('#spec-policy').textContent = '"' + this.value + '"'; });
+  $('input[name=key][value=new]').addEventListener('change', function () { $('#keydrop').hidden = true; });
+  $('input[name=key][value=group]').addEventListener('change', function () { $('#keydrop').hidden = false; });
+
+  $('#copyjson').addEventListener('click', function () {
+    var b = this, txt = $('#spec').innerText;
+    try { navigator.clipboard && navigator.clipboard.writeText(txt); } catch (e) {}
+    b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy JSON'; }, 1400);
+  });
+
+  // run
+  $('#run').addEventListener('click', function () { $('#dry-done').hidden = true; $('#run-done').hidden = false; $('#run').disabled = true; $('#run').textContent = 'Job queued'; $('#run-done').focus(); });
+  $('#dry').addEventListener('click', function () { $('#run-done').hidden = true; $('#dry-done').hidden = false; });
+
+  // deep links for reviewers and screenshots: ?step=4&write=in_place&pk=token&mode=synthesize&select=query&cred=inline&confirmed=1
+  syncProd();
+  if (params.get('cred') === 'inline') $$('#cred-ref, #cred-inline').length && $('[data-show="cred-inline"]').click();
+  if (params.get('select') === 'query') $('[data-show="sel-query"]').click();
+  if (params.get('mode') === 'synthesize') setMode('synthesize');
+  setWM(params.get('write') || 'table');
+  setPK(params.get('pk') || 'offset');
+  if (params.get('confirmed') === '1' && needsConfirm() && !blocked()) setConfirmed(true);
+  else if (params.get('typed') === '1') { $('#cf-input').value = TABLE; syncGate(); }
+  go(Math.min(5, Math.max(1, +(params.get('step') || 1))), false);
+})();
+</script>
+</body></html>

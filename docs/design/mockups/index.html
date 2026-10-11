@@ -1,13 +1,159 @@
 <!doctype html>
 <html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DPS Privacy Console — mockups</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script></head>
-<body><div class="page" style="max-width:980px;margin:0 auto">
-<div class="page-head"><div><h1>Privacy Console — design mockups</h1><p>Static HTML, no framework. These illustrate the "Vault" design direction and the three headline screens from the design brief §9. Use the floating control to toggle light/dark.</p></div><button class="btn" onclick="toggleTheme()">Toggle theme</button></div>
-<div class="grid cols-3">
-  <a class="card" href="01-dashboard.html"><div class="card-title">01 · Overview dashboard</div><p class="muted">Protection posture, the "raw PII sent to LLM: 0" promise, trends, layer cards.</p></a>
-  <a class="card" href="02-playground.html"><div class="card-title">02 · Playground (Layer 1)</div><p class="muted">Paste → detect → obfuscate / synthesize → reveal with key. The demo hero.</p></a>
-  <a class="card" href="03-data-sources.html"><div class="card-title">03 · Data sources & jobs (Layer 2)</div><p class="muted">Connector wizard, column classification heat-map, running job with partitions and evidence.</p></a>
-  <a class="card" href="04-ui-scanner.html"><div class="card-title">04 · UI scanner (Layer 3)</div><p class="muted">Crawl map, field inventory, and the parallel view: original screen beside the same screen filled with synthetic or obfuscated data. Never submitted.</p></a>
-</div>
-<div class="callout">Policies, Reports and Admin follow the same system and are mocked during their milestones.</div>
-</div></body></html>
+<title>Privacy Console design set — DPS</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+  .ix { max-width: 1160px; margin: 0 auto; padding: 32px 24px 56px; display: flex; flex-direction: column; gap: 26px; }
+  .ix-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap; }
+  .ix-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .ix-head h1 { margin: 0; font-size: 26px; letter-spacing: -.015em; }
+  .ix-head p { margin: 6px 0 0; color: var(--ink-2); max-width: 70ch; line-height: 1.55; }
+  .ix-head .head-actions { flex: none; }
+
+  .facts-row { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; }
+  .walk { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; font-size: 12.5px; }
+  .walk li { display: inline-flex; align-items: center; gap: 4px; }
+  .walk li + li::before { content: "→"; color: var(--ink-3); margin-right: 4px; }
+  .walk a { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 4px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--ink); font-weight: 600; }
+  .walk a:hover { border-color: var(--teal-border); color: var(--teal); }
+  .walk .n { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; line-height: 17px; }
+  .sig { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; font-size: 12.5px; color: var(--ink-2); }
+  .sig span { display: grid; grid-template-columns: 10px 62px minmax(0, 1fr); gap: 8px; align-items: baseline; min-width: 0; line-height: 1.4; }
+  .sig i { width: 10px; height: 10px; border-radius: 3px; align-self: center; }
+  .sig b { color: var(--ink); font-weight: 600; }
+  .box-title { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 10px; }
+
+  .area { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 20px; padding-top: 22px; border-top: 1px solid var(--border); }
+  .area-h .k { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--teal); font-weight: 800; }
+  .area-h h2 { margin: 4px 0 6px; font-size: 16px; letter-spacing: -.005em; }
+  .area-h p { margin: 0; color: var(--ink-3); font-size: 12.5px; line-height: 1.5; }
+  .screens { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 14px; }
+  a.scr { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 13px; transition: border-color .12s, transform .12s; }
+  a.scr:hover { border-color: var(--teal-border); transform: translateY(-1px); }
+  .scr .top { display: flex; align-items: center; gap: 10px; }
+  .scr .no { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--ink-2); border: 1px solid var(--border-strong); background: var(--surface-2); border-radius: 7px; padding: 1px 7px; flex: none; }
+  .scr .t { font-weight: 700; font-size: 14px; }
+  .scr .d { color: var(--ink-2); font-size: 12.5px; line-height: 1.5; margin: 0; }
+  .scr .m { margin-top: auto; padding-top: 4px; font-size: 11.5px; color: var(--ink-3); display: flex; flex-direction: column; gap: 2px; }
+  .scr .m .file { font-family: var(--mono); }
+  .scr .m .home { color: var(--teal); font-weight: 700; }
+  .ix-foot { border-top: 1px solid var(--border); padding-top: 16px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--ink-3); }
+
+  @media (max-width: 980px) { .facts-row { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 760px) {
+    .ix { padding: 20px 16px 36px; gap: 20px; }
+    .ix-head h1 { font-size: 22px; }
+    .ix-head .head-actions { flex: 1 1 100%; }
+    .area { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-top: 18px; }
+    .screens { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  }
+</style></head>
+<body>
+<main class="ix">
+  <header class="ix-head">
+    <div>
+      <div class="ix-brand"><div class="brand-mark">D</div><div><div class="brand-title">Data Privacy Services</div><div class="brand-sub">Privacy Console · design set</div></div></div>
+      <h1>Privacy Console: all screens</h1>
+      <p>Twelve static screens in the Vault design system, with plain HTML and no framework. Every screen uses the same sidebar, so you can move between them as you would in the product. Add <span class="mono">?light</span> to any URL for the light theme.</p>
+    </div>
+    <div class="head-actions"><a class="btn" href="01-dashboard.html">Open the console</a><button class="btn btn-primary" type="button" onclick="toggleTheme()">Toggle theme</button></div>
+  </header>
+
+  <div class="facts-row">
+    <section class="card" aria-labelledby="walk-t">
+      <div class="box-title" id="walk-t">Ten-minute demo path</div>
+      <ol class="walk">
+        <li><a href="01-dashboard.html"><span class="n">01</span>Overview</a></li>
+        <li><a href="02-playground.html"><span class="n">02</span>Playground</a></li>
+        <li><a href="08-documents.html"><span class="n">08</span>Documents</a></li>
+        <li><a href="07-jobs.html"><span class="n">07</span>Jobs</a></li>
+        <li><a href="06-connect-wizard.html"><span class="n">06</span>New job</a></li>
+        <li><a href="03-data-sources.html"><span class="n">03</span>Job detail</a></li>
+        <li><a href="10-evidence-pack.html"><span class="n">10</span>Evidence pack</a></li>
+        <li><a href="12-scanner-setup.html"><span class="n">12</span>Scan setup</a></li>
+        <li><a href="04-ui-scanner.html"><span class="n">04</span>Parallel view</a></li>
+        <li><a href="09-reports.html"><span class="n">09</span>Reports</a></li>
+      </ol>
+    </section>
+    <section class="card" aria-labelledby="sig-t">
+      <div class="box-title" id="sig-t">Signal colours: each one has a single meaning</div>
+      <div class="sig">
+        <span><i style="background:var(--teal)"></i><b>Teal</b> protected, obfuscated, reversible</span>
+        <span><i style="background:var(--violet)"></i><b>Violet</b> synthetic, one-way</span>
+        <span><i style="background:var(--amber)"></i><b>Amber</b> detected, needs a decision</span>
+        <span><i style="background:var(--emerald)"></i><b>Emerald</b> verified, passed, zero</span>
+        <span><i style="background:var(--rose)"></i><b>Rose</b> critical, leak, destructive</span>
+        <span><i style="background:var(--ink-3)"></i><b>Slate</b> kept, neutral</span>
+      </div>
+    </section>
+  </div>
+
+  <section class="area" aria-labelledby="a-op">
+    <div class="area-h"><div class="k">Operate</div><h2 id="a-op">Posture and policy</h2><p>The tenant's protection posture, and the policies that decide what happens to every entity type.</p></div>
+    <div class="screens">
+      <a class="card scr" href="01-dashboard.html"><div class="top"><span class="no">01</span><span class="t">Overview</span></div>
+        <p class="d">Posture at a glance: values protected, findings by type, jobs, layer cards, and raw PII sent to the LLM, which stays at 0.</p>
+        <div class="m"><span class="home">Sidebar · Overview</span><span class="file">01-dashboard.html</span></div></a>
+      <a class="card scr" href="05-policies.html"><div class="top"><span class="no">05</span><span class="t">Policies</span></div>
+        <p class="d">Presets, the treatment matrix, declared fields, a custom recognizer with a live test, plan preview, versions and publishing.</p>
+        <div class="m"><span class="home">Sidebar · Policies</span><span class="file">05-policies.html</span></div></a>
+    </div>
+  </section>
+
+  <section class="area" aria-labelledby="a-l1">
+    <div class="area-h"><div class="k">Layer 1</div><h2 id="a-l1">Stateless API</h2><p>Try the engine on a record or a scanned document. Nothing is stored, and the caller keeps the key.</p></div>
+    <div class="screens">
+      <a class="card scr" href="02-playground.html"><div class="top"><span class="no">02</span><span class="t">Playground</span></div>
+        <p class="d">Paste JSON or text, see the findings, obfuscate or synthesize, copy the key and reveal the originals with it.</p>
+        <div class="m"><span class="home">Sidebar · Playground</span><span class="file">02-playground.html</span></div></a>
+      <a class="card scr" href="08-documents.html"><div class="top"><span class="no">08</span><span class="t">Documents</span></div>
+        <p class="d">The Playground's Document tab: OCR a scanned PDF, then redact it, or obfuscate or synthesize its text, page by page.</p>
+        <div class="m"><span>From 02 · Document tab</span><span class="file">08-documents.html</span></div></a>
+    </div>
+  </section>
+
+  <section class="area" aria-labelledby="a-l2">
+    <div class="area-h"><div class="k">Layer 2</div><h2 id="a-l2">Connectors and jobs</h2><p>Protect whole tables and collections in Oracle, PostgreSQL and MongoDB, with every write mode confirmed.</p></div>
+    <div class="screens">
+      <a class="card scr" href="07-jobs.html"><div class="top"><span class="no">07</span><span class="t">Jobs</span></div>
+        <p class="d">Queue and worker health, every job with filters, and the crm-uat-refresh job group with its three-way consistency join.</p>
+        <div class="m"><span class="home">Sidebar · Data sources &amp; jobs</span><span class="file">07-jobs.html</span></div></a>
+      <a class="card scr" href="06-connect-wizard.html"><div class="top"><span class="no">06</span><span class="t">New job wizard</span></div>
+        <p class="d">Connect, select, discover, pick a write mode (in place and append need a typed confirmation), then review and run.</p>
+        <div class="m"><span>From 07 · New job</span><span class="file">06-connect-wizard.html</span></div></a>
+      <a class="card scr" href="03-data-sources.html"><div class="top"><span class="no">03</span><span class="t">Job detail</span></div>
+        <p class="d">One running job: the reviewed column classification, partition progress, throughput and the evidence so far.</p>
+        <div class="m"><span>From 07 · a job</span><span class="file">03-data-sources.html</span></div></a>
+    </div>
+  </section>
+
+  <section class="area" aria-labelledby="a-l3">
+    <div class="area-h"><div class="k">Layer 3</div><h2 id="a-l3">UI scanner</h2><p>Crawl an application, inventory its forms and fill them with safe data. Forms are never submitted.</p></div>
+    <div class="screens">
+      <a class="card scr" href="12-scanner-setup.html"><div class="top"><span class="no">12</span><span class="t">Scan setup and live crawl</span></div>
+        <p class="d">Target, scope, stored session and fill mode beside the live crawl map and the navigation log, where every POST is blocked.</p>
+        <div class="m"><span class="home">Sidebar · UI scanner</span><span class="file">12-scanner-setup.html</span></div></a>
+      <a class="card scr" href="04-ui-scanner.html"><div class="top"><span class="no">04</span><span class="t">Parallel view</span></div>
+        <p class="d">Each captured form beside the same form filled with a synthetic persona or obfuscated tokens, with the field inventory.</p>
+        <div class="m"><span>From 12 · Open parallel view</span><span class="file">04-ui-scanner.html</span></div></a>
+    </div>
+  </section>
+
+  <section class="area" aria-labelledby="a-gv">
+    <div class="area-h"><div class="k">Govern</div><h2 id="a-gv">Evidence and administration</h2><p>Proof of what ran and what it did, and the keys, tenants and hosts that control it.</p></div>
+    <div class="screens">
+      <a class="card scr" href="09-reports.html"><div class="top"><span class="no">09</span><span class="t">Reports and audit</span></div>
+        <p class="d">Verification sweeps, an evidence pack for every job, scan and API roll-up, and the append-only audit log, which never holds values.</p>
+        <div class="m"><span class="home">Sidebar · Reports &amp; audit</span><span class="file">09-reports.html</span></div></a>
+      <a class="card scr" href="10-evidence-pack.html"><div class="top"><span class="no">10</span><span class="t">Evidence pack</span></div>
+        <p class="d">The sealed, printable record of one job: configuration, classification, execution, verification, synthetic fidelity and signatures.</p>
+        <div class="m"><span>From 09 or 03 · Evidence pack</span><span class="file">10-evidence-pack.html</span></div></a>
+      <a class="card scr" href="11-admin.html"><div class="top"><span class="no">11</span><span class="t">Admin</span></div>
+        <p class="d">API keys and scopes (each key is shown once), tenants and quotas, connections and who may write, scanner hosts, health and posture.</p>
+        <div class="m"><span class="home">Sidebar · Admin</span><span class="file">11-admin.html</span></div></a>
+    </div>
+  </section>
+
+  <footer class="ix-foot"><span>Data Privacy Services · Privacy Console mockups · v0.1</span><span>All names, identifiers and keys on these screens are fictional or test values.</span></footer>
+</main>
+</body></html>

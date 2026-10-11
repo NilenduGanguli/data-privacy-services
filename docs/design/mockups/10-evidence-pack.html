@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Evidence pack j_01K7…9Q — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+  .sheet { max-width: 1040px; width: 100%; margin: 0 auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-md); padding: 36px 44px 40px; }
+  .eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .doc-head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; padding-bottom: 20px; border-bottom: 2px solid var(--ink); flex-wrap: wrap; }
+  .doc-head h1 { margin: 6px 0 4px; font-size: 24px; letter-spacing: -.01em; }
+  .doc-head .jid { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .seal { text-align: right; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; font-size: 12px; color: var(--ink-2); }
+  .seal .mono { font-size: 11.5px; }
+  .meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 20px; padding: 16px 0 4px; }
+  .meta .l, dl.kv dt { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .meta .v { font-size: 13px; margin-top: 3px; }
+  section.sec { padding-top: 26px; }
+  section.sec > h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 12px; font-size: 16px; letter-spacing: -.005em; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  section.sec > h2 .n { font-family: var(--mono); font-size: 12px; color: var(--ink-3); font-weight: 700; min-width: 16px; }
+  section.sec > h2 .r { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--ink-3); }
+  h3 { font-size: 13.5px; margin: 20px 0 8px; }
+  .lead { font-size: 14px; line-height: 1.6; margin: 0 0 14px; max-width: 74ch; }
+  .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+  .stats > div { background: var(--surface); padding: 10px 12px; min-width: 0; }
+  .stats .l { font-size: 11px; color: var(--ink-3); font-weight: 600; }
+  .stats .v { font-size: 19px; font-weight: 800; margin-top: 2px; letter-spacing: -.01em; }
+  .stats .v.ok { color: var(--emerald); }
+  .stats .s { font-size: 11px; color: var(--ink-3); margin-top: 1px; }
+  dl.kv { display: grid; grid-template-columns: 210px minmax(0, 1fr); margin: 0; border-top: 1px solid var(--border); }
+  dl.kv dt, dl.kv dd { padding: 8px 0; border-bottom: 1px solid var(--border); margin: 0; }
+  dl.kv dt { padding-top: 10px; }
+  dl.kv dd { font-size: 13px; min-width: 0; }
+  dl.kv dd .mono { word-break: break-all; }
+  dl.kv dd .s2 { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
+  .tbl.doc td, .tbl.doc th { padding: 7px 8px; }
+  .tbl.doc td { font-size: 12.5px; vertical-align: top; }
+  .tbl.doc tr:hover td { background: transparent; }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .m { font-family: var(--mono); font-size: 12px; }
+  .prm { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+  .note { font-size: 12px; color: var(--ink-3); margin-top: 8px; }
+  .timeline { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; margin: 14px 0 4px; position: relative; }
+  .timeline::before { content: ""; position: absolute; left: 6px; right: 6px; top: 6px; height: 1px; background: var(--border-strong); }
+  .timeline > div { position: relative; padding-top: 20px; font-size: 12px; padding-right: 8px; }
+  .timeline > div::before { content: ""; position: absolute; top: 1px; left: 1px; width: 9px; height: 9px; border-radius: 50%; background: var(--surface); border: 2px solid var(--ink-3); }
+  .timeline > div.warn::before { border-color: var(--amber); }
+  .timeline > div.ok::before { border-color: var(--emerald); background: var(--emerald); }
+  .timeline .t { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .two { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+  .dist { display: flex; align-items: center; gap: 8px; }
+  .dist .track { position: relative; flex: 1; height: 6px; border-radius: 999px; background: var(--surface-3); min-width: 60px; }
+  .dist .track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--ink-3); }
+  .dist .track b { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink); }
+  .cmx { display: grid; grid-template-columns: 112px repeat(5, minmax(0, 1fr)); gap: 3px; font-size: 11px; }
+  .cmx .hl2 { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); display: flex; align-items: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cmx .hc { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); text-align: center; writing-mode: vertical-rl; transform: rotate(180deg); justify-self: center; align-self: end; height: 82px; white-space: nowrap; }
+  .cmx .c { aspect-ratio: 1.5 / 1; border-radius: 4px; display: grid; place-items: center; font-family: var(--mono); font-size: 11px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .cmx .c.diag { background: transparent; color: var(--ink-3); border: 1px dashed var(--border-strong); }
+  .cmx .c.blank { background: transparent; }
+  .ramp { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-3); margin-top: 10px; }
+  .ramp .g { flex: 1; max-width: 180px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--surface), color-mix(in srgb, var(--ink-2) 70%, var(--surface))); border: 1px solid var(--border); }
+  .pm { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .pm > div { border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; background: var(--surface-2); }
+  .pm .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pm .l { font-weight: 700; font-size: 13px; }
+  .pm .v { font-size: 22px; font-weight: 800; margin: 6px 0 2px; letter-spacing: -.01em; }
+  .pm p { margin: 0; font-size: 12px; color: var(--ink-2); }
+  .reg { display: grid; gap: 10px; }
+  .reg .callout { font-size: 13px; line-height: 1.55; }
+  .sig { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  .sig > div { border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; display: flex; flex-direction: column; min-height: 168px; }
+  .sig .role { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .sig .who { font-weight: 700; margin-top: 4px; font-size: 13px; }
+  .sig .what { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+  .sig .line { margin-top: auto; border-top: 1px solid var(--ink-3); padding-top: 4px; font-size: 11px; color: var(--ink-3); display: flex; justify-content: space-between; }
+  .doc-foot { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .doc-foot .mono { font-size: 11px; word-break: break-all; }
+  .print-only { display: none; }
+
+  @media screen and (max-width: 1100px) {
+    .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .two { grid-template-columns: minmax(0, 1fr); }
+    .sig { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media screen and (max-width: 720px) {
+    .sheet { padding: 20px 16px 24px; border-radius: var(--r-md); }
+    .doc-head h1 { font-size: 19px; }
+    .seal { text-align: left; align-items: flex-start; }
+    .meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    dl.kv { grid-template-columns: minmax(0, 1fr); }
+    dl.kv dt { border-bottom: 0; padding-bottom: 0; }
+    .timeline { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .timeline::before { left: 5px; right: auto; top: 6px; bottom: 6px; width: 1px; height: auto; }
+    .timeline > div { padding: 0 0 0 22px; }
+    .pm, .sig { grid-template-columns: minmax(0, 1fr); }
+    .cmx { grid-template-columns: 74px repeat(5, minmax(0, 1fr)); gap: 2px; }
+    .cmx .c { font-size: 9.5px; aspect-ratio: 1 / 1; }
+    .cmx .hc { height: 70px; font-size: 9.5px; }
+    .cmx .hl2 { font-size: 9.5px; }
+    table.stack tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+    table.stack tfoot tr { display: grid; }
+    table.stack td { border: 0; padding: 0 !important; min-width: 0; text-align: left !important; }
+    table.stack td::before { content: attr(data-l); display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 2px; }
+    table.stack td.wide { grid-column: 1 / -1; }
+    table.stack tr { grid-auto-flow: row dense; }
+    section.sec > h2 { flex-wrap: wrap; }
+    section.sec > h2 .r { flex-basis: 100%; margin-left: 26px; }
+    table.stack.c3 tr { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-flow: row dense; }
+    table.stack.fid td:nth-child(4) { grid-column: 1 / -1; }
+    table.stack.fid td:nth-child(4)::before { display: none; }
+    table.snap td:nth-child(6) { grid-column: span 2; }
+  }
+
+  /* ---------- print: clean black-on-white A4, no console chrome ---------- */
+  @page {
+    size: A4; margin: 14mm 13mm 16mm;
+    @bottom-left { content: "DPS evidence pack · j_01K7ZQ3R8D5W2N6X4H1VTB7F9Q"; font-size: 8pt; color: #444; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 8pt; color: #444; }
+  }
+  @media print {
+    :root, :root[data-theme="dark"], :root[data-theme="light"] {
+      --bg: #fff; --bg-tint: #fff; --surface: #fff; --surface-2: #fff; --surface-3: #e4e4e4;
+      --border: #bdbdbd; --border-strong: #8a8a8a; --ink: #000; --ink-2: #1f1f1f; --ink-3: #4a4a4a;
+      --teal: #000; --teal-soft: transparent; --teal-border: #000;
+      --amber: #000; --amber-soft: transparent; --amber-border: #000;
+      --emerald: #000; --emerald-soft: transparent; --emerald-border: #000;
+      --rose: #000; --rose-soft: transparent; --rose-border: #000;
+      --violet: #000; --violet-soft: transparent; --shadow-md: none; --shadow-lg: none;
+    }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    html, body { background: #fff; height: auto; }
+    body { font-size: 9pt; color: #000; }
+    .sidebar, .topbar, .mock-banner, .no-print { display: none !important; }
+    .shell, .main { display: block; min-height: 0; }
+    .page { padding: 0; display: block; }
+    .sheet { border: 0; box-shadow: none; padding: 0; max-width: none; border-radius: 0; }
+    .print-only { display: block; }
+    a { color: #000; text-decoration: none; }
+    .doc-head { border-bottom-width: 1.5pt; flex-wrap: nowrap; }
+    .doc-head > div:first-child { flex: 1 1 auto !important; }
+    .seal { flex: none; }
+    .snap { table-layout: fixed; }
+    .snap .m { word-break: break-word; font-size: 8pt; }
+    section.keep { break-inside: avoid; page-break-inside: avoid; }
+    .doc-head h1 { font-size: 17pt; }
+    section.sec { padding-top: 16pt; }
+    section.sec > h2 { font-size: 12pt; break-after: avoid; page-break-after: avoid; }
+    h3 { break-after: avoid; page-break-after: avoid; }
+    tr, .stats, .pm > div, .sig, .reg .callout, .timeline, .cmx, dl.kv > * { break-inside: avoid; page-break-inside: avoid; }
+    .chip { border-width: .75pt; }
+    .callout { border-left-width: 2pt; }
+    .stats .v { font-size: 14pt; }
+    .pm .v { font-size: 15pt; }
+    .tbl.doc td, .tbl.doc th { padding: 3pt 5pt; }
+    .cmx .c { aspect-ratio: 2.6 / 1; }
+    .cmx .hc { height: 56pt; }
+    .lead { font-size: 9.5pt; margin-bottom: 8pt; }
+    h3 { margin: 12pt 0 6pt; }
+    .timeline { margin: 6pt 0 2pt; }
+    .note { margin-top: 5pt; }
+    .tbl th { color: #333; }
+    .pagebreak { break-before: page; page-break-before: always; padding-top: 0 !important; }
+    .sig { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .sig > div { min-height: 92pt; }
+    .doc-foot { margin-top: 12pt; break-before: avoid; page-break-before: avoid; }
+    .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .two { grid-template-columns: minmax(0, 1fr); gap: 12pt; }
+    .two > div { break-inside: avoid; page-break-inside: avoid; }
+    .two > div:last-child { max-width: 120mm; }
+    .pm { break-before: avoid; }
+    .snap td, .snap th { font-size: 8.5pt; padding: 4pt 4pt !important; }
+    .snap td.faint { font-size: 8pt; }
+  }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><a class="crumb" href="09-reports.html">Reports & audit</a><span class="sep">/</span><span class="muted">Evidence pack <span class="mono">j_01K7…9Q</span></span><span class="topbar-spacer"></span>
+  <a class="btn btn-sm hide-sm" href="09-reports.html">Back to reports</a><button class="btn btn-sm hide-sm" type="button">Download JSON</button><button class="btn btn-sm btn-primary" type="button" onclick="window.print()">Print or save as PDF</button><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+<article class="sheet" aria-labelledby="doc-title">
+
+  <header class="doc-head">
+    <div style="min-width:0;flex:1 1 420px">
+      <div class="eyebrow">Data Privacy Services · evidence pack</div>
+      <h1 id="doc-title">Oracle CRM.CUSTOMERS → CRM_MASKED.CUSTOMERS</h1>
+      <div class="jid">Job j_01K7ZQ3R8D5W2N6X4H1VTB7F9Q · obfuscate · purpose CHG-48213</div>
+    </div>
+    <div class="seal">
+      <span class="chip emerald">verified · 0 leaks</span>
+      <span>Sealed 11 Oct 2026, 09:49:12 UTC</span>
+      <span>Pack <span class="mono">ev_01K7ZT6QW3</span> · sha256 <span class="mono">6ec5e6dd…d73b</span></span>
+    </div>
+  </header>
+
+  <div class="meta">
+    <div><div class="l">Tenant · region</div><div class="v">retail-banking-apac · ap-south-1</div></div>
+    <div><div class="l">Requested by</div><div class="v">API key <span class="mono">crm-uat-refresh</span><br><span class="faint" style="font-size:12px">owner: CRM platform team</span></div></div>
+    <div><div class="l">Purpose</div><div class="v">CHG-48213 · UAT provisioning for CRM release 26.4</div></div>
+    <div><div class="l">Legal basis</div><div class="v">Legitimate interest — UAT provisioning</div></div>
+    <div><div class="l">Job group</div><div class="v"><span class="mono">crm-uat-refresh</span> · 3 systems</div></div>
+    <div><div class="l">Mode · write</div><div class="v">obfuscate · table, truncate_insert</div></div>
+    <div><div class="l">Data owner</div><div class="v">Priya Raman, CRM</div></div>
+    <div><div class="l">Pack kept until</div><div class="v">10 Nov 2026 · 30-day retention</div></div>
+  </div>
+
+  <!-- 1 SUMMARY -->
+  <section class="sec" aria-labelledby="s1">
+    <h2 id="s1"><span class="n">1</span>Summary</h2>
+    <p class="lead">On 11 October 2026 DPS read 2,706,118 rows from Oracle <b>CRM.CUSTOMERS</b>, replaced the personal data in 11 of its 22 columns under policy <b>gdpr-pseudonymise v3</b>, and wrote the rows to <b>CRM_MASKED.CUSTOMERS</b> for change CHG-48213. The leakage sweep found no source value in the output. The key that reverses the output was returned to the requesting team; DPS kept no copy.</p>
+    <div class="stats">
+      <div><div class="l">Rows written</div><div class="v">2,706,118</div><div class="s">= rows read</div></div>
+      <div><div class="l">Columns transformed</div><div class="v">11 of 22</div><div class="s">11 kept, not personal</div></div>
+      <div><div class="l">Values transformed</div><div class="v">24,311,870</div><div class="s">nulls skipped</div></div>
+      <div><div class="l">Leakage sweep</div><div class="v ok">0 hits</div><div class="s">exact and normalised</div></div>
+      <div><div class="l">Duration</div><div class="v">7 min 52 s</div><div class="s">8 partitions · 1 retry</div></div>
+      <div><div class="l">Raw values to LLM</div><div class="v ok">0</div><div class="s">no LLM call in this job</div></div>
+    </div>
+  </section>
+
+  <!-- 2 CONFIGURATION -->
+  <section class="sec" aria-labelledby="s2">
+    <h2 id="s2"><span class="n">2</span>Configuration<span class="r">hashes identify exactly what ran</span></h2>
+    <dl class="kv">
+      <dt>Policy</dt><dd><b>gdpr-pseudonymise v3</b> + 1 override <span class="mono">CUSTOMERS.RISK_SCORE → bucket</span><span class="s2">Preset hash <span class="mono">sha256:18d2493121bae95d38598115b80269bd6c86088a59562dd9b7d0b34b1c5e3a66</span></span></dd>
+      <dt>Resolved policy hash</dt><dd><span class="mono">sha256:7818519279f4631ee975c21ef88b02eb478ba223d7f0776dc0efba1e9a00f13f</span><span class="s2">preset + override + reviewed snapshot, canonical JSON</span></dd>
+      <dt>Engine</dt><dd>DPS engine 0.1.0 · image <span class="mono">sha256:6105d6cc76af…43e3d</span><span class="s2">Detectors: structural, patterns with checksums (python-stdnum, Luhn, Verhoeff), NER (Presidio with spaCy en). LLM labelling off. FF1 format-preserving encryption on.</span></dd>
+      <dt>Key id</dt><dd><span class="mono">kid k_01K7ZQ4M8V</span> · consistency scope <b>key</b><span class="s2">Data key returned at job creation, wrapped with the caller's RSA-OAEP-256 public key (fingerprint <span class="mono">sha256:6feecc8c…892b</span>). DPS stored no key. This pack holds the key id only.</span></dd>
+      <dt>Source</dt><dd>Oracle 19c · secret <span class="mono">dps/src/crm-prod-ro</span> (read-only) · <span class="mono">CRM.CUSTOMERS</span><span class="s2">Selection <span class="mono">CREATED_AT &gt;= DATE '2025-01-01'</span>, bound parameters, SELECT only (sqlglot check passed)</span></dd>
+      <dt>Target</dt><dd>Oracle 19c · secret <span class="mono">dps/tgt/crm-uat</span> · <span class="mono">CRM_MASKED.CUSTOMERS</span><span class="s2">write_mode table · truncate_insert · created from the source definition</span></dd>
+      <dt>Shared with</dt><dd>MongoDB <span class="mono">profiles_uat</span> (job j_01K7…4D) and PostgreSQL <span class="mono">ledger_uat</span>, same key id, so CUSTOMER_ID, EMAIL and TAX_ID tokens join across all three</dd>
+    </dl>
+  </section>
+
+  <!-- 3 CLASSIFICATION SNAPSHOT -->
+  <section class="sec" aria-labelledby="s3">
+    <h2 id="s3"><span class="n">3</span>Classification snapshot<span class="r"><span class="mono">snap_01K7ZP4N2C</span> · accepted 11 Oct 08:52 UTC</span></h2>
+    <table class="tbl doc stack snap c3"><colgroup><col style="width:15%"><col style="width:14%"><col style="width:16%"><col style="width:7%"><col style="width:19%"><col class="c-dec" style="width:19%"><col style="width:10%"></colgroup><thead><tr><th>Column</th><th>Type</th><th>Inferred entity</th><th class="num">Conf.</th><th>Method</th><th>Decision</th><th>Reviewer</th></tr></thead><tbody>
+      <tr><td class="m">CUSTOMER_ID</td><td class="faint">NUMBER(12)</td><td>CUSTOMER_ID · declared key</td><td class="num m">1.00</td><td><span class="m">fpe_digits</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">FULL_NAME</td><td class="faint">VARCHAR2(120)</td><td>PERSON_NAME</td><td class="num m">0.96</td><td><span class="m">fpe_text</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">NATIONAL_ID</td><td class="faint">VARCHAR2(16)</td><td>AADHAAR</td><td class="num m">0.99</td><td><span class="m">fpe_digits</span> <span class="prm">keep_suffix 4</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">TAX_ID</td><td class="faint">CHAR(10)</td><td>PAN_IN</td><td class="num m">0.98</td><td><span class="m">fpe_text</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">EMAIL</td><td class="faint">VARCHAR2(254)</td><td>EMAIL</td><td class="num m">0.99</td><td><span class="m">email</span> <span class="prm">domain keep</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">MOBILE</td><td class="faint">VARCHAR2(20)</td><td>PHONE</td><td class="num m">0.97</td><td><span class="m">phone</span> <span class="prm">keep_country_code</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">DOB</td><td class="faint">DATE</td><td>DATE_OF_BIRTH</td><td class="num m">0.95</td><td><span class="m">date_shift</span> <span class="prm">±365 d, anchor CUSTOMER_ID</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">ADDR_LINE1</td><td class="faint">VARCHAR2(200)</td><td>STREET_ADDRESS</td><td class="num m">0.90</td><td><span class="m">det_token</span></td><td>accepted</td><td>P. Raman</td></tr>
+      <tr><td class="m">PIN_CODE</td><td class="faint">VARCHAR2(6)</td><td>POSTAL_CODE</td><td class="num m">0.93</td><td><span class="m">generalize</span> <span class="prm">keep_chars 3</span></td><td><b>overridden</b><span class="s2">was fpe_digits; a 6-digit PIN has under 10⁶ real values</span></td><td>P. Raman</td></tr>
+      <tr><td class="m">RISK_SCORE</td><td class="faint">NUMBER(4)</td><td>BUSINESS_SENSITIVE · declared</td><td class="num m">—</td><td><span class="m">bucket</span> <span class="prm">0 · 300 · 600 · 900</span></td><td><b>overridden</b><span class="s2">was keep; declared by the CRM data owner</span></td><td>P. Raman</td></tr>
+      <tr><td class="m">RM_NOTES</td><td class="faint">CLOB</td><td>FREE_TEXT · mixed</td><td class="num m">0.84</td><td><span class="m">text pipeline</span> <span class="prm">span-level</span></td><td><b>overridden</b><span class="s2">was det_token on the whole note; spans keep the rest readable</span></td><td>P. Raman</td></tr>
+    </tbody></table>
+    <p class="note">11 columns kept as not personal: CREATED_AT, SEGMENT, CREDIT_LIMIT, AVG_BALANCE_90D, TENURE_MONTHS, PRODUCT_COUNT, KYC_STATUS, CHANNEL, BRANCH_STATE, CITY, LAST_LOGIN_AT. Discovery sampled 2,000 rows; examples shown to the reviewer were masked.</p>
+  </section>
+
+  <!-- 4 EXECUTION -->
+  <section class="sec" aria-labelledby="s4">
+    <h2 id="s4"><span class="n">4</span>Execution<span class="r">8 partitions by CUSTOMER_ID range</span></h2>
+    <div class="timeline">
+      <div><div class="t">08:52:10</div>Snapshot accepted</div>
+      <div><div class="t">09:41:06</div>Job started, 8 workers</div>
+      <div class="warn"><div class="t">09:45:31</div>p6 lease reclaimed, resumed from checkpoint</div>
+      <div><div class="t">09:48:58</div>Last batch committed</div>
+      <div class="ok"><div class="t">09:49:10</div>Verification passed</div>
+      <div class="ok"><div class="t">09:49:12</div>Pack sealed and hashed</div>
+    </div>
+    <table class="tbl doc stack c3" style="margin-top:12px"><thead><tr><th>Partition</th><th class="num">Rows</th><th class="num">Batches</th><th class="num">Checkpoints</th><th class="num">Retries</th><th class="num">Duration</th><th>Result</th></tr></thead><tbody>
+      <tr><td class="m">p0</td><td class="num m">338,412</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 41 s</td><td>committed</td></tr>
+      <tr><td class="m">p1</td><td class="num m">338,290</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 38 s</td><td>committed</td></tr>
+      <tr><td class="m">p2</td><td class="num m">338,507</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 52 s</td><td>committed</td></tr>
+      <tr><td class="m">p3</td><td class="num m">338,181</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">7 min 03 s</td><td>committed</td></tr>
+      <tr><td class="m">p4</td><td class="num m">338,366</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 57 s</td><td>committed</td></tr>
+      <tr><td class="m">p5</td><td class="num m">338,240</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">7 min 10 s</td><td>committed</td></tr>
+      <tr><td class="m">p6</td><td class="num m">337,901</td><td class="num m">68</td><td class="num m">7</td><td class="num m">1</td><td class="num m">7 min 46 s</td><td>committed<span class="s2">worker lost its lease; resumed from the last committed batch, 0 rows written twice (upsert on primary key)</span></td></tr>
+      <tr><td class="m">p7</td><td class="num m">338,221</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">7 min 05 s</td><td>committed</td></tr>
+      <tr style="font-weight:700"><td>Total</td><td class="num m">2,706,118</td><td class="num m">544</td><td class="num m">56</td><td class="num m">1</td><td class="num m">7 min 52 s</td><td>wall clock · 5,733 rows/s</td></tr>
+    </tbody></table>
+    <p class="note">Batches of 5,000 rows; a checkpoint after every 50,000. Checkpoint positions stay in DPS's job tables and are not printed here, because a key position is a customer identifier.</p>
+  </section>
+
+  <!-- 5 VERIFICATION -->
+  <section class="sec keep" aria-labelledby="s5">
+    <h2 id="s5"><span class="n">5</span>Verification<span class="r">run on the written output, 09:49:10 UTC</span></h2>
+    <table class="tbl doc stack"><thead><tr><th>Check</th><th style="min-width:150px">Result</th><th>What was checked</th><th>Status</th></tr></thead><tbody>
+      <tr><td><b>Leakage sweep</b></td><td class="m">0 hits</td><td class="wide">Every output row compared with the source values of its 11 transformed columns, exact and normalised (case, spaces and separators removed)</td><td><span class="chip emerald">pass</span></td></tr>
+      <tr><td><b>Detectors re-run on output</b></td><td class="m">0 source values</td><td class="wide">24,311,870 output values rescanned; every finding is a token or a value the policy keeps</td><td><span class="chip emerald">pass</span></td></tr>
+      <tr><td><b>Exact-match count</b></td><td class="m">0</td><td class="wide">Transformed values identical to their source value, including format-preserving fixed points</td><td><span class="chip emerald">pass</span></td></tr>
+      <tr><td><b>FPE fallbacks</b></td><td class="m">1 column · 412 values</td><td class="wide">PIN_CODE generalised at review. 412 MOBILE values had fewer than 6 free digits after the country code and ran as det_token, recorded as <span class="m">fallback:fpe_domain_too_small</span></td><td><span class="chip slate">recorded</span></td></tr>
+      <tr><td><b>Cross-system consistency</b></td><td class="m">3 of 3 joins</td><td class="wide">CUSTOMER_ID, EMAIL and TAX_ID tokens match profiles_uat and ledger_uat on a 10,000-row join sample</td><td><span class="chip emerald">pass</span></td></tr>
+      <tr><td><b>Row counts</b></td><td class="m">2,706,118 = 2,706,118</td><td class="wide">Rows read equal rows written; 0 rows rejected by the target</td><td><span class="chip emerald">pass</span></td></tr>
+    </tbody></table>
+  </section>
+
+  <!-- 6 SYNTHETIC COMPANION -->
+  <section class="sec" id="synthetic" aria-labelledby="s6">
+    <h2 id="s6"><span class="n">6</span>Synthetic companion run<span class="r">job j_01K7ZR9D…S7 · 11 Oct 10:12 UTC</span></h2>
+    <p class="lead" style="margin-bottom:10px">Same source, synthesize mode: <b>CRM.CUSTOMERS → CRM_SYNTH.CUSTOMERS</b>, 500,000 rows from the built-in copula engine under <b>synthetic-realistic v1</b> (<span class="mono" style="font-size:12px">sha256:7c152f80…7bd6</span>). Personal columns were replaced by persona surrogates; the 11 other columns were sampled from a model fitted on 2,506,118 rows. 200,000 source rows were held out to measure privacy. The synthesis seed was returned to the caller and is not in this pack.</p>
+
+    <h3>Fidelity · how closely the synthetic columns follow the source</h3>
+    <div class="two">
+      <div>
+        <table class="tbl doc stack c3 fid"><thead><tr><th>Column</th><th>Metric</th><th class="num">Distance</th><th style="width:28%">vs 0.05 limit</th><th class="num">Null rate Δ</th></tr></thead><tbody>
+          <tr><td class="m">RISK_SCORE</td><td>KS</td><td class="num m">0.021</td><td><div class="dist"><span class="track"><i style="width:42%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+          <tr><td class="m">CREDIT_LIMIT</td><td>KS</td><td class="num m">0.034</td><td><div class="dist"><span class="track"><i style="width:68%"></i><b style="left:100%"></b></span></div></td><td class="num m">+0.1 pp</td></tr>
+          <tr><td class="m">AVG_BALANCE_90D</td><td>KS</td><td class="num m">0.047</td><td><div class="dist"><span class="track"><i style="width:94%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+          <tr><td class="m">TENURE_MONTHS</td><td>KS</td><td class="num m">0.018</td><td><div class="dist"><span class="track"><i style="width:36%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+          <tr><td class="m">PRODUCT_COUNT</td><td>KS</td><td class="num m">0.015</td><td><div class="dist"><span class="track"><i style="width:30%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+          <tr><td class="m">CREATED_AT</td><td>KS</td><td class="num m">0.012</td><td><div class="dist"><span class="track"><i style="width:24%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+          <tr><td class="m">SEGMENT</td><td>TVD</td><td class="num m">0.009</td><td><div class="dist"><span class="track"><i style="width:18%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+          <tr><td class="m">KYC_STATUS</td><td>TVD</td><td class="num m">0.004</td><td><div class="dist"><span class="track"><i style="width:8%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+          <tr><td class="m">CHANNEL</td><td>TVD</td><td class="num m">0.011</td><td><div class="dist"><span class="track"><i style="width:22%"></i><b style="left:100%"></b></span></div></td><td class="num m">−0.2 pp</td></tr>
+          <tr><td class="m">BRANCH_STATE</td><td>TVD</td><td class="num m">0.038</td><td><div class="dist"><span class="track"><i style="width:76%"></i><b style="left:100%"></b></span></div></td><td class="num m">0.0 pp</td></tr>
+        </tbody></table>
+        <p class="note">KS = Kolmogorov–Smirnov statistic for numbers and dates; TVD = total-variation distance for categories. BRANCH_STATE categories under 50 rows were folded together before fitting. All 10 columns are within the 0.05 limit. Summary score <b>0.96</b> = 1 − mean column distance (0.021) − mean correlation delta (0.019).</p>
+      </div>
+      <div>
+        <div style="font-size:12.5px;font-weight:700;margin-bottom:8px">Correlation-matrix delta, |synthetic − source|</div>
+        <div class="cmx" role="table" aria-label="Absolute change in correlation between synthetic and source, lower triangle">
+        <div role="presentation"></div>
+        <div class="hc" role="columnheader" title="RISK_SCORE">RISK_SCORE</div>
+        <div class="hc" role="columnheader" title="CREDIT_LIMIT">CREDIT_LIMIT</div>
+        <div class="hc" role="columnheader" title="AVG_BALANCE_90D">AVG_BAL_90D</div>
+        <div class="hc" role="columnheader" title="TENURE_MONTHS">TENURE_MONTHS</div>
+        <div class="hc" role="columnheader" title="PRODUCT_COUNT">PRODUCT_COUNT</div>
+        <div class="hl2" role="rowheader" title="CREDIT_LIMIT">CREDIT_LIMIT</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 17%, var(--surface))" title="CREDIT_LIMIT × RISK_SCORE: |Δ| 0.024">0.024</div>
+        <div class="c blank" role="cell"></div>
+        <div class="c blank" role="cell"></div>
+        <div class="c blank" role="cell"></div>
+        <div class="c blank" role="cell"></div>
+        <div class="hl2" role="rowheader" title="AVG_BALANCE_90D">AVG_BAL_90D</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 22%, var(--surface))" title="AVG_BALANCE_90D × RISK_SCORE: |Δ| 0.031">0.031</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 41%, var(--surface))" title="AVG_BALANCE_90D × CREDIT_LIMIT: |Δ| 0.058">0.058</div>
+        <div class="c blank" role="cell"></div>
+        <div class="c blank" role="cell"></div>
+        <div class="c blank" role="cell"></div>
+        <div class="hl2" role="rowheader" title="TENURE_MONTHS">TENURE_MONTHS</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 8%, var(--surface))" title="TENURE_MONTHS × RISK_SCORE: |Δ| 0.012">0.012</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 12%, var(--surface))" title="TENURE_MONTHS × CREDIT_LIMIT: |Δ| 0.017">0.017</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 18%, var(--surface))" title="TENURE_MONTHS × AVG_BALANCE_90D: |Δ| 0.026">0.026</div>
+        <div class="c blank" role="cell"></div>
+        <div class="c blank" role="cell"></div>
+        <div class="hl2" role="rowheader" title="PRODUCT_COUNT">PRODUCT_COUNT</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 6%, var(--surface))" title="PRODUCT_COUNT × RISK_SCORE: |Δ| 0.008">0.008</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 15%, var(--surface))" title="PRODUCT_COUNT × CREDIT_LIMIT: |Δ| 0.021">0.021</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 13%, var(--surface))" title="PRODUCT_COUNT × AVG_BALANCE_90D: |Δ| 0.019">0.019</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 10%, var(--surface))" title="PRODUCT_COUNT × TENURE_MONTHS: |Δ| 0.014">0.014</div>
+        <div class="c blank" role="cell"></div>
+        <div class="hl2" role="rowheader" title="CREATED_AT">CREATED_AT</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 4%, var(--surface))" title="CREATED_AT × RISK_SCORE: |Δ| 0.006">0.006</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 6%, var(--surface))" title="CREATED_AT × CREDIT_LIMIT: |Δ| 0.009">0.009</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 8%, var(--surface))" title="CREATED_AT × AVG_BALANCE_90D: |Δ| 0.011">0.011</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 15%, var(--surface))" title="CREATED_AT × TENURE_MONTHS: |Δ| 0.022">0.022</div>
+        <div class="c" role="cell" style="background:color-mix(in srgb, var(--ink-2) 5%, var(--surface))" title="CREATED_AT × PRODUCT_COUNT: |Δ| 0.007">0.007</div>
+        </div>
+        <div class="ramp"><span>0.00</span><span class="g"></span><span>0.10 limit</span></div>
+        <p class="note">Largest change 0.058 for CREDIT_LIMIT × AVG_BALANCE_90D. Mean 0.019 across 15 pairs.</p>
+      </div>
+    </div>
+
+    <h3>Privacy · how far the synthetic rows are from real customers</h3>
+    <div class="pm">
+      <div><div class="top"><span class="l">Exact-row matches</span><span class="chip emerald">enforced</span></div><div class="v">0 of 500,000</div><p>No synthetic row equals a source row on all columns. The engine rejects and resamples any match before writing.</p></div>
+      <div><div class="top"><span class="l">Nearest-neighbour distance ratio</span><span class="chip emerald">pass · ≥ 1.00</span></div><div class="v">1.04</div><p>Median distance synthetic → source 0.412, against 0.398 between real customers in the holdout. Synthetic rows are not closer to real people than real people are to each other.</p></div>
+      <div><div class="top"><span class="l">Quasi-identifier uniqueness</span><span class="chip emerald">pass</span></div><div class="v">0.8% <span class="faint" style="font-size:13px;font-weight:600">vs 2.9% in source</span></div><p>Rows unique on age band, PIN prefix, gender and segment. None of the unique synthetic rows matches a unique source row.</p></div>
+      <div><div class="top"><span class="l">Membership-inference proxy</span><span class="chip slate">not run</span></div><div class="v">—</div><p>Available with the optional ML engine. Not applicable to the built-in copula engine used here. Train-on-synthetic utility was not requested.</p></div>
+    </div>
+  </section>
+
+  <!-- 7 REGULATORY NOTE -->
+  <section class="sec keep" aria-labelledby="s7">
+    <h2 id="s7"><span class="n">7</span>Regulatory note</h2>
+    <div class="reg">
+      <div class="callout"><b>CRM_MASKED is pseudonymised, and pseudonymised data is still personal data</b> under GDPR Art. 4(5) and India's Digital Personal Data Protection Act 2023. Hold it under the same controls as CRM production. Whoever holds key <span class="mono">k_01K7ZQ4M8V</span> can re-identify every row.</div>
+      <div class="callout amber"><b>The synthetic report is a measurement, not a claim.</b> The fidelity and privacy figures in section 6 describe this run against a 200,000-row holdout. They do not state that CRM_SYNTH is anonymous. Treat it as confidential until your data protection officer decides otherwise; the synthesis seed can link rows back if someone also holds candidate originals.</div>
+      <p class="note" style="margin:2px 0 0">DPS stores no customer values and no keys. This pack holds counts, hashes, column names, method names and key ids only. Its hash is written to the append-only audit log, so any later edit to the pack is detectable.</p>
+    </div>
+  </section>
+
+  <!-- 8 SIGNATURES -->
+  <section class="sec" aria-labelledby="s8">
+    <h2 id="s8"><span class="n">8</span>Signatures</h2>
+    <div class="sig">
+      <div><div class="role">System attestation</div><div class="who">Data Privacy Services 0.1.0</div><div class="what">Generated and hashed at 09:49:12 UTC. Audit row <span class="mono">a_01K7ZT6R0P</span>.</div><div class="line"><span class="mono">sha256:6ec5e6dd…d73b</span></div></div>
+      <div><div class="role">Data owner</div><div class="who">Priya Raman</div><div class="what">CRM data owner. Accepted the classification snapshot in the console at 08:52 UTC.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+      <div><div class="role">Data protection officer</div><div class="who">&nbsp;</div><div class="what">Confirms purpose, legal basis and retention.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+      <div><div class="role">Change approver</div><div class="who">Owen Clarke</div><div class="what">UAT environment manager. Approves release of CRM_MASKED to UAT under CHG-48213.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+    </div>
+  </section>
+
+  <footer class="doc-foot">
+    <span>DPS evidence pack · job j_01K7ZQ3R8D5W2N6X4H1VTB7F9Q · generated 11 Oct 2026 09:49:12 UTC</span>
+    <span>Pack sha256 <span class="mono">6ec5e6ddf67837f2b91df0fea306b9db0fcd146c58a7d233c79d6bae6ab7d73b</span></span>
+  </footer>
+</article>
+</main></div></div>
+<script>
+  renderSidebar('Reports & audit');
+  /* table cells are labelled for phone layouts by labelCells() in vault.js */
+</script>
+</body></html>

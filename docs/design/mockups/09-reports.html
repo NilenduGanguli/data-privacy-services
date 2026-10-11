@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reports & audit — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+
+  /* filter row */
+  .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .filters .flabel { font-size: 12px; color: var(--ink-3); font-weight: 600; margin-right: -4px; }
+  .filters .seg button { padding: 7px 12px; }
+  .filters select.input { width: auto; min-width: 0; padding: 7px 30px 7px 12px; }
+  .filters .search { flex: 1 1 150px; width: auto; min-width: 150px; padding: 7px 12px; }
+  .filters .grow { flex: 1; }
+
+  .kpi .value { font-variant-numeric: normal; }
+  .split { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+
+  /* chart */
+  .chart { position: relative; height: 220px; }
+  .chart svg { display: block; overflow: visible; }
+  .chart .hit { fill: transparent; cursor: default; outline: none; }
+  .chart .hit:focus-visible { stroke: var(--teal); stroke-width: 2; rx: 6px; }
+  .chart .hit:hover + .col, .chart .hit:focus + .col { opacity: .82; }
+  .chart .hit:focus-visible ~ .focus-ring { display: block; }
+  .chart-empty { position: absolute; inset: 0; display: none; place-items: center; text-align: center; padding: 20px; color: var(--ink-2); font-size: 13px; }
+  .chart-empty.show { display: grid; }
+  .tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-md); box-shadow: var(--shadow-lg); padding: 8px 10px; font-size: 12px; min-width: 132px; display: none; z-index: 3; }
+  .tip.show { display: block; }
+  .tip .d { color: var(--ink-3); font-size: 11.5px; margin-bottom: 4px; }
+  .tip .r { display: flex; align-items: center; gap: 8px; }
+  .tip .r i { width: 12px; height: 2px; border-radius: 2px; display: inline-block; }
+  .tip .r b { font-variant-numeric: tabular-nums; min-width: 28px; }
+  .tip .r span { color: var(--ink-2); }
+  .chart-table { display: none; max-height: 220px; overflow: auto; }
+  .chart-table.show { display: block; }
+  .chart-table .tbl td, .chart-table .tbl th { padding: 6px 10px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* failures list */
+  .fail { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .fail:last-child { border-bottom: 0; padding-bottom: 0; }
+  .fail .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .fail .what { margin: 6px 0 4px; color: var(--ink); }
+  .fail .fix { color: var(--ink-3); font-size: 12px; }
+  .fail .fix a { color: var(--teal); font-weight: 600; }
+
+  /* tables */
+  .tbl-scroll > table.tbl { min-width: 980px; }
+  .tbl td.sub { line-height: 1.35; }
+  .tbl .t { font-family: var(--mono); font-size: 12px; white-space: nowrap; color: var(--ink-2); }
+  .tbl th { white-space: nowrap; }
+  #packs td.mono { white-space: nowrap; }
+  .dl { display: flex; gap: 6px; }
+  .meth { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .more { font-family: var(--mono); font-size: 11px; color: var(--ink-3); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; margin-left: 2px; }
+  .card-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; font-size: 12px; color: var(--ink-3); flex-wrap: wrap; }
+  .lock { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); }
+  .lock svg { width: 14px; height: 14px; }
+  #audit .tbl td { padding: 8px 6px; font-size: 12px; vertical-align: top; }
+  #audit .tbl th { padding: 8px 6px; }
+  #audit .tbl td .chip { margin-top: -1px; }
+  #audit .rt { font-size: 11px; color: var(--ink); min-width: 140px; }
+  #audit .mono.nw { font-size: 11px; }
+  #audit .tbl td:last-child { min-width: 150px; }
+  .empty-row td { text-align: center; color: var(--ink-2); padding: 24px !important; }
+
+  @media (max-width: 1240px) { .split { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 720px) {
+    .filters select.input, .filters .search { width: 100%; min-width: 0; }
+    .filters .seg { width: 100%; }
+    .filters .seg button { flex: 1; padding: 7px 8px; }
+    .filters .flabel { width: 100%; margin: 4px 0 -4px; }
+    #packs td.mono, #audit .nw { white-space: normal; overflow-wrap: anywhere; }
+    table.stack td.num { text-align: left; }
+  }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><span class="crumb">Reports & audit</span><span class="sep">/</span><span class="muted">Tenant: retail-banking-apac + 3 tenants you can read</span><span class="topbar-spacer"></span>
+  <span class="pill"><span class="dot"></span>Audit writer healthy · append-only</span><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>Evidence and audit</h1><p>Every job, scan and API call leaves an evidence pack or an audit row. Rows hold counts, entity types, method names, hashes and key names. They never hold values.</p></div>
+    <div class="head-actions"><button class="btn" type="button">Schedule a weekly export</button><button class="btn btn-primary" type="button" id="export">Export 24.6M audit rows as CSV</button></div></div>
+
+  <!-- one row of filters; they scope everything below -->
+  <div class="filters" role="search" aria-label="Filter reports and audit">
+    <select class="input" id="f-range" aria-label="Date range">
+      <option value="7">Last 7 days (5–11 Oct)</option>
+      <option value="14" selected>Last 14 days (28 Sep–11 Oct)</option>
+      <option value="30">Last 30 days (12 Sep–11 Oct)</option>
+    </select>
+    <span class="flabel">Layer</span>
+    <div class="seg" role="group" aria-label="Layer" id="f-layer"><button type="button" class="on" data-v="all">All</button><button type="button" data-v="api">API</button><button type="button" data-v="conn">Connectors</button><button type="button" data-v="ui">UI scanner</button></div>
+    <span class="flabel">Outcome</span>
+    <div class="seg" role="group" aria-label="Outcome" id="f-out"><button type="button" class="on" data-v="all">All</button><button type="button" data-v="ok">OK</button><button type="button" data-v="failed">Failed</button><button type="button" data-v="blocked">Blocked</button></div>
+    <input class="input search" id="f-q" type="search" placeholder="Job, ticket or key name" aria-label="Search by job, ticket or key name">
+    <button class="btn btn-ghost btn-sm" type="button" id="f-clear">Clear</button>
+  </div>
+
+  <div class="grid cols-4">
+    <div class="card kpi"><div class="label">Evidence packs</div><div class="value" id="k-packs">62</div><div class="delta" id="k-packs-d">48 jobs · 9 scans · 5 API roll-ups</div></div>
+    <div class="card kpi"><div class="label">Verification sweeps</div><div class="value" id="k-sweeps">1,457</div><div class="delta" id="k-sweeps-d">1,454 passed · 3 failed, all failed closed</div></div>
+    <div class="card kpi"><div class="label">Audit rows</div><div class="value" id="k-rows">24.6M</div><div class="delta">append-only · one partition per day</div></div>
+    <div class="card kpi zero"><div class="label">Customer values stored</div><div class="value">0</div><div class="delta">counts, hashes and key names only</div></div>
+  </div>
+
+  <div class="split">
+    <section class="card" aria-labelledby="vh-t">
+      <div class="card-head"><div><div class="card-title" id="vh-t">Verification sweeps per day</div><div class="faint" style="font-size:12px;margin-top:2px">One sweep per job partition, scan page and hourly API batch</div></div>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><div class="legend" id="legend"><span><i style="background:var(--emerald)"></i>Passed</span><span><i style="background:var(--rose)"></i>Failed</span></div><button class="btn btn-sm" type="button" id="tbl-toggle" aria-pressed="false">View as table</button></div></div>
+      <div class="chart" id="chart" aria-label="Verification sweeps per day, passed and failed"><div class="tip" id="tip" role="status"></div><div class="chart-empty" id="chart-empty">Sweeps pass or fail; none are blocked. Blocked requests are listed in the audit log below.</div></div>
+      <div class="chart-table" id="chart-table"><table class="tbl"><thead><tr><th>Day</th><th class="num">Passed</th><th class="num">Failed</th></tr></thead><tbody id="chart-rows"></tbody></table></div>
+    </section>
+
+    <section class="card" aria-labelledby="fs-t">
+      <div class="card-head"><div class="card-title" id="fs-t">Failed sweeps</div><span class="chip rose">3 in 14 days</span></div>
+      <div class="fail">
+        <div class="top"><span class="mono">j_01K7…F2 · p3, p4</span><span class="faint" style="font-size:12px">9 Oct 16:22 UTC</span></div>
+        <div class="what">Oracle LOANS.APPLICANTS → S3 Parquet. 2 applicant names survived in EMPLOYER_NAME: sole proprietors trade under their own name. Both partitions were discarded before upload; nothing reached the bucket.</div>
+        <div class="fix"><span class="chip amber">re-run waits for v4</span> Fix drafted: <a href="05-policies.html#declared">declare EMPLOYER_NAME as ORG_NAME</a></div>
+      </div>
+      <div class="fail">
+        <div class="top"><span class="mono">POST /api/v1/synthesize · kyc-intake</span><span class="faint" style="font-size:12px">3 Oct 11:08 UTC</span></div>
+        <div class="what">The LLM rewrite of a free-text note reused a surname from the input. The verifier failed closed to the deterministic path; the response carried placeholders filled by DPS and no original value.</div>
+        <div class="fix"><span class="chip slate">contained automatically</span> No action needed. The model saw placeholders only.</div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" id="packs-card" aria-labelledby="ep-t">
+    <div class="card-head"><div class="card-title" id="ep-t">Evidence packs</div><span class="faint" style="font-size:12px">Kept 30 days under the tenant retention policy. Download a pack to keep it longer.</span></div>
+    <div class="tbl-scroll"><table class="tbl stack" id="packs"><thead><tr><th style="width:34%">Job or request</th><th>Layer</th><th>Mode</th><th>Policy</th><th>Verification</th><th>Created (UTC)</th><th>Download</th></tr></thead><tbody>
+      <tr data-layer="conn" data-out="ok"><td class="sub"><span class="mono">j_01K7…9Q</span> · Oracle CRM.CUSTOMERS → CRM_MASKED.CUSTOMERS<span class="s2">CHG-48213 · table, truncate_insert · 2,706,118 rows</span></td><td>Connectors</td><td><span class="chip teal">obfuscate</span></td><td class="mono">gdpr-pseudonymise v3</td><td><span class="chip emerald">passed · 0 leaks</span></td><td class="t">11 Oct 09:49</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…9Q as JSON">JSON</button><a class="btn btn-sm" href="10-evidence-pack.html" aria-label="Open printable evidence pack j_01K7…9Q">PDF</a></div></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="sub"><span class="mono">j_01K7…S7</span> · Oracle CRM.CUSTOMERS → CRM_SYNTH.CUSTOMERS<span class="s2">CHG-48213 · synthetic companion · 500,000 rows · fidelity 0.96</span></td><td>Connectors</td><td><span class="chip violet">synthesize</span></td><td class="mono">synthetic-realistic v1</td><td><span class="chip emerald">passed · 0 exact rows</span></td><td class="t">11 Oct 10:12</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…S7 as JSON">JSON</button><a class="btn btn-sm" href="10-evidence-pack.html#synthetic" aria-label="Open printable evidence pack j_01K7…S7">PDF</a></div></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="sub"><span class="mono">j_01K7…4D</span> · MongoDB profiles → profiles_uat<span class="s2">CHG-48213 · job group crm-uat-refresh · 1,120,442 documents</span></td><td>Connectors</td><td><span class="chip teal">obfuscate</span></td><td class="mono">gdpr-pseudonymise v3</td><td><span class="chip emerald">passed · 0 leaks</span></td><td class="t">11 Oct 08:37</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…4D as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…4D as PDF">PDF</button></div></td></tr>
+      <tr data-layer="conn" data-out="failed"><td class="sub"><span class="mono">j_01K7…F2</span> · Oracle LOANS.APPLICANTS → S3 Parquet<span class="s2">CHG-48160 · files · stopped at partition 3 of 8, nothing uploaded</span></td><td>Connectors</td><td><span class="chip teal">obfuscate</span></td><td class="mono">gdpr-pseudonymise v3</td><td><span class="chip rose">failed · 2 leaks caught</span></td><td class="t">9 Oct 16:22</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…F2 as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…F2 as PDF">PDF</button></div></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="sub"><span class="mono">j_01K7…B8</span> · PostgreSQL LEDGER.COUNTERPARTIES, in place<span class="s2">CHG-48090 · in_place · 412,560 rows · write confirmed by Tom Hargreaves</span></td><td>Connectors</td><td><span class="chip teal">obfuscate</span></td><td class="mono">pci-dss v2</td><td><span class="chip emerald">passed · 0 leaks</span></td><td class="t">8 Oct 21:05</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…B8 as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…B8 as PDF">PDF</button></div></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="sub"><span class="mono">j_01K7…A3</span> · Oracle LOANS.REPAYMENTS, append to same table<span class="s2">CHG-48177 · append · key strategy offset +90,000,000 · 250,000 synthetic rows</span></td><td>Connectors</td><td><span class="chip violet">synthesize</span></td><td class="mono">synthetic-realistic v1</td><td><span class="chip emerald">passed · 0 key clashes</span></td><td class="t">8 Oct 11:40</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…A3 as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…A3 as PDF">PDF</button></div></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="sub"><span class="mono">j_01K7…1A</span> · PostgreSQL ledger.transactions → S3 Parquet<span class="s2">CHG-48011 · files · 3,400,000 synthetic rows · fidelity 0.97</span></td><td>Connectors</td><td><span class="chip violet">synthesize</span></td><td class="mono">synthetic-strict v1</td><td><span class="chip emerald">passed · 0 exact rows</span></td><td class="t">7 Oct 14:30</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…1A as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download evidence pack j_01K7…1A as PDF">PDF</button></div></td></tr>
+      <tr data-layer="ui" data-out="ok"><td class="sub"><span class="mono">s_01K6…MX</span> · UI scan of onboarding-uat.bank.internal<span class="s2">38 pages · 12 forms · 20 personas · 0 submissions</span></td><td>UI scanner</td><td><span class="chip violet">synthesize</span></td><td class="mono">synthetic-realistic v1</td><td><span class="chip emerald">passed · 0 POSTs left</span></td><td class="t">6 Oct 12:11</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download evidence pack s_01K6…MX as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download evidence pack s_01K6…MX as PDF">PDF</button></div></td></tr>
+      <tr data-layer="api" data-out="ok"><td class="sub"><span class="mono">POST /api/v1/obfuscate</span> · daily roll-up, 10 Oct<span class="s2">1,862,404 calls · 41 keys · 6 policies</span></td><td>API</td><td><span class="chip teal">obfuscate</span></td><td class="mono">6 policies</td><td><span class="chip emerald">passed · 0 leaks</span></td><td class="t">11 Oct 00:05</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download API roll-up for 10 Oct as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download API roll-up for 10 Oct as PDF">PDF</button></div></td></tr>
+      <tr data-layer="api" data-out="failed"><td class="sub"><span class="mono">POST /api/v1/synthesize</span> · daily roll-up, 3 Oct<span class="s2">211,930 calls · 1 sweep failed closed, response served safely</span></td><td>API</td><td><span class="chip violet">synthesize</span></td><td class="mono">synthetic-realistic v1</td><td><span class="chip rose">1 failed · fell back</span></td><td class="t">4 Oct 00:05</td><td><div class="dl"><button class="btn btn-sm" type="button" aria-label="Download API roll-up for 3 Oct as JSON">JSON</button><button class="btn btn-sm" type="button" aria-label="Download API roll-up for 3 Oct as PDF">PDF</button></div></td></tr>
+      <tr class="empty-row hidden" id="packs-empty"><td colspan="7">No evidence pack matches these filters. Clear the filters, or widen the date range to 30 days.</td></tr>
+    </tbody></table></div>
+    <div class="card-foot"><span id="packs-count">Showing 10 of 62 packs</span><button class="btn btn-sm" type="button">Show 52 older packs</button></div>
+  </section>
+
+  <section class="card" id="audit" aria-labelledby="al-t">
+    <div class="card-head"><div class="card-title" id="al-t">Audit log</div>
+      <span class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>Append-only. Rows cannot be edited or deleted; partitions expire under the retention policy.</span></div>
+    <div class="tbl-scroll"><table class="tbl stack" id="audit-tbl"><thead><tr><th>Time (UTC)</th><th>Tenant</th><th>Key name</th><th>Route</th><th>Mode</th><th>Policy</th><th class="num">Findings</th><th>Methods</th><th>Outcome</th></tr></thead><tbody>
+      <tr data-layer="api" data-out="ok"><td class="t">10:14:51<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">console · a.mehta</td><td class="mono rt">POST <wbr>/api/v1/reveal</td><td>reveal</td><td class="faint">—</td><td class="num mono nw">10</td><td class="nw"><span class="meth">fpe_digits</span><span class="more">+4</span></td><td><span class="chip emerald">ok</span><span class="s2">reveal scope</span></td></tr>
+      <tr data-layer="api" data-out="ok"><td class="t">10:14:22<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">console · a.mehta</td><td class="mono rt">POST <wbr>/api/v1/obfuscate</td><td>obfuscate</td><td class="mono nw">gdpr-pseudonymise v3</td><td class="num mono nw">10</td><td class="nw"><span class="meth">fpe_digits</span><span class="more">+5</span></td><td><span class="chip emerald">ok</span><span class="s2">key returned once</span></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="t">10:12:40<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">crm-uat-refresh</td><td class="mono rt">job j_01K7…S7 completed</td><td>synthesize</td><td class="mono nw">synthetic-realistic v1</td><td class="num mono nw">22 cols</td><td class="nw"><span class="meth">surrogate</span><span class="more">+1</span></td><td><span class="chip emerald">ok</span><span class="s2">0 exact rows</span></td></tr>
+      <tr data-layer="api" data-out="ok"><td class="t">10:09:03<span class="s2">11 Oct</span></td><td class="nw">cards-us</td><td class="mono nw">cards-qa-harness</td><td class="mono rt">POST <wbr>/api/v1/obfuscate</td><td>obfuscate</td><td class="mono nw">pci-dss v2</td><td class="num mono nw">3</td><td class="nw"><span class="meth">fpe_digits</span><span class="more">+1</span></td><td><span class="chip emerald">ok</span></td></tr>
+      <tr data-layer="api" data-out="ok"><td class="t">10:02:17<span class="s2">11 Oct</span></td><td class="nw">wealth-uk</td><td class="mono nw">statements-etl</td><td class="mono rt">POST <wbr>/api/v1/documents/obfuscate</td><td>obfuscate</td><td class="mono nw">gdpr-pseudonymise v2</td><td class="num mono nw">41</td><td class="nw"><span class="meth">fpe_text</span><span class="more">+2</span></td><td><span class="chip emerald">ok</span><span class="s2">3-page PDF</span></td></tr>
+      <tr data-layer="api" data-out="ok"><td class="t">09:58:44<span class="s2">11 Oct</span></td><td class="nw">retail-mx</td><td class="mono nw">onboarding-mx</td><td class="mono rt">POST <wbr>/api/v1/detect</td><td>detect</td><td class="mono nw">gdpr-pseudonymise v3</td><td class="num mono nw">12</td><td class="faint">—</td><td><span class="chip emerald">ok</span><span class="s2">CURP, RFC found</span></td></tr>
+      <tr data-layer="conn" data-out="blocked"><td class="t">09:51:30<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">crm-uat-refresh</td><td class="mono rt">POST <wbr>/api/v1/jobs</td><td>obfuscate</td><td class="mono nw">gdpr-pseudonymise v3</td><td class="num mono nw">—</td><td class="faint">—</td><td><span class="chip amber">rejected</span><span class="s2">in_place without confirm_write</span></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="t">09:49:12<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">crm-uat-refresh</td><td class="mono rt">job j_01K7…9Q evidence written</td><td>obfuscate</td><td class="mono nw">gdpr-pseudonymise v3</td><td class="num mono nw">24,311,870</td><td class="nw"><span class="meth">fpe_digits</span><span class="more">+6</span></td><td><span class="chip emerald">ok</span><span class="s2">0 leaks</span></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="t">09:45:31<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">dps-worker-3</td><td class="mono rt">job j_01K7…9Q p6 lease reclaimed</td><td>obfuscate</td><td class="mono nw">gdpr-pseudonymise v3</td><td class="num mono nw">—</td><td class="faint">—</td><td><span class="chip emerald">ok</span><span class="s2">resumed from checkpoint</span></td></tr>
+      <tr data-layer="ui" data-out="blocked"><td class="t">09:12:55<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">ui-scan-svc</td><td class="mono rt">scan s_01K7…R2 form POST</td><td>synthesize</td><td class="mono nw">synthetic-realistic v1</td><td class="num mono nw">9</td><td class="nw"><span class="meth">surrogate</span></td><td><span class="chip slate">blocked</span><span class="s2">by design, no submissions</span></td></tr>
+      <tr data-layer="conn" data-out="ok"><td class="t">08:52:10<span class="s2">11 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">console · p.raman</td><td class="mono rt">snapshot snap_01K7ZP… accepted</td><td>review</td><td class="mono nw">gdpr-pseudonymise v3</td><td class="num mono nw">22 cols</td><td class="faint">—</td><td><span class="chip emerald">ok</span><span class="s2">3 overrides</span></td></tr>
+      <tr data-layer="api" data-out="blocked"><td class="t">08:40:33<span class="s2">11 Oct</span></td><td class="faint">—</td><td class="mono nw">unknown key<span class="s2">sha256:3f9a…c210</span></td><td class="mono rt">POST <wbr>/api/v1/reveal</td><td>reveal</td><td class="faint">—</td><td class="num mono nw">—</td><td class="faint">—</td><td><span class="chip rose">denied</span><span class="s2">401 · key not recognised</span></td></tr>
+      <tr data-layer="conn" data-out="failed"><td class="t">16:22:09<span class="s2">9 Oct</span></td><td class="nw">retail-banking-apac</td><td class="mono nw">loans-handoff</td><td class="mono rt">job j_01K7…F2 leakage sweep</td><td>obfuscate</td><td class="mono nw">gdpr-pseudonymise v3</td><td class="num mono nw">2 leaks</td><td class="nw"><span class="meth">fpe_text</span><span class="more">+1</span></td><td><span class="chip rose">failed closed</span><span class="s2">output discarded</span></td></tr>
+      <tr class="empty-row hidden" id="audit-empty"><td colspan="9">No audit rows match these filters. Clear the search or pick another layer.</td></tr>
+    </tbody></table></div>
+    <div class="card-foot"><span id="audit-count">Showing 13 of 24,611,402 rows, newest first</span><button class="btn btn-sm" type="button">Load 50 older rows</button></div>
+  </section>
+</main></div></div>
+
+<script>
+  renderSidebar('Reports & audit');
+
+  /* table cells are labelled for phone layouts by labelCells() in vault.js */
+
+  /* 30 days of sweep counts (12 Sep–11 Oct 2026), split by layer. Failures are part of the totals. */
+  var DAYS = ['Sep 12','Sep 13','Sep 14','Sep 15','Sep 16','Sep 17','Sep 18','Sep 19','Sep 20','Sep 21','Sep 22','Sep 23','Sep 24','Sep 25','Sep 26','Sep 27','Sep 28','Sep 29','Sep 30','Oct 1','Oct 2','Oct 3','Oct 4','Oct 5','Oct 6','Oct 7','Oct 8','Oct 9','Oct 10','Oct 11'];
+  var SWEEPS = {
+    conn: [28,30,96,90,84,97,95,30,32,89,103,97,91,94,25,38,80,98,78,89,100,30,25,99,84,93,97,78,29,33],
+    api:  [24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24],
+    ui:   [0,0,18,0,0,0,0,0,0,9,18,18,9,18,0,0,18,0,12,18,0,0,0,12,18,12,0,18,0,0]
+  };
+  var FAILS = { conn: { 27: 2 }, api: { 21: 1 }, ui: {} };
+  /* audit rows per layer and outcome over 14 days, used for the export label */
+  var ROWS14 = { api: { ok: 24470661, failed: 1, blocked: 12253 }, conn: { ok: 118590, failed: 2, blocked: 30 }, ui: { ok: 9013, failed: 0, blocked: 852 } };
+
+  var state = { range: 14, layer: 'all', out: 'all', q: '' };
+  function layers() { return state.layer === 'all' ? ['conn', 'api', 'ui'] : [state.layer]; }
+  function series() {
+    var start = DAYS.length - state.range, out = [];
+    for (var i = start; i < DAYS.length; i++) {
+      var p = 0, f = 0;
+      layers().forEach(function (l) { var fl = FAILS[l][i] || 0; p += SWEEPS[l][i] - fl; f += fl; });
+      out.push({ day: DAYS[i], passed: p, failed: f });
+    }
+    return out;
+  }
+  function fmt(n) { return n.toLocaleString('en-US'); }
+  function compact(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e5 ? Math.round(n / 1e3) + 'K' : fmt(n); }
+
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  function node(tag, attrs, parent) { var e = document.createElementNS(SVGNS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+  function topRounded(x, y, w, h, r) { r = Math.min(r, h, w / 2); return 'M' + x + ',' + (y + h) + 'V' + (y + r) + 'Q' + x + ',' + y + ' ' + (x + r) + ',' + y + 'H' + (x + w - r) + 'Q' + (x + w) + ',' + y + ' ' + (x + w) + ',' + (y + r) + 'V' + (y + h) + 'Z'; }
+
+  function renderChart() {
+    var box = document.getElementById('chart'), tip = document.getElementById('tip'), empty = document.getElementById('chart-empty');
+    var old = box.querySelector('svg'); if (old) old.remove();
+    tip.classList.remove('show');
+    var data = series(), showP = state.out !== 'failed', showF = state.out !== 'ok';
+    empty.classList.toggle('show', state.out === 'blocked');
+    document.getElementById('legend').style.visibility = state.out === 'blocked' ? 'hidden' : 'visible';
+    renderTable(data);
+    if (state.out === 'blocked') return;
+    var W = box.clientWidth, H = 220, m = { l: 38, r: 6, t: 30, b: 26 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
+    var max = 0; data.forEach(function (d) { max = Math.max(max, (showP ? d.passed : 0) + (showF ? d.failed : 0)); });
+    var step = max <= 4 ? 1 : max <= 10 ? 2 : max <= 60 ? 20 : 50, top = Math.max(step, Math.ceil(max / step) * step);
+    var svg = node('svg', { width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'Verification sweeps per day, ' + data[0].day + ' to ' + data[data.length - 1].day });
+    for (var v = 0; v <= top; v += step) {
+      var y = m.t + ph - (v / top) * ph;
+      node('line', { x1: m.l, x2: W - m.r, y1: y, y2: y, stroke: 'var(--border)', 'stroke-width': 1 }, svg);
+      var t = node('text', { x: m.l - 8, y: y + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'var(--ink-3)', 'font-family': 'var(--mono)' }, svg); t.textContent = fmt(v);
+    }
+    var slot = pw / data.length, bw = Math.min(24, Math.max(6, slot * 0.56)), every = Math.ceil(data.length / Math.max(2, Math.floor(pw / 64)));
+    data.forEach(function (d, i) {
+      var cx = m.l + slot * i + slot / 2, x = cx - bw / 2, base = m.t + ph;
+      var ph1 = showP ? (d.passed / top) * ph : 0, ph2 = showF && d.failed ? Math.max(3, (d.failed / top) * ph) : 0;
+      var hit = node('rect', { x: m.l + slot * i, y: m.t, width: slot, height: ph, class: 'hit', tabindex: 0, 'aria-label': d.day + ': ' + d.passed + ' passed, ' + d.failed + ' failed' }, svg);
+      var g = node('g', { class: 'col' }, svg);
+      if (ph1 > 0) node('path', { d: topRounded(x, base - ph1, bw, ph1, ph2 ? 0 : 4), fill: 'var(--emerald)' }, g);
+      if (ph2 > 0) {
+        var yTop = base - ph1 - (ph1 > 0 ? 2 : 0) - ph2;
+        node('path', { d: topRounded(x, yTop, bw, ph2, Math.min(4, ph2)), fill: 'var(--rose)' }, g);
+        node('line', { x1: cx, x2: cx, y1: m.t - 6, y2: yTop - 3, stroke: 'var(--ink-3)', 'stroke-width': 1 }, svg);
+        var anchor = cx < m.l + 40 ? 'start' : cx > W - m.r - 40 ? 'end' : 'middle';
+        var lab = node('text', { x: cx, y: m.t - 10, 'text-anchor': anchor, 'font-size': 11, 'font-weight': 700, fill: 'var(--ink)' }, svg); lab.textContent = d.failed + ' failed';
+      }
+      if (i % every === (data.length - 1) % every) { var xl = node('text', { x: cx, y: H - 6, 'text-anchor': 'middle', 'font-size': 11, fill: 'var(--ink-3)', 'font-family': 'var(--mono)' }, svg); xl.textContent = d.day; }
+      function show() {
+        tip.textContent = '';
+        var dd = document.createElement('div'); dd.className = 'd'; dd.textContent = d.day + ' 2026'; tip.appendChild(dd);
+        [['var(--emerald)', d.passed, 'passed'], ['var(--rose)', d.failed, 'failed']].forEach(function (r) {
+          var row = document.createElement('div'); row.className = 'r';
+          var i2 = document.createElement('i'); i2.style.background = r[0]; var b = document.createElement('b'); b.textContent = fmt(r[1]); var s = document.createElement('span'); s.textContent = r[2];
+          row.appendChild(i2); row.appendChild(b); row.appendChild(s); tip.appendChild(row);
+        });
+        tip.classList.add('show');
+        var tw = tip.offsetWidth, right = cx + bw / 2 + 10;
+        tip.style.left = (right + tw <= W ? right : Math.max(0, cx - bw / 2 - 10 - tw)) + 'px';
+        tip.style.top = (m.t + 8) + 'px';
+      }
+      hit.addEventListener('pointerenter', show); hit.addEventListener('focus', show);
+      hit.addEventListener('pointerleave', function () { tip.classList.remove('show'); }); hit.addEventListener('blur', function () { tip.classList.remove('show'); });
+    });
+    node('line', { x1: m.l, x2: W - m.r, y1: m.t + ph, y2: m.t + ph, stroke: 'var(--border-strong)', 'stroke-width': 1 }, svg);
+    box.insertBefore(svg, tip);
+  }
+  function renderTable(data) {
+    var body = document.getElementById('chart-rows'); body.textContent = '';
+    data.slice().reverse().forEach(function (d) {
+      var tr = document.createElement('tr');
+      [d.day, fmt(d.passed), fmt(d.failed)].forEach(function (v, i) { var td = document.createElement('td'); td.textContent = v; if (i) td.className = 'num mono'; tr.appendChild(td); });
+      body.appendChild(tr);
+    });
+  }
+
+  function applyFilters() {
+    var q = state.q.trim().toLowerCase();
+    function filterRows(tableId, emptyId) {
+      var shown = 0;
+      document.querySelectorAll('#' + tableId + ' tbody tr[data-layer]').forEach(function (tr) {
+        var ok = (state.layer === 'all' || tr.getAttribute('data-layer') === state.layer) &&
+                 (state.out === 'all' || tr.getAttribute('data-out') === state.out) &&
+                 (!q || tr.textContent.toLowerCase().indexOf(q) > -1);
+        tr.classList.toggle('hidden', !ok); if (ok) shown++;
+      });
+      document.getElementById(emptyId).classList.toggle('hidden', shown > 0);
+      return shown;
+    }
+    var p = filterRows('packs', 'packs-empty'), a = filterRows('audit-tbl', 'audit-empty');
+    var total = 0, scale = state.range / 14;
+    layers().forEach(function (l) { ['ok', 'failed', 'blocked'].forEach(function (o) { if (state.out === 'all' || state.out === o) total += ROWS14[l][o]; }); });
+    total = Math.round(total * (state.out === 'failed' ? 1 : scale));
+    var filtered = state.layer !== 'all' || state.out !== 'all';
+    document.getElementById('audit-count').textContent = 'Showing ' + a + ' of ' + fmt(total) + (filtered ? ' matching rows' : ' rows') + ', newest first';
+    document.getElementById('packs-count').textContent = 'Showing ' + p + ' of ' + (filtered || q ? p + ' matching' : '62') + ' packs';
+    document.getElementById('k-rows').textContent = compact(total);
+    document.getElementById('export').textContent = total === 0 ? 'Nothing to export for these filters' : 'Export ' + compact(total) + (total === 1 ? ' audit row' : ' audit rows') + ' as CSV';
+    document.getElementById('export').disabled = total === 0;
+    var s = series(), sp = 0, sf = 0; s.forEach(function (d) { sp += d.passed; sf += d.failed; });
+    document.getElementById('k-sweeps').textContent = fmt(sp + sf);
+    document.getElementById('k-sweeps-d').textContent = fmt(sp) + ' passed · ' + sf + ' failed' + (sf ? ', all failed closed' : '');
+    renderChart();
+  }
+
+  document.getElementById('f-range').addEventListener('change', function () { state.range = parseInt(this.value, 10); applyFilters(); });
+  [['f-layer', 'layer'], ['f-out', 'out']].forEach(function (pair) {
+    document.querySelectorAll('#' + pair[0] + ' button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        state[pair[1]] = b.getAttribute('data-v');
+        document.querySelectorAll('#' + pair[0] + ' button').forEach(function (x) { x.classList.toggle('on', x === b); });
+        applyFilters();
+      });
+    });
+  });
+  document.getElementById('f-q').addEventListener('input', function () { state.q = this.value; applyFilters(); });
+  document.getElementById('f-clear').addEventListener('click', function () {
+    state = { range: 14, layer: 'all', out: 'all', q: '' };
+    document.getElementById('f-range').value = '14'; document.getElementById('f-q').value = '';
+    ['f-layer', 'f-out'].forEach(function (id) { document.querySelectorAll('#' + id + ' button').forEach(function (x, i) { x.classList.toggle('on', i === 0); }); });
+    applyFilters();
+  });
+  document.getElementById('tbl-toggle').addEventListener('click', function () {
+    var on = this.getAttribute('aria-pressed') !== 'true';
+    this.setAttribute('aria-pressed', on ? 'true' : 'false'); this.textContent = on ? 'View as chart' : 'View as table';
+    document.getElementById('chart').style.display = on ? 'none' : '';
+    document.getElementById('chart-table').classList.toggle('show', on);
+    if (!on) renderChart();
+  });
+  var rt; window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(renderChart, 120); });
+  applyFilters();
+</script>
+</body></html>

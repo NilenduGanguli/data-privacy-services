@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
+<style>
+  .pill .dot.amber { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+  .tbl-wrap { overflow-x: auto; margin: 0 -6px; padding: 0 6px; }
+  .tbl td { vertical-align: top; }
+  .tbl .sub { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+  .tbl .dt { font-family: var(--mono); font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+  .tbl .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .kname { font-weight: 700; white-space: nowrap; }
+  .kpref { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+  .scopes { display: flex; flex-wrap: wrap; gap: 4px; }
+  .scopes .chip { font-size: 11px; padding: 1px 7px; }
+  .acts { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+  .tbl tr.off td:not(.acts-td) { opacity: .5; }
+  .btn-ghost.danger { color: var(--rose); }
+  .search { width: 220px; padding: 6px 10px; font-size: 12.5px; }
+  .tbl td.host { font-size: 12.5px; white-space: nowrap; }
+  .tbl .scopes { min-width: 214px; }
+  .hostfoot { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: center; margin-top: 12px; }
+  .hostform { display: flex; gap: 8px; }
+  .hostform .input:first-child { flex: 1; min-width: 0; }
+  #hostErr { font-size: 12px; color: var(--rose); margin-top: 8px; }
+
+  .row-c { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.45fr); gap: 16px; align-items: start; }
+    .row-e { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+
+  /* create key */
+  .frow { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px 12px; align-items: center; margin-bottom: 12px; }
+  .frow > label, .frow > .lbl { font-size: 12px; color: var(--ink-2); font-weight: 600; }
+  .frow .help { grid-column: 2; font-size: 11.5px; color: var(--ink-3); margin-top: -4px; }
+  .frow .err { grid-column: 2; font-size: 12px; color: var(--rose); margin-top: -4px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 6px; }
+  .check { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 8px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface-2); font-size: 12px; font-weight: 600; color: var(--ink-2); cursor: pointer; user-select: none; }
+  .check input { accent-color: var(--teal); margin: 0; }
+  .check:has(input:checked) { color: var(--ink); border-color: var(--teal-border); background: var(--teal-soft); }
+  .check.priv:has(input:checked) { color: var(--amber); border-color: var(--amber-border); background: var(--amber-soft); }
+  .check.priv input { accent-color: var(--amber); }
+  .check:has(input:focus-visible) { box-shadow: var(--ring); }
+  .newkey { margin-top: 14px; border: 1px solid var(--teal-border); background: var(--bg-tint); border-radius: var(--r-md); padding: 12px 14px; }
+  .newkey .t { font-weight: 700; font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+  .keyval { display: flex; gap: 8px; align-items: stretch; margin: 10px 0; }
+  .keyval code { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; background: var(--surface-2); border: 1px dashed var(--border-strong); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; color: var(--ink); letter-spacing: .02em; }
+
+  /* bars */
+  .bar.neu > i { background: var(--ink-3); }
+  .q { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 100px; }
+  .q .v { font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .q .v b { color: var(--ink); }
+
+  /* health */
+  .health { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .svc { border: 1px solid var(--border); background: var(--surface-2); border-radius: var(--r-md); padding: 11px 13px 12px; min-width: 0; display: flex; flex-direction: column; }
+  .svc .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .svc .nm { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+  .svc .d { font-size: 12px; color: var(--ink-2); margin-top: 6px; line-height: 1.45; }
+  .svc .d2 { font-size: 11.5px; color: var(--ink-3); }
+  .strip { display: grid; grid-template-columns: repeat(30, minmax(0, 1fr)); gap: 2px; height: 10px; margin-top: auto; padding-top: 10px; box-sizing: content-box; }
+  .strip i { border-radius: 2px; background: var(--emerald); opacity: .5; }
+  .strip i.dg { background: var(--amber); opacity: 1; }
+
+  /* posture */
+  .chk { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 10px; padding: 9px 0; border-bottom: 1px solid var(--border); align-items: start; }
+  .chk:last-child { border-bottom: 0; }
+  .chk .ic { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 800; margin-top: 1px; }
+  .chk .ic.ok { background: var(--emerald-soft); color: var(--emerald); border: 1px solid var(--emerald-border); }
+  .chk .ic.no { background: var(--rose-soft); color: var(--rose); border: 1px solid var(--rose-border); }
+  .chk .nm { font-weight: 600; font-size: 13px; }
+  .chk .d { grid-column: 2 / -1; font-size: 12px; color: var(--ink-3); }
+  .chk .d .mono { font-size: 11.5px; color: var(--ink-2); }
+  .chk.fail { background: linear-gradient(90deg, var(--rose-soft), transparent 70%); border-radius: var(--r-md); padding: 10px 10px 12px; border-bottom: 0; margin-bottom: 4px; }
+  .chk.fail .d { color: var(--ink-2); }
+  .gauge { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+
+  /* dialog */
+  dialog.confirm { border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--surface); color: var(--ink); padding: 20px 22px; width: min(460px, calc(100vw - 32px)); box-shadow: var(--shadow-lg); }
+  dialog.confirm::backdrop { background: rgba(5, 8, 15, .62); backdrop-filter: blur(2px); }
+  dialog.confirm h2 { margin: 0 0 8px; font-size: 17px; }
+  dialog.confirm p { margin: 0 0 12px; color: var(--ink-2); font-size: 13.5px; line-height: 1.5; }
+  dialog .dlg-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+
+  @media (max-width: 1200px) { .row-c, .row-e { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 720px) {
+    .grid.cols-4 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+    /* tables become labelled stacks on phones */
+    .tbl.kvstack thead { display: none; }
+    .tbl.kvstack, .tbl.kvstack tbody, .tbl.kvstack tr, .tbl.kvstack td { display: block; width: 100%; }
+    .tbl.kvstack tr { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .tbl.kvstack tr:last-child { border-bottom: 0; }
+    .tbl.kvstack tr:hover td { background: none; }
+    .tbl.kvstack td { border: 0; padding: 3px 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; text-align: right; white-space: normal; }
+    .tbl.kvstack td::before { content: attr(data-label); flex: none; text-align: left; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; font-family: var(--font); padding-top: 2px; }
+    .tbl.kvstack td > .cv { min-width: 0; }
+    .tbl.kvstack td:first-child { text-align: left; padding-bottom: 6px; } .tbl.kvstack td:first-child::before { display: none; }
+    .tbl.kvstack td[data-label=""]::before { display: none; }
+    .tbl.kvstack td[data-label=""] { justify-content: flex-end; }
+    .tbl.kvstack .scopes { justify-content: flex-end; min-width: 0; } .tbl.kvstack .acts { justify-content: flex-end; width: 100%; }
+    .tbl.kvstack .q { min-width: 150px; } .tbl.kvstack td.host { white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
+    .health { grid-template-columns: minmax(0, 1fr); }
+    .frow { grid-template-columns: minmax(0, 1fr); gap: 6px; } .frow .help, .frow .err { grid-column: 1; }
+    .search { width: 100%; }
+    .hostfoot { grid-template-columns: minmax(0, 1fr); } .hostform { flex-wrap: wrap; } .hostform .input:first-child { flex-basis: 100%; }
+  }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><span class="crumb">Admin</span><span class="sep">/</span><span class="muted">dps-prod · ap-south-1</span><span class="topbar-spacer"></span>
+  <span class="pill hide-sm"><span class="dot amber"></span>Posture · 8 of 9 checks pass</span><span class="pill mono hide-sm">platform-admin · admin</span><button class="btn btn-sm hide-sm" type="button" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>Admin</h1><p>Keys, tenants, connections and health for deployment <b>dps-prod</b> in ap-south-1. Every change on this page is written to the audit log.</p></div>
+    <div class="head-actions"><button class="btn" type="button">Export configuration</button><button class="btn btn-primary" type="button" id="goCreate">Create key</button></div></div>
+
+  <div class="grid cols-4">
+    <div class="card kpi"><div class="label">Active API keys</div><div class="value" id="kpiKeys">9</div><div class="delta">1 disabled · 1 due for rotation</div></div>
+    <div class="card kpi"><div class="label">Tenants</div><div class="value">5</div><div class="delta">7 jobs running of 17 allowed</div></div>
+    <div class="card kpi"><div class="label">Posture checks</div><div class="value">8 <span class="faint" style="font-size:16px;font-weight:600">of 9 pass</span></div><div class="delta">1 to fix: key rotation</div></div>
+    <div class="card kpi zero"><div class="label">Keys stored in clear</div><div class="value">0</div><div class="delta">SHA-256 hashes only · each key shown once</div></div>
+  </div>
+
+  <!-- API KEYS -->
+  <section class="card" aria-labelledby="keysT">
+    <div class="card-head"><div class="card-title" id="keysT">API keys</div>
+      <div class="head-actions"><span class="legend"><span><i style="background:var(--amber)"></i>privileged scope · needs approval</span></span><input class="input search" id="keyFilter" type="search" placeholder="Filter by name or tenant" aria-label="Filter keys"></div></div>
+    <div class="tbl-wrap"><table class="tbl kvstack" id="keysTbl"><thead><tr><th>Name</th><th>Tenants</th><th>Scopes</th><th>Created</th><th>Last used</th><th>Expires</th><th style="text-align:right">Actions</th></tr></thead><tbody>
+      <tr><td><div class="kname">platform-admin</div><div class="kpref">dps_9Fq2…</div></td><td class="mono nw">all tenants (*)</td><td><div class="scopes"><span class="chip amber">admin</span></div></td><td class="dt">01 Oct 2026</td><td class="dt">just now</td><td class="dt">01 Nov 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr><td><div class="kname">kyc-docs-pipeline</div><div class="kpref">dps_k7Hq…</div></td><td class="mono nw">retail-banking-apac</td><td><div class="scopes"><span class="chip slate">detect</span><span class="chip slate">obfuscate</span><span class="chip slate">synthesize</span></div></td><td class="dt">14 Sep 2026</td><td class="dt">12 s ago</td><td class="dt">14 Mar 2027</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr><td><div class="kname">crm-uat-provisioner</div><div class="kpref">dps_Xm41…</div></td><td class="mono nw">retail-banking-apac</td><td><div class="scopes"><span class="chip slate">detect</span><span class="chip slate">obfuscate</span><span class="chip slate">jobs</span></div></td><td class="dt">02 Aug 2026</td><td class="dt">4 min ago</td><td class="dt">02 Feb 2027</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr><td><div class="kname">qa-onboarding-scanner</div><div class="kpref">dps_c2Rv…</div></td><td class="mono nw">retail-banking-apac</td><td><div class="scopes"><span class="chip slate">scan</span><span class="chip slate">synthesize</span></div></td><td class="dt">30 Sep 2026</td><td class="dt">yesterday</td><td class="dt">30 Dec 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr><td><div class="kname">cards-dispute-desk</div><div class="kpref">dps_pW8n…</div></td><td class="mono nw">cards-in</td><td><div class="scopes"><span class="chip slate">detect</span><span class="chip slate">obfuscate</span><span class="chip amber">reveal</span></div></td><td class="dt">21 Aug 2026</td><td class="dt">2 h ago</td><td class="dt">21 Nov 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr><td><div class="kname">collections-voice-redaction</div><div class="kpref">dps_Tz5s… · new</div></td><td class="mono nw">collections-in</td><td><div class="scopes"><span class="chip slate">detect</span><span class="chip slate">obfuscate</span></div></td><td class="dt">11 Oct 2026</td><td class="dt">never</td><td class="dt">09 Jan 2027</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr><td><div class="kname">wealth-nri-analytics</div><div class="kpref">dps_e3Lk…</div></td><td class="mono nw">wealth-nri</td><td><div class="scopes"><span class="chip slate">detect</span><span class="chip slate">synthesize</span><span class="chip slate">jobs</span></div></td><td class="dt">05 Jul 2026</td><td class="dt">3 days ago</td><td class="dt">05 Jan 2027</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr id="ledgerRow"><td><div class="kname">ledger-recon-batch</div><div class="kpref">dps_Q0vb…</div></td><td class="mono nw">retail-banking-apac<div class="sub">+ cards-in</div></td><td><div class="scopes"><span class="chip slate">detect</span><span class="chip slate">obfuscate</span><span class="chip slate">jobs</span></div></td><td class="dt">20 Jun 2026</td><td class="dt">2 h ago</td><td><span class="dt">never</span><div style="margin-top:4px"><span class="chip amber">rotate · 113 days</span></div></td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr><td><div class="kname">hr-attrition-model</div><div class="kpref">dps_m6Yd…</div></td><td class="mono nw">hr-people-analytics</td><td><div class="scopes"><span class="chip slate">synthesize</span></div></td><td class="dt">18 Sep 2026</td><td class="dt">6 days ago</td><td class="dt">18 Dec 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button></div></td></tr>
+      <tr class="off"><td><div class="kname">legacy-etl-poc</div><div class="kpref">dps_a1Nn… · disabled 02 Sep 2026</div></td><td class="mono nw">retail-banking-apac</td><td><div class="scopes"><span class="chip slate">detect</span><span class="chip slate">obfuscate</span></div></td><td class="dt">12 Mar 2026</td><td class="dt">02 Sep 2026</td><td class="dt">12 Mar 2027</td><td class="acts-td"><div class="acts"><button class="btn btn-sm" type="button" data-act="enable">Re-enable</button></div></td></tr>
+    </tbody></table></div>
+    <div class="faint" style="font-size:12px;margin-top:10px" id="keysFoot">10 keys · prefixes only; DPS cannot show a full key after creation · scopes: detect, obfuscate, synthesize, reveal, jobs, scan, admin</div>
+  </section>
+
+  <div class="row-c">
+    <!-- CREATE KEY -->
+    <section class="card" id="createCard" aria-labelledby="createT">
+      <div class="card-head"><div class="card-title" id="createT">Create key</div><span class="chip slate">shown once</span></div>
+      <form id="createForm" novalidate>
+        <div class="frow"><label for="kName">Name</label><input class="input" id="kName" value="collections-voice-redaction" autocomplete="off" spellcheck="false"><div class="help">Lowercase letters, digits and dashes. Name the pipeline, not a person.</div><div class="err hidden" id="nameErr"></div></div>
+        <div class="frow"><label for="kTenant">Tenant</label><select class="input" id="kTenant"><option>retail-banking-apac</option><option>cards-in</option><option selected>collections-in</option><option>wealth-nri</option><option>hr-people-analytics</option></select></div>
+        <div class="frow" role="group" aria-labelledby="scopeLbl"><span class="lbl" id="scopeLbl">Scopes</span><div class="checks">
+          <label class="check"><input type="checkbox" value="detect" checked>detect</label>
+          <label class="check"><input type="checkbox" value="obfuscate" checked>obfuscate</label>
+          <label class="check"><input type="checkbox" value="synthesize">synthesize</label>
+          <label class="check priv"><input type="checkbox" value="reveal">reveal</label>
+          <label class="check"><input type="checkbox" value="jobs">jobs</label>
+          <label class="check"><input type="checkbox" value="scan">scan</label>
+          <label class="check priv"><input type="checkbox" value="admin">admin</label></div>
+          <div class="err hidden" id="scopeErr"></div></div>
+        <div class="frow"><span class="lbl">Expires in</span><div class="seg" id="expSeg" role="group" aria-label="Expiry"><button type="button">30 days</button><button type="button" class="on" aria-pressed="true">90 days</button><button type="button">180 days</button><button type="button">1 year</button></div></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button class="btn btn-primary" type="submit">Create key</button><span class="faint" style="font-size:12px">DPS keeps only a SHA-256 hash of the key.</span></div>
+      </form>
+      <div class="newkey" id="newKey" aria-live="polite">
+        <div class="t"><span>New key for <span class="mono" id="nkName">collections-voice-redaction</span></span><span class="chip teal">shown once</span></div>
+        <div class="keyval"><code id="nkVal">dps_••••••••••••••••••••••••••••••••</code><button class="btn btn-sm" type="button" id="nkCopy">Copy key</button></div>
+        <div class="callout amber" style="font-size:12px">Store this key in your secret manager now, for example as <span class="mono" id="nkRef">dps/keys/collections-voice-redaction</span>. DPS cannot show it again; if it is lost, rotate it.</div>
+        <div style="margin-top:10px"><button class="btn btn-sm" type="button" id="nkDone">I have stored the key</button></div>
+      </div>
+      <div class="newkey hidden" id="nkHidden" style="border-color:var(--border)"><div class="t"><span>Key hidden. Calls authenticate against its hash.</span><span class="chip emerald">stored</span></div><div class="mono faint" style="font-size:12px;margin-top:6px" id="nkHash">prefix dps_Tz5s · sha256 4f1c…e2a9</div></div>
+    </section>
+
+    <!-- TENANTS -->
+    <section class="card" aria-labelledby="tenT">
+      <div class="card-head"><div class="card-title" id="tenT">Tenants and quotas</div><button class="btn btn-sm" type="button">Add tenant</button></div>
+      <div class="tbl-wrap"><table class="tbl kvstack"><thead><tr><th>Tenant</th><th>Running jobs</th><th>Daily rows</th><th>Retention</th><th>Keys</th><th></th></tr></thead><tbody>
+        <tr><td><div class="kname">retail-banking-apac</div><div class="sub">Retail Banking Technology</div></td><td><div class="q"><span class="v"><b>5</b> of 8</span><div class="bar neu"><i style="width:62%"></i></div></div></td><td><div class="q"><span class="v"><b>2.71M</b> of 50M</span><div class="bar neu"><i style="width:5%"></i></div></div></td><td class="num">30 days</td><td class="num">4 <span class="faint">+1 off</span></td><td><button class="btn btn-sm btn-ghost" type="button">Edit</button></td></tr>
+        <tr><td><div class="kname">cards-in</div><div class="sub">Cards &amp; Payments</div></td><td><div class="q"><span class="v"><b>2</b> of 4</span><div class="bar neu"><i style="width:50%"></i></div></div></td><td><div class="q"><span class="v"><b>0.84M</b> of 20M</span><div class="bar neu"><i style="width:4%"></i></div></div></td><td class="num">30 days</td><td class="num">2</td><td><button class="btn btn-sm btn-ghost" type="button">Edit</button></td></tr>
+        <tr><td><div class="kname">collections-in</div><div class="sub">Collections Operations</div></td><td><div class="q"><span class="v"><b>0</b> of 2</span><div class="bar neu"><i style="width:0%"></i></div></div></td><td><div class="q"><span class="v"><b>8.6M</b> of 10M · 86%</span><div class="bar amber"><i style="width:86%"></i></div></div></td><td class="num">30 days</td><td class="num">1</td><td><button class="btn btn-sm btn-ghost" type="button">Edit</button></td></tr>
+        <tr><td><div class="kname">wealth-nri</div><div class="sub">Wealth &amp; NRI Services</div></td><td><div class="q"><span class="v"><b>0</b> of 2</span><div class="bar neu"><i style="width:0%"></i></div></div></td><td><div class="q"><span class="v"><b>0</b> of 5M</span><div class="bar neu"><i style="width:0%"></i></div></div></td><td class="num">30 days</td><td class="num">1</td><td><button class="btn btn-sm btn-ghost" type="button">Edit</button></td></tr>
+        <tr><td><div class="kname">hr-people-analytics</div><div class="sub">HR Analytics · internal</div></td><td><div class="q"><span class="v"><b>0</b> of 1</span><div class="bar neu"><i style="width:0%"></i></div></div></td><td><div class="q"><span class="v"><b>0.12M</b> of 1M</span><div class="bar neu"><i style="width:12%"></i></div></div></td><td class="num">30 days</td><td class="num">1</td><td><button class="btn btn-sm btn-ghost" type="button">Edit</button></td></tr>
+      </tbody></table></div>
+      <div class="callout amber" style="font-size:12px;margin-top:12px">collections-in has used 86% of its daily row cap. New jobs for this tenant queue until 00:00 IST once the cap is reached. Raise the cap in <b>Edit</b> or move work to tomorrow.</div>
+      <div class="faint" style="font-size:12px;margin-top:10px">Retention covers job metadata, classification snapshots and evidence packs. Raw values are never stored, so there is nothing else to purge. us-east-1, eu-west-2 and mx-central-1 run their own deployments; DPS makes no cross-region calls.</div>
+    </section>
+  </div>
+
+    <!-- CONNECTIONS -->
+    <section class="card" aria-labelledby="connT">
+      <div class="card-head"><div class="card-title" id="connT">Registered connections</div><div class="head-actions"><span class="legend"><span><i style="background:var(--amber)"></i>production · writes need admin</span></span><button class="btn btn-sm" type="button">Register connection</button></div></div>
+      <div class="tbl-wrap"><table class="tbl kvstack"><thead><tr><th>Connection</th><th>Secret reference</th><th>Tags</th><th data-short="Who may write">Who may write in place or append</th><th>Last test</th></tr></thead><tbody>
+        <tr><td><div class="kname">crm-prod-ro</div><div class="sub">Oracle 19c · owner CRM</div></td><td class="mono nw">dps/src/crm-prod-ro</td><td><div class="scopes"><span class="chip amber">production</span><span class="chip slate">read-only</span></div></td><td>Nobody · the grant is SELECT only</td><td class="dt">09:14 · SELECT ok</td></tr>
+        <tr><td><div class="kname">loans-prod</div><div class="sub">Oracle 19c · owner LOANS</div></td><td class="mono nw">dps/src/loans-prod</td><td><div class="scopes"><span class="chip amber">production</span></div></td><td>Keys with <span class="chip amber" style="font-size:11px">admin</span> · platform-admin<div class="sub">plus a confirmation with row counts</div></td><td class="dt">09:14 · UPDATE ok</td></tr>
+        <tr><td><div class="kname">ledger-prod</div><div class="sub">PostgreSQL 16 · schema ledger</div></td><td class="mono nw">dps/src/ledger-prod</td><td><div class="scopes"><span class="chip amber">production</span></div></td><td>Keys with <span class="chip amber" style="font-size:11px">admin</span> · platform-admin<div class="sub">plus a confirmation with row counts</div></td><td class="dt">09:15 · INSERT ok</td></tr>
+        <tr><td><div class="kname">crm-uat</div><div class="sub">Oracle 19c · owner CRM_MASKED</div></td><td class="mono nw">dps/tgt/crm-uat</td><td><div class="scopes"><span class="chip slate">uat</span></div></td><td>Keys with <span class="chip slate" style="font-size:11px">jobs</span> · crm-uat-provisioner, ledger-recon-batch<div class="sub">plus a confirmation with row counts</div></td><td class="dt">09:15 · CREATE, INSERT ok</td></tr>
+        <tr><td><div class="kname">profiles-uat</div><div class="sub">MongoDB 7 · db profiles</div></td><td class="mono nw">dps/tgt/profiles-uat</td><td><div class="scopes"><span class="chip slate">uat</span></div></td><td>Keys with <span class="chip slate" style="font-size:11px">jobs</span> · crm-uat-provisioner<div class="sub">plus a confirmation with row counts</div></td><td class="dt">09:16 · insert ok</td></tr>
+        <tr><td><div class="kname">exports-aps1</div><div class="sub">S3 · s3://dps-exports-aps1/</div></td><td class="mono nw">dps/tgt/exports-aps1</td><td><div class="scopes"><span class="chip slate">files</span></div></td><td>Not applicable · files only</td><td class="dt">09:16 · PUT ok</td></tr>
+      </tbody></table></div>
+      <div class="callout" style="font-size:12px;margin-top:12px">In place rewrites the selected rows in the source table; append adds transformed copies as new rows. On connections tagged <b>production</b> both need a key with the admin scope; elsewhere the jobs scope. The console always asks for a confirmation with row counts first.</div>
+    </section>
+
+    <!-- SCANNER HOSTS -->
+    <section class="card" id="hosts" aria-labelledby="hostT">
+      <div class="card-head"><div class="card-title" id="hostT">UI-scanner hosts</div><span class="chip slate" id="hostCount">4 registered</span></div>
+      <div class="tbl-wrap"><table class="tbl kvstack" id="hostTbl"><thead><tr><th>Host</th><th>Tenant</th><th>Storage state</th><th>Added</th><th></th></tr></thead><tbody>
+        <tr><td class="mono host">https://onboarding-uat.bank.internal</td><td class="mono nw">retail-banking-apac</td><td class="mono nw">dps/ui/onboarding-uat</td><td class="dt">28 Sep 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm btn-ghost danger" type="button" data-act="host">Remove</button></div></td></tr>
+        <tr><td class="mono host">https://netbanking-sit.bank.internal</td><td class="mono nw">retail-banking-apac</td><td class="mono nw">dps/ui/netbanking-sit</td><td class="dt">02 Oct 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm btn-ghost danger" type="button" data-act="host">Remove</button></div></td></tr>
+        <tr><td class="mono host">https://cards-apply-uat.bank.internal</td><td class="mono nw">cards-in</td><td class="mono nw">dps/ui/cards-apply-uat</td><td class="dt">06 Oct 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm btn-ghost danger" type="button" data-act="host">Remove</button></div></td></tr>
+        <tr><td class="mono host">https://loans-origination-uat.bank.internal</td><td class="mono nw">retail-banking-apac</td><td class="faint">none · public pages only</td><td class="dt">09 Oct 2026</td><td class="acts-td"><div class="acts"><button class="btn btn-sm btn-ghost danger" type="button" data-act="host">Remove</button></div></td></tr>
+      </tbody></table></div>
+      <div class="hostfoot">
+        <form id="hostForm" novalidate class="hostform"><input class="input" id="hostIn" placeholder="https://host.bank.internal" aria-label="Host to register" aria-describedby="hostErr" autocomplete="off" spellcheck="false"><select class="input" aria-label="Tenant for the host" style="width:auto"><option>retail-banking-apac</option><option>cards-in</option><option>collections-in</option><option>wealth-nri</option></select><button class="btn" type="submit">Add host</button></form>
+        <div class="faint" style="font-size:12px">A scan whose URL is outside this list is refused before the browser starts. Scans stay on the same origin, and POST requests from filled pages are always blocked.</div>
+      </div>
+      <div class="err hidden" id="hostErr" role="alert"></div>
+    </section>
+  <div class="row-e">
+    <!-- HEALTH -->
+    <section class="card" aria-labelledby="healthT">
+      <div class="card-head"><div class="card-title" id="healthT">Service health</div><div class="legend"><span><i style="background:var(--emerald)"></i>ready</span><span><i style="background:var(--amber)"></i>degraded</span><span class="faint">last 30 days · from /readyz</span></div></div>
+      <div class="health">
+        <div class="svc"><div class="top"><span class="nm">api-core</span><span class="chip emerald">ready</span></div><div class="d">p95 41 ms · 1.92M requests today</div><div class="d2">v0.1.0 · 3 replicas · stateless</div><div class="strip" data-dg=""></div></div>
+        <div class="svc"><div class="top"><span class="nm">db</span><span class="chip emerald">ready</span></div><div class="d">Postgres 16 · p95 3 ms · pool 12 of 40</div><div class="d2">job metadata and reports only</div><div class="strip" data-dg=""></div></div>
+        <div class="svc"><div class="top"><span class="nm">worker</span><span class="chip emerald">ready</span></div><div class="d">7 of 8 workers busy · queue depth 23</div><div class="d2">leases 30 s · reaper on · 0 dead-lettered</div><div class="strip" data-dg=""></div></div>
+        <div class="svc"><div class="top"><span class="nm">browser-worker</span><span class="chip emerald">ready</span></div><div class="d">2 workers · Chromium · 1 scan running</div><div class="d2">POST interception on · 0 submissions ever</div><div class="strip" data-dg=""></div></div>
+        <div class="svc"><div class="top"><span class="nm">llm-gateway</span><span class="chip emerald">ready</span></div><div class="d">Stellar · gemini-2.5-flash · token renews in 11 min</div><div class="d2">placeholders only · raw values sent: 0</div><div class="strip" data-dg="9"></div></div>
+        <div class="svc"><div class="top"><span class="nm">ocr gateway</span><span class="chip emerald">ready</span></div><div class="d">Azure Read v3.2 via org gateway · p95 3.2 s per page</div><div class="d2">fallback: local Tesseract when the gateway is unset</div><div class="strip" data-dg="17"></div></div>
+        <div class="svc"><div class="top"><span class="nm">fpe ff1</span><span class="chip emerald">enabled</span></div><div class="d">fastfpe FF1 (NIST SP 800-38G) · license review approved</div><div class="d2">DPS_FPE_ENABLED=true · domain guard ≥ 10⁶ → det_token</div><div class="strip" data-dg=""></div></div>
+        <div class="svc"><div class="top"><span class="nm">ner presidio</span><span class="chip emerald">loaded</span></div><div class="d">spaCy en, es · tier T2 · p95 18 ms per text</div><div class="d2">GLiNER tier not installed</div><div class="strip" data-dg=""></div></div>
+      </div>
+    </section>
+
+    <!-- POSTURE -->
+    <section class="card" aria-labelledby="postT">
+      <div class="card-head"><div class="card-title" id="postT">Posture checks</div><span class="chip amber">1 to fix</span></div>
+      <div class="chk fail"><span class="ic no" aria-label="fail">✕</span><span class="nm">Keys rotated within 90 days</span><span class="chip rose">fail</span>
+        <span class="d"><b>ledger-recon-batch</b> is 113 days old and never expires. Rotate it, update <span class="mono">dps/keys/ledger-recon-batch</span>, then set an expiry.<br><button class="btn btn-sm" type="button" style="margin-top:8px" id="fixRotate">Rotate ledger-recon-batch</button></span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">Authentication on</span><span class="chip emerald">pass</span><span class="d"><span class="mono">DPS_AUTH_ENABLED=true</span> · every /api/v1 call needs X-API-KEY</span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">Bootstrap key absent</span><span class="chip emerald">pass</span><span class="d"><span class="mono">DPS_BOOTSTRAP_API_KEY</span> is unset</span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">API keys from a mounted secret</span><span class="chip emerald">pass</span><span class="d"><span class="mono">DPS_API_KEYS_FILE</span> · hashes only</span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">TLS on ingress and egress</span><span class="chip emerald">pass</span><span class="d">TLS 1.2+ · org CA bundle <span class="mono">DPS_SSL_CERT_FILE</span></span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">Audit strict</span><span class="chip emerald">pass</span><span class="d">append-only, partitioned · 0 failed writes in 30 days</span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">Leakage verification strict</span><span class="chip emerald">pass</span><span class="d"><span class="mono">leakage_check: strict</span> in all 6 presets</span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">LLM provider is not the stub</span><span class="chip emerald">pass</span><span class="d">stellar · placeholder text only</span></div>
+      <div class="chk"><span class="ic ok" aria-label="pass">✓</span><span class="nm">Job KEK from the secret store</span><span class="chip emerald">pass</span><span class="d"><span class="mono">DPS_JOB_KEK_FILE</span> · 32 bytes</span></div>
+      <div class="faint" style="font-size:12px;margin-top:8px">Staging and production refuse to boot when auth, the bootstrap key, TLS or audit checks fail. Checked 2 min ago.</div>
+    </section>
+  </div>
+</main></div></div>
+
+<dialog class="confirm" id="dlg" aria-labelledby="dlgT">
+  <form method="dialog">
+    <h2 id="dlgT">Confirm</h2>
+    <p id="dlgP"></p>
+    <div id="dlgGrace" class="hidden"><div style="font-size:12px;color:var(--ink-2);font-weight:600;margin-bottom:6px">Old key stops working</div>
+      <div class="seg" id="graceSeg" role="group" aria-label="Old key stops working"><button type="button">now</button><button type="button" class="on" aria-pressed="true">in 24 hours</button><button type="button">in 7 days</button></div></div>
+    <div class="dlg-acts"><button class="btn" value="cancel" type="submit">Cancel</button><button class="btn btn-primary" value="ok" type="submit" id="dlgOk">Confirm</button></div>
+  </form>
+</dialog>
+
+<script>
+  renderSidebar('Admin');
+  (function () {
+    // label cells from their column headers so tables can stack on phones
+    function labelTable(t) {
+      var hs = Array.prototype.map.call(t.querySelectorAll('thead th'), function (h) { return h.getAttribute('data-short') || h.textContent.trim(); });
+      t.querySelectorAll('tbody tr').forEach(function (r) { Array.prototype.forEach.call(r.children, function (td, i) {
+        td.setAttribute('data-label', hs[i] || '');
+        if (!td.querySelector(':scope > .cv')) { var cv = document.createElement('div'); cv.className = 'cv'; while (td.firstChild) cv.appendChild(td.firstChild); td.appendChild(cv); }
+      }); });
+    }
+    document.querySelectorAll('.tbl.kvstack').forEach(labelTable);
+    window.__labelTables = function () { document.querySelectorAll('.tbl.kvstack').forEach(labelTable); };
+    // 30-day status strips
+    document.querySelectorAll('.strip').forEach(function (s) {
+      var bad = (s.getAttribute('data-dg') || '').split(',').filter(Boolean).map(Number);
+      for (var i = 0; i < 30; i++) { var b = document.createElement('i'); if (bad.indexOf(i) > -1) { b.className = 'dg'; b.title = 'degraded'; } s.appendChild(b); }
+      s.setAttribute('role', 'img'); s.setAttribute('aria-label', bad.length ? '30 days: ' + bad.length + ' degraded day' : '30 days: ready every day');
+    });
+
+    // key display: generated in the browser for the mockup; nothing real is embedded in this file
+    function randomKey(prefix) {
+      var a = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789', r = new Uint32Array(36), out = '';
+      (window.crypto || window.msCrypto).getRandomValues(r);
+      for (var i = 0; i < r.length; i++) out += a[r[i] % a.length];
+      return 'dps_' + (prefix || '') + out.slice((prefix || '').length);
+    }
+    function showKey(name, prefix) {
+      document.getElementById('nkName').textContent = name;
+      document.getElementById('nkRef').textContent = 'dps/keys/' + name;
+      document.getElementById('nkVal').textContent = randomKey(prefix);
+      document.getElementById('newKey').classList.remove('hidden');
+      document.getElementById('nkHidden').classList.add('hidden');
+    }
+    showKey('collections-voice-redaction', 'Tz5s');
+
+    document.getElementById('nkCopy').addEventListener('click', function (e) { var b = e.currentTarget; b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy key'; }, 1400); });
+    document.getElementById('nkDone').addEventListener('click', function () {
+      var v = document.getElementById('nkVal').textContent;
+      document.getElementById('nkHash').textContent = 'prefix ' + v.slice(0, 8) + ' · sha256 4f1c…e2a9';
+      document.getElementById('nkVal').textContent = 'dps_••••••••••••••••••••••••••••••••';
+      document.getElementById('newKey').classList.add('hidden');
+      document.getElementById('nkHidden').classList.remove('hidden');
+    });
+
+    // segmented controls
+    document.querySelectorAll('#expSeg, #graceSeg').forEach(function (seg) {
+      seg.querySelectorAll('button').forEach(function (b) { b.addEventListener('click', function () { seg.querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', x === b); }); }); });
+    });
+
+    // create key
+    document.getElementById('goCreate').addEventListener('click', function () { document.getElementById('createCard').scrollIntoView({ behavior: 'smooth', block: 'start' }); document.getElementById('kName').focus({ preventScroll: true }); });
+    document.getElementById('createForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var name = document.getElementById('kName').value.trim(), ok = true;
+      var ne = document.getElementById('nameErr'), se = document.getElementById('scopeErr');
+      if (!/^[a-z0-9][a-z0-9-]{2,62}$/.test(name)) { ne.textContent = 'Use lowercase letters, digits and dashes, for example collections-voice-redaction.'; ne.classList.remove('hidden'); ok = false; } else ne.classList.add('hidden');
+      if (!document.querySelector('#createForm .checks input:checked')) { se.textContent = 'Pick at least one scope. Most pipelines need detect and obfuscate.'; se.classList.remove('hidden'); ok = false; } else se.classList.add('hidden');
+      if (ok) showKey(name, '');
+    });
+
+    // filter
+    document.getElementById('keyFilter').addEventListener('input', function (e) {
+      var q = e.target.value.toLowerCase(), n = 0, rows = document.querySelectorAll('#keysTbl tbody tr');
+      rows.forEach(function (r) { var hit = r.textContent.toLowerCase().indexOf(q) > -1; r.classList.toggle('hidden', !hit); if (hit) n++; });
+      document.getElementById('keysFoot').textContent = q ? n + ' of ' + rows.length + ' keys match "' + e.target.value + '"' : '10 keys · prefixes only; DPS cannot show a full key after creation · scopes: detect, obfuscate, synthesize, reveal, jobs, scan, admin';
+    });
+
+    // confirmation dialog
+    var dlg = document.getElementById('dlg'), pending = null;
+    function ask(opts) {
+      document.getElementById('dlgT').textContent = opts.title;
+      document.getElementById('dlgP').textContent = opts.body;
+      document.getElementById('dlgGrace').classList.toggle('hidden', !opts.grace);
+      var ok = document.getElementById('dlgOk'); ok.textContent = opts.ok; ok.className = 'btn ' + (opts.danger ? 'btn-danger' : 'btn-primary');
+      pending = opts.run; dlg.returnValue = ''; dlg.showModal();
+    }
+    dlg.addEventListener('close', function () { if (dlg.returnValue === 'ok' && pending) pending(); pending = null; });
+
+    function keyName(btn) { return btn.closest('tr').querySelector('.kname').textContent; }
+    function rotate(row) {
+      var name = row.querySelector('.kname').textContent;
+      ask({ title: 'Rotate ' + name + '?', body: 'DPS issues a new key and shows it once. Update dps/keys/' + name + ' before the old key stops working.', ok: 'Rotate key', grace: true,
+        run: function () { showKey(name, ''); document.getElementById('createCard').scrollIntoView({ behavior: 'smooth', block: 'start' }); } });
+    }
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-act]'); if (!b) return;
+      var act = b.getAttribute('data-act'), row = b.closest('tr');
+      if (act === 'rotate') rotate(row);
+      if (act === 'disable') ask({ title: 'Disable ' + keyName(b) + '?', body: 'Calls with this key fail with 401 from the next request. Jobs already running finish; new jobs are refused. You can re-enable the key later.', ok: 'Disable key', danger: true,
+        run: function () { row.classList.add('off'); row.querySelector('.acts').innerHTML = '<button class="btn btn-sm" type="button" data-act="enable">Re-enable</button>'; var k = document.getElementById('kpiKeys'); k.textContent = +k.textContent - 1; } });
+      if (act === 'enable') ask({ title: 'Re-enable ' + keyName(b) + '?', body: 'Calls with this key work again immediately, with the same tenants and scopes.', ok: 'Re-enable key',
+        run: function () { row.classList.remove('off'); row.querySelector('.acts').innerHTML = '<button class="btn btn-sm" type="button" data-act="rotate">Rotate</button><button class="btn btn-sm btn-ghost danger" type="button" data-act="disable">Disable</button>'; var k = document.getElementById('kpiKeys'); k.textContent = +k.textContent + 1; } });
+      if (act === 'host') { var host = row.querySelector('td').textContent.trim();
+        ask({ title: 'Remove ' + host.replace('https://', '') + '?', body: 'Scans of this host are refused from now on. The stored session reference is not deleted.', ok: 'Remove host', danger: true,
+          run: function () { row.remove(); document.getElementById('hostCount').textContent = document.querySelectorAll('#hostTbl tbody tr').length + ' registered'; } }); }
+    });
+    document.getElementById('fixRotate').addEventListener('click', function () { rotate(document.getElementById('ledgerRow')); });
+
+    // add host
+    document.getElementById('hostForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var v = document.getElementById('hostIn').value.trim(), err = document.getElementById('hostErr');
+      if (!/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(v)) { err.textContent = 'Use the full origin with https and no path, for example https://cards-apply-uat.bank.internal.'; err.classList.remove('hidden'); return; }
+      err.classList.add('hidden');
+      var tr = document.createElement('tr');
+      var ten = document.querySelector('#hostForm select').value;
+      tr.innerHTML = '<td class="mono host"></td><td class="mono nw"></td><td class="faint">none · public pages only</td><td class="dt">just now</td><td class="acts-td"><div class="acts"><button class="btn btn-sm btn-ghost danger" type="button" data-act="host">Remove</button></div></td>';
+      tr.children[0].textContent = v; tr.children[1].textContent = ten;
+      document.querySelector('#hostTbl tbody').appendChild(tr); window.__labelTables();
+      document.getElementById('hostIn').value = '';
+      document.getElementById('hostCount').textContent = document.querySelectorAll('#hostTbl tbody tr').length + ' registered';
+    });
+  })();
+</script>
+</body></html>
