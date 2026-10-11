@@ -623,3 +623,16 @@ Public names and signatures are as planned (`METHODS`, `MethodError`, `Transform
   Against the plan's `methods.py`, 29 of these 37 test cases fail. The plan's own 8 tests pass
   unchanged.
 - Count: 45 in the file; suite 259 passed, 1 skipped.
+
+## Task 16 — Planner
+
+- `dps/engine/planner.py` follows the plan; behaviour is unchanged. `Plan(mode=...)` uses
+  `typing.cast` to the `Literal` instead of `# type: ignore[arg-type]`, after the explicit mode
+  check. Docstrings now state the `ValueError`.
+- Tests added: `test_unknown_modes_are_refused`,
+  `test_span_findings_explain_their_span_and_entries_keep_finding_order` (it also asserts that a
+  finding's `value_hash` never reaches the plan rows),
+  `test_synthesize_fallbacks_and_reversibility_follow_the_registry` (an FPE override in
+  synthesize mode falls back without FPE; an explicit override beats `keep_non_sensitive`; the
+  `reversible` flag comes from the registry), and `test_empty_findings_give_an_empty_low_plan`.
+- Count: the plan's 3 + 4 added = 7 in the file; suite 266 passed, 1 skipped.
