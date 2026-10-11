@@ -11,7 +11,7 @@ Base path `/api/v1`. The live schema is at `/api/v1/openapi.json` (Swagger UI at
 
 | Status | When |
 |---|---|
-| 400 | bad policy (`invalid policy: …`), bad key material, wrap key, reveal hints or method parameters; malformed `X-DPS-Tenant` |
+| 400 | bad policy (`invalid policy: …`), bad key material, wrap key, reveal hints or method parameters; a key that does not match its key check value (`kcv`); malformed `X-DPS-Tenant` |
 | 401 | missing or invalid API key (`WWW-Authenticate` set) |
 | 403 | the key lacks the route's scope, is not granted the tenant, or needs `X-DPS-Tenant` |
 | 404 | unknown `/api/...` route |
@@ -96,10 +96,13 @@ Methods a policy can name: reversible `det_token`, `fpe_digits`, `fpe_text`, `em
 `key_material` (obfuscate only), `reveal_hints[]` (obfuscate only), `synthesis_seed` (synthesize
 only), `report`, `trace_id`.
 
-- `key_material`: `{alg: "dps.v1", kid, dek | wrapped_dek + wrap: {type, fingerprint},
-  consistency_scope, created_at}`. Returned once; DPS keeps no copy.
+- `key_material`: `{alg: "dps.v1", kid, dek | wrapped_dek + wrap: {type, fingerprint}, kcv,
+  consistency_scope, created_at}`. Returned once; DPS keeps no copy. `kcv` is the key check
+  value: 96 bits of HKDF output of the DEK under the kid (`kcv_` + base64url). It is not secret
+  and reveals nothing about the DEK; it lets the holder (and reveal) confirm a DEK is the right
+  one. It is kept when the DEK is wrapped, so an unwrapped DEK can be checked.
 - `reveal_hints[]`: `{path, start, end, entity_type, method, params, reverse_params,
-  original_type, anchor, kid, field_scoped}` — locations and methods, never values.
+  original_type, anchor, kid, kcv, field_scoped}` — locations and methods, never values.
 - `synthesis_seed`: `{alg: "dps.synth.v1", seed, created_at}` — confidential (it links outputs).
 
 **`report`** (every engine response): `mode`, `policy`, `policy_hash`, `engine_version`,
@@ -121,7 +124,13 @@ Under a `warn` policy a failed sweep returns the output with `verification.passe
 → `{result, revealed, report, trace_id}`; `revealed` is the number of hints applied.
 
 - `key_material` must carry the plaintext `dek`: unwrap a `wrapped_dek` client-side first.
-- Hints made under another `kid` are refused (400): a wrong FF1 key would decrypt to garbage.
+  When it also carries `kcv`, the `kcv` must match the `dek` and `kid`, or the request is refused
+  (400 `invalid reveal request: key check value does not match …`). The same check applies to
+  caller-held key material in `options.consistency` on `/obfuscate`.
+- Every hint must carry `kid` and `kcv`. Hints made under another `kid`, or whose `kcv` the
+  presented key does not match, are refused with a value-free 400 **before anything is
+  decrypted**: FF1 and the shape-keeping methods have no integrity check, so a mistyped DEK would
+  otherwise decrypt to plausible but false identifiers.
 - In `envelope` style, `det_token` replacements inside text spans are written
   `[[PII:<TYPE>:<token>]]` and reveal **without** hints. Format-keeping replacements (`fpe_*`,
   `email`, `phone`, `date_shift`) and whole-field tokens need the hints.

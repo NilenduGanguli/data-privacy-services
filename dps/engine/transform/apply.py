@@ -9,8 +9,10 @@
   is present the anchor is keyed (HMAC under a subkey) before use, because it travels in the reveal
   hints next to the output and a salt-free hash of a 6-digit customer id is no secret at all.
 
-Reveal hints carry locators, methods, types, the keyed anchor and the key id — never a value or
-anything computed from a value without the key (spec §5.5).
+Reveal hints carry locators, methods, types, the keyed anchor, the key id and the key check value
+— never a value or anything computed from a value without the key (spec §5.5). Reveal checks the
+presented key against the hints' kid and kcv before it decrypts anything: FF1 and the shape-keeping
+methods have no integrity check, so a wrong key would otherwise "reveal" plausible false values.
 """
 
 from __future__ import annotations
@@ -58,10 +60,11 @@ OriginalType = Literal["str", "int", "float"]
 class RevealHint(BaseModel):
     """Where a reversible replacement sits in the output, and how to undo it. No values.
 
-    ``kid`` names the key the hint was produced under (reveal refuses a different key, which
-    matters for FPE: a wrong key there decrypts to garbage without any error). ``field_scoped``
-    records whether subkeys were bound to the path, so reveal never depends on the policy in
-    force at reveal time.
+    ``kid`` names the key the hint was produced under and ``kcv`` is that key's check value
+    (:func:`~dps.engine.transform.crypto.key_check_value`). Reveal refuses a key whose kid or
+    check value differs, which matters for FPE: a wrong key there decrypts to well-formed,
+    plausible values without any error. ``field_scoped`` records whether subkeys were bound to
+    the path, so reveal never depends on the policy in force at reveal time.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -76,6 +79,7 @@ class RevealHint(BaseModel):
     original_type: OriginalType = "str"
     anchor: str = "record"
     kid: str | None = None
+    kcv: str | None = None
     field_scoped: bool = False
 
 
@@ -202,6 +206,11 @@ def apply_plan(
     document: Any = copy.deepcopy(data) if text is None else text
     anchor = _keyed_anchor(anchor_for(document, plan), options.key)
     kid = options.key.kid if options.key is not None else None
+    kcv = (
+        options.key.kcv or crypto.key_check_value(options.key)
+        if options.key is not None and options.key.has_dek()
+        else None
+    )
     field_scoped = options.policy.consistency.field_scoped
     hints: list[RevealHint] = []
     used: Counter[str] = Counter()
@@ -229,6 +238,7 @@ def apply_plan(
             original_type=original_type,
             anchor=anchor,
             kid=kid,
+            kcv=kcv,
             field_scoped=field_scoped,
         )
 
@@ -363,15 +373,30 @@ def reveal(*, output: Any, key: KeyMaterial, hints: list[RevealHint], options: A
     hints, an envelope that does not authenticate under ``key`` is foreign — for example one
     that was already in the input — and is left as it is.
 
+    Every hint must carry the kid and key check value of the key it was made under, and both
+    must match ``key`` (the kcv in constant time) before anything is decrypted.
+
     Raises:
-        MethodError: a hint names another key, points outside the document or at a non-scalar,
-            names an irreversible or unknown method, or a token does not decrypt.
+        MethodError: a hint lacks its kid or kcv, names another key or a key check value that
+            ``key`` does not match, points outside the document or at a non-scalar, names an
+            irreversible or unknown method, or a token does not decrypt.
     """
     options = dataclasses.replace(options, key=key)
     document = copy.deepcopy(output)
+    check_values: set[str] = set()
     for h in hints:
-        if h.kid is not None and h.kid != key.kid:
+        if h.kid is None or h.kcv is None:
+            raise MethodError(
+                "reveal hints must carry the kid and kcv of the key they were made under"
+            )
+        if h.kid != key.kid:
             raise MethodError("reveal hints were produced under a different key (kid mismatch)")
+        check_values.add(h.kcv)
+    for kcv in check_values:  # one HKDF per distinct value, not per hint
+        if not crypto.kcv_matches(key, kcv):
+            raise MethodError(
+                "the key does not match the key check value in the reveal hints; nothing was revealed"
+            )
     whole = [h for h in hints if h.start is None]
     spans = sorted(
         (h for h in hints if h.start is not None), key=lambda h: (h.path, -(h.start or 0))

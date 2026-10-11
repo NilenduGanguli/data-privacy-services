@@ -8,6 +8,10 @@
   cross-system consistency.
 * The DEK may be **wrapped** with the caller's RSA public key (OAEP-SHA256) so it never crosses the
   wire in clear.
+* A **key check value** (``kcv``) — an HKDF output of the DEK under the kid, with its own info
+  label — travels with the key material and in every reveal hint. FF1 and the shape-keeping
+  methods have no integrity check (a wrong key decrypts to well-formed, plausible values), so
+  reveal compares the kcv first and refuses a key that does not match before decrypting anything.
 
 This module logs nothing and has no debug paths. Keep it that way. Error messages name the rule
 that failed, never a key, a token or a value.
@@ -38,6 +42,9 @@ SUBKEY_BYTES = 32
 SIV_KEY_BYTES = 64
 #: Smallest RSA modulus accepted for wrapping the DEK (NIST SP 800-57: 2048 bits through 2030).
 MIN_RSA_BITS = 2048
+#: Length of the key check value: 96 bits, so a wrong key passes about once in 2**96 tries.
+KCV_BYTES = 12
+KCV_PREFIX = "kcv_"
 
 _B64U = re.compile(r"[A-Za-z0-9_-]*")
 _B32 = re.compile(r"[a-z2-7]*")
@@ -77,6 +84,9 @@ def unb32(text: str) -> bytes:
 class KeyMaterial(BaseModel):
     """What the caller receives (and later presents) to reveal or to stay consistent.
 
+    ``kcv`` is the key check value (:func:`key_check_value`): not a secret, and it reveals nothing
+    about the DEK, but it lets anyone holding the DEK confirm it is the right one.
+
     Validation errors never echo the input (it carries the DEK), and ``repr`` hides the DEK.
     """
 
@@ -85,6 +95,7 @@ class KeyMaterial(BaseModel):
     alg: str = ALG
     kid: str
     dek: str | None = Field(default=None, repr=False)
+    kcv: str | None = None
     wrapped_dek: str | None = None
     wrap: dict[str, str] | None = None
     consistency_scope: str = "request"
@@ -101,10 +112,12 @@ def new_kid() -> str:
 
 
 def generate_key_material(scope: str = "request") -> KeyMaterial:
-    """A fresh 256-bit DEK with a random key id."""
-    return KeyMaterial(
+    """A fresh 256-bit DEK with a random key id and its key check value."""
+    km = KeyMaterial(
         kid=new_kid(), dek=b64u(secrets.token_bytes(DEK_BYTES)), consistency_scope=scope
     )
+    km.kcv = key_check_value(km)
+    return km
 
 
 def dek_bytes(km: KeyMaterial) -> bytes:
@@ -120,9 +133,13 @@ def dek_bytes(km: KeyMaterial) -> bytes:
 def key_material_from_caller(payload: dict[str, Any]) -> KeyMaterial:
     """Validate caller-presented key material (reveal, or consistency scope ``key``).
 
+    When the material carries a ``kcv`` it must match the DEK and kid (a mistyped or mixed-up
+    key is refused here, before it is used); without one, the kcv is computed, so reveal can
+    still compare it with the hints.
+
     Raises:
-        ValueError: wrong ``alg``, no plaintext DEK, or a DEK that is not 32 bytes of base64url.
-            The message never contains the DEK.
+        ValueError: wrong ``alg``, no plaintext DEK, a DEK that is not 32 bytes of base64url, or a
+            ``kcv`` that does not match. The message never contains the DEK or the kcv.
     """
     km = KeyMaterial.model_validate(payload)
     if km.alg != ALG:
@@ -132,6 +149,13 @@ def key_material_from_caller(payload: dict[str, Any]) -> KeyMaterial:
     if not km.kid:
         raise ValueError("key material must carry a kid")
     dek_bytes(km)  # format and length check
+    if km.kcv is None:
+        return km.model_copy(update={"kcv": key_check_value(km)})
+    if not kcv_matches(km, km.kcv):
+        raise ValueError(
+            "key check value does not match the dek and kid: the key material is altered or "
+            "belongs to another key"
+        )
     return km
 
 
@@ -149,6 +173,21 @@ def subkey(km: KeyMaterial, info: str, length: int = SUBKEY_BYTES) -> bytes:
         info=f"{ALG}|{info}{suffix}".encode(),
     )
     return hkdf.derive(dek_bytes(km))
+
+
+def key_check_value(km: KeyMaterial) -> str:
+    """``kcv_`` + 96 bits of HKDF output for the label ``kcv`` (salted by the kid like every
+    subkey), base64url. Binds the kid to the DEK; reveals nothing about the DEK or any subkey.
+
+    Raises:
+        KeyError: the material is wrapped-only. ValueError: the DEK is malformed.
+    """
+    return KCV_PREFIX + b64u(subkey(km, "kcv", length=KCV_BYTES))
+
+
+def kcv_matches(km: KeyMaterial, kcv: str) -> bool:
+    """Constant-time comparison of ``kcv`` with the key check value of ``km``'s DEK and kid."""
+    return hmac.compare_digest(key_check_value(km).encode("utf-8"), kcv.encode("utf-8"))
 
 
 def det_encrypt(key: bytes, plaintext: bytes, aad: str) -> bytes:
@@ -200,6 +239,7 @@ def wrap_key_material(km: KeyMaterial, public_key_pem: str) -> KeyMaterial:
     return km.model_copy(
         update={
             "dek": None,
+            "kcv": km.kcv or key_check_value(km),  # lets the holder check the unwrapped DEK
             "wrapped_dek": base64.b64encode(wrapped).decode("ascii"),
             "wrap": {"type": "rsa-oaep-256", "fingerprint": hashlib.sha256(spki).hexdigest()},
         }
