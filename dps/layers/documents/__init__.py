@@ -2,7 +2,8 @@
 
 extract → OCR (pages that need it) → the unchanged M0 engine over one canonical text (pages
 joined by ``PAGE_BREAK``; CSV as records) → findings and output segments mapped back to pages,
-lines and boxes → optional true redaction, verified twice (structure, OCR re-read) → optional
+lines and boxes → optional true redaction, verified twice (structure; an OCR re-read of every
+produced page, checked for the redacted originals and run through the engine again) → optional
 previews. Nothing persists: the upload, rasters and texts live for the request only.
 """
 
@@ -16,6 +17,7 @@ import io
 import re
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from PIL import Image
@@ -55,6 +57,7 @@ from dps.layers.documents.models import (
     PageSummary,
     PageText,
     RedactionReport,
+    Word,
 )
 from dps.layers.documents.ocr import OcrClient, OcrError, OcrPage, ocr_words_to_points
 from dps.layers.documents.redact import PageRedaction, inspect_output_pdf, redact_document
@@ -78,6 +81,9 @@ REVIEW_OCR_CONFIDENCE = 0.8
 #: Surrogate types the synthesis engine generates rule-valid (checksums pass by design).
 RULE_VALID_SURROGATES = frozenset({"CARD_PAN", "AADHAAR", "SIN", "IBAN", "ROUTING_ABA", "PAN_IN"})
 MIN_NEEDLE_CHARS = 4
+#: How a painted box reads in the text the engine checks after an OCR re-read: not a word, so no
+#: cue ("Customer:") reaches past a redacted value to the words after it.
+_BOX_MARK = "\u2588"
 #: How far an OCR page size may differ from the image sent: 1 px (``pixel``), or 1 % of it
 #: (``inch``, which the service derives from a resolution).
 OCR_SIZE_TOLERANCE_PX = 1.0
@@ -252,16 +258,27 @@ def synthetic_validity(pages: list[PageSummary]) -> dict[str, int]:
     return {"checked": checked, "valid": valid}
 
 
-def _needles(summary: PageSummary, text: str) -> set[str]:
-    """Normalised originals of a page's redacted findings, token by token (≥ 4 characters)."""
-    out: set[str] = set()
+def _needles(summary: PageSummary, text: str) -> dict[str, str]:
+    """Normalised originals of a page's redacted findings, token by token (≥ 4 characters), each
+    with its entity type."""
+    out: dict[str, str] = {}
     for f in summary.findings:
         if f.redacted and f.span:
             tokens = (normalise(t) for t in text[f.span[0] : f.span[1]].split())
             needle = " ".join(t for t in tokens if t)
             if len(needle.replace(" ", "")) >= MIN_NEEDLE_CHARS:
-                out.add(needle)
+                out.setdefault(needle, f.entity_type)
     return out
+
+
+@dataclass
+class _Reread:
+    """What the OCR re-read of a produced PDF found (holds the re-read texts: never returned)."""
+
+    pages: int = 0  # pages re-read
+    texts: dict[int, str] = field(default_factory=dict)  # 1-based page → re-read text
+    hits: dict[int, list[str]] = field(default_factory=dict)  # page → types still readable
+    under: int = 0  # characters read inside painted boxes (informational)
 
 
 def _png_size(png: bytes) -> tuple[int, int]:
@@ -280,6 +297,53 @@ def _check_ocr_size(result: OcrPage, size: tuple[int, int], dpi: float) -> None:
         tolerance = [OCR_SIZE_TOLERANCE_PX, OCR_SIZE_TOLERANCE_PX]
     if any(abs(g - s) > t for g, s, t in zip(got, size, tolerance, strict=True)):
         raise OcrError("ocr_protocol", "the OCR page size differs from the image sent")
+
+
+def _under_boxes(word: Word, boxes: list[BBox]) -> bool:
+    """Whether OCR read ``word`` inside a painted box (half its area or more)."""
+    return any(word.bbox.intersection_area(b) >= 0.5 * max(word.bbox.area(), 1e-6) for b in boxes)
+
+
+def _line_through(box: BBox, words: list[Word]) -> int | None:
+    """The OCR line of the word nearest ``box`` among those its centre line passes through."""
+    cy = (box.y0 + box.y1) / 2.0
+    on_line = [w for w in words if w.line_hint is not None and w.bbox.y0 <= cy <= w.bbox.y1]
+    if not on_line:
+        return None
+    nearest = min(on_line, key=lambda w: max(w.bbox.x0 - box.x1, box.x0 - w.bbox.x1, 0.0))
+    return nearest.line_hint
+
+
+def _reread_text(r: PageRedaction, words: list[Word]) -> tuple[str, int]:
+    """A re-read page laid out as an OCR page, for the engine: what OCR read inside a painted box
+    is noise (the box is solid black; a real OCR may read it as "RR") and is dropped, and each
+    box reads as one ``_BOX_MARK`` on its line, as the redacted value sat on its line — so a
+    cue whose value was boxed names nothing after it. Returns the text and how many characters
+    OCR read inside boxes."""
+    shown = [w for w in words if not _under_boxes(w, r.boxes)]
+    marks = [
+        Word(text=_BOX_MARK, bbox=b, source="ocr", line_hint=_line_through(b, words))
+        for b in r.boxes
+    ]
+    page = PageText(page=r.index + 1, width=r.width, height=r.height, source="ocr")
+    build_page_text(page, group_lines(shown + marks))
+    return page.text, sum(len(w.text) for w in words) - sum(len(w.text) for w in shown)
+
+
+def _raise_on_leaks(hits: dict[int, list[str]], residual: dict[int, list[str]]) -> None:
+    """Fail closed (422 ``leakage``) when the re-read found a redacted original still readable, or
+    the engine found a value the policy transforms in what the re-read saw. The message names
+    counts, pages and entity types — never a value."""
+    count = sum(len(v) for v in hits.values()) + sum(len(v) for v in residual.values())
+    if not count:
+        return
+    leaked = sorted(set(hits) | set(residual))
+    types = sorted({t for found in (hits, residual) for v in found.values() for t in v})
+    raise DocumentError(
+        "leakage",
+        f"an OCR re-read of the redacted PDF still shows {count} value(s) the policy redacts "
+        f"({', '.join(types)}) on page(s) {_page_list(leaked)}; nothing was returned",
+    )
 
 
 class DocumentPipeline:
@@ -347,7 +411,14 @@ class DocumentPipeline:
         if options.redacted_pdf:
             with _timed(timings, "redact"):
                 redacted, redaction = await self._redact(
-                    doc, pages, payload.text or "", options, timings
+                    doc,
+                    pages,
+                    payload.text or "",
+                    options,
+                    timings,
+                    mode=mode,
+                    policy=request.policy,
+                    engine_options=engine_options,
                 )
         if options.previews:
             with _timed(timings, "preview"):
@@ -517,6 +588,10 @@ class DocumentPipeline:
         text: str,
         options: DocumentOptions,
         timings: dict[str, float],
+        *,
+        mode: Mode,
+        policy: str | dict[str, Any] | None,
+        engine_options: RequestOptions,
     ) -> tuple[bytes, RedactionReport]:
         suspects = [p.page for p in doc.pages if p.scan_suspect and not p.ocr_done]
         if suspects:
@@ -556,7 +631,7 @@ class DocumentPipeline:
             image_format=s.redact_image_format,
             jpeg_quality=s.redact_jpeg_quality,
         )
-        checked, ocr_pages, hits, under = False, 0, 0, 0
+        checked, reread = False, _Reread()
         with _timed(timings, "verify"):
             inspection = await asyncio.to_thread(inspect_output_pdf, output.pdf)
             if not inspection.clean or inspection.pages != len(doc.pages):
@@ -568,13 +643,11 @@ class DocumentPipeline:
             verify = options.ocr_verify if options.ocr_verify is not None else s.redact_ocr_verify
             if verify and self.ocr.configured():
                 checked = True
-                ocr_pages, hits, under = await self._ocr_reread(output.pdf, plan, pages, text)
-                if hits:
-                    raise DocumentError(
-                        "leakage",
-                        f"an OCR re-read of the redacted PDF found {hits} original "
-                        "value(s); nothing was returned",
-                    )
+                reread = await self._ocr_reread(output.pdf, plan, pages, text)
+                residual = await asyncio.to_thread(
+                    self._residual, reread.texts, mode, policy, engine_options
+                )
+                _raise_on_leaks(reread.hits, residual)
             elif verify:
                 doc.warnings.append("redaction_not_ocr_verified")
         REDACTED_BOXES.inc(output.boxes)
@@ -589,19 +662,20 @@ class DocumentPipeline:
             text_operators=inspection.text_operators,
             annotations=inspection.annotations,
             ocr_checked=checked,
-            ocr_pages=ocr_pages,
-            ocr_hits=hits,
-            chars_under_boxes=under,
+            ocr_pages=reread.pages,
+            ocr_hits=0,  # any hit raised ``leakage`` above
+            chars_under_boxes=reread.under,
             passed=True,
         )
 
     async def _ocr_reread(
         self, pdf: bytes, plan: list[PageRedaction], pages: list[PageSummary], text: str
-    ) -> tuple[int, int, int]:
-        """OCR every boxed page of the produced PDF: originals still readable (hits) and characters
-        read inside painted boxes."""
+    ) -> _Reread:
+        """OCR every page of the produced PDF — boxed or not, since a page can show what its text
+        layer never said (review B1) — and find on each the redacted originals of *any* page
+        still readable there, and the characters read inside painted boxes. Each page's re-read
+        text (see :func:`_reread_text`) is kept for :meth:`_residual`."""
         dpi = self.settings.pdf_render_dpi
-        targets = [r for r in plan if r.boxes]
         renderer = PdfRenderer(pdf)
         gate = asyncio.Semaphore(self.settings.ocr_max_concurrency)
 
@@ -617,10 +691,14 @@ class DocumentPipeline:
                 return r, result
 
         try:
-            results = await asyncio.gather(*(one(r) for r in targets), return_exceptions=True)
+            results = await asyncio.gather(*(one(r) for r in plan), return_exceptions=True)
         finally:
             renderer.close()
-        hits = under = 0
+        needles: dict[str, str] = {}
+        for summary in pages:
+            for needle, entity_type in _needles(summary, text).items():
+                needles.setdefault(needle, entity_type)
+        found = _Reread(pages=len(plan))
         for item in results:
             if isinstance(item, OcrError):
                 raise DocumentError(
@@ -634,15 +712,33 @@ class DocumentPipeline:
             words = ocr_words_to_points(result, points_per_px=72.0 / dpi)
             tokens = (normalise(w.text) for w in words)
             haystack = " " + " ".join(t for t in tokens if t) + " "
-            hits += sum(1 for needle in _needles(pages[r.index], text) if f" {needle} " in haystack)
-            under += sum(
-                len(w.text)
-                for w in words
-                if any(
-                    w.bbox.intersection_area(b) >= 0.5 * max(w.bbox.area(), 1e-6) for b in r.boxes
-                )
-            )
-        return len(targets), hits, under
+            types = [t for needle, t in needles.items() if f" {needle} " in haystack]
+            if types:
+                found.hits[r.index + 1] = types
+            found.texts[r.index + 1], under = _reread_text(r, words)
+            found.under += under
+        return found
+
+    def _residual(
+        self,
+        texts: dict[int, str],
+        mode: Mode,
+        policy: str | dict[str, Any] | None,
+        options: RequestOptions,
+    ) -> dict[int, list[str]]:
+        """Run the engine, with the request's policy, over what the re-read saw on each page:
+        any value it would transform (a method other than ``keep``) is still on the page —
+        a value the text layer misread, or one only an image shows (review B1). Returns the
+        entity types found per 1-based page."""
+        found: dict[int, list[str]] = {}
+        for number, page_text in sorted(texts.items()):
+            if not page_text.strip():
+                continue
+            planned = self.engine.plan(Payload(text=page_text), policy, options, mode=mode)
+            types = [str(row["entity_type"]) for row in planned.plan if row["method"] != "keep"]
+            if types:
+                found[number] = types
+        return found
 
     def _attach_previews(
         self, doc: ExtractedDocument, pages: list[PageSummary], redacted: bytes | None

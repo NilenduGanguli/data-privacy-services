@@ -204,7 +204,8 @@ class RedactionReport(BaseModel):
     annotations: int
     ocr_checked: bool
     ocr_pages: int
-    ocr_hits: int  # originals found by the OCR re-read (must be 0)
+    ocr_hits: int  # values the OCR re-read still found: redacted originals, or values the
+    # policy transforms that the engine finds in what OCR read (must be 0; else 422 leakage)
     chars_under_boxes: int  # characters OCR read inside painted boxes (informational)
     passed: bool
 

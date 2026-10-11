@@ -505,3 +505,110 @@ The plan's router, tests and `create_app` changes are used, adapted to M0's `app
 - Count: `tests/test_api_documents.py` 15 passed, `tests/test_api_documents_ocr.py` 1 passed;
   `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m ocr` 2 passed; suite 776 → 791 passed, 2 skipped
   (mock up).
+
+## Fix round 1 for Tasks 8–10 (review `M1-G3-review-r1`)
+
+**B1: a redacted PDF could pass, `ocr_checked: true`, while still showing SSNs and card numbers
+whenever the PDF's text layer disagreed with what the page draws.** Reproduced first with the
+review's probes against the lane mock (real tesseract): a searchable scan with an OCR-error
+invisible layer, one with a "Specimen" layer, and a text PDF whose `/ToUnicode` maps digits to `X`
+all passed with values visible. The plan's design caused it in two places ("text-layer words win";
+the re-read looks only for the originals of detected findings, and only on boxed pages). Both are
+changed; interfaces (names and signatures) are unchanged.
+
+- **(a) Verification: `_redact` / `_ocr_reread` (`dps/layers/documents/__init__.py`).**
+  - When OCR is configured and `ocr_verify` holds, **every** page of the produced PDF is re-read,
+    not only boxed ones. `RedactionReport.ocr_pages` is now the page count.
+  - New private `_residual`: the engine runs over each page's re-read text with the request's policy,
+    locale and mode, through the public `PrivacyEngine.plan`. Any finding whose method is not `keep`
+    fails the request with 422 `leakage`, and nothing is returned. This also catches values that only
+    the raster holds (vector or outlined text, broken maps).
+  - The needle check stays. It is now **document-wide**: each page's re-read is searched for the
+    redacted originals of every page. Before, it searched only for that page's own. Why: the
+    customer's name, boxed on page 1, shown on page 2 where the text layer does not say it, has no
+    cue there, so only a needle sees it.
+  - The `leakage` message now names the count, the entity types and the pages, never a value:
+    "an OCR re-read of the redacted PDF still shows N value(s) the policy redacts (CARD_PAN, SSN)
+    on page(s) 1; nothing was returned". `RedactionReport.ocr_hits` is 0 whenever a report is
+    returned, since any hit raises. Its model comment is updated.
+  - **Text the engine checks after the re-read (`_reread_text`).** The page is laid out as an OCR
+    page with two changes:
+    - words OCR read inside a painted box (half their area or more, the `chars_under_boxes` rule)
+      are dropped;
+    - each box reads as one `█` (private `_BOX_MARK`) on its OCR line.
+
+    **Why.** It came from a false positive found in the real-mock sweep. Tesseract read the
+    redacted SSN box on a text-layer page as `RR`, and with the name boxed, the weak lead-in
+    `Customer:` named the next line's `SSN RR` a `PERSON_NAME`. Without the mark, every text-layer
+    fixture failed with `leakage`: 70 of the 168 sweep combinations. A box read as nothing has the
+    same effect when the next line starts with capitalised words (`Customer:` followed by
+    `Premier Banking`). A box is solid black, so nothing under it is readable, and the mark keeps a
+    cue from reaching past a redacted value.
+- **(b) Hybrid merge: `merge_ocr_words` and `group_lines` (`dps/layers/documents/layout.py`).**
+  - **Grouping.** OCR and text-layer words that hold the same place are grouped transitively:
+    boxes overlapping `OCR_OVERLAP` of the *smaller* box. Before, the test was coverage of the OCR
+    word alone. Transitive grouping makes a word split differently on each side (`Kri`+`shnan,`
+    against `KRISHNAN`) one group.
+  - **Duplicates.** A group's OCR words are dropped only when both sides read the same text,
+    normalised with the engine's `normalise`.
+  - **Conflicts.** Otherwise the OCR line holding the conflicting word is kept **whole**, with its
+    line hint, as a line of its own. Why whole lines: a card number's four groups next to the text
+    layer's misread groups would interleave word by word, and the engine does not see a card number
+    without its "Card" cue (`4111 1111 1111 1111 09/28` alone has no finding).
+  - **Other OCR words.** OCR words over no text-layer word join the text-layer lines, as before.
+  - **`group_lines`.** It now groups hinted words by hint and clusters unhinted words by centre in
+    the same call. Before, a mixed list was clustered entirely. Pure OCR and pure text-layer pages
+    are unchanged.
+  - A text-layer index of 24 pt row bands keeps the merge near-linear on dense pages.
+- **Measured against the lane mock (real tesseract), `options.redacted_pdf: true`:**
+  - The review's probes: `garbled` and `specimen` now redact SSN, card, e-mail and name. An
+    independent OCR of the output reads none of them, and the report passes. The control `none`
+    passes unchanged. `probe-m1-G3-tounicode.py` fails closed: 422 `leakage` (CARD_PAN, SSN).
+  - A sweep of 12 fixtures × 7 policies (default and six presets) × {obfuscate, synthesize}:
+    - 154 of 168 pass, with no false-positive `leakage`. The fixtures are text 1 and 3 pages,
+      scanned 1 and 2 pages, hybrid, small image, PNG, rotated, cropped, annotated, garbled and
+      specimen.
+    - The other 14 are `cropped_pdf`, which crashes **before** the re-read on HEAD too (see the
+      next section).
+    - The hybrid and small-image fixtures keep exactly the text layer's 16 words, because tesseract
+      agrees with them, so no extra lines are added.
+  - In the rebuilt image (`data-privacy-services:m1`, lane `dps-wt-m1`), the pipeline was run against
+    the mock at `host.docker.internal`. It passed with nothing visible afterwards for text, scan,
+    garbled and specimen.
+- **Costs and side effects (for the owner):**
+  - A redaction request now makes one OCR call per output page, where it used to make one per boxed
+    page. It also runs one engine pass per page, on top of the OCR'd input pages.
+  - On a hybrid page whose OCR disagrees with the text layer, the canonical text, and so the
+    obfuscated output, holds both readings of the disagreeing lines.
+  - The re-read's detections increment `dps_findings_total` as any `PrivacyEngine.plan` call does.
+- **Open (not measurable here): NER.** With the `ner` extra (`DPS_NER_ENABLED`), spaCy may label
+  re-read text differently from the original. A context-dependent label on words the engine already
+  judged would then fail closed. That is safe, but it is a false `leakage`. A possible refinement,
+  if real traffic shows it: count a residual finding only when its value never appeared in the
+  canonical text outside redacted spans.
+- **Tests** (each B1 test fails against the pre-fix modules; checked by running them against a HEAD
+  export of `dps/`, 8 failed):
+  - `tests/documents/test_layout.py`:
+    - `test_merge_ocr_words_keeps_what_the_text_layer_reads_otherwise`;
+    - `test_merge_ocr_words_keeps_a_line_an_overlay_hides`;
+    - `test_merge_ocr_words_drops_duplicates_however_the_words_split` (a guard: different
+      segmentation, case or punctuation adds no duplicates).
+  - `tests/documents/test_pipeline.py`:
+    - `test_a_searchable_scan_is_redacted_by_what_it_shows[garbled|specimen]`;
+    - `test_values_the_text_layer_cannot_read_fail_the_reread[obfuscate|synthesize]` (broken
+      `/ToUnicode`);
+    - `test_every_page_of_a_redacted_pdf_is_reread`;
+    - `test_a_redacted_value_another_page_shows_is_a_leak`;
+    - the control `test_the_reread_passes_a_redaction_that_hides_every_value`;
+    - `test_what_ocr_reads_inside_a_box_is_not_a_leak[2 cases]` (it failed against the
+      intermediate state without box marks, in 3 of its 4 sub-cases).
+  - Fixtures (`tests/documents/fixtures.py`): `searchable_scan(hidden)`, `GARBLED_LAYER`,
+    `SPECIMEN_LAYER`, `broken_tounicode_pdf()`, and `ScreenOcr`. `ScreenOcr` is an OCR double that
+    returns the drawn words less those a black box hides in the image it is sent, and optionally
+    reads a box as text (`box_reads_as`).
+- **Count:** suite 791 → 803 passed, 2 skipped (`ner` extra; lane OCR mock up).
+  `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` gives 109 passed, and `-m ocr` gives 2
+  passed.
+- Review nits N1, N3–N8 are not addressed in this round. N2 is partly covered by (a): a value that
+  a misplaced box leaves whole on the page is found. A value it leaves only in part is still not
+  found.

@@ -11,12 +11,16 @@ import bisect
 import dataclasses
 import statistics
 
+from dps.engine.verify import normalise
 from dps.layers.documents.models import BBox, PageText, Word
 
 REDACT_PAD_PT = 1.5  # boxes grow by this on every side (anti-aliasing, OCR jitter)
 COLUMN_GAP_CHARS = 2.5  # a gap wider than this many median character widths becomes a tab …
 COLUMN_GAP_MIN_PT = 6.0  # … and wider than this many points
-OCR_OVERLAP = 0.5  # an OCR word covered this much by a text-layer word is a duplicate
+#: An OCR word and a text-layer word overlapping this much of the smaller one hold the same place;
+#: the OCR words there are duplicates only when both sides read the same (``merge_ocr_words``).
+OCR_OVERLAP = 0.5
+_BAND_PT = 24.0  # height of the row bands that index text-layer words for the hybrid merge
 
 
 def _cy(box: BBox) -> float:
@@ -30,32 +34,33 @@ def _h(box: BBox) -> float:
 def group_lines(words: list[Word]) -> list[list[Word]]:
     """Words → visual lines in reading order (top to bottom, left to right).
 
-    OCR words carry the service's line grouping (``line_hint``), which survives skew; mixed or
-    text-layer words are clustered by vertical centre: a word joins the current line when its
-    centre lies within half the smaller height of the line's running centre.
+    Words with a ``line_hint`` (OCR words: the service's line grouping, which survives skew) form
+    one line per hint; words without one (text-layer words, and the OCR words a hybrid merge adds
+    to them) are clustered by vertical centre: a word joins the current line when its centre lies
+    within half the smaller height of the line's running centre.
     """
     if not words:
         return []
-    lines: list[list[Word]]
-    if all(w.line_hint is not None for w in words):
-        by_hint: dict[int, list[Word]] = {}
-        for w in words:
-            by_hint.setdefault(w.line_hint or 0, []).append(w)
-        lines = list(by_hint.values())
-    else:
-        lines = []
-        centres: list[float] = []
-        heights: list[float] = []
-        for w in sorted(words, key=lambda w: (_cy(w.bbox), w.bbox.x0)):
-            cy, h = _cy(w.bbox), _h(w.bbox)
-            if lines and abs(cy - centres[-1]) <= 0.5 * min(h, heights[-1]):
-                lines[-1].append(w)
-                centres[-1] += (cy - centres[-1]) / len(lines[-1])
-                heights[-1] = max(heights[-1], h)
-            else:
-                lines.append([w])
-                centres.append(cy)
-                heights.append(h)
+    by_hint: dict[int, list[Word]] = {}
+    for w in words:
+        if w.line_hint is not None:
+            by_hint.setdefault(w.line_hint, []).append(w)
+    lines: list[list[Word]] = list(by_hint.values())
+    clustered: list[list[Word]] = []
+    centres: list[float] = []
+    heights: list[float] = []
+    free = (w for w in words if w.line_hint is None)
+    for w in sorted(free, key=lambda w: (_cy(w.bbox), w.bbox.x0)):
+        cy, h = _cy(w.bbox), _h(w.bbox)
+        if clustered and abs(cy - centres[-1]) <= 0.5 * min(h, heights[-1]):
+            clustered[-1].append(w)
+            centres[-1] += (cy - centres[-1]) / len(clustered[-1])
+            heights[-1] = max(heights[-1], h)
+        else:
+            clustered.append([w])
+            centres.append(cy)
+            heights.append(h)
+    lines.extend(clustered)
     ordered = [sorted(line, key=lambda w: w.bbox.x0) for line in lines]
     return sorted(ordered, key=lambda line: (min(w.bbox.y0 for w in line), line[0].bbox.x0))
 
@@ -135,16 +140,78 @@ def line_of_offset(page: PageText, offset: int) -> int:
     return page.text.count("\n", 0, offset) + 1
 
 
+def _linked(a: BBox, b: BBox, overlap: float) -> bool:
+    """Whether two word boxes hold the same place (overlap of the smaller one)."""
+    return a.intersection_area(b) >= overlap * max(min(a.area(), b.area()), 1e-6)
+
+
+def _reading(words: list[Word]) -> str:
+    """What words say, left to right, normalised (letters and digits, case-folded)."""
+    return normalise("".join(w.text for w in sorted(words, key=lambda w: w.bbox.x0)))
+
+
 def merge_ocr_words(
     text_words: list[Word], ocr_words: list[Word], *, overlap: float = OCR_OVERLAP
 ) -> list[Word]:
-    """Hybrid pages: every text-layer word, plus the OCR words the text layer does not cover."""
-    extra = [
-        dataclasses.replace(o, line_hint=None)
-        for o in ocr_words
-        if not any(
-            o.bbox.intersection_area(t.bbox) >= overlap * max(o.bbox.area(), 1e-6)
-            for t in text_words
-        )
-    ]
-    return [*text_words, *extra]
+    """Hybrid pages: every text-layer word, plus every OCR word the text layer does not say.
+
+    OCR words and text-layer words that hold the same place (boxes overlapping ``overlap`` of the
+    smaller box) are grouped, transitively, so a word split differently on each side stays one
+    group. A group whose OCR words read what its text-layer words read (normalised) is a
+    duplicate: its OCR words are dropped. Otherwise the text layer is not what the page shows (an
+    invisible OCR layer with errors, a "Specimen" overlay, a broken ``/ToUnicode`` map under an
+    image), and since a redacted raster keeps what the page shows, the engine must see the OCR
+    reading too (review B1): every OCR line holding such a word is kept whole, with its line
+    hint, so it becomes a line of its own — a value split over words (a card number) stays with
+    its cue ("Card") instead of interleaving with the text layer's reading. OCR words over no
+    text-layer word join the text-layer lines (``line_hint`` cleared).
+    """
+    n = len(ocr_words)
+    parent = list(range(n + len(text_words)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    bands: dict[int, list[int]] = {}
+    for j, t in enumerate(text_words):
+        for band in range(int(t.bbox.y0 // _BAND_PT), int(t.bbox.y1 // _BAND_PT) + 1):
+            bands.setdefault(band, []).append(j)
+    linked = [False] * n
+    for i, o in enumerate(ocr_words):
+        seen: set[int] = set()
+        for band in range(int(o.bbox.y0 // _BAND_PT), int(o.bbox.y1 // _BAND_PT) + 1):
+            for j in bands.get(band, ()):
+                if j in seen:
+                    continue
+                seen.add(j)
+                if _linked(o.bbox, text_words[j].bbox, overlap):
+                    linked[i] = True
+                    parent[root(i)] = root(n + j)
+    groups: dict[int, tuple[list[Word], list[Word]]] = {}
+    for i, o in enumerate(ocr_words):
+        if linked[i]:
+            groups.setdefault(root(i), ([], []))[0].append(o)
+    for j, t in enumerate(text_words):
+        if root(n + j) in groups:
+            groups[root(n + j)][1].append(t)
+    conflicting = {
+        i
+        for i in range(n)
+        if linked[i] and _reading(groups[root(i)][0]) != _reading(groups[root(i)][1])
+    }
+    line_of: dict[int, int] = {}
+    for number, line in enumerate(group_lines(list(ocr_words))):
+        for o in line:
+            line_of[id(o)] = number
+    shown_lines = {line_of[id(ocr_words[i])] for i in conflicting}
+    kept: list[Word] = []
+    for i, o in enumerate(ocr_words):
+        number = line_of[id(o)]
+        if number in shown_lines:
+            kept.append(dataclasses.replace(o, line_hint=number))
+        elif not linked[i]:
+            kept.append(dataclasses.replace(o, line_hint=None))
+    return [*text_words, *kept]

@@ -20,12 +20,18 @@ from dps.layers.documents.redact import inspect_output_pdf  # noqa: E402
 from dps.llm.gateway import LlmGateway  # noqa: E402
 from tests.documents.fixtures import (  # noqa: E402
     CUSTOMERS,
+    GARBLED_LAYER,
+    KYC_LINES,
+    SPECIMEN_LAYER,
     FakeOcr,
+    ScreenOcr,
+    broken_tounicode_pdf,
     csv_document,
     docx_document,
     hybrid_pdf,
     png_document,
     scanned_pdf,
+    searchable_scan,
     small_image_pdf,
     text_pdf,
     words_px,
@@ -419,3 +425,162 @@ async def test_csv_findings_are_numbered_in_row_order(
     )
     lines = [f.line for f in sorted(out.pages[0].findings, key=lambda f: f.n)]
     assert lines == sorted(lines) and max(lines) == 13
+
+
+# --- review B1 (M1-G3 r1): the redacted raster keeps what the page shows ---------------------
+
+#: Words of the KYC fixture a redaction must hide (the card's expiry is kept by the policy).
+_SENSITIVE = {"Ananya", "Krishnan", "123-45-6789", "ananya.k@example-mail.in", "4111", "1111"}
+
+
+@pytest.mark.parametrize("hidden", [GARBLED_LAYER, SPECIMEN_LAYER], ids=["garbled", "specimen"])
+async def test_a_searchable_scan_is_redacted_by_what_it_shows(
+    engine: PrivacyEngine, settings: Settings, hidden: tuple[str, ...]
+) -> None:
+    """A page image under an invisible text layer that reads otherwise (OCR errors, or
+    "Specimen"): the OCR words the text layer contradicts reach the engine, so every value the
+    page shows is boxed, and the re-read of the produced PDF shows none of them."""
+    ocr = ScreenOcr(words_px(text_pdf())[0])
+    out = await pipe(engine, settings, ocr).run(
+        mode="obfuscate",
+        content=searchable_scan(hidden),
+        filename=None,
+        content_type=None,
+        request=req(redacted_pdf=True),
+    )
+    assert ocr.calls == 2 and ocr.reads[0] and not set(ocr.reads[-1]) & _SENSITIVE
+    assert "09/28" in ocr.reads[-1]  # kept by the policy: shown, and no leak
+    assert out.pages[0].source == "hybrid"
+    redacted = {f.entity_type for f in out.pages[0].findings if f.redacted}
+    assert {"SSN", "CARD_PAN", "EMAIL", "PERSON_NAME"} <= redacted
+    redaction = out.document.redaction
+    assert redaction is not None and redaction.passed and redaction.ocr_checked
+    assert redaction.ocr_hits == 0
+
+
+@pytest.mark.parametrize("mode", ["obfuscate", "synthesize"])
+async def test_values_the_text_layer_cannot_read_fail_the_reread(
+    engine: PrivacyEngine, settings: Settings, mode: str
+) -> None:
+    """A /ToUnicode map that reads digits as X: the text layer holds no SSN or card number, the
+    page (no image) is not OCR'd, but the produced raster shows both. The re-read runs the
+    engine over what it reads and fails closed; the error names types, never values."""
+    ocr = ScreenOcr(words_px(text_pdf())[0])
+    with pytest.raises(DocumentError) as exc:
+        await pipe(engine, settings, ocr).run(
+            mode=mode,  # type: ignore[arg-type]
+            content=broken_tounicode_pdf(),
+            filename=None,
+            content_type=None,
+            request=req(redacted_pdf=True),
+        )
+    assert (exc.value.code, exc.value.status) == ("leakage", 422) and ocr.calls == 1
+    assert "SSN" in exc.value.detail and "CARD_PAN" in exc.value.detail
+    assert not any(value in exc.value.detail for value in _SENSITIVE | {"6789", "09/28"})
+
+
+async def test_the_reread_passes_a_redaction_that_hides_every_value(
+    engine: PrivacyEngine, settings: Settings
+) -> None:
+    """Control: the same page with a sound text layer redacts and passes the re-read."""
+    ocr = ScreenOcr(words_px(text_pdf())[0])
+    out = await pipe(engine, settings, ocr).run(
+        mode="obfuscate",
+        content=text_pdf(),
+        filename=None,
+        content_type=None,
+        request=req(redacted_pdf=True),
+    )
+    redaction = out.document.redaction
+    assert redaction is not None and redaction.passed and redaction.ocr_hits == 0
+    assert ocr.calls == 1 and not set(ocr.reads[0]) & _SENSITIVE and "SSN" in ocr.reads[0]
+
+
+@pytest.mark.parametrize("lines", [KYC_LINES, ("Customer: Ananya Krishnan", "Premier Banking")])
+async def test_what_ocr_reads_inside_a_box_is_not_a_leak(
+    engine: PrivacyEngine, settings: Settings, lines: tuple[str, ...]
+) -> None:
+    """A real OCR reads a black box as letters ("RR") or as nothing. Either way a cue must not
+    reach past a redacted value: with the name boxed, "Customer:" would otherwise name the next
+    capitalised words ("SSN RR", "Premier Banking") and fail a sound redaction. Each painted box
+    is read as one mark, and what OCR saw inside it is dropped."""
+    for reads_as in ("RR", None):
+        ocr = ScreenOcr(words_px(text_pdf(lines))[0], box_reads_as=reads_as)
+        out = await pipe(engine, settings, ocr).run(
+            mode="obfuscate",
+            content=text_pdf(lines),
+            filename=None,
+            content_type=None,
+            request=req(redacted_pdf=True),
+        )
+        redaction = out.document.redaction
+        assert redaction is not None and redaction.passed and ocr.calls == 1
+        assert (redaction.chars_under_boxes > 0) == (reads_as is not None)
+
+
+async def test_every_page_of_a_redacted_pdf_is_reread(
+    engine: PrivacyEngine, settings: Settings
+) -> None:
+    """A page without boxes can still show a value the engine never saw: it is re-read too."""
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(612, 792), invariant=1)
+    for lines in (KYC_LINES, ("Terms and conditions apply",)):
+        c.setFont("Helvetica", 14)
+        for i, line in enumerate(lines):
+            c.drawString(72, 720 - i * 28, line)
+        c.showPage()
+    c.save()
+    ocr = FakeOcr([[]])
+    out = await pipe(engine, settings, ocr).run(
+        mode="obfuscate",
+        content=buf.getvalue(),
+        filename=None,
+        content_type=None,
+        request=req(redacted_pdf=True),
+    )
+    assert out.pages[1].findings == []
+    redaction = out.document.redaction
+    assert redaction is not None and redaction.ocr_pages == 2 and ocr.calls == 2
+    leak = [("SSN", (300.0, 300.0, 520.0, 330.0)), ("123-45-6789", (540.0, 300.0, 800.0, 330.0))]
+    with pytest.raises(DocumentError) as exc:
+        await pipe(engine, settings, FakeOcr([leak])).run(
+            mode="obfuscate",
+            content=buf.getvalue(),
+            filename=None,
+            content_type=None,
+            request=req(redacted_pdf=True),
+        )
+    assert exc.value.code == "leakage"
+
+
+async def test_a_redacted_value_another_page_shows_is_a_leak(
+    engine: PrivacyEngine, settings: Settings
+) -> None:
+    """The name is detected and boxed on page 1; page 2 shows it too, where its text layer does
+    not say it (here: an OCR double reading it at the same place on every page). No cue on page
+    2 names it, so only the needle check sees it — and it checks every page against every
+    redacted original, not just that page's own."""
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(612, 792), invariant=1)
+    for lines in (KYC_LINES, ("Terms and conditions apply",)):
+        c.setFont("Helvetica", 14)
+        for i, line in enumerate(lines):
+            c.drawString(72, 720 - i * 28, line)
+        c.showPage()
+    c.save()
+    name = [w for w in words_px(text_pdf())[0] if w[0] in ("Ananya", "Krishnan")]
+    ocr = ScreenOcr(name)
+    with pytest.raises(DocumentError) as exc:
+        await pipe(engine, settings, ocr).run(
+            mode="obfuscate",
+            content=buf.getvalue(),
+            filename=None,
+            content_type=None,
+            request=req(redacted_pdf=True),
+        )
+    assert exc.value.code == "leakage" and "page(s) 2;" in exc.value.detail
+    assert sorted(len(r) for r in ocr.reads) == [0, 2]  # page 1 boxed it, page 2 shows it

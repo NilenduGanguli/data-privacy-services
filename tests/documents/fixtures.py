@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 
 from PIL import Image
@@ -128,6 +129,77 @@ def small_image_pdf(lines=KYC_LINES) -> bytes:
     return buf.getvalue()
 
 
+#: An invisible text layer with OCR errors, as legacy scanners write under a page image.
+GARBLED_LAYER = (
+    "Customer: Anonymous Person",
+    "SSN 1Z3-4S-67B9 on file",
+    "Email ananya.k at example-mail",
+    "Card 4lll llll llll llll expires O9/2B",
+)
+#: An invisible text layer that says something else entirely at the start of every line.
+SPECIMEN_LAYER = ("Specimen",) * 4
+
+
+def searchable_scan(hidden=GARBLED_LAYER, lines=KYC_LINES, *, dpi: int = 200) -> bytes:
+    """A full-page image of ``lines`` under an invisible (render mode 3) text layer that says
+    ``hidden`` at the same line positions: a searchable scan whose text layer is not what it
+    shows."""
+    with PdfRenderer(text_pdf(lines)) as renderer:
+        image = renderer.render(0, dpi)
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(612, 792), invariant=1)
+    c.drawImage(ImageReader(image), 0, 0, width=612, height=792)
+    text = c.beginText()
+    text.setTextRenderMode(3)
+    text.setFont("Helvetica", 14)
+    for i, line in enumerate(hidden):
+        text.setTextOrigin(72, 792 - 72 - i * 28)
+        text.textLine(line)
+    c.drawText(text)
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def broken_tounicode_pdf(lines=KYC_LINES) -> bytes:
+    """``text_pdf(lines)`` whose fonts carry a ``/ToUnicode`` map that reads every digit as ``X``:
+    the page shows the digits, its text layer does not (as in many generated statements)."""
+    from pypdf.generic import NameObject, StreamObject
+
+    entries = [
+        f"<{code:02X}> <{(0x58 if chr(code).isdigit() else code):04X}>"
+        for code in range(0x20, 0x7F)
+    ]
+    cmap = StreamObject()
+    cmap.set_data(
+        "\n".join(
+            [
+                "/CIDInit /ProcSet findresource begin",
+                "12 dict begin",
+                "begincmap",
+                "/CMapName /BrokenDigits def",
+                "1 begincodespacerange <00> <FF> endcodespacerange",
+                f"{len(entries)} beginbfchar",
+                *entries,
+                "endbfchar",
+                "endcmap",
+                "CMapName currentdict /CMap defineresource pop",
+                "end",
+                "end",
+            ]
+        ).encode()
+    )
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(text_pdf(lines))))
+    ref = writer._add_object(cmap)
+    for page in writer.pages:
+        fonts = page["/Resources"]["/Font"]
+        for name in fonts:
+            fonts[name].get_object()[NameObject("/ToUnicode")] = ref
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
 def png_document(lines=KYC_LINES, *, dpi: int = 200) -> bytes:
     with PdfRenderer(text_pdf(lines)) as renderer:
         image = renderer.render(0, dpi)
@@ -248,6 +320,50 @@ class FakeOcr:
 
     async def aclose(self) -> None:
         return None
+
+
+class ScreenOcr(FakeOcr):
+    """An OCR double that reads what an image *shows*: the words drawn on the page (pixels at the
+    size of the image sent; the same words for every page), less every word a redaction box hides
+    (its area is all but black in the image) — or, with ``box_reads_as``, that text in its place,
+    as a real OCR sometimes reads a black box as letters. ``reads`` keeps the texts each call
+    returned."""
+
+    def __init__(
+        self,
+        drawn: list[tuple[str, tuple[float, float, float, float]]],
+        *,
+        box_reads_as: str | None = None,
+        confidence: float = 0.97,
+    ) -> None:
+        super().__init__([drawn], confidence=confidence)
+        self.box_reads_as = box_reads_as
+        self.reads: list[list[str]] = []
+
+    async def read(self, image: bytes, *, content_type: str = "image/png"):  # noqa: ANN201
+        import math
+
+        from PIL import ImageStat
+
+        from dps.layers.documents.ocr import OcrPage
+
+        page = await super().read(image, content_type=content_type)
+        with Image.open(io.BytesIO(image)) as sent:
+            grey = sent.convert("L")
+        shown = []
+        for word in page.words:
+            xs, ys = word.polygon[0::2], word.polygon[1::2]
+            region = grey.crop(
+                (math.floor(min(xs)), math.floor(min(ys)), math.ceil(max(xs)), math.ceil(max(ys)))
+            )
+            if ImageStat.Stat(region).mean[0] >= 64:  # painted boxes are black
+                shown.append(word)
+            elif self.box_reads_as is not None:
+                shown.append(dataclasses.replace(word, text=self.box_reads_as))
+        self.reads.append([w.text for w in shown])
+        return OcrPage(
+            width=page.width, height=page.height, unit=page.unit, angle=page.angle, words=shown
+        )
 
 
 def words_px(
