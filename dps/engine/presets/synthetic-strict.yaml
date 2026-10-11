@@ -1,7 +1,6 @@
 name: synthetic-strict
 version: 1
 description: Synthetic with maximum privacy. Lower detection threshold, every date and location replaced, no cross-request linkage.
-locale: { default: en_US }
 detect: { tiers: [structural, patterns, ner], min_score: 0.5 }
 treat:
   default_sensitive: { method: det_token }

@@ -1,7 +1,6 @@
 name: analytics-safe
 version: 1
 description: Irreversible. Keyed pseudonyms keep joins, dates generalised to year, addresses removed, amounts lightly perturbed.
-locale: { default: en_US }
 detect: { tiers: [structural, patterns, ner], min_score: 0.55 }
 treat:
   default_sensitive: { method: hmac_pseudonym }

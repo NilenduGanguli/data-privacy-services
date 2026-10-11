@@ -173,12 +173,8 @@ class PrivacyEngine:
             raise EngineError(f"invalid policy: {exc}") from None
 
     def _locale(self, policy: Policy, options: RequestOptions) -> str:
-        """Request locale, else the policy's own (when it sets one), else the service default."""
-        if options.locale:
-            return options.locale
-        if "locale" in policy.model_fields_set and "default" in policy.locale.model_fields_set:
-            return policy.locale.default
-        return self.settings.default_locale
+        """Request locale, else the policy's pin (``locale.default``), else ``DPS_DEFAULT_LOCALE``."""
+        return options.locale or policy.locale.default or self.settings.default_locale
 
     def _detector(self, policy: Policy, locale: str) -> Detector:
         config = DetectorConfig(

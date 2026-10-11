@@ -69,6 +69,14 @@ def test_phone_matcher_uses_region() -> None:
     assert scan_phones("order 98765 shipped", region="US") == []
 
 
+def test_phone_evidence_names_the_numbers_own_region_not_the_parse_default() -> None:
+    hits = scan_phones("call +91 98451 20377 or (415) 555-0132 today", region="US")
+    assert [h.evidence for h in hits] == ["phone:IN", "phone:US"]
+    # A national-format number parsed under the locale's region is that region's number.
+    assert [h.evidence for h in scan_phones("call 098451 20377", region="IN")] == ["phone:IN"]
+    assert [h.evidence for h in scan_phones("call +44 20 7946 0958", region="IN")] == ["phone:GB"]
+
+
 def test_resolve_overlaps_prefers_validated_then_score_then_length() -> None:
     a = Hit("SSN", 0, 11, 0.5, "pattern:x", "", False)
     b = Hit("ITIN", 0, 11, 0.98, "pattern:y", "", True)

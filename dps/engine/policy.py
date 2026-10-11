@@ -73,10 +73,15 @@ class MethodSpec(BaseModel):
 
 
 class LocaleConfig(BaseModel):
-    """Default locale for surrogates and phone parsing; optionally per record."""
+    """Locale for surrogates and phone parsing; optionally per record.
+
+    ``default`` is a pin: ``None`` (most presets) lets the service's ``DPS_DEFAULT_LOCALE`` apply;
+    a value (``dpdp-pseudonymise`` pins ``en_IN``) wins over it. A request's ``options.locale``
+    wins over both.
+    """
 
     model_config = _MODEL_CONFIG
-    default: str = "en_US"
+    default: str | None = None
     by_country_field: str | None = None
 
 

@@ -158,3 +158,32 @@ def test_preset_entity_keys_are_known_types() -> None:
         assert meta["description"]
         for key in [*policy.treat, *policy.synthesize.overrides]:
             assert key == "default_sensitive" or is_builtin_entity(key), (meta["name"], key)
+
+
+def test_only_dpdp_pins_a_locale() -> None:
+    pins = {name: load_preset(name).locale.default for name in (p["name"] for p in list_presets())}
+    assert pins == {
+        "dpdp-pseudonymise": "en_IN",
+        "gdpr-pseudonymise": None,
+        "pci-dss": None,
+        "analytics-safe": None,
+        "synthetic-realistic": None,
+        "synthetic-strict": None,
+    }
+    # An inline policy and a preset with overrides that do not touch the locale stay unpinned.
+    assert Policy().locale.default is None
+    merged = resolve_policy(
+        {"preset": "gdpr-pseudonymise", "treat": {"EMAIL": {"method": "redact"}}},
+        default_name="x",
+    )
+    assert merged.locale.default is None
+    assert resolve_policy({"preset": "dpdp-pseudonymise"}, default_name="x").locale.default == (
+        "en_IN"
+    )
+
+
+def test_dpdp_policy_hash_is_unchanged_by_the_optional_locale() -> None:
+    # The hash recorded before LocaleConfig.default became optional (v0.1.0-m0).
+    assert load_preset("dpdp-pseudonymise").config_hash() == (
+        "18f2ecaf465bc0e9e6127acf1811637f8c996fb23488a108a0efcf4fc7fcb98e"
+    )

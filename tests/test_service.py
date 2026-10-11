@@ -348,9 +348,40 @@ def test_locale_precedence(engine: PrivacyEngine) -> None:
         Payload(data={"note": "098451 20377"}), inline, RequestOptions(locale="en_US")
     )
     assert "PHONE" not in [f.entity_type for f in us.findings]
-    # a policy that names its locale keeps it (every preset does: en_US)
-    preset = engine.detect(Payload(data={"note": "098451 20377"}), None, RequestOptions())
-    assert "PHONE" not in [f.entity_type for f in preset.findings]
+    # a policy that pins its locale keeps it over the service default (en_IN here)
+    pinned = {**inline, "locale": {"default": "en_US"}}
+    pins = engine.detect(Payload(data={"note": "098451 20377"}), pinned, RequestOptions())
+    assert "PHONE" not in [f.entity_type for f in pins.findings]
+    # ...and the request still wins over the pin
+    asked = engine.detect(
+        Payload(data={"note": "098451 20377"}), pinned, RequestOptions(locale="en_IN")
+    )
+    assert [f.entity_type for f in asked.findings] == ["PHONE"]
+
+
+@pytest.mark.parametrize(
+    "preset",
+    ["gdpr-pseudonymise", "pci-dss", "analytics-safe", "synthetic-realistic", "synthetic-strict"],
+)
+def test_presets_without_a_pin_follow_dps_default_locale(preset: str) -> None:
+    def detects_national_indian_phone(default_locale: str) -> bool:
+        engine = PrivacyEngine(
+            Settings(_env_file=None, ner_enabled=False, default_locale=default_locale)
+        )
+        det = engine.detect(Payload(data={"note": "098451 20377"}), preset, RequestOptions())
+        return "PHONE" in [f.entity_type for f in det.findings]
+
+    assert detects_national_indian_phone("en_IN")
+    assert not detects_national_indian_phone("en_US")
+
+
+def test_dpdp_pins_en_in_over_the_service_default() -> None:
+    engine = PrivacyEngine(Settings(_env_file=None, ner_enabled=False, default_locale="en_US"))
+    note = Payload(data={"note": "098451 20377"})
+    det = engine.detect(note, "dpdp-pseudonymise", RequestOptions())
+    assert [f.entity_type for f in det.findings] == ["PHONE"]
+    asked = engine.detect(note, "dpdp-pseudonymise", RequestOptions(locale="en_US"))
+    assert "PHONE" not in [f.entity_type for f in asked.findings]
 
 
 def test_warn_policies_return_output_and_report_the_failure(

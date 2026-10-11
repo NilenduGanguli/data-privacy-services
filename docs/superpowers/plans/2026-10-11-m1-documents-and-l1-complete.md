@@ -8867,7 +8867,7 @@ export interface RecognizerSpec {
 export interface DeclaredField { path: string; entity_type: string; score?: number; sensitivity?: Sensitivity | null }
 export interface PolicyDoc {
   name: string; version: number; description: string;
-  locale: { default: string; by_country_field: string | null };
+  locale: { default: string | null; by_country_field: string | null };   // null = DPS_DEFAULT_LOCALE applies (main @ fix(engine) O1)
   detect: { tiers: string[]; min_score: number; custom_recognizers: RecognizerSpec[]; declared_fields: DeclaredField[] };
   treat: Record<string, MethodSpec>;
   synthesize: { default: MethodSpec; overrides: Record<string, MethodSpec>; keep_non_sensitive: boolean; llm_rewrite_text: boolean };
@@ -9707,7 +9707,7 @@ export function Policies(): JSX.Element {
             {preset && <div className="ph-hash">Preset hash <span className="mono">sha256:{preset.hash.slice(0, 16)}…{preset.hash.slice(-12)}</span>
               <button className="btn btn-sm" onClick={() => { void navigator.clipboard?.writeText(preset.hash); }}>Copy hash</button></div>}
             {doc && <div className="facts">
-              <div><div className="l">Locale</div><div className="v">{doc.locale.default}<small>{doc.locale.by_country_field ? `by ${doc.locale.by_country_field}` : 'fixed'}</small></div></div>
+              <div><div className="l">Locale</div><div className="v">{doc.locale.default ?? 'service default'}<small>{doc.locale.by_country_field ? `by ${doc.locale.by_country_field}` : doc.locale.default ? 'pinned by the policy' : 'DPS_DEFAULT_LOCALE'}</small></div></div>
               <div><div className="l">Detection tiers</div><div className="v">{doc.detect.tiers.join(', ')}<small>{doc.detect.tiers.includes('llm_label') ? 'LLM labelling on' : 'LLM labelling off'}</small></div></div>
               <div><div className="l">Minimum score</div><div className="v">{doc.detect.min_score.toFixed(2)}<small>noisy-OR per locator</small></div></div>
               <div><div className="l">Consistency</div><div className="v">{doc.consistency.scope}<small>{doc.consistency.scope === 'key' ? 'caller holds the key' : doc.consistency.field_scoped ? 'field scoped' : 'per request'}</small></div></div>

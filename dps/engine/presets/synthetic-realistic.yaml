@@ -1,7 +1,6 @@
 name: synthetic-realistic
 version: 1
 description: Synthetic surrogates that look real, agree with each other (one persona per record) and keep non-sensitive values.
-locale: { default: en_US }
 detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
 treat:
   default_sensitive: { method: det_token }

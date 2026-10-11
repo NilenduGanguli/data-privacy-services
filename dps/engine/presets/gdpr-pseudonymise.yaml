@@ -1,7 +1,6 @@
 name: gdpr-pseudonymise
 version: 1
 description: Reversible pseudonymisation that keeps formats and joins. Output remains personal data (GDPR Art. 4(5)).
-locale: { default: en_US }
 detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
 treat:
   default_sensitive: { method: det_token }

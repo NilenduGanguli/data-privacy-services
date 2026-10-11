@@ -437,16 +437,19 @@ def scan_text(text: str, *, key_hint: str | None = None) -> list[Hit]:
 
 
 def scan_phones(text: str, *, region: str = "US") -> list[Hit]:
-    """Phone numbers via ``phonenumbers`` (valid numbers only, national or international)."""
+    """Phone numbers via ``phonenumbers`` (valid numbers only, national or international).
+
+    ``region`` is the parse default for national-format numbers; the evidence names the number's
+    own region (``phone:IN`` for ``+91 …`` whatever the locale; ``001`` for non-geographic).
+    """
     hits: list[Hit] = []
     try:
         matcher = phonenumbers.PhoneNumberMatcher(
             text, region, leniency=phonenumbers.Leniency.VALID
         )
         for m in matcher:
-            hits.append(
-                Hit("PHONE", m.start, m.end, 0.85, "pattern:phone", f"phone:{region}", True)
-            )
+            own = phonenumbers.region_code_for_number(m.number) or "ZZ"
+            hits.append(Hit("PHONE", m.start, m.end, 0.85, "pattern:phone", f"phone:{own}", True))
     except Exception:  # noqa: BLE001 - a matcher error must never fail detection
         return []
     return hits

@@ -61,8 +61,10 @@ Presets: `gdpr-pseudonymise` (the default), `dpdp-pseudonymise`, `pci-dss`, `ana
   An override replaces a whole `treat` / `synthesize.overrides` entry (it never inherits the
   preset's params); the effective name becomes `gdpr-pseudonymise+overrides`. Omitted: the
   server's `DPS_DEFAULT_POLICY`.
-- `options` overrides the policy for this request: `locale`; `token_style` (`natural` or
-  `envelope`); `wrap_key` (RSA ≥ 2048, OAEP-SHA256: the response then carries `wrapped_dek`
+- `options` overrides the policy for this request: `locale` (the effective locale is
+  `options.locale`, else the policy's pinned `locale.default`, else the server's
+  `DPS_DEFAULT_LOCALE`; of the presets only `dpdp-pseudonymise` pins one, `en_IN`);
+  `token_style` (`natural` or `envelope`); `wrap_key` (RSA ≥ 2048, OAEP-SHA256: the response then carries `wrapped_dek`
   instead of `dek`); `consistency.scope` (`request` | `key` | `entity`) with caller-held
   `key_material` (obfuscate: the same key gives the same tokens) or `synthesis_seed` (synthesize:
   the same seed gives the same surrogates); `llm_rewrite` (text synthesis only, and only when the
@@ -84,7 +86,8 @@ Methods a policy can name: reversible `det_token`, `fpe_digits`, `fpe_text`, `em
   "evidence": ["pattern:email", "key:email"], "value_hash": "71d4f55f72fa128d" }
 ```
 
-`start`/`end` are set for a span inside a string. `value_hash` is a salt-free 16-hex hash for
+`start`/`end` are set for a span inside a string. A phone's evidence names the number's own
+region (`phone:IN` for `+91 …`, whatever the locale used to parse national-format numbers). `value_hash` is a salt-free 16-hex hash for
 "same value as" links; it does not hide low-entropy values, so treat it like the finding itself.
 
 **`/policies/plan`** → `findings[]`, `plan[]`, `record_sensitivity`, `trace_id`. A plan row:

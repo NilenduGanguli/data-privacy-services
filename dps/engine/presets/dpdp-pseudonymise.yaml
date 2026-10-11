@@ -1,7 +1,7 @@
 name: dpdp-pseudonymise
 version: 1
 description: India DPDP pseudonymisation. Aadhaar masked to last 4 (UIDAI style), PAN/voter id format-preserving, Indian locale.
-locale: { default: en_IN }
+locale: { default: en_IN }   # the only pin: DPS_DEFAULT_LOCALE applies to every other preset
 detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
 treat:
   default_sensitive: { method: det_token }

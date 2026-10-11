@@ -1,7 +1,6 @@
 name: pci-dss
 version: 1
 description: Cardholder-data focus. PAN format-preserving with first-6/last-4 kept, CVV never retained, everything else tokenised.
-locale: { default: en_US }
 detect: { tiers: [structural, patterns, ner], min_score: 0.6 }
 treat:
   default_sensitive: { method: det_token }
