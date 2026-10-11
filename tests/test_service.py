@@ -452,3 +452,15 @@ async def test_long_values_are_replaced_quickly_and_completely(engine: PrivacyEn
     assert out.report.verification.passed  # type: ignore[union-attr]
     words = zip(remarks.split(), out.result["remarks"].split(), strict=True)
     assert sum(a == b for a, b in words) <= 2
+
+
+def test_report_counts_every_value_that_fell_back_with_fpe_off() -> None:
+    """``report.fallbacks`` counts plan-time FPE fallbacks too, one per value, not only the ones
+    a method took while running (found by the compose smoke run with DPS_FPE_ENABLED=false)."""
+    s = Settings(_env_file=None, llm_provider="stub", fpe_enabled=False, ner_enabled=False)
+    engine = PrivacyEngine(s, gateway=LlmGateway(s))
+    out = engine.obfuscate(Payload(data=SAMPLE), "gdpr-pseudonymise", RequestOptions())
+    planned = sum("fallback:fpe_disabled" in row["reason"] for row in out.plan)
+    assert planned == 3  # customer_id, full_name, aadhaar: fpe_* planned as det_token
+    assert out.report.fallbacks == {"fallback:fpe_disabled": 3, "fallback:fpe_unavailable": 1}
+    assert sum(out.report.fallbacks.values()) == out.report.methods_used["det_token"]

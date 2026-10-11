@@ -45,9 +45,18 @@ def build_report(
     llm_calls: int,
     duration_ms: float,
 ) -> Report:
-    """Assemble the report from what the request produced (findings carry no values)."""
+    """Assemble the report from what the request produced (findings carry no values).
+
+    ``fallbacks`` counts one per value that did not get its policy method: the planner's static
+    fallbacks (a ``|fallback:<why>`` reason, e.g. ``fpe_disabled``) plus the ``notes`` a method
+    reported while running (e.g. ``fpe_domain_too_small``). ``plan`` is the applied plan, or
+    ``None`` when nothing was transformed.
+    """
     by_type = Counter(f.entity_type for f in findings)
     by_detector = Counter(d.split(":")[0] for f in findings for d in f.detectors)
+    fallbacks = Counter(notes)
+    for entry in plan.entries if plan else ():
+        fallbacks.update(p for p in entry.reason.split("|")[1:] if p.startswith("fallback:"))
     return Report(
         mode=mode,
         policy=policy_name,
@@ -57,7 +66,7 @@ def build_report(
         findings_by_detector=dict(by_detector),
         record_sensitivity=str(plan.record_sensitivity) if plan else "LOW",
         methods_used=methods_used,
-        fallbacks=notes,
+        fallbacks=dict(fallbacks),
         reversible_values=reversible_values,
         verification=verification,
         llm={"calls": llm_calls, "raw_pii_sent": 0},
