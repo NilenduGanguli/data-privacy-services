@@ -964,3 +964,56 @@ checks the error metric), `test_malformed_completions_are_call_errors` (4 cases)
 `test_api_calls_send_the_bearer_and_timeout_settings`, `test_availability_per_provider`.
 Against the plan's `gateway.py`, 7 of the 13 added cases fail; the plan's own 4 pass on both.
 Count: 17 in the file; suite 342 passed, 1 skipped.
+
+## Task 21 — LLM text synthesis over placeholders
+
+Public names as planned: `PLACEHOLDER_RE`, `REWRITE_SYSTEM`, `LeakToModelError`,
+`LlmRewriteRejected`, `PlaceholderText`, `to_placeholders`, `assert_placeholder_safe`,
+`fill_placeholders`, `rewrite_placeholders`, `synthesize_text`. Additive, keyword-only and
+defaulted: `synthesize_text(..., plan=None, screen=None)`, `fill_placeholders(..., plan=None)`;
+`PlaceholderText.counts`; `info` gains `methods_used` and `notes`. Changes:
+
+- **A text that is one value was returned verbatim.** For a text that is exactly one value
+  (`"ann.k@example-mail.in"`), the ensemble emits a *whole-value* finding at `$` (no span).
+  `to_placeholders` kept span findings only, so nothing was replaced, the mapping was empty and
+  the original came back as the "synthetic" output (the strict sweep would then refuse the
+  request). Whole-value root findings now cover the stripped text.
+- **The leak guard no longer fails the request; it skips the model.** The plan ran
+  `assert_placeholder_safe` unconditionally (also when no LLM call was going to happen) and let
+  `LeakToModelError` escape, which Task 22 turned into an `EngineError`. When a detected value
+  still appears in the template (e.g. a second occurrence the detectors missed), the model is now
+  *not called* (`fallback: leak_guard`) and the deterministic fill runs; the leakage sweep in the
+  service then rules on the output exactly as for any other request. The guard checks every
+  finding's original (`collect_originals`), not only the placeholdered ones.
+- **Spec §5.6 step 5 ("verify ... any hit fails closed to the deterministic path").** The plan
+  accepted any rewrite that kept the placeholder set. Now a rewrite is also discarded when
+  (a) the filled text contains an original that the deterministic fill had removed
+  (`fallback: verification`), or (b) a caller-supplied `screen` (the service passes its
+  detector) finds more values in the rewrite than in the template it was given
+  (`fallback: llm_introduced_entities` — the model invented a name or number).
+- **The policy decides each fill.** The plan filled every placeholder with a surrogate, so in
+  text the synthesize plan was ignored: `synthetic-realistic` keeps `DATE` and `URL`, but text
+  dates were shifted; `synthetic-strict` redacts `URL`, but text URLs got a fake one. With
+  `plan=`, each label is filled by `run_method(entry.method, ...)` in synthesize mode (`keep`
+  puts the original back after the model ran, `redact` writes the label, `surrogate` asks the
+  engine). Kept values are still placeholdered before the call, so the model sees none of them.
+  `methods_used` / `notes` report what actually ran, per finding.
+- **Text that already looks like a placeholder.** `{EMAIL_1}` written in the customer's text
+  collided with the generated label, and the plan's fill replaced any unknown label with `""`,
+  deleting customer text. Generated labels now skip any placeholder-shaped string already in the
+  text, and unknown labels are left untouched.
+- `max_tokens` is capped at 8192 (the plan used `len(templated)`, up to `max_text_chars`).
+- Temperature 0.7 and the system prompt are as planned (`REWRITE_TEMPERATURE` constant).
+- `LLM_RAW_PII` stays a tripwire that nothing increments: no code path sends a detected value.
+
+Tests added: `test_a_value_that_is_the_whole_text_never_reaches_the_model`,
+`test_the_prompt_is_placeholders_only_with_the_spec_settings`,
+`test_text_that_already_looks_like_a_placeholder_is_kept_and_never_reused`,
+`test_the_leak_guard_skips_the_model_instead_of_sending`,
+`test_a_rewrite_that_brings_an_original_back_fails_closed`,
+`test_a_rewrite_that_invents_new_values_fails_closed`,
+`test_gateway_failures_and_unavailability_fall_back`, `test_the_plan_decides_each_placeholder_fill`.
+Against the plan's `llm_text.py`, 7 of the 8 fail: 4 on the behaviour above (whole-text value,
+placeholder-shaped text, leak guard, a rewrite that brings an original back) and 3 because they
+use the new `plan` / `screen` parameters or `info` fields; the plan's own 3 pass on both.
+Count: 11 in the file; suite 353 passed, 1 skipped.
