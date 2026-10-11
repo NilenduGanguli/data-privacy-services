@@ -4,7 +4,7 @@
 
 **Goal:** Finish Layer 1 of Data Privacy Services: documents in (PDF text layer, scanned PDF pages and images through the Azure Computer Vision Read v3.2 contract, DOCX, TXT, CSV), per-page findings with bounding boxes out, obfuscated/synthetic text that reveals with the caller's key, a **true** redacted PDF (rasterised pages with burned-in boxes, rebuilt image-only so no text survives, verified by re-extraction and an OCR re-read), synthetic rows from a schema / DDL / de-identified sample through a reusable generator spec, a measured detector evaluation harness with a committed report, the console Playground **Document** tab (mockup 08) and **Policies** page (mockup 05), OCR readiness, and the API reference — all offline in compose. The revision of 2026-10-11 adds the spec §5.3/§6 items no milestone owned: NDJSON streaming of large arrays (Task 19A), `Idempotency-Key` on the Layer 1 routes (19B), local Tesseract OCR when no Azure endpoint is configured (19C) and the opt-in T3 LLM metadata labelling tier (19D); contract §1, §9, §10, §12.1 and §15 already carry them.
 
-**Amended 2026-10-12 (before the M1 lane starts):** Task 19B's replay cache keeps no key material, seed or output (decision D2, contract §9 "L1 replay custody"); a replay re-runs the engine and is byte-identical only with caller-held material. Also on main since this plan was written: `LocaleConfig.default` is optional (only `dpdp-pseudonymise` pins a locale; Task 18's Policies page shows "service default" for `null`), lane-safe compose (contract §0 amendment 2026-10-12: host ports and image tags from env — write `${DPS_OCR_PORT:-5016}:5000` and `${DPS_IMAGE_TAG:-…}` where the snippets below show literals) and the console's session-only API key (O5).
+**Amended 2026-10-12 (before the M1 lane starts):** Task 19B's replay cache keeps no key material, seed or output (decision D2, contract §9 "L1 replay custody"); a replay re-runs the engine and is byte-identical only with caller-held material. Also on main since this plan was written: `LocaleConfig.default` is optional (only `dpdp-pseudonymise` pins a locale; Task 18's Policies page shows "service default" for `null`), lane-safe compose (contract §0 amendment 2026-10-12: host ports and image tags from env) and the console's session-only API key (O5). **Lane-safe rule for this whole plan:** a literal host port or image tag anywhere below — compose snippets, test code, fixtures, tools, `.env.example`, manual checks and gate commands — stands for its variable form: `${DPS_APP_PORT:-8400}`, `${DPS_OCR_PORT:-5016}`, `${DPS_IMAGE_TAG:-…}` (and the other contract §0 port variables). Code reads `DPS_TEST_*` first and otherwise builds the default from the same `DPS_*_PORT` variable (contract §12.2; Task 1's `tests/services.py`, Task 20's `tools/console_check.py`); shell commands write `${DPS_*_PORT:-<contract port>}`. Amended again 2026-10-12 (A-prepare review r1, B2): Task 1, Task 19's compose snippet and gate commands, and Task 20's console check and gates below now show those forms.
 
 **Architecture:** A new `dps/layers/documents` package turns an upload into an `ExtractedDocument` (pages of positioned words), runs OCR for pages that need it through an async `OcrClient` (Read v3.2 wire contract: the `azure-ocr-mock` container locally, the org gateway in prod), hands **one canonical text** (pages joined by `\n\f\n`; CSV as records) to the unchanged M0 `PrivacyEngine`, then maps the engine's findings and output segments back to pages, lines and boxes. Redaction renders each normalised page with pypdfium2 (serialised behind one process-wide lock, because PDFium is not thread-safe), paints solid boxes, and rebuilds an image-only PDF with reportlab; pypdf proves there is no text layer and the OCR client re-reads the output. Schema synthesis is a pure engine module (`dps/engine/synth/schema_gen.py`) that executes a validated generator spec deterministically from a 256-bit seed; the LLM may only *propose* a spec from a value-free structure profile. The evaluation harness (`dps/evaluation`) generates a labelled corpus from the surrogate engine and scores the detector ensemble per entity type. Errors gain stable codes (`{"detail","code"}`) through a framework-free `CodedError`.
 
@@ -175,49 +175,103 @@ Add `"azure_vision_endpoint"` to the existing `@field_validator("stellar_base_ur
 
 `tests/services.py` (contract §12.2 — the whole table, so M2–M4 only add fixtures):
 ```python
-"""Where the integration containers are (contract §12.2). Defaults are compose host ports."""
+"""Where the integration containers are (contract §12.2).
+
+An explicit ``DPS_TEST_*`` variable wins. Otherwise the default is built from the same ``DPS_*_PORT``
+variable compose publishes the service on (the contract port when it is unset), so a lane that
+exports ``DPS_OCR_PORT=5017`` moves compose and the tests together (contract §0, amendment
+2026-10-12). No test, fixture or tool hard-codes a host port.
+"""
 
 from __future__ import annotations
 
 import os
 import socket
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 import pytest
 
-#: name → (env var, default URL/DSN, compose profile, compose service)
-SERVICES: dict[str, tuple[str, str, str, str]] = {
-    "app": ("DPS_TEST_APP_URL", "http://127.0.0.1:8400", "", "app"),
-    "ocr": ("DPS_TEST_OCR_URL", "http://127.0.0.1:5016", "docs", "azure-ocr-mock"),
-    "pg": (
+
+class Service(NamedTuple):
+    env: str  # explicit endpoint, e.g. DPS_TEST_OCR_URL
+    template: str  # the default, with {port} for the host port
+    port_env: str  # the compose host-port variable, e.g. DPS_OCR_PORT
+    port: int  # the contract port, used when port_env is unset
+    profile: str  # compose profile ("" = default)
+    service: str  # compose service
+
+
+SERVICES: dict[str, Service] = {
+    "app": Service("DPS_TEST_APP_URL", "http://127.0.0.1:{port}", "DPS_APP_PORT", 8400, "", "app"),
+    "ocr": Service(
+        "DPS_TEST_OCR_URL",
+        "http://127.0.0.1:{port}",
+        "DPS_OCR_PORT",
+        5016,
+        "docs",
+        "azure-ocr-mock",
+    ),
+    "pg": Service(
         "DPS_TEST_PG_DSN",
-        "postgresql://postgres:postgres@127.0.0.1:5441/postgres",
+        "postgresql://postgres:postgres@127.0.0.1:{port}/postgres",
+        "DPS_DB_PORT",
+        5441,
         "",
         "dps-db",
     ),
-    "source_pg": (
+    "source_pg": Service(
         "DPS_TEST_SOURCE_PG_DSN",
-        "postgresql://postgres:postgres@127.0.0.1:5442/bank",
+        "postgresql://postgres:postgres@127.0.0.1:{port}/bank",
+        "DPS_SOURCE_PG_PORT",
+        5442,
         "sources",
         "source-pg",
     ),
-    "oracle": ("DPS_TEST_ORACLE_DSN", "127.0.0.1:1522/FREEPDB1", "oracle", "oracle"),
-    "mongo": (
+    "oracle": Service(
+        "DPS_TEST_ORACLE_DSN",
+        "127.0.0.1:{port}/FREEPDB1",
+        "DPS_ORACLE_PORT",
+        1522,
+        "oracle",
+        "oracle",
+    ),
+    "mongo": Service(
         "DPS_TEST_MONGO_URI",
-        "mongodb://127.0.0.1:27018/?directConnection=true",
+        "mongodb://127.0.0.1:{port}/?directConnection=true",
+        "DPS_MONGO_PORT",
+        27018,
         "sources",
         "mongo",
     ),
-    "s3": ("DPS_TEST_S3_ENDPOINT", "http://127.0.0.1:9010", "sources", "minio"),
-    "demo_site": ("DPS_TEST_DEMO_SITE", "http://127.0.0.1:8410", "scanner", "demo-site"),
+    "s3": Service(
+        "DPS_TEST_S3_ENDPOINT",
+        "http://127.0.0.1:{port}",
+        "DPS_MINIO_PORT",
+        9010,
+        "sources",
+        "minio",
+    ),
+    "demo_site": Service(
+        "DPS_TEST_DEMO_SITE",
+        "http://127.0.0.1:{port}",
+        "DPS_DEMO_SITE_PORT",
+        8410,
+        "scanner",
+        "demo-site",
+    ),
 }
 _DEFAULT_PORTS = {"http": 80, "https": 443, "postgresql": 5432, "postgres": 5432, "mongodb": 27017}
 
 
 def service_url(name: str) -> str:
-    """The URL/DSN for ``name``: its env var, else the compose default."""
-    env, default, _, _ = SERVICES[name]
-    return os.environ.get(env) or default
+    """The URL/DSN for ``name``: its ``DPS_TEST_*`` variable, else the compose default on the host
+    port compose uses (``DPS_*_PORT``, the contract port when unset)."""
+    svc = SERVICES[name]
+    explicit = os.environ.get(svc.env)
+    if explicit:
+        return explicit
+    return svc.template.format(port=os.environ.get(svc.port_env) or svc.port)
 
 
 def host_port(url: str) -> tuple[str, int]:
@@ -241,8 +295,9 @@ def require_service(name: str) -> str:
     """The service URL, or skip (fail under ``DPS_TEST_REQUIRE_SERVICES=1``) when unreachable."""
     if reachable(name):
         return service_url(name)
-    _, _, profile, service = SERVICES[name]
-    hint = f"start: docker compose {'--profile ' + profile + ' ' if profile else ''}up -d {service}"
+    svc = SERVICES[name]
+    profile = f"--profile {svc.profile} " if svc.profile else ""
+    hint = f"start: docker compose {profile}up -d {svc.service}"
     if os.environ.get("DPS_TEST_REQUIRE_SERVICES") == "1":
         pytest.fail(f"{name} unreachable — {hint}")
     pytest.skip(hint)
@@ -264,7 +319,8 @@ def ocr_url() -> str:
 `.env.example` — append the M1 block (values are local demo literals):
 ```bash
 # Documents (M1). OCR goes through the Azure Read v3.2 contract: the compose mock locally,
-# the org gateway (azure-gateway-api, health path /_gw/health) in prod.
+# the org gateway (azure-gateway-api, health path /_gw/health) in prod. 5016 is the mock's host
+# port, ${DPS_OCR_PORT:-5016}: a lane that moves DPS_OCR_PORT writes the same port here.
 DPS_OCR_PROVIDER=azure
 DPS_AZURE_VISION_ENDPOINT=http://127.0.0.1:5016
 DPS_AZURE_VISION_KEY=mock-key
@@ -325,14 +381,26 @@ from __future__ import annotations
 
 import pytest
 
-from tests.services import host_port, require_service, service_url
+from tests.services import SERVICES, host_port, require_service, service_url
 
 
 def test_service_url_defaults_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DPS_TEST_OCR_URL", raising=False)
-    assert service_url("ocr") == "http://127.0.0.1:5016"
-    monkeypatch.setenv("DPS_TEST_OCR_URL", "http://ocr.test:5000")
+    monkeypatch.delenv("DPS_OCR_PORT", raising=False)
+    assert service_url("ocr") == "http://127.0.0.1:5016"  # the contract port
+    monkeypatch.setenv("DPS_OCR_PORT", "5017")  # a lane moved compose's host port ...
+    assert service_url("ocr") == "http://127.0.0.1:5017"  # ... and the default follows it
+    monkeypatch.setenv("DPS_TEST_OCR_URL", "http://ocr.test:5000")  # an explicit endpoint wins
     assert service_url("ocr") == "http://ocr.test:5000"
+
+
+def test_every_default_follows_its_port_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, svc in SERVICES.items():
+        monkeypatch.delenv(svc.env, raising=False)
+        monkeypatch.delenv(svc.port_env, raising=False)
+        assert host_port(service_url(name))[1] == svc.port, name
+        monkeypatch.setenv(svc.port_env, str(svc.port + 10))
+        assert host_port(service_url(name))[1] == svc.port + 10, name
 
 
 def test_host_port_parses_urls_and_dsns() -> None:
@@ -3089,7 +3157,7 @@ async def test_mock_reads_a_rendered_page(ocr_url: str) -> None:
 
 - [ ] **Step 3: Implement** `ocr.py` as above.
 
-- [ ] **Step 4: Gates** — `pytest -q tests/documents/test_ocr_client.py` → `14 passed` (verified while writing). Then `docker compose --profile docs up -d azure-ocr-mock` (Task 19 adds the service; before Task 19 use `docker run -d --rm --name dps-ocr -p 127.0.0.1:5016:5000 document_intelligence-azure-ocr-mock:latest`) and `pytest -q -m ocr tests/documents/test_ocr_mock.py` → `1 passed`; stop the container. Full gates green.
+- [ ] **Step 4: Gates** — `pytest -q tests/documents/test_ocr_client.py` → `14 passed` (verified while writing). Then `docker compose --profile docs up -d azure-ocr-mock` (Task 19 adds the service; before Task 19 use `docker run -d --rm --name "dps-ocr-${COMPOSE_PROJECT_NAME:-dps}" -p "127.0.0.1:${DPS_OCR_PORT:-5016}:5000" document_intelligence-azure-ocr-mock:latest`) and `pytest -q -m ocr tests/documents/test_ocr_mock.py` → `1 passed`; stop the container. Full gates green.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -4889,7 +4957,7 @@ def test_scanned_kyc_pdf_is_redacted_end_to_end(ocr_url: str) -> None:
 
 - [ ] **Step 3: Implement** the router and the `app.py` changes.
 
-- [ ] **Step 4: Gates** — `pytest -q tests/test_api_documents.py tests/test_api.py tests/test_api_errors.py` → `9 passed` + M0/Task 2 API tests unchanged; with the mock running (`docker run -d --rm --name dps-ocr -p 127.0.0.1:5016:5000 document_intelligence-azure-ocr-mock:latest` until Task 19 adds it to compose) `pytest -q -m ocr` → `2 passed`; full gates green.
+- [ ] **Step 4: Gates** — `pytest -q tests/test_api_documents.py tests/test_api.py tests/test_api_errors.py` → `9 passed` + M0/Task 2 API tests unchanged; with the mock running (`docker run -d --rm --name "dps-ocr-${COMPOSE_PROJECT_NAME:-dps}" -p "127.0.0.1:${DPS_OCR_PORT:-5016}:5000" document_intelligence-azure-ocr-mock:latest` until Task 19 adds it to compose) `pytest -q -m ocr` → `2 passed`; full gates green.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -9499,7 +9567,7 @@ export function PlaygroundDocuments(): JSX.Element {
 
 - [ ] **Step 1: Implement** the files above.
 - [ ] **Step 2: Gates** — `cd frontend && npm run typecheck && npm run build` → clean (verified while writing against React 18.3 / TS 5.6 / Vite 5.4). Python gates green.
-- [ ] **Step 3: Manual check** — `DPS_AUTH_ENABLED=false DPS_LLM_PROVIDER=stub DPS_OCR_PROVIDER=azure DPS_AZURE_VISION_ENDPOINT=http://127.0.0.1:5016 DPS_AZURE_VISION_KEY=mock-key uvicorn dps.app:create_app --factory --port 8400` with the mock running; open `http://localhost:8400/playground/documents`, Load demo KYC scan, Redact → boxes on both pages, Verified line, PDF downloads; switch to Obfuscate text → tokens over the page and Reveal works; Synthesize → violet tokens and validity line. (Task 20 automates this check.)
+- [ ] **Step 3: Manual check** — `DPS_AUTH_ENABLED=false DPS_LLM_PROVIDER=stub DPS_OCR_PROVIDER=azure DPS_AZURE_VISION_ENDPOINT="http://127.0.0.1:${DPS_OCR_PORT:-5016}" DPS_AZURE_VISION_KEY=mock-key uvicorn dps.app:create_app --factory --port "${DPS_APP_PORT:-8400}"` with the mock running; open `http://localhost:${DPS_APP_PORT:-8400}/playground/documents`, Load demo KYC scan, Redact → boxes on both pages, Verified line, PDF downloads; switch to Obfuscate text → tokens over the page and Reveal works; Synthesize → violet tokens and validity line. (Task 20 automates this check.)
 - [ ] **Step 4: Commit**
 ```bash
 git add frontend/src/components/PageViewer.tsx frontend/src/pages/PlaygroundDocuments.tsx frontend/src/App.tsx frontend/src/pages/Playground.tsx frontend/src/styles.css
@@ -9947,12 +10015,12 @@ git commit -m "feat(console): Policies page — presets, treatment matrix with s
 # Local stack. Default: the app (Layer 1). Profile `docs` (or `full`) adds the Azure Computer Vision
 # Read v3.2 mock (Tesseract inside) that the documents routes use for scanned pages and images.
 #
-#   docker compose --profile docs up --build -d      # console + API on http://127.0.0.1:8400
+#   docker compose --profile docs up --build -d      # console + API on http://127.0.0.1:${DPS_APP_PORT:-8400}
 #   python tools/smoke_test.py                       # end-to-end checks (OCR checks need --profile docs)
 services:
   app:
     build: .
-    image: data-privacy-services:local
+    image: data-privacy-services:${DPS_IMAGE_TAG:-local}
     ports:
       - "127.0.0.1:${DPS_APP_PORT:-8400}:8400"
     environment:
@@ -9999,10 +10067,10 @@ services:
   azure-ocr-mock:
     build:
       context: ../mock_azure_ocr
-    image: document_intelligence-azure-ocr-mock:latest
+    image: document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG:-latest}
     profiles: ["docs", "full"]
     ports:
-      - "127.0.0.1:5016:5000"
+      - "127.0.0.1:${DPS_OCR_PORT:-5016}:5000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health', timeout=3).status==200 else 1)"]
       interval: 10s
@@ -10101,7 +10169,7 @@ def m1_checks(c: httpx.Client) -> None:
 - [ ] **Step 2: Build and run the stack**
 ```bash
 docker compose --profile docs up --build -d
-for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8400/health >/dev/null && curl -fsS http://127.0.0.1:5016/health >/dev/null && break; sleep 2; done
+for i in $(seq 1 60); do curl -fsS "http://127.0.0.1:${DPS_APP_PORT:-8400}/health" >/dev/null && curl -fsS "http://127.0.0.1:${DPS_OCR_PORT:-5016}/health" >/dev/null && break; sleep 2; done
 DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py
 ```
 Expected: the image builds (console compiled in the node:22 stage, `[fpe,docs]` installed); `/readyz` shows `ocr` ok/up; `all 23 checks passed` (M0's 13 + 10 M1 checks, no SKIP; if M0's smoke grew during its build, the total is M0's count + 10). If the mock's build has no network for `ghcr.io/astral-sh/uv`, use the cached image: `docker compose --profile docs build app && docker compose --profile docs up -d` (no `--build`).
@@ -10469,7 +10537,8 @@ async def test_m1_paths_log_no_values(
 
     uv pip install -e ".[uitest]"                    # playwright==1.55.0
     docker compose --profile docs up -d               # the stack under test (Task 19)
-    DPS_TEST_APP_URL=http://127.0.0.1:8400 DPS_API_KEY=dps_local_dev_key_change_me python tools/console_check.py
+    DPS_API_KEY=dps_local_dev_key_change_me python tools/console_check.py
+    # the app: DPS_TEST_APP_URL, else http://127.0.0.1:${DPS_APP_PORT:-8400} (as tools/smoke_test.py)
 
 Drives /playground/documents (demo KYC scan → Redact → download → reveal → Synthesize) and /policies
 (draft edit, recognizer test on the engine, plan preview) at 1440×900 and 390×844 in dark and light;
@@ -10492,7 +10561,10 @@ from pathlib import Path
 from playwright.sync_api import Browser, Error, Page, Playwright, expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = os.environ.get("DPS_TEST_APP_URL", "http://127.0.0.1:8400").rstrip("/")
+BASE = (
+    os.environ.get("DPS_TEST_APP_URL")
+    or f"http://127.0.0.1:{os.environ.get('DPS_APP_PORT') or '8400'}"
+).rstrip("/")
 KEY = os.environ.get("DPS_API_KEY", "dps_local_dev_key_change_me")
 OUT = ROOT / "docs" / "superpowers" / "build" / "m1-console"
 SIZES = {"desktop": (1440, 900), "phone": (390, 844)}
@@ -10640,22 +10712,22 @@ if __name__ == "__main__":
 4. Worked curl examples (use `$DPS_API_KEY`):
 ```bash
 # redact a scanned KYC PDF and save the redacted copy
-curl -sS -X POST http://127.0.0.1:8400/api/v1/documents/obfuscate -H "X-API-KEY: $DPS_API_KEY" \
+curl -sS -X POST "http://127.0.0.1:${DPS_APP_PORT:-8400}/api/v1/documents/obfuscate" -H "X-API-KEY: $DPS_API_KEY" \
   -F file=@demo/documents/kyc-scanned.pdf -F 'request={"options":{"redacted_pdf":true}}' \
   | python -c 'import sys,json,base64; b=json.load(sys.stdin); open("kyc.redacted.pdf","wb").write(base64.b64decode(b["redacted_pdf_b64"])); print(b["document"]["redaction"])'
 # a generator spec from DDL, then 1 000 reproducible rows as CSV
-curl -sS -X POST http://127.0.0.1:8400/api/v1/schema/generator-spec -H "X-API-KEY: $DPS_API_KEY" -H 'Content-Type: application/json' \
+curl -sS -X POST "http://127.0.0.1:${DPS_APP_PORT:-8400}/api/v1/schema/generator-spec" -H "X-API-KEY: $DPS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"ddl":"CREATE TABLE customers (customer_id INTEGER PRIMARY KEY, full_name VARCHAR(80), email VARCHAR(120))"}'
-curl -sS -X POST http://127.0.0.1:8400/api/v1/schema/synthesize -H "X-API-KEY: $DPS_API_KEY" -H 'Content-Type: application/json' \
+curl -sS -X POST "http://127.0.0.1:${DPS_APP_PORT:-8400}/api/v1/schema/synthesize" -H "X-API-KEY: $DPS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"ddl":"CREATE TABLE customers (customer_id INTEGER PRIMARY KEY, full_name VARCHAR(80))","rows":1000,"format":"csv"}'
 ```
 5. Notes: redacted PDFs are image-only (not searchable, metadata emptied, annotations/forms not drawn); OCR verification semantics; `llm_rewrite` is ignored for documents; P1 for schema proposals (what the profile contains); the evaluation report location and how to regenerate it.
 6. Tasks 19A–19D: NDJSON streaming (request/response line formats, limits, fail-closed `error` line, one key per stream), `Idempotency-Key` on the L1 routes (replica-local replay that re-runs the engine; byte-identical only with caller-held `key_material` / `synthesis_seed`, otherwise fresh material — safe because Layer 1 has no side effects; the cache keeps no key material (D2); conflict code `idempotency_key_reused`; a retry on another replica or after the TTL runs as a first call), the OCR provider table (`off`/`azure`/`tesseract`/`auto`) and the opt-in `llm_label` tier (what metadata is sent — names, types, value shapes — and what never is).
 
-`HANDOFF.md` — add an "M1" section with: build (`.[fpe,docs]`, node 22 stage), run (`docker compose --profile docs up --build -d`, ports 8400 and 5016), the M1 configuration table (every setting of Task 1 with default and meaning; `DPS_AZURE_VISION_KEY_FILE` for prod; gateway health path `/_gw/health`), probes (`/readyz` `ocr` component: `unconfigured|up|down:<status>|configured`, never required), secrets (names only: `DPS_AZURE_VISION_KEY`), and **traps**: (1) PDFium is not thread-safe — all pypdfium2 calls go through `PDFIUM_LOCK`, so renders are serialised per process (scale with replicas); (2) the OCR client refuses an `Operation-Location` on another host than `DPS_AZURE_VISION_ENDPOINT` (a gateway behind a host-rewriting proxy must return its external host); (3) the console now builds with `base: '/'` — hosting under a path prefix needs a rewrite; (4) uploads above 1 MiB spool to `/tmp` — mount it as tmpfs in OpenShift too; (5) `reportlab.rl_config.useA85 = 0` is set process-wide by `redact.py`; (6) the OCR mock reads images only — DPS rasterises PDFs itself, never send it a PDF; (7) the redacted PDF has no text layer by design; (8) Faker's es_MX `curp()`/`rfc()` ignore `seed_instance` — never use them where determinism matters; (9) `playwright==1.55.0` wants Chromium 1187, which this Mac does not cache — `tools/console_check.py` falls back to the newest cached headless shell; (10) the detector report test fails when detectors change until the report is regenerated (by design). `README.md` — "Status: M1 shipped" with the run commands, the demo flow (Playground → Document → Load demo KYC scan → Redact) and links to `docs/technical/api-m1.md` and `docs/technical/detector-eval-m1.md`.
+`HANDOFF.md` — add an "M1" section with: build (`.[fpe,docs]`, node 22 stage), run (`docker compose --profile docs up --build -d`, host ports `${DPS_APP_PORT:-8400}` and `${DPS_OCR_PORT:-5016}`), the M1 configuration table (every setting of Task 1 with default and meaning; `DPS_AZURE_VISION_KEY_FILE` for prod; gateway health path `/_gw/health`), probes (`/readyz` `ocr` component: `unconfigured|up|down:<status>|configured`, never required), secrets (names only: `DPS_AZURE_VISION_KEY`), and **traps**: (1) PDFium is not thread-safe — all pypdfium2 calls go through `PDFIUM_LOCK`, so renders are serialised per process (scale with replicas); (2) the OCR client refuses an `Operation-Location` on another host than `DPS_AZURE_VISION_ENDPOINT` (a gateway behind a host-rewriting proxy must return its external host); (3) the console now builds with `base: '/'` — hosting under a path prefix needs a rewrite; (4) uploads above 1 MiB spool to `/tmp` — mount it as tmpfs in OpenShift too; (5) `reportlab.rl_config.useA85 = 0` is set process-wide by `redact.py`; (6) the OCR mock reads images only — DPS rasterises PDFs itself, never send it a PDF; (7) the redacted PDF has no text layer by design; (8) Faker's es_MX `curp()`/`rfc()` ignore `seed_instance` — never use them where determinism matters; (9) `playwright==1.55.0` wants Chromium 1187, which this Mac does not cache — `tools/console_check.py` falls back to the newest cached headless shell; (10) the detector report test fails when detectors change until the report is regenerated (by design). `README.md` — "Status: M1 shipped" with the run commands, the demo flow (Playground → Document → Load demo KYC scan → Redact) and links to `docs/technical/api-m1.md` and `docs/technical/detector-eval-m1.md`.
 
 - [ ] **Step 1: Write the log-scan test** and run it: `pytest -q tests/test_no_values_in_logs_m1.py` → `1 passed`.
-- [ ] **Step 2: Run the console check** against the stack from Task 19: `uv pip install -e ".[uitest]" && DPS_TEST_APP_URL=http://127.0.0.1:8400 DPS_API_KEY=dps_local_dev_key_change_me python tools/console_check.py` → `all checks passed`; open the screenshot pairs (`documents-*.png` beside `mockup-documents-*.png`, `policies-*.png` beside `mockup-policies-*.png`) and record in `M1-DEVIATIONS.md` every visible difference from the mockups and whether it is intended (e.g. real page images instead of the mockup's drawn paper; OCR control; versions card).
+- [ ] **Step 2: Run the console check** against the stack from Task 19: `uv pip install -e ".[uitest]" && DPS_API_KEY=dps_local_dev_key_change_me python tools/console_check.py` (the app at `${DPS_APP_PORT:-8400}` unless `DPS_TEST_APP_URL` says otherwise) → `all checks passed`; open the screenshot pairs (`documents-*.png` beside `mockup-documents-*.png`, `policies-*.png` beside `mockup-policies-*.png`) and record in `M1-DEVIATIONS.md` every visible difference from the mockups and whether it is intended (e.g. real page images instead of the mockup's drawn paper; OCR control; versions card).
 - [ ] **Step 3: Write `docs/technical/api-m1.md`, the HANDOFF and README sections; bump the version** to 0.2.0 in the three files.
 - [ ] **Step 4: Gates** — Python gates + frontend gates green; `python tools/eval_detectors.py run --corpus tests/eval/corpus --json docs/technical/detector-eval-m1.json --markdown docs/technical/detector-eval-m1.md && git diff --exit-code docs/technical/detector-eval-m1.json`.
 - [ ] **Step 5: Commit and tag**
@@ -10677,7 +10749,7 @@ All of the following, with their output summarised in the build report:
 
 1. **Unit gates:** `ruff check dps tests tools && ruff format --check dps tests tools && mypy dps && pytest -q` → green; the only skips are service-gated (`ocr`, and M0's `ner`/`network` markers when those extras are absent).
 2. **Console gates:** `cd frontend && npm run typecheck && npm run build` → clean; `frontend/dist/index.html` references `/assets/…` and `/theme-init.js`.
-3. **Stack:** `docker compose --profile docs up --build -d` → `app` and `azure-ocr-mock` healthy; `curl -s http://127.0.0.1:8400/readyz` → `ready: true`, `components.ocr = {ok: true, detail: "up", engine: "azure-read-v3.2"}`.
+3. **Stack:** `docker compose --profile docs up --build -d` → `app` and `azure-ocr-mock` healthy; `curl -s "http://127.0.0.1:${DPS_APP_PORT:-8400}/readyz"` → `ready: true`, `components.ocr = {ok: true, detail: "up", engine: "azure-read-v3.2"}`.
 4. **Integration gate (contract §12.4):** `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` → all pass, none skipped.
 5. **Smoke:** `DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py` → every check PASS (M0's plus the ten M1 checks; no SKIP).
 6. **Demo outcomes (spec §11 M1):** *redact a scanned KYC PDF* — `demo/documents/kyc-scanned.pdf` through `/documents/obfuscate` with `redacted_pdf: true` returns a PDF with 0 extractable characters, 0 text-showing operators, and an OCR re-read with 0 originals; *synthesize from a schema* — the DDL in `docs/technical/api-m1.md` → a generator spec → 1 000 rows, identical when replayed with the returned seed.
