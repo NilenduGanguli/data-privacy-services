@@ -8,10 +8,15 @@ pypdf's own text extraction has no reliable word positions.
 
 from __future__ import annotations
 
+import codecs
+import csv
 import io
+import re
+import zipfile
 from typing import Any
 
 import pdfplumber
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pypdf import PdfReader, PdfWriter, Transformation
 from pypdf.errors import PyPdfError
 from pypdf.generic import RectangleObject
@@ -19,7 +24,14 @@ from pypdf.generic import RectangleObject
 from dps.config import Settings
 from dps.layers.documents.errors import DocumentError
 from dps.layers.documents.layout import build_page_text, group_lines
-from dps.layers.documents.models import BBox, ExtractedDocument, OcrMode, PageText, Word
+from dps.layers.documents.models import (
+    BBox,
+    DocFormat,
+    ExtractedDocument,
+    OcrMode,
+    PageText,
+    Word,
+)
 from dps.layers.documents.render import PdfRenderer
 
 _PDF_ERRORS = (PyPdfError, ValueError, KeyError, TypeError, OSError, AssertionError)
@@ -148,3 +160,320 @@ def extract_pdf(content: bytes, settings: Settings, ocr_mode: OcrMode) -> Extrac
     if annotations:
         doc.warnings.append("annotations_not_scanned_or_drawn")
     return doc
+
+
+# --- other formats ----------------------------------------------------------------------
+MAX_IMAGE_PIXELS = 40_000_000  # refuse before decoding (Pillow's own bomb guard is 89M)
+MAX_IMAGE_SIDE = 10_000  # Read v3.2 accepts at most 10000 x 10000
+DEFAULT_IMAGE_DPI = 200.0
+ZIP_RATIO_LIMIT = 10.0  # a DOCX may inflate to at most 10x the upload limit
+ZIP_MAX_ENTRIES = 5_000
+SNIFF_BYTES = 65_536  # the head of an upload that format and delimiter detection look at
+CSV_DELIMITERS = (",", ";", "\t", "|")
+CSV_SNIFF_ROWS = 50
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_DOCX_PART = re.compile(r"^/word/(header\d*|document|footnotes|endnotes|comments|footer\d*)\.xml$")
+_PART_ORDER = ("header", "document", "footnotes", "endnotes", "comments", "footer")
+
+
+def sniff_format(content: bytes, filename: str | None, content_type: str | None) -> DocFormat:
+    """Magic bytes first; the name and declared type only decide between CSV and plain text."""
+    if not content:
+        raise DocumentError("empty_document", "the uploaded file is empty")
+    if content.startswith(b"%PDF-"):
+        return "pdf"
+    if content.startswith(b"\x89PNG\r\n\x1a\n") or content.startswith(b"\xff\xd8\xff"):
+        return "image"
+    if content.startswith(b"PK\x03\x04"):
+        if _is_docx(content):
+            return "docx"
+        raise DocumentError(
+            "unsupported_format", "this zip container is not a .docx document", status=415
+        )
+    name = (filename or "").lower()
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    if name.endswith(".csv") or ctype in ("text/csv", "application/csv"):
+        return "csv"
+    if name.endswith((".txt", ".text")) or ctype.startswith("text/") or _looks_like_text(content):
+        return "text"
+    raise DocumentError(
+        "unsupported_format", "supported formats: PDF, DOCX, PNG, JPEG, TXT, CSV", status=415
+    )
+
+
+def _is_docx(content: bytes) -> bool:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = set(archive.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return "word/document.xml" in names and "[Content_Types].xml" in names
+
+
+def _looks_like_text(content: bytes) -> bool:
+    head = content[:SNIFF_BYTES]
+    if b"\x00" in head:
+        return False
+    try:
+        # final=False: a multi-byte character cut by the sample's end is not an encoding error
+        sample = codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+    except UnicodeDecodeError:
+        return False
+    printable = sum(ch.isprintable() or ch in "\t\r\n\f" for ch in sample)
+    return printable / max(len(sample), 1) >= 0.95
+
+
+def _decode_text(content: bytes) -> str:
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise DocumentError("unsupported_encoding", "text documents must be UTF-8") from exc
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def extract_text_file(content: bytes) -> ExtractedDocument:
+    page = PageText(page=1, width=0.0, height=0.0, source="text", text=_decode_text(content))
+    return ExtractedDocument(format="text", pages=[page])
+
+
+def _check_zip(content: bytes, limit_bytes: int) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            infos = archive.infolist()
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise DocumentError("corrupt_document", "the .docx container could not be read") from exc
+    if (
+        len(infos) > ZIP_MAX_ENTRIES
+        or sum(i.file_size for i in infos) > ZIP_RATIO_LIMIT * limit_bytes
+    ):
+        raise DocumentError(
+            "document_too_large", "the .docx expands beyond the size limit", status=413
+        )
+
+
+def _paragraph_text(paragraph: Any) -> str:
+    out: list[str] = []
+    for node in paragraph.iter():
+        tag = node.tag
+        if tag == _W + "t":
+            out.append(node.text or "")
+        elif tag == _W + "tab":
+            out.append("\t")
+        elif tag in (_W + "br", _W + "cr"):
+            out.append("\n")
+        elif tag == _W + "noBreakHyphen":
+            out.append("-")
+    return "".join(out)
+
+
+def _block_lines(element: Any, lines: list[str]) -> None:
+    for child in element.iterchildren():
+        if child.tag == _W + "p":
+            text = _paragraph_text(child)
+            if text.strip():
+                lines.append(text)
+        elif child.tag == _W + "tbl":
+            for row in child.iter(_W + "tr"):
+                cells = [
+                    " ".join(
+                        t for t in (_paragraph_text(p) for p in cell.iter(_W + "p")) if t.strip()
+                    )
+                    for cell in row.iterchildren(_W + "tc")
+                ]
+                if any(cells):
+                    lines.append("\t".join(cells))
+        else:
+            _block_lines(child, lines)
+
+
+def extract_docx(content: bytes, settings: Settings) -> ExtractedDocument:
+    """Headers, body (paragraphs, table rows as tab-joined cells, text boxes inline), footnotes,
+    endnotes, comments and footers, in that order. DOCX has no page geometry: one page, no boxes."""
+    import docx
+    from lxml import etree
+
+    _check_zip(content, settings.max_document_bytes)
+    try:
+        document = docx.Document(io.BytesIO(content))
+    except Exception as exc:  # noqa: BLE001 - python-docx raises several types; name only
+        raise DocumentError(
+            "corrupt_document", f"the .docx could not be opened ({type(exc).__name__})"
+        ) from exc
+    parser = etree.XMLParser(
+        resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False
+    )
+    parts: list[tuple[int, str, Any]] = []
+    for part in document.part.package.iter_parts():
+        name = str(part.partname)
+        match = _DOCX_PART.match(name)
+        if not match:
+            continue
+        kind = re.sub(r"\d+$", "", match.group(1))
+        element = getattr(part, "element", None)
+        if element is None:
+            try:
+                element = etree.fromstring(part.blob, parser=parser)
+            except etree.XMLSyntaxError:
+                raise DocumentError(
+                    "corrupt_document", "a .docx part is not well-formed XML"
+                ) from None
+        parts.append((_PART_ORDER.index(kind), name, element))
+    lines: list[str] = []
+    for _, _, element in sorted(parts, key=lambda p: (p[0], p[1])):
+        body = element.find(_W + "body")
+        _block_lines(body if body is not None else element, lines)
+    page = PageText(page=1, width=0.0, height=0.0, source="docx", text="\n".join(lines))
+    return ExtractedDocument(format="docx", pages=[page])
+
+
+def _sniff_delimiter(text: str) -> str:
+    """The delimiter (``, ; tab |``) that splits the first rows into the most consistent shape
+    with at least two columns (ties: more columns, then the order above); ``,`` when none does.
+
+    Each candidate is tried with the C ``csv`` parser, so quoting is honoured and the cost is
+    linear. ``csv.Sniffer`` is not used: its quote regexes backtrack quadratically (cubically on
+    some inputs) on crafted uploads, minutes for 64 KB.
+    """
+    sample = text[:SNIFF_BYTES]
+    truncated = len(text) > len(sample)
+    best, best_score = ",", (0.0, 0)
+    for delimiter in CSV_DELIMITERS:
+        widths: list[int] = []
+        try:
+            for row in csv.reader(io.StringIO(sample), delimiter=delimiter):
+                if any(cell.strip() for cell in row):
+                    widths.append(len(row))
+                if len(widths) > CSV_SNIFF_ROWS:
+                    break
+        except csv.Error:
+            continue
+        if truncated and len(widths) > 1:
+            widths.pop()  # the sample may end inside the last row
+        if not widths:
+            continue
+        mode = max(set(widths), key=lambda w: (widths.count(w), w))
+        score = (widths.count(mode) / len(widths), mode)
+        if mode >= 2 and score > best_score:
+            best, best_score = delimiter, score
+    return best
+
+
+def extract_csv(content: bytes, settings: Settings) -> ExtractedDocument:
+    """CSV as records: header row → keys, every cell a string, delimiter detected (, ; tab |)."""
+    text = _decode_text(content)
+    delimiter = _sniff_delimiter(text)
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    try:
+        rows = [r for r in reader if any(cell.strip() for cell in r)]
+    except csv.Error:
+        raise DocumentError(
+            "corrupt_document",
+            f"the CSV could not be parsed near line {reader.line_num} "
+            f"(a field may exceed {csv.field_size_limit()} characters)",
+        ) from None
+    if not rows:
+        raise DocumentError("empty_document", "the CSV has no header row")
+    header: list[str] = []
+    seen: set[str] = set()
+    last_suffix: dict[str, int] = {}
+    for i, raw in enumerate(rows[0]):
+        base = name = raw.strip() or f"column_{i + 1}"
+        suffix = last_suffix.get(base, 1)
+        while name in seen:  # a, a_2, a_3, … (amortised linear: each base resumes its count)
+            suffix += 1
+            name = f"{base}_{suffix}"
+        last_suffix[base] = suffix
+        seen.add(name)
+        header.append(name)
+    records: list[dict[str, str]] = []
+    for line_no, row in enumerate(rows[1:], start=2):
+        if len(row) > len(header):
+            raise DocumentError(
+                "csv_ragged_rows", f"CSV line {line_no} has more cells than the header"
+            )
+        records.append({h: (row[i] if i < len(row) else "") for i, h in enumerate(header)})
+    if len(records) * len(header) > settings.max_items:
+        raise DocumentError(
+            "too_many_values", f"the CSV holds more than {settings.max_items} values", status=413
+        )
+    page = PageText(page=1, width=0.0, height=0.0, source="csv")
+    return ExtractedDocument(
+        format="csv",
+        pages=[page],
+        records=records,
+        csv_header=header,
+        csv_delimiter=delimiter,
+    )
+
+
+def _image_dpi(info: dict[Any, Any]) -> float:
+    dpi = info.get("dpi")
+    try:
+        value = (
+            float(dpi[0]) if isinstance(dpi, tuple) else float(dpi) if dpi else DEFAULT_IMAGE_DPI
+        )
+    except (TypeError, ValueError):
+        value = DEFAULT_IMAGE_DPI
+    return value if 72.0 <= value <= 1200.0 else DEFAULT_IMAGE_DPI
+
+
+def extract_image(content: bytes) -> ExtractedDocument:
+    """PNG/JPEG → one page: EXIF-transposed, RGB, at most 10000 px a side, re-encoded as PNG.
+    Page size in points = pixels × 72 / dpi (dpi from the file, else 200)."""
+    try:
+        with Image.open(io.BytesIO(content), formats=("PNG", "JPEG")) as opened:
+            if opened.width * opened.height > MAX_IMAGE_PIXELS:
+                raise DocumentError(
+                    "image_too_large",
+                    f"images are limited to {MAX_IMAGE_PIXELS} pixels",
+                    status=413,
+                )
+            dpi = _image_dpi(opened.info)
+            image = ImageOps.exif_transpose(opened).convert("RGB")
+    except DocumentError:
+        raise
+    except (
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+        SyntaxError,  # Pillow's PNG chunk reader raises it for broken chunks
+        EOFError,
+        Image.DecompressionBombError,
+    ) as exc:
+        raise DocumentError("corrupt_document", "the image could not be decoded") from exc
+    longest = max(image.size)
+    if longest > MAX_IMAGE_SIDE:
+        factor = MAX_IMAGE_SIDE / longest
+        image = image.resize(
+            (max(1, int(image.width * factor)), max(1, int(image.height * factor))),
+            Image.Resampling.LANCZOS,
+        )
+        dpi *= factor
+    buf = io.BytesIO()
+    image.save(buf, "PNG", dpi=(dpi, dpi))
+    page = PageText(
+        page=1,
+        width=image.width * 72.0 / dpi,
+        height=image.height * 72.0 / dpi,
+        source="unreadable",
+        scan_suspect=True,
+        needs_ocr=True,
+        image_coverage=1.0,
+    )
+    return ExtractedDocument(format="image", pages=[page], image_png=buf.getvalue(), image_dpi=dpi)
+
+
+def extract_document(
+    content: bytes, fmt: DocFormat, settings: Settings, ocr_mode: OcrMode
+) -> ExtractedDocument:
+    """Dispatch by format (``sniff_format`` decides ``fmt``)."""
+    if fmt == "pdf":
+        return extract_pdf(content, settings, ocr_mode)
+    if fmt == "docx":
+        return extract_docx(content, settings)
+    if fmt == "csv":
+        return extract_csv(content, settings)
+    if fmt == "image":
+        return extract_image(content)
+    return extract_text_file(content)

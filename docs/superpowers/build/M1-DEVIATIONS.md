@@ -141,3 +141,48 @@ are preserved unless a section says otherwise.
   (the modules do not exist yet).
 - Count: `tests/documents/test_pdf.py` 12 passed (also with `-W error::DeprecationWarning`);
   suite 628 → 640 passed, 2 skipped; `-m "docs or ocr"` selects 12.
+
+## Task 6 — DOCX, TXT, CSV and image extraction; format sniffing
+
+The plan's code is used, with five robustness/security fixes found by probing it with crafted
+inputs before committing. Each has a test in `tests/documents/test_extract.py` (12 added to the
+plan's 15) that failed against the plan's code for the reason named.
+
+- `dps/layers/documents/extract.py` `extract_csv` — **`csv.Sniffer` replaced by `_sniff_delimiter`.**
+  The Sniffer's quote regexes backtrack quadratically on crafted text (cubically on some): a 64 KB
+  upload of `", ' "` repeated pinned a worker thread for more than five minutes (killed), 16 KB took
+  4.7 s. `_sniff_delimiter` parses the first ≤ 51 non-blank rows of the 64 KB head with the C `csv`
+  parser once per candidate (`, ; tab |`), keeps the candidate whose most common row width (≥ 2) is
+  the most consistent (ties: wider, then that order), and falls back to `,` — the plan's fallback
+  (`csv.excel`) when nothing is detected. Linear: the 64 KB sample now takes 4 ms. Reading uses the
+  excel dialect with the detected delimiter, so two Sniffer side effects are gone: a sniffed
+  `skipinitialspace` no longer strips the space after a delimiter (cells keep it; header names are
+  stripped as before), and `'` is not detected as a quote character. `csv_delimiter` and
+  `ExtractedDocument` are unchanged. Test: `test_csv_delimiter_detection_is_linear_on_crafted_input`
+  (< 1 s), plus `test_csv_delimiters_are_detected` (all four delimiters, single column → `,`).
+- `extract_csv` — **duplicate header names**: the plan's `while name in header: name += "_2"` is
+  cubic in the number of duplicates (list scans × growing names; 12 289 duplicate columns from the
+  crafted sample took 38 s). Now a set plus a per-name counter: `a, a_2, a_3, …` instead of
+  `a, a_2, a_2_2, …` (the plan's first duplicate, `name_2`, and blank → `column_N` are unchanged, so
+  the plan's test holds). Test: `test_csv_duplicate_header_names_are_numbered_in_linear_time`.
+- `extract_csv` — a `csv.Error` while reading (a field over `csv.field_size_limit()`, 131 072
+  characters) escaped as an uncoded exception (a 500). It is now `corrupt_document` (422) naming
+  the line and the limit, raised `from None`. Test: `test_csv_parse_errors_are_coded`.
+- `_looks_like_text` decoded the 64 KB head strictly, so a UTF-8 text whose multi-byte character
+  straddles byte 65 536 (two in three Devanagari texts over 64 KB, when the upload has no `.txt`
+  name or `text/*` type) was refused as `unsupported_format`. It now decodes the head with an
+  incremental decoder (`final=False`). The head size is the constant `SNIFF_BYTES`. Test:
+  `test_sniff_text_with_a_multibyte_character_across_the_sample_end`.
+- `extract_docx` — a part python-docx does not model (footnotes, endnotes) that is not well-formed
+  XML raised `lxml.etree.XMLSyntaxError` (a 500); now `corrupt_document`. The XXE-safe parser is the
+  plan's; `test_docx_parts_never_resolve_external_entities` pins that a `SYSTEM` entity in such a
+  part is not resolved. Test: `test_docx_unmodelled_parts_are_read_and_malformed_ones_refused`.
+- `extract_image` — `Image.open(..., formats=("PNG", "JPEG"))`: only the two formats
+  `sniff_format` admits are decoded, so a caller passing `fmt="image"` cannot reach Pillow's other
+  decoders (a GIF is `corrupt_document`). A fuzz run (3 000 mutated PNG/JPEG files) found Pillow
+  raising `SyntaxError` for broken PNG chunks (an uncoded 500 whose message held file bytes); the
+  caught tuple adds `SyntaxError` and `EOFError`. Tests: `test_only_png_and_jpeg_are_decoded`,
+  `test_broken_png_chunks_are_coded`.
+- Count: `tests/documents/test_extract.py` 27 passed (the plan says `15`; its tests are 15 cases
+  with the parametrisation); `tests/documents` 51 passed (also with `-W error::DeprecationWarning`);
+  suite 640 → 667 passed, 2 skipped; `-m "docs or ocr"` selects 39.
