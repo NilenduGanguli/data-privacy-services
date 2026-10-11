@@ -22,11 +22,18 @@ Guarantees beyond the plan's generators:
   canonical original only, so they stay pure; if every attempt reveals, the last resort is a
   seeded token of the original's length that cannot contain it (never ``original + suffix``).
 * **Reshaped identifiers are a keyed derangement** (``reshape.py``): identifiers of unmapped
-  types, CVVs, sort codes, IFSC branch digits, amounts, diagnosis codes and BICs keep their
-  layout and have their digits (and, where the value is letters, every letter, in its own
-  script) mapped by a seed-keyed permutation of the shape's value space without fixed points.
-  Two different originals of the same shape never share a surrogate, so foreign keys, joins and
-  counts survive, in any order and across requests.
+  types, CVVs, sort codes, IFSC branch codes, amounts, diagnosis codes and BICs keep their
+  layout and have their digits and letters (every letter, in its own script) mapped by a
+  seed-keyed, blockwise permutation of the shape's value space without fixed points. Two
+  different originals of the same shape never share a surrogate, so foreign keys, joins and
+  counts survive, in any order and across requests. In an identifier of an unmapped type only
+  short codes stay (``CUST-``, ``MH14``: :func:`~dps.engine.synth.reshape.code_letters`); names
+  and words next to digits are replaced like any other letters. Amounts keep their currency.
+* **Documents and wallets are rebuilt, not reshaped** (``formats.py``): an ICAO MRZ carries
+  the record's persona as holder (never one sharing a name part with the original), a fresh
+  document number and optional data, the persona's birth date, a shifted expiry date and
+  recomputed check digits; the document code and countries stay. Bitcoin and Ethereum
+  addresses are fresh valid addresses of the original's kind.
 * **Other generators** draw from a fixed output space (SSNs in the 900 area, ITINs, SINs,
   Aadhaar, test-IIN cards, fictional phone ranges, e-mails, IBANs, ...), so two originals can
   share a surrogate with a probability set by that space: about ``n²/2N`` for ``n`` originals
@@ -42,7 +49,7 @@ import random
 import re
 import secrets
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -51,6 +58,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from stdnum import iban as stdnum_iban
 
 from dps.engine.detect.checksums import luhn_check_digit, verhoeff_check_digit
+from dps.engine.synth.formats import (
+    crypto_surrogate,
+    fill_layout,
+    mrz_name,
+    seal_mrz,
+    split_mrz,
+)
 from dps.engine.synth.personas import (
     Persona,
     PersonaFactory,
@@ -59,7 +73,7 @@ from dps.engine.synth.personas import (
     normalise_locale,
     seed_int,
 )
-from dps.engine.synth.reshape import Reshaper, has_digits
+from dps.engine.synth.reshape import Reshaper, code_letters
 from dps.engine.transform.crypto import b64u, unb64u
 from dps.engine.verify import normalise
 
@@ -106,6 +120,8 @@ _MEDICATIONS = (
 )
 _ATTEMPTS = 32
 _TOKEN_ATTEMPTS = 64
+_MRZ_HEAD = re.compile(r"[A-Z<]{5}")  # document code and issuing state
+_YYMMDD = re.compile(r"[0-9]{6}")
 
 #: Credentials are never synthesised.
 _REDACT = frozenset({"API_KEY", "PASSWORD", "JWT", "PRIVATE_KEY"})
@@ -220,6 +236,31 @@ def _shift(day: date, days: int) -> date:
         return day - timedelta(days=days)
 
 
+def _redraw(field: str, rng: random.Random) -> str:
+    """A letter for every letter and a digit for every digit; ``<`` fillers stay."""
+    return "".join(
+        rng.choice(_UPPER) if ch.isalpha() else str(rng.randint(0, 9)) if ch.isdigit() else ch
+        for ch in field
+    )
+
+
+def _yymmdd(text: str, century: int) -> date | None:
+    """An MRZ date in ``century`` (the next one when the day does not exist there)."""
+    if not _YYMMDD.fullmatch(text):
+        return None
+    for base in (century, century + 100):
+        try:
+            return date(base + int(text[:2]), int(text[2:4]), int(text[4:]))
+        except ValueError:
+            continue
+    return None
+
+
+def _holds(name_field: str, part: str) -> bool:
+    """True when an MRZ name field holds the original holder's name ``part``."""
+    return part in name_field.split("<") or (len(part) >= 3 and part in name_field)
+
+
 def _reveals(canon: str, value: str) -> bool:
     """True when ``value`` would let the leakage sweep find the original in it."""
     folded = normalise(value)
@@ -268,14 +309,18 @@ class SurrogateEngine:
             "AGE": self._age,
             "ORG_NAME": lambda o, loc, a, r: str(faker_for(loc, r.getrandbits(64)).company()),
             "MEDICATION": lambda o, loc, a, r: r.choice(_MEDICATIONS),
+            "MRZ": self._mrz,
+            "CRYPTO_ADDRESS": self._crypto,
+            # the currency code or symbol is format
+            "AMOUNT": lambda o, loc, a, r: self._reshape("AMOUNT", o, r, False),
             # letters and digits: the ICD chapter letter alone reveals the condition class
             "DIAGNOSIS_CODE": lambda o, loc, a, r: self._reshape("DIAGNOSIS_CODE", o, r, True),
             # the country code (positions 4-5) stays
             "SWIFT_BIC": lambda o, loc, a, r: self._reshape(
                 "SWIFT_BIC", o, r, True, keep=range(4, 6)
             ),
-            # the bank code letters and the reserved fifth character "0" stay
-            "IFSC": lambda o, loc, a, r: self._reshape("IFSC", o, r, False, keep=range(4, 5)),
+            # the bank code and the reserved fifth character "0" stay; the branch code goes
+            "IFSC": lambda o, loc, a, r: self._reshape("IFSC", o, r, True, keep=range(0, 5)),
             "SORT_CODE": lambda o, loc, a, r: self._reshape("SORT_CODE", o, r, False),
         }
 
@@ -320,7 +365,7 @@ class SurrogateEngine:
         rng: random.Random,
         letters: bool,
         *,
-        keep: range | None = None,
+        keep: Container[int] | None = None,
     ) -> str:
         return self._reshaper.reshape(entity, original, rng, letters=letters, keep=keep)
 
@@ -333,9 +378,9 @@ class SurrogateEngine:
         generator = self._generators.get(entity)
         if generator is not None:
             return generator(original, loc, anchor, rng)
-        # identifiers of any other kind (and amounts): keep the layout; replace the digits, or
-        # every letter (any script) when there are no digits
-        return self._reshape(entity, original, rng, not has_digits(original))
+        # identifiers of any other kind: keep the layout and replace every digit and letter (any
+        # script), except the short codes of an identifier (CUST-, MH14: see code_letters)
+        return self._reshape(entity, original, rng, True, keep=code_letters(original) or None)
 
     def _person_name(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         p = self.persona(anchor, loc)
@@ -393,6 +438,57 @@ class SurrogateEngine:
         if re.search(r"\d{4}\s*$", original):
             return f"{month:02d}{sep}{year}"
         return f"{month:02d}{sep}{year % 100:02d}"
+
+    def _mrz(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
+        """An ICAO MRZ rebuilt field by field for the record's persona, check digits valid."""
+        parsed = split_mrz(original)
+        if parsed is None:  # not an ICAO layout: every letter and digit but the issuer goes
+            start = len(original) - len(original.lstrip())
+            head = _MRZ_HEAD.fullmatch(original[start : start + 5])
+            keep = range(start, start + 5) if head else None
+            return self._reshape("MRZ", original, rng, True, keep=keep)
+        flat, layout = parsed
+        out = list(flat)
+        holder = [part for part in flat[layout.name].split("<") if part]
+        width = layout.name.stop - layout.name.start
+        name = _redraw(flat[layout.name], rng)  # unreachable fallback: every persona collides
+        persona = self.persona(anchor, loc)
+        for attempt in range(_ATTEMPTS):
+            candidate = self.persona(anchor if attempt == 0 else f"{anchor}|mrz{attempt}", loc)
+            field = mrz_name(
+                ascii_fold(candidate.last_name), ascii_fold(candidate.first_name), width
+            )
+            if not any(_holds(field, part) for part in holder):
+                persona, name = candidate, field
+                break
+        out[layout.name] = name
+        number = flat[layout.number]
+        for _ in range(_ATTEMPTS):
+            out[layout.number] = _redraw(number, rng)
+            if "".join(out[layout.number]) != number:
+                break
+        for optional in layout.optional:
+            out[optional] = _redraw(flat[optional], rng)
+        birth = _yymmdd(flat[layout.birth], 1900)  # the century does not move the 5-year band
+        if birth is None:
+            out[layout.birth] = _redraw(flat[layout.birth], rng)
+        else:
+            out[layout.birth] = self._personas.birth_date(anchor, loc, birth).strftime("%y%m%d")
+        expiry = _yymmdd(flat[layout.expiry], 2000)
+        if expiry is None:
+            out[layout.expiry] = _redraw(flat[layout.expiry], rng)
+        else:
+            shift = rng.choice((-1, 1)) * rng.randint(1, 730)
+            out[layout.expiry] = _shift(expiry, shift).strftime("%y%m%d")
+        if flat[layout.sex] in ("F", "M"):
+            out[layout.sex] = persona.gender[0].upper()
+        seal_mrz(out, flat, layout)
+        return fill_layout(original, "".join(out))
+
+    def _crypto(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
+        """A fresh valid address of the original's kind; else every character is replaced."""
+        fake = crypto_surrogate(original, rng.randbytes)
+        return fake if fake is not None else self._reshape("CRYPTO_ADDRESS", original, rng, True)
 
     def _cvv(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         if len(_DIGIT.findall(original)) in (3, 4):

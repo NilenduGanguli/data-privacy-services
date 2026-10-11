@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import random
 import re
 import string
+import time
 import unicodedata
 from datetime import date
 
@@ -11,7 +14,7 @@ import pytest
 from stdnum import verhoeff
 
 from dps.engine.detect.checksums import luhn_valid, valid_aba, validate
-from dps.engine.synth.personas import PersonaFactory
+from dps.engine.synth.personas import PersonaFactory, ascii_fold
 from dps.engine.synth.reshape import Derangement
 from dps.engine.synth.surrogates import (
     SurrogateEngine,
@@ -354,3 +357,212 @@ def test_the_seed_never_shows_in_repr_or_errors() -> None:
     with pytest.raises(ValueError) as err2:
         seed_from_caller({"alg": "dps.synth.v1", "seed": 12345678901234567890})
     assert "12345678901234567890" not in str(err2.value)
+
+
+# --- fix round 2 (G4 review r2): long values, run time, letters of digit-bearing values ---------
+
+
+def _same_positions(a: str, b: str) -> int:
+    return sum(x == y for x, y in zip(a, b, strict=False))
+
+
+def _longest_common_run(a: str, b: str) -> int:
+    longest = run = 0
+    for x, y in zip(a, b, strict=False):
+        run = run + 1 if x == y else 0
+        longest = max(longest, run)
+    return longest
+
+
+def test_long_values_are_mixed_in_every_position() -> None:
+    """A long value shares only the chance rate of positions with its surrogate, nowhere a run."""
+    rng = random.Random(7)
+    letters = "".join(rng.choice(string.ascii_lowercase) for _ in range(1000))
+    digits = "".join(rng.choice(string.digits) for _ in range(1000))
+    cjk = "".join(chr(rng.randint(0x4E00, 0x9FA5)) for _ in range(300))
+    eng = SurrogateEngine(SEED)
+    for entity, original, most, run in (
+        ("REMARKS", letters, 80, 8),  # chance: ~38 positions (1/26)
+        ("ACCOUNT_NUMBER", digits, 160, 12),  # chance: ~100 positions (1/10)
+        ("ADDRESS_CN", cjk, 3, 2),  # chance: ~0 positions (1/20,902)
+    ):
+        out = eng.surrogate(entity, original, "en_US", "r1")
+        assert len(out) == len(original), entity
+        assert _same_positions(original, out) < most, entity
+        assert _longest_common_run(original, out) < run, entity
+    # the long letters-only value is still a bijection of its shape: one letter apart stays apart
+    other = letters[:500] + ("a" if letters[500] != "a" else "b") + letters[501:]
+    assert eng.surrogate("REMARKS", other, "en_US", "r1") != eng.surrogate(
+        "REMARKS", letters, "en_US", "r1"
+    )
+
+
+def test_every_block_of_a_long_value_changes_and_distinct_values_stay_distinct() -> None:
+    """50 digits are deranged as two blocks of 25: both change, and the mapping is a bijection."""
+    rng = random.Random(3)
+    originals = list({"".join(rng.choice(string.digits) for _ in range(50)) for _ in range(300)})
+    eng = SurrogateEngine(SEED)
+    out = [eng.surrogate("ACCOUNT_NUMBER", o, "en_US", "r1") for o in originals]
+    assert len(set(out)) == len(originals)
+    for original, fake in zip(originals, out, strict=True):
+        assert fake[:25] != original[:25] and fake[25:] != original[25:]
+    # values sharing their first block share its fake: the blocks of a shape are fixed
+    twins = ["1" * 25 + "2" * 25, "1" * 25 + "3" * 25]
+    first, second = (eng.surrogate("ACCOUNT_NUMBER", t, "en_US", "r1") for t in twins)
+    assert first[:25] == second[:25] and first[25:] != second[25:]
+
+
+def test_a_derangement_refuses_a_domain_wider_than_its_round_output() -> None:
+    with pytest.raises(ValueError):
+        Derangement(b"k" * 32, [26] * 200)  # ~940 bits: the reshaper splits this into blocks
+
+
+def test_reshaping_time_is_linear_in_the_value_length() -> None:
+    """A 100,000-character value reshapes in well under a second (no quadratic work)."""
+    eng = SurrogateEngine(SEED)
+    for entity, original in (
+        ("REMARKS", "abcdefghij" * 10_000),
+        ("ACCOUNT_NUMBER", "0123456789" * 10_000),
+        ("REFERENCE", "AB12-" * 20_000),
+    ):
+        start = time.perf_counter()
+        out = eng.surrogate(entity, original, "en_US", "r1")
+        assert time.perf_counter() - start < 1.0, entity
+        assert len(out) == len(original) and out != original
+
+
+TD3 = "P<INDKRISHNAN<<ANANYA<<<<<<<<<<<<<<<<<<<<<<<\nZ1234567<8IND8803143F3001011<<<<<<<<<<<<<<02"
+TD2 = "I<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<\nD231458907UTO7408122F1204159<<<<<<<6"
+TD1 = (
+    "I<UTOD231458907<<<<<<<<<<<<<<<\n7408122F1204159UTO<<<<<<<<<<<6\nERIKSSON<<ANNA<MARIA<<<<<<<<<<"
+)
+
+
+def _icao(field: str) -> str:
+    values = [int(c) if c.isdigit() else ord(c) - 55 if c.isalpha() else 0 for c in field]
+    return str(sum(v * (7, 3, 1)[i % 3] for i, v in enumerate(values)) % 10)
+
+
+def test_mrz_surrogates_carry_the_persona_and_valid_check_digits() -> None:
+    eng = SurrogateEngine(SEED, default_locale="en_IN")
+    out = eng.surrogate("MRZ", TD3, "en_IN", "r1")
+    one, two = out.split("\n")
+    assert len(one) == len(two) == 44 and re.fullmatch(r"[A-Z0-9<]+", one + two)
+    assert "KRISHNAN" not in out and "ANANYA" not in out
+    assert one[:5] == "P<IND" and two[10:13] == "IND"  # document code and countries stay
+    assert two[:9] != "Z1234567<" and re.fullmatch(r"[A-Z]\d{7}<", two[:9])  # same shape
+    assert two[9] == _icao(two[:9]) and two[19] == _icao(two[13:19])
+    assert two[27] == _icao(two[21:27]) and two[42] == _icao(two[28:42])
+    assert two[43] == _icao(two[:10] + two[13:20] + two[21:43])
+    assert two[13:19] != "880314" and 85 <= int(two[13:15]) <= 89  # DOB in its five-year band
+    assert two[20] in "FM"
+    # an unusual name: the MRZ name is the record's persona, as in its other fields
+    zz = eng.surrogate("MRZ", TD3.replace("KRISHNAN<<ANANYA", "ZZYZX<<QWERTYUIO"), "en_IN", "r1")
+    persona = eng.persona("r1", "en_IN")
+    surname, given = ascii_fold(persona.last_name).upper(), ascii_fold(persona.first_name).upper()
+    assert zz.split("\n")[0][5:].startswith(f"{surname}<<{given}"[:39])
+    assert zz.split("\n")[1][20] == persona.gender[0].upper()
+    assert zz == SurrogateEngine(SEED, default_locale="en_IN").surrogate(
+        "MRZ", TD3.replace("KRISHNAN<<ANANYA", "ZZYZX<<QWERTYUIO"), "en_IN", "r1"
+    )
+
+
+def test_td1_td2_and_unknown_mrz_layouts() -> None:
+    eng = SurrogateEngine(SEED)
+    for original in (TD1, TD2, TD1.replace("\n", ""), TD2.replace("\n", " ")):
+        out = eng.surrogate("MRZ", original, "en_US", "r1")
+        assert [len(line) for line in out.split()] == [len(line) for line in original.split()]
+        for name in ("ERIKSSON", "ANNA", "MARIA", "D23145890"):
+            assert name not in out, name
+        flat = "".join(out.split())
+        assert flat[:5] == "I<UTO"
+        if len(flat) == 90:  # TD1
+            assert flat[14] == _icao(flat[5:14]) and flat[36] == _icao(flat[30:36])
+            assert flat[44] == _icao(flat[38:44]) and flat[45:48] == "UTO"
+            assert flat[59] == _icao(flat[5:30] + flat[30:37] + flat[38:45] + flat[48:59])
+        else:  # TD2
+            assert flat[45] == _icao(flat[36:45]) and flat[55] == _icao(flat[49:55])
+            assert flat[63] == _icao(flat[57:63]) and flat[46:49] == "UTO"
+            assert flat[71] == _icao(flat[36:46] + flat[49:56] + flat[57:71])
+    # not an ICAO layout: every letter and digit is replaced, the filler and the issuer stay
+    odd = "P<INDKRISHNAN<<ANANYA<<<<Z1234567"
+    out = eng.surrogate("MRZ", odd, "en_US", "r1")
+    assert out[:5] == "P<IND" and len(out) == len(odd) and out[13:15] == "<<"
+    assert "KRISHNAN" not in out and "ANANYA" not in out and "1234567" not in out
+
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def _b58decode(text: str) -> bytes:
+    number = 0
+    for ch in text:
+        number = number * 58 + _B58.index(ch)
+    body = number.to_bytes((number.bit_length() + 7) // 8, "big")
+    return b"\0" * (len(text) - len(text.lstrip("1"))) + body
+
+
+def _bech32_valid(address: str) -> bool:
+    """BIP-173 / BIP-350 reference check (bech32 for witness v0, bech32m for later versions)."""
+    hrp, data = address.lower().rsplit("1", 1)
+    values = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    values += [_BECH32.index(c) for c in data]
+    chk = 1
+    for v in values:
+        top = chk >> 25
+        chk = (chk & 0x1FFFFFF) << 5 ^ v
+        for i, g in enumerate((0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)):
+            chk ^= g if (top >> i) & 1 else 0
+    return chk == (1 if _BECH32.index(data[0]) == 0 else 0x2BC830A3)
+
+
+def test_crypto_addresses_are_replaced_and_stay_valid() -> None:
+    eng = SurrogateEngine(SEED)
+    btc = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    out = eng.surrogate("CRYPTO_ADDRESS", btc, "en_US", "r1")
+    raw = _b58decode(out)
+    assert out[0] == "1" and len(raw) == 25 and raw[0] == 0
+    assert hashlib.sha256(hashlib.sha256(raw[:21]).digest()).digest()[:4] == raw[21:]
+    p2sh = eng.surrogate("CRYPTO_ADDRESS", "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy", "en_US", "r1")
+    assert p2sh[0] == "3" and _b58decode(p2sh)[0] == 5
+    eth = "0x52908400098527886E0F7030069857D2E4169EE7"
+    out_eth = eng.surrogate("CRYPTO_ADDRESS", eth, "en_US", "r1")
+    assert re.fullmatch(r"0x[0-9a-f]{40}", out_eth)
+    bech = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    out_bech = eng.surrogate("CRYPTO_ADDRESS", bech, "en_US", "r1")
+    assert out_bech.startswith("bc1q") and len(out_bech) == len(bech) and _bech32_valid(out_bech)
+    taproot = "bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297"
+    out_tr = eng.surrogate("CRYPTO_ADDRESS", taproot, "en_US", "r1")
+    assert out_tr.startswith("bc1p") and len(out_tr) == len(taproot) and _bech32_valid(out_tr)
+    xrp = "rEb8TK3gBgk5auZkwc6sHnwrGVJH8DuaLh"  # no dedicated format: every character replaced
+    for original in (btc, eth, bech, taproot, xrp):
+        fake = eng.surrogate("CRYPTO_ADDRESS", original, "en_US", "r1")
+        assert fake != original and _same_positions(original, fake) < len(original) / 3, fake
+        assert fake == SurrogateEngine(SEED).surrogate("CRYPTO_ADDRESS", original, "en_US", "r1")
+
+
+def test_digit_bearing_values_keep_only_short_codes() -> None:
+    """Letters of an identifier stay only as a short code (CUST-, MH14); names never stay."""
+    eng = SurrogateEngine(SEED)
+    note = "Customer Ananya Krishnan called on 5 Jan about loan 4412 and asked for Rahul Mehta"
+    out = eng.surrogate("CALL_NOTE", note, "en_US", "r1")
+    for name in ("Ananya", "Krishnan", "Rahul", "Mehta", "Customer"):
+        assert name not in out, name
+    assert [len(w) for w in out.split(" ")] == [len(w) for w in note.split(" ")]
+    assert sum(a == b for a, b in zip(note.split(), out.split(), strict=True)) <= 2
+    cust = eng.surrogate("CUSTOMER_ID", "CUST-884120", "en_US", "r1")
+    assert cust.startswith("CUST-") and cust[5:].isdigit() and cust != "CUST-884120"
+    reg = eng.surrogate("VEHICLE_REG", "MH14AB1234", "en_US", "r1")
+    assert reg[:2] == "MH" and reg[4:6] == "AB" and reg != "MH14AB1234"
+    for original, name in (
+        ("Ravi 12345678", "Ravi"),  # a word, not a code
+        ("KRISHNAN-1234", "KRISHNAN"),  # longer than a code
+        ("山田 12345678", "山田"),  # not a Latin code
+        ("REF-ANANYA-77", "ANANYA"),
+    ):
+        fake = eng.surrogate("REFERENCE", original, "en_US", "r1")
+        assert name not in fake and len(fake) == len(original), original
+    ifsc = eng.surrogate("IFSC", "ABCD0EFGHIJ", "en_IN", "r1")  # an all-letter branch code
+    assert ifsc[:5] == "ABCD0" and ifsc[5:].isalpha() and ifsc[5:] != "EFGHIJ"
+    assert eng.surrogate("AMOUNT", "INR 12,500.00", "en_IN", "r1").startswith("INR ")

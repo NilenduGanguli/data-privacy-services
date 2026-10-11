@@ -1,8 +1,8 @@
 """Keyed, format-preserving reshaping of identifier-like values (spec §5.6, P3).
 
-A reshaped surrogate keeps the original's layout (separators, case, combining marks and, for an
-identifier that carries digits, its letters) and replaces the characters that carry the
-identity: every decimal digit and, when ``letters`` is set, every letter in any script.
+A reshaped surrogate keeps the original's layout (separators, case, combining marks and the
+positions the caller keeps) and replaces the characters that carry the identity: every decimal
+digit and, when ``letters`` is set, every letter in any script.
 
 The replaced characters are mapped by a **keyed derangement** of the shape's value space: a
 permutation without fixed points, keyed by ``HMAC(seed, entity type ‖ shape)``. A reshaped
@@ -13,6 +13,17 @@ surrogate is therefore a pure function of ``(seed, entity type, canonical origin
 * it never equals the original (no fixed point);
 * two different originals of the same shape never share a surrogate (a permutation is a
   bijection), so foreign keys, joins and counts survive.
+
+The replaced characters are deranged in consecutive **blocks** of at most ~200 bits (about 38
+letters, 48 digits or 12 ideographs), each block with its own key ``HMAC(shape key, block
+number)``. Every round of a block's cipher covers the whole of its half, so every position of a
+long value is re-randomised (a single cipher over a wide domain would leave the leading
+characters of each half untouched), every block changes (so the value never equals the
+original) and the product of the block permutations is still a bijection of the shape. The
+cost is linear in the value's length.
+
+Which letters of an identifier are format and stay is the caller's decision (``keep``);
+:func:`code_letters` gives the usual answer for a value that carries digits.
 
 Letters are mapped within their own script's alphabet: ASCII Latin, Greek, Cyrillic, Armenian,
 Georgian, Hebrew, Arabic, the main Indic scripts, Sinhala, Thai, kana, CJK ideographs and Hangul
@@ -30,11 +41,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import math
 import random
 import unicodedata
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Container, Sequence
 from functools import cache
+from itertools import accumulate
+from operator import mul
 
 #: Lower-case (or caseless) alphabets: (Unicode script word, first and last code point).
 _SCRIPT_RANGES: tuple[tuple[str, int, int], ...] = (
@@ -65,7 +77,17 @@ _SCRIPT_RANGES: tuple[tuple[str, int, int], ...] = (
     ("CJK", 0x4E00, 0x9FA5),
 )
 _ROUNDS = 10
-_RESHAPE_LABEL = "dps.synth.reshape.v1"
+_RESHAPE_LABEL = "dps.synth.reshape.v2"
+#: A block's width, in whole bits per position (``ceil(log2(radix))``): integers, so block
+#: boundaries are the same on every platform.
+_BLOCK_BITS = 192
+#: The widest half a round can cover: the round output is at most 64 bytes, 8 of them margin.
+_MAX_HALF_BITS = 448
+#: Shapes whose block ciphers are kept for reuse, and the most blocks a cached shape may have.
+_CACHE_SHAPES = 4096
+_CACHE_BLOCKS = 8
+#: Letters of an identifier that read as a code (``CUST``, ``MH``, ``K``) are at most this long.
+_CODE_LETTERS = 4
 
 
 @cache
@@ -104,9 +126,52 @@ def _fold(ch: str) -> str:
     return low if len(low) == 1 else ch
 
 
-def has_digits(text: str) -> bool:
-    """True when ``text`` (compatibility-decomposed) holds a decimal digit of any script."""
-    return any(ch.isdecimal() for ch in unicodedata.normalize("NFKD", text))
+def code_letters(text: str) -> frozenset[int]:
+    """Positions (in ``text``'s NFKD form) of the letters that are an identifier's format.
+
+    In a value with at least as many digits as letters, a run of at most four ASCII letters in
+    one case (``CUST-884120``, ``MH14AB1234``, ``K1234567``, ``cust-1``) is a code and stays.
+    Every other letter carries identity and is replaced: a word or name (``Ravi 12345678``,
+    ``KRISHNAN-1234``), a letter of another script (``山田 1234``), and every letter of a value
+    with more letters than digits (free text, ``P<INDKRISHNAN<<…``). Combining marks belong to
+    the run they sit in.
+    """
+    work = unicodedata.normalize("NFKD", text)
+    letters = sum(ch.isalpha() for ch in work)
+    if not letters or sum(ch.isdecimal() for ch in work) < letters:
+        return frozenset()
+    keep: set[int] = set()
+    run: list[int] = []
+    for i, ch in enumerate([*work, " "]):  # a trailing separator closes the last run
+        if ch.isalpha():
+            run.append(i)
+        elif not unicodedata.combining(ch):
+            chars = [work[j] for j in run]
+            if (
+                run
+                and len(run) <= _CODE_LETTERS
+                and all(c.isascii() for c in chars)
+                and (all(c.isupper() for c in chars) or all(c.islower() for c in chars))
+            ):
+                keep.update(run)
+            run = []
+    return frozenset(keep)
+
+
+def _blocks(radices: Sequence[int]) -> list[tuple[int, int]]:
+    """Consecutive ``[start, end)`` blocks of about equal width, none wider than ~200 bits."""
+    weights = [(radix - 1).bit_length() for radix in radices]
+    total = sum(weights)
+    count = max(1, -(-total // _BLOCK_BITS))
+    blocks: list[tuple[int, int]] = []
+    start = cumulative = 0
+    for i, weight in enumerate(weights[:-1]):
+        cumulative += weight
+        if cumulative * count >= (len(blocks) + 1) * total:
+            blocks.append((start, i + 1))
+            start = i + 1
+    blocks.append((start, len(weights)))
+    return blocks
 
 
 class Derangement:
@@ -118,23 +183,31 @@ class Derangement:
     round function) over ``Z_left × Z_right``. For a mixed-radix domain the split
     is between positions, balancing the halves; a single position uses a binary domain of at
     least ``size`` values and cycle-walks back into range.
+
+    Each round output is 64 bits wider than the half it is added to, so it moves every digit of
+    that half. A half wider than 448 bits cannot be covered and is refused (``ValueError``):
+    derange a wide domain in blocks, as :class:`Reshaper` does.
     """
 
     def __init__(self, key: bytes, radices: Sequence[int]) -> None:
         if not radices or any(r < 2 for r in radices):
             raise ValueError("a derangement needs at least one position of radix 2 or more")
-        self.size = math.prod(radices)
         if len(radices) == 1:
+            self.size = radices[0]
             half = max(1, ((self.size - 1).bit_length() + 1) // 2)
             self._left = self._right = 1 << half
         else:
+            prefix = list(accumulate(radices, mul))
+            self.size = prefix[-1]
             best = min(
                 range(1, len(radices)),
-                key=lambda k: max(math.prod(radices[:k]), math.prod(radices[k:])),
+                key=lambda k: max(prefix[k - 1], self.size // prefix[k - 1]),
             )
-            self._left, self._right = math.prod(radices[:best]), math.prod(radices[best:])
+            self._left, self._right = prefix[best - 1], self.size // prefix[best - 1]
         width = max(self._left, self._right).bit_length()
-        self._hash = hashlib.blake2b(key=key, digest_size=min(64, (width + 7) // 8 + 8))
+        if width > _MAX_HALF_BITS:
+            raise ValueError("domain too wide for one derangement; derange it in blocks")
+        self._hash = hashlib.blake2b(key=key, digest_size=(width + 7) // 8 + 8)
 
     def __call__(self, x: int) -> int:
         return self._walk((self._walk(x, self._forward) + 1) % self.size, self._backward)
@@ -170,11 +243,33 @@ class Derangement:
 
 
 class Reshaper:
-    """Reshapes identifier-like values with seed-keyed derangements (cached per shape)."""
+    """Reshapes identifier-like values with seed-keyed blockwise derangements."""
 
     def __init__(self, seed: bytes) -> None:
         self._seed = seed
-        self._cache: dict[bytes, Derangement] = {}
+        self._cache: dict[bytes, list[tuple[int, int, Derangement]]] = {}
+
+    def _derangements(
+        self, shape_key: bytes, radices: Sequence[int]
+    ) -> list[tuple[int, int, Derangement]]:
+        """One derangement per block of the shape (cached for short, frequent shapes)."""
+        cached = self._cache.get(shape_key)
+        if cached is not None:
+            return cached
+        perms = [
+            (
+                start,
+                end,
+                Derangement(
+                    hmac.new(shape_key, number.to_bytes(4, "big"), hashlib.sha256).digest(),
+                    radices[start:end],
+                ),
+            )
+            for number, (start, end) in enumerate(_blocks(radices))
+        ]
+        if len(perms) <= _CACHE_BLOCKS and len(self._cache) < _CACHE_SHAPES:
+            self._cache[shape_key] = perms
+        return perms
 
     def reshape(
         self,
@@ -183,7 +278,7 @@ class Reshaper:
         rng: random.Random,
         *,
         letters: bool,
-        keep: range | None = None,
+        keep: Container[int] | None = None,
     ) -> str:
         """``original`` with its digits (and, with ``letters``, its letters) replaced.
 
@@ -226,19 +321,19 @@ class Reshaper:
         if slots:
             mode = "letters" if letters else "digits"
             label = "\x1f".join((_RESHAPE_LABEL, entity_type, mode, *shape))
-            key = hmac.new(self._seed, label.encode("utf-8"), hashlib.sha256).digest()
-            perm = self._cache.get(key)
-            if perm is None:
-                perm = self._cache[key] = Derangement(key, radices)
-            x = 0
-            for value, radix in zip(values, radices, strict=True):
-                x = x * radix + value
-            y = perm(x)
+            shape_key = hmac.new(self._seed, label.encode("utf-8"), hashlib.sha256).digest()
             replaced: list[int] = []
-            for radix in reversed(radices):
-                y, value = divmod(y, radix)
-                replaced.append(value)
-            for (i, alphabet_no), value in zip(slots, reversed(replaced), strict=True):
+            for start, end, perm in self._derangements(shape_key, radices):
+                x = 0
+                for value, radix in zip(values[start:end], radices[start:end], strict=True):
+                    x = x * radix + value
+                y = perm(x)
+                block: list[int] = []
+                for radix in reversed(radices[start:end]):
+                    y, value = divmod(y, radix)
+                    block.append(value)
+                replaced.extend(reversed(block))
+            for (i, alphabet_no), value in zip(slots, replaced, strict=True):
                 if alphabet_no is None:
                     out[i] = str(value)
                 else:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import random
+import string
+import time
 from typing import Any
 
 import pytest
@@ -391,3 +394,61 @@ def test_reports_carry_no_values(engine: PrivacyEngine) -> None:
     hints = json.dumps([h.model_dump(mode="json") for h in out.reveal_hints])
     for value in ("Ananya", "2341 2341", "98451", "example-mail", "884120"):
         assert value not in hints
+
+
+# --- fix round 2 (G4 review r2) ------------------------------------------------------------------
+
+MRZ_TD3 = (
+    "P<INDKRISHNAN<<ANANYA<<<<<<<<<<<<<<<<<<<<<<<\nZ1234567<8IND8803143F3001011<<<<<<<<<<<<<<02"
+)
+
+
+async def test_strict_synthesis_replaces_names_in_mrz_crypto_and_digit_bearing_fields(
+    engine: PrivacyEngine,
+) -> None:
+    """Letters next to digits are not format: the MRZ holder, a wallet and a note's names go."""
+    note = "Customer Ananya Krishnan called on 5 Jan about loan 4412 and asked for Rahul Mehta"
+    doc = {
+        "mrz": MRZ_TD3,
+        "wallet_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+        "call_note": note,
+    }
+    policy = {
+        "preset": "synthetic-strict",
+        "detect": {"declared_fields": [{"path": "$.call_note", "entity_type": "CALL_NOTE"}]},
+    }
+    out = await engine.synthesize(Payload(data=doc), policy, RequestOptions())
+    assert out.report.verification.passed  # type: ignore[union-attr]
+    mrz = out.result["mrz"]
+    assert "KRISHNAN" not in mrz and "ANANYA" not in mrz and mrz[:5] == "P<IND"
+    wallet = out.result["wallet_address"]
+    shared = sum(a == b for a, b in zip(doc["wallet_address"], wallet, strict=False))
+    assert wallet != doc["wallet_address"] and shared < len(wallet) / 3
+    for name in ("Ananya", "Krishnan", "Rahul", "Mehta"):
+        assert name not in out.result["call_note"], name
+
+
+async def test_long_values_are_replaced_quickly_and_completely(engine: PrivacyEngine) -> None:
+    """A long field neither stalls the engine nor comes back mostly verbatim."""
+    rng = random.Random(11)
+    long_id = "".join(rng.choice(string.ascii_lowercase) for _ in range(20_000))
+    start = time.perf_counter()
+    out = await engine.synthesize(
+        Payload(data={"customer_id": long_id}), "synthetic-realistic", RequestOptions()
+    )
+    assert time.perf_counter() - start < 3.0
+    fake = out.result["customer_id"]
+    assert len(fake) == len(long_id)
+    assert sum(a == b for a, b in zip(long_id, fake, strict=True)) < 2 * len(long_id) / 26
+    remarks = " ".join(
+        "".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(3, 9)))
+        for _ in range(80)
+    )
+    policy = {
+        "preset": "synthetic-strict",
+        "detect": {"declared_fields": [{"path": "$.remarks", "entity_type": "FREE_REMARKS"}]},
+    }
+    out = await engine.synthesize(Payload(data={"remarks": remarks}), policy, RequestOptions())
+    assert out.report.verification.passed  # type: ignore[union-attr]
+    words = zip(remarks.split(), out.result["remarks"].split(), strict=True)
+    assert sum(a == b for a, b in words) <= 2

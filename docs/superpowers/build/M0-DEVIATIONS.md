@@ -1154,3 +1154,115 @@ Service level (`tests/test_service.py`): `test_a_caller_held_seed_maps_each_valu
 Still open: N1 (a surrogate can equal *another* record's original in a dense space, so a large
 strict request can fail closed; a derangement does not change that rate, and an avoid-set would
 make the mapping request-dependent again) and N2 (persona-derived fields depend on the anchor).
+
+### Task 19 — fix round 2 (G4 review r2: B1 long-value mixing, B2 run time, B3 letters kept next to digits)
+
+This round supersedes, in part, fix round 1 above: the single-domain derangement, the
+`dps.synth.reshape.v1` key label, and "digits only when the value has digits".
+
+**B1: long values were barely mixed.** `Derangement` capped its BLAKE2b round output at 64
+bytes. When a Feistel half was wider than 512 bits, the round value moved only the low-order
+part of the half, so the leading characters of each half survived every round. This started
+above ~218 Latin letters, ~70 CJK characters or ~600 digits. A 400-letter value kept 186
+positions, including a verbatim 91-letter prefix. An 80-word declared field came back with 42
+words unchanged, and verification passed.
+
+Fix (in `reshape.py`): the reshaper deranges the replaced positions in consecutive **blocks**
+of at most ~200 bits.
+
+- **Block size.** The width of a position is counted in whole bits (`ceil(log2 radix)`), as
+  integers, so the block boundaries are the same on every platform. The blocks are balanced:
+  about 38 letters, 48 digits or 12 ideographs each.
+- **Keys.** Each block has its own key, `HMAC(shape key, block number)`. The shape key is the
+  round 1 key with the label `dps.synth.reshape.v2`. The label changed because every reshaped
+  output changes with this round. Seeds stay valid; only the mapping changed, before any
+  release.
+- **Full coverage.** Every round output of a block is 64 bits wider than its half, so every
+  position is re-randomised.
+- **Guarantees kept.** The product of the block permutations is still a bijection of the shape,
+  and every block changes (no fixed point). So "never the original" and "distinct stays
+  distinct" still hold, and are stronger: no block of a long value survives.
+- **Guard.** `Derangement` now refuses a half wider than 448 bits (`ValueError`) instead of
+  mixing it silently, and its split search uses prefix products.
+- **Cache.** The reshaper caches the block ciphers per shape, for up to 4,096 shapes of up to 8
+  blocks each, so free text does not grow the cache without bound.
+
+**B2: run time was roughly cubic in value length** (8,000 letters took 20 s;
+`synthesize({"customer_id": <6,000 letters>}, "synthetic-realistic")` took 8.8 s on the event
+loop). The blocks above make the cost linear. On this machine, 100,000 characters now take
+0.09 s for letters, 0.07 s for digits and 0.15 s for CJK. Through `PrivacyEngine.synthesize`
+under `synthetic-realistic`, a 20,000-letter `customer_id` takes 0.03 s and a 100,000-letter one
+0.13 s.
+
+**B3: values with digits kept every letter** (inherited from the plan's generic path). Under
+`synthetic-strict`, an MRZ kept the holder's name. A crypto address kept 26 of 34 characters.
+A declared free-text field kept every name. Verification passed in all three cases.
+
+- **MRZ** has a dedicated generator (`formats.py` with `SurrogateEngine._mrz`). It recognises
+  the ICAO 9303 layouts TD1 (3×30), TD2 (2×36), TD3 (2×44), MRV-A and MRV-B, with lines split
+  by any whitespace or not split at all. It rebuilds the MRZ field by field:
+  - **Holder:** the record's persona as `SURNAME<<GIVEN`. If a persona shares a name part with
+    the original holder (Faker `en_IN` has "Krishnan"), the generator tries the next persona.
+  - **Document number and optional data:** fresh, in the original's letter/digit shape.
+  - **Birth date:** the persona's birth date in the original's five-year band, the same date
+    as the record's `DATE_OF_BIRTH` surrogate.
+  - **Expiry date:** shifted by 1 to 730 days.
+  - **Sex:** the persona's.
+  - **Kept as they are:** the document code, the issuing state and the nationality.
+  - **Check digits:** every check digit the original carries is recomputed.
+
+  An MRZ that matches no ICAO layout has every letter and digit replaced, keeping only the `<`
+  fillers and the first five characters (document code and issuing state).
+- **CRYPTO_ADDRESS** has a dedicated generator. Bitcoin base58check addresses (P2PKH, P2SH,
+  testnet) and bech32/bech32m addresses (SegWit v0, Taproot) become fresh **valid** addresses
+  of the same kind, with the same prefix and length. Ethereum addresses become fresh lower-case
+  hex, which is valid but has no EIP-55 checksum because hashlib has no Keccak. Any other format
+  has every letter and digit replaced.
+- **Generic path** (identifiers of unmapped types): letters are now replaced as well as digits.
+  The only letters kept are short codes, as decided by `reshape.code_letters`:
+  - **Kept:** in a value with at least as many digits as letters, a run of at most 4 ASCII
+    letters in one case (`CUST-884120`, `MH14AB1234`, `K1234567`, `cust-1`).
+  - **Replaced:** a mixed-case word (`Ravi 12345678`), a longer run (`KRISHNAN-1234`), a letter
+    of another script (`山田 12345678`), and every letter of a letter-dominated value (free
+    text, `REF-ANANYA-77`).
+  - **Consistency:** `CUST-884120` and `cust-884120` still share their digits.
+- **Related changes:**
+  - `IFSC` now keeps the bank code and the reserved `0` and replaces branch letters as well as
+    digits. This also fixes review note N9: an all-letter branch code no longer falls through
+    to the hex token.
+  - `AMOUNT` keeps its currency code or symbol (`INR`, `Rs.`), as before.
+  - `reshape.has_digits` is removed: nothing uses it any more.
+
+**Tests.** All 10 new tests fail on the previous code. The two timing tests fail by running
+past a 60 s and a 90 s timeout.
+
+In `tests/test_surrogates.py`:
+
+- `test_long_values_are_mixed_in_every_position`: 1,000 letters, 1,000 digits and 300 CJK
+  characters share no more than the chance rate of positions and no verbatim run.
+- `test_every_block_of_a_long_value_changes_and_distinct_values_stay_distinct`
+- `test_a_derangement_refuses_a_domain_wider_than_its_round_output`
+- `test_reshaping_time_is_linear_in_the_value_length`: 100,000 characters in under 1 s, for
+  letters, digits and a code mix.
+- `test_mrz_surrogates_carry_the_persona_and_valid_check_digits`
+- `test_td1_td2_and_unknown_mrz_layouts`
+- `test_crypto_addresses_are_replaced_and_stay_valid`: checked with reference base58check and
+  BIP-173/350 checksum code written in the test.
+- `test_digit_bearing_values_keep_only_short_codes`
+
+In `tests/test_service.py`:
+
+- `test_strict_synthesis_replaces_names_in_mrz_crypto_and_digit_bearing_fields`: under
+  `synthetic-strict`, the MRZ contains neither name part, the wallet keeps under 1/3 of its
+  characters, the note keeps none of its names, and verification passes.
+- `test_long_values_are_replaced_quickly_and_completely`: a 20,000-letter `customer_id`
+  completes in under 3 s and keeps no more than the chance rate of positions; an 80-word
+  declared field keeps at most 2 words.
+
+Still open:
+
+- An MRZ holder can differ from the record's `PERSON_NAME` surrogate in one case: when the
+  record's persona shares a name part with the original holder. The MRZ then moves to the next
+  persona, and `PERSON_NAME` does not.
+- A short upper-case name inside a digit-dominated identifier (`RAVI 12345678`) still reads as
+  a code and stays.
