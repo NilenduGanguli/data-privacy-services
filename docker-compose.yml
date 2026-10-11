@@ -1,0 +1,52 @@
+# Local stack for M0: the app alone (Layer 1 is stateless). M1 adds the Azure OCR mock, M2 Postgres
+# (job metadata), a worker and source databases, M3 Oracle Free and MongoDB, M4 the browser worker.
+#
+#   docker compose up --build -d       # console + API on http://127.0.0.1:8400 (DPS_APP_PORT to move it)
+#   python tools/smoke_test.py         # end-to-end checks against it (waits for /health)
+#   docker compose down
+#
+# Host ports bind 127.0.0.1 only. The key below is a local demo literal; staging/prod refuse
+# DPS_BOOTSTRAP_API_KEY and read DPS_API_KEYS_FILE instead.
+services:
+  app:
+    build: .
+    image: data-privacy-services:local
+    ports:
+      - "127.0.0.1:${DPS_APP_PORT:-8400}:8400"
+    environment:
+      DPS_ENV: local
+      DPS_LOG_LEVEL: INFO
+      DPS_AUTH_ENABLED: "true"
+      DPS_BOOTSTRAP_API_KEY: ${DPS_BOOTSTRAP_API_KEY:-dps_local_dev_key_change_me}
+      DPS_DEFAULT_POLICY: gdpr-pseudonymise
+      DPS_DEFAULT_LOCALE: ${DPS_DEFAULT_LOCALE:-en_IN}
+      DPS_FPE_ENABLED: ${DPS_FPE_ENABLED:-true}   # the image ships fastfpe; false demos the det_token fallback
+      DPS_LLM_PROVIDER: ${DPS_LLM_PROVIDER:-stub}
+      DPS_LLM_MODEL: ${DPS_LLM_MODEL:-gemini-2.5-flash}
+      DPS_LLM_TEXT_REWRITE: ${DPS_LLM_TEXT_REWRITE:-false}
+      # Stellar (VDI only) — leave empty elsewhere; the provider then reports unavailable.
+      DPS_STELLAR_BASE_URL: ${DPS_STELLAR_BASE_URL:-}
+      DPS_COIN_URL: ${DPS_COIN_URL:-}
+      DPS_COIN_CLIENT_ID: ${DPS_COIN_CLIENT_ID:-}
+      DPS_COIN_CLIENT_SECRET: ${DPS_COIN_CLIENT_SECRET:-}
+      DPS_COIN_SCOPE: ${DPS_COIN_SCOPE:-}
+      DPS_SSL_CERT_FILE: ${DPS_SSL_CERT_FILE:-}
+    # Hardening: read-only root filesystem (scratch space is a memory-backed /tmp), no Linux
+    # capabilities, no privilege escalation, bounded memory.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8400/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      app: data-privacy-services
+      component: api
+      env: local
