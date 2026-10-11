@@ -3,7 +3,7 @@
 <title>UI scanner — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
 <script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
 <style>
-  .scan { display: grid; grid-template-columns: 250px 1fr; gap: 16px; align-items: start; }
+  .scan { display: grid; grid-template-columns: 284px minmax(0, 1fr); gap: 16px; align-items: start; }
   .crawl a { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: var(--r-md); color: var(--ink-2); font-size: 12.5px; }
   .crawl a.on { background: var(--teal-soft); color: var(--teal); box-shadow: inset 0 0 0 1px var(--teal-border); }
   .parallel { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -17,7 +17,33 @@
   .form .f.real { border-color: var(--amber-border); box-shadow: inset 3px 0 0 var(--amber); }
   .form .f.syn { border-color: var(--violet); box-shadow: inset 3px 0 0 var(--violet); color: var(--violet); }
   .form .f.obf { border-color: var(--teal-border); box-shadow: inset 3px 0 0 var(--teal); color: var(--teal); }
-  .form .f .n { position: absolute; right: 6px; top: 6px; font-size: 10px; font-weight: 800; color: var(--ink-on-brand); background: var(--amber); border-radius: 999px; padding: 1px 6px; font-family: var(--font); }
+  .form .f.kept { border-color: var(--border-strong); box-shadow: inset 3px 0 0 var(--ink-3); color: var(--ink-2); }
+  .crawl .cnt { display: inline-flex; gap: 4px; flex: none; }
+  .crawl a { gap: 8px; } .crawl a.on .chip { background: var(--surface); } .crawl .pth { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crawl a:focus-visible { outline-offset: -2px; }
+  .crawl .more { font-size: 12px; color: var(--ink-3); padding: 6px 10px 0; }
+  .nosub-line { margin-top: 8px !important; color: var(--ink) !important; font-size: 13px; display: flex; gap: 8px; align-items: flex-start; }
+  .nosub-line svg { width: 16px; height: 16px; color: var(--teal); flex: none; margin-top: 1px; }
+  .fill-key { margin-top: 10px; }
+  /* captures of rendered personal data */
+  .cap-sub { margin: -4px 0 12px; color: var(--ink-2); font-size: 12.5px; max-width: 80ch; }
+  .prof { padding: 16px 18px; font-size: 12.5px; }
+  .prof-h { display: flex; gap: 12px; align-items: center; padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+  .prof .av { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 13px; background: var(--surface-3); color: var(--ink-2); flex: none; }
+  .prof .ps { color: var(--ink-3); font-size: 12px; margin-top: 2px; }
+  .prof dl { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 8px 12px; margin: 0; }
+  .prof dt { color: var(--ink-3); font-size: 12px; } .prof dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; }
+  .pv { padding: 1px 5px; border-radius: 5px; }
+  .pv.real { box-shadow: inset 0 0 0 1px var(--amber-border); background: var(--amber-soft); color: var(--ink); }
+  .pv.crit { box-shadow: inset 0 0 0 1.5px var(--rose); background: var(--rose-soft); color: var(--ink); }
+  .pv.obf { box-shadow: inset 0 0 0 1px var(--teal-border); background: var(--teal-soft); color: var(--teal); }
+  .prof .av.obf { background: var(--teal-soft); color: var(--teal); }
+  .cap-foot { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; align-items: start; }
+  .cap-foot .pane { font-size: 11.5px; margin: 0; }
+  .cap-foot .pane .t { color: var(--teal); }
+  .cap-facts { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
+  .cap-facts b { color: var(--ink); }
+  .form .f .n { position: absolute; right: 6px; top: 6px; font-size: 11px; font-weight: 800; color: var(--ink-on-brand); background: var(--amber); border-radius: 999px; padding: 1px 6px; font-family: var(--font); }
   .form .btnrow { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
   .form .fakebtn { background: var(--surface-3); color: var(--ink-3); border-radius: 6px; padding: 8px 14px; font-weight: 700; font-size: 12px; text-decoration: line-through; }
   .flag { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
@@ -27,7 +53,7 @@
   .frame .bar-url .chip { flex: none; }
   .form .f.real { padding-right: 30px; }
   .form .f { overflow-wrap: anywhere; }
-  @media (max-width: 1200px) { .scan, .parallel { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 1200px) { .scan, .parallel, .cap-foot { grid-template-columns: minmax(0, 1fr); } }
   @media (max-width: 720px) {
     .form { grid-template-columns: minmax(0, 1fr); padding: 14px; }
     .frame .bar-url { flex-wrap: wrap; }
@@ -35,32 +61,41 @@
     .fillwith, .fillwith .seg { width: 100%; }
     .fillwith .seg { display: grid; grid-template-columns: 1fr 1fr; }
     .fillwith .seg button { white-space: normal; }
+    .prof { padding: 14px; } .prof dl { grid-template-columns: 92px minmax(0, 1fr); }
   }
 </style></head>
 <body><div class="shell"><nav class="sidebar"></nav><div class="main">
 <header class="topbar"><a class="crumb" href="12-scanner-setup.html">UI scanner</a><span class="sep">/</span><span class="muted mono">https://onboarding-uat.bank.internal</span><span class="topbar-spacer"></span>
   <span class="pill"><span class="dot" style="background:var(--teal);box-shadow:0 0 0 3px var(--teal-soft)"></span>No submissions · POST interception on</span><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
 <main class="page">
-  <div class="page-head"><div><h1>Scan <span class="mono" style="font-size:16px;color:var(--ink-2)">s_01K7ZR…</span> · onboarding-uat</h1><p>38 pages crawled · 12 forms · 212 fields · 97 classified as personal data · 3 risk flags · auth: storage state <span class="mono">dps/ui/onboarding-uat</span></p></div>
-    <div class="head-actions"><a class="btn" href="12-scanner-setup.html">Scan setup</a><button class="btn">Export inventory</button><button class="btn">Export personas</button><button class="btn btn-primary">Evidence pack</button></div></div>
+  <div class="page-head"><div><h1>Scan <span class="mono" style="font-size:16px;color:var(--ink-2)">s_01K7ZR…</span> · onboarding-uat</h1><p>Crawl running · 31 of 38 pages · 10 forms and 180 fields so far · 81 personal data fields, 5 of them critical · 3 risk flags · auth: storage state <span class="mono">dps/ui/onboarding-uat</span></p>
+      <p class="nosub-line"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/><path d="M9 9l6 6M15 9l-6 6"/></svg><span><b>DPS never submits forms.</b> The browser worker fills and captures each form; it never presses a button, and every POST from a filled page is blocked.</span></p></div>
+    <div class="head-actions"><a class="btn" href="12-scanner-setup.html">Live crawl</a><button class="btn" type="button">Export inventory so far</button><button class="btn" type="button">Export personas</button><a class="btn btn-primary" href="09-reports.html?layer=ui">Evidence packs</a></div></div>
 
   <div class="card" style="padding:14px 18px"><div class="stepper">
-    <a class="step done" href="12-scanner-setup.html"><span class="n">✓</span>Crawl <span class="faint">· 38 pages</span></a><div class="step-sep"></div>
-    <div class="step done"><span class="n">✓</span>Classify <span class="faint">· 212 fields</span></div><div class="step-sep"></div>
-    <div class="step on"><span class="n">3</span>Parallel view <span class="faint">· persona 7 of 20</span></div><div class="step-sep"></div>
-    <div class="step"><span class="n">4</span>Export</div>
+    <a class="step done" href="12-scanner-setup.html"><span class="n">✓</span>Setup</a><div class="step-sep"></div>
+    <a class="step" href="12-scanner-setup.html"><span class="n">2</span>Crawl <span class="faint">· running, 31 of 38 pages</span></a><div class="step-sep"></div>
+    <div class="step"><span class="n">3</span>Classify <span class="faint">· 24 pages</span></div><div class="step-sep"></div>
+    <div class="step on"><span class="n">4</span>Parallel view <span class="faint">· 9 pages ready · persona 1 of 20</span></div><div class="step-sep"></div>
+    <div class="step"><span class="n">5</span>Export</div>
   </div></div>
 
   <div class="scan">
-    <div class="card crawl"><div class="card-head"><div class="card-title">Pages with forms</div><span class="chip slate">12</span></div>
-      <a href="#">/apply <span class="chip rose">7 crit.</span></a>
-      <a href="#" class="on">/apply/identity <span class="chip rose">9 crit.</span></a>
-      <a href="#">/apply/address <span class="chip amber">6</span></a>
-      <a href="#">/apply/employment <span class="chip amber">4</span></a>
-      <a href="#">/apply/card <span class="chip rose">4 crit.</span></a>
-      <a href="#">/apply/review <span class="chip amber">rendered PII</span></a>
-      <a href="#">/profile <span class="chip amber">rendered PII</span></a>
-      <a href="#">/login <span class="chip slate">2</span></a>
+    <div class="card crawl"><div class="card-head"><div class="card-title">Pages with forms</div><span class="chip slate">10 so far</span></div>
+      <a href="#"><span class="pth">/apply</span><span class="cnt"><span class="chip amber">PII 14</span><span class="chip rose">1 crit.</span></span></a>
+      <a href="#" class="on" aria-current="true"><span class="pth">/apply/identity</span><span class="cnt"><span class="chip amber">PII 9</span><span class="chip rose">2 crit.</span></span></a>
+      <a href="#"><span class="pth">/apply/address</span><span class="cnt"><span class="chip amber">PII 16</span></span></a>
+      <a href="#"><span class="pth">/apply/employment</span><span class="cnt"><span class="chip amber">PII 7</span></span></a>
+      <a href="#"><span class="pth">/apply/card</span><span class="cnt"><span class="chip teal">filling</span></span></a>
+      <a href="#"><span class="pth">/login</span><span class="cnt"><span class="chip amber">PII 1</span></span></a>
+      <a href="#"><span class="pth">/profile/contact</span><span class="cnt"><span class="chip amber">PII 11</span></span></a>
+      <a href="#"><span class="pth">/profile/nominee</span><span class="cnt"><span class="chip amber">PII 17</span><span class="chip rose">1 crit.</span></span></a>
+      <a href="#"><span class="pth">/accounts/statements</span><span class="cnt"><span class="chip amber">PII 2</span><span class="chip rose">1 crit.</span></span></a>
+      <a href="#"><span class="pth">/help/contact-us</span><span class="cnt"><span class="chip amber">PII 4</span></span></a>
+      <div class="more">Queued: /apply/documents, /profile/security</div>
+      <div class="card-head" style="margin-top:14px"><div class="card-title">Rendered personal data</div><span class="chip slate">2 pages</span></div>
+      <a href="#captures"><span class="pth">/profile</span><span class="cnt"><span class="chip amber">A3</span><span class="chip slate">capture</span></span></a>
+      <a href="#captures"><span class="pth">/apply/review</span><span class="cnt"><span class="chip amber">A2</span><span class="chip slate">capture</span></span></a>
       <div class="card-head" style="margin-top:14px"><div class="card-title">Risk flags</div><span class="chip rose">3</span></div>
       <div class="flag"><span class="chip rose">A1</span><span><b>autocomplete on</b> for Aadhaar and PAN inputs (<span class="mono">/apply/identity</span>)</span></div>
       <div class="flag"><span class="chip amber">A2</span><span>PII in query string: <span class="mono">?email=</span> on <span class="mono">/apply/review</span></span></div>
@@ -88,7 +123,7 @@
             </div>
           </div>
           <div class="frame">
-            <div class="bar-url"><i></i><i></i><i></i><span class="mono">onboarding-uat…/apply/identity</span><span id="fillchip" class="chip violet" style="margin-left:auto">filled · synthetic persona 7</span></div>
+            <div class="bar-url"><i></i><i></i><i></i><span class="mono">onboarding-uat…/apply/identity</span><span id="fillchip" class="chip violet" style="margin-left:auto">filled · synthetic persona 1</span></div>
             <div class="form" id="filled">
               <div><label>Full name</label><div class="f syn" data-syn="Meera Venkatesan" data-obf="Tilqoe Mzvhrpkat">Meera Venkatesan</div></div>
               <div><label>Date of birth</label><div class="f syn" data-syn="29/07/1988" data-obf="02/11/1987">29/07/1988</div></div>
@@ -97,16 +132,17 @@
               <div><label>Mobile</label><div class="f syn" data-syn="+91 90000 15627" data-obf="+91 93117 84062">+91 90000 15627</div></div>
               <div><label>Email</label><div class="f syn" data-syn="meera.venkatesan@example.com" data-obf="vqzmra.p@example-mail.in">meera.venkatesan@example.com</div></div>
               <div class="full"><label>Residential address</label><div class="f syn" data-syn="22 Cunningham Road, Bengaluru 560052" data-obf="[[PII:STREET_ADDRESS:m4q7t2…]]">22 Cunningham Road, Bengaluru 560052</div></div>
-              <div><label>Gender</label><div class="f syn" data-syn="Female" data-obf="Female">Female</div></div>
-              <div><label>Nationality</label><div class="f syn" data-syn="Indian" data-obf="Indian">Indian</div></div>
+              <div><label>Gender</label><div class="f syn" data-syn="Female" data-obf="Female" data-keep="1">Female</div></div>
+              <div><label>Nationality</label><div class="f syn" data-syn="Indian" data-obf="Indian" data-keep="1">Indian</div></div>
               <div class="btnrow"><span class="fakebtn">Continue →</span></div>
             </div>
           </div>
         </div>
+        <div class="legend fill-key" id="fillkey"><span><i style="background:var(--amber)"></i>original value</span><span><i style="background:var(--violet)"></i>synthetic persona value</span></div>
         <div class="callout" style="margin-top:12px;font-size:12px">Fields are filled in the real page by the browser worker and captured; the Continue button is never pressed and any form POST is blocked by request interception. Client-side validation accepted all nine values (format evidence recorded).</div>
       </div>
 
-      <div class="card"><div class="card-head"><div class="card-title">Field inventory · /apply/identity</div><div class="legend"><span><i style="background:var(--rose)"></i>critical</span><span><i style="background:var(--amber)"></i>sensitive</span></div></div>
+      <div class="card"><div class="card-head"><div class="card-title">Field inventory · /apply/identity</div><div class="legend"><span><i style="background:var(--rose)"></i>critical</span><span><i style="background:var(--amber)"></i>sensitive</span><span><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>kept</span></div></div>
         <table class="tbl stack"><thead><tr><th>#</th><th>Label</th><th>Input</th><th>autocomplete</th><th>Entity</th><th>Conf.</th><th>Fill method</th><th>Evidence</th></tr></thead><tbody>
           <tr><td>1</td><td>Full name</td><td class="mono">text · name=fullName</td><td class="mono">name</td><td><span class="chip amber">PERSON_NAME</span></td><td class="mono">0.99</td><td class="mono">persona.name / fpe_text</td><td class="faint">token + label</td></tr>
           <tr><td>2</td><td>Date of birth</td><td class="mono">date · name=dob</td><td class="mono">bday</td><td><span class="chip amber">DATE_OF_BIRTH</span></td><td class="mono">0.99</td><td class="mono">persona.dob / date_shift</td><td class="faint">token</td></tr>
@@ -118,15 +154,61 @@
           <tr><td>8</td><td>Gender</td><td class="mono">select</td><td class="mono">sex</td><td><span class="chip slate">GENDER</span></td><td class="mono">0.95</td><td class="mono">persona.gender / keep</td><td class="faint">token</td></tr>
           <tr><td>9</td><td>Nationality</td><td class="mono">select</td><td class="mono">—</td><td><span class="chip slate">NATIONALITY</span></td><td class="mono">0.81</td><td class="mono">persona.nationality / keep</td><td class="faint">label dictionary</td></tr>
         </tbody></table></div>
+
+      <div class="card" id="captures"><div class="card-head"><div class="card-title">Capture · <span class="mono">/profile</span> · rendered personal data</div><span class="chip amber">A3 · full PAN rendered</span></div>
+        <p class="cap-sub">/profile has no form; it shows the signed-in customer's details. DPS keeps only the masked capture: personal data in the screenshot and in the DOM text is replaced with reversible tokens inside the worker, before anything is stored or exported.</p>
+        <div class="parallel">
+          <div class="frame">
+            <div class="bar-url"><i></i><i></i><i></i><span class="mono">onboarding-uat…/profile</span><span class="chip amber" style="margin-left:auto">original · worker memory only</span></div>
+            <div class="prof">
+              <div class="prof-h"><span class="av">AK</span><div><div><span class="pv real">Ananya Krishnan</span></div><div class="ps">Savings account · Lavelle Road branch</div></div></div>
+              <dl><dt>Mobile</dt><dd><span class="pv real">+91 98451 20377</span></dd>
+                <dt>Email</dt><dd><span class="pv real">ananya.k@example-mail.in</span></dd>
+                <dt>Date of birth</dt><dd><span class="pv real">14/03/1988</span></dd>
+                <dt>Address</dt><dd><span class="pv real">14 Lavelle Road, Bengaluru 560001</span></dd>
+                <dt>Card on file</dt><dd><span class="pv crit">4532 7811 2290 4417</span></dd>
+                <dt>Customer since</dt><dd>2014</dd></dl>
+            </div>
+          </div>
+          <div class="frame">
+            <div class="bar-url"><i></i><i></i><i></i><span class="mono">onboarding-uat…/profile</span><span class="chip teal" style="margin-left:auto">masked capture · exported</span></div>
+            <div class="prof">
+              <div class="prof-h"><span class="av obf">TM</span><div><div><span class="pv obf">Tilqoe Mzvhrpkat</span></div><div class="ps">Savings account · Lavelle Road branch</div></div></div>
+              <dl><dt>Mobile</dt><dd><span class="pv obf">+91 93117 84062</span></dd>
+                <dt>Email</dt><dd><span class="pv obf">vqzmra.p@example-mail.in</span></dd>
+                <dt>Date of birth</dt><dd><span class="pv obf">02/11/1987</span></dd>
+                <dt>Address</dt><dd><span class="pv obf">[[PII:STREET_ADDRESS:m4q7t2…]]</span></dd>
+                <dt>Card on file</dt><dd><span class="pv obf">4532 7861 0375 4417</span></dd>
+                <dt>Customer since</dt><dd>2014</dd></dl>
+            </div>
+          </div>
+        </div>
+        <div class="cap-foot">
+<div class="pane" aria-label="Masked DOM text of /profile"><span class="k">&lt;h2 class="name"&gt;</span><span class="t">Tilqoe Mzvhrpkat</span><span class="k">&lt;/h2&gt;</span>
+<span class="k">&lt;dd id="mobile"&gt;</span><span class="t">+91 93117 84062</span><span class="k">&lt;/dd&gt;</span>
+<span class="k">&lt;dd id="email"&gt;</span><span class="t">vqzmra.p@example-mail.in</span><span class="k">&lt;/dd&gt;</span>
+<span class="k">&lt;dd id="dob"&gt;</span><span class="t">02/11/1987</span><span class="k">&lt;/dd&gt;</span>
+<span class="k">&lt;dd id="address"&gt;</span><span class="t">[[PII:STREET_ADDRESS:m4q7t2…]]</span><span class="k">&lt;/dd&gt;</span>
+<span class="k">&lt;dd id="card"&gt;</span><span class="t">4532 7861 0375 4417</span><span class="k">&lt;/dd&gt;</span></div>
+          <div class="cap-facts">
+            <span><b>7 values replaced</b> in the screenshot and the DOM text, including the initials in the avatar. 1 is critical: the full card number (risk flag A3).</span>
+            <span>Screenshot regions are repainted with the token text, not blurred, so nothing can be recovered from the image.</span>
+            <span>The reversible map (7 entries) is wrapped with the qa-onboarding public key and returned with the export. DPS keeps no copy of the original capture.</span>
+            <span class="faint">The second capture in this scan is /apply/review (A2).</span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </main></div></div>
 <script>
   renderSidebar('UI scanner');
   function setFill(m){
-    document.querySelectorAll('#filled .f').forEach(function(f){ f.textContent = f.getAttribute(m==='syn'?'data-syn':'data-obf'); f.className = 'f ' + m; });
-    var c = document.getElementById('fillchip'); c.textContent = m==='syn' ? 'filled · synthetic persona 7' : 'filled · obfuscated tokens (key held by caller)'; c.className = 'chip ' + (m==='syn' ? 'violet' : 'teal');
-    document.querySelectorAll('.seg button').forEach(function(b){ b.classList.toggle('on', (b.textContent.indexOf('Synthetic')===0) === (m==='syn')); });
+    document.querySelectorAll('#filled .f').forEach(function(f){ f.textContent = f.getAttribute(m==='syn'?'data-syn':'data-obf'); f.className = 'f ' + (m==='obf' && f.hasAttribute('data-keep') ? 'kept' : m); });
+    var c = document.getElementById('fillchip'); c.textContent = m==='syn' ? 'filled · synthetic persona 1' : 'filled · obfuscated tokens (key held by caller)'; c.className = 'chip ' + (m==='syn' ? 'violet' : 'teal');
+    document.getElementById('fillkey').innerHTML = m==='syn' ? '<span><i style="background:var(--amber)"></i>original value</span><span><i style="background:var(--violet)"></i>synthetic persona value</span>'
+      : '<span><i style="background:var(--amber)"></i>original value</span><span><i style="background:var(--teal)"></i>reversible token</span><span><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>kept by policy</span>';
+    document.querySelectorAll('.fillwith .seg button').forEach(function(b){ b.classList.toggle('on', (b.textContent.indexOf('Synthetic')===0) === (m==='syn')); });
   }
 </script>
 </body></html>

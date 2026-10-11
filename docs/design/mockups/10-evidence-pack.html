@@ -11,7 +11,7 @@
   .seal { text-align: right; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; font-size: 12px; color: var(--ink-2); }
   .seal .mono { font-size: 11.5px; }
   .meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 20px; padding: 16px 0 4px; }
-  .meta .l, dl.kv dt { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .meta .l, dl.kv dt { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
   .meta .v { font-size: 13px; margin-top: 3px; }
   section.sec { padding-top: 26px; }
   section.sec > h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 12px; font-size: 16px; letter-spacing: -.005em; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
@@ -51,9 +51,9 @@
   .dist .track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--ink-3); }
   .dist .track b { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink); }
   .cmx { display: grid; grid-template-columns: 112px repeat(5, minmax(0, 1fr)); gap: 3px; font-size: 11px; }
-  .cmx .hl2 { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); display: flex; align-items: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cmx .hc { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); text-align: center; writing-mode: vertical-rl; transform: rotate(180deg); justify-self: center; align-self: end; height: 82px; white-space: nowrap; }
-  .cmx .c { aspect-ratio: 1.5 / 1; border-radius: 4px; display: grid; place-items: center; font-family: var(--mono); font-size: 11px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .cmx .hl2 { font-family: var(--mono); font-size: 11px; color: var(--ink-2); display: flex; align-items: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cmx .hc { font-family: var(--mono); font-size: 11px; color: var(--ink-2); text-align: center; writing-mode: vertical-rl; transform: rotate(180deg); justify-self: center; align-self: end; height: 82px; white-space: nowrap; }
+  .cmx .c { aspect-ratio: 1.5 / 1; border-radius: 4px; display: grid; place-items: center; font-family: var(--mono); font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums; }
   .cmx .c.diag { background: transparent; color: var(--ink-3); border: 1px dashed var(--border-strong); }
   .cmx .c.blank { background: transparent; }
   .ramp { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-3); margin-top: 10px; }
@@ -68,7 +68,7 @@
   .reg .callout { font-size: 13px; line-height: 1.55; }
   .sig { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
   .sig > div { border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; display: flex; flex-direction: column; min-height: 168px; }
-  .sig .role { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .sig .role { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
   .sig .who { font-weight: 700; margin-top: 4px; font-size: 13px; }
   .sig .what { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
   .sig .line { margin-top: auto; border-top: 1px solid var(--ink-3); padding-top: 4px; font-size: 11px; color: var(--ink-3); display: flex; justify-content: space-between; }
@@ -93,14 +93,14 @@
     .timeline::before { left: 5px; right: auto; top: 6px; bottom: 6px; width: 1px; height: auto; }
     .timeline > div { padding: 0 0 0 22px; }
     .pm, .sig { grid-template-columns: minmax(0, 1fr); }
-    .cmx { grid-template-columns: 74px repeat(5, minmax(0, 1fr)); gap: 2px; }
-    .cmx .c { font-size: 9.5px; aspect-ratio: 1 / 1; }
-    .cmx .hc { height: 70px; font-size: 9.5px; }
-    .cmx .hl2 { font-size: 9.5px; }
+    .cmx { grid-template-columns: 94px repeat(5, minmax(0, 1fr)); gap: 2px; }
+    .cmx .c { font-size: 12px; aspect-ratio: 1 / 1; }
+    .cmx .hc { height: 92px; font-size: 11px; }
+    .cmx .hl2 { font-size: 11px; }
     table.stack tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
     table.stack tfoot tr { display: grid; }
     table.stack td { border: 0; padding: 0 !important; min-width: 0; text-align: left !important; }
-    table.stack td::before { content: attr(data-l); display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 2px; }
+    table.stack td::before { content: attr(data-l); display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 2px; }
     table.stack td.wide { grid-column: 1 / -1; }
     table.stack tr { grid-auto-flow: row dense; }
     section.sec > h2 { flex-wrap: wrap; }
@@ -173,10 +173,10 @@
   }
 </style></head>
 <body><div class="shell"><nav class="sidebar"></nav><div class="main">
-<header class="topbar"><a class="crumb" href="09-reports.html">Reports & audit</a><span class="sep">/</span><span class="muted">Evidence pack <span class="mono">j_01K7…9Q</span></span><span class="topbar-spacer"></span>
+<header class="topbar"><a class="crumb" href="09-reports.html">Reports & audit</a><span class="sep">/</span><span class="muted">Evidence pack <span class="mono" id="crumb-id">j_01K7…9Q</span></span><span class="topbar-spacer"></span>
   <a class="btn btn-sm hide-sm" href="09-reports.html">Back to reports</a><button class="btn btn-sm hide-sm" type="button">Download JSON</button><button class="btn btn-sm btn-primary" type="button" onclick="window.print()">Print or save as PDF</button><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
 <main class="page">
-<article class="sheet" aria-labelledby="doc-title">
+<article class="sheet" id="pack-9q" aria-labelledby="doc-title">
 
   <header class="doc-head">
     <div style="min-width:0;flex:1 1 420px">
@@ -193,7 +193,7 @@
 
   <div class="meta">
     <div><div class="l">Tenant · region</div><div class="v">retail-banking-apac · ap-south-1</div></div>
-    <div><div class="l">Requested by</div><div class="v">API key <span class="mono">crm-uat-refresh</span><br><span class="faint" style="font-size:12px">owner: CRM platform team</span></div></div>
+    <div><div class="l">Requested by</div><div class="v">API key <span class="mono">crm-uat-provisioner</span><br><span class="faint" style="font-size:12px">owner: CRM platform team</span></div></div>
     <div><div class="l">Purpose</div><div class="v">CHG-48213 · UAT provisioning for CRM release 26.4</div></div>
     <div><div class="l">Legal basis</div><div class="v">Legitimate interest — UAT provisioning</div></div>
     <div><div class="l">Job group</div><div class="v"><span class="mono">crm-uat-refresh</span> · 3 systems</div></div>
@@ -220,13 +220,13 @@
   <section class="sec" aria-labelledby="s2">
     <h2 id="s2"><span class="n">2</span>Configuration<span class="r">hashes identify exactly what ran</span></h2>
     <dl class="kv">
-      <dt>Policy</dt><dd><b>gdpr-pseudonymise v3</b> + 1 override <span class="mono">CUSTOMERS.RISK_SCORE → bucket</span><span class="s2">Preset hash <span class="mono">sha256:18d2493121bae95d38598115b80269bd6c86088a59562dd9b7d0b34b1c5e3a66</span></span></dd>
+      <dt>Policy</dt><dd><b>gdpr-pseudonymise v3</b> + 3 overrides from the reviewed snapshot: <span class="mono">PIN_CODE</span>, <span class="mono">RISK_SCORE</span>, <span class="mono">RM_NOTES</span><span class="s2">Preset hash <span class="mono">sha256:18d2493121bae95d38598115b80269bd6c86088a59562dd9b7d0b34b1c5e3a66</span></span></dd>
       <dt>Resolved policy hash</dt><dd><span class="mono">sha256:7818519279f4631ee975c21ef88b02eb478ba223d7f0776dc0efba1e9a00f13f</span><span class="s2">preset + override + reviewed snapshot, canonical JSON</span></dd>
       <dt>Engine</dt><dd>DPS engine 0.1.0 · image <span class="mono">sha256:6105d6cc76af…43e3d</span><span class="s2">Detectors: structural, patterns with checksums (python-stdnum, Luhn, Verhoeff), NER (Presidio with spaCy en). LLM labelling off. FF1 format-preserving encryption on.</span></dd>
       <dt>Key id</dt><dd><span class="mono">kid k_01K7ZQ4M8V</span> · consistency scope <b>key</b><span class="s2">Data key returned at job creation, wrapped with the caller's RSA-OAEP-256 public key (fingerprint <span class="mono">sha256:6feecc8c…892b</span>). DPS stored no key. This pack holds the key id only.</span></dd>
       <dt>Source</dt><dd>Oracle 19c · secret <span class="mono">dps/src/crm-prod-ro</span> (read-only) · <span class="mono">CRM.CUSTOMERS</span><span class="s2">Selection <span class="mono">CREATED_AT &gt;= DATE '2025-01-01'</span>, bound parameters, SELECT only (sqlglot check passed)</span></dd>
       <dt>Target</dt><dd>Oracle 19c · secret <span class="mono">dps/tgt/crm-uat</span> · <span class="mono">CRM_MASKED.CUSTOMERS</span><span class="s2">write_mode table · truncate_insert · created from the source definition</span></dd>
-      <dt>Shared with</dt><dd>MongoDB <span class="mono">profiles_uat</span> (job j_01K7…4D) and PostgreSQL <span class="mono">ledger_uat</span>, same key id, so CUSTOMER_ID, EMAIL and TAX_ID tokens join across all three</dd>
+      <dt>Shared with</dt><dd>MongoDB <span class="mono">profiles_uat</span> (job j_01K7…4D) and PostgreSQL <span class="mono">ledger_uat</span> (job j_01K7…8H), same key id, so CUSTOMER_ID, PERSON_NAME, EMAIL and NATIONAL_ID tokens join across the three systems<span class="s2">The key is entity-scoped to those four types. PostgreSQL holds no national id.</span></dd>
     </dl>
   </section>
 
@@ -254,15 +254,15 @@
     <h2 id="s4"><span class="n">4</span>Execution<span class="r">8 partitions by CUSTOMER_ID range</span></h2>
     <div class="timeline">
       <div><div class="t">08:52:10</div>Snapshot accepted</div>
-      <div><div class="t">09:41:06</div>Job started, 8 workers</div>
-      <div class="warn"><div class="t">09:45:31</div>p6 lease reclaimed, resumed from checkpoint</div>
+      <div><div class="t">09:41:06</div>Job started, 8 partitions queued</div>
+      <div class="warn"><div class="t">09:45:31</div>p6 lease reclaimed, resumed from its last committed batch</div>
       <div><div class="t">09:48:58</div>Last batch committed</div>
       <div class="ok"><div class="t">09:49:10</div>Verification passed</div>
       <div class="ok"><div class="t">09:49:12</div>Pack sealed and hashed</div>
     </div>
     <table class="tbl doc stack c3" style="margin-top:12px"><thead><tr><th>Partition</th><th class="num">Rows</th><th class="num">Batches</th><th class="num">Checkpoints</th><th class="num">Retries</th><th class="num">Duration</th><th>Result</th></tr></thead><tbody>
-      <tr><td class="m">p0</td><td class="num m">338,412</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 41 s</td><td>committed</td></tr>
-      <tr><td class="m">p1</td><td class="num m">338,290</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 38 s</td><td>committed</td></tr>
+      <tr><td class="m">p0</td><td class="num m">338,412</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">5 min 21 s</td><td>committed</td></tr>
+      <tr><td class="m">p1</td><td class="num m">338,290</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">5 min 34 s</td><td>committed</td></tr>
       <tr><td class="m">p2</td><td class="num m">338,507</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 52 s</td><td>committed</td></tr>
       <tr><td class="m">p3</td><td class="num m">338,181</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">7 min 03 s</td><td>committed</td></tr>
       <tr><td class="m">p4</td><td class="num m">338,366</td><td class="num m">68</td><td class="num m">7</td><td class="num m">0</td><td class="num m">6 min 57 s</td><td>committed</td></tr>
@@ -282,17 +282,92 @@
       <tr><td><b>Detectors re-run on output</b></td><td class="m">0 source values</td><td class="wide">24,311,870 output values rescanned; every finding is a token or a value the policy keeps</td><td><span class="chip emerald">pass</span></td></tr>
       <tr><td><b>Exact-match count</b></td><td class="m">0</td><td class="wide">Transformed values identical to their source value, including format-preserving fixed points</td><td><span class="chip emerald">pass</span></td></tr>
       <tr><td><b>FPE fallbacks</b></td><td class="m">1 column · 412 values</td><td class="wide">PIN_CODE generalised at review. 412 MOBILE values had fewer than 6 free digits after the country code and ran as det_token, recorded as <span class="m">fallback:fpe_domain_too_small</span></td><td><span class="chip slate">recorded</span></td></tr>
-      <tr><td><b>Cross-system consistency</b></td><td class="m">3 of 3 joins</td><td class="wide">CUSTOMER_ID, EMAIL and TAX_ID tokens match profiles_uat and ledger_uat on a 10,000-row join sample</td><td><span class="chip emerald">pass</span></td></tr>
+      <tr><td><b>Cross-system consistency</b></td><td class="m">3 of 3 joins</td><td class="wide">CUSTOMER_ID, PERSON_NAME, EMAIL and NATIONAL_ID tokens match profiles_uat and ledger_uat for a sample of 10,000 customers drawn from the finished table. An interim check at 09:46 UTC on the rows written by then also passed.</td><td><span class="chip emerald">pass</span></td></tr>
       <tr><td><b>Row counts</b></td><td class="m">2,706,118 = 2,706,118</td><td class="wide">Rows read equal rows written; 0 rows rejected by the target</td><td><span class="chip emerald">pass</span></td></tr>
     </tbody></table>
   </section>
 
-  <!-- 6 SYNTHETIC COMPANION -->
-  <section class="sec" id="synthetic" aria-labelledby="s6">
-    <h2 id="s6"><span class="n">6</span>Synthetic companion run<span class="r">job j_01K7ZR9D…S7 · 11 Oct 10:12 UTC</span></h2>
-    <p class="lead" style="margin-bottom:10px">Same source, synthesize mode: <b>CRM.CUSTOMERS → CRM_SYNTH.CUSTOMERS</b>, 500,000 rows from the built-in copula engine under <b>synthetic-realistic v1</b> (<span class="mono" style="font-size:12px">sha256:7c152f80…7bd6</span>). Personal columns were replaced by persona surrogates; the 11 other columns were sampled from a model fitted on 2,506,118 rows. 200,000 source rows were held out to measure privacy. The synthesis seed was returned to the caller and is not in this pack.</p>
+  <p class="note" style="margin-top:18px">The synthetic companion run on the same source, job <span class="mono">j_01K7…S7</span> (CRM.CUSTOMERS → CRM_SYNTH.CUSTOMERS), has <a href="10-evidence-pack.html?pack=s7" style="color:var(--teal);font-weight:600">its own evidence pack</a>, sealed 11 Oct 08:12 UTC.</p>
 
-    <h3>Fidelity · how closely the synthetic columns follow the source</h3>
+  <!-- 6 REGULATORY NOTE -->
+  <section class="sec keep" aria-labelledby="s6">
+    <h2 id="s6"><span class="n">6</span>Regulatory note</h2>
+    <div class="reg">
+      <div class="callout"><b>CRM_MASKED is pseudonymised, and pseudonymised data is still personal data</b> under GDPR Art. 4(5) and India's Digital Personal Data Protection Act 2023. Hold it under the same controls as CRM production. Whoever holds key <span class="mono">k_01K7ZQ4M8V</span> can re-identify every row.</div>
+      <p class="note" style="margin:2px 0 0">DPS stores no customer values and no keys. This pack holds counts, hashes, column names, method names and key ids only. Its hash is written to the append-only audit log, so any later edit to the pack is detectable.</p>
+    </div>
+  </section>
+
+  <!-- 7 SIGNATURES -->
+  <section class="sec" aria-labelledby="s7">
+    <h2 id="s7"><span class="n">7</span>Signatures</h2>
+    <div class="sig">
+      <div><div class="role">System attestation</div><div class="who">Data Privacy Services 0.1.0</div><div class="what">Generated and hashed at 09:49:12 UTC. Audit row <span class="mono">a_01K7ZT6R0P</span>.</div><div class="line"><span class="mono">sha256:6ec5e6dd…d73b</span></div></div>
+      <div><div class="role">Data owner</div><div class="who">Priya Raman</div><div class="what">CRM data owner. Accepted the classification snapshot in the console at 08:52 UTC.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+      <div><div class="role">Data protection officer</div><div class="who">&nbsp;</div><div class="what">Confirms purpose, legal basis and retention.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+      <div><div class="role">Change approver</div><div class="who">Owen Clarke</div><div class="what">UAT environment manager. Approves release of CRM_MASKED to UAT under CHG-48213.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+    </div>
+  </section>
+
+  <footer class="doc-foot">
+    <span>DPS evidence pack · job j_01K7ZQ3R8D5W2N6X4H1VTB7F9Q · generated 11 Oct 2026 09:49:12 UTC</span>
+    <span>Pack sha256 <span class="mono">6ec5e6ddf67837f2b91df0fea306b9db0fcd146c58a7d233c79d6bae6ab7d73b</span></span>
+  </footer>
+</article>
+<article class="sheet" id="pack-s7" aria-labelledby="doc-title-s7" hidden>
+  <header class="doc-head">
+    <div style="min-width:0;flex:1 1 420px">
+      <div class="eyebrow">Data Privacy Services · evidence pack</div>
+      <h1 id="doc-title-s7">Oracle CRM.CUSTOMERS → CRM_SYNTH.CUSTOMERS</h1>
+      <div class="jid">Job j_01K7ZN8D4M6Q2X8T5B1NWC3HS7 · synthesize · purpose CHG-48213</div>
+    </div>
+    <div class="seal">
+      <span class="chip emerald">verified · 0 exact rows</span>
+      <span>Sealed 11 Oct 2026, 08:12:44 UTC</span>
+      <span>Pack <span class="mono">ev_01K7ZP2K8M</span> · sha256 <span class="mono">b1d84c07…5e19</span></span>
+    </div>
+  </header>
+
+  <div class="meta">
+    <div><div class="l">Tenant · region</div><div class="v">retail-banking-apac · ap-south-1</div></div>
+    <div><div class="l">Requested by</div><div class="v">API key <span class="mono">crm-uat-provisioner</span><br><span class="faint" style="font-size:12px">owner: CRM platform team</span></div></div>
+    <div><div class="l">Purpose</div><div class="v">CHG-48213 · synthetic customers for CRM release 26.4 analytics tests</div></div>
+    <div><div class="l">Legal basis</div><div class="v">Legitimate interest — UAT provisioning</div></div>
+    <div><div class="l">Companion of</div><div class="v"><a href="10-evidence-pack.html" class="mono" style="color:var(--teal)">j_01K7…9Q</a> · masked copy, own pack</div></div>
+    <div><div class="l">Mode · write</div><div class="v">synthesize · table, create</div></div>
+    <div><div class="l">Data owner</div><div class="v">Priya Raman, CRM</div></div>
+    <div><div class="l">Pack kept until</div><div class="v">10 Nov 2026 · 30-day retention</div></div>
+  </div>
+
+  <!-- 1 SUMMARY -->
+  <section class="sec" aria-labelledby="t1">
+    <h2 id="t1"><span class="n">1</span>Summary</h2>
+    <p class="lead">On 11 October 2026 DPS read 2,706,118 rows from Oracle <b>CRM.CUSTOMERS</b>, fitted the built-in copula model on 2,506,118 of them and held 200,000 out to measure privacy. It wrote 500,000 synthetic rows to <b>CRM_SYNTH.CUSTOMERS</b> for change CHG-48213 under policy <b>synthetic-realistic v1</b>. Identifier columns hold persona surrogates that pass their own format rules, RM_NOTES was rewritten from placeholders, and RISK_SCORE and the 11 non-personal columns were sampled from the model. No synthetic row equals a source row. The synthesis seed went back to the caller and is not in this pack.</p>
+    <div class="stats">
+      <div><div class="l">Rows written</div><div class="v">500,000</div><div class="s">new table CRM_SYNTH</div></div>
+      <div><div class="l">Columns</div><div class="v">22</div><div class="s">12 sampled from the model</div></div>
+      <div><div class="l">Fidelity score</div><div class="v ok">0.96</div><div class="s">all 10 columns within 0.05</div></div>
+      <div><div class="l">Exact-row matches</div><div class="v ok">0</div><div class="s">rejected and resampled</div></div>
+      <div><div class="l">Duration</div><div class="v">25 min 21 s</div><div class="s">fit 9 min · generate 16 min</div></div>
+      <div><div class="l">Raw values to LLM</div><div class="v ok">0</div><div class="s">notes rewritten from placeholders</div></div>
+    </div>
+  </section>
+
+  <!-- 2 CONFIGURATION -->
+  <section class="sec" aria-labelledby="t2">
+    <h2 id="t2"><span class="n">2</span>Configuration<span class="r">hashes identify exactly what ran</span></h2>
+    <dl class="kv">
+      <dt>Policy</dt><dd><b>synthetic-realistic v1</b><span class="s2">Preset hash <span class="mono">sha256:7c152f805644305ded5ad65e2b01e46f15444b7c7c8d14578660f11b5ec47bd6</span></span></dd>
+      <dt>Engine</dt><dd>DPS engine 0.1.0 · built-in Gaussian copula · image <span class="mono">sha256:6105d6cc76af…43e3d</span><span class="s2">Persona surrogates: Aadhaar Verhoeff-valid outside the issued space, PAN format-valid, e-mail on RFC 2606 domains, one persona per row so name, gender, e-mail and birth date agree. RM_NOTES rewritten by the LLM gateway from placeholders only.</span></dd>
+      <dt>Seed</dt><dd>Returned to the caller, wrapped with the caller's RSA-OAEP-256 public key<span class="s2">It is not a reveal key: generation is one-way. This pack holds no seed.</span></dd>
+      <dt>Source</dt><dd>Oracle 19c · secret <span class="mono">dps/src/crm-prod-ro</span> (read-only) · <span class="mono">CRM.CUSTOMERS</span><span class="s2">Selection <span class="mono">CREATED_AT &gt;= DATE '2025-01-01'</span>, 2,706,118 rows: 2,506,118 to fit, 200,000 held out</span></dd>
+      <dt>Target</dt><dd>Oracle 19c · secret <span class="mono">dps/tgt/crm-uat</span> · <span class="mono">CRM_SYNTH.CUSTOMERS</span><span class="s2">write_mode table · created from the source definition</span></dd>
+    </dl>
+  </section>
+
+  <!-- 3 FIDELITY -->
+  <section class="sec" aria-labelledby="t3">
+    <h2 id="t3"><span class="n">3</span>Fidelity<span class="r">how closely the synthetic columns follow the source</span></h2>
     <div class="two">
       <div>
         <table class="tbl doc stack c3 fid"><thead><tr><th>Column</th><th>Metric</th><th class="num">Distance</th><th style="width:28%">vs 0.05 limit</th><th class="num">Null rate Δ</th></tr></thead><tbody>
@@ -354,7 +429,11 @@
       </div>
     </div>
 
-    <h3>Privacy · how far the synthetic rows are from real customers</h3>
+  </section>
+
+  <!-- 4 PRIVACY -->
+  <section class="sec keep" aria-labelledby="t4">
+    <h2 id="t4"><span class="n">4</span>Privacy<span class="r">how far the synthetic rows are from real customers</span></h2>
     <div class="pm">
       <div><div class="top"><span class="l">Exact-row matches</span><span class="chip emerald">enforced</span></div><div class="v">0 of 500,000</div><p>No synthetic row equals a source row on all columns. The engine rejects and resamples any match before writing.</p></div>
       <div><div class="top"><span class="l">Nearest-neighbour distance ratio</span><span class="chip emerald">pass · ≥ 1.00</span></div><div class="v">1.04</div><p>Median distance synthetic → source 0.412, against 0.398 between real customers in the holdout. Synthetic rows are not closer to real people than real people are to each other.</p></div>
@@ -363,35 +442,44 @@
     </div>
   </section>
 
-  <!-- 7 REGULATORY NOTE -->
-  <section class="sec keep" aria-labelledby="s7">
-    <h2 id="s7"><span class="n">7</span>Regulatory note</h2>
+  <!-- 5 REGULATORY NOTE -->
+  <section class="sec keep" aria-labelledby="t5">
+    <h2 id="t5"><span class="n">5</span>Regulatory note</h2>
     <div class="reg">
-      <div class="callout"><b>CRM_MASKED is pseudonymised, and pseudonymised data is still personal data</b> under GDPR Art. 4(5) and India's Digital Personal Data Protection Act 2023. Hold it under the same controls as CRM production. Whoever holds key <span class="mono">k_01K7ZQ4M8V</span> can re-identify every row.</div>
-      <div class="callout amber"><b>The synthetic report is a measurement, not a claim.</b> The fidelity and privacy figures in section 6 describe this run against a 200,000-row holdout. They do not state that CRM_SYNTH is anonymous. Treat it as confidential until your data protection officer decides otherwise; the synthesis seed can link rows back if someone also holds candidate originals.</div>
-      <p class="note" style="margin:2px 0 0">DPS stores no customer values and no keys. This pack holds counts, hashes, column names, method names and key ids only. Its hash is written to the append-only audit log, so any later edit to the pack is detectable.</p>
+      <div class="callout amber"><b>The synthetic report is a measurement, not a claim.</b> The fidelity and privacy figures in sections 3 and 4 describe this run against a 200,000-row holdout. They do not state that CRM_SYNTH is anonymous. Treat it as confidential until your data protection officer decides otherwise; the synthesis seed can link rows back if someone also holds candidate originals.</div>
+      <p class="note" style="margin:2px 0 0">DPS stores no customer values, keys or seeds. This pack holds counts, hashes, column names, method names and metric values only. Its hash is written to the append-only audit log, so any later edit to the pack is detectable.</p>
     </div>
   </section>
 
-  <!-- 8 SIGNATURES -->
-  <section class="sec" aria-labelledby="s8">
-    <h2 id="s8"><span class="n">8</span>Signatures</h2>
+  <!-- 6 SIGNATURES -->
+  <section class="sec" aria-labelledby="t6">
+    <h2 id="t6"><span class="n">6</span>Signatures</h2>
     <div class="sig">
-      <div><div class="role">System attestation</div><div class="who">Data Privacy Services 0.1.0</div><div class="what">Generated and hashed at 09:49:12 UTC. Audit row <span class="mono">a_01K7ZT6R0P</span>.</div><div class="line"><span class="mono">sha256:6ec5e6dd…d73b</span></div></div>
-      <div><div class="role">Data owner</div><div class="who">Priya Raman</div><div class="what">CRM data owner. Accepted the classification snapshot in the console at 08:52 UTC.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
-      <div><div class="role">Data protection officer</div><div class="who">&nbsp;</div><div class="what">Confirms purpose, legal basis and retention.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
-      <div><div class="role">Change approver</div><div class="who">Owen Clarke</div><div class="what">UAT environment manager. Approves release of CRM_MASKED to UAT under CHG-48213.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+      <div><div class="role">System attestation</div><div class="who">Data Privacy Services 0.1.0</div><div class="what">Generated and hashed at 08:12:44 UTC. Audit row <span class="mono">a_01K7ZP2M5V</span>.</div><div class="line"><span class="mono">sha256:b1d84c07…5e19</span></div></div>
+      <div><div class="role">Data owner</div><div class="who">Priya Raman</div><div class="what">CRM data owner. Requested the synthetic companion under CHG-48213.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+      <div><div class="role">Data protection officer</div><div class="who">&nbsp;</div><div class="what">Decides whether CRM_SYNTH may be treated as anonymous.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
+      <div><div class="role">Change approver</div><div class="who">Owen Clarke</div><div class="what">UAT environment manager. Approves release of CRM_SYNTH to UAT under CHG-48213.</div><div class="line"><span>Signature</span><span>Date</span></div></div>
     </div>
   </section>
 
   <footer class="doc-foot">
-    <span>DPS evidence pack · job j_01K7ZQ3R8D5W2N6X4H1VTB7F9Q · generated 11 Oct 2026 09:49:12 UTC</span>
-    <span>Pack sha256 <span class="mono">6ec5e6ddf67837f2b91df0fea306b9db0fcd146c58a7d233c79d6bae6ab7d73b</span></span>
+    <span>DPS evidence pack · job j_01K7ZN8D4M6Q2X8T5B1NWC3HS7 · generated 11 Oct 2026 08:12:44 UTC</span>
+    <span>Pack sha256 <span class="mono">b1d84c0753a29e6f81c4d7b0e2f95a63c8d1047e6b2a9f53d18c7e40a26b5e19</span></span>
   </footer>
 </article>
 </main></div></div>
 <script>
   renderSidebar('Reports & audit');
   /* table cells are labelled for phone layouts by labelCells() in vault.js */
+  (function () {
+    if (new URLSearchParams(location.search).get('pack') !== 's7') return;
+    document.getElementById('pack-9q').hidden = true;
+    document.getElementById('pack-s7').hidden = false;
+    document.getElementById('crumb-id').textContent = 'j_01K7…S7';
+    document.title = 'Evidence pack j_01K7…S7 — DPS Privacy Console';
+    var st = document.createElement('style');
+    st.textContent = '@page { @bottom-left { content: "DPS evidence pack · j_01K7ZN8D4M6Q2X8T5B1NWC3HS7"; } }';
+    document.head.appendChild(st);
+  })();
 </script>
 </body></html>

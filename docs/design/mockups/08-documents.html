@@ -11,7 +11,7 @@
   /* input card */
   .inrow { display: flex; flex-wrap: wrap; gap: 16px 22px; align-items: flex-end; }
   .file { display: flex; gap: 12px; align-items: center; flex: 1 1 280px; min-width: 0; }
-  .fileicon { width: 38px; height: 46px; flex: none; border-radius: 4px 12px 4px 4px; background: var(--surface-3); border: 1px solid var(--border-strong); display: grid; place-items: end center; padding-bottom: 6px; font: 800 9.5px var(--mono); color: var(--ink-2); letter-spacing: .06em; }
+  .fileicon { width: 38px; height: 46px; flex: none; border-radius: 4px 12px 4px 4px; background: var(--surface-3); border: 1px solid var(--border-strong); display: grid; place-items: end center; padding-bottom: 6px; font: 800 11px var(--mono); color: var(--ink-2); letter-spacing: .06em; }
   .file .name { font-weight: 700; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
   .file .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
   .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 0; max-width: 100%; }
@@ -101,7 +101,7 @@
   .grp-b { display: none; padding: 0 0 8px; } .grp.open .grp-b { display: block; }
   .fd { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 8px; padding: 5px 6px; border-radius: 8px; align-items: center; font-size: 12.5px; cursor: default; }
   .fd:hover, .fd.hot { background: var(--surface-2); }
-  .fn { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font: 700 10.5px var(--font); border: 1px solid; }
+  .fn { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font: 700 11px var(--font); border: 1px solid; }
   .fn.r { color: var(--rose); border-color: var(--rose-border); background: var(--rose-soft); }
   .fn.a { color: var(--amber); border-color: var(--amber-border); background: var(--amber-soft); }
   .fn.k { color: var(--ink-2); border-color: var(--border-strong); background: var(--surface-2); }
@@ -341,7 +341,7 @@
     <section class="card" aria-label="Key material and verification">
       <div class="keycard" id="keyCard">
         <div class="card-head" style="margin-bottom:6px"><div class="card-title">Key material · returned once, never stored</div><span class="chip teal">dps.v1</span></div>
-        <div class="mono" style="font-size:12px;overflow-wrap:anywhere;line-height:1.6">kid: k_01K7ZT2N4R · dek: b64u:9mVb…Q2xc · wrap: rsa-oaep-256 (caller key)<br><span class="faint">reveal hints: 23 spans · locators, methods and types, no originals</span></div>
+        <div class="mono" style="font-size:12px;overflow-wrap:anywhere;line-height:1.6">kid: k_01K7ZQ4M8V · dek: b64u:3hQ9…Zt7w · wrap: rsa-oaep-256 (caller key)<br><span class="faint">reveal hints: 23 spans · locators, methods and types, no originals</span></div>
         <div class="btnrow" style="margin-top:10px"><button class="btn btn-sm" type="button" id="copyKey">Copy key</button><button class="btn btn-sm btn-primary" type="button" id="revealBtn">Reveal text with key</button><span id="revealed" class="chip emerald hidden">original text restored · POST /api/v1/reveal</span></div>
         <div class="faint" style="font-size:12px;margin-top:8px" id="keyNote">Applies to the text extraction only. The redacted PDF has no key.</div>
       </div>
@@ -349,14 +349,14 @@
 
       <div style="margin-top:12px" id="planObf">
         <div class="diffrow"><span class="k">method</span><span>fpe_text (names) · fpe_digits (Aadhaar, account, phones) · det_token (address, UPI, masked card, enrolment no.) · date_shift ±365 · email (keep domain)</span></div>
-        <div class="diffrow"><span class="k">consistency</span><span>one token per value across pages: name ×3, address ×2, mobile ×4 · IMPS digits match the mobile token</span></div>
+        <div class="diffrow"><span class="k">consistency</span><span>one token per value across pages: name ×3, address ×2, mobile ×4 · IMPS digits match the mobile token · same key as the JSON record in the Playground, so this customer gets the same tokens in both</span></div>
       </div>
       <div style="margin-top:12px" class="hidden" id="planSyn">
         <div class="diffrow"><span class="k">persona</span><span>one persona per document: Indian female name ↔ father's surname ↔ e-mail ↔ locale en_IN ↔ age band 35–39 kept</span></div>
         <div class="diffrow"><span class="k">validity</span><span>Aadhaar Verhoeff-valid outside issued space · PAN format valid · card on test IIN 411111 · RFC 2606 e-mail domain</span></div>
       </div>
       <div class="diffrow"><span class="k">ocr</span><span><span class="ocr-name">Azure Read v3.2 via org gateway</span> · 3 pages · <span id="ocrWords">701 words</span> · 4.7&nbsp;s</span></div>
-      <div class="diffrow"><span class="k">not flagged</span><span><span class="mono">CUST-884120</span> (declared business key) · IFSC (branch code) · amounts and balances (kept by <b>dpdp-pseudonymise</b>) · change in <b>Policies</b></span></div>
+      <div class="diffrow"><span class="k">not flagged</span><span><span class="mono">CUST-884120</span> (declared business key, kept in API calls) · IFSC (branch code) · amounts and balances (kept by <b>dpdp-pseudonymise</b>) · change in <b>Policies</b></span></div>
       <div class="diffrow"><span class="k">llm</span><span>not called for this document · raw values sent: <b style="color:var(--emerald)">0</b></span></div>
 
       <div class="verify" style="margin-top:12px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>

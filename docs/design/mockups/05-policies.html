@@ -36,7 +36,7 @@
   .ph-pub { font-size: 12px; color: var(--ink-3); }
   .facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; margin-top: 14px; }
   .facts > div { background: var(--surface); padding: 9px 12px; min-width: 0; }
-  .facts .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); font-weight: 700; }
+  .facts .l { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); font-weight: 700; }
   .facts .v { font-size: 12.5px; margin-top: 3px; }
   .facts .v small { display: block; color: var(--ink-3); font-size: 11.5px; }
 
@@ -217,7 +217,7 @@
         <div class="nav-label" style="padding-top:2px">On this page</div>
         <nav class="toc">
           <a href="#matrix">Treatment per entity <span>18</span></a>
-          <a href="#declared">Declared fields <span>5</span></a>
+          <a href="#declared">Declared fields <span>7</span></a>
           <a href="#recognizers">Custom recognizers <span>1</span></a>
           <a href="#plan">Plan preview <span>13</span></a>
           <a href="#versions">Versions <span>4</span></a>
@@ -286,13 +286,15 @@
         <div class="card-head"><div class="card-title" id="declared-t">Declared fields <span class="faint">· more than PII</span></div><button class="btn btn-sm" type="button">Declare a field</button></div>
         <p class="card-sub">Owners name the paths and columns that detectors cannot know about: internal scores, counterparties, employer names. Declarations apply before detection and win over inferred types; the plan records <span class="mono">declared:&lt;path&gt;</span> as the reason.</p>
         <div class="tbl-scroll"><table class="tbl stack"><thead><tr><th>Path or column</th><th>System · owner</th><th>Declared as</th><th>Treatment</th><th>Declared by</th><th>Since</th></tr></thead><tbody>
+          <tr><td class="mono">CUSTOMER_ID<span class="s2">and $.customer_id in API payloads</span></td><td class="fam">All systems · CRM</td><td><span class="chip teal">CUSTOMER_ID</span></td><td><span class="m">keep</span><span class="prm">API calls</span><br><span class="m">fpe_digits</span><span class="prm">jobs · job-group key</span></td><td>Priya Raman <span class="faint">· CRM data owner</span></td><td>v2</td></tr>
           <tr><td class="mono">$.loan.internal_score</td><td class="fam">Loans API · LOANS</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td><span class="m">bucket</span><span class="prm">0 · 300 · 600 · 900</span></td><td>Sanjay Iyer <span class="faint">· LOANS data owner</span></td><td>v2</td></tr>
+          <tr><td class="mono">LOANS.APPLICANTS.CIBIL_SCORE</td><td class="fam">Oracle · LOANS</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td><span class="m">bucket</span><span class="prm">0 · 300 · 600 · 900</span></td><td>Sanjay Iyer <span class="faint">· LOANS data owner</span></td><td>v2</td></tr>
           <tr><td class="mono">CRM.CUSTOMERS.RISK_SCORE</td><td class="fam">Oracle · CRM</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td><span class="m">bucket</span><span class="prm">0 · 300 · 600 · 900</span></td><td>Priya Raman <span class="faint">· CRM data owner</span></td><td>v3</td></tr>
           <tr><td class="mono">LEDGER.TRANSACTIONS.COUNTERPARTY_REF</td><td class="fam">PostgreSQL · LEDGER</td><td><span class="chip teal">ACCOUNT_NUMBER</span></td><td><span class="m">fpe_digits</span></td><td>Tom Hargreaves <span class="faint">· LEDGER data owner</span></td><td>v3</td></tr>
           <tr><td class="mono">profiles.$.relationship.wallet_share_pct</td><td class="fam">MongoDB · CRM profiles</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td><span class="m">noise</span><span class="prm">percent 5</span></td><td>Priya Raman <span class="faint">· CRM data owner</span></td><td>v3</td></tr>
           <tr class="drafted"><td class="mono">LOANS.APPLICANTS.EMPLOYER_NAME</td><td class="fam">Oracle · LOANS</td><td><span class="chip teal">ORG_NAME</span></td><td><span class="m">det_token</span></td><td>Arjun Mehta <span class="faint">· privacy engineering</span></td><td><span class="chip amber">draft v4</span></td></tr>
         </tbody></table></div>
-        <div class="faint" style="font-size:12px;margin-top:10px">Declared after job <span class="mono">j_01K7…F2</span> failed its leakage sweep on Oct 9: sole proprietors trade under their own name, so 2 applicant names survived in EMPLOYER_NAME, which v3 keeps.</div>
+        <div class="faint" style="font-size:12px;margin-top:10px">CUSTOMER_ID is kept in API calls so callers can match a response to their own record; jobs tokenise it with the job group's key, so masked copies still join. EMPLOYER_NAME was declared after job <span class="mono">j_01K7…F2</span> failed its leakage sweep on Oct 9: sole proprietors trade under their own name, so 2 applicant names survived in EMPLOYER_NAME, which v3 keeps.</div>
       </section>
 
       <!-- RECOGNIZER BUILDER -->
@@ -376,15 +378,18 @@
           </div>
 
           <div id="diff-v3">
-            <div class="diff-head"><div><div class="t">v2 → v3 · last published change</div><div class="s">3 edits, 2 declarations · approved by Priya Raman (CRM data owner) for CHG-47950</div></div><button class="btn btn-sm" type="button">Download v3 YAML</button></div>
+            <div class="diff-head"><div><div class="t">v2 → v3 · last published change</div><div class="s">3 edits, 3 declarations · approved by Priya Raman (CRM data owner) for CHG-47950</div></div><button class="btn btn-sm" type="button">Download v3 YAML</button></div>
             <div class="diff" role="region" aria-label="Diff v2 to v3" tabindex="0">
 <div>detect:</div>
 <div class="del">  min_score: 0.55</div>
 <div class="add">  min_score: 0.6</div>
 <div>  declared_fields:</div>
+<div>    - { path: "CUSTOMER_ID", entity_type: CUSTOMER_ID, api: keep, jobs: fpe_digits }</div>
 <div>    - { path: "$.loan.internal_score", entity_type: BUSINESS_SENSITIVE }</div>
+<div>    - { path: "LOANS.APPLICANTS.CIBIL_SCORE", entity_type: BUSINESS_SENSITIVE }</div>
 <div class="add">    - { path: "CRM.CUSTOMERS.RISK_SCORE", entity_type: BUSINESS_SENSITIVE }</div>
 <div class="add">    - { path: "LEDGER.TRANSACTIONS.COUNTERPARTY_REF", entity_type: ACCOUNT_NUMBER }</div>
+<div class="add">    - { path: "profiles.$.relationship.wallet_share_pct", entity_type: BUSINESS_SENSITIVE }</div>
 <div>treat:</div>
 <div class="del">  POSTAL_CODE: { method: fpe_digits }</div>
 <div class="add">  POSTAL_CODE: { method: generalize, keep_chars: 3 }</div>
@@ -419,11 +424,13 @@
           </div>
 
           <div id="diff-v2" class="hidden">
-            <div class="diff-head"><div><div class="t">v1 → v2</div><div class="s">1 declaration · Sanjay Iyer for CHG-47102</div></div><button class="btn btn-sm" type="button">Download v2 YAML</button></div>
+            <div class="diff-head"><div><div class="t">v1 → v2</div><div class="s">3 declarations · Sanjay Iyer and Priya Raman for CHG-47102</div></div><button class="btn btn-sm" type="button">Download v2 YAML</button></div>
             <div class="diff" role="region" aria-label="Diff v1 to v2" tabindex="0">
 <div>detect:</div>
 <div class="add">  declared_fields:</div>
+<div class="add">    - { path: "CUSTOMER_ID", entity_type: CUSTOMER_ID, api: keep, jobs: fpe_digits }</div>
 <div class="add">    - { path: "$.loan.internal_score", entity_type: BUSINESS_SENSITIVE }</div>
+<div class="add">    - { path: "LOANS.APPLICANTS.CIBIL_SCORE", entity_type: BUSINESS_SENSITIVE }</div>
 <div>treat:</div>
 <div class="add">  BUSINESS_SENSITIVE: { method: bucket, ranges: [0, 300, 600, 900] }</div>
             </div>
@@ -546,7 +553,7 @@
   (function () {
     // [locator, entity, score, chipColour, method, params, reason, fpe?, reversible, fallbackWhenOn, fallbackWhy]
     var P = [
-      ['$.customer_id', 'CUSTOMER_ID', '1.00', 'teal', 'fpe_digits', '', 'policy:CUSTOMER_ID', 1, 'Yes', '', ''],
+      ['$.customer_id', 'CUSTOMER_ID', '1.00', 'teal', 'keep', 'API calls', 'declared:<wbr>CUSTOMER_ID', 0, '—', '', ''],
       ['$.full_name', 'PERSON_NAME', '0.93', 'amber', 'fpe_text', '', 'policy:PERSON_NAME', 1, 'Yes', '', ''],
       ['$.dob', 'DATE_OF_BIRTH', '0.95', 'amber', 'date_shift', 'window 365', 'policy:DATE_OF_BIRTH', 0, 'Yes', '', ''],
       ['$.tax_ids.in_pan', 'PAN_IN', '0.98', 'rose', 'fpe_text', '', 'policy:PAN_IN', 1, 'Yes', '', ''],

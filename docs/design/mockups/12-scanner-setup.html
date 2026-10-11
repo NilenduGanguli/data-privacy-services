@@ -69,9 +69,9 @@
   .tree { font-size: 12.5px; }
   .node { display: grid; grid-template-columns: 18px 20px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px 6px; border-radius: 8px; }
   .node:hover { background: var(--surface-2); }
-  .node .tg { width: 18px; height: 18px; border: 0; background: transparent; color: var(--ink-3); cursor: pointer; padding: 0; border-radius: 4px; font-size: 10px; display: grid; place-items: center; }
+  .node .tg { width: 18px; height: 18px; border: 0; background: transparent; color: var(--ink-3); cursor: pointer; padding: 0; border-radius: 4px; font-size: 11px; display: grid; place-items: center; }
   .node .tg[aria-expanded="true"] { transform: rotate(90deg); }
-  .node .st { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-size: 9.5px; font-weight: 800; }
+  .node .st { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 800; line-height: 1; }
   .st.ok { background: var(--emerald-soft); color: var(--emerald); border: 1px solid var(--emerald-border); }
   .st.run { background: var(--teal-soft); border: 1px solid var(--teal-border); } .st.run i { width: 6px; height: 6px; border-radius: 50%; background: var(--teal); animation: pulse 1.6s infinite; }
   .st.q { border: 1.5px dashed var(--border-strong); }
@@ -95,7 +95,7 @@
   .lr .t { color: var(--ink-3); }
   .lr .u { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
   .lr .n { font-family: var(--font); font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lr .chip { font-size: 10.5px; padding: 1px 7px; justify-self: start; }
+  .lr .chip { font-size: 11px; padding: 1px 7px; justify-self: start; }
   .lr.fresh { animation: fresh 1.2s ease-out; }
   @keyframes fresh { from { background: var(--teal-soft); } to { background: transparent; } }
   @media (prefers-reduced-motion: reduce) { .lr.fresh { animation: none; } }
@@ -118,7 +118,7 @@
   <span class="pill hide-sm"><span class="dot" style="background:var(--teal);box-shadow:0 0 0 3px var(--teal-soft)"></span>No submissions · POST interception on</span><button class="btn btn-sm hide-sm" type="button" onclick="toggleTheme()">Theme</button></header>
 <main class="page">
   <div class="page-head"><div><h1>New scan · onboarding-uat</h1><p>Set the target, scope and fill mode, then crawl. Pages move through crawl, classify and fill as they are found; open the parallel view at any time.</p></div>
-    <div class="head-actions"><button class="btn" type="button" id="stopBtn">Stop crawl</button><a class="btn btn-primary" href="04-ui-scanner.html">Open parallel view <span style="opacity:.75;font-weight:600" id="readyN">· 9 pages ready</span></a></div></div>
+    <div class="head-actions"><button class="btn" type="button" id="stopBtn">Stop crawl</button><a class="btn btn-primary" href="04-ui-scanner.html">Open parallel view <span style="font-weight:600" id="readyN">· 9 pages ready</span></a></div></div>
 
   <section class="nosubmit" aria-labelledby="nsT">
     <div class="ns-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/><path d="M9 9l6 6M15 9l-6 6"/></svg></div>
@@ -211,7 +211,7 @@
         <div class="stats">
           <div class="box"><div class="v">10</div><div class="l">forms found</div></div>
           <div class="box"><div class="v">180</div><div class="l">fields inventoried</div></div>
-          <div class="box"><div class="v">81</div><div class="l">personal data fields</div></div>
+          <div class="box"><div class="v">81</div><div class="l">personal data fields · 5 critical</div></div>
           <div class="box"><div class="v" style="color:var(--rose)">3</div><div class="l">risk flags so far</div></div>
         </div>
       </section>
@@ -220,25 +220,25 @@
         <div class="card-head"><div class="card-title" id="mapT">Crawl map</div>
           <div class="legend"><span><i style="background:var(--emerald)"></i>visited</span><span><i style="background:var(--teal)"></i>in progress</span><span><i style="background:transparent;border:1.5px dashed var(--border-strong)"></i>queued</span><span><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>skipped</span></div></div>
         <div class="tree" id="tree">
-          <div class="node"><button class="tg" type="button" aria-expanded="true" aria-label="Collapse /apply">▶</button><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/apply</a><span class="d">start</span></span><span class="m">1 form · 30 fields <span class="chip amber">PII 14</span></span></div>
+          <div class="node"><button class="tg" type="button" aria-expanded="true" aria-label="Collapse /apply">▶</button><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/apply</a><span class="d">start</span></span><span class="m">1 form · 30 fields <span class="chip amber">PII 14</span><span class="chip rose">1 crit.</span></span></div>
           <div class="kids">
-            <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/apply/identity</a><span class="d">d1</span></span><span class="m">1 form · 9 fields <span class="chip amber">PII 9</span><span class="chip rose">A1</span></span></div>
+            <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/apply/identity</a><span class="d">d1</span></span><span class="m">1 form · 9 fields <span class="chip amber">PII 9</span><span class="chip rose">2 crit.</span><span class="chip rose">A1</span></span></div>
             <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/apply/address</a><span class="d">d1</span></span><span class="m">1 form · 34 fields <span class="chip amber">PII 16</span><span class="chip teal">2 POST blocked</span></span></div>
             <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/apply/employment</a><span class="d">d1</span></span><span class="m">1 form · 25 fields <span class="chip amber">PII 7</span></span></div>
-            <div class="node"><span></span><span class="st run"><i></i></span><span class="p">/apply/card<span class="d">d1</span></span><span class="m">1 form · 14 fields · filling persona 7</span></div>
+            <div class="node"><span></span><span class="st run"><i></i></span><span class="p">/apply/card<span class="d">d1</span></span><span class="m">1 form · 14 fields · filling persona 1</span></div>
             <div class="node"><span></span><span class="st q"></span><span class="p">/apply/documents<span class="d">d1</span></span><span class="m">queued · file inputs are listed, never filled</span></div>
-            <div class="node"><span></span><span class="st ok">✓</span><span class="p">/apply/review<span class="d">d1</span></span><span class="m">no form · rendered PII <span class="chip amber">A2</span></span></div>
+            <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html#captures">/apply/review</a><span class="d">d1</span></span><span class="m">no form · rendered PII <span class="chip amber">A2</span></span></div>
           </div>
           <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/login</a><span class="d">d1</span></span><span class="m">1 form · 3 fields <span class="chip amber">PII 1</span></span></div>
-          <div class="node"><button class="tg" type="button" aria-expanded="true" aria-label="Collapse /profile">▶</button><span class="st ok">✓</span><span class="p">/profile<span class="d">d1</span></span><span class="m">no form · rendered PII <span class="chip amber">A3</span></span></div>
+          <div class="node"><button class="tg" type="button" aria-expanded="true" aria-label="Collapse /profile">▶</button><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html#captures">/profile</a><span class="d">d1</span></span><span class="m">no form · rendered PII <span class="chip amber">A3</span></span></div>
           <div class="kids">
             <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/profile/contact</a><span class="d">d2</span></span><span class="m">1 form · 30 fields <span class="chip amber">PII 11</span></span></div>
-            <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/profile/nominee</a><span class="d">d2</span></span><span class="m">1 form · 34 fields <span class="chip amber">PII 17</span></span></div>
+            <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/profile/nominee</a><span class="d">d2</span></span><span class="m">1 form · 34 fields <span class="chip amber">PII 17</span><span class="chip rose">1 crit.</span></span></div>
             <div class="node"><span></span><span class="st q"></span><span class="p">/profile/security<span class="d">d2</span></span><span class="m">queued</span></div>
           </div>
           <div class="node"><button class="tg" type="button" aria-expanded="true" aria-label="Collapse /accounts">▶</button><span class="st ok">✓</span><span class="p">/accounts<span class="d">d1</span></span><span class="m">no form</span></div>
           <div class="kids">
-            <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/accounts/statements</a><span class="d">d2</span></span><span class="m">1 form · 6 fields <span class="chip amber">PII 2</span></span></div>
+            <div class="node"><span></span><span class="st ok">✓</span><span class="p"><a href="04-ui-scanner.html">/accounts/statements</a><span class="d">d2</span></span><span class="m">1 form · 6 fields <span class="chip amber">PII 2</span><span class="chip rose">1 crit.</span></span></div>
             <div class="node"><span></span><span class="st ok">✓</span><span class="p">/accounts/statements/{month}<span class="d">d3</span></span><span class="m">6 pages · depth limit, links not followed</span></div>
           </div>
           <div class="node"><button class="tg" type="button" aria-expanded="false" aria-label="Expand /help">▶</button><span class="st ok">✓</span><span class="p">/help<span class="d">d1</span></span><span class="m">1 form in 13 pages <span class="chip amber">PII 4</span></span></div>
@@ -250,11 +250,11 @@
           <div class="node skipped"><span></span><span class="st skip">–</span><span class="p">/admin</span><span class="m"><span class="chip slate">deny list</span></span></div>
           <div class="node skipped"><span></span><span class="st skip">–</span><span class="p">https://cdn.bank-assets.internal</span><span class="m"><span class="chip slate">other origin</span></span></div>
         </div>
-        <div class="tree-foot"><span>Paths with forms open in the parallel view.</span><span>Risk flags: <b style="color:var(--rose)">A1</b> autocomplete on for Aadhaar and PAN · <b style="color:var(--amber)">A2</b> PII in a query string · <b style="color:var(--amber)">A3</b> full PAN rendered</span></div>
+        <div class="tree-foot"><span>Paths with forms open in the parallel view; pages that render personal data open their masked capture.</span><span>Risk flags: <b style="color:var(--rose)">A1</b> autocomplete on for Aadhaar and PAN · <b style="color:var(--amber)">A2</b> PII in a query string · <b style="color:var(--amber)">A3</b> full PAN rendered</span></div>
       </section>
 
       <section class="card" aria-labelledby="logT">
-        <div class="card-head"><div class="card-title" id="logT">Navigation log</div><span class="faint" style="font-size:12px">newest first · query values masked · every navigation is audited</span></div>
+        <div class="card-head"><div class="card-title" id="logT">Navigation log</div><span class="faint" style="font-size:12px">newest first · times in IST · query values masked · every navigation is audited</span></div>
         <div class="log" id="log" aria-live="polite">
           <div class="lr head"><span>Time</span><span>Event</span><span class="stc">Result</span><span>Target</span><span>Note</span></div>
         </div>
@@ -386,29 +386,29 @@
       return d;
     }
     var entries = [
-      ['14:06:12', 'fill', 'persona 7', '/apply/card', 'filling 14 fields'],
-      ['14:06:11', 'GET', '200', '/help/faq/cards', 'no form'],
-      ['14:06:10', 'POST', 'blocked', '/api/v2/address/autosave', 'from filled page /apply/address · interception'],
-      ['14:06:09', 'fill', 'captured', '/apply/address', 'persona 7 · 34 fields · 2 validation messages recorded'],
-      ['14:06:07', 'GET', '200', '/accounts/statements/2026-04', 'depth 3 · links not followed'],
-      ['14:06:05', 'GET', 'skipped', '/logout', 'deny list'],
-      ['14:06:04', 'GET', '200', '/profile/nominee', '1 form · 34 fields'],
-      ['14:06:01', 'POST', 'blocked', '/api/v2/address/autosave', 'from filled page /apply/address · interception'],
-      ['14:05:58', 'GET', '200', '/accounts/statements', '1 form · personal data in a table'],
-      ['14:05:55', 'GET', 'skipped', 'https://cdn.bank-assets.internal/app.js', 'other origin'],
-      ['14:05:52', 'fill', 'captured', '/apply/identity', 'persona 7 · 9 fields · all values accepted'],
-      ['14:05:49', 'GET', '302', '/apply/review?email=•••', 'to /apply/review · A2 PII in query string, value masked'],
-      ['14:05:44', 'POST', 'blocked', '/api/v2/telemetry/form-start', 'from filled page /apply/identity · interception']
+      ['15:13:12', 'fill', 'persona 1', '/apply/card', 'filling 14 fields'],
+      ['15:13:11', 'GET', '200', '/help/faq/cards', 'no form'],
+      ['15:13:10', 'POST', 'blocked', '/api/v2/address/autosave', 'from filled page /apply/address · interception'],
+      ['15:13:09', 'fill', 'captured', '/apply/address', 'persona 1 · 34 fields · 2 validation messages recorded'],
+      ['15:13:07', 'GET', '200', '/accounts/statements/2026-04', 'depth 3 · links not followed'],
+      ['15:13:05', 'GET', 'skipped', '/logout', 'deny list'],
+      ['15:13:04', 'GET', '200', '/profile/nominee', '1 form · 34 fields'],
+      ['15:13:01', 'POST', 'blocked', '/api/v2/address/autosave', 'from filled page /apply/address · interception'],
+      ['15:12:58', 'GET', '200', '/accounts/statements', '1 form · personal data in a table'],
+      ['15:12:55', 'GET', 'skipped', 'https://cdn.bank-assets.internal/app.js', 'other origin'],
+      ['15:12:52', 'fill', 'captured', '/apply/identity', 'persona 1 · 9 fields · all values accepted'],
+      ['15:12:49', 'GET', '302', '/apply/review?email=•••', 'to /apply/review · A2 PII in query string, value masked'],
+      ['15:12:44', 'POST', 'blocked', '/api/v2/telemetry/form-start', 'from filled page /apply/identity · interception']
     ];
     var log = document.getElementById('log');
     entries.forEach(function (e) { log.appendChild(row(e)); });
 
     // a few more live events, then the demo settles
     var upcoming = [
-      ['14:06:14', 'GET', '200', '/help/faq/accounts', 'no form', 1],
-      ['14:06:16', 'fill', 'captured', '/apply/card', 'persona 7 · 14 fields · 1 validation message recorded', 0, 'filled'],
-      ['14:06:18', 'POST', 'blocked', '/api/v2/card/prefill', 'from filled page /apply/card · interception', 0, 'blocked'],
-      ['14:06:19', 'GET', '200', '/profile/security', '1 form · 10 fields', 1]
+      ['15:13:14', 'GET', '200', '/help/faq/accounts', 'no form', 1],
+      ['15:13:16', 'fill', 'captured', '/apply/card', 'persona 1 · 14 fields · 1 validation message recorded', 0, 'filled'],
+      ['15:13:18', 'POST', 'blocked', '/api/v2/card/prefill', 'from filled page /apply/card · interception', 0, 'blocked'],
+      ['15:13:19', 'GET', '200', '/profile/security', '1 form · 10 fields', 1]
     ];
     var n = { visited: 31, queued: 7, filled: 9, blocked: 3, total: 66, sec: 252 };
     function tickClock() { n.sec++; var m = Math.floor(n.sec / 60), s = n.sec % 60; document.getElementById('runTxt').textContent = 'crawling · ' + m + ':' + (s < 10 ? '0' : '') + s; }

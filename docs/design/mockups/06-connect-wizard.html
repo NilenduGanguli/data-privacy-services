@@ -4,7 +4,7 @@
 <script>if (/(^|[?&])light(&|=|$)/.test(location.search)) document.documentElement.setAttribute('data-theme', 'light');</script>
 <style>
   .page h2:focus { outline: none; }
-  .btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; }
+  .btn[disabled], .btn[disabled]:hover { background: var(--surface-2); border-color: var(--border); color: var(--ink-3); opacity: 1; filter: none; cursor: not-allowed; transform: none; }
   .btn-warn { background: var(--amber); border-color: transparent; color: var(--ink-on-brand); }
   .btn-warn:hover { background: var(--amber); filter: brightness(1.06); }
   .callout.emerald { border-color: var(--emerald); background: var(--emerald-soft); }
@@ -74,7 +74,7 @@
   .checks { display: flex; flex-direction: column; }
   .ck { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
   .ck:last-child { border-bottom: 0; }
-  .ck .ic { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 10.5px; font-weight: 800; margin-top: 1px; border: 1px solid; }
+  .ck .ic { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 800; margin-top: 1px; border: 1px solid; }
   .ck.ok .ic { background: var(--emerald-soft); color: var(--emerald); border-color: var(--emerald-border); }
   .ck.bad .ic { background: var(--rose-soft); color: var(--rose); border-color: var(--rose-border); }
   .ck.warn .ic { background: var(--amber-soft); color: var(--amber); border-color: var(--amber-border); }
@@ -165,25 +165,25 @@
   }
 </style></head>
 <body><div class="shell"><nav class="sidebar"></nav><div class="main">
-<header class="topbar"><a class="crumb" href="07-jobs.html">Data sources &amp; jobs</a><span class="sep">/</span><span class="muted">New job</span><span class="muted mono hide-sm" style="font-size:12px">draft d_01K8C4M2V7</span><span class="topbar-spacer"></span>
-  <span class="pill hide-sm"><span class="dot"></span>Draft saved 14:38</span><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
+<header class="topbar"><a class="crumb" href="07-jobs.html">Data sources &amp; jobs</a><span class="sep">/</span><span class="muted">New job</span><span class="muted mono hide-sm" style="font-size:12px">j_01K6…ZT · awaiting review</span><span class="topbar-spacer"></span>
+  <span class="pill hide-sm"><span class="dot"></span>Draft saved 11:24</span><button class="btn btn-sm hide-sm" onclick="toggleTheme()">Theme</button></header>
 <main class="page">
-  <div class="page-head"><div><h1>New job</h1><p>Protect a table or collection in five steps. DPS reads only the discovery sample until you press Run job, and writes nothing before then.</p></div>
+  <div class="page-head"><div><h1>New job · LOANS.APPLICANTS</h1><p>Protect a table or collection in five steps. DPS reads only the discovery sample until you press Run job, and writes nothing before then.</p></div>
     <div class="head-actions"><a class="btn btn-ghost" href="07-jobs.html">Cancel</a><button class="btn" type="button">Save draft</button></div></div>
 
   <div class="card" style="padding:12px 14px"><nav class="wsteps" aria-label="Job steps">
-    <button class="step on" type="button" data-go="1" aria-current="step"><span class="n">1</span><span class="lbl"><span class="t">Connect</span><span class="sub">Oracle · crm-prod-ro</span></span></button><div class="step-sep"></div>
-    <button class="step" type="button" data-go="2"><span class="n">2</span><span class="lbl"><span class="t">Select data</span><span class="sub">1,948,210 rows · 22 columns</span></span></button><div class="step-sep"></div>
+    <button class="step on" type="button" data-go="1" aria-current="step"><span class="n">1</span><span class="lbl"><span class="t">Connect</span><span class="sub">Oracle · loans-prod</span></span></button><div class="step-sep"></div>
+    <button class="step" type="button" data-go="2"><span class="n">2</span><span class="lbl"><span class="t">Select data</span><span class="sub">642,318 rows · 22 columns</span></span></button><div class="step-sep"></div>
     <button class="step" type="button" data-go="3"><span class="n">3</span><span class="lbl"><span class="t">Discover</span><span class="sub">2,000 sampled · 3 to decide</span></span></button><div class="step-sep"></div>
-    <button class="step" type="button" data-go="4"><span class="n">4</span><span class="lbl"><span class="t">Target and write mode</span><span class="sub" id="sub4">Copy to CRM_MASKED</span></span></button><div class="step-sep"></div>
-    <button class="step" type="button" data-go="5"><span class="n">5</span><span class="lbl"><span class="t">Review and run</span><span class="sub" id="sub5">obfuscate · CHG-48213</span></span></button>
+    <button class="step" type="button" data-go="4"><span class="n">4</span><span class="lbl"><span class="t">Target and write mode</span><span class="sub" id="sub4">Copy to LOANS_MASKED</span></span></button><div class="step-sep"></div>
+    <button class="step" type="button" data-go="5"><span class="n">5</span><span class="lbl"><span class="t">Review and run</span><span class="sub" id="sub5">obfuscate · CHG-48190</span></span></button>
   </nav></div>
 
   <div class="wiz">
   <div>
   <!-- ============ STEP 1 · CONNECT ============ -->
   <section class="panel on" data-step="1" aria-labelledby="h1s">
-    <div class="panel-head"><h2 id="h1s">1 · Connect to the source</h2><p>Pick the engine and how DPS reaches it. The source is always read through a read-only session, and the job stores a secret name, never a password.</p></div>
+    <div class="panel-head"><h2 id="h1s">1 · Connect to the source</h2><p>Pick the engine and how DPS reaches it. Reads always run in read-only transactions, and the job stores a secret name, never a password.</p></div>
 
     <div class="card">
       <div class="card-head"><div class="card-title">Engine</div></div>
@@ -208,13 +208,13 @@
         <div class="seg" role="group" aria-label="How DPS connects"><button type="button" class="on" aria-pressed="true" data-show="cred-ref" data-hide="cred-inline">Secret reference</button><button type="button" aria-pressed="false" data-show="cred-inline" data-hide="cred-ref">Inline credentials (dev only)</button></div></div>
       <div id="cred-ref">
         <label class="lbl" for="secret">Secret name</label>
-        <input class="input mono" id="secret" value="dps/src/crm-prod-ro" spellcheck="false">
+        <input class="input mono" id="secret" value="dps/src/loans-prod" spellcheck="false">
         <div class="help">The job stores only this name. Workers read the secret from the mounted store when they start; it never appears in the console, the logs or the evidence pack.</div>
       </div>
       <div id="cred-inline" hidden>
         <div class="fgrid">
-          <div><label class="lbl" for="ihost">Host</label><input class="input mono" id="ihost" value="crm-dev-db.bank.internal" spellcheck="false"></div>
-          <div class="fgrid" style="grid-template-columns:110px minmax(0,1fr);gap:12px"><div><label class="lbl" for="iport">Port</label><input class="input mono" id="iport" value="2484"></div><div><label class="lbl" for="isvc">Service name</label><input class="input mono" id="isvc" value="CRMDEV" spellcheck="false"></div></div>
+          <div><label class="lbl" for="ihost">Host</label><input class="input mono" id="ihost" value="loans-dev-db.bank.internal" spellcheck="false"></div>
+          <div class="fgrid" style="grid-template-columns:110px minmax(0,1fr);gap:12px"><div><label class="lbl" for="iport">Port</label><input class="input mono" id="iport" value="2484"></div><div><label class="lbl" for="isvc">Service name</label><input class="input mono" id="isvc" value="LNSDEV" spellcheck="false"></div></div>
           <div><label class="lbl" for="iuser">Username</label><input class="input mono" id="iuser" value="dps_reader" spellcheck="false"></div>
           <div><label class="lbl" for="ipass">Password</label><input class="input mono" id="ipass" type="password" placeholder="Enter the password for dps_reader" autocomplete="off"></div>
         </div>
@@ -231,24 +231,24 @@
     <div class="card">
       <div class="card-head"><div class="card-title">Target connection</div><span class="faint" style="font-size:12px">used by Copy to a table</span></div>
       <label class="lbl" for="tsecret">Secret name</label>
-      <input class="input mono" id="tsecret" value="dps/tgt/crm-uat" spellcheck="false">
-      <div class="help">In place and Append write through a connection to the source database instead; you choose it in step 4.</div>
+      <input class="input mono" id="tsecret" value="dps/tgt/loans-uat" spellcheck="false">
+      <div class="help">In place and Append write through the source connection instead, and only after a typed confirmation in step 4.</div>
     </div>
 
     <div class="card" id="testcard">
       <div class="card-head"><div class="card-title">Test connection</div>
         <div class="rowx"><span class="chip emerald" id="test-chip">6 of 6 checks passed</span><button class="btn btn-sm" type="button" id="test-btn">Test again</button></div></div>
       <div class="checks" id="test-body">
-        <div class="cgroup"><span class="rowx"><span class="sub-title">Source</span><span class="mono">dps/src/crm-prod-ro</span></span><span class="faint" style="font-size:12px">Oracle Database 19c (19.21) · CRMPRD</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>Reachable over TLS</b><span class="d">TCPS to crm-prod-scan.bank.internal, service CRMPRD</span></span><span class="meta">38 ms</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>SELECT on CRM.CUSTOMERS</b><span class="d">4,102,377 rows by optimizer statistics (gathered Oct 10)</span></span><span class="meta">ok</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>No DML on source</b><span class="d">The account has no INSERT, UPDATE, DELETE or MERGE grants, so the read path cannot change source data</span></span><span class="meta">ok</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>Session tagged for audit</b><span class="d">module DPS, action discover, client id d_01K8C4M2V7</span></span><span class="meta">ok</span></div>
-        <div class="cgroup"><span class="rowx"><span class="sub-title">Target</span><span class="mono">dps/tgt/crm-uat</span></span><span class="faint" style="font-size:12px">Oracle Database 19c (19.21) · CRMUAT</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>CREATE TABLE in CRM_MASKED</b><span class="d">Needed when the target table is missing</span></span><span class="meta">ok</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>INSERT on CRM_MASKED</b><span class="d">38 GB free in tablespace CRM_MASKED_DATA</span></span><span class="meta">ok</span></div>
+        <div class="cgroup"><span class="rowx"><span class="sub-title">Source</span><span class="mono">dps/src/loans-prod</span></span><span class="faint" style="font-size:12px">Oracle Database 19c (19.21) · LNSPRD</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>Reachable over TLS</b><span class="d">TCPS to loans-prod-scan.bank.internal, service LNSPRD</span></span><span class="meta">41 ms</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>SELECT on LOANS.APPLICANTS</b><span class="d">1,873,512 rows by optimizer statistics (gathered Oct 10)</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>Reads are read-only</b><span class="d">Every read runs in SET TRANSACTION READ ONLY. The account can also UPDATE and INSERT; DPS uses that only for In place or Append, after a typed confirmation</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>Session tagged for audit</b><span class="d">module DPS, action discover, client id j_01K6…ZT</span></span><span class="meta">ok</span></div>
+        <div class="cgroup"><span class="rowx"><span class="sub-title">Target</span><span class="mono">dps/tgt/loans-uat</span></span><span class="faint" style="font-size:12px">Oracle Database 19c (19.21) · LNSUAT</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>CREATE TABLE in LOANS_MASKED</b><span class="d">Needed when the target table is missing</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>MERGE on LOANS_MASKED</b><span class="d">Upsert uses MERGE · 24 GB free in tablespace LOANS_MASKED_DATA</span></span><span class="meta">ok</span></div>
       </div>
-      <div class="faint" style="font-size:12px;margin-top:8px" id="test-time">Tested at 14:31:07 · 412 ms · no rows were read</div>
+      <div class="faint" style="font-size:12px;margin-top:8px" id="test-time">Tested at 11:19:07 · 412 ms · no rows were read</div>
     </div>
 
     <div class="wfoot"><span class="hint">Step 1 of 5</span><button class="btn btn-primary" type="button" data-go="2">Next: Select data</button></div>
@@ -260,9 +260,9 @@
 
     <div class="card">
       <div class="fgrid">
-        <div><label class="lbl" for="owner">Owner</label><div class="sel"><select class="input" id="owner"><option>CRM</option><option>CRM_ARCHIVE</option><option>LOANS</option></select></div></div>
-        <div><label class="lbl" for="table">Table</label><div class="sel"><select class="input" id="table"><option>CUSTOMERS</option><option>CUSTOMER_ADDRESSES</option><option>KYC_REVIEWS</option><option>RM_INTERACTIONS</option></select></div></div>
-        <div class="full kv">4,102,377 rows · 22 columns · primary key <b class="mono">CUSTOMER_ID NUMBER(12)</b> · 3.1 GB<div class="help">For MongoDB you pick a database and a collection here.</div></div>
+        <div><label class="lbl" for="owner">Owner</label><div class="sel"><select class="input" id="owner"><option>LOANS</option><option>LOANS_ARCHIVE</option><option>CRM</option></select></div></div>
+        <div><label class="lbl" for="table">Table</label><div class="sel"><select class="input" id="table"><option>APPLICANTS</option><option>CREDIT_DECISIONS</option><option>COLLATERAL</option><option>REPAYMENT_SCHEDULE</option></select></div></div>
+        <div class="full kv">1,873,512 rows · 22 columns · primary key <b class="mono">APPLICATION_ID NUMBER(14)</b> · 1.4 GB<div class="help">For MongoDB you pick a database and a collection here.</div></div>
       </div>
     </div>
 
@@ -271,31 +271,31 @@
         <div class="seg" role="group" aria-label="Selection type"><button type="button" class="on" aria-pressed="true" data-show="sel-where" data-hide="sel-query">WHERE expression</button><button type="button" aria-pressed="false" data-show="sel-query" data-hide="sel-where">Read-only SELECT</button></div></div>
 
       <div id="sel-where">
-        <label class="lbl" for="where">WHERE expression on CRM.CUSTOMERS</label>
-        <textarea class="input" id="where" rows="3" spellcheck="false">CREATED_AT &gt;= DATE '2025-01-01'
-AND COUNTRY_CODE IN ('IN', 'US', 'GB', 'MX')</textarea>
+        <label class="lbl" for="where">WHERE expression on LOANS.APPLICANTS</label>
+        <textarea class="input" id="where" rows="3" spellcheck="false">CREATED_AT &gt;= DATE '2025-04-01'
+AND APPLICATION_STATUS &lt;&gt; 'WITHDRAWN'</textarea>
         <div class="between" style="margin-top:12px"><span class="chip emerald">Valid · 6 of 6 checks</span><button class="btn btn-sm" type="button">Check again</button></div>
         <div class="checks" style="margin-top:6px">
           <div class="ck ok"><span class="ic">✓</span><span><b>One statement</b></span><span class="meta">ok</span></div>
           <div class="ck ok"><span class="ic">✓</span><span><b>SELECT only</b><span class="d">No INSERT, UPDATE, DELETE, MERGE or DDL</span></span><span class="meta">ok</span></div>
           <div class="ck ok"><span class="ic">✓</span><span><b>No INTO, procedure calls, database links or FOR UPDATE</b></span><span class="meta">ok</span></div>
-          <div class="ck ok"><span class="ic">✓</span><span><b>Identifiers validated</b><span class="d mono">CRM · CUSTOMERS · CREATED_AT · COUNTRY_CODE</span></span><span class="meta">4</span></div>
-          <div class="ck ok"><span class="ic">✓</span><span><b>Literals bound as parameters</b><span class="d">5 values become :p1 to :p5</span></span><span class="meta">5</span></div>
-          <div class="ck ok"><span class="ic">✓</span><span><b>Keyset-able</b><span class="d">Reads page by CUSTOMER_ID, so a restart resumes where it stopped</span></span><span class="meta">ok</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Identifiers validated</b><span class="d mono">LOANS · APPLICANTS · CREATED_AT · APPLICATION_STATUS</span></span><span class="meta">4</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Literals bound as parameters</b><span class="d">2 values become :p1 and :p2</span></span><span class="meta">2</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Keyset-able</b><span class="d">Reads page by APPLICATION_ID, so a restart resumes where it stopped</span></span><span class="meta">ok</span></div>
         </div>
         <div class="lbl" style="margin-top:12px">Runs as</div>
-        <div class="pane">SELECT … FROM "CRM"."CUSTOMERS"
-WHERE "CREATED_AT" &gt;= :p1 AND "COUNTRY_CODE" IN (:p2, :p3, :p4, :p5)
-ORDER BY "CUSTOMER_ID"</div>
-        <div class="kv" style="margin-top:10px"><b>1,948,210 rows</b> match · IN 1,186,402 · US 421,775 · GB 230,118 · MX 109,915 <span class="faint">· counted at 14:33 in 1.8 s</span></div>
+        <div class="pane">SELECT … FROM "LOANS"."APPLICANTS"
+WHERE "CREATED_AT" &gt;= :p1 AND "APPLICATION_STATUS" &lt;&gt; :p2
+ORDER BY "APPLICATION_ID"</div>
+        <div class="kv" style="margin-top:10px"><b>642,318 rows</b> match · personal 288,904 · home 141,206 · auto 97,431 · two-wheeler 64,880 · gold 49,897 <span class="faint">· counted at 11:21 in 0.9 s</span></div>
       </div>
 
       <div id="sel-query" hidden>
         <label class="lbl" for="query">Read-only SELECT</label>
-        <textarea class="input" id="query" rows="7" spellcheck="false">SELECT c.CUSTOMER_ID, c.FULL_NAME, c.NATIONAL_ID, c.EMAIL, c.MOBILE
-FROM CRM.CUSTOMERS c
-JOIN CRM.KYC_REVIEWS k ON k.CUSTOMER_ID = c.CUSTOMER_ID
-WHERE k.REVIEW_STATUS = 'PENDING'
+        <textarea class="input" id="query" rows="7" spellcheck="false">SELECT a.APPLICATION_ID, a.APPLICANT_NAME, a.PAN, a.MOBILE
+FROM LOANS.APPLICANTS a
+JOIN LOANS.CREDIT_DECISIONS d ON d.APPLICATION_ID = a.APPLICATION_ID
+WHERE d.DECISION = 'REFER'
 FOR UPDATE</textarea>
         <div class="between" style="margin-top:12px"><span class="chip rose">Not accepted · 1 problem</span><button class="btn btn-sm" type="button">Check again</button></div>
         <div class="callout rose" style="margin-top:10px;font-size:12.5px"><b>FOR UPDATE is not allowed (line 5).</b> DPS never locks source rows, so it would block your application's writes for the length of the job. Delete line 5 and check again.</div>
@@ -303,8 +303,8 @@ FOR UPDATE</textarea>
           <div class="ck ok"><span class="ic">✓</span><span><b>One statement</b></span><span class="meta">ok</span></div>
           <div class="ck ok"><span class="ic">✓</span><span><b>SELECT only</b></span><span class="meta">ok</span></div>
           <div class="ck bad"><span class="ic">✕</span><span><b>No INTO, procedure calls, database links or FOR UPDATE</b><span class="d">FOR UPDATE found on line 5</span></span><span class="meta">failed</span></div>
-          <div class="ck ok"><span class="ic">✓</span><span><b>Identifiers validated</b><span class="d mono">CRM · CUSTOMERS · KYC_REVIEWS · 6 columns</span></span><span class="meta">8</span></div>
-          <div class="ck ok"><span class="ic">✓</span><span><b>Keyset-able</b><span class="d">on c.CUSTOMER_ID</span></span><span class="meta">ok</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Identifiers validated</b><span class="d mono">LOANS · APPLICANTS · CREDIT_DECISIONS · 5 columns</span></span><span class="meta">8</span></div>
+          <div class="ck ok"><span class="ic">✓</span><span><b>Keyset-able</b><span class="d">on a.APPLICATION_ID</span></span><span class="meta">ok</span></div>
         </div>
       </div>
     </div>
@@ -312,26 +312,26 @@ FOR UPDATE</textarea>
     <div class="card">
       <div class="card-head"><div class="card-title">Columns <span class="faint" id="colcount">· 22 of 22</span></div><div class="rowx"><button class="btn btn-sm" type="button" id="cols-all">Select all</button><button class="btn btn-sm btn-ghost" type="button" id="cols-none">Clear</button></div></div>
       <div class="cols" id="cols">
-        <label class="colpick"><input type="checkbox" checked disabled><span class="mono">CUSTOMER_ID</span><span class="ty">key · always read</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">FULL_NAME</span><span class="ty">VARCHAR2(120)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">NATIONAL_ID</span><span class="ty">VARCHAR2(18)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">TAX_ID</span><span class="ty">CHAR(10)</span></label>
+        <label class="colpick"><input type="checkbox" checked disabled><span class="mono">APPLICATION_ID</span><span class="ty">key · always read</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">CUSTOMER_ID</span><span class="ty">NUMBER(12)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">APPLICANT_NAME</span><span class="ty">VARCHAR2(120)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">PAN</span><span class="ty">CHAR(10)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">AADHAAR_NO</span><span class="ty">VARCHAR2(14)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">MOBILE</span><span class="ty">VARCHAR2(16)</span></label>
         <label class="colpick"><input type="checkbox" checked><span class="mono">EMAIL</span><span class="ty">VARCHAR2(254)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">MOBILE</span><span class="ty">VARCHAR2(20)</span></label>
         <label class="colpick"><input type="checkbox" checked><span class="mono">DOB</span><span class="ty">DATE</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">ADDR_LINE1</span><span class="ty">VARCHAR2(200)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">PIN_CODE</span><span class="ty">VARCHAR2(10)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">COUNTRY_CODE</span><span class="ty">CHAR(2)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">STATE_CODE</span><span class="ty">VARCHAR2(8)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">RISK_SCORE</span><span class="ty">NUMBER(4)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">SEGMENT</span><span class="ty">VARCHAR2(16)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">KYC_STATUS</span><span class="ty">VARCHAR2(12)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">BRANCH_CODE</span><span class="ty">VARCHAR2(11)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">RM_NOTES</span><span class="ty">CLOB</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">PREF_LANG</span><span class="ty">VARCHAR2(5)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">CHANNEL</span><span class="ty">VARCHAR2(12)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">ACCOUNT_COUNT</span><span class="ty">NUMBER(3)</span></label>
-        <label class="colpick"><input type="checkbox" checked><span class="mono">CUSTOMER_STATUS</span><span class="ty">VARCHAR2(10)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">RESI_ADDRESS</span><span class="ty">VARCHAR2(240)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">PIN_CODE</span><span class="ty">VARCHAR2(6)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">EMPLOYER_NAME</span><span class="ty">VARCHAR2(150)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">BANK_ACCOUNT_NO</span><span class="ty">VARCHAR2(18)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">IFSC</span><span class="ty">CHAR(11)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">MONTHLY_INCOME</span><span class="ty">NUMBER(12,2)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">CIBIL_SCORE</span><span class="ty">NUMBER(3)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">LOAN_PRODUCT</span><span class="ty">VARCHAR2(20)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">LOAN_AMOUNT</span><span class="ty">NUMBER(12,2)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">TENURE_MONTHS</span><span class="ty">NUMBER(3)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">APPLICATION_STATUS</span><span class="ty">VARCHAR2(12)</span></label>
+        <label class="colpick"><input type="checkbox" checked><span class="mono">UNDERWRITER_NOTES</span><span class="ty">CLOB</span></label>
         <label class="colpick"><input type="checkbox" checked><span class="mono">CREATED_AT</span><span class="ty">TIMESTAMP(6)</span></label>
         <label class="colpick"><input type="checkbox" checked><span class="mono">UPDATED_AT</span><span class="ty">TIMESTAMP(6)</span></label>
       </div>
@@ -341,9 +341,9 @@ FOR UPDATE</textarea>
     <div class="card">
       <div class="card-head"><div class="card-title">Limits</div></div>
       <div class="fgrid c3">
-        <div><label class="lbl" for="maxrows">Max rows</label><input class="input mono" id="maxrows" placeholder="No limit" inputmode="numeric"><div class="help">Leave empty to read all 1,948,210 matching rows.</div></div>
+        <div><label class="lbl" for="maxrows">Max rows</label><input class="input mono" id="maxrows" placeholder="No limit" inputmode="numeric"><div class="help">Leave empty to read all 642,318 matching rows.</div></div>
         <div><label class="lbl" for="sample">Discovery sample</label><input class="input mono" id="sample" value="2,000" inputmode="numeric"><div class="help">Drawn with Oracle SAMPLE. Values stay inside the worker.</div></div>
-        <div><label class="lbl" for="par">Parallelism</label><div class="sel"><select class="input" id="par"><option>8 partitions by CUSTOMER_ID range</option><option>4 partitions by CUSTOMER_ID range</option><option>16 partitions by ROWID range</option></select></div><div class="help">Checkpoint after every 50,000 committed rows.</div></div>
+        <div><label class="lbl" for="par">Parallelism</label><div class="sel"><select class="input" id="par"><option>8 partitions by APPLICATION_ID range</option><option>4 partitions by APPLICATION_ID range</option><option>16 partitions by ROWID range</option></select></div><div class="help">Checkpoint after every 50,000 committed rows.</div></div>
       </div>
     </div>
 
@@ -352,72 +352,72 @@ FOR UPDATE</textarea>
 
   <!-- ============ STEP 3 · DISCOVER ============ -->
   <section class="panel" data-step="3" aria-labelledby="h3s">
-    <div class="panel-head"><h2 id="h3s">3 · Discover</h2><p>DPS sampled the selection, ran the detectors and suggests a method for every column. You accept or change each suggestion in the review table; the accepted result becomes the run policy.</p></div>
+    <div class="panel-head"><h2 id="h3s">3 · Discover</h2><p>DPS sampled the selection, ran the detectors and suggests a method for every column. Three columns need your decision before the job can run; the accepted result becomes the run policy.</p></div>
 
     <div class="card">
-      <div class="card-head"><div class="card-title">Sampled 2,000 of 1,948,210 rows in 3.4 s</div><span class="chip emerald">sample complete</span></div>
+      <div class="card-head"><div class="card-title">Sampled 2,000 of 642,318 rows in 2.1 s</div><span class="chip emerald">sample complete</span></div>
       <div class="kv">Detectors: <b>structural</b> · <b>patterns and checksums</b> · <b>NER</b> on 2 text columns · LLM labelling <b>off</b> · <b style="color:var(--emerald)">0</b> raw values sent to the LLM</div>
-      <div class="dist" role="img" aria-label="22 columns: 2 critical, 7 sensitive, 2 declared, 11 kept">
-        <i style="flex:2;background:var(--rose)"></i><i style="flex:7;background:var(--amber)"></i><i style="flex:2;background:var(--teal)"></i><i style="flex:11;background:var(--surface-3)"></i>
+      <div class="dist" role="img" aria-label="22 columns: 3 critical, 8 sensitive, 2 declared, 9 kept">
+        <i style="flex:3;background:var(--rose)"></i><i style="flex:8;background:var(--amber)"></i><i style="flex:2;background:var(--teal)"></i><i style="flex:9;background:var(--surface-3)"></i>
       </div>
       <div class="counts">
-        <div class="cbox"><div class="l"><i style="background:var(--rose)"></i>Critical</div><div class="v">2</div><div class="s">government IDs</div></div>
-        <div class="cbox"><div class="l"><i style="background:var(--amber)"></i>Sensitive</div><div class="v">7</div><div class="s">contact, identity, free text</div></div>
-        <div class="cbox"><div class="l"><i style="background:var(--teal)"></i>Declared</div><div class="v">2</div><div class="s">named by the CRM owner</div></div>
-        <div class="cbox"><div class="l"><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>Kept</div><div class="v">11</div><div class="s">not personal data</div></div>
+        <div class="cbox"><div class="l"><i style="background:var(--rose)"></i>Critical</div><div class="v">3</div><div class="s">government IDs, account number</div></div>
+        <div class="cbox"><div class="l"><i style="background:var(--amber)"></i>Sensitive</div><div class="v">8</div><div class="s">contact, identity, employer, free text</div></div>
+        <div class="cbox"><div class="l"><i style="background:var(--teal)"></i>Declared</div><div class="v">2</div><div class="s">in Policies › Declared fields</div></div>
+        <div class="cbox"><div class="l"><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>Kept</div><div class="v">9</div><div class="s">not personal data</div></div>
       </div>
     </div>
 
     <div class="card">
-      <div class="card-head"><div class="card-title">Column heat-map · CRM.CUSTOMERS</div><div class="legend"><span><i style="background:var(--rose)"></i>critical</span><span><i style="background:var(--amber)"></i>sensitive</span><span><i style="background:var(--teal)"></i>declared</span><span><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>kept</span></div></div>
+      <div class="card-head"><div class="card-title">Column heat-map · LOANS.APPLICANTS</div><div class="legend"><span><i style="background:var(--rose)"></i>critical</span><span><i style="background:var(--amber)"></i>sensitive</span><span><i style="background:var(--teal)"></i>declared</span><span><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>kept</span></div></div>
       <div class="hm">
-        <div class="cell decl"><div class="cn">CUSTOMER_ID</div><div class="ce"><span>CUSTOMER_ID · key</span><span>1.00</span></div></div>
-        <div class="cell sens"><div class="cn">FULL_NAME</div><div class="ce"><span>PERSON_NAME</span><span>0.96</span></div></div>
-        <div class="cell crit"><div class="cn">NATIONAL_ID</div><div class="ce"><span>4 ID types</span><span>0.99</span></div></div>
-        <div class="cell crit"><div class="cn">TAX_ID</div><div class="ce"><span>PAN_IN · IN rows</span><span>0.98</span></div></div>
+        <div class="cell decl"><div class="cn">CUSTOMER_ID</div><div class="ce"><span>CRM customer key</span><span>1.00</span></div></div>
+        <div class="cell"><div class="cn">APPLICATION_ID</div><div class="ce"><span>kept · primary key</span><span>—</span></div></div>
+        <div class="cell sens"><div class="cn">APPLICANT_NAME</div><div class="ce"><span>PERSON_NAME</span><span>0.97</span></div></div>
+        <div class="cell crit"><div class="cn">PAN</div><div class="ce"><span>PAN_IN</span><span>0.99</span></div></div>
+        <div class="cell crit"><div class="cn">AADHAAR_NO</div><div class="ce"><span>AADHAAR</span><span>0.99</span></div></div>
+        <div class="cell sens"><div class="cn">MOBILE</div><div class="ce"><span>PHONE</span><span>0.98</span></div></div>
         <div class="cell sens"><div class="cn">EMAIL</div><div class="ce"><span>EMAIL</span><span>0.99</span></div></div>
-        <div class="cell sens"><div class="cn">MOBILE</div><div class="ce"><span>PHONE · 4 regions</span><span>0.97</span></div></div>
-        <div class="cell sens"><div class="cn">DOB</div><div class="ce"><span>DATE_OF_BIRTH</span><span>0.95</span></div></div>
-        <div class="cell sens"><div class="cn">ADDR_LINE1</div><div class="ce"><span>STREET_ADDRESS</span><span>0.90</span></div></div>
-        <div class="cell sens"><div class="cn">PIN_CODE</div><div class="ce"><span>POSTAL_CODE</span><span>0.93</span></div></div>
-        <div class="cell"><div class="cn">COUNTRY_CODE</div><div class="ce"><span>kept · 4 values</span><span>—</span></div></div>
-        <div class="cell"><div class="cn">STATE_CODE</div><div class="ce"><span>kept · 61 values</span><span>—</span></div></div>
-        <div class="cell decl"><div class="cn">RISK_SCORE</div><div class="ce"><span>BUSINESS_SENSITIVE</span><span></span></div></div>
-        <div class="cell"><div class="cn">SEGMENT</div><div class="ce"><span>kept · 4 values</span><span>—</span></div></div>
-        <div class="cell"><div class="cn">KYC_STATUS</div><div class="ce"><span>kept · 5 values</span><span>—</span></div></div>
-        <div class="cell"><div class="cn">BRANCH_CODE</div><div class="ce"><span>kept · bank branch</span><span>—</span></div></div>
-        <div class="cell sens"><div class="cn">RM_NOTES</div><div class="ce"><span>FREE_TEXT · mixed</span><span>0.84</span></div></div>
-        <div class="cell"><div class="cn">PREF_LANG</div><div class="ce"><span>kept · 7 values</span><span>—</span></div></div>
-        <div class="cell"><div class="cn">CHANNEL</div><div class="ce"><span>kept · 5 values</span><span>—</span></div></div>
-        <div class="cell"><div class="cn">ACCOUNT_COUNT</div><div class="ce"><span>kept · numeric</span><span>—</span></div></div>
-        <div class="cell"><div class="cn">CUSTOMER_STATUS</div><div class="ce"><span>kept · 3 values</span><span>—</span></div></div>
+        <div class="cell sens"><div class="cn">DOB</div><div class="ce"><span>DATE_OF_BIRTH</span><span>0.96</span></div></div>
+        <div class="cell sens"><div class="cn">RESI_ADDRESS</div><div class="ce"><span>STREET_ADDRESS</span><span>0.91</span></div></div>
+        <div class="cell sens"><div class="cn">PIN_CODE</div><div class="ce"><span>POSTAL_CODE</span><span>0.94</span></div></div>
+        <div class="cell sens"><div class="cn">EMPLOYER_NAME</div><div class="ce"><span>ORG_NAME · mixed</span><span>0.71</span></div></div>
+        <div class="cell crit"><div class="cn">BANK_ACCOUNT_NO</div><div class="ce"><span>ACCOUNT_NUMBER</span><span>0.74</span></div></div>
+        <div class="cell"><div class="cn">IFSC</div><div class="ce"><span>kept · branch code</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">MONTHLY_INCOME</div><div class="ce"><span>kept · numeric</span><span>—</span></div></div>
+        <div class="cell decl"><div class="cn">CIBIL_SCORE</div><div class="ce"><span>BUSINESS_SENSITIVE</span><span></span></div></div>
+        <div class="cell"><div class="cn">LOAN_PRODUCT</div><div class="ce"><span>kept · 5 values</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">LOAN_AMOUNT</div><div class="ce"><span>kept · numeric</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">TENURE_MONTHS</div><div class="ce"><span>kept · numeric</span><span>—</span></div></div>
+        <div class="cell"><div class="cn">APPLICATION_STATUS</div><div class="ce"><span>kept · 6 values</span><span>—</span></div></div>
+        <div class="cell sens"><div class="cn">UNDERWRITER_NOTES</div><div class="ce"><span>FREE_TEXT · mixed</span><span>0.82</span></div></div>
         <div class="cell"><div class="cn">CREATED_AT</div><div class="ce"><span>kept · timestamp</span><span>—</span></div></div>
         <div class="cell"><div class="cn">UPDATED_AT</div><div class="ce"><span>kept · timestamp</span><span>—</span></div></div>
       </div>
       <div class="between" style="margin-top:14px">
-        <span class="faint" style="font-size:12px">Confidence is the combined detector score on the sample. Examples in the review table are masked.</span>
-        <a class="btn btn-sm" href="03-data-sources.html">Open the full review table (22 columns)</a>
+        <span class="faint" style="font-size:12px">Confidence is the combined detector score on the sample. Examples shown to reviewers are masked.</span>
+        <a class="btn btn-sm" href="#decide">Go to the 3 decisions</a>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="decide">
       <div class="card-head"><div class="card-title">Needs a decision</div><span class="chip amber">3 columns</span></div>
       <div class="decide">
-        <span class="mono">NATIONAL_ID</span>
-        <div><div class="why">Four ID types in one column: AADHAAR 1,214 · SSN 431 · CURP 236 · NINO 119 of 2,000 sampled rows.</div><div class="sug">Suggested: detect the type per value; fpe_digits for Aadhaar and SSN, fpe_text for CURP and NINO.</div></div>
+        <span class="mono">EMPLOYER_NAME</span>
+        <div><div class="why">Organisation names in 1,786 of 2,000 sampled values. 214 look like a person's name: sole proprietors trade under their own name. Policy v3 keeps this column, and job j_01K7…F2 leaked 2 such names on 9 Oct.</div><div class="sug">Suggested: det_token on every value, as draft v4 declares EMPLOYER_NAME as ORG_NAME. Reports that group by employer see tokens.</div></div>
         <button class="btn btn-sm" type="button" data-accept>Accept</button>
       </div>
       <div class="decide">
-        <span class="mono">PIN_CODE</span>
-        <div><div class="why">Indian PIN and US ZIP codes have fewer than 10⁶ possible values, so format-preserving encryption would be easy to reverse.</div><div class="sug">Suggested: generalize to the first 3 characters (one-way).</div></div>
+        <span class="mono">BANK_ACCOUNT_NO</span>
+        <div><div class="why">9 to 18 digits with no check digit, so the pattern alone also matches loan and reference numbers. The IFSC in the same row confirms an Indian bank account in 1,994 of 2,000 sampled rows.</div><div class="sug">Suggested: treat as ACCOUNT_NUMBER (critical) with fpe_digits, last 4 kept. Accounts shorter than 10 digits run as det_token, because fewer than 10⁶ values would be easy to reverse.</div></div>
         <button class="btn btn-sm" type="button" data-accept>Accept</button>
       </div>
       <div class="decide">
-        <span class="mono">RM_NOTES</span>
-        <div><div class="why">Free text with names, phone numbers or card last-4 in 38% of sampled rows.</div><div class="sug">Suggested: text pipeline with NER on the CLOB; offsets counted in UTF-16 units.</div></div>
+        <span class="mono">UNDERWRITER_NOTES</span>
+        <div><div class="why">Free text with names, PAN or phone numbers in 41% of sampled rows.</div><div class="sug">Suggested: text pipeline with NER on the CLOB; offsets counted in UTF-16 units.</div></div>
         <button class="btn btn-sm" type="button" data-accept>Accept</button>
       </div>
-      <div class="callout" style="margin-top:12px;font-size:12px">Accepted choices are saved as classification snapshot <span class="mono">snap_01K8C4WQ9T</span>. It becomes the run policy and goes into the evidence pack.</div>
+      <div class="callout" style="margin-top:12px;font-size:12px">Accepted choices are saved as classification snapshot <span class="mono">snap_01K6RZ4Q9T</span>. It becomes the run policy and goes into the evidence pack.</div>
     </div>
 
     <div class="wfoot"><button class="btn" type="button" data-go="2">Back</button><button class="btn btn-primary" type="button" data-go="4">Next: Target and write mode</button></div>
@@ -425,21 +425,21 @@ FOR UPDATE</textarea>
 
   <!-- ============ STEP 4 · TARGET AND WRITE MODE ============ -->
   <section class="panel" data-step="4" aria-labelledby="h4s">
-    <div class="panel-head"><h2 id="h4s">4 · Target and write mode</h2><p>Choose where protected rows go. Copy to a table and Export files leave the source untouched. In place and Append change CRM.CUSTOMERS and ask you to confirm first.</p></div>
+    <div class="panel-head"><h2 id="h4s">4 · Target and write mode</h2><p>Choose where protected rows go. Copy to a table and Export files leave the source untouched. In place and Append change LOANS.APPLICANTS and ask you to confirm first.</p></div>
 
     <div class="choices c2" role="radiogroup" aria-label="Write mode">
       <label class="choice"><input type="radio" name="wm" value="in_place"><span class="radio"></span>
         <span class="ct">In place <span class="chip rose">changes source rows</span></span>
-        <span class="cd">Updates the 1,948,210 selected rows in CRM.CUSTOMERS by primary key, column by column, in committed batches.</span>
-        <span class="cm">For masking a restored copy of production where it sits</span></label>
+        <span class="cd">Updates the 642,318 selected rows in LOANS.APPLICANTS by primary key, column by column, in committed batches.</span>
+        <span class="cm">Meant for a restored copy. On a production connection it also needs the admin scope.</span></label>
       <label class="choice"><input type="radio" name="wm" value="append"><span class="radio"></span>
-        <span class="ct">Append new rows <span class="chip slate">adds rows to source</span></span>
-        <span class="cd">Inserts transformed copies of the selected rows into CRM.CUSTOMERS or a table you name. Existing rows are not changed.</span>
+        <span class="ct">Append new rows <span class="chip amber">adds rows to source</span></span>
+        <span class="cd">Inserts transformed copies of the selected rows into LOANS.APPLICANTS or a table you name. Existing rows are not changed.</span>
         <span class="cm">Needs a primary-key strategy</span></label>
       <label class="choice"><input type="radio" name="wm" value="table" checked><span class="radio"></span>
         <span class="ct">Copy to a table <span class="chip slate">source unchanged</span></span>
         <span class="cd">Loads protected rows into a table in another schema, created from the source definition if it is missing.</span>
-        <span class="cm">Truncate and insert, or upsert on the primary key</span></label>
+        <span class="cm">Upsert on the primary key, or truncate and insert</span></label>
       <label class="choice"><input type="radio" name="wm" value="files"><span class="radio"></span>
         <span class="ct">Export files <span class="chip slate">source unchanged</span></span>
         <span class="cd">Writes CSV, Parquet or JSONL to S3 or a PVC path, with a manifest of files, row counts and checksums.</span>
@@ -448,18 +448,18 @@ FOR UPDATE</textarea>
 
     <!-- options: copy to a table -->
     <div class="opts" id="opt-table">
-      <div class="card-head"><div class="card-title">Copy to a table</div><span class="faint" style="font-size:12px">target connection dps/tgt/crm-uat</span></div>
+      <div class="card-head"><div class="card-title">Copy to a table</div><span class="faint" style="font-size:12px">target connection dps/tgt/loans-uat</span></div>
       <div class="fgrid">
-        <div><label class="lbl" for="tschema">Destination schema</label><input class="input mono" id="tschema" value="CRM_MASKED" spellcheck="false"></div>
-        <div><label class="lbl" for="ttable">Destination table</label><input class="input mono" id="ttable" value="CUSTOMERS" spellcheck="false"></div>
-        <div><span class="lbl">Load</span><div class="seg" role="group" aria-label="Load method"><button type="button" class="on" aria-pressed="true" data-show="load-ti" data-hide="load-up">Truncate and insert</button><button type="button" aria-pressed="false" data-show="load-up" data-hide="load-ti">Upsert on CUSTOMER_ID</button></div></div>
+        <div><label class="lbl" for="tschema">Destination schema</label><input class="input mono" id="tschema" value="LOANS_MASKED" spellcheck="false"></div>
+        <div><label class="lbl" for="ttable">Destination table</label><input class="input mono" id="ttable" value="APPLICANTS" spellcheck="false"></div>
+        <div><span class="lbl">Load</span><div class="seg" role="group" aria-label="Load method"><button type="button" class="on" aria-pressed="true" data-show="load-up" data-hide="load-ti" data-load="upsert">Upsert on APPLICATION_ID</button><button type="button" aria-pressed="false" data-show="load-ti" data-hide="load-up" data-load="truncate_insert">Truncate and insert</button></div></div>
         <div style="align-self:end"><label class="switch plain"><input type="checkbox" checked role="switch"><span class="track"></span>Create the table if it is missing</label></div>
       </div>
       <div class="checks" style="margin-top:12px">
-        <div class="ck ok"><span class="ic">✓</span><span><b>CRM_MASKED.CUSTOMERS exists and matches the source definition</b><span class="d">22 columns, same types and primary key</span></span><span class="meta">ok</span></div>
-        <div class="ck warn" id="load-ti"><span class="ic">!</span><span><b>Truncate removes the 1,912,004 rows now in CRM_MASKED.CUSTOMERS</b><span class="d">They were loaded by job j_01K7XN…8F on Oct 4. Choose Upsert to keep them.</span></span><span class="meta">check</span></div>
-        <div class="ck ok" id="load-up" hidden><span class="ic">✓</span><span><b>Upsert keeps rows that are not in this selection</b><span class="d">Matching CUSTOMER_IDs are replaced; 1,912,004 existing rows stay otherwise</span></span><span class="meta">ok</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>Space</b><span class="d">About 2.9 GB needed, 38 GB free</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>LOANS_MASKED.APPLICANTS exists and matches the source definition</b><span class="d">22 columns, same types and primary key</span></span><span class="meta">ok</span></div>
+        <div class="ck ok" id="load-up"><span class="ic">✓</span><span><b>Upsert keeps rows that are not in this selection</b><span class="d">Rows with a matching APPLICATION_ID are replaced; every other row in LOANS_MASKED.APPLICANTS stays as it is</span></span><span class="meta">ok</span></div>
+        <div class="ck warn" id="load-ti" hidden><span class="ic">!</span><span><b>Truncate empties LOANS_MASKED.APPLICANTS before loading</b><span class="d">Every row in it is removed first, including rows from earlier loads. Choose Upsert to keep them.</span></span><span class="meta">check</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>Space</b><span class="d">About 1.1 GB needed, 24 GB free</span></span><span class="meta">ok</span></div>
       </div>
     </div>
 
@@ -469,7 +469,7 @@ FOR UPDATE</textarea>
       <div class="fgrid">
         <div><span class="lbl">Format</span><div class="seg" role="group" aria-label="File format"><button type="button" aria-pressed="false">CSV</button><button type="button" class="on" aria-pressed="true">Parquet</button><button type="button" aria-pressed="false">JSONL</button></div></div>
         <div><span class="lbl">Destination</span><div class="seg" role="group" aria-label="File destination"><button type="button" class="on" aria-pressed="true">S3</button><button type="button" aria-pressed="false">PVC path</button></div></div>
-        <div class="full"><label class="lbl" for="furi">Location</label><input class="input mono" id="furi" value="s3://dps-exports-apac/crm/customers/2026-10-11/" spellcheck="false"><div class="help">Written with the secret <span class="mono">dps/s3/exports-apac</span>. One file per partition (8), Snappy compression.</div></div>
+        <div class="full"><label class="lbl" for="furi">Location</label><input class="input mono" id="furi" value="s3://dps-exports-aps1/loans/applicants/2026-10-11/" spellcheck="false"><div class="help">Written with the secret <span class="mono">dps/tgt/exports-aps1</span>. One file per partition (8), Snappy compression.</div></div>
       </div>
       <div class="checks" style="margin-top:12px">
         <div class="ck ok"><span class="ic">✓</span><span><b>PutObject allowed on the prefix; bucket encryption on (SSE-KMS)</b></span><span class="meta">ok</span></div>
@@ -481,13 +481,13 @@ FOR UPDATE</textarea>
     <div class="opts" id="opt-in_place" hidden>
       <div class="card-head"><div class="card-title">In place</div></div>
       <div class="fgrid">
-        <div><label class="lbl" for="wconn">Write connection</label><div class="sel"><select class="input mono" id="wconn"><option>dps/src/crm-prod-rw</option><option>dps/src/crm-uat-clone-rw</option></select></div>
-          <div class="help">dps/src/crm-prod-ro is read-only by design, so writes go through a separate connection.</div></div>
+        <div><label class="lbl" for="wconn">Write connection</label><input class="input mono" id="wconn" value="dps/src/loans-prod" readonly>
+          <div class="help">The source connection. It has UPDATE on LOANS.APPLICANTS; reads still run in read-only transactions.</div></div>
         <div><label class="lbl" for="batch">Commit every</label><div class="sel"><select class="input" id="batch"><option>5,000 rows per partition</option><option>1,000 rows per partition</option><option>20,000 rows per partition</option></select></div></div>
       </div>
       <div class="checks" style="margin-top:12px">
-        <div class="ck ok"><span class="ic">✓</span><span><b>UPDATE on CRM.CUSTOMERS</b><span class="d">Tested 14:36 on dps/src/crm-prod-rw</span></span><span class="meta">ok</span></div>
-        <div class="ck ok"><span class="ic">✓</span><span><b>CUSTOMER_ID is the update key and is not changed</b><span class="d">10 columns are rewritten; foreign keys that point at CUSTOMER_ID keep working</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>UPDATE on LOANS.APPLICANTS</b><span class="d">Tested 11:23 on dps/src/loans-prod</span></span><span class="meta">ok</span></div>
+        <div class="ck ok"><span class="ic">✓</span><span><b>APPLICATION_ID is the update key and is not changed</b><span class="d">13 columns are rewritten; foreign keys that point at APPLICATION_ID keep working</span></span><span class="meta">ok</span></div>
       </div>
     </div>
 
@@ -495,49 +495,49 @@ FOR UPDATE</textarea>
     <div class="opts" id="opt-append" hidden>
       <div class="card-head"><div class="card-title">Append new rows</div></div>
       <div class="fgrid">
-        <div><span class="lbl">Insert into</span><div class="seg" role="group" aria-label="Append destination"><button type="button" class="on" aria-pressed="true" data-show="" data-hide="ap-named">Same table · CRM.CUSTOMERS</button><button type="button" aria-pressed="false" data-show="ap-named">Named table</button></div></div>
-        <div id="ap-named" hidden><label class="lbl" for="apname">Table name</label><input class="input mono" id="apname" value="CRM.CUSTOMERS_SYNTH" spellcheck="false"></div>
+        <div><span class="lbl">Insert into</span><div class="seg" role="group" aria-label="Append destination"><button type="button" class="on" aria-pressed="true" data-show="" data-hide="ap-named">Same table · LOANS.APPLICANTS</button><button type="button" aria-pressed="false" data-show="ap-named">Named table</button></div></div>
+        <div id="ap-named" hidden><label class="lbl" for="apname">Table name</label><input class="input mono" id="apname" value="LOANS.APPLICANTS_SYNTH" spellcheck="false"></div>
       </div>
       <div class="lbl" style="margin-top:14px">Primary-key strategy</div>
       <div class="choices c3" role="radiogroup" aria-label="Primary-key strategy">
-        <label class="choice sm"><input type="radio" name="pk" value="generate"><span class="radio"></span><span class="ct">Database-generated</span><span class="cd">Sequence CRM.CUSTOMERS_SEQ assigns new keys.</span></label>
+        <label class="choice sm"><input type="radio" name="pk" value="generate"><span class="radio"></span><span class="ct">Database-generated</span><span class="cd">Sequence LOANS.APPLICATION_SEQ assigns new keys.</span></label>
         <label class="choice sm"><input type="radio" name="pk" value="offset" checked><span class="radio"></span><span class="ct">Offset</span><span class="cd">New key = original + 90,000,000.</span></label>
-        <label class="choice sm"><input type="radio" name="pk" value="token"><span class="radio"></span><span class="ct">Token</span><span class="cd">Use the obfuscated key; checked for clashes before any write.</span></label>
+        <label class="choice sm"><input type="radio" name="pk" value="token"><span class="radio"></span><span class="ct">Token</span><span class="cd">Obfuscate APPLICATION_ID for the new rows; checked for clashes before any write.</span></label>
       </div>
       <div class="checks" style="margin-top:10px">
-        <div class="ck ok pk-d" data-pk="generate" hidden><span class="ic">✓</span><span><b>Next value 41,882,908</b><span class="d">New rows will not join to the masked MongoDB and PostgreSQL copies by customer id. The evidence pack records this.</span></span><span class="meta">ok</span></div>
-        <div class="ck ok pk-d" data-pk="offset"><span class="ic">✓</span><span><b>No overlap with existing keys</b><span class="d">Current maximum CUSTOMER_ID is 41,882,907, so new keys fall between 90,000,001 and 131,882,907 and fit NUMBER(12).</span></span><span class="meta">ok</span></div>
-        <div class="ck bad pk-d" data-pk="token" hidden><span class="ic">✕</span><span><b>Collision pre-check failed: 79,903 of 1,948,210 token keys already exist</b><span class="d">The job would stop before writing anything. Choose Offset or Database-generated instead.</span></span><span class="meta">14:37</span></div>
+        <div class="ck ok pk-d" data-pk="generate" hidden><span class="ic">✓</span><span><b>Next value 18,406,553</b><span class="d">New rows get fresh application ids. Their CUSTOMER_ID tokens still join to the masked CRM copies.</span></span><span class="meta">ok</span></div>
+        <div class="ck ok pk-d" data-pk="offset"><span class="ic">✓</span><span><b>No overlap with existing keys</b><span class="d">Current maximum APPLICATION_ID is 18,406,552, so new keys stay at or below 108,406,552 and fit NUMBER(14).</span></span><span class="meta">ok</span></div>
+        <div class="ck bad pk-d" data-pk="token" hidden><span class="ic">✕</span><span><b>Collision pre-check failed: 2,614 of 642,318 token keys already exist</b><span class="d">The job would stop before writing anything. Choose Offset or Database-generated instead.</span></span><span class="meta">11:24</span></div>
       </div>
     </div>
 
     <!-- confirmation -->
     <div class="confirm" id="confirm" hidden tabindex="-1" role="region" aria-labelledby="cf-title">
-      <div class="between"><h3 id="cf-title">Confirm: overwrite 1,948,210 rows in CRM.CUSTOMERS</h3><span class="chip amber prod-only">production</span></div>
+      <div class="between"><h3 id="cf-title">Confirm: overwrite 642,318 rows in LOANS.APPLICANTS</h3><span class="chip amber prod-only">production</span></div>
       <p class="lead" id="cf-lead">This job changes the source table. Read what happens before you confirm.</p>
       <ul class="conseq cf-in_place">
-        <li class="r"><span><b>1,948,210 rows</b> in CRM.CUSTOMERS are updated by CUSTOMER_ID: 10 columns each, in batches of 5,000 per partition across 8 partitions.</span></li>
-        <li class="a"><span>Applications and reports that read CRM.CUSTOMERS see protected values as each batch commits.</span></li>
+        <li class="r"><span><b>642,318 rows</b> in LOANS.APPLICANTS are updated by APPLICATION_ID: 13 columns each, in batches of 5,000 per partition across 8 partitions.</span></li>
+        <li class="a"><span>Loan origination screens and credit reports that read LOANS.APPLICANTS see protected values as each batch commits.</span></li>
         <li class="t only-obf"><span>The originals can be restored only with the key returned when the job finishes. <b>The key is shown once and DPS keeps no copy</b>; if it is lost, the original values cannot be recovered.</span></li>
-        <li class="r only-syn"><span>Synthetic values have no path back. <b>After the write, the original values in these 10 columns are gone.</b></span></li>
-        <li class="a only-obf"><span>PIN_CODE and RISK_SCORE use one-way methods (generalize, bucket). Those two columns cannot be restored, even with the key.</span></li>
+        <li class="r only-syn"><span>Synthetic values have no path back. <b>After the write, the original values in these 13 columns are gone.</b></span></li>
+        <li class="a only-obf"><span>PIN_CODE and CIBIL_SCORE use one-way methods (generalize, bucket). Those two columns cannot be restored, even with the key.</span></li>
         <li><span>If a partition fails it resumes from its last committed batch. No row is left half-written.</span></li>
       </ul>
       <ul class="conseq cf-append" hidden>
-        <li class="a"><span>CRM.CUSTOMERS grows from <b>4,102,377 to 6,050,587 rows</b>. Existing rows are not changed.</span></li>
-        <li class="a" id="cf-pk"><span>New rows get CUSTOMER_ID = original + 90,000,000 (90,000,001 to 131,882,907). The evidence pack records the range.</span></li>
-        <li><span>Reports and jobs that read CRM.CUSTOMERS will count the new rows until you remove them.</span></li>
+        <li class="a"><span>LOANS.APPLICANTS grows from <b>1,873,512 to 2,515,830 rows</b>. Existing rows are not changed.</span></li>
+        <li class="a" id="cf-pk"><span>New rows get APPLICATION_ID = original + 90,000,000, up to 108,406,552. The evidence pack records the range.</span></li>
+        <li><span>Reports and jobs that read LOANS.APPLICANTS will count the new rows until you remove them.</span></li>
         <li class="t only-obf"><span>The key that reverses the new rows is returned once when the job finishes. <b>DPS keeps no copy.</b></span></li>
-        <li class="only-syn"><span>The new rows are synthetic and have no path back to real customers.</span></li>
+        <li class="only-syn"><span>The new rows are synthetic and have no path back to real applicants.</span></li>
       </ul>
-      <div class="callout amber prod-only" style="margin-top:14px;font-size:12.5px"><b>dps/src/crm-prod-rw is tagged production</b>, so this job also needs the admin scope. You have it through the role <span class="mono">dps-tenant-admin</span>; the confirmation is written to the audit log with your name and the time.</div>
+      <div class="callout amber prod-only" style="margin-top:14px;font-size:12.5px"><b>dps/src/loans-prod is tagged production</b>, so writing to it needs the admin scope. Your console session has it as <span class="mono">platform-admin</span>; the confirmation is written to the audit log with your name and the time.</div>
       <div class="callout rose" id="cf-blocked" hidden style="margin-top:10px;font-size:12.5px"><b>You can't confirm yet.</b> The collision pre-check failed for Token keys. Choose Offset or Database-generated above.</div>
       <div class="typebox" id="cf-type">
-        <div><label class="lbl" for="cf-input">Type <span class="mono" style="color:var(--ink)">CRM.CUSTOMERS</span> to confirm</label><input class="input" id="cf-input" autocomplete="off" spellcheck="false" placeholder="CRM.CUSTOMERS"></div>
+        <div><label class="lbl" for="cf-input">Type <span class="mono" style="color:var(--ink)">LOANS.APPLICANTS</span> to confirm</label><input class="input" id="cf-input" autocomplete="off" spellcheck="false"></div>
         <button class="btn" type="button" id="cf-cancel">Choose another write mode</button>
-        <button class="btn btn-danger" type="button" id="cf-go" disabled>Write 1,948,210 rows in place</button>
+        <button class="btn btn-danger" type="button" id="cf-go" disabled>Write 642,318 rows in place</button>
       </div>
-      <div class="callout emerald" id="cf-done" hidden style="margin-top:14px;font-size:12.5px"><b>Confirmed at 14:38.</b> Nothing is written yet. The job writes to CRM.CUSTOMERS only after you press Run job in step 5. <button class="linkbtn" type="button" id="cf-undo">Undo</button></div>
+      <div class="callout emerald" id="cf-done" hidden style="margin-top:14px;font-size:12.5px"><b>Confirmed at 11:24.</b> Nothing is written yet. The job writes to LOANS.APPLICANTS only after you press Run job in step 5. <button class="linkbtn" type="button" id="cf-undo">Undo</button></div>
     </div>
 
     <div class="wfoot"><button class="btn" type="button" data-go="3">Back</button><span class="rowx"><span class="hint" id="next4-hint" hidden>Confirm the write to continue</span><button class="btn btn-primary" type="button" data-go="5" id="next4">Next: Review and run</button></span></div>
@@ -560,30 +560,31 @@ FOR UPDATE</textarea>
     </div>
 
     <div class="card">
-      <div class="card-head"><div class="card-title">Policy</div><span class="chip amber">3 overrides from discovery</span></div>
+      <div class="card-head"><div class="card-title">Policy</div><span class="chip amber">3 decisions from discovery</span></div>
       <div class="fgrid">
         <div><label class="lbl" for="policy">Preset</label><div class="sel"><select class="input" id="policy">
-          <option value="gdpr-pseudonymise">gdpr-pseudonymise v3</option><option value="dpdp-pseudonymise">dpdp-pseudonymise v2</option><option value="pci-dss">pci-dss v4</option><option value="analytics-safe">analytics-safe v2 (one-way)</option><option value="synthetic-realistic">synthetic-realistic v1</option><option value="synthetic-strict">synthetic-strict v1</option></select></div></div>
-        <div class="kv" style="align-self:end">Overrides: <b class="mono">NATIONAL_ID</b> per-value type · <b class="mono">PIN_CODE</b> generalize(3) · <b class="mono">RM_NOTES</b> text pipeline</div>
+          <option value="gdpr-pseudonymise">gdpr-pseudonymise v3</option><option value="dpdp-pseudonymise">dpdp-pseudonymise v1</option><option value="pci-dss">pci-dss v2</option><option value="analytics-safe">analytics-safe v1 (one-way)</option><option value="synthetic-realistic">synthetic-realistic v1</option><option value="synthetic-strict">synthetic-strict v1</option></select></div></div>
+        <div class="kv" style="align-self:end">Decisions: <b class="mono">EMPLOYER_NAME</b> det_token · <b class="mono">BANK_ACCOUNT_NO</b> fpe_digits, last 4 kept · <b class="mono">UNDERWRITER_NOTES</b> text pipeline</div>
       </div>
-      <div class="lbl" style="margin-top:14px">Plan · 11 columns protected, 11 kept</div>
+      <div class="lbl" style="margin-top:14px">Plan · 13 columns protected, 9 kept</div>
       <div class="plan only-obf">
-        <div><span class="mono">fpe_digits</span><span class="faint">CUSTOMER_ID · NATIONAL_ID (Aadhaar, SSN)</span></div>
-        <div><span class="mono">fpe_text</span><span class="faint">FULL_NAME · TAX_ID · NATIONAL_ID (CURP, NINO)</span></div>
+        <div><span class="mono">fpe_digits</span><span class="faint">CUSTOMER_ID (group key) · AADHAAR_NO · BANK_ACCOUNT_NO, last 4 kept</span></div>
+        <div><span class="mono">fpe_text</span><span class="faint">APPLICANT_NAME · PAN</span></div>
         <div><span class="mono">email · phone</span><span class="faint">EMAIL (domain kept) · MOBILE (country code kept)</span></div>
         <div><span class="mono">date_shift ±365</span><span class="faint">DOB, anchored on CUSTOMER_ID</span></div>
-        <div><span class="mono">det_token</span><span class="faint">ADDR_LINE1</span></div>
-        <div><span class="mono">generalize · bucket</span><span class="faint">PIN_CODE · RISK_SCORE (one-way)</span></div>
-        <div><span class="mono">text pipeline</span><span class="faint">RM_NOTES</span></div>
-        <div><span class="mono">keep</span><span class="faint">11 columns</span></div>
+        <div><span class="mono">det_token</span><span class="faint">RESI_ADDRESS · EMPLOYER_NAME</span></div>
+        <div><span class="mono">generalize · bucket</span><span class="faint">PIN_CODE · CIBIL_SCORE (one-way)</span></div>
+        <div><span class="mono">text pipeline</span><span class="faint">UNDERWRITER_NOTES</span></div>
+        <div><span class="mono">keep</span><span class="faint">9 columns, APPLICATION_ID included</span></div>
       </div>
       <div class="plan only-syn">
-        <div><span class="mono">persona</span><span class="faint">FULL_NAME · EMAIL · MOBILE · DOB · ADDR_LINE1 agree per row</span></div>
-        <div><span class="mono">rule-valid surrogate</span><span class="faint">NATIONAL_ID · TAX_ID by detected type</span></div>
-        <div><span class="mono">surrogate key</span><span class="faint">CUSTOMER_ID, same fake in every system</span></div>
-        <div><span class="mono">copula</span><span class="faint">RISK_SCORE · PIN_CODE region shape kept</span></div>
-        <div><span class="mono">placeholder rewrite</span><span class="faint">RM_NOTES, LLM sees placeholders only</span></div>
-        <div><span class="mono">keep</span><span class="faint">11 columns</span></div>
+        <div><span class="mono">persona</span><span class="faint">APPLICANT_NAME · EMAIL · MOBILE · DOB · RESI_ADDRESS agree per row</span></div>
+        <div><span class="mono">rule-valid surrogate</span><span class="faint">PAN · AADHAAR_NO · BANK_ACCOUNT_NO</span></div>
+        <div><span class="mono">surrogate key</span><span class="faint">CUSTOMER_ID, same fake as the CRM copies in the group</span></div>
+        <div><span class="mono">copula</span><span class="faint">CIBIL_SCORE · PIN_CODE region shape kept</span></div>
+        <div><span class="mono">placeholder rewrite</span><span class="faint">UNDERWRITER_NOTES, LLM sees placeholders only</span></div>
+        <div><span class="mono">org surrogate</span><span class="faint">EMPLOYER_NAME</span></div>
+        <div><span class="mono">keep</span><span class="faint">9 columns, APPLICATION_ID included</span></div>
       </div>
     </div>
 
@@ -596,8 +597,8 @@ FOR UPDATE</textarea>
           <span class="cd only-syn">A new seed is generated. Fakes will not match earlier synthetic copies.</span></label>
         <label class="choice"><input type="radio" name="key" value="group" checked><span class="radio"></span>
           <span class="ct"><span>Reuse <span class="only-obf">the key</span><span class="only-syn">the seed</span> from job group <span class="mono">crm-uat-refresh</span></span></span>
-          <span class="cd only-obf">Customer ids, e-mails and national ids will match the masked Oracle, MongoDB and PostgreSQL copies already in the group.</span>
-          <span class="cd only-syn">The same customer gets the same fake name, e-mail and id as in the synthetic Oracle, MongoDB and PostgreSQL copies already in the group.</span></label>
+          <span class="cd only-obf">Customer ids, names, e-mails and Aadhaar numbers get the same tokens as in the masked CRM, MongoDB and PostgreSQL copies already in the group, so applicants join to customers.</span>
+          <span class="cd only-syn">The same customer gets the same fake name, e-mail and id as in the synthetic copies already in the group.</span></label>
       </div>
       <div class="drop" id="keydrop">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" style="color:var(--teal);flex:none"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>
@@ -610,28 +611,28 @@ FOR UPDATE</textarea>
     <div class="card">
       <div class="card-head"><div class="card-title">Purpose</div><span class="faint" style="font-size:12px">required for every run</span></div>
       <div class="fgrid">
-        <div><label class="lbl" for="ticket">Ticket</label><input class="input mono" id="ticket" value="CHG-48213" spellcheck="false"></div>
+        <div><label class="lbl" for="ticket">Ticket</label><input class="input mono" id="ticket" value="CHG-48190" spellcheck="false"></div>
         <div><label class="lbl" for="basis">Legal basis</label><div class="sel"><select class="input" id="basis"><option>Legitimate interest — UAT provisioning</option><option>Legitimate interest — fraud model testing</option><option>Legal obligation — regulatory reporting</option><option>Consent — customer research panel</option></select></div></div>
-        <div class="full"><label class="lbl" for="why">What the data is for</label><input class="input" id="why" value="Refresh CRM UAT for the Q4 onboarding release; masked copies only, no production write-back" spellcheck="false"></div>
+        <div class="full"><label class="lbl" for="why">What the data is for</label><input class="input" id="why" value="Load LOANS UAT for the credit-decisioning release 26.4; masked copy only, no write-back to production" spellcheck="false"><div class="help" id="why-help">Changes with the write mode until you edit it.</div></div>
       </div>
     </div>
 
     <div class="card">
       <div class="card-head"><div class="card-title">Ready to run</div><span class="chip emerald" id="ready-chip">all checks passed</span></div>
-      <div class="summ"><span class="k">Source</span><span>Oracle · <span class="mono">CRM.CUSTOMERS</span> via <span class="mono">dps/src/crm-prod-ro</span> <span class="chip amber prod-only" style="margin-left:4px">production</span></span><button class="linkbtn" type="button" data-go="1">Edit</button></div>
-      <div class="summ"><span class="k">Rows</span><span>1,948,210 rows · 22 columns · 8 partitions</span><button class="linkbtn" type="button" data-go="2">Edit</button></div>
-      <div class="summ"><span class="k">Discovery</span><span>2 critical · 7 sensitive · 2 declared · 11 kept · 3 overrides</span><button class="linkbtn" type="button" data-go="3">Edit</button></div>
-      <div class="summ"><span class="k">Write</span><span id="sum-wm">Copy to <span class="mono">CRM_MASKED.CUSTOMERS</span> · truncate and insert</span><button class="linkbtn" type="button" data-go="4">Edit</button></div>
+      <div class="summ"><span class="k">Source</span><span>Oracle · <span class="mono">LOANS.APPLICANTS</span> via <span class="mono">dps/src/loans-prod</span> <span class="chip amber prod-only" style="margin-left:4px">production</span></span><button class="linkbtn" type="button" data-go="1">Edit</button></div>
+      <div class="summ"><span class="k">Rows</span><span>642,318 rows · 22 columns · 8 partitions</span><button class="linkbtn" type="button" data-go="2">Edit</button></div>
+      <div class="summ"><span class="k">Discovery</span><span>3 critical · 8 sensitive · 2 declared · 9 kept · 3 decisions</span><button class="linkbtn" type="button" data-go="3">Edit</button></div>
+      <div class="summ"><span class="k">Write</span><span id="sum-wm">Copy to <span class="mono">LOANS_MASKED.APPLICANTS</span> · upsert on APPLICATION_ID</span><button class="linkbtn" type="button" data-go="4">Edit</button></div>
       <div class="summ"><span class="k">Key</span><span><span class="only-obf">Reuse key from <span class="mono">crm-uat-refresh</span> · <span class="mono">k_01K7ZQ4M8V</span></span><span class="only-syn">Reuse seed from <span class="mono">crm-uat-refresh</span> · <span class="mono">s_01K7ZQ5R2D</span></span></span><span></span></div>
-      <div class="summ"><span class="k">Purpose</span><span><span class="mono">CHG-48213</span> · legitimate interest — UAT provisioning</span><span></span></div>
-      <div class="callout rose" id="run-blocked" hidden style="margin-top:12px;font-size:12.5px"><b>Run job is off until you confirm the write.</b> In place and Append change CRM.CUSTOMERS. <button class="linkbtn" type="button" data-go="4">Go to step 4 to confirm</button></div>
+      <div class="summ"><span class="k">Purpose</span><span><span class="mono">CHG-48190</span> · legitimate interest — UAT provisioning</span><span></span></div>
+      <div class="callout rose" id="run-blocked" hidden style="margin-top:12px;font-size:12.5px"><b>Run job is off until you confirm the write.</b> In place and Append change LOANS.APPLICANTS. <button class="linkbtn" type="button" data-go="4">Go to step 4 to confirm</button></div>
     </div>
 
     <div class="runbar">
-      <div style="flex:1 1 340px"><div style="font-weight:700">Estimated 4 to 6 minutes</div><div class="faint" style="font-size:12px">From the last three runs against CRM.CUSTOMERS. You can pause from Jobs; a paused job resumes from its last checkpoint.</div></div>
+      <div style="flex:1 1 340px"><div style="font-weight:700">Estimated 2 to 3 minutes</div><div class="faint" style="font-size:12px">From the last three runs against LOANS.APPLICANTS. You can pause from Jobs; a paused job resumes from its last checkpoint.</div></div>
       <div class="rowx"><button class="btn" type="button" id="dry">Dry run (no writes)</button><button class="btn btn-primary" type="button" id="run">Run job</button></div>
     </div>
-    <div class="callout emerald" id="run-done" hidden tabindex="-1" style="font-size:13px"><b>Job j_01K8C4M2V7 queued.</b> 8 partitions are waiting; worker w-03 claimed the first one. <a href="07-jobs.html" style="color:var(--teal);font-weight:700">Open in Jobs</a></div>
+    <div class="callout emerald" id="run-done" hidden tabindex="-1" style="font-size:13px"><b>Job j_01K6…ZT queued.</b> 8 partitions are waiting; worker w-03 claimed the first one. <a href="07-jobs.html" style="color:var(--teal);font-weight:700">Open in Jobs</a></div>
     <div class="callout" id="dry-done" hidden style="font-size:13px"><b>Dry run started.</b> DPS reads and transforms 2,000 rows, runs the leakage sweep and writes nothing. The result appears in Jobs in about a minute.</div>
 
     <div class="wfoot"><button class="btn" type="button" data-go="4">Back</button><span class="hint">Step 5 of 5</span></div>
@@ -643,7 +644,7 @@ FOR UPDATE</textarea>
     <div class="card">
       <div class="card-head"><div class="card-title">What DPS guarantees</div></div>
       <div class="guard">
-        <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>The source is read in a read-only session and never locked.</span></div>
+        <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span id="g-src">The source is read in read-only transactions, never locked and never written.</span></div>
         <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>The job stores secret names, not credentials.</span></div>
         <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>Values are transformed inside the worker. The LLM sees placeholders only: raw PII sent is 0.</span></div>
         <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l5 5L20 7"/></svg><span>A leakage sweep checks the output before the job is marked complete, and every run ends with an evidence pack.</span></div>
@@ -656,12 +657,12 @@ FOR UPDATE</textarea>
 <span class="ln s1">  <span class="k">"source"</span>: {</span>
 <span class="ln s1">    <span class="k">"engine"</span>: <span class="s">"oracle"</span>,</span>
 <span class="ln s1">    <span class="k">"connection"</span>: {</span>
-<span class="ln s1">      <span class="k">"secret_ref"</span>: <span class="s">"dps/src/crm-prod-ro"</span> },</span>
-<span class="ln s2">    <span class="k">"owner"</span>: <span class="s">"CRM"</span>,</span>
-<span class="ln s2">    <span class="k">"table"</span>: <span class="s">"CUSTOMERS"</span>,</span>
+<span class="ln s1">      <span class="k">"secret_ref"</span>: <span class="s">"dps/src/loans-prod"</span> },</span>
+<span class="ln s2">    <span class="k">"owner"</span>: <span class="s">"LOANS"</span>,</span>
+<span class="ln s2">    <span class="k">"table"</span>: <span class="s">"APPLICANTS"</span>,</span>
 <span class="ln s2">    <span class="k">"selection"</span>: {</span>
 <span class="ln s2">      <span class="k">"where"</span>: <span class="s">"CREATED_AT &gt;= :p1 AND</span></span>
-<span class="ln s2"><span class="s">        COUNTRY_CODE IN (:p2, …, :p5)"</span>,</span>
+<span class="ln s2"><span class="s">        APPLICATION_STATUS &lt;&gt; :p2"</span>,</span>
 <span class="ln s2">      <span class="k">"columns"</span>: null,</span>
 <span class="ln s2">      <span class="k">"max_rows"</span>: null,</span>
 <span class="ln s3">      <span class="k">"sample"</span>: 2000 },</span>
@@ -669,37 +670,37 @@ FOR UPDATE</textarea>
 <span class="ln s4 tg tg-table">  <span class="k">"target"</span>: {</span>
 <span class="ln s4 tg tg-table">    <span class="k">"kind"</span>: <span class="s">"table"</span>,</span>
 <span class="ln s4 tg tg-table">    <span class="k">"connection"</span>: {</span>
-<span class="ln s4 tg tg-table">      <span class="k">"secret_ref"</span>: <span class="s">"dps/tgt/crm-uat"</span> },</span>
-<span class="ln s4 tg tg-table">    <span class="k">"owner"</span>: <span class="s">"CRM_MASKED"</span>,</span>
-<span class="ln s4 tg tg-table">    <span class="k">"table"</span>: <span class="s">"CUSTOMERS"</span>,</span>
+<span class="ln s4 tg tg-table">      <span class="k">"secret_ref"</span>: <span class="s">"dps/tgt/loans-uat"</span> },</span>
+<span class="ln s4 tg tg-table">    <span class="k">"owner"</span>: <span class="s">"LOANS_MASKED"</span>,</span>
+<span class="ln s4 tg tg-table">    <span class="k">"table"</span>: <span class="s">"APPLICANTS"</span>,</span>
 <span class="ln s4 tg tg-table">    <span class="k">"create_if_missing"</span>: true,</span>
-<span class="ln s4 tg tg-table">    <span class="k">"write_mode"</span>: <span class="s">"truncate_insert"</span> },</span>
+<span class="ln s4 tg tg-table">    <span class="k">"write_mode"</span>: <span class="s" id="spec-load">"upsert"</span> },</span>
 <span class="ln s4 tg tg-in_place" hidden>  <span class="k">"target"</span>: {</span>
 <span class="ln s4 tg tg-in_place" hidden>    <span class="k">"write_mode"</span>: <span class="s">"in_place"</span>,</span>
 <span class="ln s4 tg tg-in_place" hidden>    <span class="k">"connection"</span>: {</span>
-<span class="ln s4 tg tg-in_place" hidden>      <span class="k">"secret_ref"</span>: <span class="s">"dps/src/crm-prod-rw"</span> },</span>
+<span class="ln s4 tg tg-in_place" hidden>      <span class="k">"secret_ref"</span>: <span class="s">"dps/src/loans-prod"</span> },</span>
 <span class="ln s4 tg tg-in_place" hidden>    <span class="k">"confirm_write"</span>: <span class="s" id="spec-cw1">false</span> },</span>
 <span class="ln s4 tg tg-append" hidden>  <span class="k">"target"</span>: {</span>
 <span class="ln s4 tg tg-append" hidden>    <span class="k">"write_mode"</span>: <span class="s">"append"</span>,</span>
-<span class="ln s4 tg tg-append" hidden>    <span class="k">"table"</span>: <span class="s">"CUSTOMERS"</span>,</span>
+<span class="ln s4 tg tg-append" hidden>    <span class="k">"table"</span>: <span class="s">"APPLICANTS"</span>,</span>
 <span class="ln s4 tg tg-append" hidden>    <span class="k">"pk_strategy"</span>:</span>
 <span class="ln s4 tg tg-append" hidden>      <span class="s" id="spec-pk">{ "kind": "offset", "offset": 90000000 }</span>,</span>
 <span class="ln s4 tg tg-append" hidden>    <span class="k">"confirm_write"</span>: <span class="s" id="spec-cw2">false</span> },</span>
 <span class="ln s4 tg tg-files" hidden>  <span class="k">"target"</span>: {</span>
 <span class="ln s4 tg tg-files" hidden>    <span class="k">"kind"</span>: <span class="s">"files"</span>,</span>
 <span class="ln s4 tg tg-files" hidden>    <span class="k">"format"</span>: <span class="s">"parquet"</span>,</span>
-<span class="ln s4 tg tg-files" hidden>    <span class="k">"uri"</span>: <span class="s">"s3://dps-exports-apac/crm/</span></span>
-<span class="ln s4 tg tg-files" hidden><span class="s">      customers/2026-10-11/"</span>,</span>
+<span class="ln s4 tg tg-files" hidden>    <span class="k">"uri"</span>: <span class="s">"s3://dps-exports-aps1/loans/</span></span>
+<span class="ln s4 tg tg-files" hidden><span class="s">      applicants/2026-10-11/"</span>,</span>
 <span class="ln s4 tg tg-files" hidden>    <span class="k">"manifest"</span>: true },</span>
 <span class="ln s5">  <span class="k">"policy"</span>: {</span>
 <span class="ln s5">    <span class="k">"preset"</span>: <span class="s" id="spec-policy">"gdpr-pseudonymise"</span>,</span>
-<span class="ln s3">    <span class="k">"snapshot"</span>: <span class="s">"snap_01K8C4WQ9T"</span>,</span>
+<span class="ln s3">    <span class="k">"snapshot"</span>: <span class="s">"snap_01K6RZ4Q9T"</span>,</span>
 <span class="ln s3">    <span class="k">"overrides"</span>: 3 },</span>
 <span class="ln s5">  <span class="k">"consistency"</span>: {</span>
 <span class="ln s5">    <span class="k">"scope"</span>: <span class="s">"key"</span>,</span>
 <span class="ln s5">    <span class="k">"group"</span>: <span class="s">"crm-uat-refresh"</span> },</span>
 <span class="ln s5">  <span class="k">"purpose"</span>: {</span>
-<span class="ln s5">    <span class="k">"ticket"</span>: <span class="s">"CHG-48213"</span>,</span>
+<span class="ln s5">    <span class="k">"ticket"</span>: <span class="s">"CHG-48190"</span>,</span>
 <span class="ln s5">    <span class="k">"legal_basis"</span>:</span>
 <span class="ln s5">      <span class="s">"legitimate interest — UAT provisioning"</span> }</span>
 <span class="ln">}</span></div>
@@ -715,7 +716,7 @@ renderSidebar('Data sources & jobs');
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
   var params = new URLSearchParams(location.search);
   var cur = 1, wm = 'table', pk = 'offset', confirmed = false;
-  var TABLE = 'CRM.CUSTOMERS';
+  var TABLE = 'LOANS.APPLICANTS', N = '642,318', load = 'upsert', whyEdited = false;
 
   function needsConfirm() { return wm === 'in_place' || wm === 'append'; }
   function blocked() { return wm === 'append' && pk === 'token'; }
@@ -783,13 +784,32 @@ renderSidebar('Data sources & jobs');
   $$('[data-accept]').forEach(function (b) { b.addEventListener('click', function () { b.textContent = 'Accepted'; b.disabled = true; }); });
 
   // write mode
-  var subs = { in_place: 'In place · CRM.CUSTOMERS', append: 'Append to CRM.CUSTOMERS', table: 'Copy to CRM_MASKED', files: 'Parquet to S3' };
+  var subs = { in_place: 'In place · LOANS.APPLICANTS', append: 'Append to LOANS.APPLICANTS', table: 'Copy to LOANS_MASKED', files: 'Parquet to S3' };
   var sums = {
-    in_place: 'In place on <span class="mono">CRM.CUSTOMERS</span> · 10 columns rewritten · via <span class="mono">dps/src/crm-prod-rw</span>',
-    append: 'Append 1,948,210 rows to <span class="mono">CRM.CUSTOMERS</span> · keys by offset',
-    table: 'Copy to <span class="mono">CRM_MASKED.CUSTOMERS</span> · truncate and insert',
-    files: 'Parquet files to <span class="mono">s3://dps-exports-apac/crm/customers/2026-10-11/</span> · manifest'
+    in_place: 'In place on <span class="mono">LOANS.APPLICANTS</span> · 13 columns rewritten · via <span class="mono">dps/src/loans-prod</span>',
+    append: 'Append ' + N + ' rows to <span class="mono">LOANS.APPLICANTS</span> · keys by offset',
+    table: 'Copy to <span class="mono">LOANS_MASKED.APPLICANTS</span> · upsert on APPLICATION_ID',
+    files: 'Parquet files to <span class="mono">s3://dps-exports-aps1/loans/applicants/2026-10-11/</span> · manifest'
   };
+  // what DPS guarantees, and the default purpose, follow the write mode
+  var guarantee = {
+    table: 'The source is read in read-only transactions, never locked and never written.',
+    files: 'The source is read in read-only transactions, never locked and never written.',
+    in_place: 'Reads run in read-only transactions. Writes start only after your typed confirmation and lock one batch of rows at a time.',
+    append: 'Existing rows are never changed. New rows are inserted in committed batches, only after your typed confirmation.'
+  };
+  var purpose = {
+    table: 'Load LOANS UAT for the credit-decisioning release 26.4; masked copy only, no write-back to production',
+    files: 'Export masked applicants for the credit-decisioning release 26.4 test loaders; no write-back to production',
+    in_place: 'Mask personal data in LOANS.APPLICANTS where it sits, on production; the key is the only way back',
+    append: 'Add ' + N + ' masked test applicants to LOANS.APPLICANTS for load tests; existing rows unchanged'
+  };
+  $('#why').addEventListener('input', function () { whyEdited = true; $('#why-help').hidden = true; });
+  $$('[data-load]').forEach(function (b) { b.addEventListener('click', function () {
+    load = b.dataset.load; $('#spec-load').textContent = '"' + load + '"';
+    sums.table = 'Copy to <span class="mono">LOANS_MASKED.APPLICANTS</span> · ' + (load === 'upsert' ? 'upsert on APPLICATION_ID' : 'truncate and insert');
+    if (wm === 'table') $('#sum-wm').innerHTML = sums.table;
+  }); });
   function setWM(v, keepConfirm) {
     wm = v;
     if (!keepConfirm) setConfirmed(false);
@@ -800,12 +820,14 @@ renderSidebar('Data sources & jobs');
     cf.classList.toggle('append', v === 'append');
     $('.cf-in_place').hidden = v !== 'in_place';
     $('.cf-append').hidden = v !== 'append';
-    $('#cf-title').textContent = v === 'append' ? 'Confirm: insert 1,948,210 new rows into CRM.CUSTOMERS' : 'Confirm: overwrite 1,948,210 rows in CRM.CUSTOMERS';
+    $('#cf-title').textContent = v === 'append' ? 'Confirm: insert ' + N + ' new rows into ' + TABLE : 'Confirm: overwrite ' + N + ' rows in ' + TABLE;
     $('#cf-lead').textContent = v === 'append' ? 'This job adds rows to the source table. Read what happens before you confirm.' : 'This job changes the source table. Read what happens before you confirm.';
-    $('#cf-go').textContent = v === 'append' ? 'Insert 1,948,210 rows' : 'Write 1,948,210 rows in place';
+    $('#cf-go').textContent = v === 'append' ? 'Insert ' + N + ' rows' : 'Write ' + N + ' rows in place';
     $('#cf-go').className = 'btn ' + (v === 'append' ? 'btn-warn' : 'btn-danger');
     $('#sub4').textContent = subs[v];
     $('#sum-wm').innerHTML = sums[v];
+    $('#g-src').textContent = guarantee[v];
+    if (!whyEdited) $('#why').value = purpose[v];
     $$('input[name=wm]').forEach(function (r) { r.checked = r.value === v; });
     syncGate();
   }
@@ -818,9 +840,9 @@ renderSidebar('Data sources & jobs');
 
   // pk strategy
   var pkText = {
-    generate: '<span>New rows get CUSTOMER_ID from sequence CRM.CUSTOMERS_SEQ, starting at 41,882,908. They will not join to the masked MongoDB and PostgreSQL copies by customer id.</span>',
-    offset: '<span>New rows get CUSTOMER_ID = original + 90,000,000 (90,000,001 to 131,882,907). The evidence pack records the range.</span>',
-    token: '<span>New rows would use the obfuscated CUSTOMER_ID, but 79,903 of those keys already exist.</span>'
+    generate: '<span>New rows get APPLICATION_ID from sequence LOANS.APPLICATION_SEQ, starting at 18,406,553. Their CUSTOMER_ID tokens still join to the masked CRM copies.</span>',
+    offset: '<span>New rows get APPLICATION_ID = original + 90,000,000, up to 108,406,552. The evidence pack records the range.</span>',
+    token: '<span>New rows would use an obfuscated APPLICATION_ID, but 2,614 of those keys already exist.</span>'
   };
   var pkSpec = { generate: '{ "kind": "generate" }', offset: '{ "kind": "offset", "offset": 90000000 }', token: '{ "kind": "token" }' };
   function setPK(v) {
@@ -866,7 +888,7 @@ renderSidebar('Data sources & jobs');
     $('#spec-mode').textContent = '"' + v + '"';
     var pol = v === 'synthesize' ? 'synthetic-realistic' : 'gdpr-pseudonymise';
     $('#policy').value = pol; $('#spec-policy').textContent = '"' + pol + '"';
-    $('#sub5').textContent = v + ' · CHG-48213';
+    $('#sub5').textContent = v + ' · CHG-48190';
     $$('input[name=mode]').forEach(function (r) { r.checked = r.value === v; });
   }
   $$('input[name=mode]').forEach(function (r) { r.addEventListener('change', function () { setMode(r.value); }); });

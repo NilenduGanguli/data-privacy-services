@@ -1,13 +1,14 @@
-/* Vault design system — static mockup tokens (no framework). Dark is the default; light via [data-theme=light]. */
+/* Vault design system — static mockup tokens (no framework). Dark is the default; light via [data-theme=light].
+   Text tokens (--ink-3 and the signal colours on their soft fills) measure at least 4.5:1 on every surface in both themes. */
 :root, [data-theme="dark"] {
   --bg: #0b0f1a; --bg-tint: #0f1524; --surface: #121a2b; --surface-2: #172036; --surface-3: #1d2740;
   --border: #233049; --border-strong: #2f3f5f;
-  --ink: #e8edf7; --ink-2: #a9b4cc; --ink-3: #7684a3; --ink-on-brand: #06110f;
+  --ink: #e8edf7; --ink-2: #a9b4cc; --ink-3: #8996b4; --ink-on-brand: #06110f;
   --teal: #2dd4bf; --teal-soft: rgba(45,212,191,.12); --teal-border: rgba(45,212,191,.35);
   --amber: #fbbf24; --amber-soft: rgba(251,191,36,.12); --amber-border: rgba(251,191,36,.35);
   --emerald: #34d399; --emerald-soft: rgba(52,211,153,.12); --emerald-border: rgba(52,211,153,.35);
   --rose: #fb7185; --rose-soft: rgba(251,113,133,.12); --rose-border: rgba(251,113,133,.35);
-  --violet: #a78bfa; --violet-soft: rgba(167,139,250,.12);
+  --violet: #b09afb; --violet-soft: rgba(176,154,251,.12);
   --gold: #e5b457;
   --shadow-md: 0 8px 24px -12px rgba(0,0,0,.6); --shadow-lg: 0 24px 48px -16px rgba(0,0,0,.7);
   --ring: 0 0 0 3px rgba(45,212,191,.35);
@@ -19,11 +20,11 @@
 [data-theme="light"] {
   --bg: #f4f6fb; --bg-tint: #eef1f8; --surface: #ffffff; --surface-2: #f6f8fc; --surface-3: #eceff7;
   --border: #e0e5f0; --border-strong: #c5cde0;
-  --ink: #141a2b; --ink-2: #4d5875; --ink-3: #7e89a6; --ink-on-brand: #ffffff;
-  --teal: #0f766e; --teal-soft: rgba(15,118,110,.10); --teal-border: rgba(15,118,110,.35);
-  --amber: #b45309; --amber-soft: rgba(180,83,9,.10); --amber-border: rgba(180,83,9,.35);
-  --emerald: #047857; --emerald-soft: rgba(4,120,87,.10); --emerald-border: rgba(4,120,87,.35);
-  --rose: #be123c; --rose-soft: rgba(190,18,60,.10); --rose-border: rgba(190,18,60,.35);
+  --ink: #141a2b; --ink-2: #4d5875; --ink-3: #5a6582; --ink-on-brand: #ffffff;
+  --teal: #0c6960; --teal-soft: rgba(12,105,96,.10); --teal-border: rgba(12,105,96,.35);
+  --amber: #9a4508; --amber-soft: rgba(154,69,8,.10); --amber-border: rgba(154,69,8,.35);
+  --emerald: #046f50; --emerald-soft: rgba(4,111,80,.10); --emerald-border: rgba(4,111,80,.35);
+  --rose: #b01038; --rose-soft: rgba(176,16,56,.10); --rose-border: rgba(176,16,56,.35);
   --violet: #6d28d9; --violet-soft: rgba(109,40,217,.10);
   --gold: #a16207;
   --shadow-md: 0 4px 12px -4px rgba(20,26,43,.12); --shadow-lg: 0 20px 40px -16px rgba(20,26,43,.18);
@@ -42,7 +43,7 @@ a { color: inherit; text-decoration: none; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px; }
 .brand-mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--teal), #0e7490); display: grid; place-items: center; color: var(--ink-on-brand); font-weight: 800; box-shadow: 0 6px 18px -6px rgba(45,212,191,.6); }
 .brand-title { font-weight: 700; letter-spacing: .2px; font-size: 13px; line-height: 1.2; } .brand-sub { font-size: 11.5px; color: var(--ink-3); }
-.nav-label { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); padding: 10px 10px 4px; }
+.nav-label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); padding: 10px 10px 4px; }
 .nav-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--r-md); color: var(--ink-2); font-weight: 500; }
 .nav-item:hover { background: var(--surface-2); color: var(--ink); }
 .nav-item.active { background: var(--teal-soft); color: var(--teal); box-shadow: inset 0 0 0 1px var(--teal-border); }
@@ -202,7 +203,7 @@ select.input.mono { font-family: var(--mono); }
   table.stack tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 12px; padding: 12px 2px; border-bottom: 1px solid var(--border); }
   table.stack tr:last-child { border-bottom: 0; }
   table.stack td { border: 0; padding: 0 !important; min-width: 0; }
-  table.stack td::before { content: attr(data-l); display: block; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 3px; }
+  table.stack td::before { content: attr(data-l); display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 3px; }
   table.stack td:first-child, table.stack td[colspan] { grid-column: 1 / -1; }
   table.stack td:first-child::before, table.stack td[colspan]::before { display: none; }
   table.stack tr:hover td { background: transparent; }
