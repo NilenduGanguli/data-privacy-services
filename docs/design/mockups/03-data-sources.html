@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Data sources & jobs — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script>
+<style>
+  .two { display: grid; grid-template-columns: 1.35fr 1fr; gap: 16px; align-items: start; }
+  .part { display: grid; grid-template-columns: 80px 1fr 110px 90px; gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .part:last-child { border-bottom: 0; }
+  .ev { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .ev .box { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 12px; }
+  .ev .box .l { font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
+  .ev .box .v { font-size: 20px; font-weight: 800; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  @media (max-width: 1200px) { .two { grid-template-columns: 1fr; } }
+</style></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><span class="crumb">Data sources & jobs</span><span class="sep">/</span><span class="muted">Job group <span class="mono">crm-uat-refresh</span></span><span class="topbar-spacer"></span>
+  <span class="pill"><span class="dot"></span>7 workers · queue depth 23</span><button class="btn btn-sm" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>Oracle · CRM.CUSTOMERS → CRM_MASKED.CUSTOMERS</h1><p>Mode <b>obfuscate</b> · policy <b>gdpr-pseudonymise v3</b> · purpose CHG-48213 (UAT provisioning) · consistency key shared with <span class="mono">profiles_uat</span> and <span class="mono">ledger_uat</span></p></div>
+    <div style="display:flex;gap:8px"><button class="btn">Pause</button><button class="btn">Evidence pack</button><button class="btn btn-primary">Open consistency check</button></div></div>
+
+  <div class="card" style="padding:14px 18px"><div class="stepper">
+    <div class="step done"><span class="n">✓</span>Connect</div><div class="step-sep"></div>
+    <div class="step done"><span class="n">✓</span>Discover <span class="faint">· 2,000 sampled rows</span></div><div class="step-sep"></div>
+    <div class="step done"><span class="n">✓</span>Review <span class="faint">· 22 columns, 3 overrides</span></div><div class="step-sep"></div>
+    <div class="step done"><span class="n">✓</span>Target <span class="faint">· create · truncate_insert</span></div><div class="step-sep"></div>
+    <div class="step on"><span class="n">5</span>Run <span class="faint">· 72% · 8 partitions</span></div><div class="step-sep"></div>
+    <div class="step"><span class="n">6</span>Evidence</div>
+  </div></div>
+
+  <div class="two">
+    <div class="card">
+      <div class="card-head"><div class="card-title">Column classification (reviewed snapshot)</div><div class="legend"><span><i style="background:var(--rose)"></i>critical</span><span><i style="background:var(--amber)"></i>sensitive</span><span><i style="background:var(--teal)"></i>declared</span><span><i style="background:var(--surface-3);border:1px solid var(--border-strong)"></i>kept</span></div></div>
+      <table class="tbl"><thead><tr><th>Column</th><th>Type</th><th>Inferred entity</th><th>Conf.</th><th>Method</th><th>Evidence</th></tr></thead><tbody>
+        <tr><td class="mono">CUSTOMER_ID</td><td class="faint">NUMBER(12)</td><td><span class="chip teal">CUSTOMER_ID · key</span></td><td class="mono">1.00</td><td class="mono">fpe_digits</td><td class="faint">declared PK · shared across systems</td></tr>
+        <tr><td class="mono">FULL_NAME</td><td class="faint">VARCHAR2(120)</td><td><span class="chip amber">PERSON_NAME</span></td><td class="mono">0.96</td><td class="mono">fpe_text</td><td class="faint">name dict + NER 98% of sample</td></tr>
+        <tr><td class="mono">NATIONAL_ID</td><td class="faint">VARCHAR2(16)</td><td><span class="chip rose">AADHAAR</span></td><td class="mono">0.99</td><td class="mono">fpe_digits</td><td class="faint">Verhoeff valid 99.4%</td></tr>
+        <tr><td class="mono">TAX_ID</td><td class="faint">CHAR(10)</td><td><span class="chip rose">PAN_IN</span></td><td class="mono">0.98</td><td class="mono">fpe_text</td><td class="faint">pattern · CHAR bind handled</td></tr>
+        <tr><td class="mono">EMAIL</td><td class="faint">VARCHAR2(254)</td><td><span class="chip amber">EMAIL</span></td><td class="mono">0.99</td><td class="mono">email(keep)</td><td class="faint">pattern</td></tr>
+        <tr><td class="mono">MOBILE</td><td class="faint">VARCHAR2(20)</td><td><span class="chip amber">PHONE</span></td><td class="mono">0.97</td><td class="mono">fpe_digits(+cc)</td><td class="faint">E.164 IN</td></tr>
+        <tr><td class="mono">DOB</td><td class="faint">DATE</td><td><span class="chip amber">DATE_OF_BIRTH</span></td><td class="mono">0.95</td><td class="mono">date_shift ±365</td><td class="faint">anchor CUSTOMER_ID</td></tr>
+        <tr><td class="mono">ADDR_LINE1</td><td class="faint">VARCHAR2(200)</td><td><span class="chip amber">STREET_ADDRESS</span></td><td class="mono">0.90</td><td class="mono">det_token</td><td class="faint">NER LOCATION · free text</td></tr>
+        <tr><td class="mono">PIN_CODE</td><td class="faint">VARCHAR2(6)</td><td><span class="chip amber">POSTAL_CODE</span></td><td class="mono">0.93</td><td class="mono">generalize(3)</td><td class="faint"><b>override</b>: domain &lt; 10⁶ → no FPE</td></tr>
+        <tr><td class="mono">RISK_SCORE</td><td class="faint">NUMBER(4)</td><td><span class="chip teal">BUSINESS_SENSITIVE</span></td><td class="mono">—</td><td class="mono">bucket</td><td class="faint"><b>override</b>: owner-declared</td></tr>
+        <tr><td class="mono">RM_NOTES</td><td class="faint">CLOB</td><td><span class="chip amber">FREE_TEXT · mixed</span></td><td class="mono">0.84</td><td class="mono">text pipeline</td><td class="faint">NER on CLOB · UTF-16 offsets</td></tr>
+        <tr><td class="mono">CREATED_AT</td><td class="faint">TIMESTAMP(6)</td><td><span class="chip slate">kept</span></td><td class="mono">—</td><td class="mono">keep</td><td class="faint">not personal</td></tr>
+        <tr><td class="mono">SEGMENT</td><td class="faint">VARCHAR2(16)</td><td><span class="chip slate">kept</span></td><td class="mono">—</td><td class="mono">keep</td><td class="faint">4 categories</td></tr>
+      </tbody></table>
+      <div class="faint" style="font-size:12px;margin-top:10px">+ 9 more columns kept · snapshot <span class="mono">snap_01K7ZP…</span> is part of the evidence pack · examples shown to reviewers were masked.</div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div class="card">
+        <div class="card-head"><div class="card-title">Run · partitions by CUSTOMER_ID range</div><span class="chip teal">running</span></div>
+        <div class="part" style="color:var(--ink-3);font-size:11px;text-transform:uppercase;letter-spacing:.08em"><span>Part</span><span>Progress</span><span>Rows/s</span><span>Checkpoint</span></div>
+        <div class="part"><span class="mono">p0</span><div class="bar emerald"><i style="width:100%"></i></div><span class="mono">—</span><span class="chip emerald">done</span></div>
+        <div class="part"><span class="mono">p1</span><div class="bar emerald"><i style="width:100%"></i></div><span class="mono">—</span><span class="chip emerald">done</span></div>
+        <div class="part"><span class="mono">p2</span><div class="bar"><i style="width:91%"></i></div><span class="mono">12,480</span><span class="mono faint">…884120</span></div>
+        <div class="part"><span class="mono">p3</span><div class="bar"><i style="width:78%"></i></div><span class="mono">11,902</span><span class="mono faint">…771033</span></div>
+        <div class="part"><span class="mono">p4</span><div class="bar"><i style="width:74%"></i></div><span class="mono">12,115</span><span class="mono faint">…630918</span></div>
+        <div class="part"><span class="mono">p5</span><div class="bar"><i style="width:61%"></i></div><span class="mono">9,870</span><span class="mono faint">…512207</span></div>
+        <div class="part"><span class="mono">p6</span><div class="bar amber"><i style="width:40%"></i></div><span class="mono">retrying</span><span class="chip amber">lease reclaimed</span></div>
+        <div class="part"><span class="mono">p7</span><div class="bar"><i style="width:35%"></i></div><span class="mono">12,301</span><span class="mono faint">…118004</span></div>
+        <svg viewBox="0 0 320 60" width="100%" height="60" style="margin-top:10px"><polyline fill="none" stroke="var(--teal)" stroke-width="2" points="0,45 20,40 40,42 60,30 80,28 100,26 120,31 140,22 160,20 180,24 200,18 220,19 240,16 260,22 280,14 300,15 320,12"/><text x="0" y="58" font-size="10" fill="var(--ink-3)" font-family="var(--mono)">throughput · 10 min</text><text x="250" y="58" font-size="10" fill="var(--ink-3)" font-family="var(--mono)">~70k rows/s total</text></svg>
+        <div class="faint" style="font-size:12px">p6: worker lost its lease; reaper re-queued from checkpoint …402110 — no rows re-masked twice (upsert on PK).</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title">Evidence so far</div><span class="chip emerald">verifier passing</span></div>
+        <div class="ev">
+          <div class="box"><div class="l">Rows protected</div><div class="v">1,948,210</div></div>
+          <div class="box"><div class="l">Values transformed</div><div class="v">17.5M</div></div>
+          <div class="box"><div class="l">Leakage sweep</div><div class="v" style="color:var(--emerald)">0 hits</div></div>
+          <div class="box"><div class="l">FPE fallbacks</div><div class="v">1 col <span class="faint" style="font-size:12px;font-weight:600">(PIN_CODE)</span></div></div>
+          <div class="box"><div class="l">Cross-system joins</div><div class="v">3 / 3 <span class="faint" style="font-size:12px;font-weight:600">consistent</span></div></div>
+          <div class="box"><div class="l">Raw PII to LLM</div><div class="v" style="color:var(--emerald)">0</div></div>
+        </div>
+        <div class="callout" style="margin-top:12px;font-size:12px">Output is <b>pseudonymised — still personal data</b> under GDPR/DPDP. The key is held by the requesting team (kid <span class="mono">k_01K7ZQ4M8V</span>); DPS keeps no copy.</div>
+      </div>
+    </div>
+  </div>
+</main></div></div>
+<script>renderSidebar('Data sources & jobs');</script>
+</body></html>

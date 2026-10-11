@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Overview — DPS Privacy Console</title><link rel="stylesheet" href="vault.css"><script src="vault.js"></script></head>
+<body><div class="shell"><nav class="sidebar"></nav><div class="main">
+<header class="topbar"><span class="crumb">Overview</span><span class="sep">/</span><span class="muted">Tenant: retail-banking-apac</span><span class="topbar-spacer"></span>
+  <span class="pill"><span class="dot"></span>All layers ready</span><span class="pill mono">api-core · db · llm · ocr · browser</span><button class="btn btn-sm" onclick="toggleTheme()">Theme</button></header>
+<main class="page">
+  <div class="page-head"><div><h1>Protection posture</h1><p>Last 24 hours · region ap-south-1 · policy pack <b>gdpr-pseudonymise v3</b></p></div>
+    <div style="display:flex;gap:8px"><button class="btn">Export evidence</button><a class="btn btn-primary" href="02-playground.html">Open playground</a></div></div>
+
+  <div class="grid cols-4">
+    <div class="card kpi hero"><div class="label">Values protected</div><div class="value">4,812,330</div><div class="delta"><b>▲ 18%</b> vs previous 24h · 3 layers</div></div>
+    <div class="card kpi"><div class="label">PII findings</div><div class="value">611,904</div><div class="delta">41 entity types · 6 jurisdictions</div></div>
+    <div class="card kpi"><div class="label">Jobs</div><div class="value">7 <span class="faint" style="font-size:16px;font-weight:600">running</span></div><div class="delta">23 completed · 0 failed · 2 awaiting review</div></div>
+    <div class="card kpi zero"><div class="label">Raw PII sent to LLM</div><div class="value">0</div><div class="delta">2,184 gateway calls · placeholders only · verifier: <b>pass</b></div></div>
+  </div>
+
+  <div class="grid" style="grid-template-columns: 1.6fr 1fr">
+    <div class="card">
+      <div class="card-head"><div class="card-title">Protected values per day</div><div class="legend"><span><i style="background:var(--teal)"></i>Obfuscated</span><span><i style="background:var(--violet)"></i>Synthetic</span></div></div>
+      <svg viewBox="0 0 720 220" width="100%" height="220" role="img" aria-label="14-day trend">
+        <defs><linearGradient id="g1" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".35"/><stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/></linearGradient>
+        <linearGradient id="g2" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#a78bfa" stop-opacity=".3"/><stop offset="1" stop-color="#a78bfa" stop-opacity="0"/></linearGradient></defs>
+        <g stroke="var(--border)" stroke-width="1"><line x1="40" x2="700" y1="40" y2="40"/><line x1="40" x2="700" y1="90" y2="90"/><line x1="40" x2="700" y1="140" y2="140"/><line x1="40" x2="700" y1="190" y2="190"/></g>
+        <g fill="var(--ink-3)" font-size="11" font-family="var(--mono)"><text x="4" y="44">6M</text><text x="4" y="94">4M</text><text x="4" y="144">2M</text><text x="4" y="194">0</text></g>
+        <path d="M40,150 L90,142 L140,146 L190,128 L240,120 L290,124 L340,104 L390,96 L440,100 L490,84 L540,78 L590,70 L640,62 L700,56 L700,190 L40,190 Z" fill="url(#g1)"/>
+        <path d="M40,150 L90,142 L140,146 L190,128 L240,120 L290,124 L340,104 L390,96 L440,100 L490,84 L540,78 L590,70 L640,62 L700,56" fill="none" stroke="#2dd4bf" stroke-width="2.5" stroke-linejoin="round"/>
+        <path d="M40,176 L90,174 L140,170 L190,168 L240,160 L290,158 L340,150 L390,146 L440,140 L490,136 L540,130 L590,126 L640,118 L700,112 L700,190 L40,190 Z" fill="url(#g2)"/>
+        <path d="M40,176 L90,174 L140,170 L190,168 L240,160 L290,158 L340,150 L390,146 L440,140 L490,136 L540,130 L590,126 L640,118 L700,112" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linejoin="round"/>
+        <g fill="var(--ink-3)" font-size="11" font-family="var(--mono)"><text x="40" y="212">Sep 28</text><text x="340" y="212">Oct 4</text><text x="670" y="212">Oct 11</text></g>
+      </svg>
+    </div>
+    <div class="card">
+      <div class="card-head"><div class="card-title">Posture score</div><span class="chip emerald">Verified</span></div>
+      <div style="display:flex;gap:18px;align-items:center">
+        <svg viewBox="0 0 120 120" width="128" height="128"><circle cx="60" cy="60" r="50" fill="none" stroke="var(--surface-3)" stroke-width="12"/>
+          <circle cx="60" cy="60" r="50" fill="none" stroke="var(--teal)" stroke-width="12" stroke-dasharray="314" stroke-dashoffset="25" stroke-linecap="round" transform="rotate(-90 60 60)"/>
+          <text x="60" y="58" text-anchor="middle" font-size="26" font-weight="800" fill="var(--ink)">92</text><text x="60" y="76" text-anchor="middle" font-size="10" fill="var(--ink-3)">of 100</text></svg>
+        <div style="display:flex;flex-direction:column;gap:8px;flex:1;font-size:12.5px">
+          <div><div style="display:flex;justify-content:space-between"><span>Leakage sweeps passed</span><b>100%</b></div><div class="bar emerald"><i style="width:100%"></i></div></div>
+          <div><div style="display:flex;justify-content:space-between"><span>Reversible with key held by caller</span><b>100%</b></div><div class="bar"><i style="width:100%"></i></div></div>
+          <div><div style="display:flex;justify-content:space-between"><span>Columns reviewed before run</span><b>94%</b></div><div class="bar"><i style="width:94%"></i></div></div>
+          <div><div style="display:flex;justify-content:space-between"><span>Policies on latest preset</span><b>81%</b></div><div class="bar amber"><i style="width:81%"></i></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid cols-3">
+    <div class="card"><div class="card-head"><div class="card-title">Layer 1 · API</div><span class="chip teal">stateless</span></div>
+      <div class="kpi"><div class="value" style="font-size:24px">1.92M</div><div class="delta">requests · p95 <b style="color:var(--ink)">41 ms</b> JSON · 3.2 s documents</div></div>
+      <div class="legend" style="margin-top:10px"><span><i style="background:var(--teal)"></i>obfuscate 71%</span><span><i style="background:var(--violet)"></i>synthesize 24%</span><span><i style="background:var(--ink-3)"></i>detect 5%</span></div></div>
+    <div class="card"><div class="card-head"><div class="card-title">Layer 2 · Connectors</div><span class="chip amber">2 awaiting review</span></div>
+      <div class="kpi"><div class="value" style="font-size:24px">2.71M</div><div class="delta">rows · Oracle 58% · PostgreSQL 31% · MongoDB 11%</div></div>
+      <div style="margin-top:10px;font-size:12.5px" class="muted">Job group <span class="mono">crm-uat-refresh</span> keeps customer ids consistent across 3 systems.</div></div>
+    <div class="card"><div class="card-head"><div class="card-title">Layer 3 · UI scanner</div><span class="chip emerald">dry-run only</span></div>
+      <div class="kpi"><div class="value" style="font-size:24px">38</div><div class="delta">forms inventoried · 212 PII fields · 3 risk flags</div></div>
+      <div style="margin-top:10px;font-size:12.5px" class="muted">Last scan: onboarding-uat · 20 personas generated, 0 submitted.</div></div>
+  </div>
+
+  <div class="grid" style="grid-template-columns: 1fr 1.4fr">
+    <div class="card"><div class="card-head"><div class="card-title">Findings by entity type</div><span class="faint" style="font-size:12px">24h</span></div>
+      <table class="tbl"><tbody>
+        <tr><td><span class="chip rose">PAN</span></td><td style="width:45%"><div class="bar rose"><i style="width:88%"></i></div></td><td class="mono" style="text-align:right">141,220</td></tr>
+        <tr><td><span class="chip rose">AADHAAR</span></td><td><div class="bar rose"><i style="width:64%"></i></div></td><td class="mono" style="text-align:right">102,811</td></tr>
+        <tr><td><span class="chip amber">EMAIL</span></td><td><div class="bar amber"><i style="width:58%"></i></div></td><td class="mono" style="text-align:right">93,406</td></tr>
+        <tr><td><span class="chip amber">PHONE</span></td><td><div class="bar amber"><i style="width:51%"></i></div></td><td class="mono" style="text-align:right">81,970</td></tr>
+        <tr><td><span class="chip amber">PERSON_NAME</span></td><td><div class="bar amber"><i style="width:47%"></i></div></td><td class="mono" style="text-align:right">75,118</td></tr>
+        <tr><td><span class="chip slate">DATE_OF_BIRTH</span></td><td><div class="bar"><i style="width:30%"></i></div></td><td class="mono" style="text-align:right">48,212</td></tr>
+        <tr><td><span class="chip violet">API_KEY</span></td><td><div class="bar"><i style="width:2%"></i></div></td><td class="mono" style="text-align:right">37</td></tr>
+      </tbody></table></div>
+    <div class="card"><div class="card-head"><div class="card-title">Recent jobs</div><a class="btn btn-sm" href="03-data-sources.html">All jobs</a></div>
+      <table class="tbl"><thead><tr><th>Job</th><th>Source → target</th><th>Mode</th><th>Progress</th><th>Status</th></tr></thead><tbody>
+        <tr><td class="mono">j_01K7…9Q</td><td>Oracle CRM.CUSTOMERS → CRM_MASKED</td><td><span class="chip teal">obfuscate</span></td><td><div class="bar"><i style="width:72%"></i></div></td><td><span class="chip teal">running · 8 partitions</span></td></tr>
+        <tr><td class="mono">j_01K7…4D</td><td>Mongo profiles → profiles_uat</td><td><span class="chip teal">obfuscate</span></td><td><div class="bar"><i style="width:100%"></i></div></td><td><span class="chip emerald">evidence ready</span></td></tr>
+        <tr><td class="mono">j_01K7…1A</td><td>PG ledger.transactions → S3 parquet</td><td><span class="chip violet">synthesize</span></td><td><div class="bar"><i style="width:100%"></i></div></td><td><span class="chip emerald">fidelity 0.97</span></td></tr>
+        <tr><td class="mono">j_01K6…ZT</td><td>Oracle LOANS.APPLICANTS</td><td><span class="chip teal">obfuscate</span></td><td><div class="bar amber"><i style="width:0%"></i></div></td><td><span class="chip amber">awaiting review · 3 columns</span></td></tr>
+        <tr><td class="mono">s_01K6…MX</td><td>https://onboarding-uat…/apply</td><td><span class="chip violet">personas</span></td><td><div class="bar"><i style="width:100%"></i></div></td><td><span class="chip emerald">38 forms · exported</span></td></tr>
+      </tbody></table></div>
+  </div>
+</main></div></div>
+<script>renderSidebar('Overview');</script>
+</body></html>

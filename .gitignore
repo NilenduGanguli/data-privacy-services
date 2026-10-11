@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+# Local env & secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service-account*.json
+application_default_credentials.json
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+# Local data
+data/
+# Claude session config (local)
+.claude/
