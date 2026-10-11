@@ -519,3 +519,28 @@ are preserved unless a section says otherwise.
 - Docstrings added to `make_envelope` and `is_envelope`.
 - Test added: `test_make_envelope_refuses_what_parse_cannot_read` (6 parametrised cases).
 - Count: the plan's 2 + 6 = 8 in the file; suite 204 passed, 1 skipped.
+
+## Task 14 — Optional FF1 adapter
+
+- `Ff1` hex-encodes the tweak (`tweak.encode("utf-8").hex()`). Why: `fastfpe.ff1` takes the key
+  **and the tweak** as hex strings. The plan passed the tweak raw, so `Ff1(key, tweak="SSN")`
+  raised `ValueError: Invalid tweak hex` (the plan's own `test_real_ff1_round_trip` failed), and
+  a tweak that happens to be valid hex (`""`, digit strings, `"CAFE"`) was silently read as other
+  bytes. With the fix the adapter reproduces the NIST SP 800-38G FF1 samples 1, 2 and 7 exactly.
+- `_fpe_digits` raises `ValueError` for a negative `keep_prefix` / `keep_suffix` and returns
+  `None` (domain too small) when the kept digits cover the whole value. Why: a negative keep made
+  Python slicing keep the wrong digits; Task 15 turns bad method params into `MethodError`.
+- `tests/test_fpe.py`, `test_digits_keep_prefix_suffix_and_format`: `out[7] == "4"` (plan:
+  `== "1"`). Why: `"4532 78"` is indices 0-6, so index 7 is the first *encrypted* digit; under the
+  test's rotate-by-3 cipher `1` becomes `4`. The plan's assertion contradicted its own
+  `keep_prefix=6`. The kept prefix and suffix are still asserted by `startswith`/`endswith`.
+- Docstrings added to the public functions and `Cipher`.
+- Tests added: `test_real_ff1_matches_nist_sp800_38g_samples`,
+  `test_real_ff1_through_the_format_keeping_helpers` (letters at the 5-letter minimum, a card with
+  kept prefix/suffix, a field-scoped tweak with quotes and spaces), `test_ff1_refuses_bad_key_sizes`,
+  `test_negative_keeps_are_refused`, `test_keeps_that_cover_the_value_fall_back`,
+  `test_non_ascii_letters_pass_through` (documents the v1 limit: `é ú ñ` stay in place; a name
+  with no ASCII letters falls back). Against the plan's `fpe.py`, the three real-FF1 tests and
+  the negative-keep test fail.
+- With `uv pip install -e ".[dev,fpe]"` (fastfpe 0.2.1) the FF1 tests run for real: 10 passed in
+  the file; suite 214 passed, 1 skipped (the Presidio test).
