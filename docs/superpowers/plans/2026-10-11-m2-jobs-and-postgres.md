@@ -10,7 +10,7 @@
 
 **Spec:** `docs/specs/2026-10-11-data-privacy-services-design.md` — §4 (processes, statelessness), §5.7 (verification and evidence), §7 (Layer 2: lifecycle, selection, write modes D3, discovery, execution, PostgreSQL engine notes, credentials, throughput), §9 (Data sources & jobs page), §10 (cross-tenant access, connector credentials, writing to production, audit, retention) and milestone M2 in §11.
 
-**Contract (binding):** `docs/superpowers/plans/2026-10-11-m1-m5-contract.md` — §1 (M2 paths), §2 (DB, roles, DDL, RLS), §3 (job model, queue, workers), §4 (connector protocol), §5 (models and validation), §6 (engine bridge), §7 (evidence), §8 (scopes, errors, audit), §9 (M2 routes), §10 (M2 settings), §11 (compose), §12 (tests), §13 (artefacts), §14 (console 06/07/03/10/09-list), §15 (M2 owns). Every name, column, route, port and setting below is the contract's. Where this plan **adds** something (a defaulted field, a helper function, an extra index, a stricter rule) it says so in place and lists it in "Open contract questions" at the end. **Contract change: none** — this plan does not edit the contract file; the open questions are for the contract owner.
+**Contract (binding):** `docs/superpowers/plans/2026-10-11-m1-m5-contract.md` — §1 (M2 paths), §2 (DB, roles, DDL, RLS), §3 (job model, queue, workers), §4 (connector protocol), §5 (models and validation), §6 (engine bridge), §7 (evidence), §8 (scopes, errors, audit), §9 (M2 routes), §10 (M2 settings), §11 (compose), §12 (tests), §13 (artefacts), §14 (console 06/07/03/10/09-list), §15 (M2 owns). Every name, column, route, port and setting below is the contract's. Where this plan **adds** something (a defaulted field, a helper function, an extra index, a stricter rule) it says so in place and lists it in "Open contract questions" at the end. **Contract change (made 2026-10-11, before M3–M5 execute):** every addition listed in "Open contract questions" 1–20 is folded into the contract (index: contract §16) — `dps_tenant` GLOBAL with the `_system` tenant (§2.4, §3.6, §8.1), `EncodedKey`/`KeyRange` (§4.1), `Consumer(..., ctx, role, worker_id)` and `build_context` (§3.5), `create_job(job_id=)` and the other queue functions (§3.2), per-row verification (§6.4), `open_connector(..., kek, job_id, credentials)` (§1), the protocol additions (§4.2), DDL additions (§2.4), codes (§5.3), settings and posture (§10), compose one-shots (§11), the console foundation names (§14). The names below are therefore contract names; M3, M4 and M5 import them as written here.
 
 **Depends on:** M0 complete (all 28 tasks green, tag `v0.1.0-m0`). M2 does not depend on M1. Several files are shared with M1 (`pyproject.toml`, `dps/config.py`, `dps/posture.py`, `dps/app.py`, `docker-compose.yml`, `Dockerfile`, `tests/conftest.py`, `frontend/src/App.tsx`, `frontend/src/lib/{api,types}.ts`, `HANDOFF.md`). Every edit in this plan to a shared file is **additive** (new fields, new list entries, new routes); if M1 has already landed, keep both sets of additions.
 
@@ -39,7 +39,7 @@
 | `dps/engine/transform/apply.py` | `ApplyOptions.anchor: str | None = None`; `apply_plan` uses it when set, else `anchor_for` (contract §6.2) | 16 |
 | `dps/engine/service.py` | public `PrivacyEngine.detector(policy, locale)` and `PrivacyEngine.surrogate_engine(seed, locale)` | 16 |
 | `dps/engine/transform/methods.py` | `_dictionary` without a key uses `sha256`, not Python's per-process-randomised `hash()` — L2 runs one job across several worker processes | 16 |
-| `dps/auth.py` | `require_any_scope(*scopes)` dependency factory | 24 |
+| `dps/auth.py` | `require_any_scope(*scopes)` dependency factory; `resolve_tenant` refuses reserved `_` tenant ids (`AuthError(..., code="tenant_reserved")`, `AuthError.code` optional) — contract §8.1 | 24 |
 | `dps/app.py` | DB lifecycle + readiness `db`/`jobs`, M2 routers, `DpsHttpError` handler, CORS methods `PATCH`/`DELETE`, nested SPA routes resolve `…/assets/<file>` and root files (multi-segment console routes, see Task 24) | 24, 25 |
 | `dps/observability.py` | `_SAFE_FIELDS` additions (ids, counts, phases) and M2 metrics | 8 |
 | `frontend/src/App.tsx`, `frontend/src/lib/{api,types}.ts`, `frontend/src/pages/Overview.tsx`, `frontend/src/styles.css` | routes, typed API groups, recent jobs, M2 styles | 29–35 |
@@ -1066,7 +1066,7 @@ CREATE TABLE __SCHEMA__.dps_api_key (
     rotated_from text
 );
 ```
-(The contract's tenant regex is `^[a-z0-9][a-z0-9_-]{0,62}$`; this file also admits a leading `_` so the internal `_system` tenant that owns retention job rows (Task 23) can have a row — listed in "Open contract questions".)
+(The CHECK admits a leading `_` so the internal `_system` tenant that owns retention job rows (Task 23) can have a row — contract §2.4; API callers can never select a `_` tenant, Task 24. `dps_tenant` is GLOBAL — contract §2.2/§2.4 — so 008 creates no policy on it and M5's 040 adds none.)
 
 `dps/migrations/003_connections.sql`:
 ```sql
@@ -1705,7 +1705,10 @@ TENANT_TABLES: tuple[str, ...] = (
     "dps_artefact", "dps_evidence", "dps_audit_log",
 )
 GLOBAL_TABLES: tuple[str, ...] = ("dps_tenant", "dps_api_key", "dps_worker", "dps_migration_ledger")
-ALLOWED_EXTRA_POLICIES: dict[str, str] = {"dps_job": "worker_claim", "dps_job_partition": "worker_claim"}
+#: Policies besides tenant_isolation that the posture check accepts, per table. A set per table so later
+#: milestones can add theirs (M5: owner_directory on dps_job/dps_connection, worker_usage on dps_tenant_usage).
+ALLOWED_EXTRA_POLICIES: dict[str, frozenset[str]] = {"dps_job": frozenset({"worker_claim"}),
+                                                     "dps_job_partition": frozenset({"worker_claim"})}
 _SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _AUDIT_PART_RE = re.compile(r"^dps_audit_log_(\d{4})_(\d{2})$")
 
@@ -2063,7 +2066,7 @@ from __future__ import annotations
 
 from dps.db import ALLOWED_EXTRA_POLICIES, TENANT_TABLES, evaluate_rls_posture
 
-GOOD_POLICIES = {t: ["tenant_isolation"] + ([ALLOWED_EXTRA_POLICIES[t]] if t in ALLOWED_EXTRA_POLICIES else [])
+GOOD_POLICIES = {t: ["tenant_isolation", *sorted(ALLOWED_EXTRA_POLICIES.get(t, frozenset()))]
                  for t in TENANT_TABLES}
 
 
@@ -2211,7 +2214,8 @@ def evaluate_rls_posture(*, rls_enabled: bool, rolsuper: bool, rolbypassrls: boo
             problems.append(f"{table}: tenant_isolation does not reference app.tenant_id")
         if not forced.get(table, False):
             problems.append(f"{table}: row level security is not FORCE-enabled")
-        extra = sorted(n for n in names if n not in ("tenant_isolation", ALLOWED_EXTRA_POLICIES.get(table)))
+        allowed = {"tenant_isolation", *ALLOWED_EXTRA_POLICIES.get(table, frozenset())}
+        extra = sorted(n for n in names if n not in allowed)
         if extra:
             problems.append(f"{table}: unexpected policies {extra}")
     if partition_leaks:
@@ -10364,7 +10368,7 @@ git commit -m "feat(worker): python -m dps.worker - leased claims, heartbeats, r
 
 **Files:**
 - Create: `dps/layers/api/errors.py`, `dps/layers/api/deps.py`, `dps/layers/api/routers/connections.py`
-- Modify: `dps/auth.py` (`require_any_scope`), `dps/app.py` (DB lifecycle, readiness, routers, error handler, CORS, nested SPA paths, embedded worker), `tests/fixtures/db.py` (`api_client`)
+- Modify: `dps/auth.py` (`require_any_scope`; `resolve_tenant` refuses reserved `_` tenant ids, contract §8.1), `dps/app.py` (DB lifecycle, readiness, routers, error handler, CORS, nested SPA paths, embedded worker), `tests/fixtures/db.py` (`api_client`)
 - Test: `tests/api/__init__.py`, `tests/api/test_api_connections.py`, `tests/test_app_m2.py`
 
 Public interface:
@@ -10380,11 +10384,15 @@ def install_error_handlers(app: FastAPI) -> None       # {"detail", "code", **ex
 def require_db(request: Request) -> None               # 503 db_unavailable while the metadata DB is down
 def tenant_of(request: Request) -> str
 def kek_of(request: Request) -> bytes | None
-def idempotency_key(request: Request) -> str | None    # header Idempotency-Key, ^[A-Za-z0-9_.:-]{1,128}$ else 422
+def idempotency_key(request: Request) -> str | None    # header Idempotency-Key, ^[A-Za-z0-9_.:-]{1,128}$ else 422 idempotency_key_invalid (contract §9)
 def audit_action(request: Request, *, action: str, outcome: str = "ok", status: int = 200,
                  job_id: str | None = None, counts: dict[str, int] | None = None) -> None
 # dps/auth.py
 def require_any_scope(*scopes: str) -> Callable[[Request], Principal]
+RESERVED_TENANT_PREFIX = "_"                           # _system (jobs.SYSTEM_TENANT); contract §8.1
+# resolve_tenant(principal, requested): a requested id starting with "_" → AuthError(403, "tenant id is reserved",
+#   code="tenant_reserved") — checked before the grant test, so wildcard keys are refused too. M0's AuthError gains an
+#   optional `code` (default None) and the FastAPI glue renders {"detail", "code"} when it is set (M0 touch point).
 # routes (contract §9, scope jobs; production-tag changes need admin)
 POST   /api/v1/connections                    ConnectionSpec → 201 Connection
 GET    /api/v1/connections?limit&cursor        → {"items": [Connection], "next_cursor"}
@@ -10398,7 +10406,7 @@ POST   /api/v1/connections/{id}/count          {object, selection} → {"rows", 
 ```
 `count` validates and parameterises the selection first; a `SelectionError` answers 422 `{"detail", "code", "checks"}` (the wizard's checklist, mockup 06 step 2); `runs_as` is the value-free statement DPS will page with (`select_sql` over the **template**, e.g. `SELECT … FROM "bank"."customers" AS t WHERE ("created_at" >= CAST(CAST(:l1 AS TEXT) AS DATE)) ORDER BY t."customer_id"`); `binds` is the number of bound parameters. Credentials never appear in any response (`has_secret: bool` only).
 
-**App wiring.** When `db_configured(settings)`: the lifespan initialises both pools (the API pool always; the worker pool only for the embedded worker), applies the migrations mode (`auto` → `run_migrations` on the migration connection; `verify` → `verify_migrations`, failure = not ready; `off` → nothing), runs `assert_rls_posture` (problems refuse boot in staging/prod, are logged as `rls_posture_problem` names locally), loads the KEK into `app.state.kek`, starts `DbAuditSink(db.acquire, settings)` unless a sink was injected, sets readiness `db` (`up|down`) and `jobs` (`ok` when db is up, migrations verified and the KEK loaded), and — only when `embedded_worker` (local) — starts a `Consumer` in the app's loop; at shutdown it stops the consumer (drain), stops the audit writer and closes both pools. A DB that is down at boot leaves `api-core` ready, sets `db=down`, and a background task retries every 10 s. Without a DB the M2 routers answer 503 `db_unavailable`. CORS `allow_methods` gains `PATCH`, `DELETE`; `allow_headers` gains `Idempotency-Key`. The SPA fallback resolves nested routes: for `/data-sources/jobs/<id>`, a request for `…/assets/<file>` or a root file (`favicon.svg`) is served from `frontend/dist` by trying each path suffix inside the dist root (the console is built with `base: './'`, so assets are requested relative to the route).
+**App wiring.** When `db_configured(settings)`: the lifespan initialises both pools (the API pool always; the worker pool only for the embedded worker), applies the migrations mode (`auto` → `run_migrations` on the migration connection; `verify` → `verify_migrations`, failure = not ready; `off` → nothing), runs `assert_rls_posture` (problems refuse boot in staging/prod, are logged as `rls_posture_problem` names locally), loads the KEK into `app.state.kek`, starts `DbAuditSink(db.acquire, settings)` unless a sink was injected, sets readiness `db` (`up|down`) and `jobs` (`ok` when db is up, migrations verified and the KEK loaded), and — only when `embedded_worker` (local) — starts a `Consumer` in the app's loop (built like `_amain` in Task 23: `ctx = build_context(settings)` with the app's audit sink, `Consumer(..., ctx=ctx)` — `ctx` is required, contract §3.5); at shutdown it stops the consumer (drain), stops the audit writer and closes both pools. A DB that is down at boot leaves `api-core` ready, sets `db=down`, and a background task retries every 10 s. Without a DB the M2 routers answer 503 `db_unavailable`. CORS `allow_methods` gains `PATCH`, `DELETE`; `allow_headers` gains `Idempotency-Key`. The SPA fallback resolves nested routes: for `/data-sources/jobs/<id>`, a request for `…/assets/<file>` or a root file (`favicon.svg`) is served from `frontend/dist` by trying each path suffix inside the dist root (the console is built with `base: './'`, so assets are requested relative to the route).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -10418,6 +10426,16 @@ def test_m2_routes_answer_503_without_a_database() -> None:
         assert r.status_code == 503 and r.json() == {"detail": "the metadata database is not configured",
                                                      "code": "db_unavailable"}
         assert c.get("/readyz").json()["ready"] is True                     # api-core never depends on the DB
+
+
+def test_reserved_tenant_ids_are_refused_even_for_wildcard_keys() -> None:
+    settings = Settings(_env_file=None, auth_enabled=True, llm_provider="stub", rate_limit_enabled=False,
+                        api_keys='[{"name": "full", "key": "dps_full", "tenant_ids": ["*"], "scopes": ["*"]}]')
+    with TestClient(create_app(settings)) as c:
+        r = c.post("/api/v1/detect", json={"text": "x"}, headers={"X-API-KEY": "dps_full", "X-DPS-Tenant": "_system"})
+        assert r.status_code == 403 and r.json()["code"] == "tenant_reserved"
+        ok = c.post("/api/v1/detect", json={"text": "x"}, headers={"X-API-KEY": "dps_full", "X-DPS-Tenant": "t1"})
+        assert ok.status_code == 200
 
 
 def test_cors_allows_patch_delete_and_idempotency() -> None:
@@ -10526,7 +10544,7 @@ Routers wrap their bodies in `try: … except Exception as exc: raise to_http(ex
 - [ ] **Step 4: Run tests, lint, types**
 
 Run: `pytest -q tests/test_app_m2.py tests/api/test_api_connections.py tests/test_api.py && ruff check dps tests tools && mypy dps`
-Expected: `3 + 2 = 5` new tests pass (one may skip when `frontend/dist` is absent); M0's API tests stay green.
+Expected: `4 + 2 = 6` new tests pass (one may skip when `frontend/dist` is absent); M0's API tests stay green. (If M0's `api_keys` setting takes another shape, build the same wildcard key the way M0's `tests/test_api.py` does.)
 
 - [ ] **Step 5: Commit**
 
@@ -11588,7 +11606,7 @@ Not in M2 by design: Oracle and MongoDB connectors and their pitfalls (M3, again
 
 ## Open contract questions
 
-The plan follows the contract everywhere; these are the points where it **adds** something or where the contract (or a mockup) seems wrong. None changes a contract name, route, column or port.
+The plan follows the contract everywhere; these are the points where it **adds** something or where the contract (or a mockup) seems wrong. None changes a contract name, route, column or port. **Status 2026-10-11: all twenty are decided and folded into the contract (index in contract §16); they are binding for M3, M4 and M5.** Two decisions refine the text below: `dps_tenant` is GLOBAL (contract §2.4 — M5 adds no policy on it), and the `_system` tenant is the only system tenant (contract §3.6 — M5 extends `dps/retention.py` and `ensure_retention_job` instead of adding a scheduler).
 
 1. **`dps_tenant` is treated as a global table (no RLS).** The contract gives it `tenant_id` but does not mark it GLOBAL; with FORCE RLS the cross-tenant claim queries could not read `max_running`, and M5's admin routes could not list tenants. 002 also lets a tenant id start with `_` so the internal `_system` tenant (retention jobs) can have a row.
 2. **Per-row verification instead of per-batch** (contract §6.4). M0's `verify_output` over a whole batch flags a 4-character original inside another row's realistic surrogate or 12-digit FPE output; at L2 volumes strict mode would fail healthy jobs. The plan verifies each row against its own outputs: exact fixed points for originals ≥ 4 characters, cross-field containment for ≥ 8.

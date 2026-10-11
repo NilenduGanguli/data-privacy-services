@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Finish Layer 1 of Data Privacy Services: documents in (PDF text layer, scanned PDF pages and images through the Azure Computer Vision Read v3.2 contract, DOCX, TXT, CSV), per-page findings with bounding boxes out, obfuscated/synthetic text that reveals with the caller's key, a **true** redacted PDF (rasterised pages with burned-in boxes, rebuilt image-only so no text survives, verified by re-extraction and an OCR re-read), synthetic rows from a schema / DDL / de-identified sample through a reusable generator spec, a measured detector evaluation harness with a committed report, the console Playground **Document** tab (mockup 08) and **Policies** page (mockup 05), OCR readiness, and the API reference — all offline in compose.
+**Goal:** Finish Layer 1 of Data Privacy Services: documents in (PDF text layer, scanned PDF pages and images through the Azure Computer Vision Read v3.2 contract, DOCX, TXT, CSV), per-page findings with bounding boxes out, obfuscated/synthetic text that reveals with the caller's key, a **true** redacted PDF (rasterised pages with burned-in boxes, rebuilt image-only so no text survives, verified by re-extraction and an OCR re-read), synthetic rows from a schema / DDL / de-identified sample through a reusable generator spec, a measured detector evaluation harness with a committed report, the console Playground **Document** tab (mockup 08) and **Policies** page (mockup 05), OCR readiness, and the API reference — all offline in compose. The revision of 2026-10-11 adds the spec §5.3/§6 items no milestone owned: NDJSON streaming of large arrays (Task 19A), `Idempotency-Key` on the Layer 1 routes (19B), local Tesseract OCR when no Azure endpoint is configured (19C) and the opt-in T3 LLM metadata labelling tier (19D); contract §1, §9, §10, §12.1 and §15 already carry them.
 
 **Architecture:** A new `dps/layers/documents` package turns an upload into an `ExtractedDocument` (pages of positioned words), runs OCR for pages that need it through an async `OcrClient` (Read v3.2 wire contract: the `azure-ocr-mock` container locally, the org gateway in prod), hands **one canonical text** (pages joined by `\n\f\n`; CSV as records) to the unchanged M0 `PrivacyEngine`, then maps the engine's findings and output segments back to pages, lines and boxes. Redaction renders each normalised page with pypdfium2 (serialised behind one process-wide lock, because PDFium is not thread-safe), paints solid boxes, and rebuilds an image-only PDF with reportlab; pypdf proves there is no text layer and the OCR client re-reads the output. Schema synthesis is a pure engine module (`dps/engine/synth/schema_gen.py`) that executes a validated generator spec deterministically from a 256-bit seed; the LLM may only *propose* a spec from a value-free structure profile. The evaluation harness (`dps/evaluation`) generates a labelled corpus from the surrogate engine and scores the detector ensemble per entity type. Errors gain stable codes (`{"detail","code"}`) through a framework-free `CodedError`.
 
@@ -29,7 +29,9 @@
 | `dps/app.py` | routers, OCR client + readiness probe loop, per-path body limit, coded-error handler, `ocr_client=` injection | 10 |
 | `frontend/vite.config.ts`, `frontend/index.html` | `base: '/'` and `/theme-init.js` so multi-segment routes (`/playground/documents`, `/policies/:name`) load their assets | 16 |
 | `frontend/src/{App.tsx,lib/api.ts,lib/types.ts,pages/Playground.tsx,pages/Overview.tsx,components/Layout.tsx,styles.css}` | routes, typed `api.documents/schema/entities/policies`, Document seg, OCR readiness, M1 labels | 16–18 |
-| `Dockerfile`, `docker-compose.yml`, `tools/smoke_test.py`, `HANDOFF.md`, `README.md` | node 22 stage, `.[fpe,docs]`, `azure-ocr-mock` (profiles `docs`, `full`), `/tmp` tmpfs, 127.0.0.1 ports, smoke extension | 19–20 |
+| `Dockerfile`, `docker-compose.yml`, `tools/smoke_test.py`, `HANDOFF.md`, `README.md` | node 22 stage, `.[fpe,docs]`, `azure-ocr-mock` (profiles `docs`, `full`), `/tmp` tmpfs, 127.0.0.1 ports, smoke extension; `tesseract-ocr` + `ENV DPS_OCR_PROVIDER=auto` (19C) | 19–20, 19C |
+| `dps/layers/api/routers/{detect,transform}.py`, `dps/app.py` | NDJSON branches and body limit; `Idempotency-Key` replay; T3 `label_leftovers` before the engine call | 19A, 19B, 19D |
+| `dps/engine/service.py`, `dps/engine/policy.py` | `PrivacyEngine.label_leftovers`, `extra_findings=` keyword on the engine operations; `llm_label` tier accepted | 19D |
 
 ## Conventions for every task
 
@@ -70,6 +72,10 @@
 | `docs/technical/detector-eval-m1.{json,md}` | committed evaluation report |
 | `docs/technical/api-m1.md` | M1 API reference as built |
 | `frontend/src/pages/{PlaygroundDocuments,Policies}.tsx`, `frontend/src/components/{OcrStatus,PageViewer}.tsx`, `frontend/src/lib/yaml.ts` | console: Document tab, Policies, OCR readiness, page viewer with boxes, YAML export |
+| `dps/layers/api/ndjson.py` | NDJSON request/response streaming on detect/obfuscate/synthesize/reveal (Task 19A) |
+| `dps/layers/api/idempotency.py` | `Idempotency-Key` parsing and the replica-local, value-free replay cache (Task 19B) |
+| `dps/engine/detect/llm_label.py` | T3 metadata labelling: `FieldMeta`, `LabelVerdict`, `label_fields` (Task 19D) |
+| `tests/test_{ndjson,idempotency_l1,llm_label}.py`, `tests/documents/test_ocr_tesseract.py` | tests for Tasks 19A–19D |
 
 ---
 
@@ -99,7 +105,8 @@ markers = [
 `dps/config.py` — new fields in a `# --- documents and schema (M1) ---` block of `Settings` (contract §10 rows first, then the additive ones), validators and properties:
 ```python
     # --- documents and schema (M1, contract §10) ---
-    ocr_provider: str = ""                  # "" (off) | azure — the Read v3.2 wire contract (mock, org gateway, Azure)
+    ocr_provider: str = ""                  # "" | off (no OCR) | azure (Read v3.2: mock, org gateway, Azure) |
+                                            # tesseract (local CLI) | auto (azure if configured, else tesseract) — Task 19C
     azure_vision_endpoint: str = ""         # http://azure-ocr-mock:5000 locally; the org gateway URL in prod
     azure_vision_key: str = ""              # DPS_AZURE_VISION_KEY_FILE in prod; header Ocp-Apim-Subscription-Key
     ocr_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
@@ -124,8 +131,8 @@ markers = [
     @classmethod
     def _valid_ocr_provider(cls, v: str) -> str:
         v = v.strip().lower()
-        if v not in ("", "azure"):
-            raise ValueError("ocr_provider must be '' or 'azure'")
+        if v not in ("", "off", "azure", "tesseract", "auto"):
+            raise ValueError("ocr_provider must be one of '', off, azure, tesseract, auto")
         return v
 
     @field_validator("redact_image_format")
@@ -267,7 +274,7 @@ DPS_REDACT_IMAGE_FORMAT=jpeg
 DPS_SCHEMA_MAX_ROWS=10000
 ```
 
-**Behaviour:** defaults keep OCR off (`ocr_provider=""`); invalid values are refused without echoing input (M0 `hide_input_in_errors`); posture in staging/prod requires a key and an https endpoint when azure OCR is on.
+**Behaviour:** defaults keep OCR off (`ocr_provider=""`; the image sets `auto`, Task 19C); invalid values are refused without echoing input (M0 `hide_input_in_errors`); posture in staging/prod requires a key and an https endpoint when azure OCR is on. `tesseract` and `auto` are accepted here and implemented in Task 19C (until then they behave as `off`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -285,7 +292,7 @@ def test_m1_document_defaults() -> None:
 
 @pytest.mark.parametrize(
     "field,value",
-    [("ocr_provider", "tesseract"), ("redact_image_format", "tiff"), ("pdf_render_dpi", "30"),
+    [("ocr_provider", "paddle"), ("redact_image_format", "tiff"), ("pdf_render_dpi", "30"),
      ("ocr_health_path", "health"), ("azure_vision_endpoint", "ftp://ocr"), ("max_document_mb", "0")],
 )
 def test_m1_settings_refuse_bad_values(field: str, value: str) -> None:
@@ -10104,6 +10111,218 @@ git commit -m "feat: compose OCR mock (profile docs), [docs] in the image, smoke
 ```
 
 ---
+### Task 19A: NDJSON streaming of large arrays on the Layer 1 routes (spec §6)
+
+**Files:**
+- Create: `dps/layers/api/ndjson.py`, `tests/test_ndjson.py`
+- Modify: `dps/layers/api/routers/{detect,transform}.py` (M0), `dps/layers/api/common.py` (stream audit), `dps/app.py` (per-content-type body limit), `dps/config.py` + `.env.example` (`ndjson_max_items`, `ndjson_chunk_items`, `max_ndjson_mb`, contract §10), `docs/technical/api-m1.md` (Task 20 documents it)
+
+Spec §6: "Arrays stream as NDJSON when large." The JSON routes stay exactly as M0 built them; NDJSON is opt-in per request (contract §9):
+- **Response streaming** — a JSON request whose `data` is an array, sent with `Accept: application/x-ndjson`, gets a `StreamingResponse(media_type="application/x-ndjson")`.
+- **Request streaming** — a body with `Content-Type: application/x-ndjson`: line 1 is the envelope (`{"policy", "options"}`; for `/reveal` also `"key_material"`), every further line is one array item (for `/reveal`: an item line of an earlier obfuscate stream, `{"result", "reveal_hints"}`). An NDJSON request always gets an NDJSON response. Bodies up to `max_ndjson_mb` (256) are accepted on these four routes for this content type (the M0 body limit stays for JSON); at most `ndjson_max_items` (1 000 000) items; every item obeys M0's per-document limits (`max_items` values, `max_text_chars`).
+
+**Semantics (exact):** each item is processed as its own document — the item line equals what the JSON route returns for `{"data": item, ...}` with the same key material / seed. Key material (obfuscate) or the synthesis seed (synthesize) is resolved **once per stream**: the caller's, or generated up front with M0's `generate_key_material(scope)` / `generate_synthesis_seed()` and passed to every item through `RequestOptions.consistency`, so all items share one key and one seed. Items are processed in chunks of `ndjson_chunk_items` (500) through `asyncio.to_thread`, so the event loop keeps serving.
+
+Lines (UTF-8 JSON, one per line, `\n`):
+```json
+{"type": "header", "trace_id": "…", "mode": "obfuscate", "policy": {"name": "…", "hash": "…"}, "key_material": {…}}
+{"type": "item", "index": 0, "result": {…}, "findings": [{"locator": {"path": "$.email", …}, …}], "reveal_hints": […]}
+{"type": "report", "items": 2, "report": {"findings_total": 5, "findings_by_type": {…}, "methods_used": {…}, "verification": {"passed": true, "checked": 7}}}
+```
+`key_material` appears in the header only for obfuscate (wrapped when `options.wrap_key` is given, exactly as the JSON route returns it); `synthesis_seed` for synthesize when the scope is not `request` (M0 rule). Item paths are relative to the item (`$` = the item). `detect` items carry `findings` and `record_sensitivity`, no `result`. **Fail closed:** an item that fails verification under `strict` (or any engine error) produces `{"type": "error", "index": i, "code": "leakage" | "bad_request", "detail": "<value-free>"}` and ends the stream — no later item is processed; earlier item lines were each verified on their own. One audit event per stream (counts summed, `outcome` = `ok` | `verification_failed` | `bad_request`).
+
+Interfaces (`dps/layers/api/ndjson.py`):
+```python
+NDJSON = "application/x-ndjson"
+class NdjsonEnvelope(BaseModel):
+    policy: str | dict[str, Any] | None = None
+    options: RequestOptions = Field(default_factory=RequestOptions)
+    key_material: dict[str, Any] | None = None          # /reveal only
+def wants_ndjson(request: Request) -> bool               # Accept lists application/x-ndjson
+def is_ndjson_request(request: Request) -> bool          # Content-Type is application/x-ndjson
+async def read_ndjson(request: Request, settings: Settings) -> tuple[NdjsonEnvelope, list[Any]]
+    # CodedHTTPException 400 ndjson_invalid (line number only, never the line), 413 ndjson_too_large
+def resolve_stream_material(engine: PrivacyEngine, mode: str, policy_ref: Any, options: RequestOptions) -> RequestOptions
+    # returns options whose consistency carries the stream's key material / seed (caller's or generated once)
+def stream_lines(request: Request, *, mode: Literal["detect", "obfuscate", "synthesize", "reveal"],
+                 envelope: NdjsonEnvelope, items: list[Any]) -> StreamingResponse
+```
+The four routes branch first: `if is_ndjson_request(request) or (wants_ndjson(request) and isinstance(body.data, list))` → `stream_lines(...)`; else the M0 path unchanged. For NDJSON request bodies the routes read the body themselves (`read_ndjson`); FastAPI's JSON parsing is skipped by declaring the body with `Body(default=None)` and an `openapi_extra` that still documents `EngineRequest`.
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_ndjson.py` (TestClient, `auth_enabled=False`, stub LLM):
+- `test_json_array_streams_when_ndjson_is_accepted`: `POST /api/v1/obfuscate` `{"data": [{"email": "a.k@example-mail.in"}, {"email": "b.m@example-mail.in"}], "policy": "gdpr-pseudonymise"}` with `Accept: application/x-ndjson` → content type `application/x-ndjson`; lines = header, item 0, item 1, report; the header has `key_material`; each item's `result` equals the JSON route's result for that single item called with the header's key material.
+- `test_ndjson_request_body_streams_items`: the same two items as an NDJSON body (envelope line + 2 item lines) → identical item lines to the previous test when the envelope passes the same key material.
+- `test_one_key_and_one_seed_per_stream`: 1 200 items (3 chunks) of `{"email": …}` with repeated values → equal inputs give equal tokens across chunks; synthesize → equal inputs give equal surrogates across chunks.
+- `test_reveal_stream_round_trips`: feed the obfuscate stream's item lines (as an NDJSON body with the key in the envelope) to `/api/v1/reveal` → every item's `result` equals the original item.
+- `test_without_accept_json_is_unchanged`: the same array without the Accept header → M0's JSON response shape.
+- `test_fail_closed_ends_the_stream`: monkeypatch the engine's verifier to fail on item 1 → lines: header, item 0, `{"type": "error", "index": 1, "code": "leakage"}`; nothing after; the body contains no input value.
+- `test_limits_and_malformed_lines`: `ndjson_max_items=2` and 3 items → 413 `ndjson_too_large`; a non-JSON second line → 400 `ndjson_invalid` whose detail names line 2 and does not contain the line.
+- `test_one_audit_event_per_stream`: `MemoryAuditSink` holds one event for a 3-item stream with `findings_total` summed.
+
+- [ ] **Step 2: Run to confirm failure** — `pytest -q tests/test_ndjson.py` → FAIL (`ModuleNotFoundError: dps.layers.api.ndjson`).
+- [ ] **Step 3: Implement** `ndjson.py`, the route branches, the body limit for `application/x-ndjson` on the four routes, the settings.
+- [ ] **Step 4: Run** — `pytest -q tests/test_ndjson.py tests/test_api.py` → `8 passed` plus M0's API tests unchanged; unit gate green.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/layers/api/ndjson.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/common.py dps/app.py dps/config.py .env.example tests/test_ndjson.py
+git commit -m "feat(api): NDJSON streaming for large arrays on detect, obfuscate, synthesize and reveal" -- dps/layers/api/ndjson.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/common.py dps/app.py dps/config.py .env.example tests/test_ndjson.py
+```
+
+---
+
+### Task 19B: `Idempotency-Key` on the Layer 1 routes (spec §6)
+
+**Files:**
+- Create: `dps/layers/api/idempotency.py`, `tests/test_idempotency_l1.py`
+- Modify: `dps/layers/api/routers/{detect,transform,documents,schema}.py`, `dps/layers/api/ndjson.py` (Task 19A: streams use the same hook), `dps/app.py` (one cache per app in `app.state.idempotency`; CORS `allow_headers` += `Idempotency-Key`, `expose_headers` += `Idempotent-Replay`), `dps/config.py` + `.env.example` (`idempotency_ttl_seconds`, `idempotency_max_entries`, contract §10)
+
+Spec §6: "`Idempotency-Key` is honoured." Layer 1 is stateless (no database, spec §4), so L1 idempotency is a **replica-local replay cache** that stores no output and no value: per key it keeps the request body's SHA-256, the trace id and — only when DPS generated them — the key material / synthesis seed of the original call. A retry with the same key and the same body re-runs the engine with that material, which is deterministic (M0: AES-SIV tokens, FF1, seeded surrogates), so it returns the same result; a retry that lands on another replica cannot be recognised, so a caller who needs cross-replica idempotency passes its own `consistency.key_material` / `synthesis_seed` (documented in `api-m1.md`). Durable job routes keep M2's database idempotency (contract §9).
+
+Rules (contract §9):
+- Header `Idempotency-Key` matching `^[A-Za-z0-9_.:-]{1,128}$`, else 422 `idempotency_key_invalid`. Absent → M0 behaviour.
+- Scope = `(tenant_id, key_id, route template, Idempotency-Key)`, stored as its SHA-256. Body hash = SHA-256 of the raw body (multipart: of the file bytes plus the `request` form field).
+- Same scope + same body within `idempotency_ttl_seconds` (600) → replay: response header `Idempotent-Replay: true` (the header M2's job routes use, contract §9), the original `trace_id`, audit outcome `replayed`. Same scope + different body → 422 `idempotency_key_reused`. `idempotency_ttl_seconds = 0` disables the cache (the header is then accepted and ignored).
+- Generated material: when the caller sent no key material (obfuscate, `documents/obfuscate`) or seed (synthesize, `documents/synthesize`, `schema/synthesize`), the route generates it **before** calling the engine (`generate_key_material(scope)` / `generate_synthesis_seed()`, M0) and passes it through `RequestOptions.consistency`, so the cache can keep it; a wrapped key (`wrap_key`) still returns wrapped — DPS keeps the clear material only in this in-process cache, never logs it, and drops it at TTL or eviction (LRU at `idempotency_max_entries`). HANDOFF records this custody note.
+- A synthesize call that used the optional LLM rewrite (non-deterministic) is replayed with the deterministic fill and says so (`report.notes["idempotent_replay_without_llm"] = 1`).
+
+Interfaces:
+```python
+KEY_RE: re.Pattern[str]
+def parse_idempotency_key(request: Request) -> str | None          # CodedHTTPException(422, "idempotency_key_invalid")
+@dataclass(frozen=True)
+class IdemEntry: body_sha256: str; trace_id: str; material: dict[str, Any] | None; created: float
+class IdempotencyCache:
+    def __init__(self, *, ttl_seconds: int, max_entries: int, clock: Callable[[], float] = time.monotonic) -> None
+    def get(self, scope: str, body_sha256: str) -> IdemEntry | None   # raises IdempotencyConflict on a body mismatch
+    def put(self, scope: str, entry: IdemEntry) -> None
+def scope_of(request: Request, key: str) -> str                      # sha256 of tenant, key id, route template, key
+```
+M2's `dps/layers/api/deps.py::idempotency_key` applies the same pattern and error code (contract §9); M2 does not import M1's module (M2 does not depend on M1).
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_idempotency_l1.py`:
+- `test_replay_returns_identical_tokens`: `POST /api/v1/obfuscate` (no key material, `Idempotency-Key: k-1`) twice → identical `result` and `key_material`, second response `Idempotent-Replay: true` and the first `trace_id`.
+- `test_without_the_header_each_call_gets_a_new_key`: two plain calls → different `key_material.kid`.
+- `test_same_key_other_body_is_refused`: `k-2` with body A, then body B → 422 `{"code": "idempotency_key_reused"}`; the detail contains no body value.
+- `test_scope_is_per_tenant_and_route`: `k-3` on `/obfuscate` and on `/synthesize` → both executed (no conflict); `k-3` under another tenant → executed.
+- `test_wrapped_key_is_replayed_wrapped`: with `options.wrap_key` → both responses carry the same `wrapped_dek` and no `dek`.
+- `test_synthesize_and_documents_replay`: `/synthesize` and `/documents/obfuscate` (a small text PDF from Task 6's fixtures) replay identically.
+- `test_ttl_and_eviction`: with a fake clock, after `ttl + 1` s the same key runs fresh (new `kid`); `idempotency_max_entries=1` evicts the older key.
+- `test_invalid_header`: `Idempotency-Key: "bad key!"` → 422 `idempotency_key_invalid`.
+- `test_no_material_in_logs`: `capture_logs` around a replay → no log record contains the `dek` or any input value.
+
+- [ ] **Step 2: Run to confirm failure** → `ModuleNotFoundError: dps.layers.api.idempotency`.
+- [ ] **Step 3: Implement** the module, the route wiring (one helper `with_idempotency(request, body_bytes, run)` in `common.py` used by every L1 route and by `stream_lines`), the app state and CORS headers, the settings.
+- [ ] **Step 4: Run** — `pytest -q tests/test_idempotency_l1.py tests/test_ndjson.py tests/test_api.py` → `9 passed` + Task 19A's + M0's; unit gate green.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/layers/api/idempotency.py dps/layers/api/common.py dps/layers/api/ndjson.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/routers/documents.py dps/layers/api/routers/schema.py dps/app.py dps/config.py .env.example tests/test_idempotency_l1.py
+git commit -m "feat(api): honour Idempotency-Key on the Layer 1 routes with a value-free replay cache" -- dps/layers/api/idempotency.py dps/layers/api/common.py dps/layers/api/ndjson.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/routers/documents.py dps/layers/api/routers/schema.py dps/app.py dps/config.py .env.example tests/test_idempotency_l1.py
+```
+
+---
+
+### Task 19C: Local Tesseract OCR when no Azure endpoint is configured (spec §6)
+
+**Files:**
+- Modify: `dps/layers/documents/ocr.py` (`TesseractOcrClient`, `build_ocr_client`), `dps/config.py` (`ocr_provider` values, `tesseract_cmd`, `tesseract_langs`, `tesseract_timeout_seconds`, property `ocr_engine`), `dps/posture.py`, `Dockerfile` (runtime stage: `apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng` and `ENV DPS_OCR_PROVIDER=auto`), `pyproject.toml` (marker `tesseract`), `.env.example`, `HANDOFF.md`, `frontend/src/components/OcrStatus.tsx` (engine label "Local Tesseract")
+- Test: `tests/documents/test_ocr_tesseract.py`
+
+Spec §6: scanned pages and images go "via the Azure Read/DI contract through the org's gateway … or local Tesseract when unset". `ocr_provider` (Task 1) takes five values (contract §10):
+
+| `DPS_OCR_PROVIDER` | Engine |
+|---|---|
+| `""` (settings default) or `off` | none — `NullOcrClient` (unit tests and L1-only deployments stay OCR-free) |
+| `azure` | `AzureReadClient` when endpoint and key are set, else none (Task 7) |
+| `tesseract` | `TesseractOcrClient` (readiness `ocr: down, tesseract_missing` when the binary is absent) |
+| `auto` (the **image** default) | `azure` when an endpoint and key are configured, else `tesseract` when `tesseract_cmd` is on `PATH`, else none |
+
+`Settings.ocr_engine -> Literal["azure", "tesseract", "none"]` implements the table (the binary check is `shutil.which(self.tesseract_cmd)`); `ocr_configured` keeps its Task 1 meaning (azure configured). `build_ocr_client` dispatches on `ocr_engine`.
+
+`TesseractOcrClient` (implements Task 7's `OcrClient`; no Python wrapper dependency — the CLI is called directly):
+```python
+class TesseractOcrClient:
+    engine: str                                   # "tesseract-<major.minor>" from `tesseract --version`
+    def __init__(self, *, cmd: str, langs: str, timeout_s: float, max_concurrency: int) -> None
+    def configured(self) -> bool                  # binary resolvable
+    async def read(self, image: bytes, *, content_type: str = "image/png") -> OcrPage
+        # asyncio.create_subprocess_exec(cmd, "stdin", "stdout", "-l", langs, "--psm", "3", "tsv"),
+        # image on stdin, ≤ timeout_s, bounded by a semaphore of max_concurrency (ocr_max_concurrency)
+    async def probe(self) -> tuple[bool, str]     # `tesseract --version` exit 0 → (True, "up")
+    async def aclose(self) -> None
+def parse_tsv(tsv: str) -> OcrPage
+    # level-1 row → width/height (unit "pixel"); level-5 rows → OcrWord(text, polygon from left/top/width/height,
+    # confidence = conf/100 (None when conf < 0), line = ordinal of (block_num, par_num, line_num)); empty words skipped
+```
+Errors are `OcrError` codes only — `ocr_unconfigured` (binary missing), `ocr_timeout` (process killed after `timeout_s`), `ocr_failed` (non-zero exit) — never Tesseract's stderr (it can echo recognised text). The rest of the pipeline is unchanged: `ocr_words_to_points` and the hybrid merge consume `OcrPage` exactly as for Azure, and redaction re-reads output pages with whichever engine is configured.
+
+Posture (staging/prod): `ocr_provider=tesseract` or `auto` resolving to Tesseract is allowed (local, no egress); `auto` resolving to `none` adds the problem "OCR is enabled (auto) but neither an Azure endpoint nor tesseract is available".
+
+- [ ] **Step 1: Update Task 1's tests and write the new ones** — in `tests/test_config.py` the invalid-values case `("ocr_provider", "tesseract")` becomes `("ocr_provider", "paddle")` (Tesseract is now valid); add `test_ocr_engine_resolution` (monkeypatch `shutil.which`): `""`/`off` → `none`; `azure` without a key → `none`, with endpoint+key → `azure`; `tesseract` → `tesseract`; `auto` + endpoint+key → `azure`; `auto` + binary → `tesseract`; `auto` + nothing → `none`. `tests/documents/test_ocr_tesseract.py`:
+  - `test_parse_tsv_builds_words_lines_and_page_size` (offline): a fixed TSV sample (two lines, five words, one `conf -1` row) → `width/height`, five `OcrWord`s, line ordinals `[0, 0, 0, 1, 1]`, polygons from the boxes, `confidence is None` for the `-1` row.
+  - `test_missing_binary_is_unconfigured` (offline): `cmd="/nonexistent/tesseract"` → `configured() is False`, `read` raises `OcrError` code `ocr_unconfigured`; readiness detail `tesseract_missing`.
+  - `test_stderr_never_leaks` (offline): a fake `cmd` script that prints a sentinel to stderr and exits 1 → `OcrError("ocr_failed")` whose text lacks the sentinel.
+  - `@pytest.mark.tesseract test_reads_the_demo_scan`: skip unless `shutil.which("tesseract")` (fails under `DPS_TEST_REQUIRE_SERVICES=1` only when `DPS_TEST_REQUIRE_TESSERACT=1`); render page 1 of `demo/documents/kyc-scanned.pdf` at 200 dpi (Task 5's renderer) → ≥ 20 words, the fixture's synthetic name tokens among them.
+  - `@pytest.mark.tesseract test_pipeline_redacts_with_tesseract`: `DocumentPipeline` with `TesseractOcrClient` on the scanned demo → `document.ocr_pages ≥ 1`, redacted PDF re-read finds 0 originals (the Task 9 assertions, engine swapped).
+- [ ] **Step 2: Run to confirm failure** → `ImportError: cannot import name 'TesseractOcrClient'`.
+- [ ] **Step 3: Implement**; Dockerfile runtime stage installs `tesseract-ocr tesseract-ocr-eng` (Debian bookworm packages; ~30 MB) and sets `ENV DPS_OCR_PROVIDER=auto` (compose still sets `azure` for the `docs` profile, contract §11); `pyproject.toml` marker `"tesseract: needs a tesseract binary on PATH"`; HANDOFF rows for the three settings and the provider table; `OcrStatus` shows "Local Tesseract" when `components.ocr.engine` starts with `tesseract`.
+- [ ] **Step 4: Run** — `pytest -q tests/test_config.py tests/documents/test_ocr_tesseract.py tests/documents/test_ocr_client.py` → green (`2 skipped` on this Mac without tesseract); in the image: `docker compose run --rm -e DPS_OCR_PROVIDER=auto app python -m pytest -q -m tesseract tests/documents/test_ocr_tesseract.py` → `2 passed` (the image has the binary; tests are copied by the Dockerfile's test stage or bind-mounted — record which in M1-DEVIATIONS); `docker build` succeeds; unit gate green.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/layers/documents/ocr.py dps/config.py dps/posture.py Dockerfile pyproject.toml .env.example HANDOFF.md frontend/src/components/OcrStatus.tsx tests/test_config.py tests/documents/test_ocr_tesseract.py
+git commit -m "feat(documents): local Tesseract OCR when no Azure endpoint is configured" -- dps/layers/documents/ocr.py dps/config.py dps/posture.py Dockerfile pyproject.toml .env.example HANDOFF.md frontend/src/components/OcrStatus.tsx tests/test_config.py tests/documents/test_ocr_tesseract.py
+```
+
+---
+
+### Task 19D: T3 — LLM metadata labelling, opt-in, value-free (spec §5.3)
+
+**Files:**
+- Create: `dps/engine/detect/llm_label.py`, `tests/test_llm_label.py`
+- Modify (M0 touch points): `dps/engine/service.py` (`PrivacyEngine.label_leftovers`; `detect`/`plan`/`obfuscate`/`synthesize` gain keyword `extra_findings: Sequence[Finding] = ()`), `dps/engine/policy.py` (`DetectConfig.tiers` accepts `llm_label` if M0 validates tier names), `dps/layers/api/routers/{detect,transform,policies}.py` and `dps/layers/api/ndjson.py` (await `label_leftovers` before the engine call), `dps/observability.py` (`LLM_LABEL_FIELDS` counter; allow-list `fields`, `verdicts`), `dps/config.py` (`llm_label_max_fields`, `llm_label_min_confidence`, contract §10)
+
+Spec §5.3 tier T3: "the gateway classifies *field metadata* — names, types, a few de-identified or synthetic sample values — to resolve semantic types for ambiguous columns; it never receives raw values." M0 shipped T0–T2 only and M1's Policies page shows an "LLM labelling on/off" indicator (`detect.tiers` includes `llm_label`); this task makes that tier real for Layer 1 JSON. M5 (plan Task 8B) wires the same module into L2 discovery and L3 classification (contract §15). DPS sends **value shapes**, never values — stricter than the spec's "de-identified samples".
+
+Interfaces (`dps/engine/detect/llm_label.py`):
+```python
+class FieldMeta(BaseModel):
+    ref: str                                     # caller's handle, echoed in the verdict ("$.loan.ref_cd", "col:3")
+    name: str                                    # key / column / field name; aliased "field_N" when it looks like a value
+    data_type: str | None = None                 # "string", "number", "VARCHAR2(20)", "input[type=text]"
+    shapes: list[str] = Field(default_factory=list, max_length=3)   # value_shape() outputs (dps/engine/shapes.py), ≤ 24 chars
+    label: str | None = None                     # a human label, already redacted by the caller (L3)
+    hints: dict[str, str | int | float | bool] = Field(default_factory=dict)
+class LabelVerdict(BaseModel):
+    ref: str; entity_type: str; confidence: float
+async def label_fields(fields: list[FieldMeta], *, gateway: LlmGateway | None, settings: Settings,
+                       protected: Sequence[str] = ()) -> list[LabelVerdict]
+```
+Rules: no call when the gateway is missing, unavailable or `stub` (deterministic: returns `[]`); at most `llm_label_max_fields` (40) fields per call (the rest are skipped and counted); a `name` or `label` in which M0's `Detector` finds a whole-value entity is replaced by `field_<n>`; the prompt (a fixed system text listing the taxonomy's entity type names, then the fields as compact JSON) passes `assert_placeholder_safe(prompt, protected)` (M0) — on `LeakToModelError` no call is made and `[]` is returned (counted as `fallback: leak_guard`); the reply is parsed leniently (first `[` to last `]`), each verdict kept only when `ref` is one of the sent refs, `entity_type` is in the taxonomy registry and `confidence ≥ llm_label_min_confidence` (0.7); `LlmUnavailable`/`LlmCallError` → `[]`. Nothing is logged but counts (`fields`, `verdicts`, `fallback`).
+
+`PrivacyEngine.label_leftovers(payload, policy_ref, options) -> list[Finding]` (async): only when `"llm_label" in policy.detect.tiers` and the payload is JSON `data` (T3 labels fields, not free text). It runs the T0–T2 detector, collects leaf paths with no finding and a string/number value, groups them by path template (`[n]` → `[*]`), builds one `FieldMeta(ref=template, name=<last key>, data_type=<json type>, shapes=[value_shape(v) for up to 3 values])` per template with `protected` = those leaf values, calls `label_fields`, and returns one `Finding(locator=Locator(path=p), entity_type=e, score=min(conf, 0.85), detectors=["llm_label"], sensitivity=entity_info(e).sensitivity, evidence=["llm_label"], value_hash=hash_value(v))` per leaf of each labelled template (0.85 cap: T3 never outranks a checksum). The engine methods merge `extra_findings` into their findings before planning, so the plan, the transformation, verification and the report treat them like any other finding; `report.llm_calls` counts the labelling call.
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_llm_label.py` (fake gateways subclassing M0's `LlmGateway`, as in M0's `test_llm_text.py`; they record `messages`):
+- `test_no_call_without_the_tier_or_with_the_stub`: policy tiers without `llm_label` → no call; with the tier but `llm_provider="stub"` → no call, `[]`.
+- `test_leftover_json_field_is_labelled_and_transformed`: `{"loan": {"ref_cd": "AB-1234-77"}}` (no T0–T2 finding), policy with tiers `[structural, patterns, ner, llm_label]`, gateway reply `[{"ref": "$.loan.ref_cd", "entity_type": "CUSTOMER_ID", "confidence": 0.92}]` → `/api/v1/obfuscate` returns a finding with `detectors == ["llm_label"]`, `score == 0.85`, and the value transformed; the recorded prompt contains `ref_cd` and `XX-9999-99` but not `AB-1234-77`.
+- `test_array_items_share_one_verdict`: `{"rows": [{"code": "A1"}, {"code": "B2"}]}` → one field `$.rows[*].code` sent; two findings returned.
+- `test_value_like_names_are_aliased`: a key that is itself an e-mail address → the prompt shows `field_1`, not the address.
+- `test_leak_guard_blocks_the_call`: force a value into the prompt (monkeypatch `value_shape` to identity) → no call made, `[]`, fallback counted.
+- `test_bad_replies_are_ignored`: unknown entity type, unknown ref, confidence 0.3, non-JSON text → `[]` and no error.
+- `test_raw_pii_counter_stays_zero`: after all of the above, M0's `LLM_RAW_PII` value is unchanged.
+- [ ] **Step 2: Run to confirm failure** → `ModuleNotFoundError: dps.engine.detect.llm_label`.
+- [ ] **Step 3: Implement** the module, the engine method and keyword, the route calls (each route: `extra = await engine.label_leftovers(payload, body.policy, body.options)` then `call=lambda: engine.<op>(payload, body.policy, body.options, extra_findings=extra)`), the settings and metrics. The Policies page indicator (Task 18) needs no change: it already reflects `detect.tiers`, which is now a working tier.
+- [ ] **Step 4: Run** — `pytest -q tests/test_llm_label.py tests/test_llm_text.py tests/test_api.py` → `7 passed` + M0's unchanged; unit gate green.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/engine/detect/llm_label.py dps/engine/service.py dps/engine/policy.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/routers/policies.py dps/layers/api/ndjson.py dps/observability.py dps/config.py tests/test_llm_label.py
+git commit -m "feat(detect): opt-in T3 LLM metadata labelling of leftover JSON fields, value shapes only" -- dps/engine/detect/llm_label.py dps/engine/service.py dps/engine/policy.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/routers/policies.py dps/layers/api/ndjson.py dps/observability.py dps/config.py tests/test_llm_label.py
+```
+
+---
+
 ### Task 20: No-values log scan, console browser check, API reference, handoff, release
 
 **Files:**
@@ -10422,6 +10641,7 @@ curl -sS -X POST http://127.0.0.1:8400/api/v1/schema/synthesize -H "X-API-KEY: $
   -d '{"ddl":"CREATE TABLE customers (customer_id INTEGER PRIMARY KEY, full_name VARCHAR(80))","rows":1000,"format":"csv"}'
 ```
 5. Notes: redacted PDFs are image-only (not searchable, metadata emptied, annotations/forms not drawn); OCR verification semantics; `llm_rewrite` is ignored for documents; P1 for schema proposals (what the profile contains); the evaluation report location and how to regenerate it.
+6. Tasks 19A–19D: NDJSON streaming (request/response line formats, limits, fail-closed `error` line, one key per stream), `Idempotency-Key` on the L1 routes (replica-local replay, conflict code, cross-replica advice: pass your own key material), the OCR provider table (`off`/`azure`/`tesseract`/`auto`) and the opt-in `llm_label` tier (what metadata is sent — names, types, value shapes — and what never is).
 
 `HANDOFF.md` — add an "M1" section with: build (`.[fpe,docs]`, node 22 stage), run (`docker compose --profile docs up --build -d`, ports 8400 and 5016), the M1 configuration table (every setting of Task 1 with default and meaning; `DPS_AZURE_VISION_KEY_FILE` for prod; gateway health path `/_gw/health`), probes (`/readyz` `ocr` component: `unconfigured|up|down:<status>|configured`, never required), secrets (names only: `DPS_AZURE_VISION_KEY`), and **traps**: (1) PDFium is not thread-safe — all pypdfium2 calls go through `PDFIUM_LOCK`, so renders are serialised per process (scale with replicas); (2) the OCR client refuses an `Operation-Location` on another host than `DPS_AZURE_VISION_ENDPOINT` (a gateway behind a host-rewriting proxy must return its external host); (3) the console now builds with `base: '/'` — hosting under a path prefix needs a rewrite; (4) uploads above 1 MiB spool to `/tmp` — mount it as tmpfs in OpenShift too; (5) `reportlab.rl_config.useA85 = 0` is set process-wide by `redact.py`; (6) the OCR mock reads images only — DPS rasterises PDFs itself, never send it a PDF; (7) the redacted PDF has no text layer by design; (8) Faker's es_MX `curp()`/`rfc()` ignore `seed_instance` — never use them where determinism matters; (9) `playwright==1.55.0` wants Chromium 1187, which this Mac does not cache — `tools/console_check.py` falls back to the newest cached headless shell; (10) the detector report test fails when detectors change until the report is regenerated (by design). `README.md` — "Status: M1 shipped" with the run commands, the demo flow (Playground → Document → Load demo KYC scan → Redact) and links to `docs/technical/api-m1.md` and `docs/technical/detector-eval-m1.md`.
 
@@ -10440,7 +10660,7 @@ docker compose --profile docs down
 ---
 ## Task order and parallelism
 
-Tasks run in order; each ends green and committed. Dependencies: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 (documents backend); 11 → 12 → 13 (schema) need only Tasks 1–3; 14 needs 2; 15 needs nothing from M1 but Task 1; 16 needs 5 and 8 (the demo generator renders and rebuilds PDFs); 17 needs 10 and 16; 18 needs 14 and 16; 19 needs 10, 13, 14 and 16; 20 needs everything. With subagent-driven execution, {11–13}, {14}, {15} can run beside {4–10} in separate worktrees (each lane commits only its own paths; `dps/app.py` is touched by Tasks 2, 10, 13 and 14 — serialise those four commits).
+Tasks run in order; each ends green and committed. Dependencies: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 (documents backend); 11 → 12 → 13 (schema) need only Tasks 1–3; 14 needs 2; 15 needs nothing from M1 but Task 1; 16 needs 5 and 8 (the demo generator renders and rebuilds PDFs); 17 needs 10 and 16; 18 needs 14 and 16; 19 needs 10, 13, 14 and 16; 19A needs 2 and 3 (coded errors, segments); 19B needs 19A (streams use the same replay hook) and 10/13 (documents and schema routes); 19C needs 7 and 9; 19D needs 2, 12 (P1 profile helpers) and 18 (the Policies indicator it makes real); 20 needs everything. With subagent-driven execution, {11–13}, {14}, {15} can run beside {4–10} in separate worktrees (each lane commits only its own paths; `dps/app.py` is touched by Tasks 2, 10, 13 and 14 — serialise those four commits).
 
 ## Definition of Done (M1)
 
@@ -10456,6 +10676,7 @@ All of the following, with their output summarised in the build report:
 8. **Browser check against the mockups:** `python tools/console_check.py` → all checks PASS for dark/light × 1440×900/390×844 on `/playground/documents` and `/policies`; the screenshot pairs in `docs/superpowers/build/m1-console/` reviewed side by side with `08-documents.html` and `05-policies.html`, every difference listed in `M1-DEVIATIONS.md` as intended or fixed.
 9. **No values anywhere:** `tests/test_no_values_in_logs_m1.py` green, and after the smoke run `docker compose logs app 2>&1 | grep -E '[0-9]{4} [0-9]{4} [0-9]{4}|@example\.(com|net|org)'` prints nothing (the demo's card/Aadhaar digit groups and e-mail domains never reach the log).
 10. **Docs and release:** `docs/technical/api-m1.md`, `HANDOFF.md` (M1 section with configuration, probes, secrets by name, traps) and `README.md` committed; version 0.2.0 in `dps/__init__.py`, `pyproject.toml`, `frontend/package.json`; tag `v0.2.0`.
+11. **Spec §6/§5.3 closures (Tasks 19A–19D):** `pytest -q tests/test_ndjson.py tests/test_idempotency_l1.py tests/test_llm_label.py tests/documents/test_ocr_tesseract.py` green (Tesseract cases skip on a host without the binary); inside the image `python -m pytest -q -m tesseract tests/documents/test_ocr_tesseract.py` → `2 passed`; `curl -s -H 'Accept: application/x-ndjson' …/api/v1/obfuscate` on a 3-item array prints 5 lines (header, 3 items, report); a repeated `Idempotency-Key` returns `Idempotent-Replay: true`; `api-m1.md` documents all four.
 
 ## Self-review against the spec and the contract
 
@@ -10473,6 +10694,10 @@ All of the following, with their output summarised in the build report:
 | Contract §1 M1 paths, §10 settings, §11 `azure-ocr-mock`, §12.1 markers `docs`/`ocr`, §12.2 service discovery, §12.4 gate, §15 boundaries | Tasks 1, 4–10, 19; no engine method semantics changed; M0 responses changed additively only (`segments`, `code`, preset summary fields) |
 | Contract §0.1 log-scan test per milestone; §0.6 HANDOFF; §15 "every plan ends by updating HANDOFF, README, api-m<N>.md" | Task 20 |
 | Readiness: OCR component | Task 7 (`refresh_ocr_readiness`), Task 10 (lifespan + probe loop), Task 16 (`OcrStatus`) |
+| Spec §6 "arrays stream as NDJSON when large" | Task 19A (opt-in by `Accept`/`Content-Type`, one key per stream, fail closed per item, one audit event) |
+| Spec §6 "`Idempotency-Key` is honoured" | Task 19B (L1 replay cache, value-free, generated material only; durable job idempotency stays M2's) |
+| Spec §6 "or local Tesseract when unset" | Task 19C (`ocr_provider` `tesseract`/`auto`, image default `auto`, CLI client, stderr never surfaced) |
+| Spec §5.3 T3 "LLM-assisted labelling (opt-in) … never receives raw values" | Task 19D (L1 JSON leftovers; value shapes only; leak guard; confidence capped 0.85); L2/L3 wiring in M5 Task 8B |
 
 Placeholders: none — every task names its files, interfaces, tests (with assertions), commands, expected output and commit. Code that a task leaves to the executor is limited to prose-specified documents (`api-m1.md`, HANDOFF/README sections) whose required content is enumerated.
 
@@ -10488,7 +10713,7 @@ Followed the contract in every case below; each is a concern or a gap to settle 
 4. **§9 `/schema/synthesize {spec, rows, seed?} → {rows, synthesis_seed, report}`.** The task brief asks for "spec proposed by the LLM from a schema or de-identified sample, executed deterministically, spec returned as a reusable artefact". M1 keeps `/schema/generator-spec` as specified and **adds** to `/schema/synthesize`: `schema | ddl | sample` as alternatives to `spec`, `format: json|csv`, `name`, `locale`, `use_llm`, and `spec`, `spec_hash`, `csv` in the response. Additive; please fold into §9.
 5. **§8.2 `DpsHttpError` is an M2 deliverable**, but M1 routes need stable codes now. M1 adds `dps.errors.CodedError` (framework-free) and `dps.layers.api.common.CodedHTTPException` with the same `{"detail","code"}` wire shape; M0 routes gain `code` (`bad_request`, `leakage`) additively. Recommend M2's `DpsHttpError` subclass `CodedHTTPException` (or replace it) rather than add a parallel class.
 6. **§14 mockup 05 shows drafts, publish, version history, "jobs and API keys use it", "declared by".** No milestone before M5 stores tenant policies, and no §9 route exists for them. M1 renders shipped presets plus a browser-session draft usable inline (YAML download, "Use in Playground"); Publish is disabled. The M5 plan adds `043_policies.sql` and `dps/policy_store.py`; the contract should list those routes in §9 and assign the completion of `Policies.tsx` to M5 explicitly.
-7. **Mockup 08's OCR switch "Azure Read v3.2 via org gateway / Local Tesseract"** vs §10 `ocr_provider` = `"" | azure` and a host without tesseract. M1 shows the configured engine (readiness component) and an `auto|always|never` OCR mode instead; the compose mock *is* Tesseract behind the Read contract. Decide whether a local-Tesseract provider is wanted at all (it would need tesseract in the app image).
+7. **Mockup 08's OCR switch "Azure Read v3.2 via org gateway / Local Tesseract".** Resolved 2026-10-11 (spec §6 requires the local fallback): Task 19C adds `TesseractOcrClient`, `ocr_provider` `tesseract`/`auto`, and `tesseract-ocr` in the app image (`DPS_OCR_PROVIDER=auto` by default there). The console still shows the configured engine (readiness component, now "Local Tesseract" when active) plus the `auto|always|never` OCR mode rather than a per-request engine switch.
 8. **Mockup 05's "Deny list: exact values that never match"** contradicts Presidio's (and M0's) `deny_list`, which means *always flag*. M1 keeps `deny_list` semantics and adds `RecognizerSpec.allow_list` (never match) as a DPS extension, labelled in the console; the contract's custom-recognizer description should mention it (Presidio's YAML loader may reject the unknown key if these files are ever fed to Presidio directly).
 9. **§14 routes are multi-segment** but M0 builds the console with `base: './'`, which only works one segment deep. M1 switches to `base: '/'`; hosting the console under a path prefix now needs a gateway rewrite — add to §11/HANDOFF.
 10. **§1 row "`DocumentPipeline` façade (§7.4)"** — the contract has no §7.4; the façade's interface is defined in Task 9 of this plan.

@@ -13,6 +13,8 @@
 **Contract change (made by the tasks named, each in the same commit as its code, contract rule "a plan may add"):**
 §1 new M5 paths and the `tabular`/`synth-ml` extras' exact pins (Task 1) · §2.2 the contents of 040–042 and a new `043_policies.sql` (Tasks 9, 10, 12, 15) · §3.3 `JobProgress.metrics` and `jobs.reseal_secret` (Task 6) · §5.1 `ConnectionParams.options` allow-list gains `protocol` (Task 16) · §5.3 new codes `daily_row_quota_exceeded`, `privacy_gate`, `tls_required`, `host_forbidden`, `policy_not_found` (Tasks 6, 10, 15, 16, 17) · §6.6 `TabularSampler` members and two defaulted `BatchTransformer` kwargs (Task 5) · §7.1/§7.3 additive evidence keys, the `holdout` kwarg of `nndr` and five helper metrics (Tasks 2, 6) · §9 new routes and query parameters (Tasks 11–15) · §10 settings additions (Task 1) · §11 `tokenizer-mock` service (Task 8) · §12.1 markers `deploy` and `ml` (Task 1) · policy references `@name[:vN]` accepted wherever a policy is (Task 15). Nothing in the contract is contradicted; every addition is listed verbatim in the task that makes it.
 
+**Revision 2026-10-11 (plan critique; the contract was amended first and wins):** `dps_tenant` is a GLOBAL table (contract §2.4) — 040 adds no policy on it; the single system tenant is M2's `jobs.SYSTEM_TENANT = "_system"` (contract §3.6) — M5 never uses another name; retention is M2's `dps/retention.py` + `ensure_retention_job`, which Task 13 *extends* (no second scheduler); M2's `Consumer` requires `ctx` (contract §3.5); `dps_scan_request` and the other scan tables cascade from `dps_job` (contract §2.4). New tasks close the spec items no milestone owned: **6B** utility (train-on-synthetic/test-on-real) and the membership-inference proxy (spec §5.7), **7B** MOSTLY differential privacy and linked/sequential tables (spec §5.6), **8B** T3 metadata labelling in L2 discovery and L3 classify (spec §5.3, §8), **16B** per-tenant LLM exposure counter, egress verifier and alerts (spec P1, §10), and **26B** the showcase deck (spec §11 M5); Task 16 makes strict verification a boot-time posture rule (spec §10).
+
 ---
 
 ## Conventions for every task
@@ -58,7 +60,10 @@
 | `dps/layers/connectors/jobs_run.py` (M2) | `prepare` fits/gates/seals; `run_partition` loads the sampler | 6 |
 | `dps/layers/connectors/evidence.py` (M2) | additive pack keys (columns detail, fidelity/privacy/tabular, policy version) | 6 |
 | `dps/layers/api/routers/{jobs,connections}.py` (M2) | daily quota at accept; `@name` refs; TLS-only connections | 10, 15, 16 |
-| `dps/worker.py` (M2) | `retention` handler + `RetentionScheduler` | 13 |
+| `dps/retention.py` (M2) | `run_retention`, `RetentionCounts`, `enqueue_retention`, M5 tables, roll-up refresh — extends M2's `retention_job`; M2's `ensure_retention_job` stays the only scheduler and `dps/worker.py` is untouched | 13 |
+| `dps/db.py` (M2) | `ALLOWED_EXTRA_POLICIES` (set per table) += `owner_directory` (`dps_job`, `dps_connection`), `worker_usage` (`dps_tenant_usage`) | 10 |
+| `dps/layers/connectors/discovery.py` (M2), `dps/layers/scanner/classify.py` (M4) | T3 metadata labelling of leftover columns / fields through M1's `llm_label` | 8B |
+| `dps/llm/gateway.py` (M0), `dps/layers/api/common.py` (M0/M1) | egress verifier, per-tenant LLM counters, `CURRENT_TENANT`, audit LLM counts | 16B |
 | `dps/layers/api/routers/{documents,schema}.py` (M1) | `@name` refs | 15 |
 | `frontend/src/pages/Policies.tsx` (M1) | completed to mockup 05 incl. versions | 23 |
 | `frontend/src/pages/EvidencePack.tsx` (M2) | synthetic section, PDF download | 21 |
@@ -80,7 +85,11 @@
 | `dps/keys_cli.py` | `python -m dps.keys_cli create|list|rotate|disable` (operator bootstrap) |
 | `dps/tenants.py` | tenant CRUD, effective settings, usage, daily quota check, tenant directory |
 | `dps/audit_query.py` | audit search across granted tenants, layer mapping (shared with roll-ups), CSV export with formula guard |
-| `dps/retention.py` | `retention_job` handler, `RetentionScheduler` |
+| `dps/retention.py` (M2's module, extended) | `run_retention`, `RetentionCounts`, `enqueue_retention`; M2's `retention_job` keeps its name and counters |
+| `dps/engine/synth/linked.py` | MOSTLY linked (parent → child) and sequential tables: context mapping, sequence position mapping (Task 7B) |
+| `dps/llm/egress.py` | the LLM egress verifier and per-tenant exposure accounting (Task 16B) |
+| `tools/build_deck.py`, `docs/demo/dps-showcase.pptx` | the showcase deck (Task 26B) |
+| `dps/migrations/044_llm_exposure.sql` | per-tenant LLM counts in the daily roll-ups (Task 16B) |
 | `dps/reports.py` | roll-up refresh (audit + jobs + partitions + scans), summary/jobs/evidence/api-roll-up queries |
 | `dps/layers/reports/__init__.py`, `dps/layers/reports/pdf.py` | evidence-pack and API-roll-up PDFs (reportlab, escaped, ASCII-safe) |
 | `dps/policy_store.py` | tenant policies, drafts, immutable versions, diffs, `@name[:vN]` resolution |
@@ -96,7 +105,7 @@
 | `deploy/openshift/{base,components/{network-policies,monitoring,dev-mocks},overlays/{dev,prod}}/**` | kustomize, Wega layout |
 | `tools/demo_client.py`, `tools/demo_seed.py`, `tools/e2e_demo.py`, `tools/flow_report.py`, `tools/settings_table.py` | shared HTTP client, demo seed, automated demo, route-coverage report, HANDOFF config table |
 | `docs/demo/DEMO-SCRIPT.md`, `docs/security/2026-10-11-m5-security-review.md`, `docs/technical/api-m5.md`, `HANDOFF.md`, `README.md`, `CHANGELOG.md` | documentation |
-| `tests/test_{contract_surface,config_m5,metrics,copula,constraints,batch_tabular,tabular_prepare,mostly,external_tokenize,auth_db,keys_cli,tenants,quota,admin_api,reports,retention,evidence_pdf,policy_diff,policy_store,posture_m5,egress_tls,rekey,handoff}.py`, `tests/security/*.py`, `tests/test_no_values_in_logs_m5.py`, `tests/integration/test_synthesize_copula.py`, `tests/deploy/test_openshift.py`, `tests/console/test_console_pages.py` | tests |
+| `tests/test_{contract_surface,config_m5,metrics,copula,constraints,batch_tabular,tabular_prepare,mostly,mostly_linked,utility_mia,llm_label_l2_l3,llm_egress,external_tokenize,auth_db,keys_cli,tenants,quota,admin_api,reports,retention_m5,evidence_pdf,policy_diff,policy_store,posture_m5,egress_tls,rekey,handoff,deck}.py`, `tests/security/*.py`, `tests/test_no_values_in_logs_m5.py`, `tests/integration/test_synthesize_copula.py`, `tests/deploy/test_openshift.py`, `tests/console/test_console_pages.py` | tests |
 
 ---
 
@@ -136,21 +145,25 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "dps.engine.findings": ("hash_value",),
     "dps.layers.api.common": ("run_engine",),
     "dps.db": ("init_pool", "init_worker_pool", "close_pools", "acquire", "acquire_queue",
-               "run_migrations", "verify_migrations", "assert_rls_posture", "db_configured", "TENANT_TABLES"),
+               "run_migrations", "verify_migrations", "assert_rls_posture", "db_configured", "TENANT_TABLES",
+               "GLOBAL_TABLES", "ALLOWED_EXTRA_POLICIES"),
     "dps.ids": ("new_id",),
     "dps.secrets": ("load_kek", "seal", "open_sealed", "resolve_secret_ref"),
     "dps.storage": ("ObjectStore", "ArtefactService", "artefact_store"),
-    "dps.jobs": ("JobKind", "JobState", "JobPhase", "PartitionState", "Job", "ClaimedJob", "ClaimedPartition",
-                 "create_job", "get_job", "list_jobs", "claim_jobs", "claim_partitions", "advance_job",
-                 "checkpoint", "finish_partition", "queue_stats", "worker_id"),
-    "dps.worker": ("Consumer", "HandlerContext"),
+    "dps.jobs": ("JobKind", "JobState", "JobPhase", "PartitionState", "Job", "JobInternal", "ClaimedJob",
+                 "ClaimedPartition", "create_job", "get_job", "list_jobs", "claim_jobs", "claim_partitions",
+                 "advance_job", "checkpoint", "finish_partition", "queue_stats", "worker_id", "SYSTEM_TENANT",
+                 "ensure_retention_job", "load_job_internal"),
+    "dps.worker": ("Consumer", "HandlerContext", "build_context"),
+    "dps.retention": ("retention_job",),
+    "dps.engine.detect.llm_label": ("FieldMeta", "LabelVerdict", "label_fields"),
     "dps.jobs_models": ("RunSpec", "RunOptions", "JobSecret", "JobProgress", "RetentionSpec", "ConnectionSpec",
                         "TargetSpec", "SpecError", "validate_run"),
     "dps.engine.batch": ("BatchTransformer", "ColumnPlan", "BatchResult", "TabularSampler", "LeakageError"),
     "dps.layers.connectors.base": ("ObjectRef", "ColumnInfo", "TableShape", "Connector", "Row", "to_engine_text",
                                    "from_engine_text"),
     "dps.layers.connectors.selection": ("validate_selection", "compile_where", "quote_ident", "SelectionError"),
-    "dps.layers.connectors.evidence": ("EvidencePack",),
+    "dps.layers.connectors.evidence": ("EvidencePack", "render_html", "pack_sha256"),
     "dps.layers.connectors.jobs_run": ("prepare", "run_partition", "finalize"),
     "dps.layers.connectors.registry": ("open_connector",),
     "dps.layers.api.errors": ("DpsHttpError",),
@@ -172,6 +185,7 @@ PARAMS: dict[tuple[str, str], tuple[str, ...]] = {
                                                "locale", "unclassified", "tabular"),
     ("dps.jobs", "create_job"): ("tenant_id", "kind", "phase", "spec", "sealed_secret", "purpose", "created_by"),
     ("dps.jobs", "advance_job"): ("worker_id", "job_id", "phase", "state", "progress", "error_code"),
+    ("dps.worker", "Consumer"): ("settings", "kinds", "handlers", "partition_handler", "concurrency", "ctx", "role"),
 }
 
 
@@ -208,6 +222,13 @@ def test_m0_to_m4_surface_exists() -> None:
     assert missing == [], "contract surface missing: " + ", ".join(missing)
 
 
+def test_system_tenant_and_global_tenant_table() -> None:
+    jobs = importlib.import_module("dps.jobs")
+    db = importlib.import_module("dps.db")
+    assert jobs.SYSTEM_TENANT == "_system"                     # contract §3.6: the only system tenant
+    assert "dps_tenant" in db.GLOBAL_TABLES and "dps_tenant" not in db.TENANT_TABLES   # contract §2.4
+
+
 def test_job_models_carry_the_m5_hooks() -> None:
     models = importlib.import_module("dps.jobs_models")
     assert "tabular" in models.RunOptions.model_fields
@@ -230,7 +251,7 @@ def test_routes_m5_extends_exist() -> None:
 - [ ] **Step 2: Run it**
 
 Run: `pytest -q tests/test_contract_surface.py`
-Expected: `3 passed`. If the evidence route's parameter is named differently (e.g. `{id}`), read `dps/layers/api/routers/evidence.py` and correct only the literal in the test. Any other failure means an earlier milestone is incomplete: stop and report the printed names; do not implement M1–M4 surface here.
+Expected: `4 passed`. If the evidence route's parameter is named differently (e.g. `{id}`), read `dps/layers/api/routers/evidence.py` and correct only the literal in the test. Any other failure means an earlier milestone is incomplete: stop and report the printed names; do not implement M1–M4 surface here.
 
 - [ ] **Step 3: Commit**
 
@@ -269,6 +290,9 @@ def test_m5_defaults() -> None:
     assert s.tokenizer_provider == "" and s.tokenizer_batch == 500
     assert s.egress_tls_required is False and s.cors_origins == "*"
     assert s.mostly_pool_rows == 20_000 and s.rollup_retention_days == 400
+    assert s.verify_warn_allowed is True and s.llm_egress_check == "strict"           # posture: false/strict in prod
+    assert (s.utility_max_rows, s.mia_min_holdout, s.mia_auc_target) == (5_000, 50, 0.60)
+    assert s.mostly_dp_enabled is False and (s.mostly_dp_max_epsilon, s.mostly_dp_delta) == (5.0, 1e-5)
 
 
 @pytest.mark.parametrize("value,expected", [("copula", ["copula"]), ("copula,mostly", ["copula", "mostly"]),
@@ -279,7 +303,8 @@ def test_tabular_engine_list(value: str, expected: list[str]) -> None:
 
 @pytest.mark.parametrize("field,value", [("synth_tabular_engine", "ctgan"), ("tokenizer_provider", "voltage"),
                                          ("tokenizer_url", "ftp://x"), ("copula_rare_floor", 0.5),
-                                         ("copula_max_resample", 0)])
+                                         ("copula_max_resample", 0), ("llm_egress_check", "off"),
+                                         ("mostly_dp_max_epsilon", 0.0)])
 def test_m5_settings_are_validated(field: str, value: object) -> None:
     with pytest.raises(ValueError):
         Settings(_env_file=None, **{field: value})
@@ -354,6 +379,17 @@ Inside `class Settings`, after the M4 block (field names are the contract §10 M
     rollup_retention_days: int = 400
     egress_tls_required: bool = False        # posture: true in staging/prod
     cors_origins: str = "*"                  # posture: never "*" in staging/prod; "" = same-origin only
+    # --- M5: strict verification and LLM exposure (spec §10, P1; Tasks 16, 16B) -----------------
+    verify_warn_allowed: bool = True         # posture: false in staging/prod (callers cannot ask for "warn")
+    llm_egress_check: Literal["strict", "warn"] = "strict"   # egress verifier: strict blocks, warn counts
+    # --- M5: utility and membership inference (spec §5.7; Task 6B) ------------------------------
+    utility_max_rows: int = 5_000            # TSTR train/test budget per job
+    mia_min_holdout: int = 50                # below this many holdout rows the MIA proxy reports "not run"
+    mia_auc_target: float = 0.60             # AUC at or below which the proxy reads "pass"
+    # --- M5: MOSTLY differential privacy (spec §5.6; Task 7B) -----------------------------------
+    mostly_dp_enabled: bool = False
+    mostly_dp_max_epsilon: float = Field(5.0, gt=0)
+    mostly_dp_delta: float = Field(1e-5, gt=0, lt=1)
 ```
 Validators and properties (add next to the M0 validators):
 ```python
@@ -416,7 +452,7 @@ KEYS_LOADED = Gauge("dps_auth_keys_loaded", "Active DB-backed API keys in this p
 
 - [ ] **Step 6: Contract amendments (same commit)**
 
-In the contract: §1 extras sentence becomes "`tabular` (M5: `numpy>=2.0`, `scipy>=1.13`), `synth-ml` (M5: `mostlyai[local]>=4.5`, `pandas>=2.2`; never in an image)"; §1 table gains the M5 rows of this plan's file-structure table (paths only); §10 gains one M5 row per field added in Step 4 that is not already listed (`copula_holdout_rows`, `copula_metrics_rows`, `copula_max_resample`, `fidelity_column_limit`, `fidelity_corr_limit`, `privacy_nndr_target`, `privacy_nndr_enforce`, `mostly_pool_rows`, `mostly_max_training_minutes`, `tokenizer_*`, `key_max_ttl_days`, `key_rotation_max_age_days`, `key_rotation_max_grace_hours`, `rollup_retention_days`, `egress_tls_required`, `cors_origins`) with the defaults above, and "`synth_tabular_engine` = comma list of enabled engines"; §12.1 table gains `deploy` (kustomize binary, M5) and `ml` (`synth-ml` extra, M5).
+In the contract: §1 extras sentence becomes "`tabular` (M5: `numpy>=2.0`, `scipy>=1.13`), `synth-ml` (M5: `mostlyai[local]>=4.5`, `pandas>=2.2`; never in an image)"; §1 table gains the M5 rows of this plan's file-structure table (paths only); §10 gains one M5 row per field added in Step 4 that is not already listed (`copula_holdout_rows`, `copula_metrics_rows`, `copula_max_resample`, `fidelity_column_limit`, `fidelity_corr_limit`, `privacy_nndr_target`, `privacy_nndr_enforce`, `mostly_pool_rows`, `mostly_max_training_minutes`, `tokenizer_*`, `key_max_ttl_days`, `key_rotation_max_age_days`, `key_rotation_max_grace_hours`, `rollup_retention_days`, `egress_tls_required`, `cors_origins`; `verify_warn_allowed`, `llm_egress_check`, `utility_max_rows`, `mia_min_holdout`, `mia_auc_target`, `mostly_dp_*` are already in §10 since 2026-10-11) with the defaults above, and "`synth_tabular_engine` = comma list of enabled engines"; §12.1 table gains `deploy` (kustomize binary, M5) and `ml` (`synth-ml` extra, M5).
 
 Append to `.env.example`:
 ```bash
@@ -2593,7 +2629,7 @@ Contract edits (same commit): §3.3 `JobProgress` gains `metrics: dict[str, Any]
 - [ ] **Step 5: Write the integration test**
 
 `tests/integration/test_synthesize_copula.py` (markers `db`, `pg_source`, `integration`; fixtures from contract §12.2: `api_client`, `source_pg`, `migrated_db`). Flow, all through the API with `options.tabular="copula"`:
-1. `POST /connections` for `source-pg` (`bank` database, inline demo credentials, roles `source,target`); `POST /jobs/discover` for `public.customers`; run the in-process worker (the M2 suites' helper; if none is exported, `asyncio.create_task(Consumer(settings, kinds=(JobKind.discover, JobKind.run), handlers=HANDLERS, partition_handler=run_partition, concurrency=2).run())`, cancelled at teardown) until the discover job succeeds; `POST /snapshots/{id}/accept`.
+1. `POST /connections` for `source-pg` (`bank` database, inline demo credentials, roles `source,target`); `POST /jobs/discover` for `public.customers`; run the in-process worker (the M2 suites' helper; if none is exported, `consumer = Consumer(settings, kinds=(JobKind.discover, JobKind.run), handlers=HANDLERS, partition_handler=run_partition, concurrency=2, ctx=handler_ctx)` with M2's `handler_ctx` fixture (contract §3.5/§12.2: `ctx` is required) and `HANDLERS = {JobPhase.discover: discover_job, JobPhase.prepare: prepare, JobPhase.finalize: finalize}`, run as `asyncio.create_task(consumer.run())`, stopped at teardown with `consumer.stop()` and awaited) until the discover job succeeds; `POST /snapshots/{id}/accept`.
 2. Create a scratch schema `synth_<8 hex>` in `bank`; `POST /jobs/run` with `mode="synthesize"`, `target={"write_mode": "table", "connection_id": <same>, "object": {"owner": "synth_x", "name": "customers"}}`, `options={"tabular": "copula"}`, `purpose`; keep the returned `synthesis_seed`.
 3. Assertions — `test_copula_job_writes_measured_synthetic_rows`:
    - job `succeeded`; `GET /evidence?job_id=` pack has `fidelity.score >= 0.85`, `privacy.exact_row_matches == 0`, `privacy.nndr.measured == 1.0`, `tabular.engine == "copula"`, `label == "synthetic — measured, not claimed anonymous"`;
@@ -2613,6 +2649,67 @@ Run: `pytest -q tests/test_tabular_prepare.py` → `6 passed`. With `docker comp
 ```bash
 git add dps/layers/connectors/tabular.py dps/jobs.py dps/jobs_models.py dps/layers/connectors/jobs_run.py dps/layers/connectors/evidence.py tests/test_tabular_prepare.py tests/integration/test_synthesize_copula.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
 git commit -m "feat(connectors): copula-backed synthesize jobs — fit, preview, measure and gate at prepare; evidence fidelity and privacy" -- dps/layers/connectors/tabular.py dps/jobs.py dps/jobs_models.py dps/layers/connectors/jobs_run.py dps/layers/connectors/evidence.py tests/test_tabular_prepare.py tests/integration/test_synthesize_copula.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+```
+
+---
+
+### Task 6B: Utility (train on synthetic, test on real) and the membership-inference proxy (spec §5.7)
+
+**Files:**
+- Modify: `dps/engine/metrics.py` (two functions), `dps/engine/policy.py` (M0: `SynthesizeConfig.utility_label`), `dps/layers/connectors/tabular.py` (`measure`), `dps/layers/connectors/evidence.py` (M2: `EvidencePack.utility`), contract §7.1 (already lists `utility` and the `membership_inference` fields since 2026-10-11) and §7.3 (the two signatures below)
+- Test: `tests/test_utility_mia.py` (offline)
+
+Spec §5.7 asks for **utility** ("optional train-on-synthetic / test-on-real for a nominated label") and a **membership-inference proxy** ("when the ML engine is used"). Both are computed for every tabular engine (copula and MOSTLY), from the rows `measure` already holds: the fit sample (members), the holdout (non-members, never fitted) and the deterministic preview of synthetic rows. Only numbers are stored.
+
+Interfaces (`dps/engine/metrics.py`, NumPy only; `scipy.stats.rankdata` for the AUC):
+```python
+def membership_inference_proxy(train: np.ndarray, holdout: np.ndarray, synth: np.ndarray, *,
+                               sample: int = 2000, seed: int = 0) -> dict[str, Any]
+    """Distance-to-closest-synthetic-record attack: score(r) = -min_j ||r - synth_j||; AUC of members
+    (fit rows) vs non-members (holdout rows) on balanced samples of min(len(train), len(holdout), sample).
+    0.5 = no membership signal; 1.0 = synthetic rows copy fit rows.
+    Returns {"run": True, "method": "dcr_auc", "auc": float, "members": n, "non_members": n}."""
+def utility_tstr(real_x: np.ndarray, real_y: Sequence[Any], synth_x: np.ndarray, synth_y: Sequence[Any],
+                 test_x: np.ndarray, test_y: Sequence[Any], *, task: Literal["classification", "regression"],
+                 k: int = 5) -> dict[str, Any]
+    """k-NN (k=5, Euclidean on encode_features output, chunked distances) trained on real rows and on
+    synthetic rows, both tested on held-out real rows. classification → accuracy (majority vote, ties →
+    the smallest label); regression → R². Returns {"run": True, "model": "knn5", "metric": "accuracy"|"r2",
+    "train_on_real": a, "train_on_synthetic": b, "ratio": b / a if a > 0 else 0.0, "test_rows": n}."""
+```
+Distances are computed in chunks of 512 rows (memory bound ≈ 512 × 5 000 floats). The label column is never a feature.
+
+`SynthesizeConfig` (M0 `dps/engine/policy.py`, Task 4 already added `constraints` and `quasi_identifiers`) gains `utility_label: str | None = None` — a top-level column path (`"$.STATUS"`) of the modelled (non-sensitive) columns. Its task is `classification` when the column's tabular kind is `categorical`/`bool`, else `regression`.
+
+`measure` (Task 6) changes — it gains the keyword `utility_label: str | None = None` (`prepare_tabular` passes `policy.synthesize.utility_label`), the `membership_inference` stub is replaced and `utility` is added at the top level of the returned dict:
+```python
+    mia = ({"run": False, "reason": f"holdout has {len(holdout_rows)} rows (< {settings.mia_min_holdout})"}
+           if holdout_x is None or len(holdout_rows) < settings.mia_min_holdout
+           else membership_inference_proxy(train_x, holdout_x, synth_x, sample=2000, seed=0))
+    if mia.get("run"):
+        mia |= {"target": settings.mia_auc_target, "passed": mia["auc"] <= settings.mia_auc_target}
+    ...
+    "privacy": {..., "membership_inference": mia},
+    "utility": _utility(utility_label, columns, train_rows, synth_rows, holdout_rows, kinds, settings),
+```
+`_utility` returns `{"run": False, "reason": "no utility_label in the policy"}` when none is nominated, `{"run": False, "reason": "utility_label is not a modelled column"}` when the path is not in `columns`, `{"run": False, "reason": "holdout has N rows (< mia_min_holdout)"}` when there is too little real test data, else `utility_tstr(...)` on at most `settings.utility_max_rows` rows per side plus `"label": path`. `prepare_tabular` stores `metrics["utility"]`; the run's privacy gate (Task 6) also fails prepare with `privacy_gate` when `privacy_nndr_enforce` is true and the MIA proxy ran and did not pass. `dps/layers/connectors/evidence.py`: `EvidencePack.utility = progress.metrics.get("utility")`. The PDF (Task 14) and the console (Task 21) render both — their code already reads `privacy.membership_inference` and `utility`.
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_utility_mia.py`:
+- `test_mia_proxy_detects_copies_and_accepts_fresh_draws`: `rng = np.random.default_rng(1)`; `train = rng.normal(size=(400, 3))`, `holdout = rng.normal(size=(400, 3))`; copies `train + rng.normal(scale=1e-3, size=train.shape)` → `auc >= 0.9`; fresh `rng.normal(size=(400, 3))` → `0.4 <= auc <= 0.6`; `members == non_members == 400`.
+- `test_mia_proxy_is_deterministic_and_balanced`: the same inputs twice → identical dict; `train` of 1 000 rows and `holdout` of 80 → `members == non_members == 80`.
+- `test_utility_classification`: `x = rng.normal(size=(600, 2))`, `y = x[:, 0] > 0`; real 400 / test 200; synthetic = a second draw from the same law → `train_on_real >= 0.9` and `ratio >= 0.9`; synthetic with permuted labels → `ratio <= 0.7`.
+- `test_utility_regression`: `y = 2 * x[:, 0] + rng.normal(scale=0.1, size=600)` → `metric == "r2"`, `train_on_real >= 0.8`.
+- `test_measure_reports_utility_and_mia`: Task 6's offline fixture (copula on 600 rows with a categorical `$.STATUS`) with `policy.synthesize.utility_label = "$.STATUS"` → `out["utility"]["run"] is True` and `out["utility"]["label"] == "$.STATUS"`; `out["privacy"]["membership_inference"]["run"] is True` and `0 <= auc <= 1`; with `mia_min_holdout=10_000` → MIA `run is False` and the reason names the holdout size; without a label → `out["utility"] == {"run": False, "reason": "no utility_label in the policy"}`; `json.dumps(out)` contains none of five sampled source values.
+- `test_evidence_carries_utility`: a pack built from `progress.metrics = {"utility": {...}, "privacy": {...}}` → `pack.utility["metric"] == "accuracy"`.
+
+- [ ] **Step 2: Run to confirm failure** → `ImportError: cannot import name 'membership_inference_proxy'`.
+- [ ] **Step 3: Implement** the two metrics, `utility_label`, the `measure`/`prepare_tabular`/gate changes and the evidence field; contract §7.3 gains the two signatures (same commit).
+- [ ] **Step 4: Run tests**: `pytest -q tests/test_utility_mia.py tests/test_metrics.py tests/test_tabular_prepare.py` → `6 passed` plus the existing counts; unit gate green.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/engine/metrics.py dps/engine/policy.py dps/layers/connectors/tabular.py dps/layers/connectors/evidence.py tests/test_utility_mia.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+git commit -m "feat(synth): utility (train-on-synthetic, test-on-real) and a membership-inference proxy in every synthetic evidence pack" -- dps/engine/metrics.py dps/engine/policy.py dps/layers/connectors/tabular.py dps/layers/connectors/evidence.py tests/test_utility_mia.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
 ```
 
 ---
@@ -2893,6 +2990,87 @@ git commit -m "feat(synth): optional MOSTLY AI pool engine behind the synth-ml e
 ```
 
 ---
+### Task 7B: MOSTLY AI — differential privacy and linked (multi-table, sequential) generation (spec §5.6)
+
+**Files:**
+- Create: `dps/engine/synth/linked.py`
+- Modify: `dps/engine/synth/mostly.py` (Task 7: DP configuration), `dps/jobs_models.py` (M2: `RunOptions.tabular_dp`, `RunOptions.linked`, `LinkedSpec`, `validate_run` rules), `dps/layers/connectors/tabular.py` (`prepare_linked`), `dps/layers/connectors/jobs_run.py` (M2: the linked branch of `prepare`, `run_partition`, `finalize`), `dps/layers/connectors/evidence.py` (M2: `tabular.dp`, `tabular.linked`), contract §5.3 (the models below), §7.1 (evidence keys)
+- Test: `tests/test_mostly_linked.py` (offline, injected trainer), one `ml` test in it (real SDK)
+
+Spec §5.6 names the MOSTLY AI SDK "for higher fidelity, multi-table and sequential data" with a "differential privacy option". Task 7 wires the single-table pool. This task adds the other two capabilities without changing the 1:1 row path:
+
+**1 · Differential privacy.** `RunOptions.tabular_dp: bool | None = None` (`None` → `settings.mostly_dp_enabled`); allowed only with `tabular == "mostly"` (`tabular_invalid` otherwise). `_sdk_trainer` and the linked trainer take `dp: DpConfig | None` and, when set, add to the table's `tabular_model_configuration`:
+```python
+class DpConfig(BaseModel):
+    max_epsilon: float; delta: float
+def _dp_configuration(dp: DpConfig) -> dict[str, Any]:
+    # MOSTLY SDK DifferentialPrivacyConfig; the only place that names its keys — verify with help() in the ml run
+    return {"differential_privacy": {"max_epsilon": dp.max_epsilon, "delta": dp.delta}}
+```
+The evidence records `tabular.dp = {"enabled": true, "max_epsilon", "delta", "achieved_epsilon"}` (`achieved_epsilon` read from the trained generator when the SDK reports it, else `null`). With DP off the key is `{"enabled": false}`.
+
+**2 · Linked generation (multi-table and sequential).** A synthesize run whose target is `files` may name a linked child table. DPS then trains one MOSTLY generator on the parent table (the run's `source.object`) and the child table linked to it by a foreign key (MOSTLY's context foreign key), optionally ordered (`order_by` = the sequence order, e.g. an event timestamp), and **generates** a new synthetic dataset — `subjects` parents with their child sequences — instead of mapping source rows 1:1. Generated keys are new (`1..n` for integer keys, `S00000001…` for text keys); the child's foreign key references the generated parent ids, so referential integrity holds inside the output and no source key value is written.
+```python
+class LinkedSpec(BaseModel):                      # dps/jobs_models.py (contract §5.3, M5)
+    child: ObjectRef                              # on the source connection
+    child_snapshot_id: str                        # accepted snapshot of the child (sensitive columns, kinds)
+    parent_key: str                               # single parent key column
+    foreign_key: str                              # child column referencing parent_key
+    order_by: str | None = None                   # child column ordering each parent's sequence (sequential data)
+    subjects: int = Field(1000, ge=10, le=100_000)
+class RunOptions(BaseModel):                      # + two defaulted fields
+    tabular_dp: bool | None = None
+    linked: LinkedSpec | None = None
+```
+`validate_run` (M2 touch point): `linked` requires `mode == "synthesize"`, `options.tabular == "mostly"`, `target.write_mode == "files"`, `child != source.object`, an accepted child snapshot of the same connection and object → else `tabular_invalid` (422); `prepare` refuses composite keys, a missing column or a `foreign_key`/`order_by` that the child snapshot marks sensitive with `tabular_invalid` and a value-free detail.
+
+`dps/engine/synth/linked.py`:
+```python
+LinkedTrainer = Callable[[dict[str, list[Any]], dict[str, list[Any]], LinkedLayout, int, int, DpConfig | None],
+                         tuple[list[dict[str, Any]], list[dict[str, Any]]]]
+     # (parent columns, child columns, layout, subjects, minutes, dp) → (parent rows, child rows with "__parent" index)
+class LinkedLayout(BaseModel): parent_key: str; foreign_key: str; order_by: str | None
+class LinkedPool:                                  # sealed like the single-table pool (JobSecret.tabular_model)
+    @classmethod
+    def fit(cls, parent: dict[str, list[Any]], child: dict[str, list[Any]], kinds: dict[str, str], *,
+            layout: LinkedLayout, subjects: int, seed: bytes, max_training_minutes: int, dp: DpConfig | None,
+            trainer: LinkedTrainer | None = None) -> LinkedPool
+    parent_rows: list[dict[str, Any]]; child_rows: list[dict[str, Any]]   # generated, typed (Task 7's _coerce)
+    def to_bytes(self) -> bytes; @classmethod def from_bytes(cls, data: bytes, seed: bytes) -> LinkedPool
+def _sdk_linked_trainer(...)                       # the only function that touches the SDK for two tables:
+    # tables=[{"name": "parent", "data": df_parent, "primary_key": parent_key, "tabular_model_configuration": {...}},
+    #         {"name": "child", "data": df_child, "foreign_keys": [{"column": foreign_key,
+    #          "referenced_table": "parent", "is_context": True}], "tabular_model_configuration": {...}}]
+    # child rows sorted by (foreign_key, order_by) before training; generate(size=subjects) returns both tables
+def sequence_lengths(child_rows: Iterable[Mapping[str, Any]], fk: str) -> list[int]
+```
+Training data never contains a sensitive column, a key value or the order of real customers beyond the sampled sequences: the trainer receives only the snapshot's non-sensitive, non-key columns of both tables plus the link (`parent_key`, `foreign_key` re-numbered `1..n` over the sample before training) and `order_by` (kept only when the child snapshot classifies it non-sensitive). Sensitive columns of the generated rows are filled with surrogates from the job's synthesis seed, anchored on the generated id (`f"linked:{table}:{generated id}"` as the surrogate input — never a real value), so personas stay coherent per generated subject.
+
+Job flow (M2 touch points in `jobs_run.py`, only when `options.linked` is set): **prepare** samples up to `copula_fit_rows` parents (`connector.sample`), reads child rows whose foreign key is in the sampled parent set by keyset paging over the child table (`read_partition` with an open `KeyRange()`, stopping after `mostly_linked_child_rows` = 200 000 kept rows — a new M5 setting), fits `LinkedPool`, measures (fidelity per table with Task 2's `fidelity_report`; `sequence_length` KS between source and generated lengths; exact-row matches and NNDR on the child's modelled columns; MIA proxy as in Task 6B), seals the pool into `JobSecret.tabular_model`, and adds **two** partitions (0 = parent, 1 = child) with `add_partitions(..., plan=...)`. **run_partition** loads the pool and writes partition 0's generated parent rows or partition 1's generated child rows through two `FilesWriter`s (`base_prefix = f"{base}/{table name}"`, so objects land under `<prefix>/<table>/<job_id>/part-…`); a restarted partition rewrites its objects (deterministic content, M2 files rule). **finalize** writes one manifest at `<prefix>/<job_id>/manifest.json` with a `tables` map (`parent`, `child`: columns, objects, rows) and the evidence pack with `tabular.linked = {"parent": fqn, "child": fqn, "subjects": n, "child_rows": n, "sequence_length": {"source_mean", "synthetic_mean", "ks"}, "ordered": bool}` and `tabular.dp`. No ledger, no key material (synthesize). Evidence `label` stays "synthetic — measured, not claimed anonymous".
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_mostly_linked.py` (offline unless marked):
+- `fake_linked_trainer(parent, child, layout, subjects, minutes, dp)` returns `subjects` parents (`{"SEGMENT": "A"|"B", "OPENED": "2021-0m-0d"}`) and 2–4 children per parent with `"__parent": i`, `"AMOUNT"` floats and `"TS"` increasing per parent; it records `dp` in a list the test inspects.
+- `test_linked_pool_is_deterministic_and_referentially_intact`: `LinkedPool.fit(..., subjects=50, trainer=fake)` twice with the same seed → identical `parent_rows`/`child_rows`; every child's foreign key is one of the generated parent keys; parent keys are `1..50`; child keys are unique.
+- `test_sequences_keep_their_order`: within each parent the child rows are sorted by `TS` (`order_by`); `sequence_lengths` matches the fake's per-parent counts.
+- `test_no_source_key_or_sensitive_value_reaches_the_trainer_or_the_output`: source sample with keys `10000001…` and a sensitive `EMAIL` column (child snapshot) → the dicts passed to the trainer contain no `EMAIL` column and no value ≥ 10 000 001 in the link columns; generated `EMAIL` values are surrogates (RFC 2606 domains) and none equals a source email.
+- `test_dp_configuration_is_passed_and_recorded`: `tabular_dp=True` → the fake saw `DpConfig(max_epsilon=5.0, delta=1e-5)`; `_dp_configuration` returns the `differential_privacy` block; evidence `tabular.dp.enabled is True`; with DP off the fake saw `None`.
+- `test_linked_validation`: `linked` with `write_mode="table"` → `SpecError("tabular_invalid")`; with `tabular="copula"` → `tabular_invalid`; `child == source.object` → `tabular_invalid`; `tabular_dp=True` with `tabular="copula"` → `tabular_invalid`.
+- `test_round_trip_bytes`: `LinkedPool.from_bytes(pool.to_bytes(), seed)` → equal rows.
+- `@pytest.mark.ml test_real_sdk_trains_linked_tables`: `pytest.importorskip("mostlyai")`; 120 parents × 1–5 children → `_sdk_linked_trainer(..., subjects=20, minutes=1, dp=None)` returns 20 parents and children whose `__parent` indexes are in range.
+
+- [ ] **Step 2: Run to confirm failure** → `ModuleNotFoundError: No module named 'dps.engine.synth.linked'`.
+- [ ] **Step 3: Implement** `linked.py`, the DP plumbing in `mostly.py`, the models and validation, the linked branch of the run handlers and the evidence keys; contract §5.3 (`LinkedSpec`, `RunOptions.tabular_dp`, `RunOptions.linked`) and §7.1 (`tabular.dp`, `tabular.linked`) in the same commit; HANDOFF §11 gains the trap "linked generation writes new ids — joins back to production keys are impossible by design".
+- [ ] **Step 4: Run tests**: `pytest -q tests/test_mostly_linked.py tests/test_mostly.py` → `6 passed, 1 skipped` (+ Task 7's); unit gate green. Optional on a machine with the extra: `pytest -q -m ml tests/test_mostly_linked.py` → `1 passed`.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/engine/synth/linked.py dps/engine/synth/mostly.py dps/jobs_models.py dps/layers/connectors/tabular.py dps/layers/connectors/jobs_run.py dps/layers/connectors/evidence.py dps/config.py tests/test_mostly_linked.py HANDOFF.md docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+git commit -m "feat(synth): MOSTLY differential privacy and linked multi-table/sequential generation to files" -- dps/engine/synth/linked.py dps/engine/synth/mostly.py dps/jobs_models.py dps/layers/connectors/tabular.py dps/layers/connectors/jobs_run.py dps/layers/connectors/evidence.py dps/config.py tests/test_mostly_linked.py HANDOFF.md docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+```
+(`dps/config.py` gains `mostly_linked_child_rows: int = 200_000`; Task 1's DP settings already exist.)
+
+---
+
 ### Task 8: `external_tokenize` — the bank tokenization adapter, a mock, and batch pre-passes
 
 **Files:**
@@ -3399,6 +3577,42 @@ Expected: `7 passed` for the new file; the M0 files unchanged and green.
 ```bash
 git add dps/engine/transform/external.py dps/engine/transform/methods.py dps/engine/transform/apply.py dps/engine/planner.py dps/engine/service.py dps/layers/api/common.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/routers/policies.py dps/app.py dps/engine/batch.py docker/tokenizer-mock/server.py docker-compose.yml HANDOFF.md tests/test_external_tokenize.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
 git commit -m "feat(transform): external_tokenize via a batched, validated HTTP adapter to a bank tokenization service, with a vaultless mock" -- dps/engine/transform/external.py dps/engine/transform/methods.py dps/engine/transform/apply.py dps/engine/planner.py dps/engine/service.py dps/layers/api/common.py dps/layers/api/routers/detect.py dps/layers/api/routers/transform.py dps/layers/api/routers/policies.py dps/app.py dps/engine/batch.py docker/tokenizer-mock/server.py docker-compose.yml HANDOFF.md tests/test_external_tokenize.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+```
+
+---
+
+### Task 8B: T3 metadata labelling in L2 discovery and L3 classification (spec §5.3, §8)
+
+**Files:**
+- Modify (M2): `dps/layers/connectors/discovery.py` (`discover_job`); (M4): `dps/layers/scanner/classify.py`, `dps/layers/scanner/crawler.py` (per-page pipeline)
+- Test: `tests/test_llm_label_l2_l3.py` (offline: fake gateway, M2 `classify_columns` fixtures, M4 field records)
+
+M1 (plan Task 19D) ships the T3 engine module `dps/engine/detect/llm_label.py` — `FieldMeta`, `LabelVerdict`, `label_fields(fields, *, gateway, settings, protected=())` — and uses it for L1 JSON. The contract (§15) gives M5 the L2/L3 wiring so M2 and M4 keep no dependency on M1. T3 is **opt-in per policy** (`"llm_label" in policy.detect.tiers`), runs **per column / per field, never per row**, and sends **value-free metadata only**: names, declared types, value shapes, rates, redacted labels, autocomplete tokens — the same metadata the snapshot and the inventory already store. A stub or unconfigured gateway never calls (the verdict list is empty, behaviour unchanged).
+
+**L2 — discovery** (`discover_job`, after `classify_columns`): when the policy opts in and `ctx.engine.gateway` is available, the leftover columns — `entity_type is None`, not a key, kind not in `NEVER_TRANSFORMED_KINDS` — become
+`FieldMeta(ref=f"col:{i}", name=col.name, data_type=col.data_type, shapes=col.shapes, hints={"kind": col.kind, "null_rate": round(col.null_rate, 3), "distinct_ratio": round(col.distinct_ratio, 3), "table": shape.object.name})`;
+`protected` = every sampled non-null value of those columns (in memory only; `label_fields` refuses to call if one would appear in the prompt, and Task 16B's egress verifier checks again). Each verdict with `confidence >= settings.llm_label_min_confidence` sets the column's `entity_type`, `confidence = min(verdict.confidence, 0.85)` (T3 never outranks a checksum), `detectors += ["llm_label"]`, `sensitivity` from the taxonomy, and recomputes `suggested`/`synthesize_suggested` with M2's `suggest_methods`. The reviewer sees `llm_label` in the heat-map's detector list and can override as usual. The job records `progress.metrics.llm = {"calls": <label_fields calls made>}`; Task 16B later fills `raw_values` and `blocked` from its per-task `LLM_STATS` binding and rolls the figures up per tenant.
+
+**L3 — classification** (M4): after `classify_field(...)` has run for every field of a page, the leftover fields — no entity, not a credential, not hidden/file — become
+`FieldMeta(ref=f"field:{form_index}/{field_no}", name=name_attr or id_attr or "", data_type=f"{tag}[type={input_type}]", label=<the redacted label M4 stores>, shapes=[placeholder_shape] if placeholder_shape else [], hints={"autocomplete": autocomplete or "", "maxlength": maxlength or 0, "pattern_len": len(pattern or ""), "required": required})`;
+`protected` = the page's pre-filled values and rendered texts held in worker memory for this page. Verdicts set `entity_type`, `confidence = min(c, 0.85)`, `detectors += ["llm_label"]`, `evidence += ["llm_label"]`; persona attributes and fill formats are then derived exactly as for the other classifiers. The call happens in the async per-page pipeline of `crawler.py` (one call per page, ≤ `llm_label_max_fields` fields); its counts go to the scan's `progress.metrics.llm`.
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_llm_label_l2_l3.py`:
+- `FakeGateway(LlmGateway)` returns a fixed JSON verdict list and records every `messages` list it receives; `provider == "stellar"` so it counts as available.
+- `test_discovery_labels_an_ambiguous_column`: M2's `classify_columns` on a table with column `cust_ref_cd` (values `AB-1234`, `CD-9876`, … — not matched by T0–T2) → `entity_type is None`; the L2 wiring with the fake returning `[{"ref": "col:<i>", "entity_type": "CUSTOMER_ID", "confidence": 0.93}]` → `entity_type == "CUSTOMER_ID"`, `confidence == 0.85`, `"llm_label" in detectors`, `suggested.method != "keep"`; the recorded prompt contains `cust_ref_cd` and the shape `XX-9999` but none of the sampled values.
+- `test_policy_without_the_tier_never_calls`: the same table with a policy whose `tiers` lack `llm_label` → the fake recorded nothing and the column stays unclassified.
+- `test_low_confidence_and_unknown_types_are_ignored`: verdicts `0.4` and `"NOT_A_TYPE"` → no change.
+- `test_scanner_labels_a_leftover_field`: an M4 field record (`label="Ref code"`, `name_attr="refcd"`, no autocomplete, a pre-filled value `EMP-004211` held in page memory) → verdict `EMPLOYEE_ID` 0.9 → field `entity_type == "EMPLOYEE_ID"`, `"llm_label" in detectors`; the prompt contains `Ref code` and not `EMP-004211`.
+- `test_stub_gateway_is_a_no_op`: `llm_provider="stub"` → no verdicts, no change, `progress.metrics.llm.calls == 0`.
+
+- [ ] **Step 2: Run to confirm failure** → the column stays unclassified (the wiring does not exist yet).
+- [ ] **Step 3: Implement** the two call sites (no change to the signatures of M2's `classify_columns` or M4's `classify_field`).
+- [ ] **Step 4: Run tests**: `pytest -q tests/test_llm_label_l2_l3.py tests/test_discovery_classify.py tests/scanner/test_classify.py` → `5 passed` plus M2's and M4's unchanged; unit gate green.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/layers/connectors/discovery.py dps/layers/scanner/classify.py dps/layers/scanner/crawler.py tests/test_llm_label_l2_l3.py
+git commit -m "feat: opt-in T3 metadata labelling for leftover columns in discovery and leftover fields in the UI scanner" -- dps/layers/connectors/discovery.py dps/layers/scanner/classify.py dps/layers/scanner/crawler.py tests/test_llm_label_l2_l3.py
 ```
 
 ---
@@ -3984,7 +4198,7 @@ async def enable_key(key_id: str, *, actor: Principal, settings: Settings) -> Ap
 
 - [ ] **Step 5: Write `dps/keys_cli.py`**
 
-`python -m dps.keys_cli {create --name N --tenants a,b|* --scopes s1,s2|* --expires-in-days D | list | rotate ID [--grace-hours H] | disable ID | enable ID}`. Configures logging at `WARNING` with `structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))` so stdout carries only the JSON document. Builds `Settings()`, `await init_pool(settings)`, acts as `Principal(key_id="cli", name="operator-cli", tenant_ids=["*"], scopes=["*"])` (the operator already holds DB credentials), prints exactly one JSON document to stdout (`CreatedKey` for create, `{"new": CreatedKey, "old": ApiKeyView}` for rotate, `{"items": [...]}` for list, `ApiKeyView` otherwise), exits 2 with `{"error": code, "detail": detail}` on `GrantError`. It inserts one audit row per mutating command — `INSERT INTO dps_audit_log (tenant_id, key_id, route, action, outcome, counts) VALUES ('_dps', 'cli', 'cli', 'admin.key.<cmd>', 'ok', '{}')` under `acquire("_dps")` — and logs `api_key_<cmd>` with the key id only. Always `await close_pools()` in `finally`.
+`python -m dps.keys_cli {create --name N --tenants a,b|* --scopes s1,s2|* --expires-in-days D | list | rotate ID [--grace-hours H] | disable ID | enable ID}`. Configures logging at `WARNING` with `structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))` so stdout carries only the JSON document. Builds `Settings()`, `await init_pool(settings)`, acts as `Principal(key_id="cli", name="operator-cli", tenant_ids=["*"], scopes=["*"])` (the operator already holds DB credentials), prints exactly one JSON document to stdout (`CreatedKey` for create, `{"new": CreatedKey, "old": ApiKeyView}` for rotate, `{"items": [...]}` for list, `ApiKeyView` otherwise), exits 2 with `{"error": code, "detail": detail}` on `GrantError`. It inserts one audit row per mutating command — `INSERT INTO dps_audit_log (tenant_id, key_id, route, action, outcome, counts) VALUES ($1, 'cli', 'cli', 'admin.key.<cmd>', 'ok', '{}')` with `$1 = jobs.SYSTEM_TENANT` (`"_system"`, contract §3.6/§8.3) under `acquire(SYSTEM_TENANT)` — and logs `api_key_<cmd>` with the key id only. Always `await close_pools()` in `finally`.
 
 - [ ] **Step 6: Wire the store into `dps/app.py`**
 
@@ -4015,12 +4229,14 @@ git commit -m "feat(auth): DB-backed API keys with rotation grace, expiry, no-es
 
 **Files:**
 - Create: `dps/migrations/040_tenant_quotas.sql`, `dps/tenants.py`, `dps/netguard.py` (host normalisation part; the SSRF part lands in Task 17)
-- Modify (M2): `dps/db.py` (`TENANT_TABLES`), `dps/jobs.py` (`checkpoint`, `claim_partitions`), `dps/layers/api/routers/jobs.py` (`POST /jobs/run`); contract §2.2, §5.3
+- Modify (M2): `dps/db.py` (`TENANT_TABLES`, `ALLOWED_EXTRA_POLICIES`), `dps/jobs.py` (`checkpoint`, `claim_partitions`), `dps/layers/api/routers/jobs.py` (`POST /jobs/run`); contract §2.2, §5.3
 - Test: `tests/test_tenants.py` (`db`), `tests/test_quota.py` (`db`)
 
 `dps/migrations/040_tenant_quotas.sql`:
 ```sql
 -- 040 — tenant quotas, daily usage, and the tenant directory (M5).
+-- dps_tenant is GLOBAL (contract §2.4: configuration only, no RLS, no policies): the claim CTE (worker pool,
+-- no GUC) reads the quota column directly, and this file creates no policy on dps_tenant.
 ALTER TABLE __SCHEMA__.dps_tenant
   ADD COLUMN daily_row_quota bigint CHECK (daily_row_quota IS NULL OR daily_row_quota >= 0);
 
@@ -4037,13 +4253,12 @@ CREATE POLICY tenant_isolation ON __SCHEMA__.dps_tenant_usage
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 -- the worker counts rows inside checkpoint() and reads usage in the claim CTE (no GUC bound there)
 CREATE POLICY worker_usage ON __SCHEMA__.dps_tenant_usage TO dps_worker USING (true) WITH CHECK (true);
-CREATE POLICY worker_quota_read ON __SCHEMA__.dps_tenant FOR SELECT TO dps_worker USING (true);
 GRANT SELECT, INSERT, UPDATE, DELETE ON __SCHEMA__.dps_tenant_usage TO dps_app_rw;
 
--- Tenant directory: the ONLY cross-tenant read open to the app role, and it returns ids alone.
--- The function runs as its owner (the migration role); FORCE RLS still applies to the owner, so
--- the owner gets narrow SELECT-only policies on exactly the three tables the function reads.
-CREATE POLICY owner_directory ON __SCHEMA__.dps_tenant FOR SELECT TO dps_owner USING (true);
+-- Tenant directory: the only cross-tenant read of TENANT tables (RLS) open to the app role; it returns
+-- ids alone. The function runs as its owner (the migration role); FORCE RLS still applies to the owner,
+-- so the owner gets narrow SELECT-only policies on exactly the two tenant tables the function reads.
+-- dps_tenant needs none: it is global and the app role already reads it (configuration, never data).
 CREATE POLICY owner_directory ON __SCHEMA__.dps_job FOR SELECT TO dps_owner USING (true);
 CREATE POLICY owner_directory ON __SCHEMA__.dps_connection FOR SELECT TO dps_owner USING (true);
 CREATE FUNCTION __SCHEMA__.dps_tenant_directory() RETURNS TABLE (tenant_id text)
@@ -4056,14 +4271,14 @@ CREATE FUNCTION __SCHEMA__.dps_tenant_directory() RETURNS TABLE (tenant_id text)
 REVOKE ALL ON FUNCTION __SCHEMA__.dps_tenant_directory() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION __SCHEMA__.dps_tenant_directory() TO dps_app_rw;
 ```
-`dps/db.py`: `TENANT_TABLES` += `"dps_tenant_usage"`. The RLS posture check (`assert_rls_posture`) therefore covers it.
+`dps/db.py`: `TENANT_TABLES` += `"dps_tenant_usage"`; `ALLOWED_EXTRA_POLICIES` (M2's set-valued map, contract §2.1) becomes `{"dps_job": {"worker_claim", "owner_directory"}, "dps_job_partition": {"worker_claim"}, "dps_connection": {"owner_directory"}, "dps_tenant_usage": {"worker_usage"}}` (frozensets). The RLS posture check (`assert_rls_posture`) therefore covers the new table and accepts exactly these extra policies — without the map change it would report `unexpected policies` and staging/prod would refuse to boot.
 
 Interfaces (`dps/tenants.py`; `dps/netguard.py` part 1):
 ```python
 # netguard.py
 def normalize_host(value: str) -> str          # "https://Host.Example:8443/x" | "host.example" → "host.example"; ValueError otherwise
 # tenants.py
-SYSTEM_TENANT = "_dps"                         # retention jobs, CLI audit rows; fails the tenant-id CHECK on purpose
+from dps.jobs import SYSTEM_TENANT              # "_system" (contract §3.6): retention jobs, CLI audit rows; re-exported
 class TenantError(Exception): status: int; code: str; detail: str
 class TenantSpec(BaseModel):
     tenant_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -4077,7 +4292,7 @@ class EffectiveTenant(BaseModel): tenant_id: str; retention_days: int; max_runni
                                   daily_row_quota: int | None; registered_hosts: list[str]
 class TenantView(BaseModel): tenant_id; display_name; note; overrides: dict[str, int | None]; effective: EffectiveTenant
                              usage: TenantUsage; keys: dict[str, int]; exists: bool; created_at; updated_at
-async def tenant_directory() -> list[str]
+async def tenant_directory(*, include_system: bool = False) -> list[str]   # ids starting with "_" only when asked
 async def effective_tenant(tenant_id: str, settings: Settings) -> EffectiveTenant      # 30 s per-process cache
 async def list_tenants(actor: Principal, settings: Settings) -> list[TenantView]
 async def create_tenant(spec: TenantSpec, actor: Principal, settings: Settings) -> TenantView
@@ -4105,7 +4320,7 @@ UPDATE dps_artefact a SET expires_at = j.expires_at FROM dps_job j
 -- directory (acquire(None))
 SELECT tenant_id FROM dps_tenant_directory();
 ```
-`list_tenants` = directory ∪ tenants of the actor's explicit grants, filtered by `actor.can_access`, each rendered with `effective_tenant` (settings defaults where the row's column is NULL: `retention_days`, `job_tenant_max_running`, `job_tenant_max_queued`) and its usage. `update_tenant` invalidates the `effective_tenant` cache entry and writes `updated_at = now()`.
+`list_tenants` = directory (without `_system`) ∪ tenants of the actor's explicit grants, filtered by `actor.can_access`, each rendered with `effective_tenant` (settings defaults where the row's column is NULL: `retention_days`, `job_tenant_max_running`, `job_tenant_max_queued`) and its usage. `update_tenant` invalidates the `effective_tenant` cache entry and writes `updated_at = now()`.
 
 M2 touch points:
 - `dps/jobs.py::checkpoint` — after its fenced partition `UPDATE` returned one row and `rows_written > 0`, in the same transaction:
@@ -4130,7 +4345,8 @@ ON CONFLICT (tenant_id, day) DO UPDATE
 `tests/test_tenants.py` (`@pytest.mark.db`) — test names and exact assertions:
 - `test_create_list_update_with_effective_defaults`: `create_tenant(TenantSpec(tenant_id="retail-apac", display_name="Retail", daily_row_quota=50_000_000))` → view `.effective.retention_days == settings.retention_days` (30), `.effective.max_running == settings.job_tenant_max_running` (8), `.overrides["daily_row_quota"] == 50_000_000`; `update_tenant("retail-apac", TenantPatch(retention_days=7, max_running=2))` → `.effective.retention_days == 7 and .effective.max_running == 2`; a second `create_tenant` with the same id → `TenantError` status 409 code `tenant_exists`.
 - `test_ids_and_hosts_are_validated`: `TenantSpec(tenant_id="Bad Id")` → `ValidationError`; `TenantSpec(tenant_id="t1", registered_hosts=["https://Onboarding-UAT.bank.internal:443/apply", "demo-site"]).registered_hosts == ["demo-site", "onboarding-uat.bank.internal"]`; `"https://user:pw@host"` and `"*.bank.internal"` → `ValidationError` whose text contains neither `pw` nor `user`.
-- `test_directory_crosses_tenants_without_bypassing_rls`: create jobs (`create_job`) for tenants `a` and `b`; `tenant_directory()` ⊇ `{"a", "b"}`; under `acquire("a")`: `SELECT count(*) FROM dps_job` == 1; under `acquire(None)`: `SELECT count(*) FROM dps_tenant` == 0 (no bypass outside the function).
+- `test_directory_crosses_tenants_without_bypassing_rls`: create jobs (`create_job`) for tenants `a` and `b`; `tenant_directory()` ⊇ `{"a", "b"}`; under `acquire("a")`: `SELECT count(*) FROM dps_job` == 1; under `acquire(None)`: `SELECT count(*) FROM dps_job` == 0 and `SELECT count(*) FROM dps_connection` == 0 (no bypass of the RLS tables outside the function; `dps_tenant` is global by contract §2.4 and is not part of this assertion); after `jobs.ensure_retention_job(6)`, `"_system" not in tenant_directory()` and `"_system" in tenant_directory(include_system=True)`.
+- `test_rls_posture_accepts_the_m5_policies`: after the migrations, `await assert_rls_posture(db_settings) == []` (the `owner_directory` and `worker_usage` policies are in `ALLOWED_EXTRA_POLICIES`), and `pg_policies` has no row for `dps_tenant`.
 - `test_retention_change_restamps_terminal_jobs`: finished job with `finished_at = now() - 10 days`, default expiry; `update_tenant(..., TenantPatch(retention_days=5))` → that job's `expires_at == finished_at + 5 days` (±1 s); a running job's `expires_at` stays NULL.
 - `test_list_is_filtered_by_the_callers_grants`: tenants `a`, `b`; actor granted `["a"]` sees exactly `["a"]`; wildcard actor sees both.
 
@@ -4175,7 +4391,7 @@ def normalize_host(value: str) -> str:
 ```
 `TenantSpec`/`TenantPatch` validate `registered_hosts` with it (sorted, de-duplicated). The validator wraps errors as `ValueError("registered_hosts: entry N is not a valid host")` so the input never appears.
 
-- [ ] **Step 4: Run tests**: `pytest -q -m db tests/test_tenants.py tests/test_quota.py` → `8 passed`; unit gate green.
+- [ ] **Step 4: Run tests**: `pytest -q -m db tests/test_tenants.py tests/test_quota.py` → `9 passed`; M2's `pytest -q -m db tests/db/test_rls_posture.py` stays green; unit gate green.
 
 - [ ] **Step 5: Commit**
 
@@ -4454,7 +4670,8 @@ class JobBrief(BaseModel): id: str; kind: str; mode: str | None; state: str; sou
 class SummaryOut(BaseModel):
     tenant_id: str; days: int; generated_at: datetime
     tiles: dict[str, int | float]   # values_protected, values_protected_prev, findings, entity_types, jobs_running,
-                                    # jobs_completed, jobs_failed, snapshots_awaiting_review, raw_pii_sent_to_llm, llm_calls
+                                    # jobs_completed, jobs_failed, snapshots_awaiting_review, raw_pii_sent_to_llm, llm_calls,
+                                    # llm_blocked (per tenant, from roll-ups — Task 16B)
     trend: list[TrendPoint]; findings_by_type: list[EntityCount]
     layers: dict[str, dict[str, Any]]   # api{requests, by_mode}, conn{rows, by_engine, groups}, ui{scans, pages, fields, risk_flags, submissions, last_scan}
     posture: dict[str, float]           # sweeps_passed_pct, key_held_by_caller_pct, snapshots_reviewed_pct, policies_latest_pct, score
@@ -4480,7 +4697,7 @@ async def api_rollup_doc(tenant_id: str, day: date, action: str) -> dict[str, An
 `summary` reads `dps_report_daily`/`dps_report_entity_daily` for `[today − days + 1, today]` and the previous window of equal length (for `values_protected_prev`) and computes:
 - `values_protected` = Σ `values_transformed` of rows with action ∈ {obfuscate, synthesize, `document.*`} (API) and `job.run`, `job.scan`; `findings` = Σ entity findings; `entity_types` = distinct entity types; trend = per day, the same sums split by `mode` (`obfuscate` → obfuscated, `synthesize` → synthesized), every day present (zeros filled);
 - live counts: `SELECT state, count(*) FROM dps_job WHERE tenant_id = $1 AND kind IN ('run','scan','discover') GROUP BY state` (running = running+waiting), completed/failed from the window's `job.*` rows; `SELECT count(*) FROM dps_snapshot WHERE tenant_id = $1 AND status = 'proposed'`;
-- `raw_pii_sent_to_llm` = the process counter `LLM_RAW_PII` (always 0 by construction, spec P1) and `llm_calls` = Σ `LLM_CALLS` samples, both labelled in the UI "since process start";
+- `raw_pii_sent_to_llm`, `llm_calls` and `llm_blocked` = this **tenant's** sums over the window of the roll-up columns `llm_raw_values`, `llm_calls`, `llm_blocked` that Task 16B adds (migration 044; fed by the audit counts and job metrics the egress verifier records per tenant — spec P1/§10 "per-tenant exposure counter"); in this task the three tiles are the constant `0` (the columns arrive with 044 in Task 16B, which replaces the constants with the roll-up sums). The UI labels them "this tenant · last N days";
 - layers: api requests and `by_mode` from API rows; conn `rows` = Σ `rows_written` of `job.run`, `by_engine` = `SELECT c.engine, sum((j.progress->>'rows_written')::bigint) FROM dps_job j JOIN dps_connection c ON c.id = j.connection_id WHERE j.tenant_id = $1 AND j.kind = 'run' AND j.finished_at >= <window start> GROUP BY c.engine`, `groups` = open job groups; ui `scans/pages/fields` from `job.scan` rows, `risk_flags` = `SELECT coalesce(sum(jsonb_array_length(risk_flags)), 0) FROM dps_scan_page WHERE tenant_id = $1 AND created_at >= <window start>`, `submissions` = 0 (the evidence of every scan asserts it), `last_scan` = `{id, pages, fields, personas}` of the newest scan job;
 - posture (0–100): `sweeps_passed_pct` = passed/(passed+failed) over API rows and `job.partition` rows (100 when none); `key_held_by_caller_pct` = 100 by design (D2; the UI says so); `snapshots_reviewed_pct` = share of run jobs in the window with an accepted `snapshot_id`; `policies_latest_pct` = share of run jobs in the window whose `spec.policy` name+version equals the tenant's active version (presets count as latest); `score` = their mean;
 - `recent_jobs` = `list_jobs(tenant, limit=6)` mapped to `JobBrief` (source = `object_ref`, target = `spec.target.object.fqn` or `files`, `progress_pct` = partitions done/total, note = `"<n> partitions"` while running, `"fidelity <score>"` for finished synthesize jobs, `"awaiting review"` for discover jobs whose snapshot is proposed).
@@ -4523,121 +4740,69 @@ git commit -m "feat(reports): value-free daily roll-ups and the summary, sweeps,
 
 ---
 
-### Task 13: Retention job and scheduler
+### Task 13: Retention — extend M2's retention job (one module, one scheduler, one system tenant)
 
 **Files:**
-- Create: `dps/retention.py`
-- Modify (M2): `dps/worker.py`; `dps/layers/api/routers/admin.py` (`POST /admin/retention/run`); contract §9
-- Test: `tests/test_retention.py` (`db`)
+- Modify (M2): `dps/retention.py` (M2 Task 23 created it with `retention_job`; M5 extends it in place), `dps/layers/api/routers/admin.py` (`POST /admin/retention/run`)
+- Not modified: `dps/worker.py` and `dps/jobs.py` — M2 already registers `JobPhase.retention: retention_job` with `JobKind.retention` among the worker's kinds, and the `Consumer` reaper loop already calls `jobs.ensure_retention_job(settings.retention_interval_hours)` (contract §3.6)
+- Test: `tests/test_retention_m5.py` (`db`). M2's `tests/db/test_retention.py` stays and must stay green **unchanged** (it pins M2's counter keys and behaviour).
 
-Behaviour (contract §3.6, extended for M5 tables):
-- **What is deleted, per tenant** (GUC bound via `acquire_queue(tenant)`; tenants from `tenant_directory()`): run/scan/discover jobs with `expires_at < now()` — objects first (`ArtefactService.delete_for_job`), then `dps_scan_request` rows of those jobs (no FK), then the job rows (cascade: partitions, artefact rows, evidence, scan pages/fields); `proposed`/`superseded` snapshots older than the tenant's retention; `dps_connection.secret_enc` past `secret_expires_at` (nulled); `key_enc` of any terminal job (nulled, defence in depth); roll-up, refresh-marker and usage rows older than `DPS_ROLLUP_RETENTION_DAYS` (400). System tenant `_dps`: retention jobs finished more than `DPS_RETENTION_DAYS` ago.
-- **Never touched:** `dps_audit_log` (partitions are dropped only by `python -m dps.migrate --maintain`), accepted snapshots, policies and their versions, API keys.
-- After deletion the job refreshes roll-ups for `[today − 2, today]` for every tenant (`refresh_rollups(..., worker=True)`).
-- `dry_run` counts without deleting.
-- Job bookkeeping: `progress = {"outcome": "succeeded" | "dry_run", "metrics": {"retention": RetentionCounts}}`; one audit event `retention.run` (tenant `_dps`) with the counts.
+**What stays M2's (contract §3.6, binding):** the handler `retention_job(ctx, job)`; the only scheduler, `jobs.ensure_retention_job(interval_hours)` — an insert with `idempotency_key = f"retention:{bucket}"` that the unique index `dps_job_idem` turns into at most one job per interval across every replica; the owner `jobs.SYSTEM_TENANT == "_system"` (it has a `dps_tenant` row; the 002 CHECK admits it); the per-tenant statements and the `retention:*` counters in `progress.values_by_method`. M5 adds **no** `RetentionScheduler`, starts no task in any `main()`, and never uses another system-tenant name.
+
+**What M5 adds to `dps/retention.py`:**
+- `RetentionCounts` and `run_retention(...)` — M2's handler body moved into a function (same statements, same order) plus the M5 tables below; `retention_job` becomes a thin wrapper around it.
+- Tenants come from `tenant_directory(include_system=True)` (Task 10) instead of M2's `dps_tenant ∪ dps_job` query: the directory also covers tenants that only have connections, and it includes `_system`, so expired retention jobs of `_system` are deleted by the same per-tenant loop as everyone else's (every terminal job gets `expires_at`; no special statement for the system tenant).
+- Per tenant, after M2's statements: roll-up, refresh-marker and usage rows older than `DPS_ROLLUP_RETENTION_DAYS` (400).
+- Scan rows need no statement: M4's 030 declares `dps_scan_page`, `dps_scan_field`, `dps_scan_request` and `dps_scan_event` with `job_id … REFERENCES dps_job(id) ON DELETE CASCADE` (contract §2.4), so deleting the job row deletes them. The test proves it and `dps/retention.py` contains no `dps_scan_*` statement.
+- After deletion: `refresh_rollups(tenant, today − 2, today, settings=…, worker=True)` for every tenant that had jobs in the window.
+- Bookkeeping: `retention_job` keeps M2's `retention:*` keys in `values_by_method` **and** adds `progress.metrics.retention = RetentionCounts` (Task 6's `JobProgress.metrics`); one audit event `retention.run` with tenant `_system` and the counts.
+- `enqueue_retention(*, dry_run, created_by)` for the admin route only: `create_job(tenant_id=SYSTEM_TENANT, kind=JobKind.retention, phase=JobPhase.retention, spec=RetentionSpec(dry_run=dry_run).model_dump(mode="json"), created_by=created_by, priority=200)` — no idempotency key (an on-demand run is not a scheduled bucket).
+
+**Never touched:** `dps_audit_log` (partitions are dropped only by `python -m dps.migrate --maintain`), accepted snapshots, policies and their versions, API keys, exported files. `dry_run` counts without deleting (each `DELETE`/`UPDATE` becomes the matching `SELECT count(*)`).
 
 Interfaces:
 ```python
-SYSTEM_TENANT = "_dps"      # re-exported from dps.tenants
+from dps.jobs import SYSTEM_TENANT              # "_system" — the only system tenant (contract §3.6)
 class RetentionCounts(BaseModel):
     tenants: int = 0; jobs: int = 0; objects: int = 0; snapshots: int = 0; secrets_purged: int = 0
-    keys_purged: int = 0; scan_requests: int = 0; rollup_rows: int = 0; usage_rows: int = 0; system_jobs: int = 0
+    keys_purged: int = 0; rollup_rows: int = 0; usage_rows: int = 0
 async def run_retention(*, settings: Settings, artefacts: ArtefactService, dry_run: bool) -> RetentionCounts
-async def retention_job(ctx: HandlerContext, job: ClaimedJob) -> None          # handler for JobPhase.retention
+async def retention_job(ctx: HandlerContext, job: ClaimedJob) -> None          # M2's name and registration
 async def enqueue_retention(*, dry_run: bool, created_by: str | None) -> Job
-class RetentionScheduler:
-    def __init__(self, settings: Settings) -> None
-    async def tick(self) -> str | None          # job id when it enqueued one
-    async def run(self, stop: asyncio.Event) -> None
 ```
+`run_retention` loops tenants, catches `asyncpg.PostgresError` per tenant, logs `retention_tenant_failed` with the exception class only and continues. The `retention:*` counter keys stay M2's (`retention:jobs`, `retention:artefacts`, `retention:snapshots`, `retention:secrets`, `retention:keys`) plus `retention:rollup_rows`, `retention:usage_rows` (contract §3.3).
 
-Per-tenant SQL (all with `$1 = tenant`; `$2 = now`; batches of 200 ids):
+M5 per-tenant statements (run after M2's, under `acquire_queue(tenant)`; `$1 = tenant`, `$2 = now`, `$3 = DPS_ROLLUP_RETENTION_DAYS`):
 ```sql
-SELECT id FROM dps_job WHERE tenant_id = $1 AND expires_at IS NOT NULL AND expires_at < $2
- ORDER BY expires_at LIMIT 200;
-DELETE FROM dps_scan_request WHERE tenant_id = $1 AND job_id = ANY($2::text[]);
-DELETE FROM dps_job WHERE tenant_id = $1 AND id = ANY($2::text[]) AND expires_at < $3;   -- re-checked
-DELETE FROM dps_snapshot WHERE tenant_id = $1 AND status IN ('proposed', 'superseded')
-   AND created_at < $2 - make_interval(days => $3);
-UPDATE dps_connection SET secret_enc = NULL, updated_at = now()
- WHERE tenant_id = $1 AND secret_enc IS NOT NULL AND secret_expires_at < $2;
-UPDATE dps_job SET key_enc = NULL
- WHERE tenant_id = $1 AND key_enc IS NOT NULL AND state IN ('succeeded', 'failed', 'dead', 'canceled');
 DELETE FROM dps_report_daily WHERE tenant_id = $1 AND day < ($2 AT TIME ZONE 'UTC')::date - $3::int;
 DELETE FROM dps_report_entity_daily WHERE tenant_id = $1 AND day < ($2 AT TIME ZONE 'UTC')::date - $3::int;
 DELETE FROM dps_report_refresh WHERE tenant_id = $1 AND day < ($2 AT TIME ZONE 'UTC')::date - $3::int;
 DELETE FROM dps_tenant_usage WHERE tenant_id = $1 AND day < ($2 AT TIME ZONE 'UTC')::date - $3::int;
--- system tenant (acquire_queue('_dps')):
-DELETE FROM dps_job WHERE tenant_id = '_dps' AND kind = 'retention' AND finished_at < $1 - make_interval(days => $2);
 ```
-In `dry_run` each `DELETE`/`UPDATE` becomes the matching `SELECT count(*)`.
 
-Scheduler (single enqueue across replicas — a session advisory lock held across the check and the insert):
-```python
-class RetentionScheduler:
-    """Every worker runs one; at most one retention job is enqueued per interval across replicas."""
+Admin route (contract §9 row added 2026-10-11): `POST /api/v1/admin/retention/run` body `{"dry_run": bool = false}` → 202 `{"job": Job}`; audit `admin.retention.run`.
 
-    LOCK = "dps.retention.schedule"
-
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-
-    async def tick(self) -> str | None:
-        hours = self._settings.retention_interval_hours
-        async with acquire_queue(SYSTEM_TENANT) as conn:
-            if not await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", self.LOCK):
-                return None
-            try:
-                recent = await conn.fetchval(
-                    "SELECT count(*) FROM dps_job WHERE kind = 'retention' "
-                    "AND created_at > now() - make_interval(hours => $1)", hours)
-                if recent:
-                    return None
-                job = await enqueue_retention(dry_run=False, created_by="scheduler")
-                logger.info("retention_enqueued", job_id=job.id)
-                return job.id
-            finally:
-                await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", self.LOCK)
-
-    async def run(self, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            try:
-                await self.tick()
-            except (asyncpg.PostgresError, OSError) as exc:
-                logger.warning("retention_schedule_failed", error=type(exc).__name__)
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=300)   # look every 5 min; the interval gate is in SQL
-            except TimeoutError:
-                pass
-```
-(The `SELECT ... FROM dps_job` under the worker login sees every tenant through the `worker_claim` policy; use the schema-qualified table name exactly as M2's module renders it.)
-
-`enqueue_retention` = `create_job(tenant_id=SYSTEM_TENANT, kind=JobKind.retention, phase=JobPhase.retention, spec=RetentionSpec(dry_run=dry_run).model_dump(mode="json"), created_by=created_by, priority=200)`.
-
-M2 touch (`dps/worker.py`): the `handlers` passed to `Consumer` gain `JobPhase.retention: retention_job`; `kinds` contains `JobKind.retention` (contract §3.5); `main()` starts `asyncio.create_task(RetentionScheduler(settings).run(stop))` next to `Consumer.run()` and sets `stop` on SIGTERM.
-
-Admin route (contract §9 addition): `POST /api/v1/admin/retention/run` body `{"dry_run": bool = false}` → 202 `{"job": Job}`; audit `admin.retention.run`.
-
-- [ ] **Step 1: Write the failing tests** — `tests/test_retention.py` (`@pytest.mark.db`; `object_store` fixture = local tmp store; an `ArtefactService` over it):
+- [ ] **Step 1: Write the failing tests** — `tests/test_retention_m5.py` (`@pytest.mark.db`; `object_store` fixture = local tmp store; an `ArtefactService(object_store, acquire=db.acquire_queue)` over it; M2's `handler_ctx`):
 - `test_dry_run_counts_without_deleting`: one expired job with one artefact → `run_retention(dry_run=True)` → `counts.jobs == 1, counts.objects == 1`; the job row and the object still exist.
-- `test_expired_jobs_and_their_objects_are_deleted`: expired job (artefact + evidence + 2 partitions + 1 scan request row) and an unexpired job → after a real run: expired job, its artefact row, its object, its evidence, partitions and scan-request rows are gone; the unexpired job is intact; `counts.jobs == 1`.
+- `test_expired_jobs_their_objects_and_scan_rows_are_deleted`: an expired scan job with an artefact, an evidence row, a `dps_scan_page` row and a `dps_scan_request` row, plus an expired run job with 2 partitions, and an unexpired job → after a real run both expired jobs, their artefact rows, objects, evidence, partitions, scan page and scan request rows are gone (FK cascade — contract §2.4), the unexpired job is intact, `counts.jobs == 2`; and `"dps_scan" not in Path("dps/retention.py").read_text()`.
 - `test_snapshots_proposed_and_superseded_age_out_accepted_stay`: three 40-day-old snapshots (proposed, superseded, accepted) → only the accepted one remains.
 - `test_inline_secrets_are_purged_after_expiry`: a connection with `secret_enc` and `secret_expires_at = now() - 1 hour` → `secret_enc IS NULL`; another with a future expiry keeps its blob.
 - `test_terminal_jobs_lose_key_enc`: a `succeeded` job that still has `key_enc` → NULL; a `running` job keeps it.
 - `test_audit_log_is_never_touched`: audit row count before == after (including rows older than every retention window).
-- `test_scheduler_enqueues_once_across_two_replicas`: `asyncio.gather(s1.tick(), s2.tick())` → exactly one job id returned and one `retention` job row in the last interval; a third tick → `None`.
-- `test_handler_records_counts_and_refreshes_rollups`: run `retention_job` with a `HandlerContext` built from the test settings on a claimed retention job → job `succeeded`, `progress.metrics.retention.tenants >= 1`, a `dps_report_refresh` row for today exists for a tenant with jobs, one `retention.run` audit row under `_dps`.
-- `test_admin_route_enqueues_a_retention_job`: `POST /api/v1/admin/retention/run {"dry_run": true}` with an admin key → 202, `job.kind == "retention"`, `job.tenant_id == "_dps"`.
+- `test_rollup_and_usage_rows_age_out`: report/usage rows dated 401 days ago are deleted, rows from yesterday stay; `counts.rollup_rows ≥ 1`, `counts.usage_rows == 1`.
+- `test_system_tenant_retention_jobs_expire_like_any_other`: a finished `_system` retention job with `expires_at` in the past is deleted, a fresh one stays — no `_system`-specific statement exists.
+- `test_one_scheduler_one_job_per_interval`: `asyncio.gather(*(jobs.ensure_retention_job(6) for _ in range(4)))` → exactly one `True`; one `retention` job row for `_system` in the bucket; `not hasattr(dps.retention, "RetentionScheduler")`.
+- `test_handler_keeps_m2_counters_adds_metrics_and_refreshes_rollups`: `ensure_retention_job(6)`, claim it, run `retention_job(handler_ctx, claimed)` → job `succeeded`; `progress.values_by_method["retention:jobs"]` present (M2's keys) and `progress.metrics.retention.tenants >= 1`; a `dps_report_refresh` row for today exists for a tenant with jobs; `handler_ctx.audit` holds one `retention.run` event with tenant `_system`.
+- `test_admin_route_enqueues_a_retention_job`: `POST /api/v1/admin/retention/run {"dry_run": true}` with an admin key → 202, `job.kind == "retention"`, `job.tenant_id == "_system"`.
 
-- [ ] **Step 2: Run to confirm failure** → `ModuleNotFoundError: No module named 'dps.retention'`.
-- [ ] **Step 3: Implement** `dps/retention.py` (SQL above; `run_retention` loops tenants, catches `asyncpg.PostgresError` per tenant, logs `retention_tenant_failed` with the exception class only and continues), the worker wiring and the admin route.
-- [ ] **Step 4: Run tests**: `pytest -q -m db tests/test_retention.py` → `9 passed`; unit gate green.
+- [ ] **Step 2: Run to confirm failure** → `ImportError: cannot import name 'run_retention' from 'dps.retention'`.
+- [ ] **Step 3: Implement** the refactor and additions in `dps/retention.py` (keep `retention_job`'s signature and M2's counter keys) and the admin route. Do not edit `dps/worker.py` or `dps/jobs.py`.
+- [ ] **Step 4: Run tests**: `pytest -q -m db tests/test_retention_m5.py tests/db/test_retention.py tests/db/test_consumer.py` → `11 + 1 + 2 passed`; unit gate green.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add dps/retention.py dps/worker.py dps/layers/api/routers/admin.py tests/test_retention.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
-git commit -m "feat: retention job and single-enqueue scheduler — expire jobs, objects, snapshots, inline secrets; refresh roll-ups" -- dps/retention.py dps/worker.py dps/layers/api/routers/admin.py tests/test_retention.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+git add dps/retention.py dps/layers/api/routers/admin.py tests/test_retention_m5.py
+git commit -m "feat: extend the M2 retention job - M5 tables, roll-up refresh, counts, on-demand admin run" -- dps/retention.py dps/layers/api/routers/admin.py tests/test_retention_m5.py
 ```
 
 ---
@@ -4658,7 +4823,7 @@ def render_rollup_pdf(doc: Mapping[str, Any]) -> bytes
 def pdf_text(value: Any) -> str      # XML-escaped, folded to the Latin-1 subset of the standard fonts
 ```
 
-Sections (mockup 10, same order and headings): header (eyebrow "Data Privacy Services · evidence pack", title `"<source engine> <source object> -> <target object | files | in place>"`, job line, seal: verification result, sealed time, pack id, short sha256) · meta grid (tenant, requested by key id, purpose ticket, legal basis, job group, mode · write mode, outcome) · **1 Summary** (one sentence built from counts + six stat cells: rows written, columns transformed, values transformed, leakage hits, duration, raw values to LLM = 0) · **2 Configuration** (policy name vN + hash, config hash, engine version + image digest, key id + scope + custody, source, target, job group) · **3 Classification snapshot** (path, type, entity, confidence, method + params, decision = accepted/overridden) · **4 Execution** (partitions table: no, rows, attempts, resumed, state + totals; timings) · **5 Verification** (leakage sweep, detectors re-run on output, FPE fallbacks, row counts) · **6 Synthetic** (only with `fidelity`: per-column table with metric, distance, limit, null-rate delta; correlation summary and the lower-triangle delta matrix; privacy table: exact-row matches, resamples, NNDR ratio/medians/target/pass, QI uniqueness source vs synthetic + overlap, membership inference "not run" with reason; for `tabular == none` the single line "privacy not measured — non-sensitive columns were copied") · **UI scan** (only with `scan`: pages, forms, fields, personas, submissions = 0, blocked requests by method) · **7 Regulatory note** (the pack `label`: obfuscate → pseudonymised wording; synthesize → measurement-not-claim wording) · **8 Signatures** (system attestation filled with version, time, sha256; data owner = snapshot `accepted_by`; DPO; change approver — signature lines) · footer on every page (`DPS evidence pack · job <id> · page n` and the full pack sha256).
+Sections (mockup 10, same order and headings): header (eyebrow "Data Privacy Services · evidence pack", title `"<source engine> <source object> -> <target object | files | in place>"`, job line, seal: verification result, sealed time, pack id, short sha256) · meta grid (tenant, requested by key id, purpose ticket, legal basis, job group, mode · write mode, outcome) · **1 Summary** (one sentence built from counts + six stat cells: rows written, columns transformed, values transformed, leakage hits, duration, raw values to LLM = 0) · **2 Configuration** (policy name vN + hash, config hash, engine version + image digest, key id + scope + custody, source, target, job group) · **3 Classification snapshot** (path, type, entity, confidence, method + params, decision = accepted/overridden) · **4 Execution** (partitions table: no, rows, attempts, resumed, state + totals; timings) · **5 Verification** (leakage sweep, detectors re-run on output, FPE fallbacks, row counts) · **6 Synthetic** (only with `fidelity`: per-column table with metric, distance, limit, null-rate delta; correlation summary and the lower-triangle delta matrix; privacy table: exact-row matches, resamples, NNDR ratio/medians/target/pass, QI uniqueness source vs synthetic + overlap, membership-inference proxy (AUC vs target, or "not run" with the reason — Task 6B), utility TSTR row when the pack has `utility`; for `tabular == none` the single line "privacy not measured — non-sensitive columns were copied") · **UI scan** (only with `scan`: pages, forms, fields, personas, submissions = 0, blocked requests by method) · **7 Regulatory note** (the pack `label`: obfuscate → pseudonymised wording; synthesize → measurement-not-claim wording) · **8 Signatures** (system attestation filled with version, time, sha256; data owner = snapshot `accepted_by`; DPO; change approver — signature lines) · footer on every page (`DPS evidence pack · job <id> · page n` and the full pack sha256).
 
 Core of `dps/layers/reports/pdf.py` (helpers and two sections in full; the other sections follow the same `_section`/`_table`/`_kv` pattern with the fields listed above):
 ```python
@@ -4744,7 +4909,10 @@ def _fidelity(pack: Mapping[str, Any]) -> list[Any]:
          f"target {nn.get('target', 0):.2f}: {'pass' if nn.get('passed') else 'below target'}"],
         ["Quasi-identifier uniqueness", f"{100 * qi.get('synthetic', 0):.1f}% (source {100 * qi.get('source', 0):.1f}%)",
          f"{qi.get('unique_overlap', 0)} unique synthetic rows match a unique source row"],
-        ["Membership-inference proxy", "not run", (priv.get("membership_inference") or {}).get("reason", "")]]
+        _mia_row(priv.get("membership_inference") or {})]
+    util = pack.get("utility") or {}
+    if util:
+        privacy_rows.append(_utility_row(util))
     flow: list[Any] = [_p(f"Engine {fid.get('engine', 'copula')}; summary score {fid.get('score', 0):.2f} "
                           f"(1 - mean column distance - mean correlation delta {fid.get('corr_delta', 0):.3f}). "
                           f"Measured on {(fid.get('measured_on') or {}).get('synthetic_rows', 0)} preview rows.")]
@@ -4758,6 +4926,24 @@ def _fidelity(pack: Mapping[str, Any]) -> list[Any]:
                  _table([""] + names[:-1], rows, [40] + [width] * (len(names) - 1))]
     flow += [Spacer(1, 3 * mm), _table(["Privacy check", "Result", "What it means"], privacy_rows, [45, 35, 90])]
     return _section(6, "Synthetic data — fidelity and privacy", *flow)
+
+
+def _mia_row(mia: Mapping[str, Any]) -> list[str]:
+    """Membership-inference proxy (Task 6B): distance-based AUC, 0.5 = no membership signal."""
+    if not mia.get("run"):
+        return ["Membership-inference proxy", "not run", str(mia.get("reason", ""))]
+    return ["Membership-inference proxy", f"AUC {mia.get('auc', 0):.2f}",
+            f"target <= {mia.get('target', 0):.2f}: {'pass' if mia.get('passed') else 'above target'}; "
+            f"{mia.get('members', 0)} fit rows vs {mia.get('non_members', 0)} holdout rows"]
+
+
+def _utility_row(util: Mapping[str, Any]) -> list[str]:
+    """Train-on-synthetic / test-on-real for the nominated label column (Task 6B)."""
+    if not util.get("run"):
+        return ["Utility (TSTR)", "not run", str(util.get("reason", ""))]
+    return ["Utility (TSTR)", f"{util.get('metric', '')} {util.get('train_on_synthetic', 0):.3f}",
+            f"label {util.get('label', '')}; train-on-real {util.get('train_on_real', 0):.3f}; "
+            f"ratio {util.get('ratio', 0):.2f} ({util.get('model', '')})"]
 
 
 def _footer(job_id: str, sha: str) -> Any:
@@ -4994,6 +5180,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 UPDATE dps_policy SET active_version = $3, draft = NULL, draft_by = NULL, draft_updated_at = NULL, updated_at = now()
  WHERE tenant_id = $1 AND name = $2;
 ```
+Before the insert, `publish` refuses a body whose `verify.leakage_check` is `warn` while `settings.verify_warn_allowed` is false (`PolicyStoreError` 422 `verify_warn_disallowed`; nothing written) — spec §10 strict verification, the boot-time half is Task 16.
 The body is `Policy.model_validate({**draft, "name": name, "version": next}).model_dump(mode="json")`; `policy_hash = Policy(...).config_hash()`. `save_draft` validates with `resolve_policy(dict(body), default_name=...)` (an invalid draft → 400 `invalid_policy` with pydantic's message, which names fields and methods, never data). Job counts: `SELECT spec->'policy'->>'name', spec->'policy'->>'version', count(*) FROM dps_job WHERE tenant_id = $1 AND kind = 'run' AND jsonb_typeof(spec->'policy') = 'object' GROUP BY 1, 2` plus `spec->>'policy'` for preset strings.
 
 Routes (`dps/layers/api/routers/policy_store.py`, registered **after** M0's policies router so `/policies/presets` keeps its meaning; contract §9 additions):
@@ -5060,10 +5247,11 @@ def test_reference_grammar_and_yaml() -> None:
 - `test_run_spec_records_the_resolved_body`: `POST /jobs/run` with `policy="@gdpr-pseudonymise"` (valid spec) → stored `dps_job.spec->'policy'->>'version' == '2'`.
 - `test_diff_and_yaml_routes`: `GET /policies/gdpr-pseudonymise/diff?from=1&to=2` → one `change` at `detect.min_score`; `to=draft` with no draft → 409 `no_draft`; `versions/2?format=yaml` → `text/yaml` attachment containing `min_score: 0.55`.
 - `test_policies_are_tenant_isolated`: tenant `t2` → `GET /policies/gdpr-pseudonymise` 404; `GET /policies` lists only presets for `t2`.
+- `test_publish_refuses_relaxed_verification_when_disallowed`: with `verify_warn_allowed=False`, a draft setting `verify.leakage_check: warn` → `publish` raises `PolicyStoreError` 422 `verify_warn_disallowed` and `active_version` is unchanged; with the local default (`True`) it publishes.
 
 - [ ] **Step 2: Run to confirm failure** → `ModuleNotFoundError: No module named 'dps.policy_store'`.
 - [ ] **Step 3: Implement** migration, store, refs helper, router, router call sites; `TENANT_TABLES` += `dps_policy`, `dps_policy_version`.
-- [ ] **Step 4: Run tests**: `pytest -q tests/test_policy_diff.py` → `3 passed`; `pytest -q -m db tests/test_policy_store.py` → `8 passed`; unit gate green.
+- [ ] **Step 4: Run tests**: `pytest -q tests/test_policy_diff.py` → `3 passed`; `pytest -q -m db tests/test_policy_store.py` → `9 passed`; unit gate green.
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -5072,7 +5260,7 @@ git commit -m "feat(policies): tenant policies with drafts, immutable versions, 
 ```
 
 ---
-### Task 16: Posture tightening — secrets from files, TLS-only egress, KEK rotation, runtime posture report
+### Task 16: Posture tightening — strict verification at boot, secrets from files, TLS-only egress, KEK rotation, runtime posture report
 
 **Files:**
 - Create: `dps/rekey.py`
@@ -5116,8 +5304,23 @@ def _m5_problems(settings: Settings, environ: Mapping[str, str]) -> list[str]:
         problems.append("DPS_EMBEDDED_WORKER must be false (run dedicated worker deployments)")
     if not (settings.audit_enabled and settings.audit_strict):
         problems.append("DPS_AUDIT_ENABLED and DPS_AUDIT_STRICT must both be true")
+    # spec §10: "refuses to boot in staging/prod without ... strict verification"
+    if settings.verify_warn_allowed:
+        problems.append("DPS_VERIFY_WARN_ALLOWED must be false (callers may not relax verification)")
+    if settings.llm_egress_check != "strict":
+        problems.append("DPS_LLM_EGRESS_CHECK must be strict")
+    problems += [f"policy {name} must use verify.leakage_check=strict" for name in non_strict_policies(settings)]
     return problems
+
+
+def non_strict_policies(settings: Settings) -> list[str]:
+    """Shipped presets and the default policy whose leakage check is not strict (names only)."""
+    names = dict.fromkeys([*list_presets(), settings.default_policy])
+    return [n for n in names if resolve_policy(n, default_name=settings.default_policy).verify.leakage_check != "strict"]
 ```
+(`from dps.engine.policy import list_presets, resolve_policy`.) Tenant policies stored in the DB cannot be checked before boot: Task 15's publish path refuses a policy with `verify.leakage_check: warn` while `DPS_VERIFY_WARN_ALLOWED=false` (`verify_warn_disallowed`, 422), and the runtime `leakage_strict` check of the posture report covers anything older.
+
+**Enforcement of `DPS_VERIFY_WARN_ALLOWED=false` at request time** (so a caller cannot relax verification after boot): M0 touch point `PrivacyEngine.policy(ref)` raises `CodedError("verify_warn_disallowed", "verify.leakage_check=warn is not allowed on this deployment", status=422)` (M1's `dps.errors`) for a resolved policy with `warn`; M2 touch point `validate_run` raises `SpecError("verify_warn_disallowed", 422)` for `options.verify == "warn"` (contract §5.3 row added 2026-10-11).
 (`dps/posture.py` imports grow to `base64`, `os`, `collections.abc.Mapping`.) `posture_problems` appends `_m5_problems(settings, os.environ)` (keep M0–M4 checks; duplicates of M2 checks are de-duplicated by `dict.fromkeys`).
 
 **Runtime report** for the Admin page — `dps/posture.py`:
@@ -5127,7 +5330,7 @@ class PostureReport(BaseModel): env: str; enforced: bool; passed: int; total: in
                                 checks: list[PostureCheck]
 async def posture_report(settings: Settings, *, environ: Mapping[str, str] | None = None) -> PostureReport
 ```
-Checks (ids fixed; evaluated "as if production" in every env; `enforced = settings.is_production`): `auth_enabled`, `bootstrap_key_absent`, `api_keys_from_file` (DB keys or `DPS_API_KEYS_FILE`), `tls_egress` (setting + https URLs + CA bundle), `audit_strict`, `leakage_strict` (every preset and every tenant's active policy has `verify.leakage_check == "strict"`; detail names offending policies), `llm_not_stub`, `kek_from_secret` (`DPS_JOB_KEK_FILE` set, 32 bytes), `keys_rotated` (DB: active keys with `created_at < now() - key_rotation_max_age_days` and no `rotated_at`; detail lists their **names** and ages in days — the mockup's "ledger-recon-batch is 113 days old"), `rls_posture` (`assert_rls_posture()` returns no problems), `migrations_verified` (`verify_migrations()` raises nothing). DB-dependent checks report `ok=False, detail="database unavailable"` when the DB is down. `GET /api/v1/admin/posture` (admin) returns the report.
+Checks (ids fixed; evaluated "as if production" in every env; `enforced = settings.is_production`): `auth_enabled`, `bootstrap_key_absent`, `api_keys_from_file` (DB keys or `DPS_API_KEYS_FILE`), `tls_egress` (setting + https URLs + CA bundle), `audit_strict`, `leakage_strict` (`enforced_at_boot: true` — the static part, `non_strict_policies` + `verify_warn_allowed` + `llm_egress_check`, is in `posture_problems`; the report adds every tenant's active policy from the DB; detail names offending policies), `llm_not_stub`, `kek_from_secret` (`DPS_JOB_KEK_FILE` set, 32 bytes), `keys_rotated` (DB: active keys with `created_at < now() - key_rotation_max_age_days` and no `rotated_at`; detail lists their **names** and ages in days — the mockup's "ledger-recon-batch is 113 days old"), `rls_posture` (`assert_rls_posture()` returns no problems), `migrations_verified` (`verify_migrations()` raises nothing). DB-dependent checks report `ok=False, detail="database unavailable"` when the DB is down. `GET /api/v1/admin/posture` (admin) returns the report.
 
 **App changes:** `CORSMiddleware(allow_origins=settings.cors_origin_list, ...)` (empty list → no CORS headers at all); `FastAPI(docs_url=None, redoc_url=None, openapi_url=None)` when `settings.is_production`.
 
@@ -5186,7 +5389,8 @@ def _prod(**kw: object) -> Settings:
         _env_file=None, env="prod", auth_enabled=True, llm_provider="", audit_enabled=True, audit_strict=True,
         egress_tls_required=True, cors_origins="https://console.bank.example", ssl_cert_file="/etc/ssl/org-ca.pem",
         tokenizer_provider="http", tokenizer_url="https://tokenizer.bank.example", migrations_mode="verify",
-        inline_secrets_allowed=False, rls_enabled=True, pg_host="db.bank.example", pg_ssl_root_cert="/etc/ssl/pg.pem")
+        inline_secrets_allowed=False, rls_enabled=True, pg_host="db.bank.example", pg_ssl_root_cert="/etc/ssl/pg.pem",
+        verify_warn_allowed=False, llm_egress_check="strict")
     base.update(kw)
     return Settings(**base)  # type: ignore[arg-type]
 
@@ -5206,12 +5410,32 @@ def test_good_m5_production_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     ({"s3_endpoint_url": "http://minio:9000"}, "DPS_S3_ENDPOINT_URL"),
     ({"ssl_cert_file": ""}, "DPS_SSL_CERT_FILE"),
     ({"job_kek": base64.b64encode(b"short").decode()}, "32 bytes"),
+    ({"verify_warn_allowed": True}, "DPS_VERIFY_WARN_ALLOWED"),
+    ({"llm_egress_check": "warn"}, "DPS_LLM_EGRESS_CHECK"),
 ])
 def test_bad_m5_production_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict, needle: str) -> None:
     _files(tmp_path, monkeypatch)
     with pytest.raises(PostureError) as err:
         assert_production_posture(_prod(**change))
     assert needle in str(err.value) and "tok-sentinel-998877" not in str(err.value)
+
+
+def test_boot_refuses_a_non_strict_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _files(tmp_path, monkeypatch)
+    monkeypatch.setattr("dps.posture.non_strict_policies", lambda s: ["analytics-safe"])
+    with pytest.raises(PostureError) as err:
+        assert_production_posture(_prod())
+    assert "policy analytics-safe must use verify.leakage_check=strict" in str(err.value)
+
+
+def test_relaxed_verification_is_refused_at_request_time() -> None:
+    from dps.errors import CodedError
+    from dps.engine.service import PrivacyEngine
+
+    engine = PrivacyEngine(Settings(_env_file=None, llm_provider="stub", verify_warn_allowed=False))
+    with pytest.raises(CodedError) as err:
+        engine.policy({"preset": "gdpr-pseudonymise", "verify": {"leakage_check": "warn"}})
+    assert err.value.code == "verify_warn_disallowed" and err.value.status == 422
 
 
 def test_literal_secret_env_vars_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5256,13 +5480,80 @@ def test_docs_and_cors_follow_the_environment(tmp_path: Path, monkeypatch: pytes
 - `test_rekey_dry_run_and_unreadable_rows`: a blob sealed with an unknown KEK C → `unreadable == 1`, exit code 3, the row unchanged; `--dry-run` changes nothing.
 
 - [ ] **Step 2: Run to confirm failure** → `tests/test_posture_m5.py` fails on the first parametrised case (no `DPS_EGRESS_TLS_REQUIRED` problem yet).
-- [ ] **Step 3: Implement** the posture additions, `posture_report`, the app changes, `require_tls_connection` and its three M2 call sites, the `protocol` option (contract §5.1 allow-list sentence gains `protocol`), `dps/rekey.py`, `GET /admin/posture`; HANDOFF §3 rows (`DPS_EGRESS_TLS_REQUIRED`, `DPS_CORS_ORIGINS`), §9 KEK-rotation runbook.
-- [ ] **Step 4: Run tests**: `pytest -q tests/test_posture_m5.py tests/test_egress_tls.py tests/test_posture.py` → `12 passed` + `12 passed` + M0's tests; if a posture rule an earlier milestone added (beyond the contract's list) fires on `_prod()`, add the setting that satisfies it to `_prod()` — never relax the rule; `pytest -q -m db tests/test_rekey.py` → `2 passed`; unit gate green.
+- [ ] **Step 3: Implement** the posture additions (incl. `non_strict_policies` and the two settings `verify_warn_allowed` / `llm_egress_check` from Task 1's settings block — add them there if Task 1 did not), the request-time `verify_warn_disallowed` checks in `PrivacyEngine.policy` (M0) and `validate_run` (M2), `posture_report`, the app changes, `require_tls_connection` and its three M2 call sites, the `protocol` option (contract §5.1 allow-list sentence gains `protocol`), `dps/rekey.py`, `GET /admin/posture`; HANDOFF §3 rows (`DPS_EGRESS_TLS_REQUIRED`, `DPS_CORS_ORIGINS`), §9 KEK-rotation runbook.
+- [ ] **Step 4: Run tests**: `pytest -q tests/test_posture_m5.py tests/test_egress_tls.py tests/test_posture.py` → `16 passed` + `12 passed` + M0's tests; if a posture rule an earlier milestone added (beyond the contract's list) fires on `_prod()`, add the setting that satisfies it to `_prod()` — never relax the rule; `pytest -q -m db tests/test_rekey.py` → `2 passed`; unit gate green.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add dps/posture.py dps/netguard.py dps/rekey.py dps/app.py dps/layers/api/routers/admin.py dps/jobs_models.py dps/layers/api/routers/connections.py dps/layers/connectors/registry.py HANDOFF.md tests/test_posture_m5.py tests/test_egress_tls.py tests/test_rekey.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
-git commit -m "feat(posture): secrets from files, TLS-only egress, explicit CORS, docs off in prod, KEK re-sealing, runtime posture report" -- dps/posture.py dps/netguard.py dps/rekey.py dps/app.py dps/layers/api/routers/admin.py dps/jobs_models.py dps/layers/api/routers/connections.py dps/layers/connectors/registry.py HANDOFF.md tests/test_posture_m5.py tests/test_egress_tls.py tests/test_rekey.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+git add dps/posture.py dps/netguard.py dps/rekey.py dps/app.py dps/config.py dps/engine/service.py dps/layers/api/routers/admin.py dps/jobs_models.py dps/layers/api/routers/connections.py dps/layers/connectors/registry.py HANDOFF.md tests/test_posture_m5.py tests/test_egress_tls.py tests/test_rekey.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+git commit -m "feat(posture): strict verification at boot, secrets from files, TLS-only egress, explicit CORS, docs off in prod, KEK re-sealing, runtime posture report" -- dps/posture.py dps/netguard.py dps/rekey.py dps/app.py dps/config.py dps/engine/service.py dps/layers/api/routers/admin.py dps/jobs_models.py dps/layers/api/routers/connections.py dps/layers/connectors/registry.py HANDOFF.md tests/test_posture_m5.py tests/test_egress_tls.py tests/test_rekey.py docs/superpowers/plans/2026-10-11-m1-m5-contract.md
+```
+
+---
+
+### Task 16B: Per-tenant LLM exposure counter, egress verifier and alerts (spec P1, §10)
+
+**Files:**
+- Create: `dps/llm/egress.py`, `dps/migrations/044_llm_exposure.sql`
+- Modify: `dps/observability.py` (M0: `CURRENT_TENANT`, `LLM_STATS`, three labelled counters), `dps/llm/gateway.py` (M0: `complete(..., protected=())` runs the egress verifier), `dps/engine/synth/llm_text.py` (M0) and `dps/engine/synth/schema_gen.py` / `dps/engine/detect/llm_label.py` (M1: pass `protected=`), `dps/layers/api/common.py` (M0/M1: bind the tenant, audit LLM counts), `dps/worker.py` (M2: bind the job's tenant in `Consumer._guard`), `dps/reports.py` (Task 12: roll-up columns), contract §8.3 (already describes this since 2026-10-11)
+- Test: `tests/test_llm_egress.py` (offline), `tests/test_reports.py` (`db`, one case appended)
+
+Spec P1 and §10 require a **per-tenant** exposure counter with an alert. M0's process counter `dps_llm_raw_pii_sent_total` stays (M0 tests pin it); this task adds the tenant dimension, a second, independent check at the single egress point, and per-tenant figures in the roll-ups that the Overview reads.
+
+**Tenant binding.** `dps/observability.py`:
+```python
+CURRENT_TENANT: ContextVar[str | None] = ContextVar("dps_tenant", default=None)
+@dataclass
+class LlmStats: calls: int = 0; raw_values: int = 0; blocked: int = 0
+LLM_STATS: ContextVar[LlmStats | None] = ContextVar("dps_llm_stats", default=None)
+LLM_CALLS_TENANT = Counter("dps_llm_calls_by_tenant", "LLM gateway calls per tenant", ["tenant_id", "purpose"])
+LLM_RAW_PII_TENANT = Counter("dps_llm_raw_pii_sent_by_tenant", "Raw sensitive values sent to the LLM per tenant. Must stay 0.", ["tenant_id"])
+LLM_BLOCKED_TENANT = Counter("dps_llm_exposure_blocked_by_tenant", "Prompts the egress verifier blocked per tenant", ["tenant_id"])
+def record_llm(*, purpose: str, raw_values: int = 0, blocked: bool = False) -> None
+    # increments the tenant counters (tenant "-" when unbound), M0's LLM_RAW_PII when raw_values > 0,
+    # and the request/job LlmStats when bound; never takes a value
+```
+`run_engine` (M0, `dps/layers/api/common.py`) sets `CURRENT_TENANT` to `request.state.tenant_id` and `LLM_STATS` to a fresh `LlmStats()` for the request, and `_audit` adds `counts["llm_calls"]`, `counts["llm_raw_values"]`, `counts["llm_blocked"]` from it. M2's `Consumer._guard` sets `CURRENT_TENANT` to the claimed job's / partition's `tenant_id` and `LLM_STATS` to a fresh `LlmStats()` inside the handler task (asyncio tasks copy the context, so the binding is per task); handlers that call the LLM (Task 8B discovery and scanner labelling) copy it into `progress.metrics.llm`.
+
+**Egress verifier** (`dps/llm/egress.py`) — the last check before any byte leaves for the model:
+```python
+class LlmEgressBlocked(LlmCallError):            # callers already fall back on LlmCallError (M0 llm_text, M1 proposer)
+    """A prompt contained a raw sensitive value; nothing was sent."""
+def residual_values(messages: list[dict[str, str]], *, protected: Sequence[str],
+                    detector: Detector) -> int
+    """Count of raw values in the outgoing text: normalised protected originals of >= 3 characters,
+    plus whole-value T1 findings (checksum-validated identifiers, cards, e-mails, phones) that are not
+    DPS placeholders ({TYPE_N})."""
+```
+`LlmGateway.complete(messages, *, temperature, max_tokens, purpose, protected: Sequence[str] = ())` (M0 touch point) runs `residual_values` first. `n > 0` and `settings.llm_egress_check == "strict"` → `record_llm(purpose=purpose, blocked=True)` and raise `LlmEgressBlocked` (nothing sent); `n > 0` under `warn` (local diagnosis only — staging/prod posture requires `strict`, Task 16) → the call proceeds and `record_llm(purpose=purpose, raw_values=n)` increments both raw counters, which fires the alert; `n == 0` → `record_llm(purpose=purpose)`. Callers pass what they protect: `synthesize_text` the placeholder mapping's originals, M1's schema proposer the sensitive sample values, M1's `label_fields` its `protected` argument. The verifier logs `llm_egress_blocked` with `purpose` and `count` only.
+
+**Roll-ups** — `dps/migrations/044_llm_exposure.sql`:
+```sql
+-- 044 — per-tenant LLM figures in the daily roll-ups (M5, spec P1/§10). Counts only.
+ALTER TABLE __SCHEMA__.dps_report_daily
+  ADD COLUMN llm_calls bigint NOT NULL DEFAULT 0,
+  ADD COLUMN llm_raw_values bigint NOT NULL DEFAULT 0,
+  ADD COLUMN llm_blocked bigint NOT NULL DEFAULT 0;
+```
+Task 12's statement 1 (audit rows) also sums `counts->'llm_calls'`, `counts->'llm_raw_values'`, `counts->'llm_blocked'` (the same `jsonb_typeof(...) = 'number'` guard), and statement 3 (job rows) sums `progress->'metrics'->'llm'->'calls'|'raw_values'|'blocked'`; `summary` reads the tenant's window sums into `tiles.llm_calls`, `tiles.raw_pii_sent_to_llm`, `tiles.llm_blocked`. The alert rules `DpsRawPiiSentToLlm` (per `tenant_id`, critical) and `DpsLlmExposureBlocked` (warning) are part of Task 25's `PrometheusRule`.
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_llm_egress.py`:
+- `test_residual_values_finds_protected_and_validated_values`: `"rewrite {EMAIL_1} for Ananya"` with `protected=["Ananya"]` → 1; `"card 4111 1111 1111 1111"` (Luhn-valid) → 1; `"{EMAIL_1} wrote {DATE_2}"` → 0.
+- `test_strict_blocks_and_counts_per_tenant`: a gateway (`llm_provider="stub"`, `llm_egress_check="strict"`) with `CURRENT_TENANT` bound to `t1` → `complete([...Ananya...], protected=["Ananya"])` raises `LlmEgressBlocked`; `dps_llm_exposure_blocked_by_tenant_total{tenant_id="t1"}` rose by 1; `dps_llm_raw_pii_sent_total` unchanged.
+- `test_warn_sends_and_raises_the_alarm_counters`: `llm_egress_check="warn"` → returns a result; `dps_llm_raw_pii_sent_by_tenant_total{tenant_id="t1"}` and the global counter rose by 1 (this test resets nothing global: it reads deltas).
+- `test_calls_are_counted_per_tenant`: two clean calls under `a` and one under `b` → `dps_llm_calls_by_tenant_total` deltas 2 and 1.
+- `test_audit_carries_llm_counts`: `POST /api/v1/synthesize` (text, `options.llm_rewrite=true`, stub gateway, `MemoryAuditSink`) → the audit event's `counts["llm_calls"] == 1` and `counts["llm_raw_values"] == 0`.
+- `test_synthesize_text_falls_back_when_blocked`: a rewriting gateway whose prompt would contain a protected value (forced by monkeypatching `to_placeholders` to leave one original) → the response is the deterministic fill and `report.llm_calls == 0`.
+- `tests/test_reports.py` (`db`) appended: `test_summary_llm_tiles_are_per_tenant` — audit rows for `t1` with `counts={"llm_calls": 3, "llm_blocked": 1}` and for `t2` with `{"llm_calls": 5}` → `summary("t1").tiles` has `llm_calls == 3`, `llm_blocked == 1`, `raw_pii_sent_to_llm == 0`; `t2` has `llm_calls == 5`.
+
+- [ ] **Step 2: Run to confirm failure** → `ModuleNotFoundError: No module named 'dps.llm.egress'`.
+- [ ] **Step 3: Implement** the observability additions, the verifier, the gateway change and its three callers, the tenant binding in `run_engine` and `Consumer._guard`, 044 and the roll-up/summary changes.
+- [ ] **Step 4: Run tests**: `pytest -q tests/test_llm_egress.py tests/test_llm_text.py tests/test_observability.py` → `6 passed` plus M0's unchanged (M0's `LLM_RAW_PII == 0` assertions still hold); `pytest -q -m db tests/test_reports.py` → previous count + 1; unit gate green.
+- [ ] **Step 5: Commit**
+
+```bash
+git add dps/llm/egress.py dps/llm/gateway.py dps/observability.py dps/engine/synth/llm_text.py dps/engine/synth/schema_gen.py dps/engine/detect/llm_label.py dps/layers/api/common.py dps/worker.py dps/reports.py dps/migrations/044_llm_exposure.sql tests/test_llm_egress.py tests/test_reports.py
+git commit -m "feat(llm): egress verifier and per-tenant LLM exposure counters, audit counts and roll-ups" -- dps/llm/egress.py dps/llm/gateway.py dps/observability.py dps/engine/synth/llm_text.py dps/engine/synth/schema_gen.py dps/engine/detect/llm_label.py dps/layers/api/common.py dps/worker.py dps/reports.py dps/migrations/044_llm_exposure.sql tests/test_llm_egress.py tests/test_reports.py
 ```
 
 ---
@@ -5747,7 +6038,7 @@ git commit -m "feat(console): M5 API groups and types, download/chart/dialog/key
 Built to `docs/design/mockups/01-dashboard.html`, reading `GET /reports/summary?days=14` and `/readyz`:
 - Topbar crumb "Overview / Tenant: <tenant>"; pill "All layers ready" (or "N degraded") with the component list from `/readyz`.
 - Page head "Protection posture" · "Last 14 days · policy pack <most-used policy>"; buttons **Export evidence** (→ `/reports`) and **Open playground**.
-- KPI row (`Kpi`): **Values protected** (hero; `tiles.values_protected`, delta vs `values_protected_prev` as ▲/▼ %), **PII findings** (`findings`, "`entity_types` entity types"), **Jobs** (`jobs_running` running; "completed · failed · `snapshots_awaiting_review` awaiting review"), **Raw PII sent to LLM** (zero tile; `raw_pii_sent_to_llm`; "`llm_calls` gateway calls since start · placeholders only").
+- KPI row (`Kpi`): **Values protected** (hero; `tiles.values_protected`, delta vs `values_protected_prev` as ▲/▼ %), **PII findings** (`findings`, "`entity_types` entity types"), **Jobs** (`jobs_running` running; "completed · failed · `snapshots_awaiting_review` awaiting review"), **Raw PII sent to LLM** (zero tile; `raw_pii_sent_to_llm` for this tenant; "`llm_calls` gateway calls · `llm_blocked` blocked at egress · last 14 days · placeholders only").
 - Row: **Protected values per day** (`BarChart`, series obfuscated `var(--teal)` / synthetic `var(--violet)`, x = `trend[].day`) and **Posture score** (SVG ring for `posture.score` + four bars: leakage sweeps passed, reversible with key held by caller, columns reviewed before run, policies on latest version; chip "Verified" when score ≥ 95 else amber "Review").
 - Three layer cards: **Layer 1 · API** ("stateless"; requests, by-mode legend), **Layer 2 · Connectors** (rows, by-engine split, "`groups` job groups keep ids consistent across systems"; amber chip "N awaiting review" when snapshots await), **Layer 3 · UI scanner** (chip "never submits"; scans/pages/fields/risk flags; "Last scan: N pages, P personas, 0 submitted").
 - Row: **Findings by entity type** (table of `findings_by_type`, entity chip toned by sensitivity, bar, count) and **Recent jobs** (`recent_jobs`: id → `/data-sources/jobs/:id` or `/scanner/scans/:id`, source → target, mode chip, progress bar, status chip with `note`).
@@ -5796,7 +6087,7 @@ The M2 page renders sections 1–5 and 7–8 of mockup 10 from `GET /evidence/{i
 - Topbar: **Download JSON** (`api.evidence.json`), **Download PDF** (`api.evidence.pdf` — the server-rendered, archivable copy), **Print** (`window.print()` with the mockup's print CSS).
 - Section 2 shows the policy as `name vN` (new `policy.version`) and the key custody line.
 - Section 3 (snapshot table) gains Type (`data_type`), Conf. (`confidence`), Decision (`accepted` / **overridden**) from the new column fields.
-- Section 6 **Synthetic** (`FidelityPanel`, only when `fidelity` is present): lead sentence (engine, preview rows, the label that the seed is not in the pack); **Fidelity** table — column, metric (KS/TVD), distance, a `.dist` bar against `limits.column`, null-rate delta in pp; the **correlation-matrix delta** grid (`.cmx`, lower triangle, cell shade `color-mix(in srgb, var(--ink-2) <|Δ| / limits.corr × 45>%, var(--surface))`, a `.ramp` legend 0.00 → limit) with the "Largest change … Mean … across N pairs" note; **Privacy** cards (`.pm`) — exact-row matches (chip "enforced", value `0 of N`, resample counts), nearest-neighbour distance ratio (chip pass/below target, medians), quasi-identifier uniqueness (synthetic vs source, overlap), membership-inference proxy (slate "not run" with the reason); excluded tabular columns listed under the table. For `privacy.engine == "none"` the section shows one amber callout "Privacy not measured — non-sensitive columns were copied from the source (tabular synthesis off)".
+- Section 6 **Synthetic** (`FidelityPanel`, only when `fidelity` is present): lead sentence (engine, preview rows, the label that the seed is not in the pack); **Fidelity** table — column, metric (KS/TVD), distance, a `.dist` bar against `limits.column`, null-rate delta in pp; the **correlation-matrix delta** grid (`.cmx`, lower triangle, cell shade `color-mix(in srgb, var(--ink-2) <|Δ| / limits.corr × 45>%, var(--surface))`, a `.ramp` legend 0.00 → limit) with the "Largest change … Mean … across N pairs" note; **Privacy** cards (`.pm`) — exact-row matches (chip "enforced", value `0 of N`, resample counts), nearest-neighbour distance ratio (chip pass/below target, medians), quasi-identifier uniqueness (synthetic vs source, overlap), membership-inference proxy (AUC with a pass/above-target chip; slate "not run" with the reason when the holdout was too small), **Utility** card when the pack has `utility` (train-on-synthetic vs train-on-real score for the nominated label, ratio; slate "not run" with the reason); excluded tabular columns listed under the table. For `privacy.engine == "none"` the section shows one amber callout "Privacy not measured — non-sensitive columns were copied from the source (tabular synthesis off)".
 - Section 7 regulatory callouts chosen by `label` (pseudonymised vs measured-not-claimed), wording as in the mockup.
 - `@media print` styles (Task 18 copied them) hide chrome and print exactly the sheet.
 
@@ -6100,7 +6391,7 @@ spec:
 `base/service-app.yaml` (ClusterIP 8400 → `http`), `base/route-app.yaml` (`tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}`, host `dps.apps.example.invalid`), `base/pdb.yaml` (`dps-app` minAvailable 1, `dps-worker` maxUnavailable 1), `base/serviceaccounts.yaml` (`dps-app`, `dps-worker`, `dps-browser-worker`, `dps-migrate`, each `automountServiceAccountToken: false`).
 
 `components/network-policies/networkpolicies.yaml` — `default-deny` (empty `podSelector`, `policyTypes: [Ingress, Egress]`); `allow-dns` (egress to namespace `openshift-dns`, UDP/TCP 53 and 5353); `app-ingress-from-router` (to component `app`, from namespace label `network.openshift.io/policy-group: ingress`, TCP 8400); `metrics-from-monitoring` (to all three components from `openshift-user-workload-monitoring`, TCP 8400/9400/9401); `egress-dps-db` (all components, `ipBlock 192.0.2.10/32` TCP 5432 — parameter); `egress-gateways` (app + worker: LLM gateway, OCR gateway, tokenizer, S3 — `ipBlock 192.0.2.0/27` TCP 443, parameter per endpoint); `egress-source-databases` (worker only: `192.0.2.32/27` TCP 1521, 2484, 5432, 27017 — parameter); `egress-scan-targets` (browser-worker only: `192.0.2.64/27` TCP 443 — the registered UAT hosts' network, parameter).
-`components/monitoring/` — `PodMonitor` for the three components (ports `http`/`ops`, path `/metrics`); `PrometheusRule` with alerts `DpsRawPiiSentToLlm` (`dps_llm_raw_pii_sent_total > 0`, critical — must never fire), `DpsVerificationFailures` (`increase(dps_verification_failures_total[15m]) > 0`, warning), `DpsExactRowResamplesHigh` (`increase(dps_tabular_resamples_total[1h]) > 1000`, info), `DpsTokenizerFailing` (`increase(dps_external_token_calls_total{outcome!="ok"}[10m]) > 10`, warning), `DpsNoDbKeysLoaded` (`dps_auth_keys_loaded == 0` for 15 m, warning), `DpsWorkersAbsent` (`absent(up{app_kubernetes_io_component="worker"} == 1)` for 10 m, critical).
+`components/monitoring/` — `PodMonitor` for the three components (ports `http`/`ops`, path `/metrics`); `PrometheusRule` with alerts `DpsRawPiiSentToLlm` (`sum by (tenant_id) (increase(dps_llm_raw_pii_sent_by_tenant_total[10m])) > 0 or dps_llm_raw_pii_sent_total > 0`, critical, labels carry `tenant_id` — must never fire; Task 16B), `DpsLlmExposureBlocked` (`sum by (tenant_id) (increase(dps_llm_exposure_blocked_by_tenant_total[15m])) > 0`, warning — the egress verifier stopped a prompt; Task 16B), `DpsVerificationFailures` (`increase(dps_verification_failures_total[15m]) > 0`, warning), `DpsExactRowResamplesHigh` (`increase(dps_tabular_resamples_total[1h]) > 1000`, info), `DpsTokenizerFailing` (`increase(dps_external_token_calls_total{outcome!="ok"}[10m]) > 10`, warning), `DpsNoDbKeysLoaded` (`dps_auth_keys_loaded == 0` for 15 m, warning), `DpsWorkersAbsent` (`absent(up{app_kubernetes_io_component="worker"} == 1)` for 10 m, critical).
 `components/dev-mocks/` — `dps-tokenizer-mock` Deployment + Service (app image, `args: ["python", "/mock/server.py", "--port", "8420"]`, the server file from a `configMapGenerator` over `server.py` — a copy of `docker/tokenizer-mock/server.py` kept identical by a test — mounted at `/mock`; `MOCK_TOKENIZER_TOKEN`/`_KEY` from secret `dps-tokenizer-mock`) and `dps-azure-ocr-mock` (image `azure-ocr-mock`, port 5000). No Oracle, Mongo, MinIO or source PostgreSQL — those are bank systems.
 
 `overlays/dev/kustomization.yaml`:
@@ -6221,6 +6512,50 @@ git commit -m "feat(demo): idempotent demo seed, automated ten-minute demo with 
 ```
 
 ---
+### Task 26B: The showcase deck (spec §11 M5 "demo script and deck")
+
+**Files:**
+- Create: `tools/build_deck.py`, `docs/demo/dps-showcase.pptx` (generated, committed), `tests/test_deck.py`
+- Modify: `pyproject.toml` (dev-only extra `deck = ["python-pptx>=1.0"]` — never in an image), `tools/e2e_demo.py` (Task 26: also write `reports/e2e-demo-report.json`, the same value-free facts as the Markdown report), `docs/demo/DEMO-SCRIPT.md` (one line: which slide goes with which beat)
+
+The deck accompanies the ten-minute demo (spec §9) and is built from the rehearsal's own outputs, so every number on a slide was measured. It is a `.pptx` that renders correctly in **Keynote** (the owner's viewer; no Microsoft Office): charts are drawn as native shapes (rectangles and text boxes), never as PowerPoint chart parts (Keynote drops them); fonts are `Helvetica Neue` with `Arial` as the fallback name (no Cambria); 16:9; Vault tokens as fixed colours (ink `#0E141B`, paper `#F4F6F8`, teal = protected, amber = detected, emerald = verified, rose = critical).
+
+`tools/build_deck.py` — `python tools/build_deck.py [--report reports/e2e-demo-report.json] [--screens reports/demo-screens] [--bench docs/technical/bench] [--out docs/demo/dps-showcase.pptx]`; inputs are value-free (ids, counts, durations, rows/s, fidelity scores) and screenshots of the demo stack (synthetic seed data only). Twelve slides, each with a title and speaker notes taken from the matching DEMO-SCRIPT beat:
+1. Title — "Data Privacy Services" + the one-line promise.
+2. The problem — production data in lower environments; three entry points (API, connectors, UI).
+3. Principles — P1 (no raw value to an LLM), stateless key custody (D2), evidence not claims.
+4. Architecture — one engine, four roles, the metadata DB (shapes, no picture assets needed).
+5. Layer 1 — Playground screenshot (light theme), finding counts from step S2.
+6. Documents — redacted PDF: OCR pages and "0 characters left" from step S4.
+7. Layer 2 — job detail screenshot; rows written, partitions, rows/s (bar chart as shapes from `bench/*.json`).
+8. Cross-system consistency — the three-way join result from step S7 (pairs and overlaps).
+9. Synthetic data, measured — fidelity score, exact-row matches 0, NNDR, MIA AUC and utility ratio from step S8 (Task 6B values).
+10. Layer 3 — parallel-view screenshot; "POST requests received: 0" from step S9.
+11. Evidence and posture — evidence-PDF page and the posture checks from steps S10/S11; "raw PII sent to LLM: 0" per tenant.
+12. Decisions and next steps — D1–D14 status table (from the spec's decision record, static text).
+A missing input (no screenshot, no bench file) renders a slate placeholder box saying what is missing — the build never fails silently and never invents a number.
+
+QA (manual, on this Mac): open the deck in Keynote and export to PDF (`osascript -e 'tell application "Keynote" to export (open POSIX file "<abs path>") to POSIX file "<abs>/reports/deck.pdf" as PDF'`), then page through the PDF: every chart visible, no font substitution warnings, no text overflow. The PDF is not committed.
+
+- [ ] **Step 1: Write the failing test** — `tests/test_deck.py` (`pytest.importorskip("pptx")`): build the deck from fixtures (a two-step report JSON, two 8 × 8 PNG screenshots written to `tmp_path`, one bench JSON) →
+  - exactly 12 slides, each with a non-empty title placeholder and non-empty notes;
+  - the `.pptx` zip contains no `ppt/charts/` part and no embedded font other than the two names above in any run;
+  - every number printed on slides 7–11 appears in the fixture inputs (no invented figures);
+  - slide 9 shows "MIA" and "utility" values when the report has them and a placeholder box otherwise;
+  - running M0's `Detector` over all slide text finds no CRITICAL-sensitivity entity;
+  - the file is < 20 MB.
+- [ ] **Step 2: Run to confirm failure** → `FileNotFoundError: tools/build_deck.py`.
+- [ ] **Step 3: Implement** the tool and the JSON report in `e2e_demo.py`.
+- [ ] **Step 4: Build and check** — after Task 26's `python tools/e2e_demo.py --console`: `uv pip install -e ".[deck]" && python tools/build_deck.py` → `docs/demo/dps-showcase.pptx`; the Keynote PDF export reviewed as above; `pytest -q tests/test_deck.py` → `1 passed`.
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools/build_deck.py tools/e2e_demo.py pyproject.toml docs/demo/dps-showcase.pptx docs/demo/DEMO-SCRIPT.md tests/test_deck.py
+git commit -m "docs(demo): showcase deck built from the rehearsal's measured outputs" -- tools/build_deck.py tools/e2e_demo.py pyproject.toml docs/demo/dps-showcase.pptx docs/demo/DEMO-SCRIPT.md tests/test_deck.py
+```
+
+---
+
 ### Task 27: HANDOFF complete, README, API reference, changelog
 
 **Files:**
@@ -6338,7 +6673,8 @@ All gates run with `DPS_TEST_REQUIRE_SERVICES=1` (a missing service fails, never
 8. **Browser check against the mockups:** open each screenshot beside its mockup (`01-dashboard`, `05-policies`, `09-reports`, `10-evidence-pack` incl. `#synthetic`, `11-admin`; and, for regression, `02`, `03`, `04`, `06`, `07`, `08`, `12`) in light and dark at 1440 px and 390 px: same sections, order, labels and states; the only accepted differences are the deviations listed in the self-review. Also print-preview the evidence page and open the downloaded PDF.
 9. **Security:** `pytest -q tests/security tests/test_no_values_in_logs_m5.py` green; `docs/security/2026-10-11-m5-security-review.md` complete with every row's status; `git ls-files | xargs grep -nE "AKIA[0-9A-Z]{16}|BEGIN (RSA |EC )?PRIVATE KEY"` → nothing.
 10. **OpenShift:** `kustomize build deploy/openshift/overlays/{dev,prod}` succeeds; `tests/deploy` green; optional `kubeconform` 0 errors.
-11. **Docs:** `python tools/settings_table.py --check` → 0; HANDOFF, README, `api-m5.md`, DEMO-SCRIPT, CHANGELOG, security review committed; contract amended in the same commits as the code (Tasks 1, 5, 6, 8–17, 25).
+11. **Docs:** `python tools/settings_table.py --check` → 0; HANDOFF, README, `api-m5.md`, DEMO-SCRIPT, CHANGELOG, security review committed; contract amended in the same commits as the code (Tasks 1, 5, 6, 6B, 7B, 8–17, 25); the deck `docs/demo/dps-showcase.pptx` rebuilt from the final rehearsal (`python tools/build_deck.py`) and its Keynote PDF export reviewed (Task 26B).
+13. **Spec closures (critique 2026-10-11):** a copula synthesize pack shows `privacy.membership_inference.run == true` and a `utility` block when the policy names a label (Task 6B); `pytest -q tests/test_mostly_linked.py` green (DP + linked generation, Task 7B); `pytest -q tests/test_llm_label_l2_l3.py tests/test_llm_egress.py` green (Tasks 8B, 16B); `/metrics` exposes `dps_llm_raw_pii_sent_by_tenant_total` series only when non-zero and the Overview tile reads the tenant's roll-up; `assert_production_posture` refuses `DPS_VERIFY_WARN_ALLOWED=true` (Task 16); retention: exactly one `retention` job per interval across two workers, owned by `_system` (Task 13).
 12. **Release:** version `1.0.0` in `pyproject.toml`, `dps/__init__.py`, `frontend/package.json`; annotated tag `v1.0.0`; HANDOFF "Last verified" filled.
 
 ## Plan self-review (spec coverage, done while writing)
@@ -6347,18 +6683,20 @@ All gates run with `DPS_TEST_REQUIRE_SERVICES=1` (a missing service fails, never
 |---|---|---|
 | §5.6 tabular shape — marginals (quantiles, rare categories folded, null rates), Gaussian copula on rank-transformed data | Tasks 2–3, 6 | tails clamped at 0.1 %/99.9 % so no outlier's exact value is stored or emitted |
 | §5.6 constraints — ranges, positivity, uniqueness, dependent-field rules | Task 4, 5 | uniqueness by keyed Feistel permutation of a single integer key (refused with a clear error otherwise); **parent/child cardinality** is preserved by L2's 1:1 row mapping with consistent key methods, not modelled generatively |
-| §5.6 optional MOSTLY AI engine (`synth-ml`) | Task 7 | pool engine (single table); multi-table, sequential and the DP option are not wired (open question 12) |
-| §5.7 fidelity (KS, TVD, correlation delta, null-rate delta), privacy (exact-row = 0 enforced, NNDR, QI uniqueness) | Tasks 2, 5, 6, 14, 21 | measured on a deterministic preview of the rows the job writes, gated before writing; exact rows also rejected in flight. **Not built:** train-on-synthetic utility and the membership-inference proxy (reported "not run") |
+| §5.6 optional MOSTLY AI engine (`synth-ml`) | Tasks 7, 7B | single-table pool (Task 7); differential-privacy option and linked multi-table / sequential generation to `files` targets with new keys and intact foreign keys (Task 7B) |
+| §5.7 fidelity (KS, TVD, correlation delta, null-rate delta), privacy (exact-row = 0 enforced, NNDR, QI uniqueness) | Tasks 2, 5, 6, 6B, 14, 21 | measured on a deterministic preview of the rows the job writes, gated before writing; exact rows also rejected in flight; utility (train-on-synthetic / test-on-real for the policy's `utility_label`) and the distance-based membership-inference proxy (AUC, fit rows vs holdout) are measured for every tabular engine (Task 6B) |
 | §5.5 `external_tokenize` adapter | Task 8 | batched, validated, retried; vaultless mock; fails closed when unconfigured |
-| §4/§7 job state, retention (D11) | Tasks 10, 13 | retention per tenant, re-stamped on change; audit never touched |
+| §4/§7 job state, retention (D11) | Tasks 10, 13 | retention per tenant, re-stamped on change; audit never touched; one retention module and scheduler (M2's, extended), one system tenant `_system` |
 | §9 console — Overview, Policies, Reports & audit, evidence PDF, Admin | Tasks 18–23 | deviations from mockups: no 30-day health strips (no readiness history), no "Schedule a weekly export", API roll-up rows show calls/values/findings (not key and policy counts), FF1 toggle in the plan preview is simulated client-side |
-| §9 ten-minute demo | Task 26 | automated (`e2e_demo.py`) and scripted (`DEMO-SCRIPT.md`); the **deck** named in §11's M5 row is not part of this plan (open question 14) |
+| §9 ten-minute demo | Tasks 26, 26B | automated (`e2e_demo.py`), scripted (`DEMO-SCRIPT.md`) and the **deck** of §11's M5 row (`docs/demo/dps-showcase.pptx`, built from the rehearsal's measured outputs, Keynote-safe) |
+| §5.3/§8 T3 LLM metadata labelling | M1 Task 19D (engine, L1), Task 8B (L2 discovery, L3 classify) | opt-in tier `llm_label`; value-free metadata only; confidence capped at 0.85 |
+| P1/§10 per-tenant LLM exposure counter and alert; strict verification at boot | Tasks 16, 16B, 25 | egress verifier at the gateway, `dps_llm_*_by_tenant_total` counters, audit/roll-up counts per tenant, PrometheusRule alerts; `verify_warn_allowed=false`, `llm_egress_check=strict` and strict presets refused at boot otherwise |
 | §10 security/compliance posture | Tasks 9, 11, 16, 17 | secrets from files, TLS-only egress, CORS, docs off, KEK rotation, audit strict, no-escalation keys, scrubbed errors, ReDoS and SSRF guards |
 | §11 M5 row — LLM text synthesis with verifier | M0 Task 21 (unchanged) | L2 text columns keep the M2 span pipeline; no new LLM path in M5 |
 | D2 key custody | Tasks 6, 9 | tabular model sealed with the job key and purged with it; API keys hashed; raw keys shown once |
 | D7, D9, D12 | Tasks 3/7, 25, 9 | — |
 
-**Interfaces used consistently:** `GaussianCopula.fit/sample_rows/row_digest/is_rejected/to_bytes/from_bytes`; `TabularSampler` (Task 5); `ConstraintSet.apply`; `prepare_tabular`, `load_sampler`, `build_constraints`, `tabular_columns`; `HttpTokenizer`, `ExternalTokenizer`, `TokenizationUnavailable`; `DbKeyStore`, `ChainKeyStore`, `create_key/rotate_key/disable_key/enable_key/list_keys`, `check_grant`; `tenant_directory`, `effective_tenant`, `check_daily_quota`; `layer_case`, `query_audit`, `csv_cell`; `refresh_rollups`, `ensure_fresh`, `summary`, `jobs_report`, `evidence_list`; `run_retention`, `RetentionScheduler`, `enqueue_retention`; `render_evidence_pdf`, `pdf_text`; `resolve_ref`, `resolved_policy`, `policy_label`, `diff_policies`; `posture_report`, `require_tls_connection`, `check_scan_url`, `chromium_resolver_rules`, `check_pattern`.
+**Interfaces used consistently:** `GaussianCopula.fit/sample_rows/row_digest/is_rejected/to_bytes/from_bytes`; `TabularSampler` (Task 5); `ConstraintSet.apply`; `prepare_tabular`, `load_sampler`, `build_constraints`, `tabular_columns`; `HttpTokenizer`, `ExternalTokenizer`, `TokenizationUnavailable`; `DbKeyStore`, `ChainKeyStore`, `create_key/rotate_key/disable_key/enable_key/list_keys`, `check_grant`; `tenant_directory`, `effective_tenant`, `check_daily_quota`; `layer_case`, `query_audit`, `csv_cell`; `refresh_rollups`, `ensure_fresh`, `summary`, `jobs_report`, `evidence_list`; `run_retention`, `RetentionCounts`, `enqueue_retention` (M2's `retention_job`/`ensure_retention_job` extended, no scheduler of M5's own); `membership_inference_proxy`, `utility_tstr`; `LinkedPool`, `LinkedSpec`, `DpConfig`; `residual_values`, `LlmEgressBlocked`, `record_llm`, `CURRENT_TENANT`; `render_evidence_pdf`, `pdf_text`; `resolve_ref`, `resolved_policy`, `policy_label`, `diff_policies`; `posture_report`, `require_tls_connection`, `check_scan_url`, `chromium_resolver_rules`, `check_pattern`.
 
 **Soft spots to watch during execution:** (1) Task 0 is the gate for every M2–M4 name this plan touches — fix the earlier milestone, not this plan, when it fails; (2) M2's internal names inside `prepare`/`run_partition` are bound in Task 6 by role, not by name — read the M2 module first; (3) `re._parser`/`re._constants` are private stdlib modules (stable since 3.11) — pin Python 3.12 as the project does; (4) `test_marginals_correlations_and_nulls_are_preserved` and `test_nndr_detects_copies_and_accepts_fresh_draws` use fixed seeds; if a NumPy major upgrade shifts them, check the maths before touching the bounds; (5) the MOSTLY SDK's `local_dir` parameter name — verify with `help(MostlyAI)` in the `ml` run (only `_sdk_trainer` changes).
 
@@ -6367,19 +6705,19 @@ All gates run with `DPS_TEST_REQUIRE_SERVICES=1` (a missing service fails, never
 These follow the contract as written; each is a point the contract owner should decide.
 
 1. **Mockup 05 ownership.** §15 gives the Policies page to M1; the M5 brief asks for it, including versions. Task 23 completes whatever M1 shipped and adds drafts and versions (which need M5's 043 tables). Confirm, or move versions to M1 with a migration number in M1's range.
-2. **Tenant enumeration under RLS.** `dps_tenant` is a tenant table (§2.2), so no app query can list tenants. M5 adds a `SECURITY DEFINER` `dps_tenant_directory()` returning ids only, with narrow owner SELECT policies (040). Alternative: make `dps_tenant` global like `dps_api_key`.
+2. **Tenant enumeration.** Resolved (contract §2.4, 2026-10-11): `dps_tenant` is GLOBAL (no RLS, configuration only), as M2 built it. 040 creates no policy on it; `dps_tenant_directory()` stays the only cross-tenant read of the RLS tables `dps_job`/`dps_connection` (owner SELECT policies, ids only), and `ALLOWED_EXTRA_POLICIES` lists those policies.
 3. **`registered_hosts`: hosts or origins?** §9 says hosts; mockup 11 shows `https://` origins. M5 stores bare hostnames and enforces the scheme (https when `DPS_EGRESS_TLS_REQUIRED`) in `netguard`.
 4. **`RunOptions.tabular` default.** §5.3 defaults to `"none"`; spec §5.6 implies synthesize jobs model non-PII columns with the copula. M5 keeps `"none"` for API compatibility and defaults the console wizard and demo to `"copula"`. Flip the API default at v1.0.0?
 5. **Reports scope.** §9 puts `/reports/*` under `detect`, which lets a detect-only key read tenant-wide job and sweep aggregates. M5 uses `jobs` for `/reports/evidence` (packs) and keeps `detect` for the aggregates as written. Consider `jobs` (or `admin`) for all.
-6. **Audit of failed authentication.** `dps_audit_log` is tenant-scoped; a 401 has no tenant, so M5 counts it in metrics only. Option: write such rows under the system tenant `_dps`.
+6. **Audit of failed authentication.** Resolved (contract §8.3): M2 writes 401 rows under the pseudo-tenant `-`; operator-CLI and retention rows use `_system`. Neither can be selected through the API (§8.1); M5's roll-ups skip both.
 7. **Roll-up sources.** §9 says "from audit rollups"; job, partition (sweep) and scan layers come from job tables because the audit log has no per-partition data.
 8. **Exact-row guarantee scope.** Enforcement compares each synthetic row with the fit sample, the holdout and the source rows of its batch, in memory; a whole-table guarantee would need a post-write hash join on the target. The pack states the basis.
 9. **Quota day boundary.** M5 resets daily row quotas at 00:00 UTC; mockup 11 says IST. Add `DPS_QUOTA_TIMEZONE`?
 10. **Key prefix display.** Showing `dps_` + 4 characters reveals 24 of ~256 bits; acceptable, but record it.
 11. **`GET /evidence/{id}/pdf` placement.** The route path is in M2's evidence group; M5 implements it in its reports router (M5-owned code). Fine unless the contract wants routers strictly by path prefix.
-12. **MOSTLY engine shape.** The pool approach repeats rows when the source is larger than the pool; per-row generation needs a persisted model (hundreds of MB) shared across workers. Limit `mostly` to `files` targets, or accept repetition?
-13. **Spec §5.7 items not in v1:** train-on-synthetic utility and the membership-inference proxy.
-14. **Spec §11 M5 "deck":** not in this plan's brief; a separate deliverable.
+12. **MOSTLY engine shape.** The single-table pool repeats rows when the source is larger than the pool (recorded as `tabular.pool_rows`); linked multi-table/sequential data is generated (Task 7B), not mapped 1:1, and is limited to `files` targets. Owner to confirm the pool repetition is acceptable for `table` targets.
+13. **Spec §5.7 utility and membership-inference proxy:** delivered by Task 6B (k-NN TSTR; distance-to-closest-record AUC). Owner to confirm the AUC target (`DPS_MIA_AUC_TARGET`, default 0.60) and whether it should gate (today only with `privacy_nndr_enforce`).
+14. **Spec §11 M5 "deck":** delivered by Task 26B (`docs/demo/dps-showcase.pptx`).
 15. **No `rollup` job kind.** Roll-ups ride on the `retention` job plus on-demand refresh, avoiding a §2.4 CHECK change; confirm.
 16. **Evidence `expires_at`.** The append-only trigger on `dps_evidence` blocks re-stamping it when a tenant's retention changes; retention keys off `dps_job.expires_at`, so behaviour is correct but the column can be stale.
 17. **Preset hashes.** Adding `SynthesizeConfig.constraints` and `.quasi_identifiers` changes every preset's `config_hash()` once; nothing in the contract pins a literal hash.
@@ -6388,5 +6726,5 @@ These follow the contract as written; each is a point the contract owner should 
 
 Plan complete and saved to `docs/superpowers/plans/2026-10-11-m5-hardening-and-showcase.md`. Two execution options:
 
-1. **Subagent-driven (recommended)** — a fresh subagent per task, review between tasks (`superpowers:subagent-driven-development`). Tasks 2–7 (engine), 8, 9–17 (server), 18–23 (console) and 24–26 (stack, deploy, demo) are the natural review checkpoints; console tasks can run in parallel with server tasks once Task 18 lands, because they depend only on the route shapes fixed here.
+1. **Subagent-driven (recommended)** — a fresh subagent per task, review between tasks (`superpowers:subagent-driven-development`). Tasks 2–7B (engine), 8–8B, 9–17 (server, incl. 16B), 18–23 (console) and 24–26B (stack, deploy, demo, deck) are the natural review checkpoints; console tasks can run in parallel with server tasks once Task 18 lands, because they depend only on the route shapes fixed here.
 2. **Inline execution** — tasks executed in one session with checkpoints (`superpowers:executing-plans`).

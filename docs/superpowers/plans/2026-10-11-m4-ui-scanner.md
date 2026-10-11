@@ -10,7 +10,7 @@
 
 **Spec:** `docs/specs/2026-10-11-data-privacy-services-design.md` §8 (Layer 3), §9 (UI scanner page), §10 (safety rows), §11 (M4 row), decision D4. **Contract (binding):** `docs/superpowers/plans/2026-10-11-m1-m5-contract.md` (§1, §2.2/§2.4 migrations 030–031, §3 jobs, §5.1 secret refs, §6 bridge, §7 evidence, §9 routes, §10 settings, §11 compose, §12 tests, §13 artefacts, §14 console). **Builds on:** M0 (engine, auth, observability, app factory, console shell) and M2 (DB, queue, workers, secrets, artefacts, evidence). M1 and M3 are not prerequisites.
 
-**Contract changes made by this plan (each lands in the same commit as its code, as contract §0 requires):** §2.4 — migration 030 adds columns to `dps_scan_page`/`dps_scan_field`, a foreign key on `dps_scan_request.job_id`, the value-free `dps_scan_event` table (navigation log) and CHECK constraints (Task 3); §3.3 — `JobSecret.scan_start_url` (Task 4); §9 — `ScanSpec` additions (`policy`, `scope.iframes|shadow_dom|spa_clicks`, `fill.display_persona`) and two routes, `GET /scans/{id}/events` and `POST /scans/personas/preview` (Tasks 4 and 18); §10 — nine additional `scan_*` settings (Task 1). Nothing in the contract is contradicted; concerns are listed in "Open contract questions" at the end.
+**Contract changes made by this plan (each lands in the same commit as its code, as contract §0 requires):** §2.4 — migration 030 adds columns to `dps_scan_page`/`dps_scan_field`, a foreign key on `dps_scan_request.job_id`, the value-free `dps_scan_event` table (navigation log) and CHECK constraints (Task 3); §3.3 — `JobSecret.scan_start_url` (Task 4); §9 — `ScanSpec` additions (`policy`, `scope.iframes|shadow_dom|spa_clicks`, `fill.display_persona`) and two routes, `GET /scans/{id}/events` and `POST /scans/personas/preview` (Tasks 4 and 18); §10 — nine additional `scan_*` settings (Task 1). Nothing in the contract is contradicted; concerns are listed in "Open contract questions" at the end. **M2 names (revision 2026-10-11):** the contract now fixes the M2 interfaces this plan uses (contract §3.2, §3.5, §7.1, §13, §14, §16): `Consumer(..., ctx: HandlerContext, role=..., worker_id=None)` with `ctx` required and the role **passed**, `build_context(settings)`, `create_job(job_id=...)`, `render_html(pack, *, sha)` / `pack_sha256(pack)`, `ArtefactService(store, *, acquire)`, and the console's single `usePoll(load, intervalMs, active, deps)` hook plus `Page<T>`, `JobState`, `request`/`json`/`post`/`qs` from M2 Task 29.
 
 ---
 
@@ -43,10 +43,10 @@
 | M2 `dps/db.py` | `acquire`, `acquire_queue`, `db_configured`, `init_worker_pool`, `close_pools`, `TENANT_TABLES`, `assert_rls_posture` | metadata DB |
 | M2 `dps/jobs.py` | `JobKind`, `JobPhase`, `JobState`, `Job`, `ClaimedJob`, `create_job`, `get_job`, `list_jobs`, `advance_job`, `cancel` | scan jobs are kind `scan`, phase `scan` (+ `finalize` on cancel) |
 | M2 `dps/jobs_models.py` | `ConsistencySpec`, `Purpose`, `JobSecret`, `JobProgress` | spec pieces and sealed secrets (contract §3.3, §5.3) |
-| M2 `dps/worker.py` | `Consumer`, `HandlerContext` | the browser-worker's claim/heartbeat/reaper loops |
+| M2 `dps/worker.py` | `Consumer` (`ctx` required, `role="browser-worker"`), `HandlerContext`, `build_context` | the browser-worker's claim/heartbeat/reaper loops (contract §3.5) |
 | M2 `dps/secrets.py`, `dps/ids.py` | `load_kek`, `seal`, `open_sealed`, `resolve_secret_ref`, `new_id` | key custody, storage-state refs, ids |
-| M2 `dps/storage.py` | `ArtefactService` (`save`, `open`, `delete_for_job`) | screenshots, captures, exports, evidence HTML |
-| M2 `dps/layers/connectors/evidence.py` | `EvidencePack`, `render_evidence_html` | scan evidence (contract §7) |
+| M2 `dps/storage.py` | `ArtefactService(store, *, acquire)` (`save`, `open`, `delete_for_job`) | screenshots, captures, exports, evidence HTML |
+| M2 `dps/layers/connectors/evidence.py` | `EvidencePack`, `render_html(pack, *, sha)`, `pack_sha256(pack)` | scan evidence (contract §7) |
 | M2 `dps/layers/api/errors.py` | `DpsHttpError` | `{"detail", "code"}` errors |
 
 ## M0/M2 touch points (changed together with their tests, contract §0.7)
@@ -84,13 +84,13 @@
 | `dps/layers/scanner/crawler.py` | `ScanRunner` (BFS, budgets, SPA clicks, per-page pipeline), `ScanSink`, `MemoryScanSink` |
 | `dps/layers/scanner/inventory.py` | risk flags, inventory rows, export JSON/CSV, scan evidence pack |
 | `dps/layers/scanner/store.py` | `ScanStore`: SQL for the scan tables |
-| `dps/browser_worker.py` | process entry: Chromium, ops server on 9401, `Consumer(kinds=(scan,))` |
+| `dps/browser_worker.py` | process entry: Chromium, ops server on 9401, `Consumer(kinds=(scan,), ctx=build_context(settings), role="browser-worker")` |
 | `dps/layers/api/routers/scans.py` | `/api/v1/scans…` routes |
-| `dps/engine/service.py`, `dps/engine/synth/surrogates.py`, `dps/layers/connectors/evidence.py`, `dps/app.py`, `dps/db.py` (modify) | touch points above |
+| `dps/engine/service.py`, `dps/engine/synth/surrogates.py`, `dps/layers/connectors/evidence.py` (`render_html` gains the scan section), `dps/app.py`, `dps/db.py` (modify) | touch points above |
 | `demo/onboarding/{server.mjs,site.mjs,data.json}`, `demo/onboarding/static/{app.css,forms.js,spa.js,postal-lookup.js}` | demo onboarding web app (contract §1 path) |
 | `docker/secrets/dps/ui/demo-onboarding/storage_state.json` | local-only demo session for the demo site |
 | `Dockerfile.browser`, `docker-compose.yml`, `.dockerignore` | browser-worker image; `browser-worker` and `demo-site` services |
-| `frontend/src/lib/{types.ts,api.ts}`, `frontend/src/hooks/usePoll.ts` | scan types, `api.scans.*`, polling |
+| `frontend/src/lib/{types.ts,api.ts}` | scan types, `api.scans.*` (polling reuses M2's `frontend/src/hooks/usePoll.ts`, unchanged) |
 | `frontend/src/components/scanner/*.tsx` | `ArtefactImage`, `NoSubmitBanner`, `CrawlMap`, `NavLog`, `CrawlProgress`, `ParallelView`, `FieldInventory`, `RiskFlags`, `PersonaPreview` |
 | `frontend/src/pages/{ScanNew,ScanDetail}.tsx`, `frontend/src/App.tsx`, `frontend/src/styles.css` | the two scanner pages, routes, styles from mockups 12 and 04 |
 | `tools/smoke_test.py` (modify) | scanner checks behind `DPS_SMOKE_SCANNER=1` |
@@ -4685,13 +4685,13 @@ async def finalize_scan(ctx: HandlerContext, job: ClaimedJob, runtime: ScanRunti
     pack = build_scan_evidence(evidence_id=evidence_id, job=job, runtime=runtime, pages=pages, fields=fields,
                                counts=counts, outcome=outcome, result=result, errors=errors,
                                settings=ctx.settings, exports=exports)
-    canon = json.dumps(pack.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sha = pack_sha256(pack)            # M2 evidence module (contract §7.1): sha256 of the canonical JSON
     html_id = await ctx.artefacts.save(tenant_id=job.tenant_id, job_id=job.id, kind="evidence_html",
-                                       data=render_evidence_html(pack).encode("utf-8"),
+                                       data=render_html(pack, sha=sha).encode("utf-8"),
                                        content_type="text/html; charset=utf-8", meta={"evidence_id": evidence_id})
     expires = datetime.now(UTC) + timedelta(days=ctx.settings.retention_days)
     async with acquire_queue(job.tenant_id) as conn:
-        await store.insert_evidence(conn, job.tenant_id, job.id, pack, pack_sha256=hashlib.sha256(canon).hexdigest(),
+        await store.insert_evidence(conn, job.tenant_id, job.id, pack, pack_sha256=sha,
                                     html_artefact_id=html_id, expires_at=expires)
     progress = JobProgress(outcome=result, pages=counts["pages_visited"], fields=counts["fields"],
                            blocked_requests=sum((counts["blocked"] or {}).values()), evidence_id=evidence_id)
@@ -4725,7 +4725,7 @@ Rules: `persona_set` excludes `credential` and `otp`; text fields re-render each
 
 **Evidence pack (`EvidencePack`, contract §7.1) for a scan:** `job_kind="scan"`, `outcome=result`, `purpose` from the job, `source={"kind": "ui", "url": <redacted start>, "origin": <url_origin>, "scope": {same_origin, max_pages, max_depth, allow, deny, iframes, shadow_dom, spa_clicks}, "auth": "storage_state_ref" | "inline" | "none"}`, `target={"kind": "artefacts", "store": settings.artefact_store, "exports": exports}`, `policy={"name", "hash"}`, `snapshot={}`, `consistency={"scope", "field_scoped", "kid": job.kid, "seed_fingerprint": sha256(seed)[:16], "key_custody": {"returned": True, "wrapped": spec.consistency.key_wrapped, "purged_at": now}}`, `columns=[]`, `reveal_map=[{"path": f"field:{page_no}/{form_index}/{field_no}", "entity_type", "method": obfuscate_method, "params": {}, "anchor_path": None, "reveal": METHODS[method].reversible}]` for every field with a token, `counts={"pages", "forms", "fields", "personal_fields"}`, `verification={"mode": policy.verify.leakage_check, "batches": pages filled, "values_checked": tokens verified, "hits": 0, "passed": result != "failed"}`, `fidelity=None`, `privacy=None`, **`scan`** `= {"pages", "forms", "fields", "by_entity": {type: n}, "risk_flags": [numbered flags], "personas", "display_persona", "submissions": 0, "non_get_allowed": counts["non_get_allowed"], "blocked_requests": {method: n}, "navigations", "validation": {mode: {checked, accepted, rejected}}, "captures": {"captured", "withheld"}, "spa_routes", "truncated", "submit_attempts_neutralised", "websockets_closed", "dialogs_dismissed", "popups_closed", "events_dropped"}`, `timings={"started_at", "finished_at", "duration_s"}`, `partitions=[]`, `errors`, `config_hash = sha256(policy hash + canonical JSON of job.spec)`, and the contract §7.2 label (`"synthetic — measured, not claimed anonymous"` for `mode=synthesize`, `"pseudonymised — still personal data"` for `obfuscate`). `submissions` is 0 by construction (D4: no code path submits) and `non_get_allowed` is the measured counterpart; both are printed on the evidence HTML.
 
-M2 touch point — `render_evidence_html`: when `pack.scan` is present, add a "UI scan" section (pages, forms, fields, by-entity table, numbered risk flags, "Submissions: 0 · Non-GET requests allowed: N · Blocked: POST n …", validation summary) with the same escaping helper the rest of the template uses. Its test lives with the scanner tests: `tests/scanner/test_evidence_html_scan.py::test_scan_block_rendered` — a pack with `scan={"submissions": 0, "non_get_allowed": 0, "blocked_requests": {"POST": 3}, …}` renders "Submissions: 0" and "POST 3", and a pack without `scan` renders exactly as before (M2's own evidence tests stay green unchanged).
+M2 touch point — `render_html` (`from dps.layers.connectors.evidence import pack_sha256, render_html`): when `pack.scan` is present, add a "UI scan" section (pages, forms, fields, by-entity table, numbered risk flags, "Submissions: 0 · Non-GET requests allowed: N · Blocked: POST n …", validation summary) with the same escaping helper the rest of the template uses. Its test lives with the scanner tests: `tests/scanner/test_evidence_html_scan.py::test_scan_block_rendered` — a pack with `scan={"submissions": 0, "non_get_allowed": 0, "blocked_requests": {"POST": 3}, …}` renders "Submissions: 0" and "POST 3", and a pack without `scan` renders exactly as before (M2's own evidence tests stay green unchanged).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4735,7 +4735,7 @@ M2 touch point — `render_evidence_html`: when `pack.scan` is present, add a "U
   - `test_csv_guard` — `write_csv(["a"], [["=HYPERLINK(\"x\")"], ["+91 98451 20377"], ["-SUM(1)"], ["@x"]])` decodes to rows `'=HYPERLINK("x")`, `+91 98451 20377`, `'-SUM(1)`, `'@x`.
   - `test_evidence_pack_shape_and_labels` — `build_scan_evidence(result="succeeded", mode synthesize)`: `pack.job_kind == "scan"`, `pack.scan["submissions"] == 0`, `pack.scan["non_get_allowed"] == 0`, `pack.label == "synthetic — measured, not claimed anonymous"`, `reveal_map` has an entry `{"path": "field:3/1/3", "method": "fpe_digits", "reveal": True}`; the canonical pack JSON contains none of the persona values (`normalise` search).
 
-`tests/scanner/test_scan_job_e2e.py` (`pytestmark = [pytest.mark.db, pytest.mark.browser, pytest.mark.slow]`; M2 fixtures `migrated_db`, `queue`, `kek`, `object_store`; a local `handler_ctx` fixture builds `HandlerContext(settings=db_settings ⊕ scanner settings with DPS_ENV=local, engine=scan_engine, worker_id="test-bw:1", kek=kek, artefacts=ArtefactService(object_store), audit=MemoryAuditSink())` — construct `ArtefactService` exactly as `dps/worker.py` does in M2):
+`tests/scanner/test_scan_job_e2e.py` (`pytestmark = [pytest.mark.db, pytest.mark.browser, pytest.mark.slow]`; M2 fixtures `migrated_db`, `queue`, `kek`, `object_store`; a local `handler_ctx` fixture builds `HandlerContext(settings=db_settings ⊕ scanner settings with DPS_ENV=local, engine=scan_engine, worker_id="test-bw:1", kek=kek, artefacts=ArtefactService(object_store, acquire=db.acquire_queue), audit=MemoryAuditSink())` — the constructor of contract §13, as `dps/worker.py::build_context` uses it):
   - `test_scan_job_end_to_end` — create the job the way the API will (Task 18's `create_scan_job` helper is not yet written, so the test seals `JobSecret(key_material=…, synthesis_seed=…, scan_start_url=f"{demo}/apply", scan_auth=demo_cookie_state("127.0.0.1"))` itself with `aad=f"dps_job.key:{job_id}"`, `job_id = new_id("s")`, and calls `jobs.create_job(job_id=job_id, tenant_id="t-scan", kind=JobKind.scan, phase=JobPhase.scan, spec=redact_scan_spec(...), mode="obfuscate", sealed_secret=…, kid=…)`), claim it with `jobs.claim_jobs("test-bw:1", kinds=(JobKind.scan,), batch=1)`, `await scan_job(ctx, claimed)`, then assert: job `succeeded`, `progress.pages >= 15`, `progress.evidence_id` set, `key_enc IS NULL` (SQL), `dps_scan_page` has ≥ 15 `done` rows and the `/apply/identity` row has four screenshot artefacts whose `GET` through `ArtefactService.open` returns `image/png` bytes starting with `\x89PNG`; `dps_scan_request` has blocked POST rows and **zero allowed non-GET rows**; the evidence row's `pack->'scan'->>'submissions' = '0'` and `non_get_allowed = 0`; the export JSON has 3 personas and the display persona's Aadhaar value equals that field's `fill_synthesize`; `MemoryAuditSink` holds one `scan.navigate` event per `navigate` event row; and a normalised search of every `dps_scan_*` row, the evidence pack, the export JSON/CSV and every `capture` JSON artefact finds none of the demo values.
   - `test_cancel_running_scan_finalizes_canceled` — start `scan_job` as a task; poll `dps_scan_page` until one `done` row exists; `await jobs.cancel("t-scan", job_id)`; await the task (it returns after `LeaseLost`); claim again (the job is now `phase=finalize, state=queued`), run `scan_finalize_job`; assert state `canceled`, an evidence pack with `outcome == "canceled"`, `key_enc IS NULL`, and the export artefacts exist.
   - `test_missing_storage_state_secret_fails_the_job` — `storage_state_ref="dps/ui/does-not-exist"` with `DPS_SECRET_DIR` pointing at an empty tmp dir → job `failed`, `error_code == "secret_unavailable"`, `key_enc IS NULL`.
@@ -4765,7 +4765,8 @@ git commit -m "feat(scanner): scan and finalize handlers, persona/field exports,
 
 ```python
 async def serve_ops(port: int) -> asyncio.Server        # GET /health, /readyz, /metrics; nothing else
-def build_consumer(settings: Settings) -> Consumer      # kinds=(scan,), handlers {scan, finalize}, no partitions
+def build_consumer(settings: Settings, ctx: HandlerContext | None = None) -> Consumer
+    # kinds=(scan,), handlers {scan, finalize}, no partitions, ctx (M2 build_context when None), role="browser-worker"
 async def amain(settings: Settings | None = None) -> None
 def main() -> None
 ```
@@ -4784,6 +4785,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 
 from dps import __version__
 from dps.config import Settings, get_settings
@@ -4794,7 +4796,7 @@ from dps.layers.scanner.browser import close_browser, get_browser
 from dps.observability import READINESS, configure_logging, get_logger, metrics_payload
 from dps.posture import assert_production_posture
 from dps.secrets import load_kek
-from dps.worker import Consumer
+from dps.worker import Consumer, HandlerContext, build_context
 
 logger = get_logger(__name__)
 
@@ -4830,10 +4832,13 @@ async def serve_ops(port: int) -> asyncio.Server:
     return await asyncio.start_server(_respond, host="0.0.0.0", port=port)
 
 
-def build_consumer(settings: Settings) -> Consumer:
+def build_consumer(settings: Settings, ctx: HandlerContext | None = None) -> Consumer:
+    """M2's Consumer for scan jobs (contract §3.5): ``ctx`` is required by M2, and the role is passed
+    explicitly so ``dps_worker`` records ``browser-worker`` (the ``browser`` readiness counts those rows)."""
     return Consumer(settings, kinds=(JobKind.scan,),
                     handlers={JobPhase.scan: scan_job, JobPhase.finalize: scan_finalize_job},
-                    partition_handler=None, concurrency=settings.browser_concurrency)
+                    partition_handler=None, concurrency=settings.browser_concurrency,
+                    ctx=ctx if ctx is not None else build_context(settings), role="browser-worker")
 
 
 async def amain(settings: Settings | None = None) -> None:
@@ -4846,15 +4851,22 @@ async def amain(settings: Settings | None = None) -> None:
         raise SystemExit("browser-worker needs DPS_JOB_KEK to open scan secrets")
     READINESS.set("api-core", True, "browser-worker", version=__version__)
     server = await serve_ops(settings.browser_metrics_port)
-    await init_worker_pool(settings)
+    await init_worker_pool(settings)          # build_context's ArtefactService and DbAuditSink use acquire_queue
+    ctx = build_context(settings)
+    ctx.audit.start()                         # type: ignore[attr-defined]  - DbAuditSink, as in M2's worker main
+    consumer = build_consumer(settings, ctx)
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, consumer.stop)   # Consumer.run() installs no handlers itself (contract §3.5)
     try:
         browser = await get_browser(settings)
         READINESS.set("browser", True, "chromium", version=browser.version)
         logger.info("startup", component="browser-worker", version=__version__)
-        await build_consumer(settings).run()
+        await consumer.run()
     finally:
         READINESS.set("browser", False, "stopped")
         await close_browser()
+        await ctx.audit.stop()                # type: ignore[attr-defined]
         await close_pools()
         server.close()
 
@@ -4867,13 +4879,13 @@ if __name__ == "__main__":
     main()
 ```
 
-The `Consumer` registers this process in `dps_worker` with role `browser-worker` (contract §2.4 CHECK); M2's `Consumer` derives the role from `kinds == (JobKind.scan,)` — if M2's signature instead takes `role=`, pass `role="browser-worker"` in `build_consumer` and keep the test below as the guard.
+The `Consumer` registers this process in `dps_worker` with role `browser-worker` (contract §2.4 CHECK) because `build_consumer` passes `role="browser-worker"`: M2's `Consumer` takes the role as an argument (default `"worker"`) and never derives it from `kinds` (contract §3.5). It also requires `ctx` — omitting it is a `TypeError` at start. Task 18's `browser` readiness counts `dps_worker` rows with this role, so the DB test below is the guard for M4 DoD 3 (`browser: ok (1 online)`).
 
 - [ ] **Step 1: Write the failing tests** — `tests/scanner/test_browser_worker.py`:
   - `test_ops_server_serves_health_readyz_metrics_only` — start `serve_ops(0)` (port from `server.sockets[0].getsockname()[1]`); `GET /health` → 200 `{"status":"ok"}`; `GET /metrics` body contains `dps_scan_requests_total`; `GET /readyz` → 200 or 503 with JSON `components`; `POST /health` → 404; `GET /anything` → 404.
-  - `test_consumer_claims_scan_jobs_only` — `build_consumer(settings)` with `monkeypatch.setattr("dps.browser_worker.Consumer", FakeConsumer)` capturing kwargs: `kinds == (JobKind.scan,)`, `set(handlers) == {JobPhase.scan, JobPhase.finalize}`, `partition_handler is None`, `concurrency == settings.browser_concurrency`.
+  - `test_consumer_claims_scan_jobs_only` — `build_consumer(settings, ctx=sentinel)` with `monkeypatch.setattr("dps.browser_worker.Consumer", FakeConsumer)` capturing kwargs: `kinds == (JobKind.scan,)`, `set(handlers) == {JobPhase.scan, JobPhase.finalize}`, `partition_handler is None`, `concurrency == settings.browser_concurrency`, `ctx is sentinel`, `role == "browser-worker"`; then with `monkeypatch.setattr("dps.browser_worker.build_context", lambda s: sentinel2)`, `build_consumer(settings)` passes `ctx is sentinel2` (the context is built when none is given).
   - `test_refuses_to_start_without_db_or_kek` — `amain(Settings(_env_file=None, pg_host=""))` raises `SystemExit` naming `DPS_PG_HOST`; with `pg_host="x"` and no KEK raises `SystemExit` naming `DPS_JOB_KEK` (`init_worker_pool` is never reached: patch it to fail the test if called).
-  - `test_worker_row_has_browser_role` (`db`) — run `build_consumer(db_settings).run()` as a task for 2 s, cancel it, and assert a `dps_worker` row with `role = 'browser-worker'` exists.
+  - `test_worker_row_has_browser_role` (`db`; M2 fixture `handler_ctx`) — `consumer = build_consumer(db_settings, handler_ctx)`; run `consumer.run()` as a task; poll (≤ 5 s) until `SELECT role FROM dps.dps_worker WHERE worker_id = $1` (`handler_ctx.worker_id`) returns `'browser-worker'`; then `consumer.stop()`, await the task, and assert the row is gone (the drain unregisters it).
 
 - [ ] **Step 2: Run to confirm failure** — `pytest -q tests/scanner/test_browser_worker.py` → FAIL (`ModuleNotFoundError: dps.browser_worker`).
 
@@ -5119,17 +5131,16 @@ git commit -m "feat(scanner): browser-worker image on the Playwright 1.55.0 base
 ```
 
 ---
-### Task 21: Console foundations — scan types, `api.scans`, polling, authenticated images, scanner styles
+### Task 21: Console foundations — scan types, `api.scans`, authenticated images, scanner styles (polling = M2's `usePoll`)
 
 **Files:**
 - Modify: `frontend/src/lib/types.ts`, `frontend/src/lib/api.ts`, `frontend/src/styles.css`
-- Create: `frontend/src/hooks/usePoll.ts`, `frontend/src/lib/download.ts`, `frontend/src/components/scanner/ArtefactImage.tsx`, `frontend/src/components/scanner/format.ts`
+- Create: `frontend/src/lib/download.ts`, `frontend/src/components/scanner/ArtefactImage.tsx`, `frontend/src/components/scanner/format.ts`
+- Reuse, never recreate: `frontend/src/hooks/usePoll.ts` (M2 Task 29, contract §14) and M2's `types.ts` names (`Job`, `JobState`, `JobProgress`, `Page<T>`, …) — redeclaring any of them is a TS2300 duplicate identifier and overwriting the hook breaks the M2/M3 pages.
 
-**Types** (`types.ts`, mirroring the pydantic models field for field; if M2 already declared `Job`/`JobProgress`/`PageOf`, reuse them and add only what is missing):
+**Types** (`types.ts`, mirroring the pydantic models field for field; append only the names below — every one is new; `Job`, `JobState`, `Page<T>`, `KeyMaterial` and `Sensitivity` already exist from M0/M2):
 
 ```ts
-export type JobState = 'queued' | 'running' | 'waiting' | 'paused' | 'succeeded' | 'failed' | 'dead' | 'canceled';
-export interface PageOf<T> { items: T[]; next_cursor: string | null }
 export interface SynthesisSeed { alg: string; seed: string; created_at: string }
 export type ScanMode = 'obfuscate' | 'synthesize';
 export interface ScanScope { same_origin: boolean; max_pages: number | null; max_depth: number | null; allow: string[]; deny: string[]; iframes: boolean; shadow_dom: boolean; spa_clicks: boolean }
@@ -5179,86 +5190,46 @@ export interface InventoryRow { page_no: number; path: string; form_index: numbe
 export interface PersonaPreview { synthesis_seed: SynthesisSeed; personas: { persona: number; values: Record<string, string> }[]; notes: string[] }
 ```
 
-**`api.ts` additions** (complete):
+**`api.ts` additions** (complete; they use M2 Task 29's module-level helpers `request`, `json`, `post` and `qs` — never redeclare `qs`, it already exists in the file):
 
 ```ts
-async function callBlob(path: string, auth: Auth): Promise<Blob> {
-  const headers: Record<string, string> = {};
-  if (auth.apiKey) headers['X-API-KEY'] = auth.apiKey;
-  if (auth.tenant) headers['X-DPS-Tenant'] = auth.tenant;
-  const res = await fetch(path, { headers });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail ?? detail; } catch { /* binary body */ }
-    throw new ApiError(res.status, typeof detail === 'string' ? detail : JSON.stringify(detail));
-  }
-  return res.blob();
-}
-
-const qs = (params: Record<string, string | number | null | undefined>): string => {
-  const s = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') s.set(k, String(v));
-  const t = s.toString();
-  return t ? `?${t}` : '';
-};
 const enc = encodeURIComponent;
+const blob = (path: string, auth: Auth): Promise<Blob> => request(path, auth).then((r) => r.blob());  // ApiError on !ok
 
 export const scansApi = {
-  create: (auth: Auth, spec: ScanSpecIn, idempotencyKey?: string) => call<ScanCreated>('/api/v1/scans', auth, {
-    method: 'POST', body: JSON.stringify(spec), headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined }),
-  list: (auth: Auth, p: { state?: string; limit?: number; cursor?: string } = {}) => call<PageOf<Job>>(`/api/v1/scans${qs(p)}`, auth),
-  get: (auth: Auth, id: string) => call<ScanDetail>(`/api/v1/scans/${enc(id)}`, auth),
-  pages: (auth: Auth, id: string, after = 0, limit = 200) => call<PageOf<ScanPage>>(`/api/v1/scans/${enc(id)}/pages${qs({ after, limit })}`, auth),
-  page: (auth: Auth, id: string, pageNo: number) => call<ScanPageDetail>(`/api/v1/scans/${enc(id)}/pages/${pageNo}`, auth),
-  events: (auth: Auth, id: string, after = 0, limit = 200) => call<PageOf<ScanEvent>>(`/api/v1/scans/${enc(id)}/events${qs({ after, limit })}`, auth),
-  inventory: (auth: Auth, id: string) => call<{ items: InventoryRow[]; risk_flags: NumberedRiskFlag[] }>(`/api/v1/scans/${enc(id)}/inventory?format=json`, auth),
-  download: (auth: Auth, id: string, what: 'inventory' | 'export', format: 'json' | 'csv') => callBlob(`/api/v1/scans/${enc(id)}/${what}?format=${format}`, auth),
-  cancel: (auth: Auth, id: string) => call<Job>(`/api/v1/scans/${enc(id)}/cancel`, auth, { method: 'POST' }),
+  create: (auth: Auth, spec: ScanSpecIn, idempotencyKey?: string) =>
+    post<ScanCreated>('/api/v1/scans', auth, spec, idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined),
+  list: (auth: Auth, p: { state?: string; limit?: number; cursor?: string } = {}) => json<Page<Job>>(`/api/v1/scans${qs(p)}`, auth),
+  get: (auth: Auth, id: string) => json<ScanDetail>(`/api/v1/scans/${enc(id)}`, auth),
+  pages: (auth: Auth, id: string, after = 0, limit = 200) => json<Page<ScanPage>>(`/api/v1/scans/${enc(id)}/pages${qs({ after, limit })}`, auth),
+  page: (auth: Auth, id: string, pageNo: number) => json<ScanPageDetail>(`/api/v1/scans/${enc(id)}/pages/${pageNo}`, auth),
+  events: (auth: Auth, id: string, after = 0, limit = 200) => json<Page<ScanEvent>>(`/api/v1/scans/${enc(id)}/events${qs({ after, limit })}`, auth),
+  inventory: (auth: Auth, id: string) => json<{ items: InventoryRow[]; risk_flags: NumberedRiskFlag[] }>(`/api/v1/scans/${enc(id)}/inventory?format=json`, auth),
+  download: (auth: Auth, id: string, what: 'inventory' | 'export', format: 'json' | 'csv') => blob(`/api/v1/scans/${enc(id)}/${what}?format=${format}`, auth),
+  cancel: (auth: Auth, id: string) => post<Job>(`/api/v1/scans/${enc(id)}/cancel`, auth),
   personaPreview: (auth: Auth, body: { locale: string; count?: number; synthesis_seed?: SynthesisSeed | null }) =>
-    call<PersonaPreview>('/api/v1/scans/personas/preview', auth, { method: 'POST', body: JSON.stringify(body) }),
-  artefact: (auth: Auth, artefactId: string) => callBlob(`/api/v1/artefacts/${enc(artefactId)}`, auth),
+    post<PersonaPreview>('/api/v1/scans/personas/preview', auth, body),
+  artefact: (auth: Auth, artefactId: string) => blob(`/api/v1/artefacts/${enc(artefactId)}`, auth),
 };
 ```
 
 and `scans: scansApi` inside the exported `api` object (contract §14: `api.scans.*`).
 
-`hooks/usePoll.ts` (complete):
+**Polling** reuses M2's hook unchanged (contract §14):
+`usePoll<T>(load: () => Promise<T>, intervalMs: number, active: (data: T | undefined) => boolean, deps?: unknown[])
+→ { data: T | undefined; error: Error | undefined; refresh: () => void }`. The scanner pages call it as:
 
 ```ts
-import { useEffect, useRef, useState } from 'react';
-
-/** Poll ``fn`` every ``intervalMs`` until ``stopWhen`` says the value is final (contract §14: 2 s while non-terminal). */
-export function usePoll<T>(fn: (() => Promise<T>) | null, deps: unknown[],
-  { intervalMs = 2000, stopWhen }: { intervalMs?: number; stopWhen?: (value: T) => boolean } = {}):
-  { data: T | null; error: string | null; refresh: () => void } {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-  const stop = useRef(stopWhen);
-  stop.current = stopWhen;
-  useEffect(() => {
-    if (!fn) return undefined;
-    let alive = true;
-    let timer: number | undefined;
-    const run = async (): Promise<void> => {
-      try {
-        const value = await fn();
-        if (!alive) return;
-        setData(value);
-        setError(null);
-        if (stop.current?.(value)) return;
-      } catch (e) {
-        if (!alive) return;
-        setError(e instanceof Error ? e.message : String(e));
-      }
-      timer = window.setTimeout(() => { void run(); }, intervalMs);
-    };
-    void run();
-    return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [...deps, tick]); // eslint-disable-line react-hooks/exhaustive-deps
-  return { data, error, refresh: () => setTick((t) => t + 1) };
-}
+const TERMINAL: ReadonlySet<JobState> = new Set(['succeeded', 'failed', 'dead', 'canceled']);
+// nothing to poll before a scan exists: resolve undefined and stay inactive
+const detail = usePoll(() => (scanId ? api.scans.get(auth, scanId) : Promise.resolve(undefined)), 2000,
+                       (d) => !!d && !TERMINAL.has(d.scan.state), [scanId]);
+const running = !!detail.data && !TERMINAL.has(detail.data.scan.state);
+// pages/events follow the scan: `running` is a dep, so the terminal flip triggers one final fetch, then they stop
+const pages = usePoll(() => (scanId ? api.scans.pages(auth, scanId) : Promise.resolve(undefined)), 2000,
+                      () => running, [scanId, running]);
 ```
+`error` is an `Error` (render `error.message`); `data` is `undefined` (not `null`) before the first load.
 
 `lib/download.ts`: `export function saveBlob(blob: Blob, filename: string): void` (object URL → temporary `<a download>` → click → revoke) and `export function saveText(text: string, filename: string, type = 'application/json'): void`. Filenames are built from scan ids only.
 
@@ -5296,12 +5267,12 @@ export function ArtefactImage({ id, alt }: { id: string | null | undefined; alt:
 `styles.css` — append a `/* --- UI scanner (M4): mockups 12 and 04 --- */` block that ports the mockup classes verbatim (`.nosubmit .ns-icon .ns-t .ns-body .ns-stats .ns-stat .setup .col .hint .two-in .urlrow .sw .switch .deny .addrow .seg.full .persona .ok-line .reqpane .live-dot .prog-top .bar.big .pipe .stats .tree .node .st.* .kids .tree-foot .log .lr .scan .crawl .parallel .frame .bar-url .form .f.real/.syn/.obf .f .n .btnrow .fakebtn .flag` and their media queries), scoping the two names M0 already uses differently: `.setup .field { gap: 6px; margin-bottom: 12px }` and `.setup .err { background: none; border: 0; padding: 0; color: var(--rose) }`; plus `.shot { display: block; width: 100%; height: auto }`, `.shot-empty { padding: 32px; text-align: center; color: var(--ink-3); font-size: 12.5px }`, `.shot-skeleton { height: 360px; border-radius: 0 }`, `.tabs` (reuse `.seg`) and `.switch[aria-disabled="true"] { opacity: .5; cursor: not-allowed }`. Only Vault tokens — no raw palette.
 
 - [ ] **Step 1: Write the files** above.
-- [ ] **Step 2: Gates** — `cd frontend && npm run typecheck && npm run build` → no errors; `pytest -q` unaffected.
+- [ ] **Step 2: Gates** — `cd frontend && npm run typecheck && npm test && npm run build` → no errors (M2's Vitest suite still green); `git diff --stat frontend/src/hooks/usePoll.ts` is empty (the hook is M2's); `grep -c "export type JobState\|interface PageOf" frontend/src/lib/types.ts` prints `1` (M2's `JobState` only, no `PageOf`); `pytest -q` unaffected.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add frontend/src/lib/types.ts frontend/src/lib/api.ts frontend/src/lib/download.ts frontend/src/hooks/usePoll.ts frontend/src/components/scanner/ArtefactImage.tsx frontend/src/components/scanner/format.ts frontend/src/styles.css
-git commit -m "feat(console): scan types, api.scans client, polling hook, authenticated screenshot images, scanner styles" -- frontend/src/lib/types.ts frontend/src/lib/api.ts frontend/src/lib/download.ts frontend/src/hooks/usePoll.ts frontend/src/components/scanner/ArtefactImage.tsx frontend/src/components/scanner/format.ts frontend/src/styles.css
+git add frontend/src/lib/types.ts frontend/src/lib/api.ts frontend/src/lib/download.ts frontend/src/components/scanner/ArtefactImage.tsx frontend/src/components/scanner/format.ts frontend/src/styles.css
+git commit -m "feat(console): scan types, api.scans client, authenticated screenshot images, scanner styles" -- frontend/src/lib/types.ts frontend/src/lib/api.ts frontend/src/lib/download.ts frontend/src/components/scanner/ArtefactImage.tsx frontend/src/components/scanner/format.ts frontend/src/styles.css
 ```
 
 ---
@@ -5330,7 +5301,7 @@ git commit -m "feat(console): scan types, api.scans client, polling hook, authen
 | **Crawl map** card: legend, collapsible tree (status dot, path link to the parallel view for pages with forms, depth `d1`, meta "1 form · 30 fields", chips `PII n`, risk codes `A1`, `n POST blocked`, skip reasons), footer | `CrawlMap` builds the tree from `parent_page_no`; per-page blocked counts come from the event feed (`kind=request, result=blocked`) | `GET /scans/{id}/pages`, events |
 | **Navigation log** card: newest first, Time / Event / Result / Target / Note, "Showing 13 of N entries", **Download log as JSONL** | `NavLog` (13 newest rows; `fresh` animation on new rows unless reduced motion); download builds JSONL client-side from the events already fetched | `GET /scans/{id}/events?after=` (incremental) |
 
-Polling: `usePoll` on `get`, `pages` and `events` every 2 s while `scan.state` is non-terminal (`queued|running|waiting|paused`), one final fetch after it turns terminal. `/scanner` without `?scan=` shows the setup column and an empty live column with the text "Start a crawl to see pages appear here." Accessibility as in the mockup: labelled inputs, `role="switch"` with `aria-checked`, `aria-live="polite"` on the log and the request pane, focus-visible rings from the tokens.
+Polling: M2's `usePoll(load, 2000, active, deps)` (Task 21 shows the call shape) on `get`, `pages` and `events` every 2 s while `scan.state` is non-terminal (`queued|running|waiting|paused`), one final fetch after it turns terminal. `/scanner` without `?scan=` shows the setup column and an empty live column with the text "Start a crawl to see pages appear here." Accessibility as in the mockup: labelled inputs, `role="switch"` with `aria-checked`, `aria-live="polite"` on the log and the request pane, focus-visible rings from the tokens.
 
 - [ ] **Step 1: Write the page and components** per the table (state in one `cfg` object mirroring `ScanSpecIn`; the request preview renders from it).
 - [ ] **Step 2: Gates** — `cd frontend && npm run typecheck && npm run build` → clean.
@@ -5366,7 +5337,7 @@ git commit -m "feat(console): UI scanner setup and live crawl — scope, session
 | **Inventory** tab | the whole-scan table from `GET /scans/{id}/inventory` with filters (entity type, sensitivity, "risk flags only") and CSV/JSON download | inventory |
 | **Captures** tab | `CapturesTab`: one card per page with `capture_status` — `captured`: `ArtefactImage` of `masked_capture`, chip `obfuscated · reversible map` (obfuscate) or `synthetic replacement` (synthesize), "Download reversible map" (the `capture_json` artefact) with the hint "Reveal with POST /api/v1/reveal and this scan's key material"; `withheld`: "Withheld — a value could not be masked, so nothing was stored" | pages |
 
-Polling every 2 s while the scan is non-terminal (the parallel view fills in as pages finish). Responsive: `.scan` and `.parallel` collapse to one column below 1200 px exactly as the mockup's media query.
+Polling every 2 s with M2's `usePoll` while the scan is non-terminal (the parallel view fills in as pages finish). Responsive: `.scan` and `.parallel` collapse to one column below 1200 px exactly as the mockup's media query.
 
 - [ ] **Step 1: Write the page and components** per the table.
 - [ ] **Step 2: Gates** — `cd frontend && npm run typecheck && npm run build` → clean.
@@ -5494,7 +5465,7 @@ All of the following, run from a clean checkout of the M4 branch on the Mac, wit
 | §8 request | `url`, `scope{same_origin,max_pages,max_depth,deny}`, `auth.storage_state_ref`, `mode`, `fill{personas,locale}`, `parallel_view`, `capture{screenshots,har}` | Task 4 (`ScanSpec`, plus allow-list and the mockup's switches) |
 | §8 crawl | same-origin, depth and page budgets, SPA routes by clicking in-scope links, open shadow DOM, same-origin iframes | Tasks 2, 8, 14 (template budget and time budget added) |
 | §8 per-page facts | tag, type, name, id, label via `label[for]` / `aria-label` / `aria-labelledby` / placeholder / nearest text, autocomplete, pattern, maxlength, required, select options; screenshot with numbered overlays; rendered text | Tasks 8, 12 (options counted, never stored; text kept in memory only) |
-| §8 classify | autocomplete token map → structural dictionary (EN/ES via M0's T0) → input type and pattern → value detectors on pre-filled/rendered values | Task 9; **T3 LLM labelling of leftovers is not built in M4** (M0 ships no `llm_label` module; the metadata-only design makes it a later add-on) |
+| §8 classify | autocomplete token map → structural dictionary (EN/ES via M0's T0) → input type and pattern → value detectors on pre-filled/rendered values | Task 9; T3 LLM labelling of leftover fields: the engine module is M1's (`dps/engine/detect/llm_label.py`, M1 plan Task 19D) and M5 wires it into `classify.py` (contract §15), so M4 keeps no M1 dependency |
 | §8 inventory + risk flags | autocomplete on sensitive fields, passwords without `new-password`, PII in URL query strings, PII rendered (in tables) | Tasks 10, 16 (plus sensitive GET forms) |
 | §8 parallel view (D4) | fill every field with persona values (synthesize) or reversible tokens (obfuscate), capture original and filled screens, record client-side validation messages, never submit; guard blocks non-GET and navigations of filled pages; export persona set and field→entity→value mapping as CSV/JSON | Tasks 6, 11, 13, 14, 15, 16 |
 | §8 obfuscate | DOM text replaced, masked screenshot, reversible map | Task 12 (fail closed when a value cannot be masked) |
@@ -5512,11 +5483,11 @@ Placeholders: none — every task names exact files, interfaces, tests with thei
 The plan follows the contract where it speaks; these are the places where it is silent, ambiguous, or (in one case) at odds with the task brief.
 
 1. **Demo-site path.** The task brief asks for `tools/demo_sites/onboarding`; the contract (§1, §11) fixes `demo/onboarding/` with `server.mjs`. The plan uses the contract path.
-2. **`create_job` needs a known id.** §3.3 seals the job secret with `aad=f"dps_job.key:{id}"`, but §3.2's `create_job` signature has no `job_id`. The plan calls `create_job(job_id=new_id("s"), …)`; if M2 did not add that keyword, add `job_id: str | None = None` (generate when `None`) with a test in Task 18 (M2 touch point).
-3. **Consumer role.** `dps_worker.role` must be `browser-worker`, but §3.5's `Consumer` signature has no role. The plan assumes the role is derived from `kinds == (JobKind.scan,)`; otherwise pass `role="browser-worker"` (Task 17's DB test is the guard).
+2. **`create_job` needs a known id.** Resolved (contract §3.2, 2026-10-11): `create_job(..., job_id=None)` is M2's; the plan calls `create_job(job_id=new_id("s"), …)`.
+3. **Consumer role.** Resolved (contract §3.5, 2026-10-11): M2's `Consumer` requires `ctx` and takes `role`; Task 17 passes `ctx=build_context(settings)` and `role="browser-worker"` (its DB test is the guard).
 4. **Progress writes.** The plan writes in-flight scan progress with `advance_job(phase=scan, state=running, progress=…)` — allowed by the signature, not stated by the contract.
 5. **Audit fields.** §2.4 has `action` and `job_id` audit columns, but §8.3 does not spell out the `AuditEvent` fields M2 adds. The plan sets `action="scan.navigate" | "scan.finalize" | "job.create"` and `job_id`.
-6. **Names the contract leaves open.** `render_evidence_html` (§7.1 fixes the module and model, not the renderer's name); the `ArtefactService` constructor (§13 fixes only its methods); the module holding `JobSecret`/`JobProgress` (§3.3 fixes the shapes; the plan imports them from `dps.jobs_models`); the `label` field the evidence pack must carry (§7.2) is not in §7.1's model. The plan uses these names as written; if M2 chose others, use M2's.
+6. **Names the contract leaves open.** Resolved (contract §7.1, §13, §16, 2026-10-11): the renderer is M2's `render_html(pack, *, sha)` with `pack_sha256(pack)`; `ArtefactService(store, *, acquire)`; `JobSecret`/`JobProgress` live in `dps.jobs_models`; `EvidencePack.label` is in §7.1.
 7. **Additions this plan makes to the contract** (each in the commit with its code): `dps_scan_event`, extra columns, CHECKs, and the `dps_scan_request` foreign key in 030; `JobSecret.scan_start_url`; `ScanSpec.policy`, `scope.iframes|shadow_dom|spa_clicks`, `fill.display_persona`; `GET /scans/{id}/events` and `POST /scans/personas/preview`; nine `scan_*` settings; posture refusing a headed browser.
 8. **Parallel view against mockup 04.** The mockup's obfuscated pane shows tokens of the values *as captured*. The contract forbids storing tokens of page data in `dps_scan_field.fill_obfuscate` (§2.4) and storing unmasked originals of pages that render personal data (§13). So both filled screens come from persona-derived values (the persona itself, or tokens of it); pre-filled page values are masked on the stored original (chip "personal data masked"); and reversible obfuscation of real page data lives in the Captures tab (masked capture plus reversible map).
 9. **Persona count.** Mockup 12 lets you enter up to 200 personas; the contract caps `fill.personas` at 50. The plan uses 50.

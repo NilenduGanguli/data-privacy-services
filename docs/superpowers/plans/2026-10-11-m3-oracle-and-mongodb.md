@@ -7,7 +7,9 @@ the M2 connector conformance suite on real containers, the three measured Oracle
 tests, Oracle Free and MongoDB in the local stack with demo data whose customer ids are shared with the M2
 PostgreSQL bank schema, job groups that protect one customer consistently across the three systems with one
 caller-held key, and a cross-system consistency check (a three-way join over the masked outputs) with its
-console panel on the Jobs page (mockup 07) and the job detail page (mockup 03).
+console panel on the Jobs page (mockup 07) and the job detail page (mockup 03), and the Oracle and MongoDB paths of
+the new-job wizard (mockup 06: connection fields, Oracle owners, the Mongo JSON filter, Mongo targets — Task 18b) so the
+spec §9 demo runs from the console.
 
 **Architecture:** Two new `Connector`/`BatchWriter` implementations behind M2's `open_connector()` registry —
 nothing else in the job pipeline changes. `dps/layers/connectors/oracle.py` drives python-oracledb in thin
@@ -51,6 +53,13 @@ commit as the code that needs it, and listed again in "Open contract questions")
   timestamptz` to `dps_job_group`.
 - §11 the `oracle` service mounts `docker/oracle/initdb` at `/container-entrypoint-initdb.d`; app and
   worker mount `docker/secrets/local` at `/var/run/secrets/dps/local` (demo secret refs, local only).
+- §14 (made by the contract revision of 2026-10-11, not by this plan): the wizard `06` gains its Oracle and
+  MongoDB paths in M3 (Task 18b); `Selection.mongo_filter` is added to the console types.
+
+**M2 names (contract revision 2026-10-11).** The M2 interfaces this plan's seam table assumes — `KeyRange`
+with encoded keys, `open_connector(..., kek, job_id, credentials)`, the protocol additions, `ResolvedTarget`,
+`PrepareReport.append_upper`, `ConnectorError(code, detail, *, retryable)`, `Credentials` — are now contract
+names (contract §1, §4, §16), so Task 1's seam audit checks them against the contract rather than guessing.
 
 ---
 
@@ -134,6 +143,8 @@ adapts **only its own call sites** (never M2 behaviour) when a name differs.
 | `frontend/src/lib/{types,api}.ts` | modify | group check types; `api.groups.consistencyCheck` |
 | `frontend/src/components/groups/*.tsx`, `frontend/src/hooks/useJobGroup.ts` | create | group card, verdict, coverage, new-group dialog, data hook |
 | `frontend/src/pages/{Jobs,JobDetail,JobWizard}.tsx`, `frontend/src/styles.css` | modify (M2) | group section + badge, group header + joins box, `?group=` preselect, Vault styles |
+| `frontend/src/lib/engines.ts` (+ `engines.test.ts`), `frontend/src/pages/wizard/*`, `frontend/src/lib/jobs.ts` | create / modify (M2) | Oracle and MongoDB in the wizard: connection fields, owners, JSON filter, Mongo targets (Task 18b) |
+| `tests/console/test_console_m3_wizard.py` | create | browser check of the Oracle and Mongo wizard paths (Task 18b) |
 | `tests/fixtures/m3_services.py`, `tests/conftest.py` | create / modify | Oracle per-session schemas, Mongo per-test databases, service probes |
 | `tests/connectors/test_oracle_*.py`, `test_mongo_*.py`, `test_docpaths.py`, `test_selection_mongo.py`, `test_selection_oracle.py`, `test_engine_bridge_m3.py`, `test_consistency.py`, `harness_oracle.py`, `harness_mongo.py` | create | unit + integration tests, conformance harnesses |
 | `tests/api/test_groups_consistency_api.py`, `tests/e2e/test_m3_three_way.py`, `tests/e2e/test_m3_resume_after_kill.py`, `tests/test_seed_model.py`, `tests/test_no_values_in_logs_m3.py` | create | route, end-to-end, resume-after-kill, seed, log-scan |
@@ -6051,6 +6062,67 @@ git add frontend/src/lib/groups.ts frontend/src/lib/groups.test.ts frontend/src/
 (screenshots are committed with Task 21's docs commit.)
 
 ---
+### Task 18b: Console — Oracle and MongoDB in the new-job wizard (mockup 06; spec §9 demo)
+
+**Why:** M2's wizard (M2 Tasks 32–34) enables only PostgreSQL: the Oracle and MongoDB engine cards are disabled with an "M3" chip, the connection form has PostgreSQL fields only and step 2 offers SQL `WHERE`/`SELECT` only. Spec §9 (Data sources page) and the ten-minute demo ("connect Oracle CRM and Mongo profiles, discover, review the heat-map, run …") need both engines in the console. Contract §14/§15 assign this to M3.
+
+**Files:**
+- Create: `frontend/src/lib/engines.ts`, `frontend/src/lib/engines.test.ts` (Vitest), `tests/console/test_console_m3_wizard.py`
+- Modify (M2 pages and helpers): `frontend/src/pages/wizard/{StepConnect,StepSelect,StepDiscover,StepTarget,state}.ts(x)`, `frontend/src/lib/jobs.ts` (`WizardDraft`, `draftForStorage`, `buildRunSpec`, `specPreview`), `frontend/src/lib/jobs.test.ts`, `frontend/src/lib/fixtures.ts`, `frontend/src/lib/types.ts` (`Selection.mongo_filter?: Record<string, unknown> | null` — the only type added; everything else is M2's, contract §14)
+
+**`lib/engines.ts`** (pure, value-free):
+```ts
+export type SourceEngine = 'postgres' | 'oracle' | 'mongo';
+export interface FieldDef { key: 'host' | 'port' | 'database' | 'service_name' | `options.${string}`; label: string;
+  required: boolean; placeholder?: string; defaultValue?: string | number; help?: string }
+export function connectionFields(engine: SourceEngine): FieldDef[]
+//   postgres: Host, Port (5432), Database, options.sslmode
+//   oracle:   Host, Port (1521), Service name (required, e.g. FREEPDB1)
+//   mongo:    Host, Port (27017), Database (required), options.replicaSet, options.directConnection, options.authSource, options.tls
+export function secretRefHelp(engine: SourceEngine): string
+//   oracle: files username, password and optional dsn (overrides host/port/service); mongo: optional uri (overrides
+//   host/port) or username/password; postgres: unchanged M2 text
+export function ownerLabel(engine: SourceEngine): string | null      // 'Owner' (PG schema / Oracle owner); null for mongo
+export function objectLabel(engine: SourceEngine): 'Table' | 'Collection'
+export function filterModes(engine: SourceEngine): ('where' | 'query' | 'mongo')[]   // mongo → ['mongo'] only
+export function parseMongoFilter(text: string): { filter: Record<string, unknown> | null; error: string | null }
+//   JSON.parse + object check; client hint for $where/$expr/$function/$accumulator (the server's allow-list,
+//   M2/M3 selection.py, stays authoritative); the error never contains the text
+export function mongoFilterTemplate(filter: Record<string, unknown>): Record<string, unknown>   // every literal → "<bound>"
+export function needsTransactions(mode: WriteMode): boolean          // in_place, append (Mongo: replica set required)
+```
+
+**Step 1 · Connect** — the three engine cards are enabled (the "M3" chip and disabled state go); choosing an engine filters **Saved connection** to that engine with role `source` and renders `connectionFields(engine)` for **New connection** (secret reference with `secretRefHelp(engine)`, or inline credentials in dev). After **Test connection** the check list shows the server version (Oracle 23.x / MongoDB 7.x) and, for Mongo, a capability chip `transactions: yes|no` from `capabilities.transactions` with the note "In place and append need a replica set".
+
+**Step 2 · Select data** — Oracle: **Owner** = distinct owners of `GET /connections/{id}/objects` (no `owner` parameter: M3's connector lists every non-Oracle-maintained user), **Table**, then **WHERE expression** / **Read-only SELECT** as for PG with the hint "bind values as `:name`; identifiers are upper-cased". MongoDB: no Owner select — a read-only line "Database: <params.database>"; **Collection** select; the only filter mode is **Filter (JSON)** (monospace textarea; `parseMongoFilter` gives instant feedback); **Check** → `POST /connections/{id}/count {object: {owner: null, name}, selection: {mongo_filter}}` → "N documents match"; a 422 (`selection_operator_denied`, …) shows the failing check and the server's message, never the filter text. The **Columns** checklist shows `describe` paths (`$.profile.fullName` grouped under `profile`); `_id` is locked as the key.
+
+**Step 3 · Discover** — unchanged flow; the review table shows Mongo paths without the `$.` prefix and Oracle `type_note`s (e.g. CLOB `text_pipeline`).
+
+**Step 4 · Target and write mode** — *Copy to a table*: Oracle → target connection (engine oracle, role target), **Destination schema** (= owner, e.g. `CRM_MASKED`) and **Destination table**; MongoDB → target connection (engine mongo, role target) and **Destination collection** (no schema field: the database is the target connection's — M3 open question 12). *In place* / *Append* on Mongo are blocked with an amber callout (`transactions_unsupported`) when the tested connection reports no transactions.
+
+**Step 5 · Review and run** — unchanged; the rail's specification shows `mongo_filter` through `mongoFilterTemplate` (literals as `<bound>`), like M2 shows SQL binds.
+
+**Draft and spec helpers** (`lib/jobs.ts`): `WizardDraft` gains `engine: SourceEngine` and `mongoFilterText: string`; `draftForStorage` drops `mongoFilterText` (as it drops `where`/`query` and credentials); `buildRunSpec` emits `source.object = {owner: null, name}` and `source.selection = {mongo_filter}` for Mongo (no `where`/`query`/`params`), and the owner exactly as listed for Oracle; Mongo `table` targets get `target.object = {owner: null, name}`.
+
+**Accessible names** (M2's list stays; additions used by the browser check): radio cards `Oracle`, `MongoDB` (enabled); fields `Service name`, `Database`, `Replica set`, `Filter (JSON)`, `Destination collection`; select `Collection`.
+
+- [ ] **Step 1: Vitest first** — `engines.test.ts`: `connectionFields('oracle')` includes a required `service_name` and no `database`; `connectionFields('mongo')` includes a required `database` and `options.replicaSet`; `filterModes('mongo')` is `['mongo']`; `parseMongoFilter('{"segment": "premium"}')` → filter, no error; `parseMongoFilter('{"$where": "1"}')` → error mentioning `$where` but not `"1"`; `parseMongoFilter('nope')` → error "not valid JSON"; `mongoFilterTemplate({a: 1, b: {$in: ['x', 'y']}})` → `{a: '<bound>', b: {$in: ['<bound>', '<bound>']}}`. `jobs.test.ts` additions: `buildRunSpec` for a Mongo draft → `source.object.owner === null`, `selection.mongo_filter` set, no `where`; for an Oracle draft → owner `CRM` kept; `JSON.stringify(draftForStorage(draft({engine: 'mongo', mongoFilterText: '{"email": "a@x.in"}'})))` does not contain `a@x.in`.
+- [ ] **Step 2: Run** `cd frontend && npm test` → the new cases fail.
+- [ ] **Step 3: Implement** `engines.ts` and the step changes.
+- [ ] **Step 4: Gates** — `cd frontend && npm run typecheck && npm test && npm run build` → clean; M2's and Task 18's Vitest cases still pass.
+- [ ] **Step 5: Browser check** — `tests/console/test_console_m3_wizard.py` (markers `browser`, `integration`, `oracle`, `mongo`, `slow`; same harness as M2's `tests/console/test_console_m2.py`: Playwright 1.55.0, `DPS_TEST_APP_URL`, `DPS_TEST_API_KEY`, screenshots to `docs/superpowers/build/m3-shots/`), against `docker compose --profile oracle --profile sources up -d` with the Task 15 seed and the `smoke --m3` connections (`smoke-ora-src`, `smoke-ora-tgt`, `smoke-mdb-src`, `smoke-mdb-tgt`):
+  - `test_engine_cards_are_enabled` — `Oracle` and `MongoDB` radio cards are enabled; no element with text `M3` inside the engine group.
+  - `test_oracle_wizard_discovers_and_runs` — Oracle → Saved connection `smoke-ora-src` → Test connection → "N of M checks passed" → Next: Select data → Owner `CRM` → Table `CUSTOMERS` → WHERE expression `SEGMENT = 'RETAIL'` → Check → "rows match" → Next: Discover → Run discovery → ≥ 8 heat-map cells → Accept snapshot → Next → Copy to a table → Target connection `smoke-ora-tgt` → Destination schema `CRM_MASKED` → Destination table `CUSTOMERS_CONSOLE` → Next: Review and run → Ticket `CHG-30301` → Run job → "shown once" → Open job → the Evidence pack link appears within 300 s → evidence sections 1–5 visible. No source value is visible on any page (25 `FULL_NAME` values read beforehand through the M3 Oracle fixture are absent from `body` text).
+  - `test_mongo_wizard_filters_discovers_and_runs` — MongoDB → `smoke-mdb-src` → Test connection → Next → Collection `profiles` → Filter (JSON) `{"segment": "premium"}` → Check → "documents match"; then `{"$where": "1"}` → Check → the operator-denied message is shown and the page text does not contain `"$where": "1"` outside the textarea; back to the valid filter → Run discovery → heat-map cells include a `profile.` path → Accept snapshot → Copy to a table → Target connection `smoke-mdb-tgt` → Destination collection `profiles_console` → Ticket → Run job → evidence pack within 300 s.
+  Run: `python -m playwright install chromium && DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m3_wizard.py` → `3 passed`. Then compare `06-wizard-oracle-*-desktop.png` with `docs/design/mockups/06-connect-wizard.html` (its example *is* an Oracle CRM source): same five steps, the engine cards, the check lists, the heat-map and the write-mode cards; light and dark; 1440 px and 390 px without horizontal scroll. Log intentional differences in `M3-DEVIATIONS.md`.
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/src/lib/engines.ts frontend/src/lib/engines.test.ts frontend/src/lib/jobs.ts frontend/src/lib/jobs.test.ts frontend/src/lib/fixtures.ts frontend/src/lib/types.ts frontend/src/pages/wizard tests/console/test_console_m3_wizard.py && git commit -m "feat(console): Oracle and MongoDB in the new-job wizard - connection fields, owners, JSON filter, Mongo targets" -- frontend/src/lib/engines.ts frontend/src/lib/engines.test.ts frontend/src/lib/jobs.ts frontend/src/lib/jobs.test.ts frontend/src/lib/fixtures.ts frontend/src/lib/types.ts frontend/src/pages/wizard tests/console/test_console_m3_wizard.py
+```
+(screenshots are committed with Task 21's docs commit, like Task 18's.)
+
+---
 ### Task 19: End to end — the three-way consistency join through the API and worker; resume after kill on Oracle and Mongo
 
 **Files:**
@@ -6465,6 +6537,7 @@ git tag -a v0.4.0-m3 -m "M3: Oracle and MongoDB connectors, cross-system job gro
 | `dps/layers/api/routers/groups.py`, `JobGroup`, group repository (M2) | consistency-check route; `last_check`, `last_check_at` | 17 |
 | `tools/seed_sources.py`, `tools/bench_connector.py`, `tools/smoke_test.py` (M2/M0) | oracle/mongo targets, PG customers from `seed_model`; `--engine`; `--m3` | 15, 21 |
 | `frontend/src/pages/{Jobs,JobDetail,JobWizard}.tsx`, `lib/{api,types}.ts`, `styles.css` (M2) | group section, badge, header, joins box, `?group=` | 18 |
+| `frontend/src/pages/wizard/*`, `frontend/src/lib/{jobs,types,fixtures}.ts` (M2) | Oracle and MongoDB wizard paths; `Selection.mongo_filter`; Mongo-aware `buildRunSpec`/`draftForStorage` | 18b |
 | `tests/connectors/conformance.py` registration (M2) | `oracle`, `mongo` harnesses (suite tests untouched) | 14 |
 | `docs/superpowers/plans/2026-10-11-m1-m5-contract.md` | the additive changes listed in this plan's header | 3, 17, 21 |
 
@@ -6496,7 +6569,10 @@ into `docs/superpowers/build/M3-DEVIATIONS.md` under "Gates":
    `03-data-sources.html` (crumb, subtitle, "Open consistency check", "Cross-system joins" box), at 1440 px and
    390 px, light and dark; the verdict shows **3 / 3 consistent** for the demo group; screenshots committed
    under `docs/superpowers/build/m3-shots/`; intentional differences (coverage table instead of masked sample
-   rows; `NOTES` instead of `RM_NOTES`) logged.
+   rows; `NOTES` instead of `RM_NOTES`) logged. **And the wizard (Task 18b):**
+   `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m3_wizard.py` → `3 passed` (Oracle and
+   MongoDB connect → select (Oracle owner, Mongo JSON filter incl. a denied operator) → discover → accept →
+   copy to a table → run → evidence, all in the console), screenshots compared with `06-connect-wizard.html`.
 9. **Benchmarks recorded:** Oracle and Mongo rows/s in `HANDOFF.md`.
 10. **Docs:** `HANDOFF.md` (services, ports, secret ref names, traps, throughput), `README.md`,
     `docs/technical/api-m3.md`, the contract file's additive changes, `M3-DEVIATIONS.md` complete; tag
@@ -6520,7 +6596,7 @@ into `docs/superpowers/build/M3-DEVIATIONS.md` under "Gates":
 | §7 cross-system consistency | one key across a job group, entity-scoped tweaks (`field_scoped=false`), the three-way join demonstrated | Tasks 13, 16, 17, 18, 19 |
 | §7 credentials | `secret_ref` files in production, inline only in dev; least-privilege `test-connection` checks | Tasks 2, 5, 11 |
 | §7 throughput | measured, not promised | Task 21 |
-| §9 console | job groups in Data sources & jobs; consistency check visible | Task 18 |
+| §9 console | job groups in Data sources & jobs; consistency check visible; Oracle and MongoDB connect → discover → review → run from the wizard (the ten-minute demo's Data sources beat) | Tasks 18, 18b |
 | §10 | no values in logs/metrics/errors; connector credentials never echoed; Mongo/Oracle error messages never read | Tasks 4, 11, 20 |
 | §11 M3 | local Oracle Free + Mongo in compose; cross-system job groups; three Oracle pitfalls as tests; **exit: conformance suite green on real containers** | Tasks 2, 7, 14, DoD 4–5 |
 
@@ -6562,7 +6638,7 @@ incomplete or in tension with the mockups:
    strategies. Suggest "in_place and append need transactions".
 7. **`$options` is not on the Mongo allow-list (§5.2).** Case-insensitive matches must use the inline `(?i)`
    flag. Suggest allowing `$options` restricted to `^[imsx]{0,4}$` next to `$regex`.
-8. **Non-contract M2 internals M3 depends on.** The M2 plan (written in parallel) fixes `ResolvedTarget`
+8. **Non-contract M2 internals M3 depends on.** Resolved 2026-10-11: the contract now carries these M2 names (contract §1, §4.1, §4.2, §16); the remaining items below (`POST /job-groups` response, conformance harness, `append_upper` handling) are as M2's plan defines them. Original note: the M2 plan (written in parallel) fixes `ResolvedTarget`
    (`write_columns`, `generated_key`, `target_shape`, `column_types`, …), `PrepareReport` (`checks`,
    `append_upper`), `ConnectorError(code, detail, *, retryable)`, `KeyRange` holding *encoded* keys (the
    contract's §4.1 says `Key`), `Connector.key_at_offset`, `sample_keys(..., upper=)`,
@@ -6602,6 +6678,7 @@ incomplete or in tension with the mockups:
 Plan complete and saved to `docs/superpowers/plans/2026-10-11-m3-oracle-and-mongodb.md`. Two execution options:
 
 1. **Subagent-driven (recommended)** — a fresh subagent per task, review between tasks; the Oracle lane
-   (Tasks 3–8) and the Mongo lane (Tasks 9–12) can run in parallel after Task 2, joined by Task 13
+   (Tasks 3–8) and the Mongo lane (Tasks 9–12) can run in parallel after Task 2, joined by Task 13; Task 18b
+   (wizard) needs Tasks 8 and 11 (both connectors registered) and runs after Task 18
    (`superpowers:subagent-driven-development`).
 2. **Inline execution** — tasks in order with checkpoints (`superpowers:executing-plans`).
