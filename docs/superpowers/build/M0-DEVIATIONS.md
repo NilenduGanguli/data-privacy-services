@@ -505,3 +505,17 @@ are preserved unless a section says otherwise.
   Against the plan's `crypto.py`, four of the five fail (the wrapped-only refusal was already
   there).
 - Count: the plan's 7 + 5 added = 12 in the file; suite 196 passed, 1 skipped.
+
+## Task 13 — Token envelope
+
+- `make_envelope` raises `ValueError` when its result would not match `ENVELOPE_RE` (entity not
+  upper snake case, token not lower-case base32 of 2+ characters). Why: the plan built the string
+  unchecked, so an entity type outside the grammar produced an "envelope" that
+  `parse_envelopes` cannot see. Such a token is neither self-describing nor revealable without
+  hints. Task 17 catches the error and keeps the bare token (the reveal hint still covers it).
+  Entity types reach this point from findings: built-in names and Task 10's validated custom
+  names all fit, except that Task 10's `^…$` with `re.match` also accepts a trailing newline
+  (`"FOO\n"`, open item in the report).
+- Docstrings added to `make_envelope` and `is_envelope`.
+- Test added: `test_make_envelope_refuses_what_parse_cannot_read` (6 parametrised cases).
+- Count: the plan's 2 + 6 = 8 in the file; suite 204 passed, 1 skipped.
