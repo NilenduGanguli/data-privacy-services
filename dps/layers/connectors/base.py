@@ -12,11 +12,15 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import AsyncIterator
 from datetime import date, datetime
 from decimal import Context, Decimal, InvalidOperation
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    from dps.jobs_models import Selection
 
 Engine = Literal["postgres", "oracle", "mongo"]
 ConnEngine = Literal["postgres", "oracle", "mongo", "s3", "pvc"]
@@ -156,8 +160,10 @@ class PkOffset(BaseModel):
 
     model_config = _HIDDEN
     kind: Literal["offset"] = "offset"
-    offset: int | None = Field(None, gt=0)
-    prefix: str | None = Field(None, min_length=1, max_length=16, pattern=r"^[A-Za-z0-9_-]+$")
+    offset: int | None = Field(default=None, gt=0)
+    prefix: str | None = Field(
+        default=None, min_length=1, max_length=16, pattern=r"^[A-Za-z0-9_-]+$"
+    )
 
     @model_validator(mode="after")
     def _exactly_one(self) -> PkOffset:
@@ -181,9 +187,9 @@ class FilesSpec(BaseModel):
 
     model_config = _HIDDEN
     format: Literal["csv", "parquet", "jsonl"] = "parquet"
-    prefix: str = Field("", max_length=200, pattern=r"^[A-Za-z0-9/_.-]*$")
+    prefix: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9/_.-]*$")
     compression: Literal["none", "gzip", "snappy", "zstd"] = "snappy"
-    rows_per_file: int = Field(1_000_000, ge=1000)
+    rows_per_file: int = Field(default=1_000_000, ge=1000)
 
 
 class IncompatibleValue(ValueError):
@@ -404,3 +410,158 @@ def from_engine_text(text: str | None, column: ColumnInfo) -> Any:
         return text.ljust(column.length) if column.length else text
     _check_length(text, column)
     return text
+
+
+# --- write side and protocols (contract §4.2) ------------------------------------------------
+
+
+class ResolvedTarget(BaseModel):
+    """A run's target after validation and prepare (built by ``targets.py``, used by writers)."""
+
+    model_config = _HIDDEN
+    job_id: str
+    write_mode: WriteMode
+    connection_id: str
+    engine: ConnEngine
+    object: ObjectRef | None = None  # None for files
+    same_as_source: bool = False
+    create_if_missing: bool = True
+    table_load: Literal["truncate_insert", "upsert"] = "truncate_insert"
+    pk_strategy: PkStrategy | None = None
+    files: FilesSpec | None = None
+    ledger_owner: str | None = None
+    key: list[str] = Field(default_factory=list)  # key column names (source = target names)
+    write_columns: list[str] = Field(
+        default_factory=list
+    )  # in_place: SET list; else written columns
+    generated_key: bool = False  # append+generate: key columns omitted from INSERT
+    target_shape: TableShape | None = None  # existing table, or the table prepare will create
+    column_types: dict[str, str] = Field(default_factory=dict)  # DDL type per column (create)
+
+
+class Connector(Protocol):
+    """A source (and, for databases, target) engine (contract §4.2).
+
+    Rules every implementation obeys (``tests/connectors/conformance.py``): source reads are
+    read-only (PG ``BEGIN READ ONLY`` + ``statement_timeout``; never ``FOR UPDATE``); partitions
+    are read in key order with the keyset predicate ``key >= lower AND key < upper AND key >
+    after_key``; identifiers are interpolated only after ``selection.quote_ident``; nothing logs or
+    raises a row value or a key.
+    """
+
+    engine: Engine
+
+    async def open(self) -> None:
+        """Open the driver pool/client."""
+        ...
+
+    async def close(self) -> None:
+        """Close the driver pool/client."""
+        ...
+
+    async def test(
+        self,
+        *,
+        role: Literal["source", "target"],
+        obj: ObjectRef | None = None,
+        write_mode: WriteMode | None = None,
+    ) -> ConnectionTestResult:
+        """Value-free connectivity and privilege checks for ``role``."""
+        ...
+
+    async def list_objects(self, owner: str | None = None, *, limit: int = 500) -> list[ObjectRef]:
+        """Tables/collections visible to the connection (optionally of one owner)."""
+        ...
+
+    async def describe(self, obj: ObjectRef) -> TableShape:
+        """Columns, kinds and the paging key of ``obj``."""
+        ...
+
+    async def count(
+        self, shape: TableShape, selection: Selection, params: dict[str, JsonScalar]
+    ) -> int:
+        """Rows the selection matches."""
+        ...
+
+    async def sample(
+        self, shape: TableShape, selection: Selection, params: dict[str, JsonScalar], n: int
+    ) -> list[Row]:
+        """Up to ``n`` sampled rows (discovery)."""
+        ...
+
+    async def sample_keys(
+        self,
+        shape: TableShape,
+        selection: Selection,
+        params: dict[str, JsonScalar],
+        n: int,
+        *,
+        upper: tuple[Any, ...] | None = None,
+    ) -> list[tuple[Any, ...]]:
+        """Up to ``n`` keys ordered by the database; only keys ``< upper`` (the read bound)."""
+        ...
+
+    async def key_at_offset(
+        self,
+        shape: TableShape,
+        selection: Selection,
+        params: dict[str, JsonScalar],
+        offset: int,
+    ) -> tuple[Any, ...] | None:
+        """The key at ``offset`` in key order (``max_rows`` → the global upper bound), or None."""
+        ...
+
+    def read_partition(
+        self,
+        shape: TableShape,
+        selection: Selection,
+        params: dict[str, JsonScalar],
+        key_range: KeyRange,
+        *,
+        after_key: tuple[Any, ...] | None,
+        batch: int,
+    ) -> AsyncIterator[list[Row]]:
+        """Batches of rows in ``key_range`` after ``after_key``, ordered by key, keyset paged."""
+        ...
+
+    async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> BatchWriter:
+        """A writer for ``target`` (in_place, append, table) on this engine."""
+        ...
+
+
+class BatchWriter(Protocol):
+    """Writes transformed batches to a target (contract §4.2).
+
+    ``write_batch`` is ONE target transaction holding the rows and the partition's ledger mark
+    (``in_place``/``append``), so a resumed partition never applies a batch twice; on resume the
+    ledger mark is authoritative over the queue's checkpoint. ``table`` loads upsert on the key;
+    ``files`` writes one object per partition, uploaded by ``finish_partition``.
+    """
+
+    async def prepare(self, *, dry_run: bool) -> PrepareReport:
+        """Create-if-missing, truncate (table), ledger table, capability checks."""
+        ...
+
+    async def precheck_collisions(self, keys: AsyncIterator[list[tuple[Any, ...]]]) -> int:
+        """Append offset/token: how many transformed keys already exist (a count only)."""
+        ...
+
+    async def read_ledger(self, job_id: str, partition_no: int) -> LedgerMark | None:
+        """The partition's last committed mark, or None."""
+        ...
+
+    async def write_batch(self, rows: list[Row], *, mark: LedgerMark) -> int:
+        """Write ``rows`` and ``mark`` in one transaction; returns rows written."""
+        ...
+
+    async def finish_partition(self, job_id: str, partition_no: int) -> dict[str, Any]:
+        """Files: upload the part object and return its metadata; ``{}`` otherwise."""
+        ...
+
+    async def clear_ledger(self, job_id: str) -> int:
+        """Finalize: delete the job's ledger rows; returns rows deleted."""
+        ...
+
+    async def close(self) -> None:
+        """Release the writer's connections."""
+        ...

@@ -144,3 +144,34 @@ otherwise.
   plan's code stored only `.code` and `.retryable`). `decode_key`'s unknown-tag error no longer
   names the tag (it comes from a stored row). `Key = tuple[Any, ...]` is exported (contract §4.1).
 - Tests: the plan's 15 plus the two above (17).
+
+## Task 7 — Job, connection and snapshot models and the connector protocols
+
+- `tests/test_jobs_models.py` — **plan assertion that could never pass, corrected.**
+  `test_connection_spec_rules` asserted `"p" not in repr(inline)` with the password `"p"`, but the
+  repr legitimately contains the letter `p` (`dev-pg`, `postgres`, `params`, `source-pg`). The test
+  now uses a distinctive password and asserts that string is absent from the repr — the intent
+  (inline credentials never appear in a repr). Other plan assertions unchanged.
+- `dps/jobs_models.py`: every model sets `hide_input_in_errors=True`. Why: `Selection.params`
+  holds bound customer values, `InlineCredentials` a password and `ConsistencySpec` caller key
+  material; pydantic's default error text quotes the offending input. New test
+  `test_spec_validation_errors_never_echo_values` (a card number in a bad bind value, an integer
+  password) — both values were echoed before the setting.
+- `dps/jobs_models.py` / `base.py`: field defaults are written `Field(default=…, …)` instead of
+  `Field(None, …)`, and `ConnectionSpec.roles` uses a typed factory (`_source_only`) instead of a
+  lambda. Why: mypy (no pydantic plugin) reads pydantic's `dataclass_transform` and only honours
+  the `default=` keyword, so `Selection()` (used by `DiscoverSpec`'s validator and as a
+  `default_factory`) failed `mypy dps` with "missing named argument". Same defaults at runtime.
+  New alias `ConnRole = Literal["source", "target"]`.
+- `ConnectionSpec` rejects an empty `roles` set ("a connection needs at least one role"). Why:
+  migration 003 has `CHECK (cardinality(roles) > 0)`; the plan's model accepted `roles=set()` and
+  the insert would have failed later with a database error.
+- `dps/layers/connectors/base.py` `Connector.sample_keys` takes `*, upper: tuple[Any, ...] | None =
+  None` (contract §4.2: "only keys < upper (the global read bound)"). The plan's interface block
+  omitted the keyword; the contract is binding. Protocol methods carry docstrings stating the §4.2
+  rules (read-only sources, keyset order, one transaction per `write_batch` including the ledger
+  mark), as Step 4 asks. `ResolvedTarget` list/dict defaults use `default_factory`.
+- Tests added: `test_file_stores_are_target_only` (the plan's s3/`source` case used the bucket
+  `"b"`, which already fails the bucket pattern, so the role rule itself was untested),
+  `test_spec_validation_errors_never_echo_values`, `test_resolved_target_defaults`. 9 tests
+  (plan: 6).
