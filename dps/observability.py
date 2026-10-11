@@ -69,7 +69,40 @@ _SAFE_FIELDS = frozenset(
         "auth",
         # audit events (dps.audit.AuditEvent)
         "ts",
+        # documents, OCR and schema synthesis (M1): counts, names, hashes and infrastructure
+        # hosts — never a value, a page's text or an OCR response body
+        "format",
+        "pages",
+        "ocr_pages",
+        "unreadable_pages",
+        "boxes",
+        "words",
+        "rows",
+        "fields",
+        "generator",
+        "source",
+        "engine",
+        "phase",
+        "http_status",
+        "host",
+        "fallback",
+        "spec_hash",
+        "bytes",
+        "warnings",
     }
+)
+
+#: Third-party loggers bypass the structlog allow-list (they log through stdlib ``logging``), and
+#: pdfminer's debug output quotes page content, so they are capped whatever ``DPS_LOG_LEVEL`` is.
+_THIRD_PARTY_LEVELS = (
+    ("pypdf", logging.ERROR),
+    ("pdfminer", logging.ERROR),
+    ("pdfplumber", logging.ERROR),
+    ("PIL", logging.ERROR),
+    ("reportlab", logging.ERROR),
+    ("faker", logging.ERROR),
+    ("httpx", logging.WARNING),
+    ("httpcore", logging.WARNING),
 )
 
 
@@ -116,6 +149,8 @@ def configure_logging(level: str = "INFO", *, json_output: bool = True) -> None:
         wrapper_class=structlog.make_filtering_bound_logger(numeric),
         cache_logger_on_first_use=False,
     )
+    for name, cap in _THIRD_PARTY_LEVELS:
+        logging.getLogger(name).setLevel(cap)
 
 
 def get_logger(name: str) -> Any:
@@ -141,6 +176,17 @@ LATENCY = Histogram(
     "Request latency by route",
     ["route"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+# documents and OCR (M1)
+DOCUMENT_PAGES = Counter(
+    "dps_document_pages_total", "Document pages processed", ["format", "source"]
+)
+REDACTED_BOXES = Counter("dps_redacted_boxes_total", "Boxes burned into redacted PDFs")
+OCR_CALLS = Counter("dps_ocr_calls_total", "OCR calls by engine and outcome", ["engine", "outcome"])
+OCR_SECONDS = Histogram(
+    "dps_ocr_seconds",
+    "OCR call latency (analyze + polls)",
+    buckets=(0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0),
 )
 
 

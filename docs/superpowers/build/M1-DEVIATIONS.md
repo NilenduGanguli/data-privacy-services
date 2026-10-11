@@ -112,3 +112,21 @@ are preserved unless a section says otherwise.
   response field (M0 routes return `"segments": null` unless asked); not in the plan's file list.
 - Count: `tests/test_segments.py` 9 passed (the plan's 6, one replaced, three added); suite
   605 → 614 passed, 2 skipped.
+
+## Task 4 — Document models, layout geometry, document metrics and log fields
+
+- `dps/layers/documents/models.py`: `PageBox`, `PageSummary`, `RedactionReport` and `DocumentInfo`
+  gained one-line class docstrings (project rule: Google-style docstrings on public names); the
+  `PageFinding.out_span` comment sits on one line. Fields, types and defaults are the plan's.
+- `dps/layers/documents/errors.py`: the module docstring carries the plan's list of M1 codes and
+  statuses, so later tasks find them next to `DocumentError`.
+- `dps/observability.py`: the third-party logger caps are a module constant
+  (`_THIRD_PARTY_LEVELS`, same loggers and levels as the plan) applied at the end of
+  `configure_logging`. Before widening `_SAFE_FIELDS`, an AST scan of every `logger.*(...)` call in
+  `dps/` confirmed that no M0 call site passes any of the 18 new field names, so the extension lets
+  no M0 value through.
+- No `docs`/`ocr`-marked tests exist yet (Tasks 1–4 add none, and compose has no `azure-ocr-mock`
+  until Task 19), so the M1 integration gate `pytest -q -m "docs or ocr"` selects nothing at this
+  point (630 deselected).
+- Count: `tests/documents` 12 passed, `tests/test_observability.py` +2; suite 614 → 628 passed,
+  2 skipped.

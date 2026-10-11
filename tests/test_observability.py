@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from dps.observability import (
     LLM_RAW_PII,
     READINESS,
@@ -132,3 +134,25 @@ def test_free_text_event_messages_are_replaced() -> None:
     for event in ("customer 078-05-1120 processed", "Probe Person", "pan_4111111111111111", 42):
         out = _drop_value_fields(None, "info", {"event": event})
         assert out == {"event": "event_redacted"}, event
+
+
+def test_m1_fields_are_allowed_and_values_still_dropped() -> None:
+    out = _drop_value_fields(
+        None,
+        "info",
+        {
+            "event": "document_processed",
+            "pages": 3,
+            "boxes": 9,
+            "ocr_pages": 2,
+            "text": "Ananya",
+            "value": "x",
+        },
+    )
+    assert out == {"event": "document_processed", "pages": 3, "boxes": 9, "ocr_pages": 2}
+
+
+def test_third_party_loggers_are_capped() -> None:
+    configure_logging("DEBUG", json_output=True)
+    assert logging.getLogger("pdfminer").level == logging.ERROR
+    assert logging.getLogger("httpx").level == logging.WARNING
