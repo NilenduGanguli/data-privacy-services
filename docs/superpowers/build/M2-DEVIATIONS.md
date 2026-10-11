@@ -39,3 +39,27 @@ otherwise.
   module-level `TypeVar` (ruff UP047 under `target-version = "py312"`); same signature for callers.
 - `dps/secrets.py`: `SECRET_FILES` is documented and laid out one name per line; slices formatted by
   `ruff format`. Behaviour as planned.
+
+## Task 3 — Metadata DB service, roles, scratch clusters, service fixtures
+
+- `docker-compose.yml`: `dps-db` publishes `127.0.0.1:${DPS_DB_PORT:-5441}:5432` (plan: literal
+  `5441`). Why: contract §0 amendment 2026-10-12. The `app` mapping was already lane-safe (M0 fix).
+- `docker-compose.yml`: the `dps-db` healthcheck is `pg_isready -h 127.0.0.1 -U postgres -d dps`
+  (plan/contract table: without `-h`). Why: the postgres image runs `docker-entrypoint-initdb.d`
+  against a temporary server that listens on the unix socket only; a socket probe reports healthy
+  before `01_roles.sql` has created the roles and the `dps` database, a TCP probe does not.
+  Same command and same intent, closes a first-boot race.
+- `tools/scratch_pg.sh`: ports come from `${DPS_DB_PORT:-5441}` / `${DPS_SOURCE_PG_PORT:-5442}` and
+  each cluster's data directory is `$BASE/<name>-<port>` (plan: literal ports, `$BASE/<name>`). Why:
+  lane-safe amendment; two lanes on one host would otherwise share (and re-init) one data
+  directory. `psql` gets `-d postgres` explicitly; an unknown cluster name exits 2; `shellcheck`
+  clean. Verified on private ports (55441) with `tests/db/test_service.py` green, then stopped and
+  removed.
+- `tests/fixtures/services.py`: `SERVICES` entries carry `(port variable, contract port)` and a
+  `{port}` template; `service_url` returns `DPS_TEST_*` when set (non-empty), else builds the
+  default from the `DPS_*_PORT` variable, else the contract port (plan: literal defaults). Why:
+  contract §12.2 + amendment. The skip/fail message names the service and start command, never the
+  URL (it may carry a password). New unit test `tests/test_service_urls.py` (8 tests) pins the
+  precedence; contract ports are asserted only with both variables unset.
+- `HANDOFF.md` §3: services table with `dps-db`, the scratch-cluster command and the `db` test
+  variables; §4 compose-only variables gain `DPS_DB_PORT`.

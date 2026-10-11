@@ -6,6 +6,8 @@ import pytest
 
 from dps.config import Settings
 
+pytest_plugins = ["tests.fixtures.services", "tests.fixtures.db", "tests.fixtures.sources"]
+
 
 @pytest.fixture
 def settings() -> Settings:

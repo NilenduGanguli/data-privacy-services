@@ -54,8 +54,20 @@ python tools/smoke_test.py            # waits for /health (DPS_SMOKE_WAIT_SECOND
 docker compose down
 ```
 
-One service, `app` (image `data-privacy-services:${DPS_IMAGE_TAG:-local}`), port
-`127.0.0.1:${DPS_APP_PORT:-8400}:8400`.
+Services (host ports bind `127.0.0.1` only):
+
+| Service | Image | Host port → container | Notes |
+|---|---|---|---|
+| `app` | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | `${DPS_APP_PORT:-8400}` → 8400 | console + API |
+| `dps-db` (M2) | `postgres:16-alpine` | `${DPS_DB_PORT:-5441}` → 5432 | metadata DB; `docker/dps-db/initdb/01_roles.sql` creates the contract roles (`dps_owner`, `dps_app_rw`, `dps_worker`, `dps_app`, `dps_worker_login`; local passwords = role name) and the `dps` database (owner `dps_owner`, timezone UTC) on first start; volume `dps-db-data`; superuser `postgres`/`postgres` (local only); healthy once `pg_isready -h 127.0.0.1 -d dps` answers |
+
+`docker compose up -d dps-db` starts the metadata database alone (the `db` tests need nothing else).
+Without Docker, `tools/scratch_pg.sh start meta` runs a Homebrew PostgreSQL 16 cluster on
+`${DPS_DB_PORT:-5441}` with the same roles (trust auth, timezone UTC, data under
+`${DPS_SCRATCH_DIR:-~/.cache/dps-scratch-pg}/meta-<port>`); `stop` and `status` likewise. `db`
+tests find the server through `DPS_TEST_PG_DSN` (default
+`postgresql://postgres:postgres@127.0.0.1:${DPS_DB_PORT:-5441}/postgres`); without it they skip,
+and with `DPS_TEST_REQUIRE_SERVICES=1` they fail.
 Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,
@@ -146,8 +158,8 @@ Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`.
 
 Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
-(default `local`) and the host-port variables `DPS_APP_PORT` (8400; the others arrive with their
-services, §3 "Lane-safe stacks").
+(default `local`) and the host-port variables `DPS_APP_PORT` (8400), `DPS_DB_PORT` (5441; the others
+arrive with their services, §3 "Lane-safe stacks").
 
 ## 5. Probes and ops surfaces
 

@@ -1,7 +1,9 @@
-# Local stack for M0: the app alone (Layer 1 is stateless). M1 adds the Azure OCR mock, M2 Postgres
-# (job metadata), a worker and source databases, M3 Oracle Free and MongoDB, M4 the browser worker.
+# Local stack: the app (Layer 1 is stateless) and, from M2, the metadata Postgres `dps-db`. M1 adds
+# the Azure OCR mock, M2 also a worker and source databases, M3 Oracle Free and MongoDB, M4 the
+# browser worker.
 #
 #   docker compose up --build -d       # console + API on http://127.0.0.1:8400 (DPS_APP_PORT to move it)
+#   docker compose up -d dps-db        # metadata Postgres alone on 127.0.0.1:5441 (DPS_DB_PORT)
 #   python tools/smoke_test.py         # end-to-end checks against it (waits for /health)
 #   docker compose down
 #
@@ -63,3 +65,35 @@ services:
       app: data-privacy-services
       component: api
       env: local
+
+  # Metadata database (M2, contract §2.3/§11). 01_roles.sql creates the contract roles and the `dps`
+  # database on first start (empty volume); migrations run as dps_owner (`python -m dps.migrate`).
+  # Superuser postgres/postgres is a local-only demo literal.
+  dps-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+    command: ["postgres", "-c", "max_connections=200", "-c", "timezone=UTC"]
+    ports:
+      - "127.0.0.1:${DPS_DB_PORT:-5441}:5432"
+    volumes:
+      - dps-db-data:/var/lib/postgresql/data
+      - ./docker/dps-db/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1: the image's init-time server listens on the unix socket only, so the check
+      # turns healthy after 01_roles.sql has created the roles and the dps database.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d dps"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 768m
+    labels:
+      app: data-privacy-services
+      component: metadata-db
+      env: local
+
+volumes:
+  dps-db-data: {}
