@@ -39,3 +39,14 @@ are preserved unless a section says otherwise.
   `hide_input_in_errors=False`).
 - Count: the plan's expected "14 passed" is an arithmetic slip; the plan's own tests total 16
   (1 package + 7 config + 8 posture); with the added test, 17.
+
+## Task 3 — Observability
+
+- `dps/observability.py`: `_drop_value_fields` is typed with `structlog.typing.EventDict`
+  (`MutableMapping[str, Any]`) for the event dict and return value instead of `dict[str, Any]`.
+  Why: mypy rejected the plan's signature as a structlog processor (`list-item` error: structlog's
+  `Processor` type takes a `MutableMapping`). Behaviour is identical; the test still passes a dict.
+- `tests/test_observability.py`: added `test_configured_pipeline_drops_values_end_to_end`, which
+  configures the real structlog pipeline, logs `value=` and `token=` fields and asserts neither
+  reaches stdout while `entity_type` does. Why: the plan only unit-tested the processor; this proves
+  it is wired into `configure_logging`.
