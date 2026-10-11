@@ -21,7 +21,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | Artefact | Kind | Notes |
 |---|---|---|
 | `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001** |
-| `dps` package | Python 3.12 | Layer 1 engine + API; extras `fpe` (baked in), `ner` (build-arg `WITH_NER=1`), `vertex` |
+| `dps` package | Python 3.12 | Layer 1 engine + API; extras `fpe` and `docs` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex` |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | 13 end-to-end checks against a running stack; prints verdicts, never bodies |
 
@@ -37,7 +37,7 @@ Tag semver + git sha. No database, no volumes in M0. The image:
 
 - stage 1 `node:22-slim`: `npm ci` (lockfile only, no `npm install` fallback) + `npm run build`;
 - stage 2 `python:3.12-slim`: `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
-  `uv pip install --system --no-cache -e ".[fpe]"` (`.[fpe,ner]` + `en_core_web_sm` when `WITH_NER=1`),
+  `uv pip install --system --no-cache -e ".[fpe,docs]"` (`.[fpe,docs,ner]` + `en_core_web_sm` when `WITH_NER=1`),
   the console dist at `/app/frontend/dist`;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
   (15 s interval, 15 s start period);
@@ -110,15 +110,15 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_COIN_TLS_INSECURE` | `false` | `true` skips TLS verification **on the COIN token mint only** (the VDI's intercepting proxy); logs one `coin_tls_insecure` warning at startup and `/readyz` reports `coin_tls: insecure`; Stellar API calls still verify |
 | `DPS_ALLOW_INSECURE_COIN_MINT` | `false` | the documented VDI exception: staging/prod refuse `DPS_COIN_TLS_INSECURE=true` unless this is `true` too |
 | `DPS_VERTEX_PROJECT` / `DPS_VERTEX_LOCATION` | — / `global` | laptop path; needs the `vertex` extra and ADC |
-| `DPS_MAX_PAYLOAD_MB` / `DPS_MAX_TEXT_CHARS` / `DPS_MAX_ITEMS` | 8 / 1,000,000 / 10,000 | 413 beyond (body bytes by header or while streaming; text characters; JSON leaf values) |
+| `DPS_MAX_PAYLOAD_MB` / `DPS_MAX_TEXT_CHARS` / `DPS_MAX_ITEMS` | 8 / 1,000,000 / 10,000 | 413 beyond (JSON-route body bytes by header or while streaming, `payload_too_large`; text characters, documents' canonical text included; JSON leaf values) |
 | `DPS_RATE_LIMIT_ENABLED` / `_RPS` / `_BURST` | `true` / 50 / 100 | token bucket per API key, per process; 429 + `Retry-After` |
 | `DPS_AUDIT_ENABLED` | `true` | `false` only locally; refused in staging/prod |
 | `DPS_OCR_PROVIDER` | `""` | M1 documents: `""`/`off` (no OCR), `azure` (Read v3.2: the compose mock, the org gateway, Azure), `tesseract`, `auto` (the last two behave as `off` until M1 Task 19C); staging/prod with `azure` need a key and an `https` endpoint |
 | `DPS_AZURE_VISION_ENDPOINT` / `DPS_AZURE_VISION_KEY` | — | Read v3.2 base URL (locally `http://127.0.0.1:${DPS_OCR_PORT:-5016}`, in compose `http://azure-ocr-mock:5000`) and its `Ocp-Apim-Subscription-Key`; prefer `DPS_AZURE_VISION_KEY_FILE` |
 | `DPS_OCR_TIMEOUT_SECONDS` / `DPS_OCR_POLL_INTERVAL_SECONDS` | 60 / 0.5 | one OCR call (analyze + polls) / poll spacing |
 | `DPS_OCR_HEALTH_PATH` / `DPS_OCR_PROBE_INTERVAL_SECONDS` | `/health` / 30 | readiness probe of the OCR endpoint (`/_gw/health` behind azure-gateway-api; `""` = no probe; interval `0` = once at startup) |
-| `DPS_OCR_MAX_CONCURRENCY` / `DPS_OCR_MIN_TEXT_CHARS` / `DPS_OCR_IMAGE_COVERAGE` | 4 / 20 / 0.25 | parallel OCR calls; a PDF page with fewer text-layer characters, or images covering this share of it, is OCR'd under `ocr: auto` |
-| `DPS_MAX_DOCUMENT_MB` / `DPS_MAX_DOCUMENT_PAGES` / `DPS_PDF_RENDER_DPI` | 20 / 200 / 200 | upload limits (413 beyond) and the raster resolution of OCR and redaction; a PDF page that would render over 10,000 px a side (the Read v3.2 limit) at the higher of this and `DPS_PREVIEW_DPI` is refused with 413 `image_too_large` (3,600 pt at 200 dpi) |
+| `DPS_OCR_MAX_CONCURRENCY` / `DPS_OCR_MIN_TEXT_CHARS` / `DPS_OCR_IMAGE_COVERAGE` | 4 / 20 / 0.25 | parallel OCR calls; a PDF page with fewer text-layer characters, or images covering this share of it, is OCR'd under `ocr: auto`; when a redacted PDF is requested (and OCR is configured) every page carrying any image is OCR'd too, else the response warns `images_not_ocr_read` |
+| `DPS_MAX_DOCUMENT_MB` / `DPS_MAX_DOCUMENT_PAGES` / `DPS_PDF_RENDER_DPI` | 20 / 200 / 200 | upload limits (413 beyond: the `/api/v1/documents/*` body may be this + 1 MiB of multipart overhead, by header or while streaming, `payload_too_large`; the file itself, `document_too_large`) and the raster resolution of OCR and redaction; a PDF page that would render over 10,000 px a side (the Read v3.2 limit) at the higher of this and `DPS_PREVIEW_DPI` is refused with 413 `image_too_large` (3,600 pt at 200 dpi) |
 | `DPS_REDACT_IMAGE_FORMAT` / `DPS_REDACT_JPEG_QUALITY` / `DPS_REDACT_OCR_VERIFY` | `jpeg` / 85 / `true` | page rasters inside a redacted PDF (`jpeg` or `png`); re-read redacted pages with OCR when OCR is configured |
 | `DPS_PREVIEW_DPI` / `DPS_MAX_PREVIEW_PAGES` | 72 / 50 | console page previews |
 | `DPS_SCHEMA_MAX_ROWS` | 10,000 | rows per `/schema/synthesize` call |
@@ -137,14 +137,23 @@ services, §3 "Lane-safe stacks").
 - `GET /health` — liveness, `{"status": "ok"}`.
 - `GET /readyz` — `{"ready", "components"}` with `api-core`, `llm-gateway` (`provider`, `coin_tls`
   `verified` / `insecure`), `ner`
-  (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`); **503** only when a required
-  component is down, and only `api-core` is required in M0 (it turns false on shutdown).
+  (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`) and, from M1, `ocr`
+  (`up` / `down` / `down:<status>` / `error` / `unconfigured`, with `provider` and `engine`; probed at
+  startup and every `DPS_OCR_PROBE_INTERVAL_SECONDS` while OCR is configured; never required, since
+  JSON and text need no OCR); **503** only when a required component is down, and only `api-core`
+  is required (it turns false on shutdown).
 - `GET /metrics` — Prometheus: `dps_requests_total{route,outcome}`,
   `dps_request_seconds{route}`, `dps_findings_total{entity_type,detector}`,
   `dps_transforms_total{mode,method}`, `dps_llm_calls_total{provider,purpose,outcome}`,
-  `dps_verification_failures_total{mode}` and **`dps_llm_raw_pii_sent_total`, which must stay 0**.
+  `dps_verification_failures_total{mode}` and **`dps_llm_raw_pii_sent_total`, which must stay 0**;
+  M1 adds `dps_document_pages_total{format,source}`, `dps_redacted_boxes_total`,
+  `dps_ocr_calls_total{engine,outcome}` and `dps_ocr_seconds`.
 - Audit: one `audit` log line per engine request, rejections included (trace id, route, tenant, key
   id, mode, policy label, outcome, counts, methods, verification, duration — never a value or a key).
+  Document routes audit mode `document.detect|obfuscate|synthesize`; the outcome is the error code
+  when a document is refused (`encrypted_pdf`, `ocr_unavailable`, `leakage`, …), and the policy
+  is `-` when the `request` form field could not be parsed. The `document_processed` log line
+  carries counts only (format, pages, OCR pages, boxes, duration).
   The policy label is a shipped preset name, `unknown`/`invalid` for any other string, or
   `<preset|custom>+inline:<hash12>` for an inline policy (M1; never the inline body).
   Logs go to stdout through an allow-list of field names; outside `local` they are JSON.

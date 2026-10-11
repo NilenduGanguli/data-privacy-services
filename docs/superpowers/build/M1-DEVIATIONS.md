@@ -450,3 +450,58 @@ failed, 17 passed):
   passed, 2 skipped (lane OCR mock up). Live probe against the mock (not committed): scanned PDF,
   PNG, small-image and hybrid PDFs all redact with `ocr_checked: true`, `ocr_hits: 0`; the hybrid
   merge adds no duplicate words (16 = the text layer's 16).
+
+## Task 10 — Documents API, app wiring, OCR readiness loop
+
+The plan's router, tests and `create_app` changes are used, adapted to M0's `app.py` as built.
+
+- `dps/app.py` `_BodyLimit`: **M0's pure-ASGI middleware is extended** instead of the plan's
+  `BaseHTTPMiddleware` replacement. The plan's version checked only `Content-Length`, which would
+  have dropped M0's streaming check (a chunked body has no length; `test_body_limit_by_header_and_by_stream`
+  pins it). The middleware takes `max_bytes` and `document_max_bytes` (the plan's names), picks the
+  limit by path (`/api/v1/documents/*` → `max_document_bytes + DOCUMENT_MULTIPART_OVERHEAD`), and
+  both refusals now carry `"code": "payload_too_large"`: the `Content-Length` answer adds the code
+  to M0's body, and the streaming refusal raises `CodedHTTPException(413, "payload_too_large", …)`
+  instead of M0's uncoded `StarletteHTTPException` (FastAPI re-raises it from multipart parsing as
+  it does from JSON parsing; checked with a chunked 4 MB multipart upload in the test and with
+  `curl -H "Transfer-Encoding: chunked"` against a live uvicorn). The detail text is M0's.
+- `dps/app.py`: the startup probe and the loop both go through a private `_refresh_ocr`, which
+  catches any exception from a probe, marks the `ocr` component `{"ok": false, "detail": "error"}`
+  and logs `ocr_probe_error` with the exception's class name only. Why: the plan wrapped the loop
+  but called `refresh_ocr_readiness` bare at startup, so a probe that raised (a client double, an
+  unexpected `httpx` error type) would have failed the app's startup although OCR is never
+  required. Test: `test_a_probe_that_raises_at_startup_does_not_stop_the_app`.
+- `dps/app.py` lifespan: `api-core` is set to `stopping` inside the `finally` that also cancels the
+  probe loop and closes the OCR client (the plan's block, with M0's shutdown line moved into it).
+- `dps/layers/api/routers/documents.py` `_run`: the `request` JSON is parsed before
+  `run_engine` (to label the policy) but its refusal, and the upload read, are raised **inside**
+  `run_engine`'s call. Why: M0 audits every outcome, rejections included (`payload_from` runs
+  inside the call); the plan's router parsed and read outside it, so an invalid `request` field
+  or an oversized file was neither audited nor counted. The audited policy is `-` when the request
+  could not be parsed (its policy is unknown). Test: `test_rejections_are_audited_value_free`.
+  Response models and route functions gained one-line docstrings.
+- `Dockerfile` (not in the plan's Task 10 file list; Task 19 plans the same line): the runtime
+  installs `.[fpe,docs]` (`.[fpe,docs,ner]` under `WITH_NER=1`). Why: `dps.app` now imports the
+  document pipeline at startup (the plan's code does), so an image without the `docs` extra could
+  no longer start — the lane's compose stack would have been broken from this commit until Task 19.
+  Checked: `docker compose build app` (image `data-privacy-services:m1`), the container reaches
+  `healthy`, `/readyz` shows `ocr: unconfigured`, and inside the container a 2-page text PDF is
+  obfuscated with a redacted PDF (`passed`, 0 text characters, no SSN in the PDF or the result,
+  2 previews) while a scanned PDF answers 200 with `ocr_unconfigured` on detect and 503
+  `ocr_unconfigured` on redaction (compose has no OCR until Task 19).
+- `HANDOFF.md` (contract §0.6): §1/§2 the `docs` extra in the image, §4 the per-route body limits
+  and the redaction OCR rule of Task 9 (`images_not_ocr_read`), §5 the `ocr` readiness component,
+  the M1 metrics and the document audit modes and outcomes.
+- Tests added beyond the plan's 9 (+1 `ocr`): `test_body_limits_are_per_route` (JSON route still
+  1 MB, a 1.5 MB upload reaches the pipeline, a chunked 4 MB upload is a coded 413),
+  `test_rejections_are_audited_value_free`, `test_lifespan_probes_ocr_and_closes_the_client`,
+  `test_a_failed_probe_never_stops_the_loop` (a probe that raises, then `down`, then `up`),
+  `test_a_probe_that_raises_at_startup_does_not_stop_the_app`. `tests/test_api_documents_ocr.py`
+  also `importorskip`s `pdfplumber` (its fixtures need the `docs` extra).
+- Mock: compose has no `azure-ocr-mock` until Task 19, so the plan's pre-Task-19 command ran it in
+  the lane-safe form (`docker run -d --rm --name dps-ocr-dps-wt-m1 -p
+  "127.0.0.1:${DPS_OCR_PORT:-5016}:5000" document_intelligence-azure-ocr-mock:latest`); the test
+  reads `DPS_TEST_OCR_URL`.
+- Count: `tests/test_api_documents.py` 15 passed, `tests/test_api_documents_ocr.py` 1 passed;
+  `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m ocr` 2 passed; suite 776 → 791 passed, 2 skipped
+  (mock up).

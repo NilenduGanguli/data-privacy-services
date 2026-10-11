@@ -3,6 +3,9 @@
 Middleware order (outermost first): security headers → CORS → body-size guard → value-free
 error guard → FastAPI. Auth and rate limiting are per-route dependencies. The compiled console
 (``frontend/dist``) is served from the same process with a strict CSP, as in the sibling services.
+The body-size guard is per route: ``max_payload_mb`` for the JSON routes, ``max_document_mb`` plus
+1 MiB of multipart overhead for ``/api/v1/documents/*``. OCR readiness is probed at startup and,
+when OCR is configured, re-probed every ``ocr_probe_interval_seconds`` (never required).
 
 Nothing on the error paths quotes a request: 422 bodies list the field, the rule and the error
 type (never the input), and an unexpected exception becomes a 500 ``internal error`` with only its
@@ -11,6 +14,8 @@ class name logged — it never reaches the server's traceback log, which could q
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers, MutableHeaders
-from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from dps import __version__
@@ -34,7 +38,9 @@ from dps.layers.api.common import (
     CodedHTTPException,
     coded_http_exception_handler,
 )
-from dps.layers.api.routers import detect, ops, policies, transform
+from dps.layers.api.routers import detect, documents, ops, policies, transform
+from dps.layers.documents import DocumentPipeline
+from dps.layers.documents.ocr import OcrClient, build_ocr_client, refresh_ocr_readiness
 from dps.llm.gateway import get_gateway
 from dps.observability import READINESS, configure_logging, get_logger
 from dps.posture import assert_production_posture
@@ -47,6 +53,10 @@ CSP = (
     "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 )
 HSTS = "max-age=31536000; includeSubDomains"
+#: Room for the multipart envelope (boundaries, part headers, the ``request`` field) on top of
+#: ``max_document_mb``; the documents router re-checks the file itself while reading it.
+DOCUMENT_MULTIPART_OVERHEAD = 1 << 20
+DOCUMENTS_PREFIX = "/api/v1/documents/"
 
 
 class _SecurityHeaders:
@@ -74,25 +84,37 @@ class _SecurityHeaders:
 
 
 class _BodyLimit:
-    """413 for bodies over ``max_bytes`` — by ``Content-Length`` up front, or while streaming.
+    """413 ``payload_too_large`` for bodies over the route's limit — by ``Content-Length`` up
+    front, or while streaming.
 
-    A chunked body has no length header, so the receive channel counts bytes and raises an
-    ``HTTPException(413)`` once the limit is passed (FastAPI re-raises it from body parsing).
+    The limit is ``max_bytes`` for the JSON routes and ``document_max_bytes`` for
+    ``/api/v1/documents/*`` (multipart uploads). A chunked body has no length header, so the
+    receive channel counts bytes and raises a coded 413 once the limit is passed (FastAPI
+    re-raises an ``HTTPException`` from body parsing, JSON and multipart alike).
     """
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
-        self.app, self.max_bytes = app, max_bytes
+    def __init__(self, app: ASGIApp, *, max_bytes: int, document_max_bytes: int) -> None:
+        self.app, self.max_bytes, self.document_max_bytes = app, max_bytes, document_max_bytes
 
-    def _too_large(self) -> str:
-        return f"payload exceeds {self.max_bytes} bytes"
+    @staticmethod
+    def _too_large(limit: int) -> str:
+        return f"payload exceeds {limit} bytes"
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        limit = (
+            self.document_max_bytes
+            if str(scope.get("path", "")).startswith(DOCUMENTS_PREFIX)
+            else self.max_bytes
+        )
         length = Headers(scope=scope).get("content-length")
-        if length and length.isdigit() and int(length) > self.max_bytes:
-            await JSONResponse({"detail": self._too_large()}, status_code=413)(scope, receive, send)
+        if length and length.isdigit() and int(length) > limit:
+            response = JSONResponse(
+                {"detail": self._too_large(limit), "code": "payload_too_large"}, status_code=413
+            )
+            await response(scope, receive, send)
             return
         received = 0
 
@@ -101,8 +123,8 @@ class _BodyLimit:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
-                    raise StarletteHTTPException(status_code=413, detail=self._too_large())
+                if received > limit:
+                    raise CodedHTTPException(413, "payload_too_large", self._too_large(limit))
             return message
 
         await self.app(scope, counting_receive, send)
@@ -151,6 +173,23 @@ async def _validation_error(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": detail}, status_code=422)
 
 
+async def _refresh_ocr(ocr: OcrClient, settings: Settings) -> None:
+    """Probe OCR once. A probe that raises marks the component down (``error``) and logs the
+    exception's class name only; it never takes the app or the probe loop down."""
+    try:
+        await refresh_ocr_readiness(ocr, settings)
+    except Exception as exc:  # noqa: BLE001 - readiness is best effort; the name is enough
+        READINESS.set("ocr", False, "error", provider=settings.ocr_provider, engine=ocr.engine)
+        logger.warning("ocr_probe_error", engine=ocr.engine, error=type(exc).__name__)
+
+
+async def _ocr_probe_loop(ocr: OcrClient, settings: Settings) -> None:
+    """Re-probe OCR readiness forever; one failed probe never stops the loop."""
+    while True:
+        await asyncio.sleep(settings.ocr_probe_interval_seconds)
+        await _refresh_ocr(ocr, settings)
+
+
 class _HashedStatic(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
         response = await super().get_response(path, scope)
@@ -194,8 +233,12 @@ def create_app(
     *,
     engine: PrivacyEngine | None = None,
     audit_sink: AuditSink | None = None,
+    ocr_client: OcrClient | None = None,
 ) -> FastAPI:
-    """Build the app: posture check, key store, engine, middleware, routers, console.
+    """Build the app: posture check, key store, engine, OCR client, middleware, routers, console.
+
+    ``ocr_client`` replaces the client built from the settings (tests inject a double); the app
+    closes whichever client it uses when it stops.
 
     Raises:
         PostureError: staging/prod configuration violates the production posture.
@@ -208,6 +251,7 @@ def create_app(
     if engine is None:
         engine = PrivacyEngine(settings, gateway=get_gateway(settings))
     gateway = engine.gateway
+    ocr = ocr_client or build_ocr_client(settings)
     if settings.auth_enabled and not len(key_store):
         logger.warning("auth_no_keys", reason="DPS_API_KEYS and DPS_BOOTSTRAP_API_KEY are unset")
 
@@ -243,9 +287,28 @@ def create_app(
         READINESS.set(
             "fpe", engine.fpe_enabled, "ff1" if engine.fpe_enabled else "det_token fallback"
         )
-        logger.info("startup", env=settings.env, auth=settings.auth_enabled, provider=provider)
-        yield
-        READINESS.set("api-core", False, "stopping", version=__version__)
+        await _refresh_ocr(ocr, settings)
+        logger.info(
+            "startup",
+            env=settings.env,
+            auth=settings.auth_enabled,
+            provider=provider,
+            engine=ocr.engine,
+        )
+        probe = (
+            asyncio.create_task(_ocr_probe_loop(ocr, settings))
+            if ocr.configured() and settings.ocr_probe_interval_seconds > 0
+            else None
+        )
+        try:
+            yield
+        finally:
+            READINESS.set("api-core", False, "stopping", version=__version__)
+            if probe is not None:
+                probe.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await probe
+            await ocr.aclose()
 
     app = FastAPI(
         title="Data Privacy Services",
@@ -262,12 +325,18 @@ def create_app(
         settings.rate_limit_rps, settings.rate_limit_burst, enabled=settings.rate_limit_enabled
     )
     app.state.audit = audit_sink or (LogAuditSink() if settings.audit_enabled else NullAuditSink())
+    app.state.ocr = ocr
+    app.state.documents = DocumentPipeline(engine, settings, ocr)
     app.add_exception_handler(CodedHTTPException, coded_http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_error)
 
     # add_middleware prepends: the last one added is the outermost.
     app.add_middleware(_ValueFreeErrors)
-    app.add_middleware(_BodyLimit, max_bytes=settings.max_payload_bytes)
+    app.add_middleware(
+        _BodyLimit,
+        max_bytes=settings.max_payload_bytes,
+        document_max_bytes=settings.max_document_bytes + DOCUMENT_MULTIPART_OVERHEAD,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -280,5 +349,6 @@ def create_app(
     app.include_router(detect.router)
     app.include_router(transform.router)
     app.include_router(policies.router)
+    app.include_router(documents.router)
     _mount_frontend(app)
     return app

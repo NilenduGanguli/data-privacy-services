@@ -28,14 +28,16 @@ COPY dps ./dps
 # Editable on purpose: dps/app.py serves the console from <repo root>/frontend/dist, i.e.
 # /app/frontend/dist; a regular install would look under site-packages.
 # [fpe] is MIT-licensed fastfpe; FF1 is still gated at runtime by DPS_FPE_ENABLED (spec D8).
+# [docs] (M1) is required by the app: the documents routes import the pipeline at startup.
+# pypdfium2's manylinux wheel bundles PDFium; the other document libraries ship wheels too.
 # The [ner] extra (Presidio + spaCy models) is deliberately not baked in: pass --build-arg WITH_NER=1.
 # Without it, names in free text are found by their cues only, and reports state that gap
 # (report.verification.coverage, status "partial").
 ARG WITH_NER=0
 RUN if [ "$WITH_NER" = "1" ]; then \
-      uv pip install --system --no-cache -e ".[fpe,ner]" && python -m spacy download en_core_web_sm; \
+      uv pip install --system --no-cache -e ".[fpe,docs,ner]" && python -m spacy download en_core_web_sm; \
     else \
-      uv pip install --system --no-cache -e ".[fpe]"; \
+      uv pip install --system --no-cache -e ".[fpe,docs]"; \
     fi
 COPY --from=frontend /ui/dist ./frontend/dist
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
