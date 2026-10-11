@@ -4,6 +4,7 @@
 #
 #   docker compose up --build -d       # console + API on http://127.0.0.1:8400 (DPS_APP_PORT to move it)
 #   docker compose up -d dps-db        # metadata Postgres alone on 127.0.0.1:5441 (DPS_DB_PORT)
+#   docker compose --profile sources up -d source-pg   # demo source on 127.0.0.1:5442 (DPS_SOURCE_PG_PORT)
 #   python tools/smoke_test.py         # end-to-end checks against it (waits for /health)
 #   docker compose down
 #
@@ -95,6 +96,38 @@ services:
       component: metadata-db
       env: local
 
+  # Demo source database (M2, contract §11), profile `sources` (and `full`). 01_bank_schema.sql
+  # creates the `bank` database (10 tables in schema `bank`, target schemas bank_uat, bank_restore,
+  # bank_perf) and the local logins dps_reader/dps_writer (password = role name) on first start;
+  # rows come from tools/seed_sources.py. Superuser postgres/postgres is a local-only demo literal.
+  #   docker compose --profile sources up -d source-pg
+  source-pg:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+    command: ["postgres", "-c", "max_connections=200", "-c", "timezone=UTC", "-c", "shared_buffers=256MB"]
+    ports:
+      - "127.0.0.1:${DPS_SOURCE_PG_PORT:-5442}:5432"
+    volumes:
+      - source-pg-data:/var/lib/postgresql/data
+      - ./docker/source-pg/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1 as for dps-db: the init-time server listens on the unix socket only, so the
+      # check turns healthy after 01_bank_schema.sql has created the bank database.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d bank"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: source-db
+      env: local
+
   # Object storage for artefacts and `files` exports (M2, contract §11/§13), profile `sources` (and
   # `full`). minio-init is a one-shot that creates the buckets and exits 0. minioadmin/minioadmin is
   # a local-only demo literal; the console listens on ${DPS_MINIO_CONSOLE_PORT:-9011}.
@@ -143,4 +176,5 @@ services:
 
 volumes:
   dps-db-data: {}
+  source-pg-data: {}
   minio-data: {}

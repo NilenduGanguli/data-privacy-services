@@ -60,10 +60,14 @@ Services (host ports bind `127.0.0.1` only):
 |---|---|---|---|
 | `app` | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | `${DPS_APP_PORT:-8400}` → 8400 | console + API |
 | `dps-db` (M2) | `postgres:16-alpine` | `${DPS_DB_PORT:-5441}` → 5432 | metadata DB; `docker/dps-db/initdb/01_roles.sql` creates the contract roles (`dps_owner`, `dps_app_rw`, `dps_worker`, `dps_app`, `dps_worker_login`; local passwords = role name) and the `dps` database (owner `dps_owner`, timezone UTC) on first start; volume `dps-db-data`; superuser `postgres`/`postgres` (local only); healthy once `pg_isready -h 127.0.0.1 -d dps` answers |
+| `source-pg` (M2, profiles `sources`/`full`) | `postgres:16` | `${DPS_SOURCE_PG_PORT:-5442}` → 5432 | demo source; `docker/source-pg/initdb/01_bank_schema.sql` creates the `bank` database (schema `bank`: the 10 demo tables; `bank_uat`, `bank_restore`, `bank_perf` for table/in-place/append targets) and the local logins `dps_reader` (SELECT on `bank`) and `dps_writer` (owns the target schemas), password = role name, on first start; volume `source-pg-data`; superuser `postgres`/`postgres` (local only); healthy once `pg_isready -h 127.0.0.1 -d bank` answers |
 | `minio` (M2, profiles `sources`/`full`) | `minio/minio:latest` | `${DPS_MINIO_PORT:-9010}` → 9000, `${DPS_MINIO_CONSOLE_PORT:-9011}` → 9001 (console) | artefacts and `files` exports (`DPS_ARTEFACT_STORE=s3`); root user `minioadmin`/`minioadmin` (local only); volume `minio-data`; healthcheck `curl /minio/health/live` (the cached image ships curl) |
 | `minio-init` (M2, profiles `sources`/`full`) | `minio/mc:latest` | — | one-shot after `minio` is healthy: creates buckets `dps-artefacts` and `dps-exports`, exits 0 |
 
 `docker compose up -d dps-db` starts the metadata database alone (the `db` tests need nothing else).
+`docker compose --profile sources up -d source-pg` starts the demo source for the `pg_source` tests
+(`DPS_TEST_SOURCE_PG_DSN`, default `postgresql://postgres:postgres@127.0.0.1:${DPS_SOURCE_PG_PORT:-5442}/bank`;
+each test works in its own `t_<hex>` schema and drops it).
 `docker compose --profile sources up -d minio minio-init` starts object storage for the `s3` tests
 (`DPS_TEST_S3_ENDPOINT`, default `http://127.0.0.1:${DPS_MINIO_PORT:-9010}`, bucket `dps-artefacts`).
 Without Docker, `tools/scratch_pg.sh start meta` runs a Homebrew PostgreSQL 16 cluster on
@@ -173,7 +177,7 @@ Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.
 
 Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
 (default `local`) and the host-port variables `DPS_APP_PORT` (8400), `DPS_DB_PORT` (5441),
-`DPS_MINIO_PORT` (9010), `DPS_MINIO_CONSOLE_PORT` (9011; the others arrive with their services, §3
+`DPS_SOURCE_PG_PORT` (5442), `DPS_MINIO_PORT` (9010), `DPS_MINIO_CONSOLE_PORT` (9011; the others arrive with their services, §3
 "Lane-safe stacks").
 
 ## 5. Probes and ops surfaces
@@ -270,6 +274,15 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   `TO_DATE(:l1, 'YYYY-MM-DD')` and intervals as `NUMTODSINTERVAL(:l1, 'DAY')`; those format/unit
   strings are the only literals left in a compiled selection (plus `ORDER BY` positions and type
   parameters).
+- PostgreSQL sources (M2, `dps/layers/connectors/postgres.py`): every read runs in `BEGIN READ ONLY` on a
+  session with `statement_timeout` = `DPS_CONNECTOR_STATEMENT_TIMEOUT_SECONDS`, `lock_timeout=5s` and
+  `application_name = dps:<action>:<job id>` (what a DBA sees in `pg_stat_activity`). Bind values are
+  coerced by the prepared statement's parameter types (a JSON string for a `date` column works; one
+  that is not a date fails with `selection_param_invalid`, no value in the message). A refused login
+  is `connection_failed` and not retried; network failures are. The connection test's advisory
+  `no_sql_string_functions` counts SQL-string/export functions (`dblink*`, `xpath_table`,
+  `pg_background_launch`, `aws_s3.query_export_to_s3`, …) the source login can execute: give the
+  source login none.
 - Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py` (see
   "Lane-safe stacks", §3).
 - Synthesis under a `strict` policy is still refused, rarely, when a reshaped identifier (a keyed

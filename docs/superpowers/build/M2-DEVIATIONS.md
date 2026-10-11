@@ -548,3 +548,64 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   known SQL-string or exfiltration functions (`dblink_exec`, `xpath_table`, `crosstab`,
   `ts_stat`, `query_to_xml`, `pg_background_launch`, `aws_s3.query_export_to_s3`), and a contract
   amendment could move §5.2 to a function allow-list for `where`/`query`.
+
+## Task 15 — PostgreSQL connector (read side) and `source-pg`
+
+- `docker-compose.yml` `source-pg`: publishes `127.0.0.1:${DPS_SOURCE_PG_PORT:-5442}:5432` (plan:
+  literal 5442; contract §0 amendment 2026-10-12) and its healthcheck is `pg_isready -h 127.0.0.1
+  -U postgres -d bank` (plan: without `-h`), for the reason recorded at Task 3: the image's
+  init-time server listens on the unix socket only, and `pg_isready` answers "accepting" even
+  for a database that does not exist yet, so a socket probe turns healthy before
+  `01_bank_schema.sql` has created `bank`. Labels as on the other services.
+- `dps/layers/connectors/postgres.py`, sessions: `sslmode` `prefer`/`allow` are passed to asyncpg
+  as those modes (try TLS, fall back), where the plan's `_ssl` returned `False` (never TLS) for
+  the default `prefer`. An unknown `sslmode` is `connection_invalid`; a `sslrootcert_ref` that
+  does not resolve is `secret_unavailable` (plan: a raw `SecretUnavailable`).
+- Login refusals are not retryable: `InvalidAuthorizationSpecificationError` (wrong password, no
+  such role), `InvalidCatalogNameError` (no such database) and `ssl.SSLError` raise
+  `connection_failed` with `retryable=False`; network failures stay retryable (plan: every open
+  failure retryable, so a wrong password would have been retried until dead-lettered).
+- `_fetch`: the retryable classes are matched before `PostgresError` (`TooManyConnectionsError`
+  and `CannotConnectNowError` are `PostgresError`s, so the plan's order made them non-retryable);
+  `UndefinedTableError` → `object_not_found`; a bind value that does not parse as its parameter
+  type → **new code `selection_param_invalid`** (not retryable, value-free; the plan let the
+  `ValueError` from `coerce_bind` escape unmapped). A selection whose compiled binds name a
+  parameter without a value is `selection_param_missing` (existing code; the plan's
+  `params[name]` raised a `KeyError` carrying the bind name).
+- `coerce_bind`: booleans accept `true/t/1/yes/y/on` and `false/f/0/no/n/off`, anything else is
+  an error (plan: any other text silently became `False`); a non-integral float for an integer
+  parameter is an error (plan: truncated). Plan parametrised cases unchanged.
+- `sample_keys`: the step comes from the size of the **bounded** set in the same query
+  (`count(*) OVER ()` beside `row_number()`), where the plan counted the whole selection without
+  `upper` first. With a global upper bound (`max_rows`), the plan returned about
+  `n × bounded/total` keys instead of `n` (25 of 50 in its own test); the test now also asserts at
+  least 40. One scan instead of two.
+- Keyset methods (`read_partition`, `sample_keys`, `key_at_offset`) refuse a shape without a key
+  with `no_key` (contract prepare-time code; the plan would have built SQL with an empty key
+  list). `select_sql` emits no `ORDER BY` for a keyless shape (`count`/`sample` still work).
+- `describe` only sees tables (`relkind IN ('r','p')`) the login can `SELECT`; anything else is
+  `object_not_found`, matching the message. `read_transaction` raises `RuntimeError` when the
+  connector is not open (plan: `assert`, removed under `python -O`).
+- `test()`: opens the connector itself when needed (a refused login returns `ok=False,
+  error_code="connection_failed"` as the plan specifies, without raising); a missing source table
+  fails `select_source` (`detail="missing"`); target checks run when an object and a write mode
+  are given. **Added advisory check `no_sql_string_functions`** (count of executable `dblink*`,
+  `crosstab*`, `connectby`, `xpath_table`, `pg_background_launch`, `query_export_to_s3`): the
+  recommendation recorded under "Review G3 r2 fixes" — the selection validator refuses these
+  functions, but a source login able to run them is not least-privilege.
+- `writer()` is a stub raising `ConnectorError("engine_unavailable")` until Task 19, so
+  `PostgresConnector` satisfies the `Connector` protocol for `mypy` (the registry returns it as
+  one).
+- `tests/fixtures/sources.py`: `SourcePg` also exposes `host`/`port`/`database` (from the DSN); the
+  fixture drops the schema with `IF EXISTS` in `finally`. Fixture names and helpers as planned.
+- Tests: the plan's 13 offline + 6 integration, plus offline
+  `test_single_column_keys_compare_scalars`, `test_tablesample_applies_to_tables_only`,
+  `test_identifiers_are_validated_before_interpolation`, `test_coerce_bind_more_types`,
+  `test_kinds_cover_the_common_types`; integration `test_string_binds_are_coerced_by_parameter_type`,
+  `test_query_selection_reads_through_the_wrapped_query`,
+  `test_sql_string_functions_are_reported_as_advisory` (creates `tablefunc` in the test schema;
+  the schema drop removes it), and extra assertions in the plan's tests (listing, whole-range
+  read, `max_rows`/projection, the `dps_writer` target checks, a refused login is not retryable
+  and `test()` reports it without raising): 18 offline + 9 integration = 27 (plan: 19).
+- `HANDOFF.md`: §3 `source-pg` row, start command and `DPS_TEST_SOURCE_PG_DSN`; §4
+  `DPS_SOURCE_PG_PORT`; §8 the read-session rules and the advisory check.
