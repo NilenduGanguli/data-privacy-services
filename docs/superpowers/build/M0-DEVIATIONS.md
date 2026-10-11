@@ -308,3 +308,41 @@ are preserved unless a section says otherwise.
 - The real-Presidio test (`@pytest.mark.ner`) skips because the `[ner]` extra and spaCy models
   are not installed in this venv; the plan expects that skip.
 - Count: the plan's "3 passed, 1 skipped" + 2 added = 5 passed, 1 skipped; suite 139 passed, 1 skipped.
+
+## Task 10 — Custom recognizers and declared fields (tier T4)
+
+- `dps/engine/detect/custom.py`, declared-field globs: paths are matched by a new public helper
+  `path_glob(pattern)`. In it, `[*]` means any array index, `*` means any run of characters
+  inside one dotted name, and everything else is literal. The plan used `fnmatch.fnmatchcase`.
+  Why: in fnmatch `[*]` is a character class matching a literal `*`, so the plan's own test
+  (`$.accounts[*].iban` vs `$.accounts[3].iban`) returned `None`. Every JSON path with an index
+  or quoted key (`[0]`, `['k']`) also misread as a character class. Exact paths still match by
+  equality first.
+- `RecognizerSpec` and `DeclaredField` refuse `sensitivity` on a **built-in** entity type at
+  validation time (`ValueError`, "sensitivity cannot be set for built-in entity type …"). Why:
+  this is the Task 10 follow-up recorded under Fix round 1 / B2. Since that fix,
+  `register_entity` raises for built-ins. Without the validator, a policy that set `sensitivity`
+  on `IBAN` would pass policy validation and then raise inside the request, mapped to a 500. A
+  policy validation error is a 400. A built-in type *without* `sensitivity` is still accepted.
+- The `PatternSpecModel`, `RecognizerSpec` and `DeclaredField` configs add
+  `hide_input_in_errors=True`. The regex error reads `invalid regex: <re.error>` without the
+  pattern text. Why: deny-list terms and patterns are often the sensitive terms themselves (code
+  names, VIP names). Pydantic's model-level errors otherwise echo the whole input, deny list
+  included; this was verified, and the same flag closed the matching settings leak in Task 2.
+- `RecognizerSpec.deny_list` refuses blank entries, and `scan` skips zero-length regex matches.
+  Why: a pattern like `\d*` or a deny-list entry `""` produced empty hits at every position. In
+  an empty leaf such a hit counts as a whole-value finding, and downstream an empty span would
+  insert a token into the text.
+- Small additions:
+  - `DENY_LIST_SCORE = 0.9` is now a named constant (same value);
+  - the context window is built with an f-string;
+  - `custom_detector_from` checks `isinstance` first;
+  - docstrings were added to the public classes and methods.
+- Tests added:
+  - `test_declared_globs_follow_json_path_syntax`;
+  - `test_sensitivity_on_a_builtin_entity_is_refused_at_validation`;
+  - `test_validation_errors_never_echo_policy_terms`;
+  - `test_empty_matches_and_blank_deny_entries_never_become_hits`.
+
+  All four were red before the change.
+- Count: the plan's 4 + 4 added = 8 in the file; suite 147 passed, 1 skipped.
