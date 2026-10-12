@@ -32,7 +32,8 @@ name in free text is found only next to a cue (title, "name is", contact details
 swept without NER is reported as a gap and the verdict is ``partial``, not ``passed``. Some types
 have no free-text detector at all — they are recognised only by the JSON key or column that names
 them (a CVV, a voter id, a street address): free text is reported as a gap for them too, naming
-every such type (:func:`field_name_only_entities`), with NER on or off.
+every such type (:func:`field_name_only_entities`), with NER on or off; and for the types it
+finds in text only next to their label (an account number, a customer id, an address line).
 ``status`` is ``failed`` (an original was found), ``partial`` (none found, coverage has gaps) or
 ``passed`` (none found, no gaps); ``passed`` stays the plain "no hits" flag.
 """
@@ -47,7 +48,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from dps.engine.detect.ner_presidio import NER_ENTITIES, PRESIDIO_TO_DPS
-from dps.engine.detect.patterns import CATALOGUE
+from dps.engine.detect.patterns import CATALOGUE, LABEL_ONLY_TEXT_ENTITIES
 from dps.engine.detect.structural import structural_entities
 from dps.engine.findings import Finding
 from dps.engine.jsonpath import flatten, get_path
@@ -89,6 +90,23 @@ def field_name_only_entities(*, ner: bool, text_entities: Iterable[str] = ()) ->
     if ner:
         found |= NER_TEXT_ENTITIES
     return tuple(sorted(structural_entities() - found))
+
+
+#: The start of the gap statement for the types free text shows only next to their label.
+LABEL_ONLY_GAP_PREFIX = "types found inside free text only next to their label"
+
+
+def label_only_entities(*, text_entities: Iterable[str] = ()) -> tuple[str, ...]:
+    """The types free text shows only next to a label, less a policy's custom recognizers."""
+    return tuple(sorted(LABEL_ONLY_TEXT_ENTITIES - frozenset(text_entities)))
+
+
+def label_only_gap(entities: Iterable[str]) -> str:
+    """The gap statement for labelled-only ``entities`` (type names only, never a value)."""
+    return (
+        f"{LABEL_ONLY_GAP_PREFIX} (A/c, Account no., Customer ID, CIF or CUST-, a line that "
+        "starts Address:), not on their own: " + ", ".join(entities)
+    )
 
 
 def name_only_gap(entities: Iterable[str]) -> str:
@@ -212,6 +230,7 @@ def assess_coverage(
     detectors: list[str],
     ner: NerState,
     name_only: Iterable[str] | None = None,
+    label_only: Iterable[str] | None = None,
 ) -> Coverage:
     """What the sweep could see for this input (counts and fixed statements, never a value).
 
@@ -220,7 +239,9 @@ def assess_coverage(
     nothing; one kept in clear, or with span findings only, still could). Without NER (off or
     failed to load), free text is a gap: a name there without a cue is never detected. Free text
     is also a gap for every type recognised only by a field name (``name_only``; by default
-    :func:`field_name_only_entities` for this NER state), and the statement names them all.
+    :func:`field_name_only_entities` for this NER state), and for the types found in text only
+    next to their label (``label_only``; by default :func:`label_only_entities`); each statement
+    names them all.
     """
     if text is not None:
         free = 1 if _free_text(text, 1) else 0
@@ -241,6 +262,9 @@ def assess_coverage(
     )
     if free and unseen:
         gaps.append(name_only_gap(unseen))
+    labelled = tuple(label_only_entities() if label_only is None else sorted(label_only))
+    if free and labelled:
+        gaps.append(label_only_gap(labelled))
     return Coverage(
         detectors=detectors, ner=ner, free_text_fields=free, complete=not gaps, gaps=gaps
     )

@@ -98,6 +98,9 @@ _ADDRESS_VALUE = (
     rf"(?m:(?=[ \t]*[,;]?[ \t]*{_POSTAL_CUE}|[ \t]*$))"
 )
 LABEL_SCORE = 0.95
+#: Types free text shows only next to their label (an account number alone is just a number; a
+#: customer id also by its ``CUST-``/``CIF`` prefix): the coverage gaps name them.
+LABEL_ONLY_TEXT_ENTITIES = frozenset({"ACCOUNT_NUMBER", "CUSTOMER_ID", "STREET_ADDRESS"})
 
 CATALOGUE: tuple[PatternSpec, ...] = (
     _p(

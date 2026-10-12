@@ -65,6 +65,7 @@ from dps.engine.verify import (
     assess_coverage,
     collect_originals,
     field_name_only_entities,
+    label_only_entities,
     verify_output,
 )
 from dps.llm.gateway import LlmGateway
@@ -445,6 +446,7 @@ class PrivacyEngine:
             *(["custom"] if detector.custom is not None else []),
         ]
         kept = _kept(plan)
+        custom_text: frozenset[str] = getattr(detector.custom, "text_entities", frozenset())
         coverage = assess_coverage(
             data=payload.data,
             text=payload.text,
@@ -452,10 +454,8 @@ class PrivacyEngine:
             kept=kept,
             detectors=detectors,
             ner=ner,
-            name_only=field_name_only_entities(
-                ner=ner == "on",
-                text_entities=getattr(detector.custom, "text_entities", frozenset()),
-            ),
+            name_only=field_name_only_entities(ner=ner == "on", text_entities=custom_text),
+            label_only=label_only_entities(text_entities=custom_text),
         )
         source = payload.text if payload.text is not None else payload.data
         verification = verify_output(originals, output, kept=kept, coverage=coverage, source=source)

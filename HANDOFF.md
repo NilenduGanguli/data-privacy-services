@@ -744,7 +744,7 @@ the M1 version; `v0.1.0-m2` is M2's lane tag).
 
 ### 11.1 Integrated verification r1 fixes (2026-10-12)
 
-`fix(integrate)` on top of `88eae2e`. Both findings were reproduced first (the new tests fail on the
+Two `fix(integrate)` commits on top of `88eae2e`. Both findings were reproduced first (the new tests fail on the
 `88eae2e` tree: 6/6 in `tests/connectors/test_demo_pii_survival.py`; the statement text finds only
 one name).
 
@@ -781,19 +781,21 @@ one name).
   (`STREET_ADDRESS`, to a `PIN code`/`Postcode`/`ZIP` cue or the line end); a labelled hit is
   decisive over a checksum shape inside it. Names after a `NEFT/IMPS/RTGS/UPI/NACH/ACH /` narration
   are a name cue. The coverage gaps of a verification now also name every type recognised only by
-  a field name (`types recognised only by a field name …`). The eval corpus has free-text account
+  a field name (`types recognised only by a field name …`) and the types free text shows only
+  next to their label (`types found inside free text only next to their label …`: account
+  numbers, customer ids, addresses). The eval corpus has free-text account
   numbers and customer ids, and the committed report an *In free text* table (`ACCOUNT_NUMBER`
   85/85, `CUSTOMER_ID` 70/70). Page 2 (and page 1's address) of the redacted scan re-read by OCR:
   0 findings.
 
 **Gates (final image, `down -v` then `up -d --build`, all profiles).** `ruff format --check` /
-`ruff check` on `dps tests tools` (251 files) · `mypy dps` (103 files) · `pytest -q` 1664 passed, 4
+`ruff check` on `dps tests tools` (251 files) · `mypy dps` (103 files) · `pytest -q` 1665 passed, 4
 skipped (`tesseract` ×2 on the host, presidio, NER model; the tesseract file in the image: 8 passed)
 · M1 gate `-m "docs or ocr"` 139 passed, 2 skipped · M2 gate `-m "db or pg_source or s3"` 170 passed
-· resume-after-kill 6 passed · `npm run typecheck && npm test && npm run build` (42 node + 62 Vitest)
-· `DPS_SMOKE_REQUIRE_OCR=1 tools/smoke_test.py` 34/34 · `tools/demo_m2.py` 12 jobs passed, 0 orphans
-· `tools/console_check.py` 84/84 · `tests/console` + M2 log scan 40 passed · eval report and corpus
-regenerate byte-identically · compose logs: 0 demo or source values, 0 key material;
+(the 3 console tests among them) · resume-after-kill 6 passed · `npm run typecheck && npm test &&
+npm run build` (42 node + 62 Vitest) · `DPS_SMOKE_REQUIRE_OCR=1 tools/smoke_test.py` 34/34 ·
+`tools/demo_m2.py` 12 jobs passed, 0 orphans · `tools/console_check.py` 84/84 · eval report and
+corpus regenerate byte-identically · compose logs: 0 demo or source values, 0 key material;
 `dps_llm_raw_pii_sent_total 0`.
 
 **Traps (r1).**

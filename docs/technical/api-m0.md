@@ -141,7 +141,10 @@ NATIONAL_ID, ORG_NAME, VOTER_ID`; a policy's custom recognizers remove the types
 text). Account numbers and customer ids are found in text by their label (`A/c`, `Acct#`,
 `Account no.:`, `cuenta`; `Customer ID`, `Cust. No.`, `Client id`, `CIF`) and a `CUST-`/`CIF`
 prefix, and a postal address by a line that starts `Address:` (to a `PIN code` / `Postcode` /
-`ZIP` cue or the line end); a labelled hit is decisive over a checksum shape inside it. A detected name is also
+`ZIP` cue or the line end); a labelled hit is decisive over a checksum shape inside it. Because a
+bare number is not reported as an account, free text is a gap for these too: a third statement
+starts `types found inside free text only next to their label` and names `ACCOUNT_NUMBER,
+CUSTOMER_ID, STREET_ADDRESS` (less what a policy's recognizers find). A detected name is also
 checked part by part: a part of four or more characters that an output string holds more often than
 the input held it outside the detected names (`Krishnan` in a surrogate `Utkarsh Krishnan` for
 `Ananya Krishnan`) is a hit there, with entity type `PERSON_NAME`. Synthesis avoids such hits at the

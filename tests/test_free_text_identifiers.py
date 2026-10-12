@@ -13,10 +13,15 @@ from __future__ import annotations
 import pytest
 
 from dps.config import Settings
-from dps.engine.detect.patterns import scan_text
+from dps.engine.detect.patterns import CATALOGUE, LABEL_ONLY_TEXT_ENTITIES, scan_text
 from dps.engine.detect.structural import structural_entities
 from dps.engine.service import Payload, PrivacyEngine, RequestOptions
-from dps.engine.verify import NAME_ONLY_GAP_PREFIX, assess_coverage, field_name_only_entities
+from dps.engine.verify import (
+    LABEL_ONLY_GAP_PREFIX,
+    NAME_ONLY_GAP_PREFIX,
+    assess_coverage,
+    field_name_only_entities,
+)
 
 ENGINE = PrivacyEngine(
     Settings(_env_file=None, llm_provider="stub", ner_enabled=False, default_locale="en_IN")  # type: ignore[call-arg]
@@ -155,6 +160,10 @@ def test_coverage_names_every_type_recognised_by_field_name_only() -> None:
     )
     gap = next(g for g in cov.gaps if g.startswith(NAME_ONLY_GAP_PREFIX))
     assert all(entity in gap for entity in off) and not cov.complete
+    # found in text, but only next to a label: said so too
+    labelled = next(g for g in cov.gaps if g.startswith(LABEL_ONLY_GAP_PREFIX))
+    assert labelled.endswith("ACCOUNT_NUMBER, CUSTOMER_ID, STREET_ADDRESS")
+    assert LABEL_ONLY_TEXT_ENTITIES <= {s.entity_type for s in CATALOGUE if s.labelled}
 
 
 def test_structured_json_has_no_name_only_gap() -> None:
@@ -197,3 +206,32 @@ def test_a_line_labelled_address_is_a_street_address(text: str, value: str) -> N
 )
 def test_address_words_without_a_line_label_are_not_addresses(text: str) -> None:
     assert _spans(text, "STREET_ADDRESS") == []
+
+
+def test_a_policy_recognizer_that_finds_a_type_in_text_removes_it_from_the_gaps() -> None:
+    policy = {
+        "name": "bank-custom",
+        "detect": {
+            "custom_recognizers": [
+                {
+                    "name": "acct",
+                    "supported_entity": "ACCOUNT_NUMBER",
+                    "patterns": [{"name": "ten", "regex": r"\b\d{10}\b", "score": 0.7}],
+                },
+                {
+                    "name": "staff",
+                    "supported_entity": "EMPLOYEE_ID",
+                    "patterns": [{"name": "emp", "regex": r"\bEMP\d{6}\b", "score": 0.8}],
+                },
+            ]
+        },
+    }
+    out = ENGINE.obfuscate(
+        Payload(text="Reviewed by the branch team today."), policy, RequestOptions()
+    )
+    assert out.report.verification is not None and out.report.verification.coverage is not None
+    gaps = out.report.verification.coverage.gaps
+    name_only = next(g for g in gaps if g.startswith(NAME_ONLY_GAP_PREFIX))
+    labelled = next(g for g in gaps if g.startswith(LABEL_ONLY_GAP_PREFIX))
+    assert "EMPLOYEE_ID" not in name_only and "CVV" in name_only
+    assert labelled.endswith("CUSTOMER_ID, STREET_ADDRESS") and "ACCOUNT_NUMBER" not in labelled

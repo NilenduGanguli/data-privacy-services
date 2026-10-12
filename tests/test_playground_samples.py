@@ -29,7 +29,14 @@ from dps.engine.synth.personas import PersonaFactory
 from dps.engine.synth.surrogates import SurrogateEngine, SynthesisSeed
 from dps.engine.transform.apply import anchor_for
 from dps.engine.transform.crypto import b64u
-from dps.engine.verify import NER_GAP, field_name_only_entities, name_only_gap, normalise
+from dps.engine.verify import (
+    NER_GAP,
+    field_name_only_entities,
+    label_only_entities,
+    label_only_gap,
+    name_only_gap,
+    normalise,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = json.loads((ROOT / "frontend/src/lib/samples.json").read_text(encoding="utf-8"))
@@ -82,6 +89,7 @@ def test_text_sample_never_returns_the_name(client: Any, mode: str, policy: str)
     assert verification["coverage"]["gaps"] == [
         NER_GAP["off"],
         name_only_gap(field_name_only_entities(ner=False)),
+        label_only_gap(label_only_entities()),
     ]
 
 
