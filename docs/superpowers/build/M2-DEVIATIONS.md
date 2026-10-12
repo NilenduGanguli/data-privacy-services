@@ -1235,3 +1235,46 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   integer keys need it; skipped when the `fpe` extra is missing) and disables NER for determinism;
   it also asserts the partitions, `GET /jobs/stats` (`workers_online == 1`, the embedded worker),
   the artefact's `Content-Disposition`, and that the returned key never appears in a later answer.
+
+## Task 26 — Connector conformance suite and resume-after-kill tests
+
+- `tests/connectors/conformance.py` — the env protocol gains three members the engine-agnostic
+  suite needs: `make_table(…, key="none")` (the plan's "a table without a key" case had no key
+  kind to ask for), `insert(obj, rows)` (the append test needs keys that clash after the offset)
+  and `rejected_selections()` (the refused selections are engine syntax: SQL cases for PostgreSQL
+  and Oracle via `sql_rejected_selections()`, Mongo filters for M3's Mongo binding). Tables hold
+  `name`/`note` text columns with synthetic values; `make_table` keys are `id` = 1..rows,
+  `(a, b)` or a mixed-case `code` (a collation order that differs from Python's).
+- Tests, as specified, with these additions: keyset paging also resumes after a middle key
+  (`after_key`) and checks each batch's size; selection rejections also go through the
+  connector's `count` (refused before a query runs; the unknown-column case is a shape check only,
+  the connector has no shape-free way to know it); the in-place crash test checks the untouched
+  `note` column too and closes the partial reader explicitly; the no-values test also covers a
+  refused selection carrying a literal and a bound parameter; the append test checks the exact
+  ids after the write. 10 tests (plan: 10).
+- `tests/connectors/test_resume_after_kill.py`, per case (the plan left these open):
+  - **modes:** the table, in-place and files cases run obfuscate with one caller key; the two
+    append cases run **synthesize** with one caller seed (a same-table or offset append in
+    obfuscate would transform the key column before the offset, which `test_run_modes` does not do
+    either; synthesize keeps the key);
+  - **`table_upsert`:** the pre-created targets keep the source DDL, so the snapshot is reviewed
+    (`national_id` → `fpe_digits`, `tax_id` → `mask_partial`): a `det_token` cannot fit
+    `national_id varchar(18)` in an existing table (`length_overflow`, the Task 22 finding);
+  - **two copies per run** for `in_place` and `append_generate_same` (both change their source);
+    the kill copy gets a **clone** of the reference copy's reviewed snapshot (same columns, object
+    adjusted, inserted as accepted) instead of a second discovery, whose random sample could
+    classify a borderline column differently and make the digests differ for a reason unrelated
+    to resuming;
+  - `append_generate_same` uses an identity key whose sequence is set to the largest seeded key;
+    the digest compares the appended rows (`customer_id >= 10 006 001`) without the key;
+  - digests carry the row count and must cover at least 6 000 rows (an empty target would
+    otherwise compare equal); `files` digests every JSONL line listed by the job's manifest
+    (6 000 lines);
+  - worker output goes to `<tmp>/<label>.log` (ref, kill-1, kill-2) for diagnosis; workers run with
+    `cwd=tmp_path`; the env is `worker_env(...)` + `DPS_BATCH_ROWS=200` computed after the case is
+    set up (the PVC case moves `export_root`).
+  - extra assertions: six partitions, `rows_written >= 6000`, the evidence's verification passed.
+  Measured: 6 passed in 91 s (three consecutive runs green). The tests skip without the `fpe`
+  extra (integer keys need FF1 in the worker subprocess).
+- `pytest -q` (the unit gate) now includes these `slow` tests (≈ 90 s): no default deselection was
+  added, so every gate run exercises resume-after-kill.
