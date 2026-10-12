@@ -1355,7 +1355,61 @@ The plan's `PageViewer`, `PlaygroundDocuments`, routes and styles are used; name
   390×844 in dark and light: demo scan → Redact → boxes on page 1, "Verified, with partial
   coverage", `kyc-scanned.redacted.pdf` downloads (a PDF), page 2 via the strip, hover links box
   and finding, Reveal restores; Obfuscate → tokens over the page, Reveal; Synthesize → violet tokens
-  and the validity line; no horizontal scroll, no console error (92 checks). Also: DOCX in Redact
+  and the validity line; no horizontal scroll, no console error (72 checks, 18 per size and theme; 11 more below). Also: DOCX in Redact
   mode, CSV obfuscate + reveal, and the JSON/Text/Document hand-over.
 - Count: frontend 31 `node:test` cases (+14 incl. `hasGeometry`); Python suite unchanged (995
   passed, 4 skipped); `npm run build` 46 modules.
+
+## Task 18 — Console: Policies page (mockup 05)
+
+The plan's page, routes (`/policies`, `/policies/:name`), section titles, labels ("Obfuscate method
+for CVV", "Run on the engine", "Re-run plan", …) and test ids (`policy-header`, `matrix`,
+`recognizer`, `plan`, `draft-yaml`) are kept. Changes:
+
+- **Pure logic in `frontend/src/lib/policyDraft.ts`** (new): `METHODS`, `REVERSIBLE`,
+  `PLAN_SAMPLE`, `TEST_TEXT`, `DEFAULT_RECOGNIZER`, `Draft`/`EMPTY_DRAFT`, `listOf`,
+  `inlinePolicy`, `draftChanges`, `withTreatment`, `treatmentRows`, `filterRows`, `declareField`,
+  `recognizerSpec`, `livePreview`, `matchCount`, `planSummary` — the plan's in-component code, so
+  that it is testable. Tests first: `frontend/tests/policies.test.ts` (10 cases) and
+  `tests/test_console_policies.py` (4), which runs the module under Node and sends what it builds
+  through the engine: the method lists equal `METHOD_NAMES` − `surrogate` and `REVERSIBLE_METHODS`;
+  every preset's inline draft validates and takes effect (`resolve_policy`); the default recognizer
+  finds the same offsets live and on `/policies/test-recognizer` (`EMP-204417` only); the plan
+  sample plans with a draft (≥ 4 rows, CVV on the drafted method). Shared Node runner:
+  `tests/node_ts.py`; `tests/test_console_yaml.py` (Task 16) now uses it.
+- `REVERSIBLE` includes `external_tokenize` (the engine's `REVERSIBLE_METHODS` does; the plan's
+  list did not, so the matrix said "No" for a reversible method).
+- `withTreatment`: choosing the method the preset already uses drops the draft entry, so the
+  preset's parameters come back and the draft count does not grow (the plan stored
+  `{method, params: {}}` for any choice, which silently dropped e.g. `keep_prefix`/`keep_suffix`).
+  Task 20's check (CVV `redact` → `det_token` → "draft · 1 change") is unaffected.
+- Live preview: the count names the reported (not allow-listed) hits with matching grammar (the
+  plan printed "1 matches"); a pattern the browser cannot compile says Python-only syntax may still
+  work on the engine (the plan said it "matches nothing"). Engine result "0 matches" says so.
+- Plan preview sends the preset **name** while there is no draft (the plan always sent the inline
+  form, so the plan's report named `<preset>+overrides` for an unchanged preset); with a draft it
+  sends the inline policy as planned. "Nothing detected" row for an empty plan.
+- **Layout bug fixed:** the plan's port dropped the mockup's `.pol-cell` wrapper, so the sticky
+  side column's containing block was the whole grid and it slid over the full-width sections below
+  (Declared fields, recognizer, plan), covering "Add recognizer to draft" (found by the browser
+  check: the click was intercepted). The mockup's `.pol-cell` / `.pol-main { grid-column: 2;
+  grid-row: 1 }` rules and its 1200/1240 px breakpoints are ported. The "On this page" card stays
+  visible on narrow screens (the mockup hides it), because Task 20's check reads the first match
+  of each section title and the index would be a hidden first match.
+- **Phone tables:** the plan's tables carry `class="stack"` and `data-l` labels but its CSS never
+  defined them (they lived in `docs/design/mockups/vault.css`), so on a phone the tables were
+  squeezed columns. The mockups' `table.stack` rules (≤ 720 px: labelled cards) are ported.
+- Version history items are plain `div`s with `aria-current` (the plan's `<button>`s did nothing
+  when pressed); Publish sits in a span carrying the M5 tooltip (a disabled button shows none);
+  "Copy hash" and "Copy as Presidio YAML" confirm the copy; `Declare a field` is disabled without a
+  path; the facts row breaks `DPS_DEFAULT_LOCALE` at the underscore; family names replace every `_`.
+- Manual check (plan Step 3), private Playwright as in Task 17, at 1440×900 and 390×844 in dark and
+  light (96 checks): six presets; `/policies/pci-dss` loads; CVV `det_token` marks the row and
+  "draft · 1 change", choosing `redact` again clears it; live preview and engine both `EMP-204417`
+  only; adding the recognizer and declaring `$.loan.internal_score` count; Re-run plan fills the
+  table with the draft's methods (CVV `det_token`, `BUSINESS_SENSITIVE` `bucket`); Download YAML
+  saves `pci-dss-draft.yaml`; Use in Playground opens `/playground` with "draft from Policies"
+  selected and the Document tab keeps it; no horizontal scroll, no console error. The Task 17 checks
+  were re-run on the final styles (72 + 11 pass).
+- Count: Python 995 → 999 passed, 4 skipped; frontend 41 `node:test` cases; `npm run build` 49
+  modules.
