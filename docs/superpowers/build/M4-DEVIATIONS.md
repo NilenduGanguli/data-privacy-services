@@ -335,3 +335,38 @@ fails on `032b076`.
   nine fields and typing fires `POST /api/autosave` and the `sendBeacon` (counted by
   `/__received`); `/apply/address` holds `#pin` in an open shadow root; clicking the `role=link` on
   `/app` routes to `/app/preferences`.
+
+## Task 8 — Browser runtime and DOM extraction
+
+- `dps/layers/scanner/browser.py`: the plan's `get_browser` / `close_browser` / `new_scan_context`
+  and options, plus: the module state is tied to the running event loop — a browser started on
+  another loop is dropped and relaunched, and the lock is created per loop (the plan's module-level
+  `asyncio.Lock()` and Playwright objects would be reused across loops, which Playwright refuses);
+  `close_browser` is idempotent and stops Playwright even if closing the browser fails. Launch
+  arguments are the plan's, as `LAUNCH_ARGS`.
+- `dps/layers/scanner/dom.py`: the plan's snippets and wrappers, with these fixes:
+  - **`CLICKABLES_JS` uses the same predicate as `EXTRACT_JS`.** The plan's version counted an
+    element that is laid out but `visibility:hidden` (EXTRACT skips it) and always descended into
+    shadow roots (EXTRACT only with `shadow_dom`), so replay ordinals could point at a different
+    element than the one discovered. It now takes `{frameIndex, shadow}`; a bare frame index (the
+    plan's Task 14 call form) still works and means `shadow: true`. **Task 14 should pass
+    `{"frameIndex": i, "shadow": scope.shadow_dom}`.** Test: a hidden `role=link` is skipped by both.
+  - `utf16_offset` encodes with `surrogatepass`: `EXTRACT_JS` cuts node text at 2000 UTF-16 units,
+    which can split a surrogate pair, and the plan's encode then raised `UnicodeEncodeError`.
+  - `text_rects` keeps the plan's code signature `(page, frames, snapshot, spans)` (the interface
+    list above it shows `(page, spans)`; the code is the binding form), batches one evaluation per
+    frame, and gives `[]` for a span whose node or frame is gone instead of raising.
+  - `extract_page` skips a child frame that detaches or navigates while it is read (a
+    `PlaywrightError`), so one flaky same-origin iframe does not fail the page; main-frame errors
+    still propagate. `frame_map` treats a malformed port in a frame URL as another origin instead
+    of raising. `EXTRACT_JS`/`CLICKABLES_JS` tolerate a document without `body` or root element.
+- `tests/scanner/test_dom_browser.py`: the plan's 6 tests (lane URL via the fixture; the session
+  cookie's domain is taken from the demo URL) extended — shadow DOM off hides the PIN field,
+  iframes off keeps frame 0 only, field numbers run across frames in order, the profile's account
+  number and customer id cells carry their row labels, no demo value appears in the snapshot's
+  `repr`, the review page's `dt` hint — plus: a password value is never read, numbers are stable
+  across loads and `max_fields` truncation is reported, clickables re-stamp with the same ordinals
+  (both call forms), `text_rects` (incl. a missing node) and `REPLACE_TEXT_JS`, `SET_VALUES_JS`
+  sets values (also inside the shadow root) without firing `input`/`change` and so without an
+  autosave reaching the demo site, the context's locale and viewport, and the one-browser-per-
+  process relaunch: 12 tests (plan: 6).
