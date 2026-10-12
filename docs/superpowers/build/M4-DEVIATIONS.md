@@ -240,3 +240,59 @@ fails on `032b076`.
   the classifier has no NER — use the NER classifier in the worker when the `[ner]` extra is
   present, Task 14), N-f (`template_is_value_free` does not check the host part), and the round-1
   deferrals N2, N3, N6, N7, N8 as listed above.
+
+## Task 6 — The request guard (D4)
+
+- `dps/layers/scanner/guard.py`: the plan's interface (`ALLOWED_METHODS`, `MIN_NEEDLE`, `HARDEN_JS`,
+  `Decision`, `decide`, `BlockedRequest`, `ScanGuard.install/bind/arm/release/drain_counts/
+  drain_blocked`, `blocked_total`, `websockets_closed`) and `HARDEN_JS` verbatim, made stricter
+  where the plan left a way for data to leave the browser:
+  - **`decide` gains two optional keywords** (additive, the plan's calls still work):
+    `resource_type` and `method_override`. A method-override header (`X-HTTP-Method-Override`,
+    `X-HTTP-Method`, `X-Method-Override`) or a `_method` query key makes a GET count as the other
+    method (reason `method`): frameworks that honour them would treat the GET as a POST.
+  - **New reason `filled_request`.** On a filled page every request that is not a passive resource
+    (`PASSIVE_TYPES`: stylesheet, image, media, font, script, texttrack, manifest) is aborted — XHR,
+    fetch, EventSource, beacons, `other` and an unknown (`None`) type. Why: the plan only looked for
+    a fill value in the URL, so a GET fetch could carry one in a header, split over keys or encoded
+    (base64, hashed) and still go out. Order of reasons on a filled page: `filled_navigation`,
+    `filled_value`, `filled_request`. The plan test's `ok` case (`/static/app.css` on a filled page)
+    now passes `resource_type="stylesheet"`.
+  - **Fill values are checked on every page once armed**, not only on filled pages (the plan's
+    `arm` docstring said so but its handler passed the needles only for filled pages). A draft the
+    page kept in local storage can resurface on a later, unfilled page. Needles are the shown values
+    of sensitive fields only (Task 11), so harmless URLs are not caught.
+  - The value check normalises the URL as is and after each of up to four rounds of
+    percent-decoding (the plan decoded once; `%2520` hid a value).
+  - **Popups of a filled page are filled** (the route handler follows `page.opener()`), and are
+    attributed to the opener's page number. `release(page)` never un-fills a page that is still
+    open; a filled page is forgotten on its `close` event. Why: the plan's `_close` releases before
+    closing, which left an open, filled page unguarded for that window, and `window.open` from a
+    filled page opened an unguarded page.
+  - **Fail closed:** if the decision cannot be computed the request is aborted, reason
+    `guard_error`.
+  - **Value-free counters.** `stored_method` records a non-standard method as `OTHER` (a page
+    chooses a custom method's token, so it could carry a value — it would have reached
+    `dps_scan_request.method` and a metric label). `stored_host` keeps an allowed host; any other
+    host keeps only its last two labels when both are plain words (`*.` marks dropped labels),
+    else `{host}` — a page can put data in a hostname (`<value>.tracker.example`). The plan stored
+    the raw host. `BlockedRequest.url` is `field(repr=False)`; at most `MAX_BLOCKED_KEPT` (2000)
+    blocked requests are kept in memory between drains (counters keep counting).
+- `tests/scanner/test_guard.py`: the plan's 12 cases plus method override, multiple encodings,
+  needles on unfilled pages, `filled_request` per type (6) and passive types (5), the value-free
+  host/method, `BlockedRequest` repr, a static source check (one `route.continue_(`, the fixed
+  method set, no click/press/dispatch), and a **browser proof against a local stdlib server that
+  counts everything it receives** (positive control; from an unfilled page with the hardening off:
+  fetch POST, method-override GET, XHR PUT, `sendBeacon`, a dedicated worker's POST, a WebSocket,
+  another host, `requestSubmit` of a POST form — the server receives no non-GET, no upgrade, nothing
+  for the other host; from a filled page: `submit()`/`requestSubmit()` counted as attempts, fetch,
+  an image carrying a value, `window.open`, `location.href`, a navigation after `release` — none
+  arrives, while a plain image and a later fresh page still load): 32 tests (plan: 12).
+- `tests/scanner/conftest.py` is created here with `skip_or_fail` and `chromium` (plan: Task 7),
+  because the guard's browser proof needs Chromium; Task 7 adds the demo-site and engine fixtures.
+- Found while proving it (for Tasks 13–14): a navigation the guard aborts from a filled page
+  commits Chromium's error page (`chrome-error://chromewebdata/`) in that tab, so the page's
+  `__dpsGuard` counter and DOM are gone. The fill step must read `SUBMIT_ATTEMPTS_JS` and check
+  `page.url` before capturing a filled screen, or it captures an error page.
+- Not done here: N-c (registered hosts bound to `host[:port]`) — `ScanGuard(host_allowed=…)` keeps
+  the plan's host-only callable; the scope change belongs to `CrawlScope` (Task 14).
