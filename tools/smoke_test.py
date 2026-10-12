@@ -9,6 +9,10 @@ Environment:
 - ``DPS_API_KEY`` (or ``DPS_BOOTSTRAP_API_KEY``): a key with every Layer 1 scope; default the compose
   stack's local demo key.
 - ``DPS_SMOKE_WAIT_SECONDS``: how long to wait for ``/health`` before the first check (default 90).
+- ``DPS_SMOKE_M2``: ``auto`` (default) runs the job-platform checks when ``/readyz`` reports a
+  configured metadata database; ``off`` skips them (the plain ``docker compose up`` stack has the
+  database but not the ``sources`` profile's demo source, so those checks cannot pass there); ``on``
+  runs them whatever ``/readyz`` says.
 
 Waits for ``/health``, then runs the checks in order, prints a one-line verdict per check and exits
 non-zero on the first failure. Never prints a request or response body, a value or a key: a
@@ -31,6 +35,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -65,6 +70,22 @@ PLAYGROUND = json.loads(
 NAME_PARTS = ("ananya", "krishnan")
 
 results: list[tuple[str, bool, str]] = []
+
+
+def m2_wanted(components: dict[str, Any], setting: str | None) -> tuple[bool, str]:
+    """Whether to run the job-platform checks, and the note printed when they are skipped.
+
+    ``setting`` is ``DPS_SMOKE_M2`` (``auto`` / ``on`` / ``off``, case-insensitive; empty = auto).
+    """
+    choice = (setting or "auto").strip().lower()
+    if choice not in ("auto", "on", "off"):
+        raise SystemExit("DPS_SMOKE_M2 must be auto, on or off")
+    if choice == "off":
+        return False, "note: DPS_SMOKE_M2=off: the M2 job checks are skipped"
+    configured = "db" in components and components["db"].get("detail") != "unconfigured"
+    if choice == "on" or configured:
+        return True, ""
+    return False, "note: /readyz reports no metadata database: the M2 job checks are skipped"
 
 
 def _flip(text: str) -> str:
@@ -247,10 +268,11 @@ def main() -> None:
             root.status_code == 200 and b'<div id="root">' in root.content,
             f"HTTP {root.status_code}",
         )
-        if components.get("db", {}).get("detail") == "unconfigured" or "db" not in components:
-            print("note: /readyz reports no metadata database: the M2 job checks are skipped")
-        else:
+        run_m2, note = m2_wanted(components, os.environ.get("DPS_SMOKE_M2"))
+        if run_m2:
             m2_checks(c)
+        else:
+            print(note)
     print(f"\nall {len(results)} checks passed against {BASE}")
 
 

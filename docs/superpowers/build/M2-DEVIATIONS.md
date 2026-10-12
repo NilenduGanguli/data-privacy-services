@@ -1825,3 +1825,49 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
 - Measured: `pytest -q tests/test_no_values_in_logs_m2.py` → 36 passed (32 module cases, the list,
   the scanner self-test, the audit fields, the full job in ≈ 0.8 s). No module needed a change and no
   field was added to `_SAFE_FIELDS`.
+
+## Task 38 — Documentation, handoff, milestone gates
+
+- **Finding fixed: the documented first run failed on the plain stack.** Since Task 27 the default
+  compose profile includes `dps-db`, `migrate` and `worker`, so `/readyz` reports a configured
+  database and `tools/smoke_test.py` runs its nine job checks — which need the `sources` profile's demo
+  source and secrets. On a plain `docker compose up -d --build` (verified under a separate project and
+  ports) the smoke stopped at "m2 connections tested — 0/4 ok" (17/18), although Layer 1 and the jobs
+  API work (DoD 2: `/readyz` `db`/`jobs` ok, `GET /api/v1/jobs` 200). `tools/smoke_test.py` gains
+  `DPS_SMOKE_M2=auto|on|off` (`m2_wanted(components, setting)`; default `auto` = the old behaviour,
+  `off` skips the job checks with a note, `on` forces them, anything else exits with a message);
+  `tests/test_tools_m2.py::test_smoke_runs_the_job_checks_where_the_stack_has_them` was written first
+  (red on the missing function). The plain stack then passes `DPS_SMOKE_M2=off` 15/15. README, HANDOFF
+  §1/§3 and the lane example use `DPS_SMOKE_M2=off` for the plain stack (and move `DPS_DB_PORT`
+  together with `DPS_APP_PORT`, since the plain stack now publishes the metadata database too).
+- `HANDOFF.md`: the plan's sections, mapped onto the existing layout — *Last verified* (date, the
+  `m2` tag on top of `2b38deb`, every gate with its count); §1 the three roles of the image and the
+  M2 surface; §2 the M2 image size, the development extras (`dev,fpe,db,connectors,e2e` +
+  `python -m playwright install chromium`) and the console Vitest suite; §3 a *Ports* paragraph (the
+  plan's 8400/5441/5442/9010/9011, worker 9400 inside the network, all lane variables), the demo,
+  reveal and test-gate commands, the console check's prerequisites; the measured-throughput heading
+  names the image and tools commits; §6 CORS now lists `PATCH DELETE` and `Idempotency-Key` (it still
+  said `GET POST OPTIONS`); §7 the `_FILE` forms, `DPS_S3_ACCESS_KEY_ID` and the `dps/src/*`,
+  `dps/tgt/*`, `dps/s3/*` secret-ref directories; §8 the stale "routes are one segment deep" trap is
+  replaced by the suffix-resolution trap, and an *M2 traps* block holds the plan's list (asyncpg
+  coercion, `dps_write_ledger` folding, ledger over checkpoint, `fpe_digits` on short keys, created
+  tables, superseded snapshots, Homebrew `timezone=UTC`, the once-only key, `DPS_EMBEDDED_WORKER`)
+  plus the review table's sideways scroll; §9 marks M2 done. *Configuration* and *Probes* already held
+  every contract §10 setting (incl. `preflight_rows` and the `audit_*` ones) and the worker probes
+  (Tasks 1, 23, 24), so they are unchanged; `up --wait` and `--scale worker=N` were already there.
+- `README.md`: status (M2), the API reference link, the plan's three "Run it" lines with the
+  `--env-file .env` note for lanes, the plain stack's smoke with `DPS_SMOKE_M2=off` (the old line said
+  13 checks; it is 15), "Develop" with the M2 extras, all gates, the services/`tools/scratch_pg.sh`,
+  the markers (`db pg_source s3 slow browser`) and the integration gate commands, the extras list, and
+  a one-paragraph job flow.
+- `docs/technical/api-m2.md`: every M2 route as built (method, path, scope, request → response,
+  error codes), request bodies, the run-validation and job error codes, the job/partition state
+  machine, the evidence pack fields and the measured throughput (the six results). Built from the
+  routers and models, not from the plan: `POST /connections/{id}/test` answers 200 with `ok: false`
+  and an `error_code` for unavailable secrets or a failed connect; ids are `grp_…` / `art_…` for
+  groups and artefacts.
+- Milestone gates: as planned, with the lane's `--env-file .env` before `docker/compose.sources.env`
+  (HANDOFF trap) and `DPS_TEST_*` from `.env.lane`; plus the plain-stack check (DoD 2) under
+  `COMPOSE_PROJECT_NAME=dps-wt-m2-plain` on ports 8470/5471, removed afterwards with
+  `docker compose -p dps-wt-m2-plain down -v` (that project only). The smoke test reports **24**
+  checks (15 Layer 1 + 9 M2), not the plan's 22 (Task 27 deviation).

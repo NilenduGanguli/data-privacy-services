@@ -1,17 +1,20 @@
 # HANDOFF — data-privacy-services (DPS)
 
-Last verified: 2026-10-12 at `629f4db` = tag `v0.1.0-m0` (`48d9425`) + the post-M0 fixes (SEC-1 COIN
-mint TLS, O1/O2 locale and phone evidence, O5 session-only console key, lane-safe compose, the D2
-idempotency amendment) + the A-prepare review r1 fixes (B1: surrogates never reuse a part of the
-record and the sweep checks name parts; B2: lane-safe test endpoints in the plans; this file's refresh
-on top changes no code) · gates: `ruff format dps tests`, `ruff check dps tests`, `mypy dps`,
-`pytest -q` (588 passed, 2 skipped: the two tests that need the `ner` extra; 5 consecutive runs, plus
-40 runs of `pytest -q tests/test_playground_samples.py -k synthesize`, all green), `cd frontend && npm
-run build`, `docker compose up --build -d` + `python tools/smoke_test.py` (15/15). Checked at `1bac79b`
-and not repeated since: `/readyz` `coin_tls: verified` and a headless browser check of the console's
-"Remember key on this device" storage behaviour. Checked on 2026-10-11 during the M0 verification and
-not repeated since: the `WITH_NER=1` image (`ner=ok`), a `linux/amd64` build, and the stack with
-`DPS_FPE_ENABLED=false` (`det_token` fallbacks reported).
+Last verified: 2026-10-12 at the commit tagged `m2` (M2 complete: `2b38deb` + this documentation
+pass; M0 base tag `v0.1.0-m0`) · gates on this lane's stack (`COMPOSE_PROJECT_NAME` `dps-wt-m2`, image
+`data-privacy-services:m2`): `ruff check dps tests tools`, `ruff format --check dps tests tools`,
+`mypy dps` (82 files), `pytest -q` with the stack up (1098 passed, 2 skipped: the `ner` extra), console
+`npm run typecheck && npm test && npm run build` (52 Vitest cases), `docker compose --env-file .env
+--env-file docker/compose.sources.env --profile sources up -d --build` (app, worker, dps-db,
+source-pg, minio healthy; migrate, minio-init, demo-secrets, seed-sources exited 0; app `/readyz`
+`api-core`, `db`, `jobs` ok; worker `:9400/readyz` 200), `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m
+"db or pg_source or s3"`, the six resume-after-kill cases, `python tools/smoke_test.py` (24/24),
+`python tools/demo_m2.py` (12 jobs succeeded, verification passed, 0 orphans) and the console browser
+check `tests/console/test_console_m2.py` (2 passed); and a plain `docker compose up -d --build` (no
+profile) under its own project and ports: app, worker, dps-db healthy, migrate exited 0, `/readyz`
+`db`/`jobs` ok, `GET /api/v1/jobs` 200, `DPS_SMOKE_M2=off python tools/smoke_test.py` 15/15. Counts and
+timings in the M2 build report. The M0-only checks of that release (`WITH_NER=1` image,
+`linux/amd64` build, `DPS_FPE_ENABLED=false` stack, `coin_tls: verified`) were not repeated for M2.
 
 **Update rule (the Wega rule):** update this file in the same change as anything that alters build or
 deploy facts — image, ports, env, extras, probes, labels.
@@ -20,10 +23,11 @@ deploy facts — image, ports, env, extras, probes, labels.
 
 | Artefact | Kind | Notes |
 |---|---|---|
-| `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001** |
+| `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001**. The same image runs three roles: `app` (uvicorn), `worker` (`python -m dps.worker`, M2) and `migrate` (`python -m dps.migrate`, M2) |
+| M2 job platform | API + console | `/api/v1` connections, jobs (discover, run with `table` / `files` / `in_place` / `append`, controls), snapshots, job groups, evidence and artefacts (`docs/technical/api-m2.md`); console pages Data sources & jobs (07), job detail (03), the five-step New-job wizard (06), the evidence pack (10) and the evidence list of Reports (09) |
 | `dps` package | Python 3.12 | Layer 1 engine + API; extras `fpe` (baked in), `ner` (build-arg `WITH_NER=1`), `vertex` |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `tools/smoke_test.py` | script | 15 Layer 1 checks against a running stack, plus 9 job-platform checks when `/readyz` reports the metadata database (24 with the `sources` profile; rerunnable); prints verdicts, never bodies |
+| `tools/smoke_test.py` | script | 15 Layer 1 checks against a running stack, plus 9 job-platform checks when `/readyz` reports the metadata database (24 with the `sources` profile; rerunnable); `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2) |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
 
@@ -50,13 +54,19 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
   `migrate` one-shot) and
   `CMD uvicorn dps.app:create_app --factory --host 0.0.0.0 --port 8400 --no-access-log`.
 
-Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB.
+Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. M2 (2026-10-12, arm64): 687 MB.
+
+Development install (M2): `uv pip install -e ".[dev,fpe,db,connectors,e2e]"` (`e2e` = Playwright
+1.55.0 for the console browser check; then `python -m playwright install chromium`, a no-op when
+`~/Library/Caches/ms-playwright/chromium-1187` exists). The console's Vitest suite (`cd frontend &&
+npm test`, 52 cases for the job helpers and the wizard reducer) runs in the gates, not in the image
+build.
 
 ## 3. Run locally (compose)
 
 ```bash
 docker compose up --build -d          # http://127.0.0.1:8400, key dps_local_dev_key_change_me
-python tools/smoke_test.py            # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90), then 15 checks
+DPS_SMOKE_M2=off python tools/smoke_test.py   # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90), then 15 checks
 docker compose down
 ```
 
@@ -70,8 +80,8 @@ DPS_API_KEY=dps_local_dev_key_change_me python tools/smoke_test.py   # 24 checks
 docker compose up -d --scale worker=3 worker                         # more workers
 ```
 
-**Measured throughput (M2, 2026-10-12)** — `python tools/bench_connector.py --rows 200000 …` against
-this compose stack on an Apple-silicon Mac (18 CPUs; Docker Desktop VM with 12 CPUs and ~15 GiB),
+**Measured throughput (M2, 2026-10-12; image of `17e14a2`, tools of `8204191`)** — `python
+tools/bench_connector.py --rows 200000 …` against this compose stack on an Apple-silicon Mac (18 CPUs; Docker Desktop VM with 12 CPUs and ~15 GiB),
 `DPS_FPE_ENABLED=true` (FF1), 200 000 synthetic customers (16 columns, 8 transformed), 4 partitions
 of 50 000 rows, 1 000-row batches, worker concurrency 4. Wall clock from submission to the terminal
 state (prepare, preflight and finalize included); results in `docs/technical/bench/`. The numbers
@@ -91,6 +101,26 @@ GIL): more partitions per worker do not add throughput, more worker replicas do.
 tools/demo_m2.py` (10 tables into `bank_uat` under one job group, then in place and append) took
 30 s with 3 workers; every job succeeded with verification passed and every foreign key of the UAT
 copy found its parent.
+
+Ports (host side binds `127.0.0.1` only; every one is a lane variable, see "Lane-safe stacks"):
+`${DPS_APP_PORT:-8400}` app, `${DPS_DB_PORT:-5441}` dps-db, `${DPS_SOURCE_PG_PORT:-5442}` source-pg,
+`${DPS_MINIO_PORT:-9010}` / `${DPS_MINIO_CONSOLE_PORT:-9011}` MinIO; the worker's ops port 9400 stays
+inside the compose network.
+
+The M2 demo and checks against a running full stack:
+
+```bash
+python tools/smoke_test.py                                   # 24 checks (15 Layer 1 + 9 job platform)
+python tools/demo_m2.py                                      # 10 bank tables → bank_uat (one job group), in place, append
+python tools/reveal_rows.py --help                           # local reveal of output rows with the key (no network)
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"                      # integration gate
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after_kill.py
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py                # console vs mockups
+```
+
+The console check needs the demo connections the smoke test creates (`bank-pg-ro`, `bank-uat`), runs a
+real wizard job into `bank_uat.customers_console`, and writes screenshots (dark and light, 1440 and 390
+px, beside the mockups) to `docs/superpowers/build/m2-console/` (git-ignored).
 
 Never `up --wait` (it fails on the one-shots that exit 0). `--env-file` replaces the default `.env`:
 a lane that keeps its ports and image tag in `.env` passes both files (`--env-file .env --env-file
@@ -165,8 +195,8 @@ stack on this host, so `docker-compose.yml` fixes neither a host port nor an ima
 - give each lane its own `COMPOSE_PROJECT_NAME` so containers, networks and volumes stay apart:
 
 ```bash
-COMPOSE_PROJECT_NAME=dps-m2 DPS_IMAGE_TAG=m2 DPS_APP_PORT=8401 docker compose up --build -d
-DPS_APP_PORT=8401 python tools/smoke_test.py
+COMPOSE_PROJECT_NAME=dps-m2 DPS_IMAGE_TAG=m2 DPS_APP_PORT=8401 DPS_DB_PORT=5451 docker compose up --build -d
+DPS_APP_PORT=8401 DPS_SMOKE_M2=off python tools/smoke_test.py   # the full stack: --profile sources, no DPS_SMOKE_M2
 COMPOSE_PROJECT_NAME=dps-m2 docker compose down
 ```
 
@@ -295,16 +325,20 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 - Console API key: kept in `sessionStorage` (gone with the tab); the header's "Remember key on this
   device" moves it to `localStorage` and unticking removes it again. A key left in `localStorage` by
   the M0 console is moved into the tab's session on first load.
-- CORS: any origin, methods `GET POST OPTIONS`, headers `Content-Type X-API-KEY X-DPS-Tenant
-  X-Request-ID` (keys travel in headers, not cookies; to be narrowed in M5).
+- CORS: any origin, methods `GET POST PATCH DELETE OPTIONS` (M2), headers `Content-Type X-API-KEY
+  X-DPS-Tenant X-Request-ID Idempotency-Key` (keys travel in headers, not cookies; to be narrowed in
+  M5).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a
   500 `internal error` with only the exception class logged.
 
 ## 7. Secrets (names only)
 
 `DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`, `DPS_COIN_CLIENT_SECRET`, `DPS_COIN_SCOPE` — mount them and use
-the `_FILE` form. M2 adds `DPS_JOB_KEK` (`_FILE` only in staging/prod), `DPS_PG_PASSWORD`,
-`DPS_PG_WORKER_PASSWORD`, `DPS_PG_MIGRATION_PASSWORD` and `DPS_S3_SECRET_ACCESS_KEY`. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
+the `_FILE` form. M2 adds `DPS_JOB_KEK(_FILE)` (`_FILE` only in staging/prod; `DPS_JOB_KEK_PREVIOUS`
+arrives with M5's rotation), `DPS_PG_PASSWORD(_FILE)`, `DPS_PG_WORKER_PASSWORD(_FILE)`,
+`DPS_PG_MIGRATION_PASSWORD(_FILE)` and `DPS_S3_SECRET_ACCESS_KEY(_FILE)` (with `DPS_S3_ACCESS_KEY_ID`),
+plus the connection `secret_ref` directories under `DPS_SECRET_DIR`: `dps/src/*` (sources),
+`dps/tgt/*` (targets), `dps/s3/*` (file stores). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
 set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
 
 Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
@@ -320,7 +354,9 @@ the references the deployment's tenants may use (open issue, see the M2 build re
 - `uvicorn dps.app:create_app --factory` — there is no module-level `app`.
 - The image installs `dps` **editable** on purpose: `dps/app.py` serves `<source root>/frontend/dist`.
   A wheel install into site-packages starts without the console (`frontend_disabled` in the log).
-- Routes in the console are one segment deep (`base: './'`).
+- The console uses relative assets (`base: './'`), so nested routes (`/data-sources/jobs/new`,
+  `/reports/evidence/<id>`) work only because the app resolves `…/assets/<file>` and root files under
+  any route prefix (Task 24). A reverse proxy in front must pass those paths through unchanged.
 - FPE fallbacks: with `DPS_FPE_ENABLED=false` the plan turns `fpe_*` into `det_token` with reason
   `…|fallback:fpe_disabled`; `phone` stays `phone` in the plan and runs as `det_token`
   (`fallback:fpe_unavailable`). With FPE on, a domain under 10⁶ still falls back
@@ -390,7 +426,34 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   in 3,000 to 5,000; retry without the seed (or with another one). Every other surrogate is re-drawn
   when it would hold another value of the record or a part of its names.
 
+- **M2 traps.**
+  - asyncpg does not coerce a JSON string into a typed parameter (a `date` bind given as
+    `"2024-01-01"` is refused by the driver); DPS coerces every bind by the prepared statement's
+    parameter types, and a value that does not parse is `selection_param_invalid` (no value in the
+    message).
+  - The contract's `DPS_WRITE_LEDGER` is the table `dps_write_ledger` (PostgreSQL folds unquoted names
+    to lower case); `ledger_owner` moves it to another schema.
+  - On resume the target's write ledger is authoritative over the partition checkpoint: a batch
+    committed with its ledger mark but not yet checkpointed is not applied again.
+  - `fpe_digits` on a value with fewer than 6 digits falls back to `det_token`, whose output does not
+    fit an integer column; discovery therefore suggests `keep` for such numeric keys
+    (`numeric_key_kept`) and `det_token` for short text identifiers (`fpe_domain_too_small`).
+  - Created target tables (`table` with `create_if_missing`) copy the column definitions only — no
+    foreign keys, indexes, defaults or constraints beyond the key.
+  - A superseded snapshot (an object accepted again) still drives the jobs that were submitted with
+    it; only a dropped or retyped column stops them (`snapshot_stale` at prepare).
+  - Homebrew PostgreSQL scratch clusters need `timezone = 'UTC'` (`tools/scratch_pg.sh` sets it);
+    tests compare timestamps across the driver and the server.
+  - The in-place (and every other generated) key is returned **once**, in the `POST /jobs/run`
+    answer; keep it. The evidence pack holds only its `kid`; a retry after the key was purged needs
+    it resubmitted (`key_material_required`).
+  - `DPS_EMBEDDED_WORKER=true` runs a worker inside the app process for local demos only; posture
+    refuses it in staging/prod.
+  - The console's step 3 review table has eight columns and scrolls sideways inside its card at
+    1440 px (Method, Anchor and Text pipeline are to the right).
+
 ## 9. Next milestones
 
-M1 documents → M2 jobs + PostgreSQL (adds Postgres, worker, migrations) → M3 Oracle + MongoDB → M4 UI
+M1 documents → **M2 jobs + PostgreSQL (done: tag `m2`; Postgres, worker, migrations, the jobs API and
+console)** → M3 Oracle + MongoDB → M4 UI
 scanner (browser worker image) → M5 hardening + showcase. Each adds a section here.

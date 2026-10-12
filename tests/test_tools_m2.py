@@ -17,7 +17,7 @@ from dps.engine.service import PrivacyEngine
 from dps.engine.transform import fpe
 from dps.engine.transform.crypto import generate_key_material
 from dps.layers.connectors.base import ColumnInfo, ObjectRef, TableShape
-from tools import bench_connector, demo_m2, reveal_rows
+from tools import bench_connector, demo_m2, reveal_rows, smoke_test
 
 CONTRACT_TABLES = {
     "customers",
@@ -79,6 +79,21 @@ def test_demo_tables_are_the_contract_ten_parents_first() -> None:
     for child, _column, parent, _key in demo_m2.FOREIGN_KEYS:
         assert order[parent] < order[child], (parent, child)
     assert set(demo_m2.KEYS) == CONTRACT_TABLES
+
+
+def test_smoke_runs_the_job_checks_where_the_stack_has_them() -> None:
+    db = {"db": {"ok": True, "detail": "up"}, "jobs": {"ok": True, "detail": "ready"}}
+    no_db = {"db": {"ok": False, "detail": "unconfigured"}}
+    assert smoke_test.m2_wanted(db, None) == (True, "")
+    assert smoke_test.m2_wanted(db, "auto")[0] is True
+    assert smoke_test.m2_wanted(no_db, "")[0] is False
+    assert smoke_test.m2_wanted({}, "auto")[0] is False
+    # the plain stack has the metadata database but not the sources profile's demo source
+    skip, note = smoke_test.m2_wanted(db, "off")
+    assert skip is False and "DPS_SMOKE_M2=off" in note
+    assert smoke_test.m2_wanted(no_db, "ON")[0] is True  # asked for: a missing database then fails
+    with pytest.raises(SystemExit):
+        smoke_test.m2_wanted(db, "maybe")
 
 
 COLS = [
