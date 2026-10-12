@@ -101,7 +101,11 @@ class ObjectRef(BaseModel):
 
 
 class ColumnInfo(BaseModel):
-    """One column (SQL) or field path (Mongo) as the connector describes it (contract §4.1)."""
+    """One column (SQL) or field path (Mongo) as the connector describes it (contract §4.1).
+
+    ``pseudo`` marks a read-only key column that is not table data, e.g. Oracle ``ROWID`` of a
+    key-less table (M3): never classified, never written.
+    """
 
     model_config = _HIDDEN
     path: str
@@ -116,6 +120,7 @@ class ColumnInfo(BaseModel):
     is_key: bool = False
     has_default: bool = False
     is_identity: bool = False
+    pseudo: bool = False
 
 
 class TableShape(BaseModel):

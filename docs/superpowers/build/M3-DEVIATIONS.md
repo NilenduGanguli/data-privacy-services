@@ -170,3 +170,61 @@ plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as b
   rm -sfv mongo` resets it), like Oracle's "no volume" reset.
 - Contract: no change. §11 already names the `oracle`/`mongo` services, `docker/oracle/initdb/01_crm.sql`
   and the `demo-secrets` one-shot; the plan's §11 mount of `docker/secrets/local` is not made (above).
+
+## Task 3 — Oracle rules: type table, SQL builders, ROWID codec
+
+- **Write ledger statements follow the binding write-guard amendment** (contract §0 amendment
+  2026-10-12, "the write guard is the caller's mark", written after this plan). Plan: one
+  `ledger_mark_sql` `MERGE … WHEN MATCHED … WHERE s.BATCH_NO > l.BATCH_NO WHEN NOT MATCHED THEN INSERT`
+  with positional binds, and a ledger without a row counter. That MERGE applies a *skipped* batch
+  (mark 7 over ledger 5) and relies on MERGE re-reading a row another holder changed while it waited.
+  Now (`dps/layers/connectors/oracle_sql.py`):
+  - `ledger_ensure_sql(owner)` (new name): `MERGE … WHEN NOT MATCHED THEN INSERT (… 0, '[]', 0 …)` —
+    creates the partition's row at batch 0 before it is locked; a concurrent first batch waits on the
+    other holder's uncommitted insert and then fails with ORA-00001, which the writer (Task 6) maps to
+    `ledger_conflict`.
+  - `ledger_mark_sql(owner)`: the guarded advance `UPDATE … SET BATCH_NO = :batch, LAST_KEY =
+    :last_key, ROWS_WRITTEN = :written … WHERE JOB_ID = :job AND PARTITION_NO = :part AND BATCH_NO =
+    :prev` (`:prev` = `mark.batch_no - 1`); row count 1 = apply the batch, 0 = `ledger_conflict`.
+    Oracle restarts an UPDATE whose WHERE column another transaction changed while it waited for the
+    row lock, so a zombie re-reads and matches 0 rows. No `FOR UPDATE` anywhere (the plan's invariant).
+  - `ledger_ddl` gains `ROWS_WRITTEN NUMBER(19) DEFAULT 0 NOT NULL` and `ledger_read_sql` selects it:
+    M2's `LedgerMark` carries `rows` (cumulative rows; a resume reconciles the partition counters), so
+    the Oracle ledger must store it like PostgreSQL's `rows`. A `BATCH_NO = 0` row means "no mark"
+    (contract amendment; Task 6's `read_ledger`).
+  - every ledger statement carries `/* dps:ledger */` and named binds (`:job`, `:part`, …).
+  - `tests/connectors/test_oracle_sql.py::test_ledger_statements_are_19c_safe_and_fenced` asserts the
+    ensure/guard shapes above instead of the plan's `s.BATCH_NO > l.BATCH_NO` (a strictly stronger
+    fence, as the contract requires); `ledger_ensure_sql` and `ledger_read_sql` joined the
+    "no FOR UPDATE / no FETCH FIRST" loop.
+  Writer contract for Task 6: in the batch's transaction run `ledger_ensure_sql`, then
+  `ledger_mark_sql` (0 rows → rollback, `LedgerConflict`), then the rows, then commit; ORA-00001 from
+  the ensure statement → `LedgerConflict`.
+- `tests/connectors/test_oracle_sql_live.py` (new, markers `integration` + `oracle`): the statements
+  executed on the lane's Oracle Free — composite TIMESTAMP(9) keyset paging through a burst of 7 rows
+  inside one microsecond (every row once, nanoseconds intact); CHAR keys paged with CHAR binds (and the
+  untyped VARCHAR2 bind shown re-reading `K17`, the pitfall); a key-less table paged on ROWID with the
+  DB order equal to `rowid_to_key` order and `[lower, upper)` ROWID ranges; `count_sql`,
+  `sample_sql` (sorted key sample, row sample), a repeatable `SAMPLE … SEED`; `create_table_sql`,
+  `merge_sql` twice (idempotent, CLOB of 4.5 KB), `update_sql`, `insert_sql` from a sequence,
+  `collision_sql`; the ledger DDL twice (ORA-00955 swallowed), ensure/mark/read/purge (replayed and
+  skipped batches fenced, a partition starts at batch 1) and **the fence under a real concurrent
+  holder** (a second session blocked on the first batch gets ORA-00001 after the commit; blocked on
+  batch 2 it matches 0 rows after the commit). Why: lesson (1) of Stage A — a fence claim must be
+  backed by a run, not by statement text.
+- `tests/connectors/test_oracle_sql.py`: the plan's tests plus statement checks for the query source,
+  the seeded sample, `count_sql`, `sample_sql`, composite `collision_sql` binds, `column_path` for
+  `$`/`#` names, `tuple_predicate` arity errors, `qualified()` (owner required, upper-cased) and the
+  `pseudo` default (40 tests). Plan rows wrapped to 100 columns; the test oracle's `eval` is commented
+  (it evaluates a predicate the code under test built from fixed names).
+- `dps/layers/connectors/oracle_sql.py`: `_KIND` is typed `dict[Family, ColumnKind]` and the key
+  bound loop is typed (`KeyOp`), so the plan's two `# type: ignore[arg-type]` are gone; the ROWID
+  codec names its bit widths. `key_columns(shape)` returns `shape.key_columns()` (M2's method).
+- `dps/layers/connectors/base.py`: `ColumnInfo.pseudo: bool = False` as planned; contract §4.1 now lists
+  the field in the `ColumnInfo` block (the "M3 adds" comment line is folded into it).
+- **M2 touch point** `dps/layers/connectors/postgres.py`: `_typmod_fields` returns a `TypedDict`
+  (`_TypmodFields`, `total=False`: `length`, `precision`, `scale`, `ts_precision`) instead of
+  `dict[str, int | None]`. Why: with the new `bool` field on `ColumnInfo`, mypy rejects
+  `ColumnInfo(..., **dict[str, int | None])` (the unpacked dict could fill `pseudo`). Typing only — the
+  same dict at run time; the unit suite is green (the PG integration tests were not run in this lane:
+  no `source-pg` was started for an annotation-only change).

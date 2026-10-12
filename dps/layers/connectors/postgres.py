@@ -43,7 +43,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 from uuid import UUID
 
 import asyncpg
@@ -236,7 +236,16 @@ def select_sql(
     return sql, binds.args
 
 
-def _typmod_fields(typname: str, typmod: int) -> dict[str, int | None]:
+class _TypmodFields(TypedDict, total=False):
+    """The ``ColumnInfo`` fields a PostgreSQL type modifier sets (typed for ``**`` unpacking)."""
+
+    length: int
+    precision: int
+    scale: int
+    ts_precision: int
+
+
+def _typmod_fields(typname: str, typmod: int) -> _TypmodFields:
     if typname in ("varchar", "bpchar") and typmod > 4:
         return {"length": typmod - 4}
     if typname == "numeric" and typmod >= 4:
