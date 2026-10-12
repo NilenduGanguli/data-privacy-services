@@ -128,6 +128,22 @@ def audit_action(
         logger.warning("audit_write_failed", error=type(exc).__name__)
 
 
+def rejected(
+    request: Request, action: str, exc: Exception, *, job_id: str | None = None
+) -> DpsHttpError:
+    """Map ``exc`` with :func:`to_http`, audit it as ``rejected`` (4xx) or ``error`` (5xx) and
+    return the error for the caller to raise (``raise rejected(...) from None``)."""
+    err = to_http(exc)
+    audit_action(
+        request,
+        action=action,
+        outcome="rejected" if err.status < 500 else "error",
+        status=err.status,
+        job_id=job_id,
+    )
+    return err
+
+
 async def audited[T](
     request: Request,
     action: str,
@@ -135,21 +151,15 @@ async def audited[T](
     *,
     status: int = 200,
     counts: dict[str, int] | None = None,
+    job_id: str | None = None,
 ) -> T:
     """Await a route body; audit ``ok`` with ``status``, or the mapped error's status as
     ``rejected`` (4xx) / ``error`` (5xx) and raise it (value-free, no exception chain)."""
     try:
         result = await body
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
-        err = to_http(exc)
-        audit_action(
-            request,
-            action=action,
-            outcome="rejected" if err.status < 500 else "error",
-            status=err.status,
-        )
-        raise err from None
-    audit_action(request, action=action, status=status, counts=counts)
+        raise rejected(request, action, exc, job_id=job_id) from None
+    audit_action(request, action=action, status=status, counts=counts, job_id=job_id)
     return result
 
 

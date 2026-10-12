@@ -243,8 +243,12 @@ class _JobPlatform:
             READINESS.set("jobs", False, "unconfigured")
             return
         from dps import db
+        from dps.storage import ArtefactService, artefact_store
 
         self.app.state.kek = load_kek(self.settings)
+        self.app.state.artefacts = ArtefactService(
+            artefact_store(self.settings), acquire=db.acquire
+        )
         if self.own_audit and self.settings.audit_enabled:
             self.sink = DbAuditSink(db.acquire, self.settings)
             self.sink.start()
@@ -474,10 +478,18 @@ def _include_m2_routers(app: FastAPI) -> bool:
     Layer 1 install without them serves the engine routes only."""
     try:
         from dps.layers.api.errors import install_error_handlers
-        from dps.layers.api.routers import connections
+        from dps.layers.api.routers import (
+            artefacts,
+            connections,
+            evidence,
+            groups,
+            jobs,
+            snapshots,
+        )
     except ModuleNotFoundError as exc:
         logger.warning("m2_routes_disabled", reason=f"missing module {exc.name}")
         return False
     install_error_handlers(app)
-    app.include_router(connections.router)
+    for module in (connections, jobs, snapshots, groups, evidence, artefacts):
+        app.include_router(module.router)
     return True

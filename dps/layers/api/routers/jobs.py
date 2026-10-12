@@ -1,0 +1,237 @@
+"""``/api/v1/jobs`` (contract §9, scope ``jobs``; production writes need ``admin``, §5.3).
+
+``POST /jobs/run`` returns the generated key material or synthesis seed **once** (``Cache-Control:
+no-store``); an idempotent replay answers 200 with ``Idempotent-Replay: true`` and no key. The
+job's stored spec is the redacted one (templates, ids, fingerprints). Controls follow the queue's
+rules (contract §3.1): 409 ``job_terminal`` / ``job_finalizing`` / ``job_not_pausable`` /
+``job_not_paused`` / ``job_not_retryable`` / ``key_material_required`` / ``key_material_mismatch``.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Body, Depends, Request, Response
+from pydantic import BaseModel, ConfigDict
+
+from dps import jobs
+from dps.auth import require_scope
+from dps.config import Settings
+from dps.jobs import Job, JobKind, JobState
+from dps.jobs_models import ConsistencySpec, DiscoverSpec, RunSpec, SpecError
+from dps.layers.api.deps import (
+    audit_action,
+    audited,
+    guarded,
+    idempotency_key,
+    kek_of,
+    page_args,
+    principal_of,
+    rejected,
+    require_db,
+    tenant_of,
+)
+from dps.layers.api.errors import DpsHttpError
+from dps.layers.connectors.submit import seal_retry_secret, submit_discover, submit_run
+from dps.ratelimit import enforce_rate_limit
+
+router = APIRouter(prefix="/api/v1", tags=["jobs"])
+_JOBS = [Depends(require_scope("jobs")), Depends(enforce_rate_limit), Depends(require_db)]
+REPLAY_HEADER = "Idempotent-Replay"
+
+
+class RetryRequest(BaseModel):
+    """Body of ``POST /jobs/{id}/retry``: the key material (or seed) when the job's was purged."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+    consistency: ConsistencySpec | None = None
+
+
+def _settings(request: Request) -> Settings:
+    settings: Settings = request.app.state.settings
+    return settings
+
+
+def _job(job: Job) -> dict[str, Any]:
+    return job.model_dump(mode="json")
+
+
+async def _owned(request: Request, job_id: str) -> Job:
+    job = await jobs.get_job(tenant_of(request), job_id)
+    if job is None:
+        raise DpsHttpError(404, "job_not_found", "job not found")
+    return job
+
+
+def _replayed(response: Response, job: Job) -> dict[str, Any]:
+    response.status_code = 200
+    response.headers[REPLAY_HEADER] = "true"
+    return {"job": _job(job)}
+
+
+@router.post("/jobs/discover", status_code=202, dependencies=_JOBS)
+async def discover(body: DiscoverSpec, request: Request, response: Response) -> dict[str, Any]:
+    """Queue a discover job (one proposed snapshot per object)."""
+    counts = {"objects": len(body.objects)}
+    try:
+        tenant, key = tenant_of(request), idempotency_key(request)
+        earlier = await jobs.find_by_idempotency(tenant, key) if key else None
+        if earlier is None:
+            job = await submit_discover(
+                body,
+                tenant_id=tenant,
+                principal=principal_of(request),
+                settings=_settings(request),
+                kek=kek_of(request),
+                idempotency_key=key,
+            )
+    except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
+        raise rejected(request, "job.create", exc) from None
+    if earlier is not None:
+        audit_action(request, action="job.create", status=200, job_id=earlier.id, counts=counts)
+        return _replayed(response, earlier)
+    audit_action(request, action="job.create", status=202, job_id=job.id, counts=counts)
+    return {"job": _job(job)}
+
+
+@router.post("/jobs/run", status_code=202, dependencies=_JOBS)
+async def run(body: RunSpec, request: Request, response: Response) -> dict[str, Any]:
+    """Validate, seal and queue a run; the generated key or seed is in this answer only."""
+    try:
+        sub = await submit_run(
+            body,
+            tenant_id=tenant_of(request),
+            principal=principal_of(request),
+            settings=_settings(request),
+            kek=kek_of(request),
+            idempotency_key=idempotency_key(request),
+        )
+    except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
+        raise rejected(request, "job.create", exc) from None
+    audit_action(request, action="job.create", status=200 if sub.replay else 202, job_id=sub.job.id)
+    if sub.replay:
+        return _replayed(response, sub.job)
+    out: dict[str, Any] = {"job": _job(sub.job)}
+    if sub.key_material:
+        out["key_material"] = sub.key_material
+    if sub.synthesis_seed:
+        out["synthesis_seed"] = sub.synthesis_seed
+    response.headers["Cache-Control"] = "no-store"  # the key is in this body: never cached
+    return out
+
+
+@router.get("/jobs", dependencies=_JOBS)
+async def list_(
+    request: Request,
+    kind: JobKind | None = None,
+    state: JobState | None = None,
+    group_id: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """The tenant's jobs, newest first (filters: kind, state, group)."""
+
+    async def body() -> dict[str, Any]:
+        items, nxt = await jobs.list_jobs(
+            tenant_of(request),
+            kind=kind,
+            state=state,
+            group_id=group_id,
+            **page_args(limit, cursor),
+        )
+        return {"items": [_job(j) for j in items], "next_cursor": nxt}
+
+    return await guarded(body())
+
+
+@router.get("/jobs/stats", dependencies=_JOBS)
+async def stats(request: Request) -> dict[str, Any]:
+    """Workers, waiting partitions, throughput and the tenant's states (Jobs page health strip)."""
+
+    async def body() -> dict[str, Any]:
+        return (await jobs.tenant_stats(tenant_of(request))).model_dump(mode="json")
+
+    return await guarded(body())
+
+
+@router.get("/jobs/{job_id}", dependencies=_JOBS)
+async def get(job_id: str, request: Request) -> dict[str, Any]:
+    """One job (progress merged from its partitions); the console polls it every 2 s."""
+
+    async def body() -> dict[str, Any]:
+        return _job(await _owned(request, job_id))
+
+    return await guarded(body())
+
+
+@router.get("/jobs/{job_id}/partitions", dependencies=_JOBS)
+async def partitions(job_id: str, request: Request) -> dict[str, Any]:
+    """Value-free partition rows (the checkpoint is a keyed fingerprint, never a key)."""
+
+    async def body() -> dict[str, Any]:
+        await _owned(request, job_id)
+        items = await jobs.list_partitions(tenant_of(request), job_id)
+        return {"items": [p.model_dump(mode="json") for p in items]}
+
+    return await guarded(body())
+
+
+async def _control(request: Request, job_id: str, action: str) -> dict[str, Any]:
+    idempotency_key(request)  # shape-checked; controls are idempotent by state
+
+    async def body() -> dict[str, Any]:
+        tenant = tenant_of(request)
+        fn = {"cancel": jobs.cancel, "pause": jobs.pause, "resume": jobs.resume}[action]
+        job = await fn(tenant, job_id)
+        if job is None:
+            raise DpsHttpError(404, "job_not_found", "job not found")
+        return _job(job)
+
+    return await audited(request, f"job.{action}", body(), job_id=job_id)
+
+
+@router.post("/jobs/{job_id}/cancel", dependencies=_JOBS)
+async def cancel(job_id: str, request: Request) -> dict[str, Any]:
+    """Cancel: queued/waiting/paused at once; running holders stop at their next fenced write."""
+    return await _control(request, job_id, "cancel")
+
+
+@router.post("/jobs/{job_id}/pause", dependencies=_JOBS)
+async def pause(job_id: str, request: Request) -> dict[str, Any]:
+    """Pause a run job that is processing partitions (each stops after its current batch)."""
+    return await _control(request, job_id, "pause")
+
+
+@router.post("/jobs/{job_id}/resume", dependencies=_JOBS)
+async def resume(job_id: str, request: Request) -> dict[str, Any]:
+    """Resume a paused run job."""
+    return await _control(request, job_id, "resume")
+
+
+@router.post("/jobs/{job_id}/retry", dependencies=_JOBS)
+async def retry(
+    job_id: str, request: Request, body: Annotated[RetryRequest | None, Body()] = None
+) -> dict[str, Any]:
+    """Requeue a failed/dead run job from its checkpoints; a purged key must be resubmitted."""
+    idempotency_key(request)
+
+    async def run_retry() -> dict[str, Any]:
+        tenant = tenant_of(request)
+        job = await _owned(request, job_id)
+        sealed: bytes | None = None
+        consistency = body.consistency if body is not None else None
+        if consistency is not None and (consistency.key_material or consistency.synthesis_seed):
+            kek = kek_of(request)
+            if kek is None:
+                raise SpecError("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
+            if job.kind != JobKind.run:
+                raise DpsHttpError(
+                    409, "job_not_retryable", "only failed or dead run jobs can be retried"
+                )
+            sealed = await seal_retry_secret(job, consistency, kek=kek)
+        retried = await jobs.retry(tenant, job_id, sealed_secret=sealed)
+        if retried is None:
+            raise DpsHttpError(404, "job_not_found", "job not found")
+        return _job(retried)
+
+    return await audited(request, "job.retry", run_retry(), job_id=job_id)

@@ -1197,3 +1197,41 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   `test_a_database_that_is_down_at_boot_leaves_api_core_ready`. 5 offline + 4 db = 9 (plan 4 + 2).
 - `HANDOFF.md` §5: readiness `db`/`jobs`, the DB-down behaviour, coded errors, reserved and
   lower-case tenants, CORS, the embedded worker.
+
+## Task 25 — Jobs, snapshots, groups, evidence and artefact routes
+
+- `dps/layers/api/routers/jobs.py`: the run route is the plan's. Additions: `POST /jobs/discover`
+  honours `Idempotency-Key` the same way (a key already admitted answers 200 + `Idempotent-Replay:
+  true` with the original job; `submit_discover` cannot tell a replay from a new job, so the route
+  looks the key up first); every control route shape-checks `Idempotency-Key` (422
+  `idempotency_key_invalid`) — controls are idempotent by state and `dps_job_idem` only covers job
+  creation, so they have no durable replay; `GET /jobs/{id}/partitions` answers 404 `job_not_found`
+  for another tenant's job (the queue function would have returned an empty list); retry with
+  `consistency` seals the resubmitted key/seed only for run jobs and needs the KEK (503
+  `kek_unconfigured`). Audit: `job.create` (with `counts.objects` for discover, the job id and 200
+  for a replay), `job.cancel|pause|resume|retry` with the job id.
+- `dps/layers/api/routers/snapshots.py`: `PATCH` body `{"overrides": [...]}` with 1–2000 entries
+  (audited with `counts.overrides`); `object=` filters `object_ref` (`OWNER.NAME`); `status` is
+  validated (`proposed|accepted|superseded`, else FastAPI's 422).
+- `dps/layers/api/routers/groups.py`: the name is validated by `GROUP_NAME_RE` in the body model
+  (FastAPI 422) before `create_group`; `Cache-Control: no-store` on the create answer (it carries
+  the key and seed); `GET /job-groups/{id}` lists at most 200 member jobs.
+- `dps/layers/api/routers/evidence.py`: `GET /evidence/{id}` also answers `id`, `job_id` and
+  `created_at`; the evidence list drops the packs of job kinds the key may not read (a key with
+  `jobs` only does not see scan packs) after paging, so a page can hold fewer than `limit` items;
+  `/html` serves the **stored** `evidence_html` artefact (the attested rendering) and re-renders
+  from the pack only if that artefact is gone, with `Cache-Control: no-store` beside the plan's CSP.
+  Helpers `scope_for_kind`, `require_kind_scope`, `job_kinds` and `artefacts_of` are shared with the
+  artefact route; the app builds `app.state.artefacts = ArtefactService(artefact_store(settings),
+  acquire=db.acquire)` at startup.
+- `dps/layers/api/routers/artefacts.py`: the first chunk is read before the response starts (a
+  missing object is a 404 `storage_not_found`, not a truncated 200); `Content-Length` is the
+  stored size; an unknown id is 404 **`artefact_not_found`** (new code).
+- `tests/test_app_m2.py`: the 503 test now covers every M2 route group (Task 24 deviation).
+- `tests/api/test_api_jobs.py` seeds snapshots on its own asyncpg connection (the app's pools
+  belong to the TestClient's event loop) and accepts them through the API. 7 tests (plan: 8 bullet
+  groups in one module; the controls, retry with a purged key, review, groups, discover replay and
+  audit are separate tests), plus `test_api_e2e.py` (1). The e2e app enables FF1 (`fpe_enabled`:
+  integer keys need it; skipped when the `fpe` extra is missing) and disables NER for determinism;
+  it also asserts the partitions, `GET /jobs/stats` (`workers_online == 1`, the embedded worker),
+  the artefact's `Content-Disposition`, and that the returned key never appears in a later answer.

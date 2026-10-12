@@ -17,7 +17,16 @@ def _settings(**overrides: object) -> Settings:
 
 def test_m2_routes_answer_503_without_a_database() -> None:
     with TestClient(create_app(_settings())) as c:
-        for path in ("/api/v1/connections", "/api/v1/connections/c_1"):
+        for path in (
+            "/api/v1/connections",
+            "/api/v1/connections/c_1",
+            "/api/v1/jobs",
+            "/api/v1/jobs/stats",
+            "/api/v1/snapshots",
+            "/api/v1/job-groups",
+            "/api/v1/evidence",
+            "/api/v1/artefacts/a_1",
+        ):
             r = c.get(path)
             assert r.status_code == 503 and r.json() == {
                 "detail": "the metadata database is not configured",
