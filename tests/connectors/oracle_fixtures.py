@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from dps.layers.connectors.base import ColumnInfo, KeyRange
+    from dps.layers.connectors.base import ColumnInfo, KeyRange, ResolvedTarget, TableShape
 
 CUSTOMERS_DDL = """CREATE TABLE "{o}"."CUSTOMERS" (
   CUSTOMER_ID NUMBER(12) NOT NULL, FULL_NAME VARCHAR2(120 CHAR) NOT NULL, TAX_ID CHAR(10),
@@ -93,3 +93,37 @@ def ranges_from_keys(
         )
         for lo, hi in zip(edges[:-1], edges[1:], strict=True)
     ]
+
+
+def make_target(shape: TableShape, **kw: Any) -> ResolvedTarget:
+    """M2's ``ResolvedTarget`` for ``shape`` with test defaults (engine-neutral; Mongo reuses it).
+
+    Defaults: ``job_id="j_test"``, ``connection_id="c_test"``, ``engine="oracle"``, ``object`` =
+    the shape's, ``same_as_source`` = whether ``object`` is the shape's, ``table_load=
+    "truncate_insert"``, ``create_if_missing=True``, ``key`` = the shape's key minus pseudo columns,
+    ``write_columns`` = every non-pseudo column (pass the SET list for ``in_place``),
+    ``generated_key`` = ``pk_strategy`` is ``generate``, ``target_shape`` = ``shape``.
+    """
+    from dps.layers.connectors.base import PkGenerate, ResolvedTarget
+
+    obj = kw.pop("object", shape.object)
+    strategy = kw.pop("pk_strategy", None)
+    pseudo = {c.name for c in shape.columns if c.pseudo}
+    fields: dict[str, Any] = {
+        "job_id": "j_test",
+        "write_mode": kw.pop("write_mode"),
+        "connection_id": "c_test",
+        "engine": kw.pop("engine", "oracle"),
+        "object": obj,
+        "same_as_source": kw.pop("same_as_source", obj == shape.object),
+        "table_load": kw.pop("table_load", "truncate_insert"),
+        "pk_strategy": strategy,
+        "create_if_missing": kw.pop("create_if_missing", True),
+        "ledger_owner": kw.pop("ledger_owner", None),
+        "key": kw.pop("key", [k for k in shape.key if k not in pseudo]),
+        "write_columns": kw.pop("write_columns", [c.name for c in shape.columns if not c.pseudo]),
+        "generated_key": kw.pop("generated_key", isinstance(strategy, PkGenerate)),
+        "target_shape": kw.pop("target_shape", shape),
+    }
+    fields.update(kw)
+    return ResolvedTarget(**fields)
