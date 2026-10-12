@@ -42,6 +42,7 @@ Scope `jobs` unless stated. "prod" = the connection carries the tag `production`
 | `POST /connections/{id}/count` | jobs | `{object, selection}` → `{rows, checks, runs_as, binds}` | `selection_*` 422 (with `checks`; no query runs), `statement_timeout` 502, `connection_role` 422 |
 | `POST /jobs/discover` | jobs | `DiscoverSpec` → 202 `{job}` | `connection_not_found` 404, `connection_role` 422, `selection_*` 422, `queue_full` 429 |
 | `POST /jobs/run` | jobs (+`admin` for in place / append on prod) | `RunSpec` → 202 `{job, key_material?, synthesis_seed?}`, `Cache-Control: no-store` | the run-validation table below, `queue_full` 429 |
+| `POST /jobs/run/validate` | jobs | `RunSpec` → 200 `{ok: true}`, `Cache-Control: no-store`; creates no job, seals nothing, returns no key | exactly what `POST /jobs/run` would answer before queueing (the run-validation table, 422 request validation such as an offset strategy with neither offset nor prefix); the console's step 5 asks it before it says "all checks passed" |
 | `GET /jobs` | jobs | `?kind&state&group_id&limit&cursor` → page of jobs | `cursor_invalid` 400 |
 | `GET /jobs/stats` | jobs | → `JobStats` | — |
 | `GET /jobs/{id}` | jobs | → job (progress merged from its partitions; the console polls every 2 s) | `job_not_found` 404 |

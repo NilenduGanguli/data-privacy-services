@@ -226,3 +226,22 @@ export function loadSavedDraft(): Partial<WizardDraft> | null {
 export function clearSavedDraft(): void {
   try { localStorage.removeItem(DRAFT_KEY); } catch { /* private mode */ }
 }
+
+/** The server's verdict on the exact spec Run job would send (`POST /jobs/run/validate`). */
+export type ServerCheck =
+  | { state: 'idle' | 'checking' | 'ok' }
+  | { state: 'refused'; message: string; code?: string };
+
+/** Step 5's "Ready to run" card: the wizard's own prerequisites first (an incomplete draft is not
+ *  sent), then the server's validation of the spec, so "all checks passed" means the server ran
+ *  the run's own rules (target role, key strategy, admin scope, lengths, …) and accepted it. */
+export function runReadiness(blocked: string[], server: ServerCheck): {
+  chip: string; tone: 'amber' | 'emerald' | 'rose' | 'slate'; canRun: boolean; reasons: string[];
+} {
+  if (blocked.length) return { chip: `${blocked.length} to resolve`, tone: 'amber', canRun: false, reasons: blocked };
+  if (server.state === 'refused') {
+    return { chip: '1 to resolve', tone: 'rose', canRun: false, reasons: [`DPS refuses this run: ${server.message}${server.code ? ` (${server.code})` : ''}`] };
+  }
+  if (server.state !== 'ok') return { chip: 'checking with DPS…', tone: 'slate', canRun: false, reasons: [] };
+  return { chip: 'all checks passed', tone: 'emerald', canRun: true, reasons: [] };
+}

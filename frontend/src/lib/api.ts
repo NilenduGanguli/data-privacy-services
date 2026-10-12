@@ -143,6 +143,8 @@ export const api = {
     discover: (a: Auth, body: { connection_id: string; objects: ObjectRef[]; selection?: Selection; sample_rows?: number; policy?: string; mode?: 'obfuscate' | 'synthesize' }) =>
       post<{ job: Job }>('/api/v1/jobs/discover', a, body),
     run: (a: Auth, spec: RunSpec, idempotencyKey: string) => post<RunOut>('/api/v1/jobs/run', a, spec, { 'Idempotency-Key': idempotencyKey }),
+    /** What `POST /jobs/run` would refuse, without queueing anything (step 5's server check). */
+    validateRun: (a: Auth, spec: RunSpec) => post<{ ok: boolean }>('/api/v1/jobs/run/validate', a, spec),
     cancel: (a: Auth, id: string) => post<Job>(`/api/v1/jobs/${enc(id)}/cancel`, a),
     pause: (a: Auth, id: string) => post<Job>(`/api/v1/jobs/${enc(id)}/pause`, a),
     resume: (a: Auth, id: string) => post<Job>(`/api/v1/jobs/${enc(id)}/resume`, a),

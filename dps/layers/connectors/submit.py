@@ -8,10 +8,15 @@ fingerprints) and returns the generated key or seed **once** — wrapped with th
 when ``wrap_key`` is given (DPS cannot unwrap it; the worker uses the clear key it sealed, for the
 job's lifetime only). An idempotent replay returns the original job and no key. Errors are
 :class:`~dps.jobs_models.SpecError` (code, status, value-free detail).
+
+``check_run`` runs every check ``submit_run`` makes before a job row exists, and nothing else (no
+job, no sealing, no key returned): ``POST /jobs/run/validate``, so the console's "all checks
+passed" is the server's verdict rather than a copy of its rules (M2 verify r2, issue 1).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -173,23 +178,26 @@ def _wrap(km: KeyMaterial, wrap_key: dict[str, str]) -> KeyMaterial:
         ) from None
 
 
-async def submit_run(
+@dataclass
+class _ValidRun:
+    """What validation resolved for a run (memory only; the key is never logged)."""
+
+    source: Connection
+    target: Connection | None
+    selection: Selection
+    km: KeyMaterial | None
+    seed: SynthesisSeed | None
+    returned_key: KeyMaterial | None
+
+
+async def _validate_run(
     spec: RunSpec,
     *,
     tenant_id: str,
     principal: Principal,
     settings: Settings,
     kek: bytes | None,
-    idempotency_key: str | None = None,
-    idempotency_fp: str | None = None,
-) -> RunSubmission:
-    """Validate, seal and queue a run job (module docstring).
-
-    Raises:
-        SpecError: every :func:`validate_run` code, ``connection_not_found`` / ``group_not_found``
-            404, ``selection_*`` / ``key_material_invalid`` / ``wrap_key_invalid`` 422.
-        QueueFull: the tenant's queue is full (429).
-    """
+) -> _ValidRun:
     if kek is None:
         raise SpecError("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
     source = await _connection(tenant_id, spec.source.connection_id, "source")
@@ -220,6 +228,50 @@ async def submit_run(
     if km is not None and spec.consistency.key_material is None:
         # validated before the job exists, so a bad wrap key never leaves a queued job behind
         returned_key = _wrap(km, wrap) if wrap else km
+    return _ValidRun(source, target, selection, km, seed, returned_key)
+
+
+async def check_run(
+    spec: RunSpec,
+    *,
+    tenant_id: str,
+    principal: Principal,
+    settings: Settings,
+    kek: bytes | None,
+) -> None:
+    """Every check :func:`submit_run` makes before a job row exists; creates nothing.
+
+    Raises:
+        SpecError: the code ``submit_run`` would answer (``connection_role``,
+            ``admin_scope_required``, ``pk_strategy_invalid``, …).
+    """
+    await _validate_run(spec, tenant_id=tenant_id, principal=principal, settings=settings, kek=kek)
+
+
+async def submit_run(
+    spec: RunSpec,
+    *,
+    tenant_id: str,
+    principal: Principal,
+    settings: Settings,
+    kek: bytes | None,
+    idempotency_key: str | None = None,
+    idempotency_fp: str | None = None,
+) -> RunSubmission:
+    """Validate, seal and queue a run job (module docstring).
+
+    Raises:
+        SpecError: every :func:`validate_run` code, ``connection_not_found`` / ``group_not_found``
+            404, ``selection_*`` / ``key_material_invalid`` / ``wrap_key_invalid`` 422.
+        QueueFull: the tenant's queue is full (429).
+    """
+    valid = await _validate_run(
+        spec, tenant_id=tenant_id, principal=principal, settings=settings, kek=kek
+    )
+    assert kek is not None  # _validate_run refuses a missing KEK
+    source, target, selection = valid.source, valid.target, valid.selection
+    km, seed, returned_key = valid.km, valid.seed, valid.returned_key
+    engine = cast(Engine, source.engine)
     job_id = new_id(PREFIX_JOB)
     secret = JobSecret(
         key_material=km.model_dump(mode="json") if km else None,

@@ -6,6 +6,9 @@ same ``Idempotency-Key`` with another request is 422 ``idempotency_key_reused`` 
 job's stored spec is the redacted one (templates, ids, fingerprints). Controls follow the queue's
 rules (contract §3.1): 409 ``job_terminal`` / ``job_finalizing`` / ``job_not_pausable`` /
 ``job_not_paused`` / ``job_not_retryable`` / ``key_material_required`` / ``key_material_mismatch``.
+``POST /jobs/run/validate`` answers what ``POST /jobs/run`` would refuse (same status and code) or
+``{"ok": true}``, without creating a job or returning a key: the console's step 5 asks it before it
+says "all checks passed".
 """
 
 from __future__ import annotations
@@ -35,7 +38,12 @@ from dps.layers.api.deps import (
 )
 from dps.layers.api.errors import DpsHttpError
 from dps.layers.api.idempotency import REPLAY_HEADER
-from dps.layers.connectors.submit import seal_retry_secret, submit_discover, submit_run
+from dps.layers.connectors.submit import (
+    check_run,
+    seal_retry_secret,
+    submit_discover,
+    submit_run,
+)
 from dps.ratelimit import enforce_rate_limit
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"])
@@ -96,6 +104,25 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
         return _replayed(response, earlier)
     audit_action(request, action="job.create", status=202, job_id=job.id, counts=counts)
     return {"job": _job(job)}
+
+
+@router.post("/jobs/run/validate", dependencies=_JOBS)
+async def validate_run_spec(body: RunSpec, request: Request, response: Response) -> dict[str, bool]:
+    """Run every check ``POST /jobs/run`` makes before a job exists; ``{"ok": true}`` or the
+    run's own refusal. Nothing is queued, sealed, stored or returned."""
+
+    async def body_() -> dict[str, bool]:
+        await check_run(
+            body,
+            tenant_id=tenant_of(request),
+            principal=principal_of(request),
+            settings=_settings(request),
+            kek=kek_of(request),
+        )
+        return {"ok": True}
+
+    response.headers["Cache-Control"] = "no-store"
+    return await guarded(body_())
 
 
 @router.post("/jobs/run", status_code=202, dependencies=_JOBS)
