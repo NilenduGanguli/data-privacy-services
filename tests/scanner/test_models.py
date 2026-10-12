@@ -152,6 +152,22 @@ def test_validation_errors_never_echo_the_url() -> None:
         ({"url": "http://demo-site:8410/admin", "scope": {"deny": ["/admin"]}}, "start_url_denied"),
         ({"url": "http://demo-site:8410/ADMIN", "scope": {"deny": ["/admin"]}}, "start_url_denied"),
         (
+            {"url": "http://demo-site:8410/admin.", "scope": {"deny": ["/admin"]}},
+            "start_url_denied",
+        ),
+        (
+            {"url": "http://demo-site:8410/admin%00", "scope": {"deny": ["/admin"]}},
+            "start_url_denied",
+        ),
+        (
+            {"url": "http://demo-site:8410/#/admin", "scope": {"deny": ["/admin"]}},
+            "start_url_denied",
+        ),
+        (
+            {"url": "http://demo-site:8410/app#!/Admin/x", "scope": {"deny": ["/admin"]}},
+            "start_url_denied",
+        ),
+        (
             {"url": "http://demo-site:8410/admin;x", "scope": {"deny": ["/admin"]}},
             "start_url_denied",
         ),

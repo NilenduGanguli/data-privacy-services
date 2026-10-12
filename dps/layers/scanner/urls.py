@@ -5,16 +5,21 @@ Anything stored or shown is produced by :func:`redact_url` (query and matrix-par
 become ``<ENTITY>`` or ``<v>``, value-like path segments ``{id}`` or ``<ENTITY>``, keys that are not
 plain names ``<k>``, userinfo and fragment dropped), :func:`template` (the same rules; the persisted
 crawl template) or :func:`redact_origin`. A segment is value-like when the classifier recognises
-it or, whatever the classifier says, when it holds a run of 4+ digits, an alphanumeric run of 8+
-characters with a digit, an ``@``, an ``=`` or whitespace, or is an id form (date, UUID, long hex,
-token). Errors carry a code only, never the URL.
+it or, whatever the classifier says, when it holds a run of 4+ digits, 6+ digits in all (digit
+groups joined by ``-``, ``.``, ``/``, ``+`` or a space are one number: ``501-002-345-678``,
+``+91-987-654-321``), a date shape (``1-5-90``), an alphanumeric run of 8+ characters with a digit,
+an ``@``, an ``=`` or whitespace, or is an id form (date, UUID, long hex, token). Consecutive
+all-numeric path segments holding 6+ digits between them (``/501/002/345/678``) are one value too.
+Errors carry a code only, never the URL.
 
 Scope globs are matched against :func:`normalise_path` (matrix parameters stripped, unreserved
 escapes decoded, ``%2F``/``%5C``/backslash as separators, dot segments resolved, ``//`` collapsed)
 and the other ways a server may read the same path (matrix parameters stripped before encoded
-separators are split, or encoded separators kept). A deny glob matching ANY reading denies, ignoring
-case; an allow list must match EVERY reading. So ``/Logout``, ``/logout;jsessionid=1``,
-``/%6Cogout`` and ``//logout`` are all denied by ``/logout``.
+separators are split, or encoded separators kept, or a lenient server's reading: every escape decoded, a NUL or ``;`` ending the
+name, trailing dots and spaces trimmed as IIS/Windows do). A deny glob matching ANY reading denies,
+ignoring case; an allow list must match EVERY reading. So ``/Logout``, ``/logout;jsessionid=1``,
+``/%6Cogout``, ``//logout``, ``/logout.`` and ``/logout%00`` are all denied by ``/logout``. A hash
+route (``#/logout``, ``#!/admin``) is a navigation as well: its path is checked against deny too.
 """
 
 from __future__ import annotations
@@ -42,6 +47,14 @@ _TEMPLATE_SEGMENT = re.compile(rf"^(?:\d+|{_ID_FORMS})$", re.IGNORECASE)
 #: (``SB-50100234567812``, ``CUST0012345``, ``A1B2C3D4…``), an ``@``, an ``=`` (``q=ananya``) or
 #: whitespace.
 _VALUE_RUN = re.compile(r"\d{4,}|(?<![A-Za-z0-9])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8,}|[@=]|\s")
+#: Digit groups shorter than four still make one number: 6+ digits in all is a value
+#: (``501-002-345-678``, ``501.002.345.678``, ``+91-987-654-321``, ``12-05-90``).
+_MIN_DIGITS = 6
+#: A date with short groups (``1-5-90``, ``01/05/1990`` once decoded) is a value whatever its count.
+_DATE_SHAPE = re.compile(r"(?<!\d)\d{1,2}[-./ ]\d{1,2}[-./ ]\d{2,4}(?!\d)")
+#: A path segment made of digits and number separators only (one part of a split number).
+_NUMERIC_SEGMENT = re.compile(r"^[-.+ \d]*\d[-.+ \d]*$")
+_ENTITY_TOKEN = re.compile(r"^<[A-Z][A-Z0-9_]{0,40}>$")
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.\-\[\]]{1,40}$")
 _ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%2[Ff]|%5[Cc]")
@@ -125,9 +138,34 @@ def canonical(url: str, base: str | None = None) -> str | None:
     return urlunsplit((scheme, netloc, parts.path or "/", query, fragment))
 
 
+def _digits(text: str) -> int:
+    return sum(ch.isdigit() for ch in text)
+
+
 def _value_like(text: str) -> bool:
     """True when decoded ``text`` looks like a value whatever the classifier says (see module)."""
-    return bool(_VALUE_RUN.search(text) or _ID_SEGMENT.match(text))
+    return bool(
+        _VALUE_RUN.search(text)
+        or _ID_SEGMENT.match(text)
+        or _digits(text) >= _MIN_DIGITS
+        or _DATE_SHAPE.search(text)
+    )
+
+
+def _split_number(bases: Sequence[str]) -> set[int]:
+    """Indexes of the path segments that are parts of one number split over segments: a run of
+    consecutive numeric segments (digits and ``-``/``.``/``+``/space only) holding 6+ digits in
+    all (``/acct/501/002/345/678``, ``/dob/12/05/90``)."""
+    out: set[int] = set()
+    run: list[int] = []
+    for i, base in enumerate([*bases, ""]):
+        if _NUMERIC_SEGMENT.match(unquote(base)):
+            run.append(i)
+            continue
+        if sum(_digits(unquote(bases[j])) for j in run) >= _MIN_DIGITS:
+            out.update(run)
+        run = []
+    return out
 
 
 def _safe_key(key: str, classify: ValueClassifier) -> str:
@@ -164,10 +202,11 @@ def _matrix(params: str, classify: ValueClassifier) -> str:
 
 
 def _path(path: str, classify: ValueClassifier, ids: re.Pattern[str], *, matrix: bool) -> str:
+    parts = [s.partition(";") for s in (path or "/").split("/")]
+    split = _split_number([base for base, _, _ in parts])
     segs: list[str] = []
-    for s in (path or "/").split("/"):
-        base, semi, params = s.partition(";")
-        out = _segment(base, classify, ids)
+    for i, (base, semi, params) in enumerate(parts):
+        out = "{id}" if i in split else _segment(base, classify, ids)
         if semi and matrix:
             out += _matrix(params, classify)
         segs.append(out)
@@ -213,8 +252,12 @@ def template_is_value_free(tpl: str) -> bool:
     path, _, route = rest.partition("#")
     for part in (path, route.removeprefix("!")):
         segs, _, keys = part.partition("?")
-        for seg in [*segs.split("/"), *(keys.split("&") if keys else [])]:
-            if seg in ("{id}", "<k>") or re.fullmatch(r"<[A-Z][A-Z0-9_]{0,40}>", seg):
+        path_segs = segs.split("/")
+        # template() makes every all-digit segment and every split number {id}
+        if _split_number(path_segs) or any(_TEMPLATE_SEGMENT.match(unquote(s)) for s in path_segs):
+            return False
+        for seg in [*path_segs, *(keys.split("&") if keys else [])]:
+            if seg in ("{id}", "<k>") or _ENTITY_TOKEN.match(seg):
                 continue
             if ";" in seg or "=" in seg or _value_like(unquote(seg)):
                 return False
@@ -235,14 +278,19 @@ def _decode_unreserved(segment: str) -> str:
     return _ESCAPE.sub(one, segment)
 
 
-def _normalise(path: str, *, params_first: bool, split_encoded: bool) -> str:
+def _normalise(path: str, *, params_first: bool, split_encoded: bool, lenient: bool = False) -> str:
     """One reading of ``path`` (see :func:`normalise_path`); ``params_first`` strips matrix
     parameters before encoded separators are split (Tomcat), ``split_encoded`` treats ``%2F`` and
-    ``%5C`` as separators (servers that decode them)."""
+    ``%5C`` as separators (servers that decode them); ``lenient`` decodes every escape first, ends
+    the path at a NUL and trims trailing dots and spaces from each name (IIS/Windows)."""
+    if lenient:
+        path = unquote(path).split("\x00", 1)[0]
     raw = [s.partition(";")[0] if params_first else s for s in path.replace("\\", "/").split("/")]
     if split_encoded:
         raw = [p for s in raw for p in _ENCODED_SEPARATOR.sub("/", s).split("/")]
     segs = [_decode_unreserved(s.partition(";")[0]) for s in raw]
+    if lenient:
+        segs = [s if s in (".", "..") else s.rstrip(". ") for s in segs]
     out: list[str] = []
     for seg in segs:
         if seg == "..":
@@ -271,6 +319,7 @@ def _readings(path: str) -> set[str]:
         normalise_path(path),
         _normalise(path, params_first=True, split_encoded=True),
         _normalise(path, params_first=True, split_encoded=False),
+        _normalise(path, params_first=True, split_encoded=True, lenient=True),
     }
 
 
@@ -307,6 +356,25 @@ def path_verdict(
     if allow and not path_matches(path, allow, every_reading=True):
         return "not_allowed"
     return "ok"
+
+
+def route_path(url: str) -> str | None:
+    """The path of ``url``'s hash route (``#/x`` or ``#!/x``, query dropped), else ``None``."""
+    fragment = urlsplit(url.strip()).fragment or ""
+    if not _HASH_ROUTE.match(fragment):
+        return None
+    return fragment.removeprefix("!").partition("?")[0]
+
+
+def url_path_verdict(
+    url: str, allow: Sequence[str], deny: Sequence[str]
+) -> Literal["ok", "deny", "not_allowed"]:
+    """:func:`path_verdict` of ``url``'s path; a hash route is a navigation too, so its path is
+    checked against ``deny`` as well (``/app#/logout``). ``allow`` applies to the URL path only."""
+    route = route_path(url)
+    if route is not None and path_matches(route, deny, fold_case=True):
+        return "deny"
+    return path_verdict(urlsplit(url.strip()).path or "/", allow, deny)
 
 
 def redact_url(url: str, classify: ValueClassifier) -> str:
@@ -369,4 +437,4 @@ class CrawlScope:
             return "other_origin"
         if not self.same_origin and not self.network_host_allowed(origin.host):
             return "unregistered_host"
-        return path_verdict(urlsplit(url).path or "/", self.allow, self.deny)
+        return url_path_verdict(url, self.allow, self.deny)

@@ -172,6 +172,21 @@ _ID_URLS = [
     ("http://h/profile/Ananya%20Kapoor", "http://h/profile/{id}"),
     ("http://h/customers/ananya.k@x.in/profile", "http://h/customers/{id}/profile"),
     ("http://h/search/q=ananya/results", "http://h/search/{id}/results"),
+    # R2-B1: digit groups shorter than four are one number all the same
+    ("http://h/acct/501-002-345-678/stmt", "http://h/acct/{id}/stmt"),
+    ("http://h/acct/501.002.345.678/stmt", "http://h/acct/{id}/stmt"),
+    ("http://h/acct/501%2F002%2F345%2F678/stmt", "http://h/acct/{id}/stmt"),
+    ("http://h/phone/%2B91-987-654-321", "http://h/phone/{id}"),
+    ("http://h/phone/+91%20987%20654%20321", "http://h/phone/{id}"),
+    ("http://h/dob/12-05-90", "http://h/dob/{id}"),
+    ("http://h/dob/1-5-90", "http://h/dob/{id}"),
+    ("http://h/c/1a2b3c4d5e6f", "http://h/c/{id}"),
+    ("http://h/acct/501/002/345/678/stmt", "http://h/acct/{id}/{id}/{id}/{id}/stmt"),
+    ("http://h/dob/12/05/90/x", "http://h/dob/{id}/{id}/{id}/x"),
+    ("http://h/acct/50-1/00-2/34-5", "http://h/acct/{id}/{id}/{id}"),
+    ("http://h/x?501-002-345-678=1&page=2", "http://h/x?<k>=<v>&page=<v>"),
+    ("http://h/x?12-05-90", "http://h/x?<k>="),
+    ("http://h/x;501-002-345-678=1/y", "http://h/x;<k>=<v>/y"),
 ]
 
 
@@ -193,6 +208,15 @@ def test_redact_url_hides_account_numbers_customer_ids_and_session_tokens(
         "Ananya",
         "Kapoor",
         "abc",
+        "501",
+        "345",
+        "678",
+        "987",
+        "654",
+        "12-05",
+        "1-5-90",
+        "1a2b",
+        "34-5",
     ):
         assert secret not in out
 
@@ -201,6 +225,10 @@ def test_redact_url_keeps_plain_route_segments() -> None:
     url = "http://h/apply/identity/step2/review;lang=en?x=1"
     assert redact_url(url, _none) == "http://h/apply/identity/step2/review;lang=<v>?x=<v>"
     assert redact_url("http://h/", _none) == "http://h/"
+    # fewer than 6 digits and no date shape: routes and versions stay readable
+    plain = "http://h/docs/v1.2.3/api/v2/faq/1/page/2/x86_64"
+    assert redact_url(plain, _none) == plain
+    assert template(plain, _none) == "h/docs/v1.2.3/api/v2/faq/{id}/page/{id}/x86_64"
 
 
 _TEMPLATE_LEAKS = [
@@ -213,6 +241,15 @@ _TEMPLATE_LEAKS = [
     ("http://h/app#/nominee/ananya.k@x.in", ("ananya",)),
     ("http://h/app#!/acct/SB-50100234567812?50100234567812=1", ("50100234567812",)),
     ("http://h/app/profile;jsessionid=A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6", ("A1B2",)),
+    ("http://h/acct/501-002-345-678/stmt", ("501", "345-678")),
+    ("http://h/acct/501.002.345.678/stmt", ("501.002",)),
+    ("http://h/phone/%2B91-987-654-321", ("987", "654")),
+    ("http://h/dob/12-05-90", ("12-05",)),
+    ("http://h/dob/1-5-90", ("1-5-90",)),
+    ("http://h/acct/50-1/00-2/34-5", ("50-1", "34-5")),
+    ("http://h/x?501-002-345-678=1&page=2", ("501",)),
+    ("http://h/x;501-002-345-678=1/y", ("501",)),
+    ("http://h/app#/acct/501-002-345-678?12-05-90=1", ("501", "12-05")),
 ]
 
 
@@ -257,6 +294,18 @@ def test_template_keeps_routes_and_shares_ids() -> None:
         "h/profile/Ananya%20Kapoor",
         "h/app#/nominee/ananya.k@x.in",
         "h/app/profile;jsessionid=A1B2C3D4",
+        "h/acct/501-002-345-678/stmt",
+        "h/acct/501.002.345.678/stmt",
+        "h/phone/%2B91-987-654-321",
+        "h/dob/12-05-90",
+        "h/dob/1-5-90",
+        "h/x?501-002-345-678",
+        "h/x?page&12-05-90",
+        "h/acct/501/002/345/678/stmt",
+        "h/acct/1",
+        "h/acct/50-1/00-2/34-5",
+        "h/app#/acct/501-002-345-678",
+        "h/app#!/x?501-002-345-678",
     ],
 )
 def test_a_page_record_refuses_a_raw_template(tpl: str) -> None:
@@ -272,6 +321,7 @@ def test_a_page_record_refuses_a_raw_template(tpl: str) -> None:
             template=tpl,
         )
     assert "ananya" not in str(err.value) and "50100234567812" not in str(err.value)
+    assert "501" not in str(err.value) and "12-05" not in str(err.value)
 
 
 def test_value_free_templates_pass_the_record_guard() -> None:
@@ -282,6 +332,7 @@ def test_value_free_templates_pass_the_record_guard() -> None:
         "h/x?<k>&page",
         "h/app#!/acct/{id}?a&b",
         "127.0.0.1:8410/",
+        "h/docs/v1.2.3/api/v2/faq/{id}/x86_64",
     ):
         assert template_is_value_free(tpl), tpl
 
@@ -311,6 +362,17 @@ DENY = ("/logout", "/admin")
         "/admin;x%2F../users",  # Tomcat strips ";x%2F.." up to the next "/": /admin/users
         "/%2E%2E/admin",
         "/a%5C..%5Cadmin",
+        # N-a: IIS/Windows trim trailing dots and spaces; a NUL or an encoded ";" ends the name
+        "/logout.",
+        "/logout%2e",
+        "/logout%20",
+        "/logout.%20.",
+        "/admin%00",
+        "/admin%00.html",
+        "/admin%3b/x",
+        "/admin%3Bx=1/users",
+        "/admin..;/",
+        "/admin%252e",
     ],
 )
 def test_deny_cannot_be_bypassed_by_case_matrix_encoding_or_dots(path: str) -> None:
@@ -340,6 +402,28 @@ def test_allow_is_matched_on_the_normalised_path_case_sensitively() -> None:
     # that splits %2F first reads it as /admin
     assert path_verdict("/apply;x%2F../admin", allow, ()) == "not_allowed"
     assert path_verdict("/apply/a%2Fb", allow, ()) == "ok"
+
+
+def test_a_hash_route_is_a_navigation_the_deny_rail_covers() -> None:
+    scope = CrawlScope(
+        start=Origin.of("http://demo-site:8410/app"),
+        same_origin=True,
+        registered_hosts=frozenset({"demo-site"}),
+        allow=("/app",),
+        deny=DENY,
+    )
+    for url in (
+        "http://demo-site:8410/app#/logout",
+        "http://demo-site:8410/app#!/admin",
+        "http://demo-site:8410/app#/Admin/users?x=1",
+        "http://demo-site:8410/app#/x/../logout",
+        "http://demo-site:8410/app#!/%61dmin",
+    ):
+        assert scope.navigation_verdict(url) == "deny", url
+    # allow applies to the URL path; the route is checked against deny only
+    assert scope.navigation_verdict("http://demo-site:8410/app#/apply/identity") == "ok"
+    assert scope.navigation_verdict("http://demo-site:8410/app#logout") == "ok"  # not a route
+    assert scope.navigation_verdict("http://demo-site:8410/help#/apply") == "not_allowed"
 
 
 @pytest.mark.parametrize(

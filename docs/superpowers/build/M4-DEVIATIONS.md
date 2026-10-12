@@ -196,3 +196,47 @@ fails on `9bfb88d`.
   composite FKs, platform-wide), N6 (IPv6 hosts fail closed), N7 (SEC-2 tenant-scoped
   `storage_state_ref`, Task 16), N8 (producer-side redaction of field and form facts, Tasks 8, 9
   and 14).
+
+## Review round 2 fixes (G1: Tasks 1–5)
+
+Review `M4-G1-review-r2.md`, blocking R2-B1, plus N-a and N-b folded in. Every fix has a test that
+fails on `032b076`.
+
+- **R2-B1 — short digit groups (`dps/layers/scanner/urls.py`).** The round-1 B1 rule list above missed
+  numbers written as groups shorter than four digits. `_value_like` (used by path segments, query and
+  matrix keys, and `template_is_value_free`, so by the `PageRecord.template` guard) now also treats
+  decoded text as a value when it holds **6+ digits in all** (`501-002-345-678`, `501.002.345.678`,
+  `501%2F002%2F345%2F678`, `+91-987-654-321`, `12-05-90`, `1a2b3c4d5e6f`) or a **date shape**
+  (`1-5-90`: 1–2, 1–2 and 2–4 digit groups joined by `-`, `.`, `/` or a space). A number split over
+  consecutive numeric path segments (`/acct/501/002/345/678`, `/dob/12/05/90`, `/acct/50-1/00-2/34-5`)
+  is `{id}` in every one of them once the run holds 6+ digits; this applies to `redact_url` and
+  `template`, and the guard refuses such a run as well as any all-digit path segment (which
+  `template()` always makes `{id}`). Routes with fewer than 6 digits and no date shape stay readable
+  (`/docs/v1.2.3/api/v2/faq/1/page/2/x86_64`). Over-redaction is the accepted failure mode: a
+  version like `1.10.12` or a dated blog path becomes `{id}`. Tests (each with a None classifier and
+  the real `Detector(en_IN)`): new cases in
+  `test_redact_url_hides_account_numbers_customer_ids_and_session_tokens`,
+  `test_the_persisted_template_is_value_free`, `test_a_page_record_refuses_a_raw_template` (the error
+  echoes none of them), `test_redact_url_keeps_plain_route_segments` and
+  `test_value_free_templates_pass_the_record_guard`.
+- **N-a — deny edge forms.** `_readings` gains a fourth, lenient reading: every escape decoded (so
+  `%3B` ends the name and a double-encoded `%252e` is read once more), the path ends at a NUL, and each
+  name loses trailing dots and spaces (IIS/Windows). Deny still wins on any reading and allow must
+  still match every reading, so the extra reading can only narrow scope. `/logout.`, `/logout%2e`,
+  `/logout%20`, `/logout.%20.`, `/admin%00`, `/admin%00.html`, `/admin%3b/x`, `/admin%3Bx=1/users`,
+  `/admin..;/` and `/admin%252e` are now `deny` (new cases in
+  `test_deny_cannot_be_bypassed_by_case_matrix_encoding_or_dots`); `validate_scan` refuses
+  `/admin.` and `/admin%00` as start URLs.
+- **N-b — hash routes.** New `urls.route_path(url)` and `urls.url_path_verdict(url, allow, deny)`
+  (additive; `path_verdict` is unchanged): a hash route (`#/x`, `#!/x`, the route query dropped) is a
+  navigation too, so its path is checked against deny; allow still applies to the URL path only (a
+  hash-routed SPA's routes need not be listed). `CrawlScope.navigation_verdict` and `validate_scan`
+  (`start_url_denied`) use it, so Task 14 inherits it through `navigation_verdict`. Contract §9's
+  `start_url_denied` text is updated. Test: `test_a_hash_route_is_a_navigation_the_deny_rail_covers`
+  and two `start_url_denied` cases (`/#/admin`, `/app#!/Admin/x`).
+- Not done (non-blocking, recorded): N-c (registered-host scope ignores port and scheme — Task 6/14
+  should bind registered entries to `host[:port]`), N-d (a 422 echoes extra-key names in `loc`;
+  platform-wide M0 behaviour, only the caller's own input), N-e (names in path segments are kept when
+  the classifier has no NER — use the NER classifier in the worker when the `[ner]` extra is
+  present, Task 14), N-f (`template_is_value_free` does not check the host part), and the round-1
+  deferrals N2, N3, N6, N7, N8 as listed above.

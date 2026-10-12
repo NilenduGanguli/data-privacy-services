@@ -34,8 +34,8 @@ from dps.layers.scanner.urls import (
     Origin,
     UrlError,
     canonical,
-    path_verdict,
     template_is_value_free,
+    url_path_verdict,
     validate_glob,
 )
 
@@ -514,8 +514,8 @@ def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) 
 
     Raises :class:`ScanSpecError` (422) with ``url_invalid`` (not an http(s) URL, or carrying
     userinfo), ``host_not_registered``, ``scope_invalid`` (more pages than ``scan_max_pages``, a
-    depth outside 0..5, a bad glob), ``start_url_denied`` (the start path is denied or outside a
-    non-empty allow list), ``inline_auth_forbidden`` (inline storage state where inline secrets are
+    depth outside 0..5, a bad glob), ``start_url_denied`` (the start path or its hash route is
+    denied, or the path is outside a non-empty allow list), ``inline_auth_forbidden`` (inline storage state where inline secrets are
     not allowed), ``auth_invalid``, ``har_not_supported`` or ``fill_invalid``. The model refuses
     most of these already; the re-check covers programmatic construction.
     """
@@ -545,7 +545,7 @@ def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) 
             validate_glob(glob)
     except UrlError:
         raise ScanSpecError("scope_invalid") from None
-    if path_verdict(urlsplit(start).path or "/", scope.allow, scope.deny) != "ok":
+    if url_path_verdict(start, scope.allow, scope.deny) != "ok":
         raise ScanSpecError("start_url_denied")
 
     auth = spec.auth
