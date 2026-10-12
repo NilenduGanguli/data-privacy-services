@@ -769,3 +769,39 @@ Review: `M2-G4-review-r1.md`, one blocking finding (B1). Contract change: §0 am
   transformed with real FF1, written to a `bigint`/`varchar`/`numeric(14,2)` table, read back and
   revealed; the `bigint` and text tokens of the same digits are equal; the legacy setting on the text
   column shows ≥ 10 zero-led tokens, so the data set exercises the defect).
+
+## Task 18 — Targets: run validation, run plan, PK strategies, created DDL
+
+- `dps/layers/connectors/targets.py`: the plan's validation table, in its order, with these
+  additions (each covered by a test in `tests/connectors/test_targets.py`):
+  - **Snapshot object match normalises the PostgreSQL owner** (`None` → `public`), because
+    `describe` stores `public.<name>` as the snapshot's `object_ref`; otherwise a run naming an
+    object without an owner could never use its own accepted snapshot.
+  - `pk_strategy_invalid` also for an `offset` on a non-integer key and a `prefix` on a non-text
+    key (the plan's `apply_pk_strategy` would raise a `TypeError` mid-run), and an `append` to
+    another connection that is missing or a file store is `target_invalid` (no rule covered it
+    when `validate_run` is called without `submit_run`'s lookups).
+  - Job groups: a `group_id` with no group passed in is **`group_not_found` (404)** — the code the
+    plan's `submit_run` already raises; `validate_run` fails closed instead of skipping rule 17.
+    Contract §5.3 lists the code (same commit). In synthesize mode a group run must carry the
+    group's seed (fingerprint equal), as obfuscate must carry the group's key (the plan's text
+    named "obfuscate without key_material" only).
+  - Rules 15/16 (`method_needs_key`, `text_method_invalid`) apply to the columns the run reads
+    (`selection.columns` ∪ key, else all), not to columns the run never touches.
+- `resolve_target`: the static worst-case length check (`length_overflow`) runs inside
+  `resolve_target` for existing targets (the plan described it both there and as a separate loop
+  in `prepare` step 5; `prepare` now relies on this one). An `in_place` run with no transformed
+  column is `target_invalid` (the `UPDATE` would have an empty `SET` list). Existing-target
+  compatibility: same kind, both textual (`text`/`char`/`lob_text`), a planned column into a
+  `text` column, or `int` into `decimal`/`float`; a `table` target's key must equal the source
+  key as a set.
+- `created_column_type` decides "text-like" by the **source column's** kind (the plan's code read
+  the plan's kind, which is the same value before `resolve_target`).
+- `tests/connectors/factories.py`: `make_connection` also takes `name` and `tenant_id`;
+  `accepted_shape` is a helper; `accepted_snapshot` takes `tenant` and marks `customer_id` as the
+  anchor, with synthesize methods `keep` (key, `country_code`) and `surrogate` (the rest).
+- Tests: the plan's 13 + 4 (typed, without `noqa` comments) plus
+  `test_engine_roles_and_in_place_key_rules`, `test_append_rules`,
+  `test_files_synthesize_group_and_tabular_rules`, `test_resolve_existing_targets_per_write_mode`,
+  `test_same_table_and_run_plan_round_trip` and extra assertions (synthesize plans, plan
+  defaults, `TYPE_RE`, `hmac_pseudonym` length): 22 tests (plan: 17).
