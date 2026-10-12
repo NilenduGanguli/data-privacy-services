@@ -63,7 +63,7 @@ Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. M2 (2026-10-12, a
 Development install (M2): `uv pip install -e ".[dev,fpe,db,connectors,e2e]"` (`e2e` = Playwright
 1.55.0 for the console browser check; then `python -m playwright install chromium`, a no-op when
 `~/Library/Caches/ms-playwright/chromium-1187` exists). The console's Vitest suite (`cd frontend &&
-npm test`, 52 cases for the job helpers and the wizard reducer) runs in the gates, not in the image
+npm test`, 58 cases for the job helpers and the wizard reducer) runs in the gates, not in the image
 build.
 
 ## 3. Run locally (compose)
@@ -122,8 +122,10 @@ DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py                # console vs mockups
 ```
 
-The console check needs the demo connections the smoke test creates (`bank-pg-ro`, `bank-uat`), runs a
-real wizard job into `bank_uat.customers_console`, and writes screenshots (dark and light, 1440 and 390
+The console check needs the demo connections the smoke test creates (`bank-pg-ro`, `bank-uat`,
+`bank-restore-rw`), runs a real wizard job into `bank_uat.customers_console`, walks In place on
+`bank_restore.customers` (blocked while the snapshot rewrites `customer_id`, then a dry run once the
+key is kept, so the restored copy is not written), and writes screenshots (dark and light, 1440 and 390
 px, beside the mockups) to `docs/superpowers/build/m2-console/` (git-ignored).
 
 Never `up --wait` (it fails on the one-shots that exit 0). `--env-file` replaces the default `.env`:
@@ -462,6 +464,10 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     refuses it in staging/prod.
   - The console's step 3 review table has eight columns and scrolls sideways inside its card at
     1440 px (Method, Anchor and Text pipeline are to the right).
+  - In place never rewrites a key column (`pk_transform_in_place`), and discovery maps an entity key
+    such as `bank_restore.customers.customer_id` (CUSTOMER_ID) to `fpe_digits`. The wizard's step 4
+    then shows a failed key check and stays closed; press **Change it in step 3**, **Run again**,
+    set the key's method to `keep` and accept the new snapshot (an accepted snapshot never changes).
   - Run the integration gates one at a time against a lane's stack: the service tests share one
     metadata database, one source database and one MinIO bucket with fixed keys (two concurrent runs
     collide, e.g. on `tests/big.bin` in `tests/connectors/test_storage_s3.py`).

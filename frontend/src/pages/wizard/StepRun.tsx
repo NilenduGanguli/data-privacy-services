@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, type Auth } from '../../lib/api';
 import {
-  fmtCount, fqn, heatTone, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
+  fmtCount, fqn, heatTone, inPlaceKeyRewrites, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
   seedFingerprint, sourceObject, writeModeLabel, writtenObject, type Step, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, JobGroup, Preset } from '../../lib/types';
@@ -53,6 +53,9 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack, run }: {
   const purposeOk = d.ticket.trim().length >= 3 && legalBasisText(d).length >= 3;
   const blocked: string[] = [];
   if (!d.snapshotAccepted) blocked.push('The classification snapshot is not accepted (step 3).');
+  const rewrites = d.writeMode === 'in_place' ? inPlaceKeyRewrites(d) : [];
+  if (rewrites === null) blocked.push('DPS is still reading the key columns of the accepted snapshot.');
+  else if (rewrites.length) blocked.push(`In place never changes a key column, and the snapshot rewrites ${rewrites.map((r) => `${r.name} (${r.method})`).join(', ')} in ${syn ? 'Synthesize' : 'Obfuscate'} mode: set it to keep in step 3.`);
   if (needsConfirmation(d.writeMode) && !confirmed) blocked.push(`${d.writeMode === 'in_place' ? 'In place' : 'Append'} changes ${fqn(writtenObject(d))}: confirm the write in step 4.`);
   if (d.keyChoice === 'group' && (!d.groupId || match !== 'matched')) blocked.push(`Load the ${syn ? 'seed' : 'key'} file of the chosen job group.`);
   if (!purposeOk) blocked.push('Enter the ticket (3 characters or more) for the purpose.');

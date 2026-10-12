@@ -3,8 +3,8 @@ import { CheckList } from '../../components/CheckList';
 import { ConfirmWriteModal } from '../../components/ConfirmWriteModal';
 import { api, ApiError, type Auth } from '../../lib/api';
 import {
-  confirmationKey, countKey, fmtClock, fmtCount, fqn, isWriteConfirmed, methodFor, needsConfirmation, oneWayColumns, parseCount, selectionOf,
-  sourceObject, writtenObject, type WizardDraft,
+  confirmationKey, countKey, fmtClock, fmtCount, fqn, inPlaceKeyRewrites, isWriteConfirmed, methodFor, needsConfirmation, oneWayColumns, parseCount,
+  selectionOf, sourceObject, writtenObject, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, Connection, ConnectionSpec, ConnectionTestResult, WriteMode } from '../../lib/types';
 import { canLeave, targetReady, type WizardAction } from './state';
@@ -65,10 +65,17 @@ const MODES: { mode: WriteMode; title: string; chip: string; tone: string }[] = 
   { mode: 'files', title: 'Export files', chip: 'source unchanged', tone: 'slate' },
 ];
 
+/** "customer_id (fpe_digits)" for the key columns an In place run would rewrite. */
+function rewriteText(rewrites: { name: string; method: string }[]): string {
+  return rewrites.map((r) => `${r.name} (${r.method})`).join(', ');
+}
+
 /**
  * Step 4 · Target and write mode: where protected rows go. In place / Append need a typed confirmation
  * that names the row count, so the rows the selection matches are counted here when step 2 did not
- * (an empty filter); the run sends that count as `expected_rows`.
+ * (an empty filter); the run sends that count as `expected_rows`. In place also needs the accepted
+ * snapshot to keep every key column (the server refuses `pk_transform_in_place`): a key the snapshot
+ * rewrites is shown as a failed check with the way back to step 3, and the step stays closed.
  */
 export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnectionsChanged, onNext, onBack }: {
   d: WizardDraft; dispatch: React.Dispatch<WizardAction>; auth: Auth; connections: Connection[]; snapshot: ClassificationSnapshot | null;
@@ -94,6 +101,12 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
   const rewritten = snapshot ? snapshot.columns.filter((c) => !c.is_key && methodFor(c, d.mode).method !== 'keep').length : undefined;
   const confirmed = isWriteConfirmed(d);
   const written = fqn(writtenObject(d));
+  const rewrites = inPlaceKeyRewrites(d);
+  const modeName = d.mode === 'synthesize' ? 'Synthesize' : 'Obfuscate';
+  const inPlaceBlock = !writable ? `${d.connectionName} has no target role, so DPS cannot write through it.`
+    : rewrites === null ? 'DPS is still reading the key columns of the accepted snapshot.'
+      : rewrites.length ? `The accepted snapshot rewrites the update key in ${modeName} mode: ${rewriteText(rewrites)}. In place never changes a key column, so set it to keep in step 3 first.`
+        : null;
   // In place / Append confirm a row count: count the selection when step 2 did not (no filter typed)
   const needCount = needsConfirmation(d.writeMode) && d.rows === null && !!d.connectionId && !!d.table;
   const counting = needCount && countError === null;
@@ -225,8 +238,16 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
               </select></div>
           </div>
           {!writable && <div className="callout amber" style={{ marginTop: 12, fontSize: 12.5 }}><b>{d.connectionName} has the source role only.</b> In place writes through the source connection, so it needs the target role too (an UPDATE-capable login). Register a writable connection for the restored copy, or add the role to this one (the admin scope is needed when it is tagged production), then come back.</div>}
-          <div className="checks" style={{ marginTop: 12 }}>
-            <div className="ck ok"><span className="ic">✓</span><span><b>{key.join(', ') || 'The key'} is the update key and is not changed</b><span className="d">{rewritten ?? 'The transformed'} columns are rewritten; foreign keys that point at the key keep working</span></span><span className="meta">ok</span></div>
+          <div className="checks" style={{ marginTop: 12 }} data-testid="in-place-key">
+            {rewrites === null ? (
+              <div className="ck warn"><span className="ic">!</span><span><b>Reading the key columns of the accepted snapshot…</b><span className="d">In place updates rows by {key.join(', ') || 'their key'} and needs the snapshot to keep the key unchanged.</span></span><span className="meta">check</span></div>
+            ) : rewrites.length ? (
+              <div className="ck bad"><span className="ic">✕</span><span><b>{rewrites.map((r) => r.name).join(', ')} {rewrites.length === 1 ? 'is the update key, but the accepted snapshot rewrites it' : 'are the update key, but the accepted snapshot rewrites them'} ({rewrites.map((r) => r.method).join(', ')} in {modeName} mode)</b>
+                <span className="d">In place updates rows by their key and never changes it, so DPS refuses this run. In step 3, run discovery again, set the method of {rewrites.map((r) => r.name).join(', ')} to keep and accept the new snapshot.{' '}
+                  <button className="linkbtn" type="button" onClick={onBack}>Change it in step 3</button></span></span><span className="meta">pk_transform_in_place</span></div>
+            ) : (
+              <div className="ck ok"><span className="ic">✓</span><span><b>{key.join(', ') || 'The key'} is the update key and is not changed</b><span className="d">{rewritten ?? 'The transformed'} columns are rewritten; foreign keys that point at the key keep working</span></span><span className="meta">ok</span></div>
+            )}
           </div>
         </div>
       )}
@@ -304,12 +325,12 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
           connectionName={d.connectionName} synthesize={d.mode === 'synthesize'} keyColumns={key} rewrittenColumns={rewritten}
           oneWay={snapshot ? oneWayColumns(snapshot, d.mode) : []} partitions={d.parallelism} batchRows={d.batchRows}
           pkText={d.writeMode === 'append' ? pkText : undefined} rowEstimate={d.writeMode === 'append' && sameTable ? d.shape?.row_estimate : null}
-          blockedReason={d.writeMode === 'in_place' && !writable ? `${d.connectionName} has no target role, so DPS cannot write through it.` : null}
+          blockedReason={d.writeMode === 'in_place' ? inPlaceBlock : null}
           onCancel={() => setModal(false)} onConfirm={(typed) => { dispatch({ type: 'confirm', typed, at: new Date().toISOString(), key: confirmationKey(d) }); setModal(false); }} />
       )}
 
       <div className="wfoot"><button className="btn" type="button" onClick={onBack}>Back</button>
-        <span className="rowx">{!canLeave(4, d) && d.writeMode && <span className="hint">{!targetReady(d) ? (d.writeMode === 'in_place' && !writable ? 'In place needs a writable connection' : 'Complete the target to continue') : 'Confirm the write to continue'}</span>}
+        <span className="rowx">{!canLeave(4, d) && d.writeMode && <span className="hint">{!targetReady(d) ? (d.writeMode === 'in_place' ? (!writable ? 'In place needs a writable connection' : rewrites === null ? 'Reading the key columns of the snapshot' : 'In place needs the key kept (step 3)') : 'Complete the target to continue') : 'Confirm the write to continue'}</span>}
           <button className="btn btn-primary" type="button" disabled={!canLeave(4, d)} onClick={onNext}>Next: Review and run</button></span></div>
     </section>
   );

@@ -45,6 +45,7 @@ export function draft(d: Partial<WizardDraft> = {}): WizardDraft {
     connectionId: 'c_src', connectionName: 'bank-restore-rw', connectionRoles: ['source', 'target'], secretRef: 'dps/src/bank-restore-rw',
     test: { ok: true, engine: 'postgres', server_version: '16.4', checks: [], capabilities: {}, error_code: null },
     owner: 'bank_restore', table: 'contacts', snapshotId: 'snap_1', snapshotAccepted: true, policyName: 'gdpr-pseudonymise',
+    keyMethods: [{ name: 'contact_id', obfuscate: 'keep', synthesize: 'keep' }],   // the accepted snapshot keeps its key
     targetConnectionId: 'c_tgt', targetOwner: 'bank_uat', targetTable: 'contacts', writeMode: 'table',
     ticket: 'CHG-12345', ...d,
   };

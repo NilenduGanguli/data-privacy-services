@@ -285,3 +285,89 @@ def test_wizard_to_evidence(page: Any, app_url: str, customer_values: list[str])
         ("09-reports.html", "09-reports"),
     ):
         mockup(page, file, name)
+
+
+def _discover_and_accept(pg: Any) -> None:
+    """Step 3: run discovery, wait for the heat-map and accept the proposed snapshot."""
+    pg.get_by_role("button", name="Run discovery").click()
+    pg.get_by_text("Column heat-map").wait_for(timeout=120_000)
+    pg.get_by_role("button", name="Accept snapshot").click()
+    pg.get_by_text(re.compile(r"classification snapshot snap_")).wait_for()
+
+
+def _confirm_in_place(pg: Any, name: str) -> Any:
+    """Open the in-place dialog once the rows are counted and type ``name``; returns the dialog."""
+    pg.get_by_text(re.compile(r"rows match the selection")).wait_for(timeout=30_000)
+    pg.get_by_role("button", name="Confirm", exact=True).click()
+    dialog = pg.get_by_role("dialog")
+    dialog.get_by_label(re.compile("Type .* to confirm")).fill(name)
+    return dialog
+
+
+def test_in_place_on_a_table_with_an_entity_typed_key(
+    page: Any, app_url: str, customer_values: list[str]
+) -> None:
+    """Verify r1: discovery maps ``bank_restore.customers.customer_id`` (CUSTOMER_ID) to a method
+    other than keep, which the server refuses in place (``pk_transform_in_place``). Step 4 says so,
+    keeps In place closed and leads back to step 3; keeping the key there opens it, and the run is
+    accepted. It is a dry run, so the restored copy stays as seeded."""
+    page.goto(f"{app_url}/data-sources/jobs/new")
+    page.get_by_label("PostgreSQL").check()
+    page.get_by_label("Saved connection").select_option(label="bank-restore-rw")
+    page.get_by_role("button", name="Test connection").click()
+    page.get_by_text(re.compile(r"\d+ of \d+ checks passed")).wait_for(timeout=30_000)
+    page.get_by_role("button", name="Next: Select data").click()
+    page.get_by_label("Owner").select_option("bank_restore")
+    page.get_by_label("Table").select_option("customers")
+    page.get_by_role("button", name="Next: Discover").click()
+    _discover_and_accept(page)
+    # 4: the accepted snapshot rewrites the key, so In place is a failed check and stays closed
+    page.get_by_role("button", name="Next: Target and write mode").click()
+    page.get_by_label(re.compile("In place")).check()
+    key_check = page.get_by_test_id("in-place-key")
+    key_check.get_by_text(
+        re.compile(r"customer_id is the update key, but the accepted snapshot rewrites it")
+    ).wait_for(timeout=15_000)
+    assert key_check.get_by_text("is not changed").count() == 0
+    page.get_by_text("In place needs the key kept (step 3)").wait_for()
+    assert page.get_by_role("button", name="Next: Review and run").is_disabled()
+    no_values(page, customer_values)
+    shoot(page, "06-wizard-4-in-place-key")
+    dialog = _confirm_in_place(page, "bank_restore.customers")
+    dialog.get_by_text(re.compile("rewrites the update key")).wait_for()
+    assert dialog.get_by_role("button", name=re.compile(r"Write .* rows in place")).is_disabled()
+    dialog.get_by_role("button", name="Choose another write mode").click()
+    # 3: a new discovery, the key set to keep, the new snapshot accepted
+    key_check.get_by_role("button", name="Change it in step 3").click()
+    page.get_by_role("button", name="Run again").click()
+    page.get_by_role("button", name="Accept snapshot").wait_for(timeout=120_000)
+    method = page.get_by_label("Method of customer_id")
+    row = page.locator("table.review tbody tr").filter(has=method)
+    row.get_by_text("keep it to write in place").wait_for()
+    method.select_option("keep")
+    page.get_by_text(re.compile(r"saved · \d+ overrides")).wait_for(timeout=15_000)
+    assert row.get_by_text("keep it to write in place").count() == 0
+    page.get_by_role("button", name="Accept snapshot").click()
+    page.get_by_text(re.compile(r"classification snapshot snap_")).wait_for()
+    # 4 again: the key is kept, the write is confirmed for the counted rows
+    page.get_by_role("button", name="Next: Target and write mode").click()
+    key_check.get_by_text("customer_id is the update key and is not changed").wait_for(
+        timeout=15_000
+    )
+    dialog = _confirm_in_place(page, "bank_restore.customers")
+    write = dialog.get_by_role("button", name=re.compile(r"Write .* rows in place"))
+    assert write.is_enabled()
+    write.click()
+    page.get_by_text(re.compile(r"Confirmed at")).wait_for()
+    # 5: ready, and the server accepts the run (a dry run: nothing is written)
+    page.get_by_role("button", name="Next: Review and run").click()
+    page.get_by_label("Ticket").fill("CHG-12345")
+    page.get_by_text("all checks passed").wait_for()
+    with page.expect_response(
+        lambda r: r.url.endswith("/api/v1/jobs/run") and r.request.method == "POST"
+    ) as answer:
+        page.get_by_role("button", name="Dry run (no writes)").click()
+    assert answer.value.status < 400, f"POST /jobs/run answered {answer.value.status}"
+    page.wait_for_url(re.compile(r"/data-sources/jobs/j_"), timeout=30_000)
+    no_values(page, customer_values)
+    no_page_errors(page)

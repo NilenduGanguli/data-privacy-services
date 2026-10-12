@@ -16,7 +16,8 @@
  */
 import { useReducer } from 'react';
 import {
-  canConfirmWrite, confirmationKey, countKey, emptyDraft, fqn, isWriteConfirmed, needsConfirmation, writtenObject, type Step, type WizardDraft,
+  canConfirmWrite, confirmationKey, countKey, emptyDraft, fqn, inPlaceKeyRewrites, isWriteConfirmed, keyMethodsOf, needsConfirmation, writtenObject,
+  type Step, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, Connection, ConnectionTestResult, CountOut, TableShape, WriteMode } from '../../lib/types';
 
@@ -56,7 +57,7 @@ const NO_CONFIRMATION: Partial<WizardDraft> = { typed: '', confirmedAt: null, co
 /** What a new source table or connection invalidates: filter, count, discovery, confirmation. */
 const CLEAR_SELECTION: Partial<WizardDraft> = {
   where: '', query: '', params: {}, ...NO_COUNT, columns: null,
-  discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, ...NO_CONFIRMATION,
+  discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, keyMethods: null, ...NO_CONFIRMATION,
 };
 const CLEAR_TABLE: Partial<WizardDraft> = { ...CLEAR_SELECTION, table: '', shape: null };
 const CLEAR_SOURCE: Partial<WizardDraft> = { ...CLEAR_TABLE, owner: '', test: null, testedAt: null };
@@ -123,14 +124,19 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
     case 'columns':
       return { ...d, columns: a.columns };
     case 'discovering':
-      return { ...d, discoverJobId: a.jobId, snapshotId: null, snapshotAccepted: false, policyName: null, ...NO_CONFIRMATION };
+      return { ...d, discoverJobId: a.jobId, snapshotId: null, snapshotAccepted: false, policyName: null, keyMethods: null, ...NO_CONFIRMATION };
     case 'snapshot':
-      return { ...d, snapshotId: a.snapshot.id, snapshotAccepted: a.snapshot.status === 'accepted', policyName: a.snapshot.policy_name };
+      return {
+        ...d, snapshotId: a.snapshot.id, snapshotAccepted: a.snapshot.status === 'accepted', policyName: a.snapshot.policy_name,
+        keyMethods: keyMethodsOf(a.snapshot),
+      };
     case 'writeMode':
       return a.mode === d.writeMode ? d : { ...d, writeMode: a.mode, ...NO_CONFIRMATION, confirmLapsed: false };
     case 'confirm': {
-      // only with a row count, for the name of the written object, in the dialog drawn for this draft
-      const blocked = !needsConfirmation(d.writeMode) || d.rows === null || a.key !== confirmationKey(d);
+      // only with a row count, for the name of the written object, in the dialog drawn for this draft;
+      // never for an in-place run the server would refuse because it rewrites a key column
+      const blocked = !needsConfirmation(d.writeMode) || d.rows === null || a.key !== confirmationKey(d)
+        || (d.writeMode === 'in_place' && !keysKeptInPlace(d));
       return canConfirmWrite(a.typed, fqn(writtenObject(d)), blocked)
         ? { ...d, typed: a.typed.trim(), confirmedAt: a.at, confirmedKey: a.key, confirmLapsed: false }
         : d;
@@ -140,7 +146,7 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
     case 'restore':
       return {
         ...d, ...a.draft, password: '', keyMaterialJson: '', where: '', query: '', params: {}, ...NO_COUNT, ...NO_CONFIRMATION, confirmLapsed: false,
-        submittedJobId: null,
+        submittedJobId: null, keyMethods: null,
       };
     case 'submitted':
       return { ...d, ...NO_CONFIRMATION, confirmLapsed: false, password: '', keyMaterialJson: '', step: 5, submittedJobId: a.jobId };
@@ -181,9 +187,14 @@ export function targetReady(d: WizardDraft): boolean {
     case 'table': return !!d.targetConnectionId && !!d.targetTable.trim();
     case 'files': return !!d.filesConnectionId;
     case 'append': return d.appendTarget === 'same' ? true : !!d.targetTable.trim();
-    case 'in_place': return d.connectionRoles.includes('target');
+    case 'in_place': return d.connectionRoles.includes('target') && keysKeptInPlace(d);
     default: return false;
   }
+}
+
+/** The accepted snapshot keeps every key column in the run's mode, as In place requires. */
+export function keysKeptInPlace(d: WizardDraft): boolean {
+  return inPlaceKeyRewrites(d)?.length === 0;
 }
 
 /** The wizard's reducer with a starting draft. */

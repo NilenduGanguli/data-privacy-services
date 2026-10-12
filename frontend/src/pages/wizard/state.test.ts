@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildRunSpec, confirmationKey, countKey, draftForStorage, fqn, isWriteConfirmed, writtenObject, type WizardDraft } from '../../lib/jobs';
-import { draft } from '../../lib/fixtures';
-import type { ColumnInfo, TableShape } from '../../lib/types';
-import { canLeave, isSubmitted, reachable, wizardReducer, type WizardAction } from './state';
+import { buildRunSpec, confirmationKey, countKey, draftForStorage, fqn, inPlaceKeyRewrites, isWriteConfirmed, writtenObject, type WizardDraft } from '../../lib/jobs';
+import { column, draft } from '../../lib/fixtures';
+import type { ClassificationSnapshot, ColumnClassification, ColumnInfo, TableShape } from '../../lib/types';
+import { canLeave, isSubmitted, reachable, targetReady, wizardReducer, type WizardAction } from './state';
 
 // The D3 write confirmation (spec §7, contract §14): In place and Append are confirmed with the row count
 // the selection matches, and a confirmation covers exactly what the operator read in the dialog.
@@ -186,11 +186,77 @@ describe('a submitted run closes the draft (B3)', () => {
     expect(canLeave(4, rebuilt)).toBe(false);
     expect(reachable(rebuilt)).toBe(4);
     expect(buildRunSpec(rebuilt).target).toMatchObject({ confirm_write: false });
-    expect(canLeave(4, confirm(rebuilt))).toBe(true);
+    // the shell reads the accepted snapshot again (key methods are never saved); then a new confirmation counts
+    const reread = run(rebuilt, { type: 'set', patch: { keyMethods: [{ name: 'customer_id', obfuscate: 'keep', synthesize: 'keep' }] } });
+    expect(canLeave(4, confirm(reread))).toBe(true);
   });
   it('the saved draft never holds the submitted job, and a restored one is open', () => {
     expect(JSON.stringify(draftForStorage(submitted()))).not.toContain('submittedJobId');
     const restored = wizardReducer(draft({ owner: '', table: '' }), { type: 'restore', draft: { submittedJobId: 'j_forged' } as Partial<WizardDraft> });
     expect(isSubmitted(restored)).toBe(false);
+  });
+});
+
+describe('in place keeps the key columns (verify r1)', () => {
+  // bank_restore.customers: discovery maps the CUSTOMER_ID key to fpe_digits, and the server refuses an
+  // in-place run that would rewrite a key column (422 pk_transform_in_place).
+  const snap = (keyMethod: string, over: Partial<ColumnClassification> = {}): ClassificationSnapshot => ({
+    id: 'snap_2', tenant_id: 'default', job_id: 'j_d', connection_id: 'c_src', engine: 'postgres', object_ref: 'bank.customers',
+    status: 'accepted', policy_name: 'gdpr-pseudonymise', policy_hash: 'h', sample_rows: 2000, content_hash: 'c',
+    created_at: '2026-10-12T09:00:00Z', accepted_at: '2026-10-12T09:00:00Z', accepted_by: 'k_1', overrides: [], shape,
+    columns: [
+      column({
+        path: '$.customer_id', name: 'customer_id', entity_type: 'CUSTOMER_ID', is_key: true, suggested: { method: 'fpe_digits', params: {} },
+        method: { method: keyMethod, params: {} }, synthesize_method: { method: 'keep', params: {} }, ...over,
+      }),
+      column({ path: '$.email', name: 'email' }),
+    ],
+  });
+  const accepted = (d: WizardDraft, s: ClassificationSnapshot): WizardDraft => wizardReducer(d, { type: 'snapshot', snapshot: s });
+
+  it('a key the snapshot rewrites keeps In place closed and cannot be confirmed', () => {
+    const d = counted(accepted(base({ keyMethods: null }), snap('fpe_digits')), 12069);
+    expect(inPlaceKeyRewrites(d)).toEqual([{ name: 'customer_id', method: 'fpe_digits' }]);
+    expect(targetReady(d)).toBe(false);
+    const c = confirm(d);
+    expect(c.typed).toBe('');
+    expect(isWriteConfirmed(c)).toBe(false);
+    expect(canLeave(4, c)).toBe(false);
+    expect(reachable(c)).toBe(4);
+    expect(buildRunSpec(c).target).toMatchObject({ write_mode: 'in_place', confirm_write: false });
+  });
+  it('the key method does not gate the other write modes', () => {
+    const d = accepted(base({ writeMode: 'table', targetConnectionId: 'c_tgt', targetTable: 'customers' }), snap('fpe_digits'));
+    expect(canLeave(4, d)).toBe(true);
+  });
+  it('a new discovery whose accepted snapshot keeps the key lets the in-place run be confirmed', () => {
+    const blocked = counted(accepted(base(), snap('fpe_digits')), 12069);
+    const rediscovered = run(blocked, { type: 'discovering', jobId: 'j_d2' });
+    expect(rediscovered.keyMethods).toBeNull();
+    expect(targetReady(rediscovered)).toBe(false);
+    const kept = confirm(accepted(rediscovered, snap('keep')));
+    expect(inPlaceKeyRewrites(kept)).toEqual([]);
+    expect(canLeave(4, kept)).toBe(true);
+    expect(buildRunSpec(kept).target).toEqual({ write_mode: 'in_place', confirm_write: true, expected_rows: 12069 });
+  });
+  it("follows the server's method for the run's mode, including the synthesize fallback to surrogate", () => {
+    const d = counted(accepted(base(), snap('keep', { synthesize_method: null, synthesize_suggested: null })), 12069);
+    expect(canLeave(4, confirm(d))).toBe(true);
+    const syn = run(confirm(d), { type: 'set', patch: { mode: 'synthesize' } });
+    expect(inPlaceKeyRewrites(syn)).toEqual([{ name: 'customer_id', method: 'surrogate' }]);
+    expect(canLeave(4, syn)).toBe(false);
+    expect(canLeave(4, confirm(syn))).toBe(false);
+    expect(reachable(syn)).toBe(4);   // step 5 closes and the wizard returns to step 4
+  });
+  it('keeps In place closed until the accepted snapshot is read, and never stores or restores the key methods', () => {
+    const d = counted(base({ keyMethods: null }), 12069);
+    expect(inPlaceKeyRewrites(d)).toBeNull();
+    expect(canLeave(4, confirm(d))).toBe(false);
+    const ok = accepted(d, snap('keep'));
+    expect(JSON.stringify(draftForStorage(ok))).not.toContain('keyMethods');
+    const forged = { ...draftForStorage(ok), keyMethods: [] } as Partial<WizardDraft>;
+    const restored = wizardReducer(draft({ owner: '', table: '' }), { type: 'restore', draft: forged });
+    expect(restored.keyMethods).toBeNull();
+    expect(targetReady({ ...restored, writeMode: 'in_place' })).toBe(false);
   });
 });

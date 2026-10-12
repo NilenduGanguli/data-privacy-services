@@ -3,7 +3,7 @@ import { HeatLegend, HeatMap } from '../../components/HeatMap';
 import { usePoll } from '../../hooks/usePoll';
 import { api, ApiError, type Auth } from '../../lib/api';
 import {
-  decisionReason, fmtCount, fqn, heatTone, isTerminal, METHOD_NAMES, methodText, needsDecision, overridesFor, parseCount,
+  decisionReason, fmtCount, fqn, heatTone, isTerminal, METHOD_NAMES, methodText, needsDecision, overridesFor, parseCount, runMethodFor,
   selectionOf, shortId, shortType, sourceObject, type ColumnEdit, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, ColumnClassification, MethodSpec } from '../../lib/types';
@@ -98,6 +98,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
   const editable = snapshot?.status === 'proposed';
   const seconds = j?.started_at && j.finished_at ? (new Date(j.finished_at).getTime() - new Date(j.started_at).getTime()) / 1000 : null;
   const entityOptions = [...new Set(cols.map((c) => c.entity_type).filter(Boolean) as string[])].sort();
+  const keyNames = new Set(snapshot?.shape.key ?? []);
 
   return (
     <section className="panel" aria-labelledby="h3s">
@@ -119,7 +120,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
         ) : (
           <>
             <div className="card-head"><div className="card-title">Sampled {fmtCount(snapshot.sample_rows)} of {fmtCount(d.count?.rows ?? d.shape?.row_estimate ?? null)} rows{seconds !== null ? ` in ${seconds.toFixed(1)} s` : ''}</div>
-              <div className="rowx"><span className="chip emerald">sample complete</span><button className="btn btn-sm" type="button" disabled={starting || snapshot.status !== 'proposed'} onClick={() => void runDiscovery()}>Run again</button></div></div>
+              <div className="rowx"><span className="chip emerald">sample complete</span><button className="btn btn-sm" type="button" disabled={starting || saving === 'saving'} onClick={() => void runDiscovery()}>Run again</button></div></div>
             <div className="kv">Detectors: <b>structural</b> · <b>patterns and checksums</b> · NER <b>{ner === null ? 'unknown' : ner ? 'on' : 'off'}</b> · LLM labelling <b>off</b> · <b style={{ color: 'var(--emerald)' }}>0</b> raw values sent to the LLM</div>
             <div className="dist" role="img" aria-label={`${cols.length} columns: ${tally.crit} critical, ${tally.sens} sensitive, ${tally.decl} declared, ${tally.kept} kept`}>
               <i style={{ flex: tally.crit, background: 'var(--rose)' }} /><i style={{ flex: tally.sens, background: 'var(--amber)' }} /><i style={{ flex: tally.decl, background: 'var(--teal)' }} /><i style={{ flex: tally.kept, background: 'var(--surface-3)' }} />
@@ -171,9 +172,12 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
                 {cols.map((c) => {
                   const m = value(c, 'method', c.method) as MethodSpec;
                   const sm = value(c, 'synthesize_method', c.synthesize_method ?? undefined) as MethodSpec | undefined;
+                  // in place updates rows by the key and the server refuses a key it would rewrite
+                  const keyRewritten = keyNames.has(c.name) && (mode === 'synthesize' ? (sm ?? runMethodFor(c, 'synthesize')).method : m.method) !== 'keep';
                   return (
                     <tr key={c.path} className={edits[c.path] || c.override || focus === c.path ? 'edited' : ''}>
-                      <td className="mono">{c.name}{c.is_key && <span className="faint sm"> · key</span>}</td>
+                      <td className="mono">{c.name}{c.is_key && <span className="faint sm"> · key</span>}
+                        {keyRewritten && <span className="faint sm" style={{ display: 'block' }} title="In place updates rows by this key and never changes it">keep it to write in place</span>}</td>
                       <td className="faint" title={c.data_type}>{shortType(c.data_type)}</td>
                       <td><input className="input mono ent" list="entity-types" aria-label={`Entity of ${c.name}`} disabled={!editable}
                                  value={(value(c, 'entity_type', c.entity_type) as string | null) ?? ''} placeholder="kept"
@@ -206,7 +210,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
                 : <span className={`chip ${snapshot.status === 'accepted' ? 'emerald' : 'slate'}`}>{snapshot.status}</span>}
             </div>
             {snapshot.status === 'accepted' && (
-              <div className="callout emerald" style={{ marginTop: 12, fontSize: 12.5 }}>Accepted choices are saved as classification snapshot <span className="mono">{snapshot.id}</span>. It becomes the run policy and goes into the evidence pack.</div>
+              <div className="callout emerald" style={{ marginTop: 12, fontSize: 12.5 }}>Accepted choices are saved as classification snapshot <span className="mono">{snapshot.id}</span>. It becomes the run policy and goes into the evidence pack. An accepted snapshot does not change: to choose another method, press Run again, review the new snapshot and accept it.</div>
             )}
             {snapshot.status === 'superseded' && <div className="callout amber" style={{ marginTop: 12, fontSize: 12.5 }}>A newer snapshot of this table was accepted after this one. Run discovery again to work from the current one.</div>}
           </div>

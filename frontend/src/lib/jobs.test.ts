@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
 import { evidenceSoFar, methodText, packTargetText, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
-import { confirmationKey, countKey, fqn, writtenObject, type WizardDraft } from './jobs';
+import { confirmationKey, countKey, fqn, keyMethodsOf, runMethodFor, writtenObject, type WizardDraft } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
@@ -215,6 +215,19 @@ describe('run spec per write mode (steps 4-5)', () => {
     expect(spec.consistency).not.toHaveProperty('key_material');
     expect(spec.consistency.synthesis_seed).toMatchObject({ seed: 'c2VlZA==' });
     expect(buildRunSpec(draft({ mode: 'synthesize' })).consistency).toEqual({ scope: 'key' });
+  });
+  it("reads the key columns' run methods as the server does (shape.key; synthesize falls back to the suggestion, then surrogate)", () => {
+    const snap = {
+      shape: { object: { owner: 'bank', name: 'customers' }, columns: [], key: ['customer_id'], key_source: 'primary_key' as const, row_estimate: 10 },
+      columns: [
+        column({ name: 'customer_id', is_key: true, method: { method: 'fpe_digits', params: {} }, synthesize_method: null, synthesize_suggested: null }),
+        column({ name: 'account_number', is_key: true, method: { method: 'det_token', params: {} } }),
+        column({ name: 'email' }),
+      ],
+    };
+    expect(keyMethodsOf(snap)).toEqual([{ name: 'customer_id', obfuscate: 'fpe_digits', synthesize: 'surrogate' }]);
+    expect(runMethodFor(column({ synthesize_method: null, synthesize_suggested: { method: 'keep', params: {} } }), 'synthesize').method).toBe('keep');
+    expect(runMethodFor(column({ method: { method: 'keep', params: {} } }), 'obfuscate').method).toBe('keep');
   });
   it('lists one-way columns and groups the plan by method', () => {
     const snap = { columns: [column({ name: 'pin', method: { method: 'generalize', params: {} } }), column({ name: 'email' }), column({ name: 'seg', entity_type: null, method: { method: 'keep', params: {} } })] };

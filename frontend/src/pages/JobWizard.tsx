@@ -84,12 +84,13 @@ export function JobWizard(): JSX.Element {
   const submitted = isSubmitted(d);
   const frozen = submitted || busy !== null;   // no step changes while a run is in flight or after it
 
-  // steps 4 and 5 read the accepted snapshot (key, one-way columns, plan)
+  // steps 4 and 5 read the accepted snapshot (key, one-way columns, plan); the draft takes its key
+  // methods from it (never from storage), so In place opens only when the server's snapshot keeps the key
   useEffect(() => {
     if (!d.snapshotId || !d.snapshotAccepted) { setSnapshot(null); return; }
     if (snapshot?.id === d.snapshotId && snapshot.status === 'accepted') return;
-    api.snapshots.get(auth, d.snapshotId).then(setSnapshot).catch(() => setSnapshot(null));
-  }, [auth, d.snapshotId, d.snapshotAccepted, snapshot]);
+    api.snapshots.get(auth, d.snapshotId).then((s) => { setSnapshot(s); dispatch({ type: 'snapshot', snapshot: s }); }).catch(() => setSnapshot(null));
+  }, [auth, d.snapshotId, d.snapshotAccepted, snapshot, dispatch]);
 
   const loadConnections = useCallback(() => {
     api.connections.list(auth, 200).then((p) => setConnections(p.items)).catch(() => setConnections([]));

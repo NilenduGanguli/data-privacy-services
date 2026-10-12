@@ -2009,3 +2009,55 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
   - Residual (unchanged, for the contract owner): a name deny-list cannot cover user-defined
     functions, operators backed by functions, casts or domain checks in a source database; the
     §5.2 allow-list recommendation of the G3 reviews stands.
+- **B2 — the console's default In place on a table whose key the snapshot transforms could not
+  run** (`frontend/src/pages/wizard/StepTarget.tsx`). Discovery maps the entity key
+  `bank_restore.customers.customer_id` to `fpe_digits`; step 4 still said "customer_id is the
+  update key and is not changed", step 5 said "Ready to run · all checks passed", and Run job got
+  422 `pk_transform_in_place` (contract §5.3: in place refuses a transformed key column). The run
+  spec carries no per-column methods (the accepted snapshot decides them) and an accepted snapshot
+  takes no overrides, so the console cannot send a key forced to keep; it now says so and leads the
+  operator to a snapshot that keeps the key. Contract and server rule unchanged.
+  - `lib/jobs.ts`: `runMethodFor(col, mode)` decides a column's run method as the server's
+    `targets.method_for_column` does (synthesize: the accepted synthesize method, else its
+    suggestion, else `surrogate`; the display helper `methodFor` falls back to keep and is
+    unchanged), `keyMethodsOf(snapshot)` lists the `shape.key` columns with their run method per
+    mode, and `inPlaceKeyRewrites(d)` the key columns an In place run would rewrite in the draft's
+    mode (`null` while unknown). The draft gains `keyMethods` (names and method names only), set by
+    the `snapshot` action, cleared with the selection, by a new discovery and by `restore`, and
+    never saved (`TRANSIENT`): it always comes from the server's snapshot.
+  - `state.ts`: `targetReady` for `in_place` also needs `keysKeptInPlace(d)` (known and every key
+    kept), so Next, the stepper's step 5 and Run job stay closed; the `confirm` action refuses an
+    in-place confirmation while a key is rewritten. Switching the mode at step 5 to one that
+    rewrites the key closes step 5 and the shell returns to step 4, as a withdrawn confirmation
+    already did.
+  - Step 4: the key check states what the spec will do — a failed check "customer_id is the update
+    key, but the accepted snapshot rewrites it (fpe_digits in Obfuscate mode)" with the server's
+    code and a **Change it in step 3** link, a pending check while the snapshot is read, and the
+    previous "is not changed" statement only when every key is kept. The confirmation dialog shows
+    the reason and keeps its write button disabled; the footer hint says "In place needs the key
+    kept (step 3)". Step 5 lists the same reason among the items to resolve.
+  - Step 3: **Run again** is enabled for an accepted or superseded snapshot too (it was off unless
+    the snapshot was proposed, although the superseded callout already asked for a new run), the
+    accepted callout says how to change a method, and a key column whose method is not keep in the
+    current mode carries the note "keep it to write in place". An accepted snapshot stays read-only.
+  - `JobWizard.tsx`: the accepted snapshot that steps 4–5 read is also dispatched as `snapshot`, so
+    the key methods are known on a restored draft or a `?snapshot=` deep link, and a snapshot found
+    superseded closes step 4 instead of being fetched again in a loop.
+  - Tests (written first): Vitest `in place keeps the key columns (verify r1)` ×5 in
+    `state.test.ts` (a rewritten key keeps In place closed and refuses the confirmation; other write
+    modes are not gated; a new discovery whose accepted snapshot keeps the key confirms and sends
+    `confirm_write`; the synthesize fallback to `surrogate` closes step 5 after a mode switch; an
+    unknown key method keeps In place closed and is neither saved nor restored) — 4 failed before
+    the change — and `jobs.test.ts` `reads the key columns' run methods as the server does`.
+    `fixtures.ts`' default draft now carries an accepted snapshot that keeps its key, and
+    `a second run starts from a new draft…` re-reads the key methods before its final confirmation
+    (the shell does that on a rebuilt draft); no assertion was loosened. 58 Vitest cases (was 52).
+    Browser case `test_in_place_on_a_table_with_an_entity_typed_key` in
+    `tests/console/test_console_m2.py` (lane stack, `bank-restore-rw`): discovery of
+    `bank_restore.customers`, In place shows the failed key check, Next disabled, the dialog's
+    write button disabled with the typed name; **Change it in step 3** → **Run again** → the key row's
+    note → method `keep` → saved override → accept; step 4 shows "customer_id is the update key and
+    is not changed", the confirmation is accepted, step 5 shows "all checks passed", and
+    `POST /jobs/run` (a dry run, so the restored copy is not written) answers below 400 and opens
+    the job. Screenshots `06-wizard-4-in-place-key-*` (git-ignored); no horizontal scroll at 390 px.
+

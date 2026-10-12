@@ -294,6 +294,36 @@ export function methodFor(col: ColumnClassification, mode: 'obfuscate' | 'synthe
   return (mode === 'synthesize' ? col.synthesize_method : col.method) ?? { method: 'keep', params: {} };
 }
 
+/**
+ * The method a run gives a column, decided as the server decides it (`targets.method_for_column`):
+ * the accepted method; in synthesize mode the accepted synthesize method, else its suggestion, else
+ * `surrogate`.
+ */
+export function runMethodFor(col: ColumnClassification, mode: 'obfuscate' | 'synthesize'): MethodSpec {
+  if (mode === 'synthesize') return col.synthesize_method ?? col.synthesize_suggested ?? { method: 'surrogate', params: {} };
+  return col.method;
+}
+
+/** A key column of the accepted snapshot and the method a run gives it in each mode (names only). */
+export interface KeyMethod { name: string; obfuscate: string; synthesize: string }
+
+/** The snapshot's key columns (`shape.key`, as the server reads them) with their run methods. */
+export function keyMethodsOf(snapshot: Pick<ClassificationSnapshot, 'shape' | 'columns'>): KeyMethod[] {
+  const keys = new Set(snapshot.shape.key);
+  return snapshot.columns.filter((c) => keys.has(c.name))
+    .map((c) => ({ name: c.name, obfuscate: runMethodFor(c, 'obfuscate').method, synthesize: runMethodFor(c, 'synthesize').method }));
+}
+
+/**
+ * The key columns an In place run would rewrite in the draft's mode. In place updates rows by their key
+ * and never changes it, so the server refuses such a run (`pk_transform_in_place`); the operator sets
+ * those columns to keep in step 3. `null` while the accepted snapshot's key methods are not known.
+ */
+export function inPlaceKeyRewrites(d: Pick<WizardDraft, 'keyMethods' | 'mode'>): { name: string; method: string }[] | null {
+  if (d.keyMethods === null) return null;
+  return d.keyMethods.filter((k) => k[d.mode] !== 'keep').map((k) => ({ name: k.name, method: k[d.mode] }));
+}
+
 /** `fpe_digits keep_suffix 4` — method name and its params, value-free. */
 export function methodText(m: MethodSpec | null | undefined): string {
   if (!m) return '—';
@@ -358,6 +388,7 @@ export interface WizardDraft {
   snapshotId: string | null;
   snapshotAccepted: boolean;
   policyName: string | null;              // the snapshot's policy
+  keyMethods: KeyMethod[] | null;         // transient: the accepted snapshot's key columns and run methods (null = not read yet)
   // 4 · target and write mode
   writeMode: WriteMode | null;
   targetOwner: string;
@@ -405,7 +436,7 @@ export function emptyDraft(draftId: string = newDraftId()): WizardDraft {
     production: false, targetConnectionId: null, test: null, testedAt: null,
     owner: '', table: '', shape: null, selMode: 'where', where: '', query: '', params: {}, count: null, countedAt: null,
     countSeconds: null, rows: null, countedKey: null, columns: null, maxRows: '', sampleRows: '2000', parallelism: 4,
-    discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null,
+    discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, keyMethods: null,
     writeMode: null, targetOwner: '', targetTable: '', tableLoad: 'truncate_insert', createIfMissing: true,
     appendTarget: 'same', pkKind: 'offset', pkOffset: '', pkPrefix: '', filesConnectionId: null, filesFormat: 'parquet',
     filesPrefix: '', filesCompression: 'snappy', batchRows: null, typed: '', confirmedAt: null, confirmedKey: null, confirmLapsed: false,
@@ -423,11 +454,12 @@ export function newDraftId(): string {
 
 /**
  * Fields that never leave React state: credentials, key material, filters, binds, the row count taken
- * for a filter (meaningless once the filter is gone), the write confirmation and the submitted job.
+ * for a filter (meaningless once the filter is gone), the write confirmation, the submitted job and the
+ * key methods (always read again from the accepted snapshot on the server).
  */
 const TRANSIENT = [
   'password', 'keyMaterialJson', 'where', 'query', 'params', 'count', 'countedAt', 'countSeconds', 'rows', 'countedKey',
-  'typed', 'confirmedAt', 'confirmedKey', 'confirmLapsed', 'submittedJobId',
+  'typed', 'confirmedAt', 'confirmedKey', 'confirmLapsed', 'submittedJobId', 'keyMethods',
 ] as const;
 
 /** The draft as `localStorage['dps.jobDraft']` may hold it (contract §14). */
