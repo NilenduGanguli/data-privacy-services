@@ -9,7 +9,7 @@ import pytest
 from dps.config import Settings
 from dps.engine.detect.ensemble import Detector, DetectorConfig
 from dps.engine.shapes import value_shape
-from dps.engine.synth.schema_gen import SchemaError, execute_spec
+from dps.engine.synth.schema_gen import RuleConstraint, SchemaError, execute_spec
 from dps.engine.synth.schema_profile import (
     ProfileResult,
     heuristic_spec,
@@ -400,3 +400,68 @@ def test_gender_and_nationality_are_not_swept() -> None:
     assert {r["gender"] for r in generated} <= {"Female", "Male"}
     assert any(r["nationality"] == "Indian" for r in generated)
     assert verify_against_sample(generated, result).passed
+
+
+# -- fix round 1 (review M1-G4-review-r1) ---------------------------------------------------------
+B1_ROWS: list[dict[str, Any]] = [
+    {
+        "ssn": ssn,
+        "card": card,
+        "opened": opened,
+        "closed": closed,
+        "balance": balance,
+        "fee": fee,
+        "lo": lo,
+        "hi": hi,
+    }
+    for ssn, card, opened, closed, balance, fee, lo, hi in [
+        ("123-45-6789", "4111 1111 1111 1111", "2019-03-14", "2021-05-01", 10.5, 15, 120, 560),
+        ("234-56-7890", "5500 0000 0000 0004", "2020-07-01", "2022-01-09", 20.0, 25, 310, 870),
+        ("345-67-8901", "4012 8888 8888 1881", "2018-11-30", "2023-08-15", 30.25, 30, 240, 990),
+    ]
+]
+
+
+async def test_llm_constraints_cannot_write_or_reorder_sensitive_fields() -> None:
+    """B1: a model rule that writes a detected field, or an order that moves one, is dropped.
+
+    Before the fix both rules were kept and every row held ``ssn = 078-05-1120`` (an issued SSN)
+    and ``card = 4111111111111111``.
+    """
+    result = profile_from_sample(B1_ROWS, DETECTOR)
+    entities = {f.name: f.entity_type for f in result.profile.fields}
+    assert (entities["ssn"], entities["card"], entities["opened"]) == ("SSN", "CARD_PAN", "DATE")
+    assert {entities[n] for n in ("balance", "fee", "lo", "hi")} == {None}
+    always = [{"field": "balance", "op": "ge", "value": 0, "then": "078-05-1120"}]
+    reply = json.dumps(
+        {
+            "fields": [
+                {
+                    "name": "balance",
+                    "generator": "decimal",
+                    "params": {"min": 0, "max": 9, "scale": 2},
+                }
+            ],
+            "constraints": [
+                {"kind": "rule", "field": "ssn", "when": always, "else": "078-05-1120"},
+                {"kind": "rule", "field": "card", "when": always, "else": "4111111111111111"},
+                {"kind": "order", "fields": ["opened", "closed"]},
+                {"kind": "rule", "field": "fee", "when": [dict(always[0], then=0)], "else": 5},
+                {"kind": "order", "fields": ["lo", "hi"]},
+            ],
+        }
+    )
+    spec, info = await propose_spec(result, RecordingGateway(reply), locale="en_US")
+    assert info["source"] == "llm" and spec.source == "llm"
+    kept = [
+        ("rule", c.field) if isinstance(c, RuleConstraint) else ("order", tuple(c.fields))
+        for c in spec.constraints
+    ]
+    assert kept == [("rule", "fee"), ("order", ("lo", "hi"))]
+    assert any(note.startswith("3 llm constraint(s) dropped") for note in spec.notes)
+    rows = execute_spec(spec, rows=40, seed=bytes(32)).rows
+    ssns = {r["ssn"] for r in rows}
+    assert len(ssns) == 40 and "078-05-1120" not in ssns
+    assert "4111111111111111" not in {str(r["card"]).replace(" ", "") for r in rows}
+    assert all(r["fee"] == 0 and r["lo"] <= r["hi"] for r in rows)
+    assert verify_against_sample(rows, result).passed

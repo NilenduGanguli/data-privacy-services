@@ -818,3 +818,30 @@ at the Task 13 routes) and one quadratic path; each fix has a test that fails on
   an inline recognizer.
 - Count: plan 7 new tests (custom 1, policy 1, entities 5); added 5 more. Suite 889 → 901 passed,
   4 skipped; `tests/test_api.py` (M0) unchanged and green.
+
+## Fix round 1 for Tasks 11–14 (review `M1-G4-review-r1`)
+
+Each blocking finding has a test that fails on the reviewed code (be188d7) and passes after the fix.
+Public names and signatures are unchanged.
+
+**B1: the model could overwrite a detected field through a constraint** (`merge_llm_spec`,
+`dps/engine/synth/schema_profile.py`). The merge kept DPS's generator for every field with an
+entity type, but passed the model's `constraints` through, and the executor applies them after
+generation: a `rule` on `ssn` made every row `078-05-1120` (an issued SSN) and one on `card` made every
+row `4111111111111111`, with `source: llm`.
+
+- New private `_llm_constraints`: the reply's constraints are parsed one by one
+  (`TypeAdapter(list[Constraint])`), and a `rule` whose `field` is detected, or an `order` that names a
+  detected field (sorting moves values between its fields), is dropped. The spec's `notes` say how many
+  (`"N llm constraint(s) dropped: …"`), never which values. Constraints that do not parse, or that fail
+  the spec's own checks, are still all dropped with `llm constraints dropped (invalid)`, as before.
+  Rules may still *read* a detected field in `when` (they write a model constant into another field).
+- Consequence: "detected" means any entity type, as the merge's existing rule does, and sample date
+  columns are usually detected as `DATE` by value, so an LLM `order` over two sampled date columns
+  (`opened ≤ closed`) is now dropped. The heuristic proposer makes no constraints, so this is no worse
+  than the no-LLM path. Allowing `order` over fields whose generator is not `entity` would bring it back;
+  that is a product decision, left as is (fail-safe).
+- Side effect, intended: an invalid `order` on a detected field (an `entity` generator is not sortable)
+  no longer takes the model's valid constraints on other fields down with it.
+- Test: `test_llm_constraints_cannot_write_or_reorder_sensitive_fields` (the review's reply plus an
+  `order` over detected dates, a kept `rule` and a kept `order`).

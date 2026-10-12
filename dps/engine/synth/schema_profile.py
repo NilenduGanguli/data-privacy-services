@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Literal, NoReturn, TypeGuard
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from dps.engine.detect.ensemble import Detector
 from dps.engine.detect.structural import classify_key
@@ -36,8 +36,10 @@ from dps.engine.synth.schema_gen import (
     ENTITY_GENERATORS,
     MAX_ABS,
     MAX_SCALE,
+    Constraint,
     FieldSpec,
     GeneratorSpec,
+    OrderConstraint,
     SchemaError,
 )
 from dps.engine.taxonomy import entity_info
@@ -101,6 +103,7 @@ _DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _NOT_IDENT = re.compile(r"[^A-Za-z0-9_]")
 _PATTERN_LITERALS = set("Aa9X\\")
+_CONSTRAINTS: TypeAdapter[list[Constraint]] = TypeAdapter(list[Constraint])
 
 SPEC_SYSTEM = (
     "You design synthetic-data generators. You receive a JSON description of a table's structure: "
@@ -873,9 +876,35 @@ def profile_originals(result: ProfileResult) -> list[str]:
     return out
 
 
+def _llm_constraints(raw: Any, kept_by_dps: set[str]) -> tuple[list[dict[str, Any]], int] | None:
+    """The model's constraints that neither write nor reorder a field in ``kept_by_dps`` (dumped
+    for ``GeneratorSpec``), and how many were dropped; ``None`` when they do not parse.
+
+    A ``rule`` replaces its field's generated value with a constant the model chose, and an
+    ``order`` moves values between its fields, so either would undo the merge's rule that a field
+    DPS detected keeps DPS's generator (a rule on a detected SSN made every row an issued SSN).
+    """
+    try:
+        parsed = _CONSTRAINTS.validate_python(raw or [])
+    except ValidationError:
+        return None
+    kept: list[dict[str, Any]] = []
+    for constraint in parsed:
+        touched = (
+            set(constraint.fields)
+            if isinstance(constraint, OrderConstraint)
+            else {constraint.field}
+        )
+        if not touched & kept_by_dps:
+            kept.append(constraint.model_dump(mode="json", by_alias=True))
+    return kept, len(parsed) - len(kept)
+
+
 def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -> GeneratorSpec:
     """Parse the model's reply; keep its choices only for non-sensitive fields (a model cannot
-    downgrade a detected SSN to an integer); invalid constraints are dropped with a note.
+    downgrade a detected SSN to an integer). Its constraints may not write (``rule``) or reorder
+    (``order``) a sensitive field either: those are dropped with a note naming how many, and
+    constraints that do not validate are all dropped with a note.
 
     Raises:
         ValueError: the reply holds no JSON object, its ``fields`` is not a list, or it proposes
@@ -917,14 +946,21 @@ def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -
         "locale": heuristic.locale,
         "fields": [f.model_dump() for f in fields],
         "source": "llm",
-        "notes": notes,
     }
-    try:
-        return GeneratorSpec.model_validate({**base, "constraints": data.get("constraints") or []})
-    except ValidationError:
-        return GeneratorSpec.model_validate(
-            {**base, "notes": [*notes, "llm constraints dropped (invalid)"][:50]}
+    invalid = "llm constraints dropped (invalid)"
+    constraints = _llm_constraints(data.get("constraints"), sensitive)
+    if constraints is None:
+        return GeneratorSpec.model_validate({**base, "notes": [*notes, invalid]})
+    kept, dropped = constraints
+    if dropped:
+        notes.append(
+            f"{dropped} llm constraint(s) dropped: a constraint may not write or reorder a field "
+            "DPS detected as sensitive"
         )
+    try:
+        return GeneratorSpec.model_validate({**base, "notes": notes, "constraints": kept})
+    except ValidationError:
+        return GeneratorSpec.model_validate({**base, "notes": [*notes, invalid]})
 
 
 async def propose_spec(
