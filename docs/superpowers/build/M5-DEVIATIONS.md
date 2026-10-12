@@ -38,17 +38,37 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
 ## Task 2 — Fidelity and privacy metrics
 
 - `dps/engine/metrics.py` `_nearest`: the plan took `sqrt(min(|q|² + |r|² − 2q·r))`. For values of
-  realistic magnitude (balances around 1e6) that expansion loses the exact zero of a copied row
-  (cancellation leaves ~1e-3), so `zero_distance_share` would read 0 for a verbatim copy. The nearest
-  row is still found on the expanded form, but its distance is recomputed directly (`‖q − r‖`), so a
-  copy measures exactly 0. New test `test_nndr_counts_exact_copies_of_large_values_as_zero_distance`
-  (fails on the plan's form).
+  realistic magnitude (balances around 1e6) that expansion loses the exact zero of many copied rows
+  (cancellation leaves a residue up to ~1e-3), so `zero_distance_share` under-counts verbatim copies
+  (0.82 instead of 1.0 for the new test's data). The nearest row is still found on the expanded form,
+  but its distance is recomputed directly (`‖q − r‖`), so a copy measures exactly 0. New test
+  `test_nndr_counts_exact_copies_of_large_values_as_zero_distance` (fails on the plan's form).
 - `to_float` returns `None` for an int too large for a float (`OverflowError`) instead of raising;
   `qi_unique_overlap` returns 0 without quasi-identifiers (the plan counted every synthetic row as
   matching the empty key); `fidelity_report` adds `corr_within_limit` (additive; the evidence shows
   the correlation limit like the column limits) and casts `within_limit` to a plain `bool`.
 - `tests/test_metrics.py`: `numpy` is taken from `pytest.importorskip` too (the module imports it
   at the top), plus assertions for `to_float("12")`, NaN, bytes and dates in `canonical`.
+
+## Task 3 — Gaussian-copula engine
+
+- `dps/engine/synth/copula.py` `_subkey`: keyed BLAKE2b (`key=seed`, the label as the message)
+  instead of hashing the seed as data with the label as a 16-byte salt — the standard keyed-KDF form,
+  no truncated labels; same interface and properties (the seed decides every stream).
+- `fit` also refuses a path without a kind (`no kind given for $.X`) and columns of unequal length
+  (`every column must have the same number of rows`) with value-free `CopulaError`s; the plan raised a
+  `KeyError` / sampled misaligned rows.
+- `from_bytes` refuses a bare `.npy` array (not an npz archive), an unknown marginal kind and a
+  Cholesky factor of the wrong shape, and maps `TypeError`/`AttributeError`/`EOFError` to
+  `CopulaError` too (the plan's `with np.load(...)` raised `AttributeError` on a `.npy`). The blob is
+  sealed (authenticated) in Task 6, so this is robustness, not a security boundary.
+- `Marginal._typed` caps a date's ordinal at `date.max` and a decimal scale at ≥ 0;
+  `Marginal.inverse` raises `CopulaError` (not `assert`) on a malformed marginal.
+- `to_bytes`: `np.savez_compressed(buffer, **arrays)` without `allow_pickle` (the keyword exists
+  only from numpy 2.1; the extra's floor is 2.0, where it would be stored as an array). The arrays
+  are numeric, so nothing is pickled; reading keeps `allow_pickle=False`.
+- `tests/test_copula.py`: added a prefix-stream property of `uniforms`, a timezone-aware timestamp
+  test, `test_serialisation_keeps_the_reject_set`, truncated/empty blobs, and the new fit errors.
 
 ## Deferred to final stage
 
