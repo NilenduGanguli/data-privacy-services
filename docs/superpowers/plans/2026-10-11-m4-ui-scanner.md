@@ -4033,7 +4033,8 @@ class ScanRunner:
         await page.wait_for_timeout(self.s.scan_settle_ms)
         frames = await frame_map(page, iframes=self.rt.spec.scope.iframes)
         frame = frames[t.replay.frame_index]
-        await frame.evaluate(CLICKABLES_JS, t.replay.frame_index)
+        await frame.evaluate(CLICKABLES_JS, {"frameIndex": t.replay.frame_index,
+                                             "shadow": self.rt.spec.scope.shadow_dom})  # same predicate as EXTRACT_JS
         # Click 1 of 2 in the scanner: replaying an SPA route — an in-scope link-like element outside
         # any form, on an unfilled page (the guard still blocks every non-GET request it could cause).
         await frame.locator(f'[data-dps-click="{t.replay.frame_index}:{t.replay.ordinal}"]').click(
