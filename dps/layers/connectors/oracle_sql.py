@@ -340,6 +340,35 @@ def _source(shape: TableShape, query: str | None, sample: tuple[float, int] | No
     return f"{qualified(shape.object)} t"
 
 
+_HASH_SPAN: Final = 4_294_967_296  # ORA_HASH returns 0 .. 2**32 - 1; its seed takes the same range
+_HASH_BUCKETS: Final = 1_000_000
+
+
+def sample_filter(keys: list[ColumnInfo], percent: float, seed: int, alias: str = "t") -> str:
+    """A selection's ``sample`` as a predicate on a hash of the key (no binds, integers only).
+
+    ``SAMPLE (p) SEED (s)`` is not stable across access paths: measured on 23ai, ``COUNT(*)``
+    with ``SAMPLE (40) SEED (7)`` saw 81 of 200 rows while keyset pages of the same clause saw 72,
+    so partitions and the count would not split one sample. A hash of the key is a function of
+    the row alone (keys are never rewritten in place), like M2's PostgreSQL filter. Composite keys
+    fold the per-column hashes; the result keeps ``percent`` of the 10**6 buckets.
+
+    Raises:
+        ValueError: no key columns.
+    """
+    if not keys:
+        raise ValueError("a sample filter needs the key columns")
+    exprs = [sort_expr(k, alias) for k in keys]
+    acc = exprs[0]
+    for i, expr in enumerate(exprs[1:]):
+        head = f"ORA_HASH({acc})" if i == 0 else acc
+        acc = f"ORA_HASH({head} * {_HASH_SPAN} + ORA_HASH({expr}))"
+    if len(exprs) > 1:
+        acc = acc[len("ORA_HASH(") : -1]  # the outer hash below takes the bucket count and seed
+    threshold = int(round(percent * _HASH_BUCKETS / 100))
+    return f"ORA_HASH({acc}, {_HASH_BUCKETS - 1}, {seed % _HASH_SPAN}) < {threshold}"
+
+
 _KEY_BOUNDS: Final[tuple[tuple[str, KeyOp], ...]] = (("lo", ">="), ("hi", "<"), ("af", ">"))
 
 

@@ -330,3 +330,42 @@ plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as b
 - Not changed (non-blocking review items, left for the tasks they name): N1 sample percent below
   `0.0000005`, N2 BYTE-semantics VARCHAR2 created targets, N4 dead TSTZ key path, N5 `.env.example`,
   N6 per-cursor output type handler.
+
+## Task 5 — `OracleConnector` reads
+
+- **`selection.sample` is a hash of the key, not `SAMPLE … SEED`** (`oracle_sql.sample_filter`, new;
+  `OracleConnector._compile`). Measured on 23ai Free: with `SAMPLE (40) SEED (7)` on 200 rows,
+  `COUNT(*)` saw 81 rows and keyset pages of the same clause saw 72 (the sampled set depends on the
+  access path), so the count, the partitions and a resumed page would not read one sample. The sample
+  is now `ORA_HASH(<key>, 999999, seed mod 2**32) < percent·10**4` (composite keys fold the per-column
+  hashes), a function of the row alone like M2's PostgreSQL `hashtextextended` filter; it also works
+  for `query` selections (the plan applied nothing there: `_source` ignores the sample under a query).
+  `read_sql`/`count_sql` are called with `sample=None`; their `SAMPLE … SEED` path stays (Task 3 tests)
+  but no connector code uses it. Unit test `test_selection_sample_is_a_key_hash_filter`; the live test
+  checks repeatability, the count, a partition split, another seed, a query and a narrowing where.
+- `_compile` binds literals itself through M2's `parameterize_literals` (generated `:lN` binds take
+  their values from the bound selection, user binds from `params`), so a where with literals runs
+  bound, never interpolated (plan: `compile_where` on the raw selection, which M2 refuses with
+  `selection_not_parameterized` when literals are present). The ROWID `selection_query_needs_key` check
+  runs before `validate_selection` (M2's key-projection rule would otherwise answer
+  `selection_query_missing_key` for a ROWID table).
+- `sample_keys` bounds the ranked set with `sample_sql(upper=True)` and typed `hi<i>` binds (review B2;
+  plan: filter in Python) and samples with `SAMPLE` sized for `10·n` keys (plan: `n`) so the quantiles
+  of large tables come from about `20·n` sampled keys; `sample()` retries without `SAMPLE` when a
+  selective where left fewer than `min(n, 50)` sampled rows (M2's PostgreSQL does the same).
+- `test()` checks carry `severity` (M2's console `Check` type and PostgreSQL's result): `required`
+  `connect`, `select_source`, `select_target`, `insert_target`, `update_target`, `create_target`,
+  `create_ledger`; `advisory` `session_tagged`, `no_dml_on_source`. `ok` = every required check; a
+  refused login returns `error_code="connection_failed"` with the driver code in the check's
+  `detail` (never raises), like PostgreSQL.
+- `engine: Engine = "oracle"` (plan: `Final`): a `Final` attribute does not satisfy the `Connector`
+  protocol's settable `engine` under mypy. `from_secret` also refuses empty `username`/`password`
+  (`secret_unavailable`) and strips the `dsn` file. `_call` forwards keyword arguments and logs the
+  mapped error's code (`oracle_call_failed`, fields `op`, `driver_code`). `list_objects` clamps
+  `limit` to 1..5000 and skips names `ObjectRef` refuses, like PostgreSQL.
+- Tests (`tests/connectors/test_oracle_connector.py`, 20): the plan's 16 plus describe without an owner,
+  ROWID-range partition coverage of a key-less table, NVARCHAR2 keys as one partition, and the owner's
+  in-place / missing-table connection checks. `TAX_ID` values are 9 characters in `CHAR(10)` so the test
+  proves CHAR values come back blank-padded. Every Oracle test module drops the session owner's tables
+  before and after each test (`oracle_fixtures.drop_all`): the owner is one schema per session, so
+  `KYC` and other names repeat across modules.

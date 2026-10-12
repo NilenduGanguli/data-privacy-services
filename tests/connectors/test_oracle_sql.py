@@ -442,3 +442,19 @@ def test_qualified_names_go_through_the_identifier_rule() -> None:
 
 def test_pseudo_columns_are_not_table_data() -> None:
     assert ColumnInfo(path="$.A", name="A", data_type="NUMBER", kind="int").pseudo is False
+
+
+def test_selection_sample_is_a_key_hash_filter() -> None:
+    # SAMPLE … SEED is not stable across access paths (measured: COUNT(*) 81 rows, keyset pages
+    # 72 of 200), so a selection's sample is a deterministic function of the key, as on PostgreSQL
+    assert osql.sample_filter([CID], 40.0, 7) == 'ORA_HASH(t."CUSTOMER_ID", 999999, 7) < 400000'
+    composite = osql.sample_filter([CID, TS9], 12.5, -1)
+    assert composite == (
+        'ORA_HASH(ORA_HASH(t."CUSTOMER_ID") * 4294967296 + ORA_HASH(t."EVENT_TS"), 999999, '
+        "4294967295) < 125000"
+    )
+    assert osql.sample_filter([osql.rowid_column()], 100.0, 0) == (
+        "ORA_HASH(t.ROWID, 999999, 0) < 1000000"
+    )
+    with pytest.raises(ValueError):
+        osql.sample_filter([], 10.0, 0)
