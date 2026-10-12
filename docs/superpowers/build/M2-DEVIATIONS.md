@@ -1908,3 +1908,34 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
     underscore (`logscanleak`), because a connection name must match `^[a-z0-9][a-z0-9-]{1,62}$`.
 - The tag `v0.1.0-m2` and HANDOFF's *Last verified* line (1098 passed) still describe `438cf86`; with
   this fix `pytest -q` counts one more case (1099 passed, 2 skipped).
+
+## Review G8 r2 fix (Tasks 36–38)
+
+- **B1 — the release tag and HANDOFF's *Last verified* line now describe the final commit.** The r1
+  entry above left both on `438cf86`, so `v0.1.0-m2` lacked the r1 log-scan fix (`62cf9e3`) that is
+  the DoD 9 safety evidence, against DoD 10 (the tag on the final commit) and Task 38 Step 1.
+  - Every gate was re-run at `62cf9e3` on a freshly rebuilt lane stack (`up -d --build`, `sources`
+    profile): `ruff format`/`ruff check`/`mypy dps` (82 files) clean; `pytest -q` 1099 passed,
+    2 skipped (the `ner` extra); `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"`
+    159 passed; resume-after-kill 6 passed; log scan + console check 39 passed; smoke 24/24;
+    `tools/demo_m2.py` 12 jobs succeeded with verification passed and 0 orphans; console typecheck,
+    52 Vitest cases and build. The plain-stack check (DoD 2) was not re-run: product code, compose
+    files and tools have not changed since `6ea0738`, where it passed; HANDOFF says so.
+  - HANDOFF's *Last verified* paragraph names `62cf9e3` + the HANDOFF update, the new counts and the
+    tag's move. A HANDOFF commit cannot carry its own hash, so it names the tagged commit by the tag
+    and its parent, as the earlier line did (`2b38deb` + the documentation pass).
+  - The annotated tag `v0.1.0-m2` was re-pointed with `git tag -f -a` to the commit that carries this
+    entry. It had never been pushed (`git ls-remote --tags origin` lists only `v0.1.0-m0`), so
+    nothing outside this repository saw the old target.
+  - No repository test was added for this finding. Where a tag points is repository metadata, not
+    code: a pytest that pins the tag to a commit or reads local tags would fail in a clone without
+    tags and on every commit after the release. The red/green evidence is a scratch check
+    (`scratchpad/build/g8fix2/check_release_tag.py`, verdicts only): it requires the annotated tag on
+    HEAD, `62cf9e3` an ancestor of the tagged commit, and the tagged HANDOFF's *Last verified*
+    paragraph to name `62cf9e3`, 1099 passed / 2 skipped and 159 passed. It failed 6 checks before
+    the fix and passes after it.
+  - While re-running the gates, a parallel `pytest -q -rs` started by the fixer collided with the
+    integration gate on MinIO's `tests/big.bin` key (`test_round_trip_and_multipart` read the other
+    run's random bytes). It is a harness collision, not a product defect: both runs share one bucket
+    and one key by design of the test. The gate was re-run alone: 159 passed. HANDOFF's *M2 traps*
+    gains "run the integration gates one at a time against a lane's stack".

@@ -1,20 +1,24 @@
 # HANDOFF — data-privacy-services (DPS)
 
-Last verified: 2026-10-12 at the commit tagged `v0.1.0-m2` (M2 complete: `2b38deb` + this documentation
-pass; M0 base tag `v0.1.0-m0`) · gates on this lane's stack (`COMPOSE_PROJECT_NAME` `dps-wt-m2`, image
-`data-privacy-services:m2`): `ruff check dps tests tools`, `ruff format --check dps tests tools`,
-`mypy dps` (82 files), `pytest -q` with the stack up (1098 passed, 2 skipped: the `ner` extra), console
-`npm run typecheck && npm test && npm run build` (52 Vitest cases), `docker compose --env-file .env
---env-file docker/compose.sources.env --profile sources up -d --build` (app, worker, dps-db,
-source-pg, minio healthy; migrate, minio-init, demo-secrets, seed-sources exited 0; app `/readyz`
-`api-core`, `db`, `jobs` ok; worker `:9400/readyz` 200), `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m
-"db or pg_source or s3"`, the six resume-after-kill cases, `python tools/smoke_test.py` (24/24),
-`python tools/demo_m2.py` (12 jobs succeeded, verification passed, 0 orphans) and the console browser
-check `tests/console/test_console_m2.py` (2 passed); and a plain `docker compose up -d --build` (no
-profile) under its own project and ports: app, worker, dps-db healthy, migrate exited 0, `/readyz`
-`db`/`jobs` ok, `GET /api/v1/jobs` 200, `DPS_SMOKE_M2=off python tools/smoke_test.py` 15/15. Counts and
-timings in the M2 build report. The M0-only checks of that release (`WITH_NER=1` image,
-`linux/amd64` build, `DPS_FPE_ENABLED=false` stack, `coin_tls: verified`) were not repeated for M2.
+Last verified: 2026-10-12 at the commit tagged `v0.1.0-m2` (M2 complete: `62cf9e3`, the G8 r1
+log-scan fix, + this HANDOFF update; the tag moved here from `438cf86`; M0 base tag `v0.1.0-m0`) ·
+gates re-run at `62cf9e3` on this lane's freshly rebuilt stack (`COMPOSE_PROJECT_NAME` `dps-wt-m2`,
+image `data-privacy-services:m2`): `ruff check dps tests tools`, `ruff format --check dps tests
+tools`, `mypy dps` (82 files), `pytest -q` with the stack up (1099 passed, 2 skipped: the `ner`
+extra), console `npm run typecheck && npm test && npm run build` (52 Vitest cases), `docker compose
+--env-file .env --env-file docker/compose.sources.env --profile sources up -d --build` (app, worker,
+dps-db, source-pg, minio healthy; migrate, minio-init, demo-secrets, seed-sources exited 0; app
+`/readyz` `api-core`, `db`, `jobs` ok; worker `:9400/readyz` 200), `DPS_TEST_REQUIRE_SERVICES=1
+pytest -q -m "db or pg_source or s3"` (159 passed), the six resume-after-kill cases, `python
+tools/smoke_test.py` (24/24), `python tools/demo_m2.py` (12 jobs succeeded, verification passed, 0
+orphans), and the M2 log scan with the console browser check (`tests/test_no_values_in_logs_m2.py
+tests/console/test_console_m2.py`, 39 passed, the console check's 2 among them). Carried from the
+first milestone-gate run (product code, compose files and tools as of `6ea0738`; only tests and docs
+changed since): a plain `docker compose up -d --build` (no profile) under its own project and ports:
+app, worker, dps-db healthy, migrate exited 0, `/readyz` `db`/`jobs` ok, `GET /api/v1/jobs` 200,
+`DPS_SMOKE_M2=off python tools/smoke_test.py` 15/15. Counts and timings in the M2 build report. The
+M0-only checks of that release (`WITH_NER=1` image, `linux/amd64` build, `DPS_FPE_ENABLED=false`
+stack, `coin_tls: verified`) were not repeated for M2.
 
 **Update rule (the Wega rule):** update this file in the same change as anything that alters build or
 deploy facts — image, ports, env, extras, probes, labels.
@@ -451,6 +455,9 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     refuses it in staging/prod.
   - The console's step 3 review table has eight columns and scrolls sideways inside its card at
     1440 px (Method, Anchor and Text pipeline are to the right).
+  - Run the integration gates one at a time against a lane's stack: the service tests share one
+    metadata database, one source database and one MinIO bucket with fixed keys (two concurrent runs
+    collide, e.g. on `tests/big.bin` in `tests/connectors/test_storage_s3.py`).
 
 ## 9. Next milestones
 
