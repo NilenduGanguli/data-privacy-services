@@ -1615,3 +1615,44 @@ for CVV", "Run on the engine", "Re-run plan", …) and test ids (`policy-header`
   fix round follows. Command for the release step, on the final verified commit:
   `git tag -a v0.2.0 -m "M1: documents and Layer 1 complete"`. The lane stack was stopped with
   `docker compose --profile docs down`, as the plan's Step 5 says.
+
+## Verification fix round 1 (review `M1-verify-r1`)
+
+- **B1-r3: a page listed twice in the page tree was rendered in place of a later page.** pypdf and
+  PDFium list a page each time the tree reaches it, while pdfminer skips an object it has already
+  visited. With root `/Kids [A A B]` and `/Count 2`, PDFium rendered A, A and pdfplumber read A, B.
+  Both counts were 2, so the count check of round 2 passed and `needs_ocr` was false. The same
+  happened with `[A A B C] /Count 3`, with `[B A A C] /Count 3`, and with a page reached once
+  through an intermediate node and once directly. On the lane API, `/documents/detect` found
+  nothing on page 2, and `/documents/obfuscate` with `redacted_pdf: true, ocr_verify: false`
+  answered 200 with `passed: true` while page 2 of the output showed the SSN. The default OCR
+  re-read caught it (422 `leakage`).
+- **Fix (`dps/layers/documents/extract.py`).** Before it settles the tree, `normalise_pdf` checks
+  that every page pypdf lists is a separate indirect object. It compares object numbers alone, as
+  pdfminer's visited set does, and refuses a missing reference too. pypdf keeps one writer object
+  per source object, so a page reached twice keeps one number. A repeat is `corrupt_document`
+  (422, "a page is listed more than once in the page tree"). The message holds no value. It is
+  raised inside the existing `try`, so pypdf errors stay coded and unchained.
+  - The check runs after the `too_many_pages` bound, so an oversized tree is not walked twice.
+  - Once the root's `/Kids` holds distinct `/Page` leaves, PDFium's page i and pdfminer's page i
+    are the same object whenever the two counts agree. A count that disagrees is still refused by
+    round 2's check.
+  - **The root's `/Count` is still not rewritten.** Rewriting it would also turn round 2's refused
+    forged counts into accepted repairs. That weakens a tested refusal, and the repeat check makes
+    it unnecessary for this attack.
+  - **No per-page text comparison** (PDFium characters against pdfplumber characters) was added.
+    The two engines legitimately differ in generated spaces, ligatures and `(cid:N)` output, so
+    such a check would refuse real documents. The structural check above settles which object
+    each page index names.
+- **Tests (`tests/documents/test_pdf.py`, +7, written first, 6 failed before the fix):**
+  - `test_a_page_listed_more_than_once_is_a_corrupt_document`, with 6 cases: `[4 4 5] /Count 2`
+    (the review's regression), `[4 4 5 6] /Count 3`, `[5 4 4 6] /Count 3`, a page through a node
+    and directly, a node listed twice, and `[4 4 5] /Count 3`. Each case is checked on
+    `normalise_pdf` and on `extract_pdf` in `auto` and `never` modes: `corrupt_document`, 422, no
+    SSN in the message, no chained cause.
+  - `test_pages_that_share_a_content_stream_are_still_distinct_pages`: two page objects drawing
+    one content stream are still accepted, and PDFium's text matches the text layer page for page.
+- **Live, lane stack rebuilt (`docker compose --profile docs up --build -d`):** `/documents/detect`,
+  `/documents/obfuscate` with `ocr_verify: false`, and the default `/documents/obfuscate` all
+  answered 422 `corrupt_document` for the review's `[4 4 5] /Count 2` file. No response body
+  holds the SSN.

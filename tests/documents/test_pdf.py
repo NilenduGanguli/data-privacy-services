@@ -16,7 +16,7 @@ from pypdf.generic import NameObject  # noqa: E402
 
 from dps.config import Settings  # noqa: E402
 from dps.layers.documents.errors import DocumentError  # noqa: E402
-from dps.layers.documents.extract import extract_pdf  # noqa: E402
+from dps.layers.documents.extract import extract_pdf, normalise_pdf  # noqa: E402
 from dps.layers.documents.models import ExtractedDocument, Word  # noqa: E402
 from dps.layers.documents.render import PdfRenderer  # noqa: E402
 from tests.documents.fixtures import (  # noqa: E402
@@ -337,3 +337,70 @@ def test_a_page_rendered_but_never_read_is_refused():
     with pytest.raises(DocumentError) as exc:
         extract_pdf(_two_readings(1), SET, "auto")
     assert (exc.value.code, exc.value.status) == ("corrupt_document", 422)
+
+
+def _listed(kids: bytes, count: int) -> bytes:
+    """Pages 4 (the SSN), 5 and 6, listed by the root's ``/Kids``; object 10 is an intermediate
+    node over pages 4 and 5. pdfminer skips an object it has already visited, while pypdf and
+    PDFium list it again: with a repeated page every later page shifts between the renderer and
+    the text layer, and a ``/Count`` set to pdfminer's reading makes the page counts agree."""
+    return _raw_pdf(
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids, count),
+        _FONT,
+        _text_page(7, b"/Type /Page"),
+        _text_page(8, b"/Type /Page"),
+        _text_page(9, b"/Type /Page"),
+        _stream(b"RASTER 123-45-6789"),
+        _stream(b"Only the text layer reads this harmless page"),
+        _stream(b"A third harmless page of ordinary text"),
+        b"<< /Type /Pages /Parent 2 0 R /Kids [4 0 R 5 0 R] /Count 2 >>",
+    )
+
+
+@pytest.mark.parametrize(
+    ("kids", "count"),
+    [
+        (b"4 0 R 4 0 R 5 0 R", 2),  # PDFium rendered 4, 4 while the text layer read 4, 5
+        (b"4 0 R 4 0 R 5 0 R 6 0 R", 3),  # PDFium 4, 4, 5; text layer 4, 5, 6
+        (b"5 0 R 4 0 R 4 0 R 6 0 R", 3),  # PDFium 5, 4, 4; text layer 5, 4, 6
+        (b"10 0 R 4 0 R 6 0 R", 3),  # through the node and directly: PDFium 4, 5, 4
+        (b"10 0 R 10 0 R", 2),  # the node listed twice
+        (b"4 0 R 4 0 R 5 0 R", 3),  # counts disagree as well
+    ],
+    ids=[
+        "first-twice",
+        "first-twice-of-four",
+        "middle-twice",
+        "node-and-root",
+        "node-twice",
+        "first-twice-counted",
+    ],
+)
+def test_a_page_listed_more_than_once_is_a_corrupt_document(kids, count):
+    data = _listed(kids, count)
+    for call in (
+        lambda: normalise_pdf(data, max_pages=100),
+        lambda: extract_pdf(data, SET, "auto"),
+        lambda: extract_pdf(data, SET, "never"),
+    ):
+        with pytest.raises(DocumentError) as exc:
+            call()
+        assert (exc.value.code, exc.value.status) == ("corrupt_document", 422)
+        assert "123-45-6789" not in str(exc.value)
+        assert exc.value.__cause__ is None
+
+
+def test_pages_that_share_a_content_stream_are_still_distinct_pages():
+    # one stream drawn by two page objects is legitimate; only a repeated page object is refused
+    data = _raw_pdf(
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>",
+        _FONT,
+        _text_page(6, b"/Type /Page"),
+        _text_page(6, b"/Type /Page"),
+        _stream(b"The same harmless sentence on both pages"),
+    )
+    doc = extract_pdf(data, SET, "auto")
+    assert [p.text.split() for p in doc.pages] == [t.split() for t in _pdfium_texts(doc.pdf)]
+    assert len(doc.pages) == 2 and doc.pages[0].text == doc.pages[1].text

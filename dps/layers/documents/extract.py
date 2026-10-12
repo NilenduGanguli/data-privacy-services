@@ -46,8 +46,12 @@ def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
     each page is typed ``/Page`` with no ``/Kids``. pypdf, pdfminer and PDFium decide what is a
     page by different rules (``/Type`` first, ``/Type`` only, ``/Kids`` only), so an untyped page
     or a ``/Page`` carrying ``/Kids`` would otherwise be rendered but never read, or read but
-    never rendered. The root's ``/Count`` is left as declared: a count that contradicts the tree
-    is refused by ``extract_pdf``, which compares the renderer with the text layer.
+    never rendered. Every page must also be its own object: pypdf and PDFium list a page each
+    time the tree reaches it, while pdfminer skips an object it has already visited, so a page
+    reached twice shifts every later page between the renderer and the text layer, and a
+    ``/Count`` matching pdfminer's reading would make the page counts agree. A repeated page is
+    ``corrupt_document``. The root's ``/Count`` is left as declared: a count that contradicts the
+    tree is refused by ``extract_pdf``, which compares the renderer with the text layer.
 
     Any failure inside pypdf is ``corrupt_document`` naming only the exception type: on malformed
     input pypdf raises far more than its own ``PyPdfError`` (``AttributeError``,
@@ -73,6 +77,10 @@ def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
         )
     annotations = 0
     try:
+        if not _distinct_pages(writer):
+            raise DocumentError(
+                "corrupt_document", "a page is listed more than once in the page tree"
+            )
         tree = writer.root_object["/Pages"].get_object()
         if not isinstance(tree, DictionaryObject):  # pypdf has walked it, so this cannot happen
             raise DocumentError("corrupt_document", "the PDF has no page tree")
@@ -112,6 +120,19 @@ def normalise_pdf(content: bytes, *, max_pages: int) -> tuple[bytes, int]:
             "corrupt_document", f"the PDF could not be normalised ({type(exc).__name__})"
         ) from None
     return out.getvalue(), annotations
+
+
+def _distinct_pages(writer: PdfWriter) -> bool:
+    """True when every page pypdf lists is a separate indirect object. Object numbers are
+    compared alone, as pdfminer's visited set does; pypdf keeps one writer object per source
+    object, so a page reached twice keeps one number."""
+    seen: set[int] = set()
+    for page in writer.pages:
+        ref = page.indirect_reference
+        if ref is None or ref.idnum in seen:
+            return False
+        seen.add(ref.idnum)
+    return True
 
 
 def _text_layer_words(plumber_page: Any) -> list[Word]:
