@@ -53,6 +53,12 @@ def posture_problems(settings: Settings) -> list[str]:
             problems.append(f"{env_name} must be https in staging/prod")
     if not settings.audit_enabled:
         problems.append("DPS_AUDIT_ENABLED must be true")
+    # M4 (contract §10): an unmasked original screenshot holds the page's personal data, and a
+    # headed browser needs a display server the production images never have.
+    if settings.scan_store_unmasked_originals:
+        problems.append("DPS_SCAN_STORE_UNMASKED_ORIGINALS must be false")
+    if not settings.browser_headless:
+        problems.append("DPS_BROWSER_HEADLESS must be true")
     # M1 (contract §10): the OCR key travels in a header and the pages are customer documents,
     # so azure OCR needs a key and TLS. The message names the setting, never the URL.
     # ``auto`` resolving to azure sends the key and the pages just the same.

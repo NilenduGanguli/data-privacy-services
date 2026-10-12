@@ -338,6 +338,21 @@ an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture che
 | `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
 | `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
 
+**M4 settings (UI scanner; contract §10).** Read by the browser-worker (`python -m dps.browser_worker`,
+Dockerfile.browser) and the scans API; the app image never imports Playwright or Pillow (the
+`scanner` extra: `playwright==1.55.0`, `pillow>=10.4`).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DPS_BROWSER_CONCURRENCY`, `DPS_BROWSER_METRICS_PORT`, `DPS_BROWSER_HEADLESS` | 2 (1..16), 9401, `true` | scans per browser-worker; metrics port 0 disables its ops server; a headed browser is refused in staging/prod |
+| `DPS_SCAN_MAX_PAGES`, `DPS_SCAN_MAX_DEPTH` | 50 (1..500), 3 (0..5) | hard page cap per scan (a scan asking for more is 422 `scope_invalid`); depth when a scan omits it |
+| `DPS_SCAN_PAGE_TIMEOUT_SECONDS`, `DPS_SCAN_JOB_TIMEOUT_SECONDS` | 30, 1800 | |
+| `DPS_SCAN_REGISTERED_HOSTS` | `localhost,127.0.0.1,demo-site` | local/dev fallback; production scans only hosts in `dps_tenant.registered_hosts` |
+| `DPS_SCAN_STORE_UNMASKED_ORIGINALS` | `false` | must stay `false` in staging/prod (an unmasked screenshot holds the page's personal data) |
+| `DPS_SCAN_MAX_PER_TEMPLATE`, `DPS_SCAN_MAX_SPA_CLICKS_PER_PAGE`, `DPS_SCAN_MAX_FIELDS_PER_PAGE` | 3, 25, 400 | crawl budgets: visits per URL template (`/help/faq/{id}`), click-only routes tried per page, fields inventoried per page |
+| `DPS_SCAN_MAX_SKIPPED_ROWS`, `DPS_SCAN_MAX_EVENTS`, `DPS_SCAN_SETTLE_MS` | 200, 2000, 400 | skipped-page rows kept for the crawl map, navigation-log rows per scan, wait after load/fill |
+| `DPS_SCAN_VIEWPORT_WIDTH` / `_HEIGHT`, `DPS_SCAN_SCREENSHOT_MAX_HEIGHT` | 1280 / 900, 12000 | capture geometry (full-page PNGs are cropped to the max height) |
+
 Declared but not read by the app: `DPS_HOST` (only the worker's ops server binds to it), `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`. The M1 document, OCR and
 schema settings above are validated (and posture-checked) and read by the document pipeline and routes.
@@ -415,7 +430,8 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   never its value. With `DPS_PG_HOST` set (M2) it also requires: the job KEK from `DPS_JOB_KEK_FILE`
   (a literal `DPS_JOB_KEK` env var is refused), `DPS_INLINE_SECRETS_ALLOWED=false`,
   `DPS_RLS_ENABLED=true`, `DPS_MIGRATIONS_MODE=verify`, `DPS_AUDIT_STRICT=true`,
-  `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`.
+  `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`. M4 adds (always, database or not): `DPS_SCAN_STORE_UNMASKED_ORIGINALS=false`
+  and `DPS_BROWSER_HEADLESS=true`.
 - **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
   default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in

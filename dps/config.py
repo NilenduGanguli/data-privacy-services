@@ -249,6 +249,28 @@ class Settings(BaseSettings):
     export_root: str = "./var/exports"
     image_digest: str = ""
 
+    # --- UI scanner (M4, contract §10) ---
+    browser_concurrency: int = Field(default=2, ge=1, le=16)  # scans one browser-worker runs
+    browser_metrics_port: int = Field(default=9401, ge=0, le=65535)  # 0 disables the ops server
+    browser_headless: bool = True  # posture: must stay true in staging/prod
+    scan_max_pages: int = Field(default=50, ge=1, le=500)  # hard cap per scan
+    scan_max_depth: int = Field(default=3, ge=0, le=5)  # default depth when a scan omits it
+    scan_page_timeout_seconds: int = Field(default=30, ge=1)
+    scan_job_timeout_seconds: int = Field(default=1800, ge=1)
+    # Local/dev fallback only; production reads dps_tenant.registered_hosts.
+    scan_registered_hosts: str = "localhost,127.0.0.1,demo-site"
+    scan_store_unmasked_originals: bool = False  # posture: must be false in staging/prod
+    # M4 additions (contract §10 "may add"): crawl budgets and capture geometry
+    scan_max_per_template: int = Field(default=3, ge=1)  # visits per URL template
+    scan_max_spa_clicks_per_page: int = Field(default=25, ge=1)
+    scan_max_fields_per_page: int = Field(default=400, ge=1)
+    scan_max_skipped_rows: int = Field(default=200, ge=1)  # skipped-page rows for the crawl map
+    scan_max_events: int = Field(default=2000, ge=1)  # navigation-log rows per scan
+    scan_settle_ms: int = Field(default=400, ge=0)  # wait after load / fill for client rendering
+    scan_viewport_width: int = Field(default=1280, ge=1)
+    scan_viewport_height: int = Field(default=900, ge=1)
+    scan_screenshot_max_height: int = Field(default=12000, ge=1)  # full-page PNGs cropped here
+
     @field_validator("env")
     @classmethod
     def _valid_env(cls, v: str) -> str:
@@ -402,6 +424,11 @@ class Settings(BaseSettings):
     def ner_languages_list(self) -> list[str]:
         """``ner_languages`` split on commas, trimmed, empties dropped."""
         return [p.strip() for p in self.ner_languages.split(",") if p.strip()]
+
+    @property
+    def scan_registered_hosts_list(self) -> list[str]:
+        """``scan_registered_hosts`` split on commas, lower-cased, trimmed, empties dropped."""
+        return [p.strip().lower() for p in self.scan_registered_hosts.split(",") if p.strip()]
 
 
 @lru_cache(maxsize=1)

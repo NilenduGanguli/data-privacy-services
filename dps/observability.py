@@ -116,6 +116,15 @@ _SAFE_FIELDS = frozenset(
         "code",
         "checks",
         "lease_lost",
+        # UI scanner (M4): page numbers, crawl depth, guard decisions and resource types, counts,
+        # step names and persona ordinals — never a URL, a label, a page value or a storage state
+        "page_no",
+        "depth",
+        "decision",
+        "resource_type",
+        "blocked",
+        "step",
+        "persona",
     }
 )
 
@@ -231,6 +240,17 @@ LEASES_LOST = Counter("dps_leases_lost_total", "Fenced writes that found the lea
 ROWS_WRITTEN = Counter("dps_rows_written_total", "Rows written by L2 jobs", ["mode", "write_mode"])
 QUEUE_DEPTH = Gauge("dps_queue_depth", "Queue rows by table and state", ["table", "state"])
 AUDIT_DROPPED = Counter("dps_audit_dropped_total", "Audit events dropped on a saturated queue")
+
+# M4 UI scanner (labels are outcomes, guard decisions, HTTP methods, reason codes and entity
+# types — never a URL, a host's path or a value)
+SCAN_PAGES = Counter("dps_scan_pages_total", "UI-scanner pages by outcome", ["outcome"])
+SCAN_REQUESTS = Counter(
+    "dps_scan_requests_total", "Requests seen by the scan guard", ["decision", "method", "reason"]
+)
+SCAN_FIELDS = Counter(
+    "dps_scan_fields_total", "Form fields inventoried by entity type", ["entity_type"]
+)
+SCAN_FILLS = Counter("dps_scan_fills_total", "Field fills by mode and outcome", ["mode", "outcome"])
 
 
 def metrics_payload() -> tuple[bytes, str]:
