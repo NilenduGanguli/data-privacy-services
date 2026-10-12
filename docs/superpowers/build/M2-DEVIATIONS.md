@@ -1278,3 +1278,60 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   extra (integer keys need FF1 in the worker subprocess).
 - `pytest -q` (the unit gate) now includes these `slow` tests (≈ 90 s): no default deselection was
   added, so every gate run exercises resume-after-kill.
+
+## Task 27 — Demo data seeding, compose stack, image, smoke extension
+
+- **Finding (not fixed here, open item for the detector owner): UK mobiles in the Ofcom drama range
+  are not detected in free text.** The surrogate engine gives GB rows `+44 7700 900xxx`; the
+  detector does not take those for phones inside text (a column of them is classified by the
+  column, so `mobile` itself is transformed). With the plan's notes ("Prefers SMS on <mobile>; alt
+  email …") the smoke's table run failed closed with `leakage` (17 hits at prepare: `$.notes`,
+  `PHONE`, `contained`) — the per-row sweep doing its job. Measured on 400 generated customers:
+  every IN/US/MX phone in notes is detected, none of the GB ones. Real numbers are valid and
+  detected, so the seed keeps GB phones out of the notes (GB notes carry the alternative e-mail
+  only). Nothing in detection or verification was changed. HANDOFF §8 records the trap.
+- `tools/seed_sources.py`:
+  - the ten tables' DDL is embedded (`TABLE_DDL`, schema-parameterised) so `--schema <test schema>`
+    can create them; `tests/test_seed_sources.py::test_table_ddl_matches_the_initdb_schema` pins it
+    to `docker/source-pg/initdb/01_bank_schema.sql` (comments and whitespace ignored);
+  - a schema seeded with **other** `(seed, rows)` is refused (exit 3, `SeedConflict`) unless
+    `--reset` (the plan only defined the matching case); tables with rows but no marker likewise;
+  - `--restore-copy` (re)creates a `bank_restore` table only when it is missing or its row count
+    differs from the source (or with `--reset`), so the compose one-shot does not undo in-place demo
+    results on every `up`; another `--schema` uses `<schema>_restore` / `<schema>_perf` (created,
+    owned by `dps_writer` when that role exists); `bank_perf.transactions` gets 1 000 rows when empty;
+  - identifiers: SSNs from the surrogate engine are in the **9xx area only** (never issued as SSNs;
+    the plan also named 666/000, which the engine does not produce), Aadhaar numbers start with 1
+    (UIDAI never issues them) and are Verhoeff-valid, NINOs use HMRC's example prefix `QQ` (never
+    issued; the surrogate engine has no NINO generator and a reshaped NINO could be a real one),
+    CURPs are built from the synthetic persona with the stdnum check digit; e-mails are
+    `<persona local><n>@example.{com,net,org}` (RFC 2606); PANs use the test IIN `411111` + Luhn;
+    `kyc_documents.notes` carry no name (without NER a name in free text has no cue to detect);
+  - the default DSN comes from `DPS_TEST_SOURCE_PG_DSN`, else `DPS_SOURCE_PG_PORT` (plan: literal
+    5442; contract §0 amendment); failures print the exception class only, never the DSN;
+  - measured: 20 000 customers → 368 529 rows generated in 7.4 s and loaded in 9.5 s in total.
+- `docker-compose.yml`: as planned, with the lane-safe image tag on every service that runs the app
+  image and `pull_policy: never` on the image-only services (they use the image `app` builds; a
+  missing image fails fast instead of a registry pull); `DPS_FPE_ENABLED` in the shared env
+  follows `${DPS_FPE_ENABLED:-true}` (the app and the worker must agree; plan: literal `"true"` in
+  the anchor but a variable on the app); the worker keeps the app's hardening (read-only root,
+  `cap_drop`, `no-new-privileges`) with a 512 MB `/tmp` tmpfs for files spools; `migrate`,
+  `demo-secrets` and `seed-sources` are read-only too; app and worker do not depend on
+  `demo-secrets` (a dependency on a profile service breaks the default-profile stack; secrets are
+  read at job time). Header comments document `--env-file` (it replaces `.env`: a lane passes
+  `--env-file .env --env-file docker/compose.sources.env`).
+- `Dockerfile`: as planned; uv 0.11.21 warns "does not have an extra named `docs`/`tabular`" and
+  installs the rest (verified). Image 687 MB (arm64; M0: 407 MB).
+- `tools/smoke_test.py`: the nine M2 checks as planned (connections "created or reused" is its
+  own check); the M2 block runs when `/readyz` lists a configured database (a database that is
+  down then fails the first M2 check instead of being skipped). The connection test of
+  `bank-uat` uses `bank_uat.customers_smoke` + `table`, `exports-s3` the `files` role check;
+  the dry run reviews `bank_restore.contacts`' key to `keep` first (in place never rewrites keys).
+  Result against the lane's stack: **all 24 checks passed** (the M0 part is 15 checks today, not
+  the plan's 13), twice in a row (rerunnable).
+- `HANDOFF.md`: §1 artefacts, §2 image, §3 the full stack, services rows (`migrate`, `worker`,
+  `demo-secrets`, `seed-sources`), the shared compose environment and the seeding CLI, §8 traps
+  (the GB phone detection gap, `--env-file` replacing `.env`).
+- Tests: `tests/test_seed_sources.py` 6 (plan: 5; + the DDL drift check, the CLI) and
+  `tests/connectors/test_seed_sources_pg.py` 1 covering the plan's three cases (fresh load with the
+  ratios, "already seeded" unchanged, `--reset`) plus the restore copy, the CLI and the conflict exit.

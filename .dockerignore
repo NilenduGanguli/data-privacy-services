@@ -1,5 +1,5 @@
-# Build context for the DPS image: only pyproject.toml, README.md, dps/, frontend/ (sources) and
-# docker/ are used. Everything below stays out of the context (smaller, faster, and no local
+# Build context for the DPS image: only pyproject.toml, README.md, dps/, frontend/ (sources),
+# tools/ (seed, bench, demo and reveal tools run in the image) and docker/ are used. Everything below stays out of the context (smaller, faster, and no local
 # secrets or session state can end up in a layer).
 .git
 .venv

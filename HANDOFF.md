@@ -23,7 +23,8 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001** |
 | `dps` package | Python 3.12 | Layer 1 engine + API; extras `fpe` (baked in), `ner` (build-arg `WITH_NER=1`), `vertex` |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `tools/smoke_test.py` | script | 13 end-to-end checks against a running stack; prints verdicts, never bodies |
+| `tools/smoke_test.py` | script | 15 Layer 1 checks against a running stack, plus 9 job-platform checks when `/readyz` reports the metadata database (24 with the `sources` profile; rerunnable); prints verdicts, never bodies |
+| `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2) |
 
 ## 2. Build
 
@@ -33,15 +34,19 @@ docker build --platform linux/amd64 -t <registry>/data-privacy-services:<semver>
 docker build --build-arg WITH_NER=1 -t <registry>/data-privacy-services:<semver>-ner .
 ```
 
-Tag semver + git sha. No database, no volumes in M0. The image:
+Tag semver + git sha. The image (app, worker and migrate all run it):
 
 - stage 1 `node:22-slim`: `npm ci` (lockfile only, no `npm install` fallback) + `npm run build`;
 - stage 2 `python:3.12-slim`: `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
-  `uv pip install --system --no-cache -e ".[fpe]"` (`.[fpe,ner]` + `en_core_web_sm` when `WITH_NER=1`),
-  the console dist at `/app/frontend/dist`;
+  `uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"` (M2; `docs`/`tabular`
+  arrive with M1/M5 and are skipped with a note until then; `ner` + `en_core_web_sm` added when
+  `WITH_NER=1`), the console dist at `/app/frontend/dist`, `tools/` at `/app/tools`, and
+  `/app/var/{artefacts,exports}` owned by uid 10001;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
   (15 s interval, 15 s start period);
-- `ENTRYPOINT docker/entrypoint.sh` (M0: `exec "$@"`; M2 adds migrations) and
+- `ENTRYPOINT docker/entrypoint.sh` (runs `python -m dps.migrate` first when `DPS_MIGRATIONS_MODE=auto`,
+  `DPS_PG_HOST` is set and the command is `uvicorn` — single-container app runs; compose uses the
+  `migrate` one-shot) and
   `CMD uvicorn dps.app:create_app --factory --host 0.0.0.0 --port 8400 --no-access-log`.
 
 Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB.
@@ -50,9 +55,24 @@ Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB.
 
 ```bash
 docker compose up --build -d          # http://127.0.0.1:8400, key dps_local_dev_key_change_me
-python tools/smoke_test.py            # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90), then 13 checks
+python tools/smoke_test.py            # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90), then 15 checks
 docker compose down
 ```
+
+The full M2 stack (metadata DB, migrate, worker, seeded demo source, MinIO artefacts, demo secrets):
+
+```bash
+docker compose --env-file docker/compose.sources.env --profile sources up -d --build
+docker compose ps                     # poll until dps-db, source-pg, minio, app, worker are healthy and
+                                      # migrate, minio-init, demo-secrets, seed-sources exited 0
+DPS_API_KEY=dps_local_dev_key_change_me python tools/smoke_test.py   # 24 checks (15 + 9 job-platform)
+docker compose up -d --scale worker=3 worker                         # more workers
+```
+
+Never `up --wait` (it fails on the one-shots that exit 0). `--env-file` replaces the default `.env`:
+a lane that keeps its ports and image tag in `.env` passes both files (`--env-file .env --env-file
+docker/compose.sources.env`). The first `seed-sources` run takes about a minute (20 000 customers,
+~370 000 rows); later runs print "already seeded".
 
 Services (host ports bind `127.0.0.1` only):
 
@@ -63,6 +83,10 @@ Services (host ports bind `127.0.0.1` only):
 | `source-pg` (M2, profiles `sources`/`full`) | `postgres:16` | `${DPS_SOURCE_PG_PORT:-5442}` → 5432 | demo source; `docker/source-pg/initdb/01_bank_schema.sql` creates the `bank` database (schema `bank`: the 10 demo tables; `bank_uat`, `bank_restore`, `bank_perf` for table/in-place/append targets) and the local logins `dps_reader` (SELECT on `bank`) and `dps_writer` (owns the target schemas), password = role name, on first start; volume `source-pg-data`; superuser `postgres`/`postgres` (local only); healthy once `pg_isready -h 127.0.0.1 -d bank` answers |
 | `minio` (M2, profiles `sources`/`full`) | `minio/minio:latest` | `${DPS_MINIO_PORT:-9010}` → 9000, `${DPS_MINIO_CONSOLE_PORT:-9011}` → 9001 (console) | artefacts and `files` exports (`DPS_ARTEFACT_STORE=s3`); root user `minioadmin`/`minioadmin` (local only); volume `minio-data`; healthcheck `curl /minio/health/live` (the cached image ships curl) |
 | `minio-init` (M2, profiles `sources`/`full`) | `minio/mc:latest` | — | one-shot after `minio` is healthy: creates buckets `dps-artefacts` and `dps-exports`, exits 0 |
+| `migrate` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot `python -m dps.migrate` as `dps_owner` after `dps-db` is healthy, exits 0; app and worker wait for it (`service_completed_successfully`) and run with `DPS_MIGRATIONS_MODE=verify` |
+| `worker` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — (9400 inside the network) | `python -m dps.worker`, `DPS_WORKER_CONCURRENCY=4`; healthcheck urllib `:9400/health`; scalable (`--scale worker=N`); read-only root, 512 MB `/tmp` tmpfs (files spools), `mem_limit: 1g` |
+| `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) into the `dps-secrets` volume, which app and worker mount read-only at `/var/run/secrets/dps` |
+| `seed-sources` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot after `source-pg` is healthy: `python tools/seed_sources.py --target postgres --rows 20000 --seed 7 --restore-copy`; idempotent |
 
 `docker compose up -d dps-db` starts the metadata database alone (the `db` tests need nothing else).
 `docker compose --profile sources up -d source-pg` starts the demo source for the `pg_source` tests
@@ -86,6 +110,17 @@ pending or changed file; `--maintain` also drops audit partitions older than
 SQLSTATE only), 2 `DPS_PG_HOST` unset. Applied files are never edited: fix forward with a new number
 (M2 owns 001–019). Against the compose database:
 `DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
+**M2 compose environment** (`x-dps-env`, shared by app, migrate and worker): `DPS_PG_HOST=dps-db`, logins
+`dps_app` / `dps_worker_login` / `dps_owner` (local passwords = role name), `DPS_MIGRATIONS_MODE=verify`
+(`auto` for `migrate`), `DPS_JOB_KEK` = a local demo literal unless the shell sets one, `DPS_SECRET_DIR=/var/run/secrets/dps`,
+`DPS_ARTEFACT_DIR=/app/var/artefacts` and `DPS_EXPORT_ROOT=/app/var/exports` (named volumes
+`dps-artefacts`, `dps-exports`; the image creates `/app/var` owned by uid 10001), `DPS_FPE_ENABLED`
+(app and worker agree), `DPS_NER_ENABLED=false`. `docker/compose.sources.env` switches artefacts to
+MinIO (`DPS_ARTEFACT_STORE=s3`, `DPS_S3_ENDPOINT_URL=http://minio:9000`, `minioadmin`).
+Demo seeding: `python tools/seed_sources.py --target postgres [--dsn …] [--schema bank] [--rows 20000]
+[--seed 7] [--restore-copy] [--reset]` (DSN default from `DPS_TEST_SOURCE_PG_DSN` /
+`DPS_SOURCE_PG_PORT`; `--target oracle|mongo` exits 2 until M3; a schema seeded with other
+parameters exits 3 unless `--reset`; another `--schema` gets `<schema>_restore`/`<schema>_perf`).
 Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,
@@ -277,6 +312,13 @@ the references the deployment's tenants may use (open issue, see the M2 build re
 - Presidio is recall-only; identifiers with checksums come from the pattern tier regardless.
   Without the `ner` image, names in free text are not detected (key names still are).
 - The access log is off (`--no-access-log`): it is stdlib logging and bypasses the allow-list.
+- UK mobiles in the Ofcom drama range (`+44 7700 900xxx`, what the surrogate engine generates for
+  GB) are not detected as phones **in free text**. A job whose free-text column repeats such a
+  number from another column fails closed with `leakage` (the per-row sweep finds the column's
+  original in the output). The demo seed therefore keeps GB phones out of `customers.notes`; real
+  numbers are valid and detected. Open item for the detector owner (M2-DEVIATIONS, Task 27).
+- `docker compose --env-file X` replaces `.env` for interpolation: a lane passes `--env-file .env`
+  first, or its image tag and host ports fall back to the defaults (another lane's).
   Per-request evidence is the `audit` line and `/metrics`. Uvicorn's startup lines and, in the NER
   image, Presidio's `Loaded recognizer` lines are plain text (they carry no values).
 - `DPS_ENV=local` logs are console-rendered with ANSI colours in `docker compose logs`; use `dev` to

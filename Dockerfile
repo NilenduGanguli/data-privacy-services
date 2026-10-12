@@ -28,20 +28,29 @@ COPY dps ./dps
 # Editable on purpose: dps/app.py serves the console from <repo root>/frontend/dist, i.e.
 # /app/frontend/dist; a regular install would look under site-packages.
 # [fpe] is MIT-licensed fastfpe; FF1 is still gated at runtime by DPS_FPE_ENABLED (spec D8).
+# [db] (asyncpg) and [connectors] (sqlglot, pyarrow, boto3) are the job platform (M2): app, worker
+# and migrate run this one image. [docs] and [tabular] arrive with M1/M5 (contract §11.1); until
+# then uv notes that the package has no such extra and installs the rest.
 # The [ner] extra (Presidio + spaCy models) is deliberately not baked in: pass --build-arg WITH_NER=1.
 # Without it, names in free text are found by their cues only, and reports state that gap
 # (report.verification.coverage, status "partial").
 ARG WITH_NER=0
 RUN if [ "$WITH_NER" = "1" ]; then \
-      uv pip install --system --no-cache -e ".[fpe,ner]" && python -m spacy download en_core_web_sm; \
+      uv pip install --system --no-cache -e ".[fpe,ner,docs,db,connectors,tabular]" \
+        && python -m spacy download en_core_web_sm; \
     else \
-      uv pip install --system --no-cache -e ".[fpe]"; \
+      uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"; \
     fi
 COPY --from=frontend /ui/dist ./frontend/dist
+# tools/: the seed-sources one-shot and the operator tools (seed, bench, demo, reveal) run in it.
+COPY tools ./tools
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+# /app/var holds the local artefact and export volumes; named volumes inherit this ownership.
 RUN chmod 0755 /usr/local/bin/entrypoint.sh \
-    && useradd --create-home --uid 10001 appuser
-# Runs as a non-root user; /app stays root-owned and read-only to the process.
+    && useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/var/artefacts /app/var/exports \
+    && chown -R appuser /app/var
+# Runs as a non-root user; /app stays root-owned and read-only to the process (except /app/var).
 USER 10001
 EXPOSE 8400
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
