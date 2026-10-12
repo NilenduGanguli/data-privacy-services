@@ -640,3 +640,60 @@ changed; interfaces (names and signatures) are unchanged.
   - `test_pipeline.py::test_text_outside_a_cropped_page_does_not_break_redaction`.
 - **Count:** suite 803 → 806 passed, 2 skipped. `-m "docs or ocr"` gives 111 passed. The real-mock
   sweep (12 fixtures × 7 policies × 2 modes) now passes 168 of 168.
+
+## Task 11 — Generator specs and the deterministic executor
+
+- `dps/engine/synth/schema_gen.py`, `ENTITY_TEMPLATES`: **every entity in `ENTITY_GENERATORS` now has
+  a template.** The plan's dict left ten without one (`DATE_OF_BIRTH`, `GENDER`, `NATIONALITY`,
+  `AGE`, `CARD_EXPIRY`, `IBAN`, `IP_ADDRESS`, `MAC_ADDRESS`, `URL`, `ORG_NAME`) and fell back to `""`.
+  The M0 surrogate engine as built returns a blank original unchanged
+  (`SurrogateEngine.surrogate`: `if not original.strip(): return original`), so those fields
+  came out empty: the plan's own `validate("IBAN", …)` assertion failed on every row. Added:
+  `YYYY-MM-DD` (unparseable, so the row persona's birth date in ISO form), `Gender`, `Nationality`,
+  `age` (no digits, so the age that agrees with the persona's birth date), `MM/YY`,
+  `GB00 AAAA 0000 0000 0000 00` (a fresh mod-97-valid GB IBAN), `0.0.0.0`, `00:00:00:00:00:00`,
+  `https://host/path` (not `https://example.com/`: the URL surrogate always lives under
+  example.com, so that template would "reveal" itself on every draw and fall through to the
+  engine's hex last resort) and `Org`. `_generate` reads `ENTITY_TEMPLATES[entity]` (no `""`
+  fallback); a test asserts the dict covers the set.
+- `ENTITY_TEMPLATES["PHONE"]` is `+ phone` instead of `+1 201 555 0100`. The plan's template is a
+  parseable US number, so every row had a US phone whatever the spec's locale; an unparseable
+  template makes the engine use the row persona's country (en_IN → `+91 …`, en_GB → the Ofcom drama
+  range) in international format. A caller who wants the US layout passes `format`.
+- `tests/test_schema_gen.py::test_entity_values_are_rule_valid_and_coherent`: the Aadhaar check is
+  "12 digits, starts with `1`, Verhoeff-valid" instead of `validate("AADHAAR", …) is True`. The M0
+  surrogate deliberately draws Aadhaar numbers outside issued space (UIDAI never issues 0/1), and
+  stdnum's validator refuses exactly those; M0's `test_surrogates.py` asserts
+  `validate("AADHAAR", aad) is False`. The plan's assertion was impossible.
+- Validation tightened so a spec that validates cannot fail or emit NaN during execution (the plan
+  says "all validated before execution"); each case is in `test_invalid_specs_are_refused`:
+  - numbers (`decimal`/`normal`/`lognormal` bounds, `weights`, `p_true`) are finite and
+    `|x| ≤ MAX_ABS` (1e100): `NaN`/`Infinity` arrive through JSON (`json.loads` accepts them) and
+    `uniform(-1e300, 1e300)` overflows to `inf`, which then fails response serialisation (500);
+  - `scale` is an integer 0..10 (the plan's `int(p.get("scale", 2))` raised on `"x"` at execution);
+  - `lognormal` needs `|mu| ≤ 100`, `sigma ≤ 20` (`exp` overflow); `normal`/`lognormal` need
+    `min ≤ max` when both are given;
+  - `choice` values and `constant` values are JSON scalars without NaN/infinity; `RuleCase` and
+    `RuleConstraint` use `allow_inf_nan=False`;
+  - an `entity` `format` must hold a letter or digit (an all-blank format came back blank).
+- Order constraints: the plan grouped `sequence`/`integer`/`decimal`/`normal`/`lognormal` as one
+  "number" kind and both sortable date formats as one "date" kind. Sorting moves values between
+  fields, so mixing produced wrong output: an integer column received a decimal, a `%Y%m%d` column an
+  ISO date (and the string sort ordered `2015-…` before `20150101`), and a `sequence` with a prefix
+  (a string) next to an integer raised `TypeError` mid-execution (a 500). Now `_sort_class` replaces
+  `_ORDER_KIND`: fields must share one class — integers (incl. a bare `sequence` and scale-0
+  `normal`/`lognormal`), numbers of one scale, dates of one sortable format, or datetimes; a
+  prefixed or padded `sequence` is not sortable; a field may not be named twice. Datetimes are sorted
+  as instants (`_sort_key`), not as strings, so different offsets order correctly
+  (`test_ordered_datetimes_compare_as_instants`).
+- A constraint may not target a `unique` field (order fields, rule target): uniqueness is enforced
+  before constraints run, and a constraint would silently rewrite the value (duplicates in a key).
+- Module docstring: `AGE` and `CARD_EXPIRY` are relative to today (M0 surrogate behaviour), so
+  replays are byte-identical within a day; every other value is a pure function of
+  (spec, seed, row). The contract §0 amendment (call `declare_record` before `surrogate`) has
+  nothing to declare here — a generated row has no original values, only templates; a comment says
+  so at the call site.
+- Count: the plan expects 17 tests; the file has 37 (17 plan cases + 5 locales of
+  `test_every_entity_generator_produces_a_value`, `test_ordered_datetimes_compare_as_instants`, 14
+  new invalid-spec cases). Against the plan's code, 21 of them fail. Throughput on this Mac:
+  ≈ 1 875 rows/s for the 16-field test spec. Suite 804 → 841 passed, 4 skipped.
