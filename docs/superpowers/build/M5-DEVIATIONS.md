@@ -70,6 +70,38 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
 - `tests/test_copula.py`: added a prefix-stream property of `uniforms`, a timezone-aware timestamp
   test, `test_serialisation_keeps_the_reject_set`, truncated/empty blobs, and the new fit errors.
 
+## Task 4 — Tabular constraints
+
+- `dps/engine/policy.py` `Policy.config_hash`: the plan accepted that every preset's hash changes
+  once ("nothing pins a literal hash"), but `tests/test_policy.py::test_dpdp_policy_hash_is_unchanged_
+  by_the_optional_locale` pins the v0.1.0-m0 hash, and M2 snapshots and evidence packs record policy
+  hashes. The two new `synthesize` lists are left out of the hash while empty
+  (`_OPTIONAL_SYNTHESIZE`), so every existing hash still matches and a policy that sets a constraint
+  or a quasi-identifier hashes differently (`test_constraints_round_trip_and_change_the_policy_hash`).
+- `WhenRule` always dumps its condition as `"if"` (a wrap `model_serializer`), not `"if_"`, so a
+  dumped policy is the input form (API responses, `resolve_policy`'s merge, YAML in the console);
+  `populate_by_name` still accepts `if_`. The new models use M0's `hide_input_in_errors` config
+  (inline policies arrive in request bodies). `quasi_identifiers` entries are validated as column
+  paths (`$.NAME`), like constraint paths (`COLUMN_PATH`/`ColumnPath`, public names).
+- `dps/engine/synth/constraints.py`:
+  - a range bound or a `then` value that does not fit the column kind fails at construction with a
+    value-free `ConstraintError` naming the path (the plan would fail mid-batch with a `ValueError`
+    quoting the literal); a malformed date literal in a `when` condition never matches;
+  - a `when` rule whose condition column the table lacks is skipped
+    (`{"path", "reason": "no_condition_column"}`) instead of always reading that column as null;
+  - a unique rule on an integer/`numeric(p, 0)` column whose `precision` is under 6 digits is refused
+    ("at least 6 digits"; the plan used `max(6, precision)` and could overflow the column);
+    `ColumnSpec.precision` is decimal digits — **Task 6 must pass 4/9/18 for
+    `smallint`/`integer`/`bigint`** (PostgreSQL integer columns carry no precision; the default 15
+    digits would overflow `integer`);
+  - the Feistel round input is the half-block in its own byte width (plan: 32 bytes) and the
+    positive-clip value is a helper (`_smallest_positive`) instead of the nested conditional the plan
+    flagged.
+- `tests/test_constraints.py`: `pytest.importorskip("scipy")` (the module imports
+  `dps.engine.metrics`, which needs the `tabular` extra); extra tests for seed-keyed uniqueness,
+  positivity on decimals, value-free range/then errors, date/text/null conditions, the skipped
+  condition column and the hash/alias round trip.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
