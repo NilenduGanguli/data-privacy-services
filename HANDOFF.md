@@ -465,6 +465,22 @@ change); a leftover top-level folder such as `dps/` makes every tenant's `dps/�
 as another tenant's. Inline credentials (dev only) are sealed with `DPS_JOB_KEK` into
 `dps_connection.secret_enc` and stop resolving after `DPS_INLINE_SECRET_TTL_HOURS`.
 
+Who may change a connection (security fix SEC-3): **any** `PATCH` or `DELETE` of a connection that
+is or becomes tagged `production` (a rename, roles, tags, a credential rotation) needs the `admin`
+scope (403 `admin_scope_required`). On a connection that holds credentials (a sealed secret or a
+`secret_ref`), changing a param that decides where the credentials are sent needs the credentials
+again in the same request (new `credentials`, or the `secret_ref` restated) or `admin`; otherwise 403
+`connection_endpoint_change_requires_credentials` and nothing changes. The list is one engine-keyed
+table, `dps.connections.ENDPOINT_PARAMS`: postgres `host port database dbname options.sslmode
+options.sslrootcert_ref`; oracle `host port service_name sid dsn` (+ TLS options); mongo `uri host
+port replica_set database options.replicaSet options.directConnection options.tls`; s3
+`endpoint_url bucket region`; pvc none. A new `ConnectionParams` field fails
+`tests/test_connection_endpoints.py` until it is classified there or in `NOT_ENDPOINT_PARAMS`. The
+`connection.update` audit event names the changed fields (`counts["field.params.host"]`, …), never a
+value. `POST /connections/{id}/test` takes no param overrides, so it always tests the stored
+endpoint. Residual: a `jobs` key may still *create* a connection that names any of its own tenant's
+`secret_ref`s with an endpoint of its choice; restrict the key or mount fewer refs per tenant.
+
 ## 8. Traps
 
 - `uvicorn dps.app:create_app --factory` — there is no module-level `app`.

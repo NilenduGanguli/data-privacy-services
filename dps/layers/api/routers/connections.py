@@ -1,5 +1,10 @@
 """``/api/v1/connections`` (contract §9, scope ``jobs``; the ``production`` tag needs ``admin``).
 
+SEC-3: updating or deleting a production-tagged connection needs ``admin``; moving a connection
+that holds credentials to another endpoint needs its credentials in the same request or ``admin``
+(:mod:`dps.connections`). The update's audit event names the changed fields
+(``counts["field.<name>"]``), never a value. The test route takes no param overrides.
+
 Credentials never appear in a response (``has_secret`` only); a connection test stores its
 value-free checks as ``last_test``; ``count`` validates and binds the selection before any query
 runs and answers the wizard's checklist (mockup 06 step 2) together with the value-free statement
@@ -18,6 +23,7 @@ from dps.config import Settings
 from dps.connections import (
     Connection,
     ConnectionPatch,
+    changed_fields,
     create_connection,
     delete_connection,
     get_connection,
@@ -28,11 +34,13 @@ from dps.connections import (
 )
 from dps.jobs_models import ConnectionSpec, Selection
 from dps.layers.api.deps import (
+    audit_action,
     audited,
     guarded,
     kek_of,
     page_args,
     principal_of,
+    rejected,
     require_db,
     tenant_of,
 )
@@ -163,29 +171,43 @@ async def get(connection_id: str, request: Request) -> dict[str, Any]:
 
 @router.patch("/connections/{connection_id}", dependencies=_JOBS)
 async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> dict[str, Any]:
-    """Update name, params, secret, roles or tags (adding or removing ``production`` needs admin)."""
+    """Update name, params, secret, roles or tags. Any change of a connection that is or becomes
+    production-tagged needs admin; an endpoint change of a connection holding credentials needs
+    them again (``credentials`` / ``secret_ref``) or admin."""
+    fields: dict[str, int] = {}
 
     async def run() -> dict[str, Any]:
         tenant = tenant_of(request)
         current = await _connection(request, connection_id)
-        if body.tags is not None and (PRODUCTION in body.tags) != current.production:
-            _require_admin_for_production(request)
+        fields.update({f"field.{name}": 1 for name in changed_fields(current, body)})
         updated = await update_connection(
-            tenant, connection_id, body, settings=_settings(request), kek=kek_of(request)
+            tenant,
+            connection_id,
+            body,
+            settings=_settings(request),
+            kek=kek_of(request),
+            admin=principal_of(request).has_scope("admin"),
         )
         if updated is None:
             raise DpsHttpError(404, "connection_not_found", "connection not found")
         return _dump(updated)
 
-    return await audited(request, "connection.update", run())
+    try:
+        result = await run()
+    except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
+        raise rejected(request, "connection.update", exc, counts=fields) from None
+    audit_action(request, action="connection.update", counts=fields)
+    return result
 
 
 @router.delete("/connections/{connection_id}", status_code=204, dependencies=_JOBS)
 async def delete(connection_id: str, request: Request) -> Response:
-    """Delete a connection (409 ``connection_in_use`` while a live job uses it)."""
+    """Delete a connection (409 ``connection_in_use`` while a live job uses it; a
+    production-tagged one needs admin)."""
 
     async def run() -> None:
-        if not await delete_connection(tenant_of(request), connection_id):
+        admin = principal_of(request).has_scope("admin")
+        if not await delete_connection(tenant_of(request), connection_id, admin=admin):
             raise DpsHttpError(404, "connection_not_found", "connection not found")
 
     await audited(request, "connection.delete", run(), status=204)

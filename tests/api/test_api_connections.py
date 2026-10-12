@@ -107,6 +107,92 @@ def test_secret_refs_are_scoped_to_the_callers_tenant(api_client) -> None:  # no
     assert {e.status for e in rejected} >= {403} and all(e.tenant_id == "t2" for e in rejected)
 
 
+def test_production_changes_need_admin_and_endpoint_changes_need_credentials(api_client) -> None:  # noqa: ANN001
+    c, sink = api_client
+    prod = c.post(
+        "/api/v1/connections",
+        json={
+            "name": "prod-pg",
+            "engine": "postgres",
+            "params": PG,
+            "secret_ref": "dps/src/test-pg",
+            "tags": ["production"],
+        },
+        headers=FULL,
+    ).json()
+    url = f"/api/v1/connections/{prod['id']}"
+    redirect = c.patch(url, json={"params": {**PG, "host": "attacker.example"}}, headers=JOBS)
+    assert redirect.status_code == 403 and redirect.json()["code"] == "admin_scope_required"
+    for body in ({"name": "prod-pg-2"}, {"secret_ref": "dps/src/test-pg-rw"}, {"tags": []}):
+        r = c.patch(url, json=body, headers=JOBS)
+        assert r.status_code == 403 and r.json()["code"] == "admin_scope_required", body
+    gone = c.delete(url, headers=JOBS)
+    assert gone.status_code == 403 and gone.json()["code"] == "admin_scope_required"
+    assert c.get(url, headers=JOBS).json()["params"]["host"] == PG["host"]
+    # another tenant cannot even see it, admin key or not
+    for key in (JOBS, FULL):
+        other = {**key, "X-DPS-Tenant": "t2"}
+        assert c.patch(url, json={"name": "x-pg"}, headers=other).status_code == 404
+        assert c.delete(url, headers=other).status_code == 404
+
+    dev = c.post(
+        "/api/v1/connections",
+        json={
+            "name": "dev-pg",
+            "engine": "postgres",
+            "params": PG,
+            "credentials": {"username": "u", "password": "pw-old-distinct"},
+        },
+        headers=JOBS,
+    ).json()
+    durl = f"/api/v1/connections/{dev['id']}"
+    moved = c.patch(durl, json={"params": {**PG, "host": "attacker.example"}}, headers=JOBS)
+    assert moved.status_code == 403
+    assert moved.json()["code"] == "connection_endpoint_change_requires_credentials"
+    assert "attacker" not in moved.text
+    with_creds = c.patch(
+        durl,
+        json={
+            "params": {**PG, "host": "uat.example"},
+            "credentials": {"username": "u", "password": "pw-new-distinct"},
+        },
+        headers=JOBS,
+    )
+    assert with_creds.status_code == 200 and with_creds.json()["params"]["host"] == "uat.example"
+    assert with_creds.json()["has_secret"] and "pw-new" not in with_creds.text
+    by_admin = c.patch(durl, json={"params": {**PG, "host": "replica.example"}}, headers=FULL)
+    assert by_admin.status_code == 200 and by_admin.json()["has_secret"]
+    assert c.delete(url, headers=FULL).status_code == 204
+
+    updates = [e for e in sink.events if e.action == "connection.update"]
+    assert [(e.outcome, e.status) for e in updates][:1] == [("rejected", 403)]
+    assert updates[0].counts == {"field.params.host": 1}
+    assert {k for e in updates for k in e.counts} >= {
+        "field.name",
+        "field.secret_ref",
+        "field.tags",
+        "field.credentials",
+        "field.params.host",
+    }
+    dumped = str([e.model_dump() for e in sink.events])
+    for value in ("attacker", "uat.example", "replica", "pw-old", "pw-new", "test-pg-rw"):
+        assert value not in dumped, value
+    deletes = [e for e in sink.events if e.action == "connection.delete"]
+    assert [(e.outcome, e.status) for e in deletes] == [
+        ("rejected", 403),
+        ("rejected", 404),
+        ("rejected", 404),
+        ("ok", 204),
+    ]
+
+
+def test_a_connection_test_takes_no_param_overrides() -> None:
+    """SEC-3: the test route can only test the stored endpoint (no overrides to gate)."""
+    from dps.layers.api.routers.connections import ConnectionTestRequest
+
+    assert set(ConnectionTestRequest.model_fields) == {"role", "object", "write_mode"}
+
+
 def test_reserved_and_upper_case_tenants_never_reach_the_database(api_client) -> None:  # noqa: ANN001
     c, _ = api_client
     reserved = c.get("/api/v1/connections", headers={**FULL, "X-DPS-Tenant": "_system"})

@@ -290,3 +290,11 @@ describe('secret reference codes (SEC-2)', () => {
     expect(errorText('secret_ref_invalid')).toMatch(/not a valid relative path/);
   });
 });
+
+describe('connection change codes (SEC-3)', () => {
+  it('explains the endpoint-change refusal in words', async () => {
+    const { errorText } = await import('./jobs');
+    expect(errorText('connection_endpoint_change_requires_credentials')).toMatch(/credentials again/);
+    expect(errorText('admin_scope_required')).toMatch(/changing a production-tagged connection/);
+  });
+});

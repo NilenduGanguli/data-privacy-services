@@ -34,8 +34,8 @@ Scope `jobs` unless stated. "prod" = the connection carries the tag `production`
 | `POST /connections` | jobs (+`admin` to tag prod) | `ConnectionSpec` → 201 connection | `connection_invalid` 422, `inline_secrets_disabled` 422, `connection_name_taken` 409, `admin_scope_required` 403, `kek_unconfigured` 503 |
 | `GET /connections` | jobs | `?limit&cursor` → page of connections | `cursor_invalid` 400 |
 | `GET /connections/{id}` | jobs | → connection | `connection_not_found` 404 |
-| `PATCH /connections/{id}` | jobs (+`admin` to add or remove prod) | `ConnectionPatch` → connection | as `POST`, `connection_not_found` 404 |
-| `DELETE /connections/{id}` | jobs | → 204 | `connection_in_use` 409 (a non-terminal job uses it) |
+| `PATCH /connections/{id}` | jobs (+`admin` for any change of a connection that is or becomes production-tagged) | `ConnectionPatch` → connection | as `POST`, `connection_not_found` 404, `connection_endpoint_change_requires_credentials` 403 (an endpoint param of a connection holding credentials changes without `credentials` / `secret_ref` in the same body, and the key lacks `admin`) |
+| `DELETE /connections/{id}` | jobs (+`admin` for a production-tagged connection) | → 204 | `connection_in_use` 409 (a non-terminal job uses it), `admin_scope_required` 403 |
 | `POST /connections/{id}/test` | jobs | `{role: source\|target, object?, write_mode?}` → `ConnectionTestResult` `{ok, engine, server_version, checks: [{name, ok, severity, detail?}], capabilities, error_code}` (stored as `last_test`); a failed test is a 200 with `ok: false` and an `error_code` such as `secret_unavailable` or `connection_failed` | `connection_not_found` 404, `engine_unavailable` 422 |
 | `GET /connections/{id}/objects` | jobs | `?owner=` → `{items: [ObjectRef], next_cursor: null}` | `connection_failed` 502 |
 | `GET /connections/{id}/describe` | jobs | `?object=OWNER.NAME` → `TableShape` | `object_invalid` 422, `object_not_found` 422 |
