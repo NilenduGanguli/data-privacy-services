@@ -196,3 +196,35 @@ def test_a_wrong_key_reveals_nothing() -> None:
             anchor=ANCHOR,
         )
     assert "Ananya" not in str(err.value)
+
+
+def test_another_key_is_refused_by_the_pack_key_id() -> None:
+    """FPE tokens decrypt to well-formed values under any key (and map back under it), so the
+    pack's key id is what refuses another key for rows without an authenticated column."""
+    plans = [p for p in PLANS if p.method.method in ("fpe_digits", "fpe_text", "date_shift")]
+    right = generate_key_material("key")
+    out = _transform(plans, right)
+    wrong = generate_key_material("key")
+    with pytest.raises(MethodError) as err:
+        reveal_row(
+            out[0],
+            reveal_map=_reveal_map(plans),
+            shape=SHAPE,
+            key=wrong,
+            engine=ENGINE,
+            policy=POLICY,
+            anchor=ANCHOR,
+            kid=right.kid,
+        )
+    assert "key id" in str(err.value) and "Ananya" not in str(err.value)
+    same = reveal_row(
+        out[0],
+        reveal_map=_reveal_map(plans),
+        shape=SHAPE,
+        key=right,
+        engine=ENGINE,
+        policy=POLICY,
+        anchor=ANCHOR,
+        kid=right.kid,
+    )
+    assert same["full_name"] == ROWS[0]["full_name"]

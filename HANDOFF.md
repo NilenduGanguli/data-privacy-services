@@ -25,6 +25,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | 15 Layer 1 checks against a running stack, plus 9 job-platform checks when `/readyz` reports the metadata database (24 with the `sources` profile; rerunnable); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2) |
+| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
 
 ## 2. Build
 
@@ -68,6 +69,28 @@ docker compose ps                     # poll until dps-db, source-pg, minio, app
 DPS_API_KEY=dps_local_dev_key_change_me python tools/smoke_test.py   # 24 checks (15 + 9 job-platform)
 docker compose up -d --scale worker=3 worker                         # more workers
 ```
+
+**Measured throughput (M2, 2026-10-12)** — `python tools/bench_connector.py --rows 200000 …` against
+this compose stack on an Apple-silicon Mac (18 CPUs; Docker Desktop VM with 12 CPUs and ~15 GiB),
+`DPS_FPE_ENABLED=true` (FF1), 200 000 synthetic customers (16 columns, 8 transformed), 4 partitions
+of 50 000 rows, 1 000-row batches, worker concurrency 4. Wall clock from submission to the terminal
+state (prepare, preflight and finalize included); results in `docs/technical/bench/`. The numbers
+are measured, not promised (spec §7):
+
+| Run | Workers | Rows/s | Wall |
+|---|---|---|---|
+| obfuscate → `table` (created UAT table) | 1 | 3 004 | 66.6 s |
+| obfuscate → `in_place` (`bench_restore` copy) | 1 | 3 196 | 62.6 s |
+| obfuscate → `files` (parquet to MinIO) | 1 | 2 912 | 68.7 s |
+| synthesize → `table` | 1 | 2 021 | 99.0 s |
+| obfuscate → `table` | 3 | 4 128 | 48.5 s |
+| obfuscate → `table`, 12 partitions (`--parallelism 12 --partition-rows 17000`) | 3 | 4 828 | 41.4 s |
+
+One worker process is bound by one Python interpreter (the transform runs in a thread under the
+GIL): more partitions per worker do not add throughput, more worker replicas do. `python
+tools/demo_m2.py` (10 tables into `bank_uat` under one job group, then in place and append) took
+30 s with 3 workers; every job succeeded with verification passed and every foreign key of the UAT
+copy found its parent.
 
 Never `up --wait` (it fails on the one-shots that exit 0). `--env-file` replaces the default `.env`:
 a lane that keeps its ports and image tag in `.env` passes both files (`--env-file .env --env-file

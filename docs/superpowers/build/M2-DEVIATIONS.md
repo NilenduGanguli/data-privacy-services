@@ -1335,3 +1335,54 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
 - Tests: `tests/test_seed_sources.py` 6 (plan: 5; + the DDL drift check, the CLI) and
   `tests/connectors/test_seed_sources_pg.py` 1 covering the plan's three cases (fresh load with the
   ratios, "already seeded" unchanged, `--reset`) plus the restore copy, the CLI and the conflict exit.
+
+## Task 28 — Benchmark, the 10-table demo and `reveal_rows`
+
+- **Defect found and fixed: `reveal_row` revealed wrong values silently under another key.** Its
+  docstring (Task 22) promised that a wrong key fails ("a candidate is accepted only when the
+  forward method maps it back to the stored token"), but FF1 and the shape-keeping methods decrypt
+  any token to a well-formed value under any key and the forward check maps it back under the same
+  wrong key. `tests/test_tools_m2.py` found it: a row of `fpe_digits`/`fpe_text`/`email`/
+  `date_shift` columns "revealed" to other plausible values with a fresh key and exit 0 (the
+  existing `test_a_wrong_key_reveals_nothing` passes only because its plans include an
+  authenticated `det_token` column). Fix, additive: `reveal_row(…, kid: str | None = None)` refuses
+  a key whose id is not `kid` (`MethodError`, value-free) before anything is decrypted; the
+  docstring now states the limits; `tools/reveal_rows.py` passes the evidence pack's
+  `consistency.kid` and warns when a pack names none. A mistyped DEK with the right id is refused
+  by its key check value (`key_material_from_caller`, M0), as L1's reveal does with hints. New test
+  `tests/test_reveal_row.py::test_another_key_is_refused_by_the_pack_key_id`.
+- `tools/m2_api.py` (new, not in the plan's file list): the small API client the benchmark and
+  the demo share (connections created or reused, discover/review/accept, run, poll, count);
+  `ApiError` carries the HTTP status and the API's code only. The tools put the repository root on
+  `sys.path` so `python tools/<tool>.py` and `import tools.<tool>` both work (`# noqa: E402`).
+- `tools/bench_connector.py`: as planned, plus `--timeout` and `--out`; the source table is filled
+  from a pool of 5 000 generated customers (`tools.seed_sources.generate_rows`, seed 11) with new
+  keys and no relationship manager (the bench table has no foreign key); in place runs review the
+  snapshot like the run tests (key kept, `national_id` → `fpe_digits`, `tax_id` → `mask_partial`);
+  synthesize/in-place is refused by the CLI (in place obfuscates). The result JSON also records the
+  job id, the terminal state and `host.machine`; `values_by_method` leaves out the `col:<column>`
+  counters. Default endpoints follow `DPS_TEST_*` / the port variables (contract §0 amendment).
+- Measured (stack of Task 27; Apple-silicon Mac, Docker VM 12 CPUs): obfuscate table 3 004 rows/s,
+  in place 3 196, files (parquet to MinIO) 2 912, synthesize table 2 021 (1 worker); obfuscate table
+  4 128 with 3 workers, 4 828 with 3 workers and 12 partitions (an extra run beyond the plan's five,
+  showing that throughput scales with worker replicas, not partitions per worker). Six result files
+  in `docs/technical/bench/`; HANDOFF §3 "Measured throughput".
+- `tools/demo_m2.py`: as planned; the group's key and seed are written with mode 0600 and a rerun
+  reuses `var/demo/<group>.json` (the key is returned once; a group name that exists without its
+  file gets a numbered suffix). Measured: all ten table jobs, the in-place job and the append job
+  succeeded with verification passed; every orphan count 0 (eleven foreign keys checked). Customer
+  ids are tokenised (FF1 under the group key) and line up in every table; account, loan and
+  employee ids are not personal data for discovery and are kept, so their checks hold trivially.
+  The append synthesizes `bank.transactions` into `bank_perf.transactions` through `bank-restore-rw`
+  (the `dps_writer` login that owns `bank_perf`).
+- `tools/reveal_rows.py`: as planned, plus `--locale` (the run's locale is not in the evidence pack;
+  the compose stack uses `en_IN`) and `--policy` (default: the snapshot's policy); accepts either
+  `GET /evidence/{id}`'s answer or the bare pack, and either the bare key material or a job group's
+  saved file. Verified beyond the test: 25 rows of the demo's `bank_uat.customers` revealed with the
+  group key equal their `bank.customers` rows column for column.
+- Observed, not changed (outside this task): fallback counters are stored as
+  `fallback:fallback:fpe_domain_too_small` (the engine's reason already carries `fallback:`), so the
+  evidence's `fallbacks` lists the note with one `fallback:` prefix. Cosmetic; no value involved.
+- Process: the tool modules were scaffolded before `tests/test_tools_m2.py` (TDD order reversed for
+  the scripts); the test then failed for a real reason (the reveal defect above) before the fix.
+- Tests: `tests/test_tools_m2.py` 4 (as planned) + `tests/test_reveal_row.py` +1.

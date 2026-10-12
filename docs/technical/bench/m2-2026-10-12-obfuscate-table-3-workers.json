@@ -1,0 +1,33 @@
+{
+  "batch_rows": 1000,
+  "engine_version": "0.1.0",
+  "fpe_enabled": true,
+  "host": {
+    "cpus": 18,
+    "machine": "arm64"
+  },
+  "job_id": "j_01M4Q286139DAZVSSKYJWCN2HA",
+  "label": "3-workers",
+  "mode": "obfuscate",
+  "parallelism": 4,
+  "partition_rows_per_second": {
+    "p50": 1060.2,
+    "p95": 3071.7
+  },
+  "partitions": 4,
+  "rows": 200000,
+  "rows_per_second": 4127.6,
+  "state": "succeeded",
+  "values_by_method": {
+    "date_shift": 200000,
+    "det_token": 436680,
+    "email": 200000,
+    "fallback:fallback:fpe_domain_too_small": 120600,
+    "fpe_digits": 200000,
+    "fpe_text": 200000,
+    "phone": 200000
+  },
+  "wall_seconds": 48.45,
+  "workers_online": 3,
+  "write_mode": "table"
+}

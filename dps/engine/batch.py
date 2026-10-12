@@ -613,6 +613,7 @@ def reveal_row(
     engine: PrivacyEngine,
     policy: Policy,
     anchor: tuple[str, str] | None,
+    kid: str | None = None,
 ) -> Row:
     """Reveal one L2 output row with the caller's key and an evidence pack's ``reveal_map``.
 
@@ -624,10 +625,20 @@ def reveal_row(
     ambiguous parameter can never reveal a wrong value silently. Free-text columns reveal their
     envelopes.
 
+    **Another key** is caught by ``kid`` — pass the evidence pack's ``consistency.kid``: FF1 and
+    the shape-keeping methods decrypt any token to a well-formed value under any key, and the
+    forward check maps that value back to the same token under the same wrong key, so without the
+    key id a wrong key is detected only by the authenticated methods (``det_token`` / AES-SIV) the
+    row happens to hold. A mistyped DEK with the right id is refused earlier by its key check value
+    (:func:`~dps.engine.transform.crypto.key_material_from_caller`), as in L1's reveal.
+
     Raises:
-        MethodError: a value does not reveal under ``key`` (another key, a tampered token);
-            the message names the path, never the value.
+        MethodError: ``kid`` is not the key's id, or a value does not reveal under ``key`` (a
+            tampered token, an authenticated token of another key); the message names the path,
+            never the value.
     """
+    if kid is not None and kid != key.kid:
+        raise MethodError("the key's id does not match the evidence pack's key id")
     out = dict(row)
     entries = [e for e in reveal_map if e.get("reveal")]
     if not entries:
