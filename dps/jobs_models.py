@@ -322,6 +322,19 @@ class CaptureSpec(BaseModel):
     har: bool = False
 
 
+class ScanConsistency(ConsistencySpec):
+    """:class:`ConsistencySpec` for a scan: the same fields, extra keys refused (decision D4: no
+    level of a scan spec accepts an unknown key). ``RunSpec`` keeps the M2 model unchanged."""
+
+    model_config = _SCAN
+
+
+class ScanPurpose(Purpose):
+    """:class:`Purpose` for a scan, extra keys refused (see :class:`ScanConsistency`)."""
+
+    model_config = _SCAN
+
+
 class ScanSpec(BaseModel):
     """``POST /api/v1/scans`` (contract §9). There is no submit field anywhere in this model, and
     extra keys are refused at every level (decision D4).
@@ -341,9 +354,9 @@ class ScanSpec(BaseModel):
     fill: FillSpec = Field(default_factory=FillSpec)
     parallel_view: bool = True
     capture: CaptureSpec = Field(default_factory=CaptureSpec)
-    consistency: ConsistencySpec = Field(default_factory=ConsistencySpec)
+    consistency: ScanConsistency = Field(default_factory=ScanConsistency)
     policy: str | dict[str, Any] | None = None  # None -> settings.default_policy
-    purpose: Purpose | None = None
+    purpose: ScanPurpose | None = None
 
 
 class RetentionSpec(BaseModel):

@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dps.config import Settings
 from dps.engine.synth.personas import SUPPORTED_LOCALES
@@ -30,7 +30,14 @@ from dps.engine.synth.surrogates import SynthesisSeed
 from dps.engine.transform.crypto import KeyMaterial
 from dps.jobs import Job
 from dps.jobs_models import ScanSpec
-from dps.layers.scanner.urls import Origin, UrlError, canonical, path_matches, validate_glob
+from dps.layers.scanner.urls import (
+    Origin,
+    UrlError,
+    canonical,
+    path_verdict,
+    template_is_value_free,
+    validate_glob,
+)
 
 _HIDDEN = ConfigDict(hide_input_in_errors=True)
 _STRICT = ConfigDict(extra="forbid", hide_input_in_errors=True)
@@ -304,6 +311,14 @@ class PageRecord(BaseModel):
     capture_status: CaptureStatus | None = None
     timings: dict[str, int] = Field(default_factory=dict)
 
+    @field_validator("template")
+    @classmethod
+    def _value_free_template(cls, value: str) -> str:
+        # the column is value-free by design: only urls.template() output may land in it
+        if not template_is_value_free(value):
+            raise ValueError("template must be the value-free urls.template() form")
+        return value
+
 
 class RequestCount(BaseModel):
     """A ``dps_scan_request`` row: guard decisions counted per page, method, type, reason, host."""
@@ -315,7 +330,7 @@ class RequestCount(BaseModel):
     decision: Literal["allowed", "blocked"]
     reason: str
     host: str
-    count: int
+    count: int = Field(ge=1)  # 0 or less would cancel other rows in summary_counts()
 
 
 EventKind = Literal[
@@ -530,8 +545,7 @@ def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) 
             validate_glob(glob)
     except UrlError:
         raise ScanSpecError("scope_invalid") from None
-    path = urlsplit(start).path or "/"
-    if path_matches(path, scope.deny) or (scope.allow and not path_matches(path, scope.allow)):
+    if path_verdict(urlsplit(start).path or "/", scope.allow, scope.deny) != "ok":
         raise ScanSpecError("start_url_denied")
 
     auth = spec.auth
@@ -567,8 +581,9 @@ def redact_scan_spec(v: ValidatedScan, url_redacted: str) -> dict[str, Any]:
     ``url`` becomes the redacted start URL (``url_origin`` is added), the resolved ``max_pages`` /
     ``max_depth`` are recorded, an inline storage state becomes ``{"inline": true}``, and
     ``consistency`` loses ``key_material``, ``synthesis_seed`` and ``wrap_key``; it keeps flags only
-    (``key_wrapped``: the returned key is wrapped; ``caller_key`` / ``caller_seed``: the caller
-    supplied them). The raw start URL travels sealed in ``JobSecret.scan_start_url``.
+    (``key_wrapped``, and ``wrapped`` as M2's ``redact_spec`` names it: the returned key is
+    wrapped; ``caller_key`` / ``caller_seed``: the caller supplied them). The raw start URL
+    travels sealed in ``JobSecret.scan_start_url``.
     """
     data = v.spec.model_dump(mode="json")
     data["url"] = url_redacted
@@ -583,6 +598,7 @@ def redact_scan_spec(v: ValidatedScan, url_redacted: str) -> dict[str, Any]:
     seed = cons.pop("synthesis_seed", None)
     wrap = cons.pop("wrap_key", None)
     cons["key_wrapped"] = wrap is not None
+    cons["wrapped"] = wrap is not None  # M2's redact_spec name, which its key custody reads
     cons["caller_key"] = key is not None
     cons["caller_seed"] = seed is not None
     return data

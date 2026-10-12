@@ -6,12 +6,21 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from dps.config import Settings
-from dps.jobs_models import CaptureSpec, FillSpec, JobSecret, ScanAuth, ScanScope, ScanSpec
+from dps.jobs_models import (
+    CaptureSpec,
+    ConsistencySpec,
+    FillSpec,
+    JobSecret,
+    ScanAuth,
+    ScanScope,
+    ScanSpec,
+)
 from dps.layers.scanner.models import (
     FieldFacts,
     LinkFacts,
     PageSnapshot,
     PersonaPreviewRequest,
+    RequestCount,
     ScanSpecError,
     TextFacts,
     redact_scan_spec,
@@ -45,6 +54,58 @@ def test_scan_spec_has_no_submit_field_anywhere() -> None:
         ScanSpec.model_validate(
             {"url": "http://demo-site:8410/apply", "fill": {"personas": 2, "submit": True}}
         )
+
+
+def _nested_models(model: type[BaseModel]) -> dict[str, type[BaseModel]]:
+    out: dict[str, type[BaseModel]] = {}
+    for name, info in model.model_fields.items():
+        for cand in getattr(info.annotation, "__args__", (info.annotation,)):
+            if isinstance(cand, type) and issubclass(cand, BaseModel):
+                out[name] = cand
+    return out
+
+
+_NESTED_MINIMUM: dict[str, dict[str, Any]] = {
+    "purpose": {"ticket": "CHG-1234", "legal_basis": "test data for UAT"},
+}
+
+
+def test_every_level_of_the_scan_spec_refuses_extra_keys() -> None:
+    nested = _nested_models(ScanSpec)
+    assert {"scope", "auth", "fill", "capture", "consistency", "purpose"} <= set(nested)
+    assert ScanSpec.model_config.get("extra") == "forbid"
+    for name, model in nested.items():
+        assert model.model_config.get("extra") == "forbid", name
+        assert model.model_config.get("hide_input_in_errors"), name
+        assert not _nested_models(model), name  # no deeper model level left unchecked
+        body = {**_NESTED_MINIMUM.get(name, {})}
+        ScanSpec.model_validate({"url": "http://demo-site:8410/apply", name: body})
+        with pytest.raises(ValidationError):
+            ScanSpec.model_validate(
+                {"url": "http://demo-site:8410/apply", name: {**body, "submit": True}}
+            )
+
+
+def test_the_run_spec_models_are_unchanged_by_the_scan_subclasses() -> None:
+    assert ConsistencySpec.model_validate({"submit": True}) == ConsistencySpec()
+    spec = ScanSpec.model_validate(
+        {"url": "http://demo-site:8410/apply", "consistency": {"scope": "entity"}}
+    )
+    assert isinstance(spec.consistency, ConsistencySpec) and spec.consistency.scope == "entity"
+
+
+def test_a_request_count_is_at_least_one() -> None:
+    for bad in (0, -3):
+        with pytest.raises(ValidationError):
+            RequestCount(
+                page_no=1,
+                method="POST",
+                resource_type="xhr",
+                decision="allowed",
+                reason="same_origin",
+                host="demo-site",
+                count=bad,
+            )
 
 
 def test_defaults_and_bounds() -> None:
@@ -89,6 +150,23 @@ def test_validation_errors_never_echo_the_url() -> None:
         ({"url": "http://evil.example/apply"}, "host_not_registered"),
         ({"url": "http://demo-site:8410/apply", "scope": {"max_pages": 51}}, "scope_invalid"),
         ({"url": "http://demo-site:8410/admin", "scope": {"deny": ["/admin"]}}, "start_url_denied"),
+        ({"url": "http://demo-site:8410/ADMIN", "scope": {"deny": ["/admin"]}}, "start_url_denied"),
+        (
+            {"url": "http://demo-site:8410/admin;x", "scope": {"deny": ["/admin"]}},
+            "start_url_denied",
+        ),
+        (
+            {"url": "http://demo-site:8410/%61dmin", "scope": {"deny": ["/admin"]}},
+            "start_url_denied",
+        ),
+        (
+            {"url": "http://demo-site:8410/apply/../admin/x", "scope": {"deny": ["/admin"]}},
+            "start_url_denied",
+        ),
+        (
+            {"url": "http://demo-site:8410/apply/%2E%2E/help", "scope": {"allow": ["/apply/*"]}},
+            "start_url_denied",
+        ),
         (
             {"url": "http://demo-site:8410/help", "scope": {"allow": ["/apply/*"]}},
             "start_url_denied",
@@ -152,6 +230,7 @@ def test_validated_scan_defaults_and_redacted_spec_has_no_secrets() -> None:
     assert "synthesis_seed" not in stored["consistency"]
     assert "wrap_key" not in stored["consistency"]
     assert stored["consistency"]["key_wrapped"] is True
+    assert stored["consistency"]["wrapped"] is True  # the name M2's redact_spec and custody read
     assert stored["scope"]["max_pages"] == 50 and stored["scope"]["max_depth"] == 3
 
 
@@ -161,7 +240,8 @@ def test_scope_limits_resolve_against_the_settings() -> None:
     )
     v = validate_scan(spec, settings=S, hosts=HOSTS)
     assert (v.max_pages, v.max_depth) == (7, 0)
-    assert redact_scan_spec(v, "http://127.0.0.1:8410/")["consistency"]["key_wrapped"] is False
+    unwrapped = redact_scan_spec(v, "http://127.0.0.1:8410/")["consistency"]
+    assert unwrapped["key_wrapped"] is False and unwrapped["wrapped"] is False
 
 
 def test_capture_spec_har_is_a_plain_flag() -> None:

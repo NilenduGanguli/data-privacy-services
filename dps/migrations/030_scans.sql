@@ -86,7 +86,7 @@ CREATE TABLE __SCHEMA__.dps_scan_request (       -- interception log: counts per
     decision      text NOT NULL CHECK (decision IN ('allowed','blocked')),
     reason        text NOT NULL,
     host          text NOT NULL,
-    count         int NOT NULL DEFAULT 1
+    count         int NOT NULL DEFAULT 1 CHECK (count >= 1)  -- a 0 or negative row would cancel others
 );
 CREATE UNIQUE INDEX dps_scan_request_key ON __SCHEMA__.dps_scan_request
     (job_id, (COALESCE(page_no, -1)), method, (COALESCE(resource_type, '')), decision, reason, host);

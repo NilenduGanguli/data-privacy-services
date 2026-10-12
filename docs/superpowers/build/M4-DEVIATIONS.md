@@ -74,7 +74,8 @@ the lane rules).
 
 - `dps/jobs_models.py`: `ScanScope`, `ScanAuth`, `FillSpec`, `CaptureSpec`, `ScanSpec`, `PATH_GLOB`,
   `SECRET_REF` and `JobSecret.scan_start_url` as planned (M2 shipped no placeholder `ScanSpec`).
-  Every scan model is `extra="forbid"` **and** `hide_input_in_errors=True` (the M2 convention: a
+  Every scan model is `extra="forbid"` **and** `hide_input_in_errors=True` (the nested M2 models
+  through the scan-local `ScanConsistency`/`ScanPurpose` subclasses since the round-1 fix below) (the M2 convention: a
   start URL can carry personal data in its query, and pydantic's default error text would quote
   it). `FillSpec` checks the locale against `SUPPORTED_LOCALES` exactly (no `normalise_locale`
   mapping, so `fr_FR` is refused rather than silently becoming `en_US`). `ScanAuth` refuses both
@@ -92,8 +93,10 @@ the lane rules).
     (both storage-state sources, or a `..` ref, in a spec built around the model's validator).
     `hosts` is normalised (trimmed, lower-cased) into `ValidatedScan.hosts`.
   - `redact_scan_spec` also records the resolved `scope.max_pages` / `scope.max_depth` and two
-    more value-free flags, `consistency.caller_key` / `caller_seed` (the run spec's `redact_spec`
-    records the same facts), beside the planned `key_wrapped`.
+    more value-free flags, `consistency.caller_key` / `caller_seed`, beside the planned
+    `key_wrapped`. The run spec's `redact_spec` names these facts differently (`wrapped`, `kid`,
+    `seed_fingerprint`); since the round-1 fix the scan also writes `wrapped`, the name M2's key
+    custody reads.
   - `PersonaPreviewRequest` is `extra="forbid"` and checks its locale like `FillSpec`.
   - `ValidationMessage.text` is capped at 200 characters by the model (the plan's comment).
 - Contract §3.3 (`JobSecret.scan_start_url`) and §9 (the M4 additions to `ScanSpec`, the accept-time
@@ -132,3 +135,64 @@ the lane rules).
 - `tests/scanner/test_store.py`: the plan's 7 tests plus the schema-name check, keyset paging of
     pages, the RLS case on `get_page`, the in-batch duplicate key, `non_get_allowed` counting an
     allowed POST (and not a HEAD), and export artefacts + evidence insertion: 11 tests (plan: 7).
+
+## Review round 1 fixes (G1: Tasks 1–5)
+
+Review `M4-G1-review-r1.md`, blocking B1–B4, plus N1, N4 and N5 folded in. Every fix has a test that
+fails on `9bfb88d`.
+
+- **B1 — `redact_url` (`dps/layers/scanner/urls.py`).** A path segment is now `{id}` whenever it is
+  value-like, whatever the classifier says: a run of 4+ digits, an alphanumeric run of 8+ characters
+  with a digit, an `@`, an `=` or whitespace (or one of the id forms as before). The real M0
+  `Detector(en_IN)` misses `SB-50100234567812`, `CUST0012345`, `acct-123456789012` and session
+  tokens, so the structural rule is what catches them. Matrix parameters are redacted in every
+  segment (`;jsessionid=<v>`; a key that is not a plain name `<k>`; a bare item `;<v>`). Query and
+  matrix keys that are value-like are `<k>` as well. Tests run with a classifier that returns None
+  and with the real detector (`test_redact_url_hides_account_numbers_customer_ids_and_session_tokens`,
+  `test_redact_url_keeps_plain_route_segments`).
+- **B2 — `template(url, classify)`.** **Signature change:** the classifier is now a required second
+  argument. The template is value-free and is what gets persisted: path segments and hash-route
+  segments follow `redact_url`'s rules (all-digit segments of any length are still `{id}`), matrix
+  parameters are dropped, query keys and hash-route query keys are `<k>` when value-like. The raw
+  dedupe key stays in worker memory (the crawl's seen-set of `canonical()` forms).
+  `urls.template_is_value_free()` re-applies the structural rules, and `PageRecord.template` refuses
+  anything that fails it (the error does not echo the value). The plan's Task 14 code is updated in
+  the plan file to pass `self.classify_value`. A skipped other-host row now keys on
+  `template(redact_origin(url), …)` (`host[:port]/`) instead of the raw `redact_origin` string,
+  because the guard would refuse a port in the path part. Tests:
+  `test_the_persisted_template_is_value_free`, `test_template_keeps_routes_and_shares_ids`,
+  `test_a_page_record_refuses_a_raw_template`, `test_value_free_templates_pass_the_record_guard`.
+- **B3 — scope path rail.** New `normalise_path(path)`: a backslash, `%2F` and `%5C` count as
+  separators, `;` matrix parameters are stripped per segment (so `..;` is `..`), escapes of
+  unreserved characters are decoded, dot segments are resolved, empty segments are dropped and a
+  trailing `/` is kept. `path_matches` compares the globs (normalised too) against every reading of
+  the path: that form, matrix parameters stripped before encoded separators are split (Tomcat), and
+  encoded separators kept. New keyword arguments: `fold_case` and `every_reading`. New
+  `path_verdict(path, allow, deny)`:
+  - deny wins when any reading matches, ignoring case;
+  - a non-empty allow list must match every reading, case-sensitively (fail closed both ways).
+
+  `CrawlScope.navigation_verdict` and `validate_scan` (`start_url_denied`) both use it. Tests:
+  `test_deny_cannot_be_bypassed_by_case_matrix_encoding_or_dots` (19 forms, including all the
+  forms the review lists), `test_allow_is_matched_on_the_normalised_path_case_sensitively`,
+  `test_normalise_path`, and five more `start_url_denied` cases in `test_validate_scan_codes`.
+- **B4 — `extra="forbid"` at every level.** `dps/jobs_models.py` gains `ScanConsistency(ConsistencySpec)`
+  and `ScanPurpose(Purpose)`, both with `extra="forbid"` and `hide_input_in_errors`.
+  `ScanSpec.consistency` and `ScanSpec.purpose` use them, and `RunSpec` keeps the M2 models
+  unchanged. Contract §9 names the subclasses and states that free-form dict values (`policy`,
+  `auth.storage_state`, the consistency key material) are data, not model levels. Tests:
+  `test_every_level_of_the_scan_spec_refuses_extra_keys` posts `submit` to every nested model and
+  asserts there is no deeper model level; `test_the_run_spec_models_are_unchanged_by_the_scan_subclasses`.
+- **N1 — request counts.** `RequestCount.count` is `Field(ge=1)`, and `030_scans.sql`
+  `dps_scan_request.count` gains `CHECK (count >= 1)`. 030 is edited in place because it is unmerged
+  and only on `m4`. Contract §2.4 is updated. Tests: `test_a_request_count_is_at_least_one` and two
+  more cases in `test_check_constraints_refuse_unknown_codes`.
+- **N4 — consistency flag names.** `redact_scan_spec` also writes `wrapped`, M2's name, beside
+  `key_wrapped`. Contract §9 is updated.
+- **N5 — authority differential.** `navigation_verdict` returns `other_origin` for any `@` or
+  backslash in the netloc. urllib reads `http://evil.com\@demo-site:8410/` as demo-site, but a
+  browser goes to evil.com. Tasks 6 and 14 must still navigate only to `canonical()` output.
+- Not done (non-blocking, left for later tasks): N2 (flush idempotency, Task 14), N3 (tenant-bound
+  composite FKs, platform-wide), N6 (IPv6 hosts fail closed), N7 (SEC-2 tenant-scoped
+  `storage_state_ref`, Task 16), N8 (producer-side redaction of field and form facts, Tasks 8, 9
+  and 14).

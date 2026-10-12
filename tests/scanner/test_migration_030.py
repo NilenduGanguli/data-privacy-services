@@ -131,6 +131,9 @@ async def test_check_constraints_refuse_unknown_codes(migrated_db, queue, tenant
                 " VALUES ('t-a', $1, 'POST', 'submitted', 'method', 'h')",
                 job_id,
             )
+        for bad in (0, -5):  # a non-positive count would cancel others in non_get_allowed
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(_REQUEST, job_id, bad)
 
 
 async def test_the_navigation_log_is_append_only_for_the_api(

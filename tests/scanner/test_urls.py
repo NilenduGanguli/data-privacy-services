@@ -1,16 +1,24 @@
 from __future__ import annotations
 
-import pytest
+from collections.abc import Callable
 
+import pytest
+from pydantic import ValidationError
+
+from dps.engine.detect.ensemble import Detector, DetectorConfig
+from dps.layers.scanner.models import PageRecord
 from dps.layers.scanner.urls import (
     CrawlScope,
     Origin,
     UrlError,
     canonical,
+    normalise_path,
     path_matches,
+    path_verdict,
     redact_origin,
     redact_url,
     template,
+    template_is_value_free,
     validate_glob,
 )
 
@@ -38,12 +46,12 @@ def test_canonical_normalises_and_drops_userinfo_fragment_default_port() -> None
 
 
 def test_template_collapses_identifiers_and_query_values() -> None:
-    assert template("http://h:8410/accounts/statements/2026-04?month=4&acct=7") == (
+    assert template("http://h:8410/accounts/statements/2026-04?month=4&acct=7", _cls) == (
         "h:8410/accounts/statements/{id}?acct&month"
     )
-    assert template("http://h/help/faq/7") == "h/help/faq/{id}"
-    assert template("http://h/help/faq/7") == template("http://h/help/faq/8")
-    assert template("http://h/app#/nominee") == "h/app#/nominee"
+    assert template("http://h/help/faq/7", _cls) == "h/help/faq/{id}"
+    assert template("http://h/help/faq/7", _cls) == template("http://h/help/faq/8", _cls)
+    assert template("http://h/app#/nominee", _cls) == "h/app#/nominee"
 
 
 def test_globs() -> None:
@@ -85,7 +93,7 @@ def test_redaction_never_keeps_a_query_key_that_is_itself_a_value() -> None:
 
 def test_a_malformed_port_is_never_echoed_and_never_raises() -> None:
     assert canonical("http://h:99999/x") is None
-    assert template("http://h:99999/x") == "h/x"
+    assert template("http://h:99999/x", _cls) == "h/x"
     assert redact_url("http://h:99999/x?q=1", _cls) == "http://h/x?q=<v>"
     assert redact_origin("http://h:99999/x") == "http://h"
     with pytest.raises(UrlError) as err:
@@ -105,6 +113,9 @@ def test_scope_verdicts() -> None:
     assert scope.navigation_verdict("http://cdn.bank.internal/x") == "other_origin"
     assert scope.navigation_verdict("http://tracker.invalid/p.gif") == "other_origin"
     assert scope.navigation_verdict("mailto:a@b.co") == "scheme"
+    # a browser goes to evil.com for this one; urllib reads demo-site:8410 (userinfo "evil.com\\")
+    assert scope.navigation_verdict("http://evil.com\\@demo-site:8410/") == "other_origin"
+    assert scope.navigation_verdict("http://u:p@demo-site:8410/apply") == "other_origin"
     assert scope.network_host_allowed("cdn.bank.internal")
     assert not scope.network_host_allowed("tracker.invalid")
     wide = CrawlScope(
@@ -127,3 +138,225 @@ def test_url_errors_carry_the_code_only() -> None:
     with pytest.raises(UrlError) as gerr:
         validate_glob("/ananya k")
     assert str(gerr.value) == "glob_invalid" and "ananya" not in repr(gerr.value)
+
+
+def _none(text: str) -> str | None:  # a classifier that recognises nothing at all
+    return None
+
+
+def _real_detector() -> Callable[[str], str | None]:
+    """The M0 detector as the classifier (en_IN): it misses prefixed account numbers, customer
+    ids and session tokens, so the structural rules must catch them."""
+    detector = Detector(DetectorConfig(locale="en_IN"))
+
+    def classify(text: str) -> str | None:
+        found = detector.detect(text=text).findings
+        return found[0].entity_type if found else None
+
+    return classify
+
+
+_ID_URLS = [
+    ("http://h/accounts/SB-50100234567812/statement", "http://h/accounts/{id}/statement"),
+    ("http://h/customer/CUST0012345/view", "http://h/customer/{id}/view"),
+    ("http://h/a/acct-123456789012", "http://h/a/{id}"),
+    ("http://h/t/A1B2C3D4/x", "http://h/t/{id}/x"),
+    ("http://h/c/ref9-2026x", "http://h/c/{id}"),
+    (
+        "http://h/app/profile;jsessionid=A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6",
+        "http://h/app/profile;jsessionid=<v>",
+    ),
+    ("http://h/app;JSESSIONID=abc/x;v=2/y", "http://h/app;JSESSIONID=<v>/x;v=<v>/y"),
+    ("http://h/x;50100234567812/y", "http://h/x;<v>/y"),
+    ("http://h/x;50100234567812=1;ananya.k%40x.in=2", "http://h/x;<k>=<v>;<k>=<v>"),
+    ("http://h/profile/Ananya%20Kapoor", "http://h/profile/{id}"),
+    ("http://h/customers/ananya.k@x.in/profile", "http://h/customers/{id}/profile"),
+    ("http://h/search/q=ananya/results", "http://h/search/{id}/results"),
+]
+
+
+@pytest.mark.parametrize("classify", [_none, _real_detector()], ids=["none", "detector"])
+@pytest.mark.parametrize("url,expected", _ID_URLS)
+def test_redact_url_hides_account_numbers_customer_ids_and_session_tokens(
+    url: str, expected: str, classify: Callable[[str], str | None]
+) -> None:
+    out = redact_url(url, classify)
+    if classify is _none:
+        assert out == expected
+    for secret in (
+        "50100234567812",
+        "0012345",
+        "123456789012",
+        "A1B2C3D4",
+        "ref9",
+        "ananya",
+        "Ananya",
+        "Kapoor",
+        "abc",
+    ):
+        assert secret not in out
+
+
+def test_redact_url_keeps_plain_route_segments() -> None:
+    url = "http://h/apply/identity/step2/review;lang=en?x=1"
+    assert redact_url(url, _none) == "http://h/apply/identity/step2/review;lang=<v>?x=<v>"
+    assert redact_url("http://h/", _none) == "http://h/"
+
+
+_TEMPLATE_LEAKS = [
+    ("http://h/customers/ananya.k@x.in/profile", ("ananya", "x.in")),
+    ("http://h/accounts/SB-50100234567812/statement", ("50100234567812",)),
+    ("http://h/customer/CUST0012345/view", ("0012345",)),
+    ("http://h/x?50100234567812=on&page=2", ("50100234567812",)),
+    ("http://h/x?ananya.k%40x.in=1&page=2", ("ananya",)),
+    ("http://h/profile/Ananya%20Kapoor", ("Ananya", "Kapoor")),
+    ("http://h/app#/nominee/ananya.k@x.in", ("ananya",)),
+    ("http://h/app#!/acct/SB-50100234567812?50100234567812=1", ("50100234567812",)),
+    ("http://h/app/profile;jsessionid=A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6", ("A1B2",)),
+]
+
+
+@pytest.mark.parametrize("classify", [_none, _real_detector()], ids=["none", "detector"])
+@pytest.mark.parametrize("url,secrets", _TEMPLATE_LEAKS)
+def test_the_persisted_template_is_value_free(
+    url: str, secrets: tuple[str, ...], classify: Callable[[str], str | None]
+) -> None:
+    tpl = template(url, classify)
+    record = PageRecord(
+        page_no=1,
+        url_redacted=redact_url(url, classify),
+        depth=0,
+        parent_page_no=None,
+        status="queued",
+        discovered_via="start",
+        template=tpl,
+    )
+    for secret in secrets:
+        assert secret not in record.template
+        assert secret not in record.url_redacted
+
+
+def test_template_keeps_routes_and_shares_ids() -> None:
+    assert template("http://h/app#/nominee/ananya.k@x.in", _cls) == "h/app#/nominee/<EMAIL>"
+    assert template("http://h/app#!/acct/SB-501002345678?b=1&a=2", _none) == (
+        "h/app#!/acct/{id}?a&b"
+    )
+    assert template("http://h/x?50100234567812=on&page=2", _none) == "h/x?<k>&page"
+    assert template("http://h/app;jsessionid=X1/p", _none) == template("http://h/app/p", _none)
+    assert template("http://h/acct/SB-50100234567812", _none) == template(
+        "http://h/acct/SB-60100234567899", _none
+    )
+
+
+@pytest.mark.parametrize(
+    "tpl",
+    [
+        "h/customers/ananya.k@x.in/profile",
+        "h/accounts/SB-50100234567812/statement",
+        "h/x?50100234567812",
+        "h/profile/Ananya%20Kapoor",
+        "h/app#/nominee/ananya.k@x.in",
+        "h/app/profile;jsessionid=A1B2C3D4",
+    ],
+)
+def test_a_page_record_refuses_a_raw_template(tpl: str) -> None:
+    assert not template_is_value_free(tpl)
+    with pytest.raises(ValidationError) as err:
+        PageRecord(
+            page_no=1,
+            url_redacted="http://h/",
+            depth=0,
+            parent_page_no=None,
+            status="queued",
+            discovered_via="start",
+            template=tpl,
+        )
+    assert "ananya" not in str(err.value) and "50100234567812" not in str(err.value)
+
+
+def test_value_free_templates_pass_the_record_guard() -> None:
+    for tpl in (
+        "demo-site:8410/apply/identity",
+        "h:8410/accounts/statements/{id}?acct&month",
+        "h/customers/<EMAIL>/profile",
+        "h/x?<k>&page",
+        "h/app#!/acct/{id}?a&b",
+        "127.0.0.1:8410/",
+    ):
+        assert template_is_value_free(tpl), tpl
+
+
+DENY = ("/logout", "/admin")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/Logout",
+        "/LOGOUT",
+        "/ADMIN/users",
+        "/logout;jsessionid=1",
+        "/admin;x/users",
+        "/%6Cogout",
+        "/%6cogout",
+        "/%61dmin/users",
+        "//logout",
+        "/apply/../logout",
+        "/apply/%2E%2E/admin",
+        "/apply/..;/admin",
+        "/./admin",
+        "/apply%2F..%2Fadmin",
+        "/apply\\..\\admin",
+        "/logout/",
+        "/admin;x%2F../users",  # Tomcat strips ";x%2F.." up to the next "/": /admin/users
+        "/%2E%2E/admin",
+        "/a%5C..%5Cadmin",
+    ],
+)
+def test_deny_cannot_be_bypassed_by_case_matrix_encoding_or_dots(path: str) -> None:
+    assert path_matches(path, DENY, fold_case=True)
+    assert path_verdict(path, (), DENY) == "deny"
+    scope = CrawlScope(
+        start=Origin.of("http://demo-site:8410/apply"),
+        same_origin=True,
+        registered_hosts=frozenset({"demo-site"}),
+        deny=DENY,
+    )
+    assert scope.navigation_verdict("http://demo-site:8410" + path) == "deny"
+
+
+def test_allow_is_matched_on_the_normalised_path_case_sensitively() -> None:
+    allow = ("/apply/*",)
+    assert path_verdict("/apply/identity", allow, ()) == "ok"
+    assert path_verdict("/apply;s=1/identity", allow, ()) == "ok"
+    assert path_verdict("/apply/../admin", allow, ()) == "not_allowed"
+    assert path_verdict("/apply/%2E%2E/admin", allow, ()) == "not_allowed"
+    assert path_verdict("/APPLY/identity", allow, ()) == "not_allowed"  # fail closed
+    assert path_verdict("/apply//identity", allow, ()) == "ok"
+    assert path_verdict("/help", (), DENY) == "ok"
+    assert path_verdict("/logoutx", (), DENY) == "ok"  # a deny stem covers sub-paths only
+    assert path_matches("/help/faq/", ["/help/faq/*"])
+    # every reading must be allowed: Tomcat reads /apply;x%2F../admin as /apply/admin, a server
+    # that splits %2F first reads it as /admin
+    assert path_verdict("/apply;x%2F../admin", allow, ()) == "not_allowed"
+    assert path_verdict("/apply/a%2Fb", allow, ()) == "ok"
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("", "/"),
+        ("/", "/"),
+        ("//a///b", "/a/b"),
+        ("/a/./b/../c", "/a/c"),
+        ("/a/b/..", "/a/"),
+        ("/../../a", "/a"),
+        ("/a;x=1/b;y", "/a/b"),
+        ("/%7Euser/%41%62c", "/~user/Abc"),
+        ("/a%20b/%3B", "/a%20b/%3B"),
+        ("/a%2fb%5Cc", "/a/b/c"),
+        ("/a/", "/a/"),
+    ],
+)
+def test_normalise_path(path: str, expected: str) -> None:
+    assert normalise_path(path) == expected

@@ -3954,11 +3954,11 @@ class ScanRunner:
         self.context.on("page", self._on_page)
         start = Target(page_no=self._alloc(), url=self.rt.start_url, depth=0, parent_page_no=None, via="start")
         self._seen.add(start.url)
-        self._per_template[template(start.url)] += 1
+        self._per_template[template(start.url, self.classify_value)] += 1
         self.frontier.append(start)
         self._pending.append(PageRecord(page_no=start.page_no, url_redacted=self._redact(start.url), depth=0,
                                         parent_page_no=None, status="queued", discovered_via="start",
-                                        template=template(start.url)))
+                                        template=template(start.url, self.classify_value)))
         try:
             async with asyncio.timeout(self.s.scan_job_timeout_seconds):
                 while self.frontier:
@@ -3984,7 +3984,7 @@ class ScanRunner:
     def _mark_budget(self, t: Target) -> None:
         self._pending.append(PageRecord(page_no=t.page_no, url_redacted=self._redact(t.url), depth=t.depth,
                                         parent_page_no=t.parent_page_no, status="skipped", status_reason="budget",
-                                        discovered_via=t.via, template=template(t.url)))
+                                        discovered_via=t.via, template=template(t.url, self.classify_value)))
 
     def _take_pending(self) -> list[PageRecord]:
         out, self._pending = self._pending, []
@@ -4050,7 +4050,7 @@ class ScanRunner:
         started = time.monotonic()
         record = PageRecord(page_no=t.page_no, url_redacted=self._redact(t.url), depth=t.depth,
                             parent_page_no=t.parent_page_no, status="visiting", discovered_via=t.via,
-                            template=template(t.url))
+                            template=template(t.url, self.classify_value))
         fields: list[FieldRecord] = []
         try:
             page, response = await self._open(t)
@@ -4230,7 +4230,7 @@ class ScanRunner:
         if verdict != "ok":
             self._skip(url, parent, verdict)
             return
-        tpl = template(url)
+        tpl = template(url, self.classify_value)
         if self._per_template[tpl] >= self.s.scan_max_per_template:
             self._skip(url, parent, "template")
             return
@@ -4248,7 +4248,9 @@ class ScanRunner:
 
     def _skip(self, url: str, parent: Target, reason: str) -> None:
         shown = redact_origin(url) if reason in _OTHER_HOST else self._redact(url)
-        key = (reason, shown if reason in _OTHER_HOST else template(url))
+        # the template column is value-free (PageRecord checks it): an other-host row keys on the
+        # origin's template ("host[:port]/"), every other row on the URL's template
+        key = (reason, template(redact_origin(url) if reason in _OTHER_HOST else url, self.classify_value))
         if key in self._skip_keys or len(self._skip_keys) >= self.s.scan_max_skipped_rows:
             return
         self._skip_keys.add(key)
@@ -4259,7 +4261,7 @@ class ScanRunner:
         self._event("skip", "skipped", page_no=no, method="GET", target=shown, note=reason)
 
     async def _discover_clicks(self, t: Target, snap: PageSnapshot) -> None:
-        base = template(canonical(snap.url) or t.url)
+        base = template(canonical(snap.url) or t.url, self.classify_value)
         for c in snap.clickables[: self.s.scan_max_spa_clicks_per_page]:
             try:
                 page, _ = await self._open(t)
@@ -4276,7 +4278,7 @@ class ScanRunner:
                 await frame.locator(f'[data-dps-click="{c.frame_index}:{c.ordinal}"]').click(timeout=3000, no_wait_after=True)
                 await page.wait_for_timeout(self.s.scan_settle_ms)
                 url = canonical(page.url)
-                if url is not None and template(url) != base:
+                if url is not None and template(url, self.classify_value) != base:
                     await self._consider(url, t, via="spa_click",
                                          replay=ClickReplay(parent=t, frame_index=c.frame_index, ordinal=c.ordinal))
             except PlaywrightError:
