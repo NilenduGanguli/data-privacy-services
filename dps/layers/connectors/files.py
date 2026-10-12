@@ -9,6 +9,13 @@ sha256}]}`` for ``dps_job_partition.meta``. A resumed partition calls
 deterministic (gzip headers carry no timestamp), so a rewrite produces the same bytes. The
 manifest is written **last**, at finalize, so a loader that sees it sees complete files.
 
+One cached writer serves every holder of a job in a process (a zombie whose lease was reclaimed
+and the re-claimed holder alike), so a spool takes each batch number exactly once and in order
+(``mark.batch_no`` must follow the spool's last batch, under the spool's lock; anything else is
+:class:`~dps.layers.connectors.base.LedgerConflict` and nothing is spooled), and every spool has
+its own folder. Batch ``n`` of a partition is the same rows whoever reads it, so a spool of
+batches ``1..n`` is complete whichever holder wrote each one.
+
 Values: CSV — a header row, ``None`` → empty, ``Decimal`` → plain digits, dates ISO-8601, bytes →
 hex; JSONL — one compact object per row with the same scalar rules (numbers stay numbers,
 ``Decimal`` becomes a string); Parquet — a ``pyarrow`` schema from the column kinds. ``snappy``
@@ -39,6 +46,7 @@ import pyarrow.parquet as pq
 from dps.layers.connectors.base import (
     ColumnInfo,
     FilesSpec,
+    LedgerConflict,
     LedgerMark,
     PrepareReport,
     Row,
@@ -140,6 +148,8 @@ class _Spool:
         self.types = [self.schema.field(n).type for n in self.names]
         self.files: list[tuple[Path, int]] = []  # (path, rows)
         self.gzip = effective_compression(spec) == "gzip"
+        self.batch = 0  # the last batch number spooled
+        self.lock = asyncio.Lock()  # one batch, reset or upload at a time
         self._raw: Any = None
         self._fh: Any = None
         self._writer: Any = None
@@ -246,6 +256,7 @@ class FilesWriter:
         root = spool_root or Path(tempfile.gettempdir()) / "dps-spool" / job_id
         self.spool_root = Path(root)
         self._spools: dict[int, _Spool] = {}
+        self._made = 0  # spools created (each gets its own folder)
 
     def base_key(self) -> str:
         """``<base_prefix>/<files.prefix>/<job_id>`` (empty parts left out)."""
@@ -259,12 +270,11 @@ class FilesWriter:
     def _gzip(self) -> bool:
         return effective_compression(self.spec) == "gzip"
 
-    def _spool(self, partition_no: int) -> _Spool:
-        spool = self._spools.get(partition_no)
-        if spool is None:
-            folder = self.spool_root / f"p{partition_no:05d}"
-            spool = _Spool(folder, partition_no, self.spec, self.columns)
-            self._spools[partition_no] = spool
+    def _new_spool(self, partition_no: int) -> _Spool:
+        self._made += 1
+        folder = self.spool_root / f"p{partition_no:05d}-{self._made:04d}"
+        spool = _Spool(folder, partition_no, self.spec, self.columns)
+        self._spools[partition_no] = spool
         return spool
 
     async def prepare(self, *, dry_run: bool) -> PrepareReport:
@@ -296,28 +306,59 @@ class FilesWriter:
         return None
 
     async def write_batch(self, rows: list[Row], *, mark: LedgerMark) -> int:
-        """Spool ``rows`` for ``mark.partition_no`` (uploaded by :meth:`finish_partition`)."""
-        if not rows:
-            return 0
-        await asyncio.to_thread(self._spool(mark.partition_no).write, rows)
-        return len(rows)
-
-    def reset_partition(self, partition_no: int) -> None:
-        """Drop what a partition spooled so far (a resumed partition starts again)."""
-        spool = self._spools.pop(partition_no, None)
-        if spool is not None:
-            spool.discard()
-
-    async def finish_partition(self, job_id: str, partition_no: int) -> dict[str, Any]:
-        """Upload the partition's part files; ``{"files": [{key, rows, bytes, sha256}]}``.
+        """Spool ``rows`` for ``mark.partition_no`` (uploaded by :meth:`finish_partition`).
 
         Raises:
+            LedgerConflict: ``mark.batch_no`` does not follow the spool's last batch (another
+                holder of the partition spooled it, or reset or uploaded the spool meanwhile).
+        """
+        spool = self._spools.get(mark.partition_no)
+        if spool is None:
+            if mark.batch_no != 1:
+                raise LedgerConflict()
+            spool = self._new_spool(mark.partition_no)
+        async with spool.lock:
+            if self._spools.get(mark.partition_no) is not spool or mark.batch_no != spool.batch + 1:
+                raise LedgerConflict()
+            if rows:
+                await asyncio.to_thread(spool.write, rows)
+            spool.batch = mark.batch_no
+        return len(rows)
+
+    async def reset_partition(self, partition_no: int) -> None:
+        """Drop what a partition spooled so far (a resumed partition starts again); waits for a
+        batch another holder is spooling into it."""
+        spool = self._spools.pop(partition_no, None)
+        if spool is not None:
+            async with spool.lock:
+                await asyncio.to_thread(spool.discard)
+                await asyncio.to_thread(shutil.rmtree, spool.root, True)
+
+    async def finish_partition(
+        self, job_id: str, partition_no: int, *, batch_no: int | None = None
+    ) -> dict[str, Any]:
+        """Upload the partition's part files; ``{"files": [{key, rows, bytes, sha256}]}``.
+
+        ``batch_no`` is the caller's last batch (0: it spooled none): the spool is uploaded only
+        when it ends with that batch, so a holder never uploads a spool that another holder of
+        the partition reset and restarted.
+
+        Raises:
+            LedgerConflict: the spool does not end with ``batch_no`` (nothing uploaded).
             StorageError: the store refused an upload (the run handler retries the partition).
         """
-        spool = self._spools.pop(partition_no, None)
+        spool = self._spools.get(partition_no)
         if spool is None:
+            if batch_no:
+                raise LedgerConflict()
             return {"files": []}
-        await asyncio.to_thread(spool.close)
+        async with spool.lock:
+            if self._spools.get(partition_no) is not spool or (
+                batch_no is not None and spool.batch != batch_no
+            ):
+                raise LedgerConflict()
+            del self._spools[partition_no]
+            await asyncio.to_thread(spool.close)
         out: list[dict[str, Any]] = []
         try:
             for path, rows in spool.files:
@@ -343,7 +384,7 @@ class FilesWriter:
     async def close(self) -> None:
         """Discard every unfinished spool."""
         for partition_no in list(self._spools):
-            self.reset_partition(partition_no)
+            await self.reset_partition(partition_no)
         await asyncio.to_thread(shutil.rmtree, self.spool_root, True)
 
 

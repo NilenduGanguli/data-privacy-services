@@ -61,8 +61,11 @@ from dps.layers.connectors.base import (
     ConnectorError,
     Engine,
     KeyRange,
+    LedgerConflict,
     LedgerMark,
+    PkOffset,
     PkToken,
+    PrepareReport,
     TableShape,
     decode_key,
     encode_key,
@@ -76,7 +79,7 @@ from dps.layers.connectors.files import (
     write_manifest,
 )
 from dps.layers.connectors.partitions import partition_count, plan_partitions
-from dps.layers.connectors.postgres import LedgerConflict, PkCollision
+from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.registry import open_connector, open_target_store
 from dps.layers.connectors.selection import SelectionError, validate_selection
 from dps.layers.connectors.targets import (
@@ -474,6 +477,8 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
                 )
         await _stage(ctx, job, "preparing target")
         report = await writer.prepare(dry_run=spec.options.dry_run)
+        if plan.same_table_append and isinstance(strategy, PkOffset):
+            await _check_same_table_offset(source, shape, selection, strategy, report)
         plan.prepare = {
             "created": report.created,
             "truncated": report.truncated,
@@ -540,6 +545,29 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         if target is not None and target is not source:
             await target.close()
         await source.close()
+
+
+async def _check_same_table_offset(
+    source: Connector,
+    shape: TableShape,
+    selection: Selection,
+    strategy: PkOffset,
+    report: PrepareReport,
+) -> None:
+    """A same-table ``offset`` must lift every selected key above the table's largest key.
+
+    The read range is clipped to ``append_upper`` (``max(key) + 1``), but a shifted key below
+    that bound (a key gap wider than the offset) would sit inside a partition range and be read
+    and appended again; requiring ``min(selected key) + offset >= append_upper`` rules it out.
+    """
+    if report.append_upper is None:
+        return  # an empty table: nothing is selected
+    first = await source.key_at_offset(shape, selection, selection.params, 0)
+    if first is not None and int(first[0]) + (strategy.offset or 0) < report.append_upper:
+        raise PrepareFailure(
+            "pk_strategy_invalid",
+            "a same-table offset must lift every selected key above the table's largest key",
+        )
 
 
 async def _transformed_keys(
@@ -743,6 +771,12 @@ async def _run_partition(
     batch_no, read_total = part.batch_no, part.rows_written
     if mode in ("in_place", "append"):
         mark = await rt.writer.read_ledger(job.id, part.partition_no)
+        if (mark.batch_no if mark is not None else 0) < part.batch_no:
+            # the ledger commits before the checkpoint, so it is never behind it unless its rows
+            # were removed: which batches were applied is unknown, so never write again
+            raise PrepareFailure(
+                "ledger_conflict", "the target's write ledger is behind the partition checkpoint"
+            )
         if mark is not None and mark.batch_no > part.batch_no:
             # the last batch committed with its ledger mark but its checkpoint did not: the
             # ledger is authoritative, so record it and continue after it
@@ -762,7 +796,7 @@ async def _run_partition(
             after, batch_no, read_total = decode_key(mark.last_key, cols), mark.batch_no, mark.rows
     elif mode == "files" and (part.batch_no > 0 or part.attempts > 1):
         assert isinstance(rt.writer, FilesWriter)
-        rt.writer.reset_partition(part.partition_no)
+        await rt.writer.reset_partition(part.partition_no)
         if not await jobs.reset_partition_progress(worker, part.id):
             raise _Lost()
         after, batch_no, read_total = None, 0, 0
@@ -814,7 +848,7 @@ async def _run_partition(
             return
         if control == "lost":
             raise _Lost()
-    meta = await rt.writer.finish_partition(job.id, part.partition_no)
+    meta = await rt.writer.finish_partition(job.id, part.partition_no, batch_no=batch_no)
     if not await jobs.finish_partition(worker, part.id, PartitionState.done, meta=meta):
         raise _Lost()
 

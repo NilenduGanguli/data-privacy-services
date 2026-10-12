@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from dps.layers.connectors.base import ColumnInfo, FilesSpec, LedgerMark
+from dps.layers.connectors.base import ColumnInfo, FilesSpec, LedgerConflict, LedgerMark
 from dps.layers.connectors.files import (
     EXTENSIONS,
     FilesWriter,
@@ -99,9 +99,9 @@ async def test_rows_per_file_split_reset_and_manifest(tmp_path: Path) -> None:
     )
     many = [dict(ROWS[0], id=i) for i in range(2500)]
     await w.write_batch(many, mark=MARK)
-    w.reset_partition(0)  # a resumed partition starts again
+    await w.reset_partition(0)  # a resumed partition starts again
     await w.write_batch(many[:1200], mark=MARK)
-    await w.write_batch(many[1200:], mark=MARK)
+    await w.write_batch(many[1200:], mark=MARK.model_copy(update={"batch_no": 2}))
     meta = await w.finish_partition("j_f", 0)
     assert [f["rows"] for f in meta["files"]] == [1000, 1000, 500]
     assert [f["key"] for f in meta["files"]] == [
@@ -137,7 +137,7 @@ async def test_partitions_are_independent_and_deterministic(tmp_path: Path) -> N
     assert second["files"][0]["key"] == "x/j_d/part-00001-000.csv.gz"
     assert (first["files"][0]["rows"], second["files"][0]["rows"]) == (2, 3)
     # a restarted partition rewrites the same object with the same bytes
-    w.reset_partition(0)
+    await w.reset_partition(0)
     await w.write_batch(ROWS[:2], mark=MARK)
     again = await w.finish_partition("j_d", 0)
     assert again["files"][0]["sha256"] == first["files"][0]["sha256"]
@@ -212,3 +212,40 @@ async def test_a_failing_store_fails_the_probe(tmp_path: Path) -> None:
     with pytest.raises(PrepareFailure) as err:
         await w.prepare(dry_run=False)
     assert err.value.code == "target_invalid"
+
+
+async def test_two_holders_sharing_one_writer_cannot_interleave_a_spool(tmp_path: Path) -> None:
+    """A zombie and the re-claimed holder of one partition share the job's cached writer: a
+    spool takes each batch number exactly once, in order, so its part file never mixes them."""
+    store = LocalObjectStore(tmp_path / "out")
+    spec = FilesSpec(format="jsonl", compression="none")
+    w = FilesWriter(
+        store, spec, job_id="j_z", base_prefix="", columns=COLS, spool_root=tmp_path / "spool"
+    )
+
+    def mark(batch: int) -> LedgerMark:
+        return MARK.model_copy(update={"batch_no": batch})
+
+    await w.write_batch(ROWS[:1], mark=mark(1))  # holder A
+    await w.write_batch(ROWS[1:2], mark=mark(2))
+    await w.reset_partition(0)  # A's lease is lost; B re-claims and starts again
+    await w.write_batch(ROWS[:1], mark=mark(1))  # holder B
+    with pytest.raises(LedgerConflict):  # the zombie's next batch is out of sequence
+        await w.write_batch(ROWS[2:3], mark=mark(3))
+    with pytest.raises(LedgerConflict):  # a batch the spool already holds
+        await w.write_batch(ROWS[:1], mark=mark(1))
+    with pytest.raises(LedgerConflict):  # the zombie finishing: the spool is B's, at batch 1
+        await w.finish_partition("j_z", 0, batch_no=2)
+    await w.write_batch(ROWS[1:3], mark=mark(2))
+    await w.write_batch(ROWS[3:], mark=mark(3))
+    meta = await w.finish_partition("j_z", 0, batch_no=3)
+    [part] = meta["files"]
+    lines = (await store.get(part["key"])).decode().splitlines()
+    assert part["rows"] == 5 and [json.loads(line)["id"] for line in lines] == [0, 1, 2, 3, 4]
+    with pytest.raises(LedgerConflict):  # a zombie writing after the upload starts no new spool
+        await w.write_batch(ROWS[4:], mark=mark(4))
+    with pytest.raises(LedgerConflict):  # nor uploads anything
+        await w.finish_partition("j_z", 0, batch_no=3)
+    assert await w.finish_partition("j_z", 0, batch_no=0) == {"files": []}  # an empty partition
+    await w.close()
+    assert not (tmp_path / "spool").exists() or not any((tmp_path / "spool").iterdir())

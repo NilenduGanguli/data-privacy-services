@@ -975,3 +975,83 @@ Review: `M2-G4-review-r1.md`, one blocking finding (B1). Contract change: §0 am
   uses), so finalize stores the same bytes as the `manifest` artefact without reading the object
   back. HANDOFF §8 gains the PostgreSQL-target trap (ledger, `CREATE` on the target schema, in-place
   review rules).
+
+## Review G5 r1 fixes (Tasks 18–22)
+
+Review: `M2-G5-review-r1.md`, three blocking findings (B1–B3). Contract change: §0 amendment 2026-10-12
+"the write guard is the caller's mark; same-table append keys", §4.2 (`BatchWriter.finish_partition`
+signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
+
+- **B1 — a same-table `append` with an `offset` re-read and re-appended its own rows.** Prepare only
+  clipped the read range to `max(key) + 1`; a shifted key in a key gap below that bound sat inside a
+  partition range (probe: 41 rows, offset 100, one key 1000 above the rest → `succeeded`, 442 rows).
+  `jobs_run._check_same_table_offset` (after `writer.prepare`, before the dry-run return, so a dry
+  run reports it too) now requires `min(selected key) + offset >= append_upper`, i.e. every new key
+  sorts above every existing key, else `pk_strategy_invalid`. `min(selected key)` is
+  `Connector.key_at_offset(…, 0)` (a contract method, so M3 connectors inherit it). The review's
+  looser alternative (`offset > max − min` of the table) is the same bound for the whole table; the
+  bound is checked against `append_upper` rather than the `max_rows`-clipped upper, which is stricter
+  but simpler to state and also rules out any collision with existing rows by construction.
+  `PostgresWriter._check_generated` refuses a same-table `generate` unless the key has an owned
+  sequence (`pg_get_serial_sequence`, identity included) that ascends (`seqincrement > 0`) and does
+  not cycle (`seqcycle`, which would wrap into the read range — not in the review, same defect class);
+  a different-table `generate` keeps the old rules (any default; the lagging-sequence check).
+- **B2 — the ledger guard compared with writer-instance state (`_seen`), which a zombie and the
+  re-claimed holder share through `RuntimeCache`.** `_seen` is gone. `write_batch` requires the locked
+  ledger row to hold `mark.batch_no - 1` (the caller's own resume point), so a zombie's replayed batch
+  and a skipped batch are both `LedgerConflict`. `LedgerConflict` moved to `base.py` (re-exported by
+  `postgres.py`, name unchanged) so the files writer can raise it.
+  - Consequence: an empty ledgered batch (`rows == []`) now still runs the transaction and records
+    its mark (it used to return 0 without a mark, which the new guard would turn into a conflict on
+    the next batch).
+  - Consequence: `_run_partition` fails a partition whose ledger is *behind* its checkpoint (ledger
+    rows removed mid-run) with `ledger_conflict` instead of writing; the old guard silently trusted the
+    checkpoint, the new one would loop on conflicts. Not reachable in normal operation (the ledger
+    commits before the checkpoint).
+  - **Files writer** (the review's "spool is shared the same way"): a spool takes each batch number
+    exactly once, in order, under a per-spool `asyncio.Lock` (`mark.batch_no` must follow the spool's
+    last batch, else `LedgerConflict`, nothing spooled; a batch 1 starts a spool, any other number
+    without a spool conflicts); every spool gets its own folder (`p<partition>-<n>`), so one holder's
+    discard or `rmtree` never deletes another's files; `reset_partition` is now `async` and waits for a
+    batch in flight; `finish_partition` gains the keyword `batch_no` (the caller's last batch, `0` for an
+    empty partition) and uploads only a spool that ends with it, else `LedgerConflict` (a zombie can no
+    longer upload — and then mark done — a spool the re-claimed holder reset and restarted). Batch `n`
+    is the same rows whoever reads it, so a contiguous spool `1..n` is complete whichever holder wrote
+    each batch. `BatchWriter.finish_partition` gained the optional keyword (contract §4.2);
+    `PostgresWriter` ignores it.
+- **B3 — a partition's first batch had no ledger row, so `FOR UPDATE` locked nothing and two holders
+  both applied batch 1.** `PostgresWriter._lock_ledger` inserts `(job_id, partition_no, 0, '[]', 0)`
+  `ON CONFLICT DO NOTHING` before the `SELECT … FOR UPDATE`, in the batch's transaction: a second
+  holder's insert waits on the first holder's uncommitted row (unique-index wait), then finds batch 1
+  and conflicts. The mark is then an `UPDATE`. `read_ledger` treats a `batch_no = 0` row as no mark (such
+  a row exists only inside an open or rolled-back transaction). The insert is inside the batch's
+  transaction rather than in `read_ledger`, so a holder that never read the ledger is serialised too.
+- Tests (each failed before the fix; run against a `git archive HEAD` copy with the new tests, the
+  files test adapted to HEAD's import location and synchronous `reset_partition`):
+  `tests/connectors/test_postgres_write.py` +3 —
+  `test_two_holders_sharing_one_writer_never_apply_a_batch_twice` (one writer, two `read_ledger`
+  holders, in place: the zombie's batch 1 and a skipped batch 3 are `LedgerConflict`; HEAD: DID NOT
+  RAISE), `test_a_first_batch_waits_for_an_open_holder_and_conflicts` (two connectors, holder A's
+  batch-1 transaction held open inside `_insert`: B waits, then conflicts, 3 rows; HEAD: B finished at
+  once and both applied), `test_same_table_generate_needs_an_owned_ascending_sequence` (plain default,
+  descending and cycling sequences refused on the same table, an owned ascending one accepted;
+  another table still takes a plain default; HEAD: DID NOT RAISE);
+  `tests/connectors/test_files.py` +1 — `test_two_holders_sharing_one_writer_cannot_interleave_a_spool`
+  (zombie batches after a reset, a replayed batch, the zombie's finish of a restarted spool and writes
+  after the upload are `LedgerConflict`; the uploaded part holds ids 0..4 once, in order; HEAD: DID NOT
+  RAISE); `tests/connectors/test_run_failures.py` +1 —
+  `test_same_table_append_refuses_an_offset_inside_the_key_span` (the review's probe as a run: offset
+  100 fails prepare with `pk_strategy_invalid` and leaves the 41 rows; offset 1 000 000 succeeds and
+  appends each row exactly once, 82 rows; HEAD: `succeeded`). Existing files tests now number their
+  batches (one wrote batch 1 twice) and await `reset_partition`.
+- The review's probes against the fixed code: `probe-m2-G5_ledger.py` and `probe-m2-G5_firstbatch.py`
+  pass (`conflict`, 3 rows); `probe-m2-G5_append_gap.py` now ends `failed pk_strategy_invalid` with
+  the 41 rows untouched (the probe asserts the alternative outcome, success with 82 rows; refusing at
+  prepare is the fix the review recommended).
+- Open (not in this round's scope): the queue fences a partition by `locked_by` only, so a zombie and
+  a re-claimed holder **on the same worker** both pass `jobs.checkpoint` / `finish_partition`. With
+  the guards above every batch is still applied or spooled once, but a files zombie whose last batch
+  went into the spool just before the re-claim reset it can still checkpoint that batch's counters
+  after the re-claim's `reset_partition_progress` (an overcount; no data effect). A claim token (e.g.
+  the claim's `attempts`) in the fence would close it; Task 23 (worker loop, lost-task cancellation)
+  is the natural place.

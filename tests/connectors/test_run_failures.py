@@ -157,3 +157,55 @@ async def test_cancel_mid_run_ends_canceled_with_evidence(
     ev = await get_evidence("t1", job.progress.evidence_id)
     assert ev is not None and ev.pack.outcome == "canceled"
     assert await db_key_enc(job.id) is None and sub.job.id not in RUNTIMES.job_ids()
+
+
+async def test_same_table_append_refuses_an_offset_inside_the_key_span(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """A shifted key that lands in a key gap below the table's largest key would sit inside a
+    partition range and be read (and appended) again: prepare refuses such an offset."""
+    obj = await source_pg.customers_table(rows=40, name="gapped")
+    table = f'"{source_pg.schema}".gapped'
+    await source_pg.admin.execute(  # one row far above the others leaves a gap of ~1000 keys
+        f"INSERT INTO {table} SELECT (jsonb_populate_record(NULL::{table}, "
+        f"to_jsonb(c) || jsonb_build_object('customer_id', 10001000))).* FROM {table} c "
+        "WHERE customer_id = (SELECT min(customer_id) FROM " + table + ")"
+    )
+    keys = "SELECT customer_id FROM " + table + " ORDER BY 1"
+    before = [r["customer_id"] for r in await source_pg.admin.fetch(keys)]
+    assert len(before) == 41 and before[-1] == 10001000 and before[-2] < 10000100
+    rw = await register_source(
+        "t1", ref="dps/src/test-pg-rw", roles={"source", "target"}, name="gapped-rw"
+    )
+    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj)
+
+    async def append(offset: int) -> jobs.Job:
+        spec = run_spec(
+            rw.id,
+            obj,
+            snap.id,
+            {
+                "write_mode": "append",
+                "confirm_write": True,
+                "pk_strategy": {"kind": "offset", "offset": offset},
+            },
+            mode="synthesize",
+        )
+        spec = spec.model_copy(update={"source": spec.source.model_copy(update={"batch_rows": 10})})
+        sub = await submit_run(
+            spec,
+            tenant_id="t1",
+            principal=LOCAL_PRINCIPAL,
+            settings=handler_ctx.settings,
+            kek=handler_ctx.kek,
+        )
+        return await drive(handler_ctx, "t1", sub.job.id)
+
+    job = await append(100)  # 10000001 + 100 < 10001001: new keys would land in unread ranges
+    assert (job.state, job.error_code) == (JobState.failed, "pk_strategy_invalid")
+    assert [r["customer_id"] for r in await source_pg.admin.fetch(keys)] == before
+    job = await append(1_000_000)  # every new key sorts above every existing key
+    assert job.state == JobState.succeeded, job.error_code
+    assert job.progress.rows_written == 41
+    after = [r["customer_id"] for r in await source_pg.admin.fetch(keys)]
+    assert after == before + [k + 1_000_000 for k in before]  # each row appended exactly once

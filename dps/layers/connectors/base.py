@@ -220,6 +220,17 @@ class ConnectorError(Exception):
         self.code, self.detail, self.retryable = code, detail, retryable
 
 
+class LedgerConflict(ConnectorError):
+    """Another holder advanced this partition: nothing was written (the caller stops quietly).
+
+    Raised by ``write_batch`` when ``mark.batch_no`` is not the batch after the one the target
+    last recorded for the partition (a zombie, a replayed or a skipped batch).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("ledger_conflict", "another worker advanced this partition")
+
+
 class ConnectionTestResult(BaseModel):
     """Outcome of ``Connector.test`` (contract §4.2); checks and capabilities are value-free."""
 
@@ -543,8 +554,12 @@ class BatchWriter(Protocol):
 
     ``write_batch`` is ONE target transaction holding the rows and the partition's ledger mark
     (``in_place``/``append``), so a resumed partition never applies a batch twice; on resume the
-    ledger mark is authoritative over the queue's checkpoint. ``table`` loads upsert on the key;
-    ``files`` writes one object per partition, uploaded by ``finish_partition``.
+    ledger mark is authoritative over the queue's checkpoint. The guard is the caller's own mark:
+    a batch is applied only when the target last recorded ``mark.batch_no - 1`` for the partition
+    (else :class:`LedgerConflict`), never writer-instance state, because one cached writer serves
+    every holder of a job in a process (a zombie and the re-claimed holder alike). ``table``
+    loads upsert on the key; ``files`` writes one object per partition, uploaded by
+    ``finish_partition`` (its spool takes each batch number once, in order).
     """
 
     async def prepare(self, *, dry_run: bool) -> PrepareReport:
@@ -563,8 +578,14 @@ class BatchWriter(Protocol):
         """Write ``rows`` and ``mark`` in one transaction; returns rows written."""
         ...
 
-    async def finish_partition(self, job_id: str, partition_no: int) -> dict[str, Any]:
-        """Files: upload the part object and return its metadata; ``{}`` otherwise."""
+    async def finish_partition(
+        self, job_id: str, partition_no: int, *, batch_no: int | None = None
+    ) -> dict[str, Any]:
+        """Files: upload the part object and return its metadata; ``{}`` otherwise.
+
+        ``batch_no`` is the caller's last batch: files upload only a spool that ends with it
+        (else :class:`LedgerConflict`: another holder reset or uploaded it).
+        """
         ...
 
     async def clear_ledger(self, job_id: str) -> int:

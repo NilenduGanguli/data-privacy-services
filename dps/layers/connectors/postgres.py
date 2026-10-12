@@ -15,12 +15,16 @@ deterministic, update-stable filter on a hash of the key; ``TABLESAMPLE`` is use
 discovery samples and key sampling (an in-place update moves tuples, which would change it).
 
 Writes (:class:`PostgresWriter`, on the separate read-write pool). For ``in_place`` and ``append``
-every ``write_batch`` is ONE transaction: lock the partition's row in the target's write ledger
-(``dps_write_ledger`` in the target schema or ``ledger_owner``), compare its batch number with the
-one this writer last saw (a mismatch means another holder wrote meanwhile → :class:`LedgerConflict`,
-nothing written), apply the rows, upsert the ledger mark, commit. The mark is therefore always the
-last applied batch, so a resumed partition never applies a batch twice (re-obfuscating an
-obfuscated row would corrupt it irreversibly). ``in_place`` is one set-based ``UPDATE … FROM
+every ``write_batch`` is ONE transaction: make sure the partition has a row in the target's write
+ledger (``dps_write_ledger`` in the target schema or ``ledger_owner``; ``INSERT … ON CONFLICT DO
+NOTHING`` with batch 0, so even a partition's first batch has a row to lock and a second holder
+waits for the first one's open transaction), lock it, require that its batch number is the one
+before the caller's ``mark.batch_no`` (anything else means another holder wrote meanwhile →
+:class:`LedgerConflict`, nothing written), apply the rows, record the mark, commit. The expected
+batch comes from the caller's own resume point, never from writer state: one cached writer serves
+every holder of a job in a process, a zombie included. The mark is therefore always the last
+applied batch, so a resumed partition never applies a batch twice (re-obfuscating an obfuscated
+row would corrupt it irreversibly). ``in_place`` is one set-based ``UPDATE … FROM
 unnest(…)`` (key columns never in the ``SET`` list); ``append`` is a binary ``COPY`` (a unique
 violation is :class:`PkCollision`); ``table`` stages rows in a session temp table with binary
 ``COPY`` and upserts with ``INSERT … SELECT … ON CONFLICT (key)`` — idempotent, so it needs no
@@ -58,6 +62,7 @@ from dps.layers.connectors.base import (
     Engine,
     JsonScalar,
     KeyRange,
+    LedgerConflict,
     LedgerMark,
     ObjectRef,
     PrepareReport,
@@ -803,13 +808,6 @@ class PostgresConnector:
 LEDGER_TABLE = "dps_write_ledger"
 
 
-class LedgerConflict(ConnectorError):
-    """Another holder advanced this partition's ledger: nothing was written (stop quietly)."""
-
-    def __init__(self) -> None:
-        super().__init__("ledger_conflict", "another worker advanced this partition")
-
-
 class PkCollision(ConnectorError):
     """An appended key already exists in the target (a unique violation; count-free)."""
 
@@ -838,7 +836,6 @@ class PostgresWriter:
         self.owner, self.name = target.object.owner or "public", target.object.name
         self.fqn = f"{_q(self.owner)}.{_q(self.name)}"
         self.ledger = f"{_q(target.ledger_owner or self.owner)}.{LEDGER_TABLE}"
-        self._seen: dict[int, int] = {}
         digest = hashlib.sha256(f"{target.job_id}:{self.fqn}".encode()).hexdigest()[:10]
         self.stage = f"dps_stage_{digest}"
 
@@ -960,20 +957,29 @@ class PostgresWriter:
             raise PrepareFailure(
                 "pk_strategy_invalid", "the key has no identity, default or sequence"
             )
+        # on the source table every generated key must sort above the read range: only an owned,
+        # ascending, non-cycling sequence ahead of the table guarantees that
+        same = self.t.same_as_source
+        refused = "a same-table generate needs an owned ascending sequence that does not cycle"
         seq = await conn.fetchval("SELECT pg_get_serial_sequence($1, $2)", self.fqn, key)
         if seq is None:
+            if same:
+                raise PrepareFailure("pk_strategy_invalid", refused)
             return  # a default that is not a sequence (e.g. gen_random_uuid()): nothing to compare
         try:
             row = await conn.fetchrow(
                 "SELECT pg_sequence_last_value($1::regclass) AS last, s.seqstart AS start, "
-                "s.seqincrement AS inc FROM pg_sequence s WHERE s.seqrelid = $1::regclass",
+                "s.seqincrement AS inc, s.seqcycle AS cycle FROM pg_sequence s "
+                "WHERE s.seqrelid = $1::regclass",
                 seq,
             )
         except asyncpg.InsufficientPrivilegeError:
             raise PrepareFailure(
                 "target_invalid", "cannot read the key sequence (SELECT on it is needed)"
             ) from None
-        if row is None:
+        if row is None or (same and (row["inc"] <= 0 or row["cycle"])):
+            if same:
+                raise PrepareFailure("pk_strategy_invalid", refused)
             return
         nxt = row["start"] if row["last"] is None else row["last"] + row["inc"]
         top = await conn.fetchval(f"SELECT max({_q(key)}) FROM {self.fqn}")
@@ -1017,12 +1023,12 @@ class PostgresWriter:
         return int(total)
 
     async def read_ledger(self, job_id: str, partition_no: int) -> LedgerMark | None:
-        """The partition's last committed mark (also the base the next batch is checked against)."""
+        """The partition's last committed mark, or None before its first batch (the caller
+        resumes after it and numbers its next batch ``batch_no + 1``)."""
         pool = await self.c.write_pool()
         try:
             async with pool.acquire() as conn:
                 if await conn.fetchval("SELECT to_regclass($1)", self.ledger) is None:
-                    self._seen[partition_no] = 0
                     return None
                 row = await conn.fetchrow(
                     f"SELECT batch_no, last_key::text AS k, rows FROM {self.ledger} "
@@ -1032,8 +1038,7 @@ class PostgresWriter:
                 )
         except (*_RETRYABLE, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
             raise _target_error(exc) from None
-        self._seen[partition_no] = row["batch_no"] if row else 0
-        if row is None:
+        if row is None or row["batch_no"] == 0:
             return None
         return LedgerMark(
             job_id=job_id,
@@ -1044,26 +1049,24 @@ class PostgresWriter:
         )
 
     async def write_batch(self, rows: list[Row], *, mark: LedgerMark) -> int:
-        """Write ``rows`` and (in_place/append) the ledger ``mark`` in one transaction."""
-        if not rows:
+        """Write ``rows`` and (in_place/append) the ledger ``mark`` in one transaction.
+
+        A ledgered batch is applied only when the partition's ledger holds ``mark.batch_no - 1``
+        (else :class:`LedgerConflict`, nothing written); an empty ledgered batch still records
+        its mark, so the next batch number stays contiguous.
+        """
+        ledgered = self.t.write_mode in ("in_place", "append")
+        if not rows and not ledgered:
             return 0
         pool = await self.c.write_pool()
-        ledgered = self.t.write_mode in ("in_place", "append")
+        written = 0
         try:
             async with pool.acquire() as conn, conn.transaction():
                 if ledgered:
-                    current = (
-                        await conn.fetchval(
-                            f"SELECT batch_no FROM {self.ledger} WHERE job_id = $1 "
-                            "AND partition_no = $2 FOR UPDATE",
-                            mark.job_id,
-                            mark.partition_no,
-                        )
-                        or 0
-                    )
-                    if current != self._seen.get(mark.partition_no, 0):
-                        raise LedgerConflict()
-                if self.t.write_mode == "in_place":
+                    await self._lock_ledger(conn, mark)
+                if not rows:
+                    pass
+                elif self.t.write_mode == "in_place":
                     written = await self._update(conn, rows)
                 elif self.t.write_mode == "append":
                     written = await self._insert(conn, rows)
@@ -1071,11 +1074,8 @@ class PostgresWriter:
                     written = await self._upsert(conn, rows)
                 if ledgered:
                     await conn.execute(
-                        f"INSERT INTO {self.ledger} (job_id, partition_no, batch_no, last_key, "
-                        "rows, updated_at) VALUES ($1, $2, $3, $4::jsonb, $5, now()) "
-                        "ON CONFLICT (job_id, partition_no) DO UPDATE SET "
-                        "batch_no = EXCLUDED.batch_no, last_key = EXCLUDED.last_key, "
-                        "rows = EXCLUDED.rows, updated_at = now()",
+                        f"UPDATE {self.ledger} SET batch_no = $3, last_key = $4::jsonb, "
+                        "rows = $5, updated_at = now() WHERE job_id = $1 AND partition_no = $2",
                         mark.job_id,
                         mark.partition_no,
                         mark.batch_no,
@@ -1088,9 +1088,28 @@ class PostgresWriter:
             raise
         except (*_RETRYABLE, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
             raise _target_error(exc) from None
-        if ledgered:
-            self._seen[mark.partition_no] = mark.batch_no
         return written
+
+    async def _lock_ledger(self, conn: asyncpg.Connection, mark: LedgerMark) -> None:
+        """Create (batch 0) and lock the partition's ledger row; require ``mark.batch_no - 1``.
+
+        The insert makes a concurrent first batch wait on the other holder's open transaction
+        (a unique-index wait) instead of finding no row to lock.
+        """
+        await conn.execute(
+            f"INSERT INTO {self.ledger} (job_id, partition_no, batch_no, last_key, rows) "
+            "VALUES ($1, $2, 0, '[]'::jsonb, 0) ON CONFLICT (job_id, partition_no) DO NOTHING",
+            mark.job_id,
+            mark.partition_no,
+        )
+        current = await conn.fetchval(
+            f"SELECT batch_no FROM {self.ledger} WHERE job_id = $1 AND partition_no = $2 "
+            "FOR UPDATE",
+            mark.job_id,
+            mark.partition_no,
+        )
+        if current != mark.batch_no - 1:
+            raise LedgerConflict()
 
     async def _update(self, conn: asyncpg.Connection, rows: list[Row]) -> int:
         names = list(self.t.key) + [c for c in self.t.write_columns if c not in self.t.key]
@@ -1141,7 +1160,9 @@ class PostgresWriter:
         )
         return rowcount(tag)
 
-    async def finish_partition(self, job_id: str, partition_no: int) -> dict[str, Any]:
+    async def finish_partition(
+        self, job_id: str, partition_no: int, *, batch_no: int | None = None
+    ) -> dict[str, Any]:
         """Nothing to upload for a database target."""
         return {}
 

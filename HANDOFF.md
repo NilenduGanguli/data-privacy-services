@@ -291,7 +291,11 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   `keep`) and any output that cannot fit an existing column: `det_token` on a bounded column is
   `length_overflow` at prepare, and FPE needs ≥ 5 letters and 0 or ≥ 6 digits (a 4-digit PAN falls
   back to `det_token` and fails the preflight on `char(10)`). `table` targets create planned text
-  columns as `text`, so they take any method.
+  columns as `text`, so they take any method. An `append` to the source table needs an `offset` of at
+  least `max(key) + 1 - min(selected key)`, or `generate` on an identity or an owned ascending sequence
+  that does not cycle; anything else fails prepare with `pk_strategy_invalid` (new rows would land in
+  key ranges still to be read). `ledger_conflict` on a *failed* partition means its ledger rows were
+  removed while the job ran: which batches were applied is unknown, so it is never written again.
 - Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py` (see
   "Lane-safe stacks", §3).
 - Synthesis under a `strict` policy is still refused, rarely, when a reshaped identifier (a keyed

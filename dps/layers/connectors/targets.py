@@ -14,8 +14,9 @@ key that is not one integer column, an offset on a non-integer key or a prefix o
 ``text_method_invalid`` · ``group_not_found`` / ``group_key_mismatch`` · ``tabular_invalid``.
 
 A same-table append re-reads its own new rows unless every new key sorts above every selected
-key; only one integer key with ``generate`` (the sequence is ahead of the table, checked at
-prepare) or ``offset`` (prepare clips the read range to ``max(key) + 1``) guarantees that.
+key; only one integer key with ``generate`` (an owned, ascending, non-cycling sequence ahead of the
+table, checked at prepare) or ``offset`` (prepare requires ``min(selected key) + offset >= max(key)
++ 1`` and clips the read range to ``max(key) + 1``) guarantees that.
 
 **Created tables** keep the source type of every kept column (validated against
 :data:`TYPE_RE` before it reaches generated SQL) and of planned numeric/date columns; planned
