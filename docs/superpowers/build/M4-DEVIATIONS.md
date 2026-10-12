@@ -296,3 +296,42 @@ fails on `032b076`.
   `page.url` before capturing a filled screen, or it captures an error page.
 - Not done here: N-c (registered hosts bound to `host[:port]`) — `ScanGuard(host_allowed=…)` keeps
   the plan's host-only callable; the scope change belongs to `CrawlScope` (Task 14).
+
+## Task 7 — Demo onboarding web app
+
+- `tests/scanner/conftest.py`: `demo_site_url` takes the URL from `tests.services.service_url
+  ("demo_site")` (`DPS_TEST_DEMO_SITE`, else `127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}`), not the
+  plan's literal `8410` (contract §0 lane amendment, §12.2); it auto-starts `node
+  demo/onboarding/server.mjs --port <that port>` only for a local host and a free port. The other
+  fixtures are the plan's (`scan_settings`, `scan_engine`, `det_engine`, `RotCipher`, `demo_data`);
+  `chromium` and `skip_or_fail` landed with Task 6.
+- `demo/onboarding/data.json` gains `account_number` and `customer_id`, and `/profile` renders them
+  as "Customer ID" and "Account number" rows (labels the structural dictionary maps to
+  `CUSTOMER_ID` / `ACCOUNT_NUMBER`). Why: Stage A lesson 3 — page redaction and obfuscated captures
+  must cover account numbers and customer ids, so the scan target has to render them for the
+  capture and leak tests (Tasks 12, 14, 16) to prove it.
+- `demo/onboarding/server.mjs`: the plan's server, plus: the request URL is parsed against a fixed
+  base (`new URL(req.url, 'http://demo.invalid')`, a 400 if it throws) instead of the `Host` header
+  — a malformed `Host` made `new URL` throw inside the async handler, an unhandled rejection that
+  ends the Node 22 process; the static-file guard requires `static/` plus a separator (the plan's
+  prefix check also matched a sibling such as `static2/`); a non-API non-GET is answered `303 →
+  /thanks` as the plan's table says (its code sent 302); SIGTERM/SIGINT exit at once (node is PID 1
+  in `node:22-slim`, which has no default SIGTERM handler, so `docker compose down` would wait
+  10 s).
+- `demo/onboarding/site.mjs`: the plan's page table, plus a `/thanks` page (the redirect target
+  existed nowhere) and `Object.hasOwn` for the page lookup. Static files are the plan's; `app.css`
+  is written out from the plan's description.
+- **Deferred to Task 20:** `docker/secrets/dps/ui/demo-onboarding/storage_state.json`. It is only
+  read through a `storage_state_ref`, and SEC-2 (applied at integration) moves refs to the
+  tenant-scoped `DPS_SECRET_DIR/<tenant_id>/<ref>/` layout (Stage A lesson 4: nothing may rely on a
+  global ref). It belongs with the compose mount that reads it; Tasks 7–8 pass the demo cookie
+  inline.
+- `tests/scanner/test_demo_site.py`: the plan's 3 tests (the profile session check uses a client
+  with the cookie, as httpx deprecates per-request cookies) plus: every `data.json` value is
+  rendered on some page (so later leak tests are not vacuous), a form POST is counted and answered
+  with a redirect, `/admin` hits are counted, unknown pages 404, the traversal guard is checked with
+  raw socket requests (httpx normalises `..` client-side, so the plan's check never sent one), and
+  `/health`: 6 tests (plan: 3). Manual check done with a private Playwright: `/apply/identity` has
+  nine fields and typing fires `POST /api/autosave` and the `sendBeacon` (counted by
+  `/__received`); `/apply/address` holds `#pin` in an open shadow root; clicking the `role=link` on
+  `/app` routes to `/app/preferences`.
