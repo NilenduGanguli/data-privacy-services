@@ -269,7 +269,8 @@ async def test_prepare_returns_a_sealable_model_and_value_free_metrics() -> None
     # the holdout is ~20 % by a keyed hash of each anchor, capped at copula_holdout_rows
     assert m["tabular"]["fit_rows"] + m["tabular"]["holdout_rows"] == 500
     assert 50 <= m["tabular"]["holdout_rows"] <= 100
-    assert m["privacy"]["membership_inference"]["run"] is False
+    assert m["privacy"]["membership_inference"]["run"] is True  # Task 6B
+    assert m["utility"] == {"run": False, "reason": "no utility_label in the policy"}
     text = json.dumps(m)
     assert not any(s in text for s in [*SENTINEL_NAMES, *LABELS])
     sampler = load_sampler("copula", prepared.model_b64, seed_bytes(seed))

@@ -8,7 +8,10 @@ returns numbers (and column paths) only. Nothing here logs, persists or returns 
   correlation matrices; :func:`fidelity_report` combines them into the evidence block.
 * **Privacy**: exact-row matches (unkeyed :func:`row_hash` for in-memory comparison, keyed
   :func:`row_digest` for the sealed reject set), the nearest-neighbour distance ratio
-  (:func:`nndr`) on :func:`encode_features` vectors, and quasi-identifier uniqueness.
+  (:func:`nndr`) on :func:`encode_features` vectors, quasi-identifier uniqueness, and a
+  membership-inference proxy (:func:`membership_inference_proxy`, spec §5.7).
+* **Utility**: train on synthetic, test on real (:func:`utility_tstr`, a k-NN on the same feature
+  encoding) for a label column the policy nominates (spec §5.7).
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from scipy import stats
@@ -383,4 +386,120 @@ def fidelity_report(
         "corr_matrix": {"columns": names, "delta": matrix},
         "limits": {"column": column_limit, "corr": corr_limit},
         "score": round(max(0.0, 1.0 - mean_col - corr), 4),
+    }
+
+
+def _cap(data: np.ndarray, limit: int, rng: np.random.Generator) -> np.ndarray:
+    return data if len(data) <= limit else data[rng.choice(len(data), limit, replace=False)]
+
+
+def membership_inference_proxy(
+    train: np.ndarray, holdout: np.ndarray, synth: np.ndarray, *, sample: int = 2000, seed: int = 0
+) -> dict[str, Any]:
+    """Distance-to-closest-synthetic-record attack (spec §5.7 "membership-inference proxy").
+
+    ``score(r) = −min_j ‖r − synth_j‖``; the AUC of members (fit rows) against non-members
+    (holdout rows, never fitted) on balanced samples of ``min(len(train), len(holdout), sample)``
+    rows. 0.5 = no membership signal; 1.0 = the synthetic rows copy the fit rows. Ties count half
+    (average ranks). ``{"run": False, "reason"}`` when there is nothing to compare.
+    """
+    n = min(len(train), len(holdout), sample)
+    if n == 0 or len(synth) == 0 or train.ndim != 2 or train.shape[1] == 0:
+        return {"run": False, "reason": "not enough rows to measure membership inference"}
+    rng = np.random.default_rng(seed)
+    members = _cap(train, n, rng)
+    non_members = _cap(holdout, n, rng)
+    reference = _cap(synth, _REFERENCE_MAX, rng)
+    scores = np.concatenate([-_nearest(members, reference), -_nearest(non_members, reference)])
+    ranks = stats.rankdata(scores, method="average")
+    auc = (float(ranks[:n].sum()) - n * (n + 1) / 2.0) / float(n * n)
+    return {
+        "run": True,
+        "method": "dcr_auc",
+        "auc": round(auc, 4),
+        "members": int(n),
+        "non_members": int(n),
+    }
+
+
+def _neighbours(train: np.ndarray, test: np.ndarray, k: int) -> np.ndarray:
+    """Indices of the ``k`` nearest training rows of every test row (chunked brute force)."""
+    train_sq = np.einsum("ij,ij->i", train, train)
+    out = np.empty((len(test), k), dtype=np.int64)
+    for start in range(0, len(test), _CHUNK):
+        q = test[start : start + _CHUNK]
+        d2 = np.einsum("ij,ij->i", q, q)[:, None] + train_sq[None, :] - 2.0 * (q @ train.T)
+        part = np.argpartition(d2, k - 1, axis=1)[:, :k] if k < len(train) else None
+        if part is None:
+            part = np.tile(np.arange(len(train)), (len(q), 1))
+        order = np.take_along_axis(d2, part, axis=1).argsort(axis=1, kind="stable")
+        out[start : start + len(q)] = np.take_along_axis(part, order, axis=1)
+    return out
+
+
+def _label_key(value: Any) -> str:
+    return str(canonical(value))
+
+
+def _knn_score(
+    train_x: np.ndarray,
+    train_y: Sequence[Any],
+    test_x: np.ndarray,
+    test_y: Sequence[Any],
+    *,
+    task: Literal["classification", "regression"],
+    k: int,
+) -> float:
+    if len(train_x) == 0 or len(test_x) == 0:
+        return 0.0
+    k = max(1, min(k, len(train_x)))
+    idx = _neighbours(train_x, test_x, k)
+    if task == "classification":
+        labels = [_label_key(v) for v in train_y]
+        truth = [_label_key(v) for v in test_y]
+        hits = 0
+        for row, expected in zip(idx, truth, strict=True):
+            votes = Counter(labels[int(j)] for j in row)
+            best = max(votes.values())
+            hits += int(min(lab for lab, c in votes.items() if c == best) == expected)
+        return hits / len(truth)
+    ys = np.asarray([to_float(v) or 0.0 for v in train_y], dtype=float)
+    yt = np.asarray([to_float(v) or 0.0 for v in test_y], dtype=float)
+    pred = ys[idx].mean(axis=1)
+    total = float(np.sum((yt - yt.mean()) ** 2))
+    if total <= 0:
+        return 0.0
+    return 1.0 - float(np.sum((yt - pred) ** 2)) / total
+
+
+def utility_tstr(
+    real_x: np.ndarray,
+    real_y: Sequence[Any],
+    synth_x: np.ndarray,
+    synth_y: Sequence[Any],
+    test_x: np.ndarray,
+    test_y: Sequence[Any],
+    *,
+    task: Literal["classification", "regression"],
+    k: int = 5,
+) -> dict[str, Any]:
+    """Train on synthetic, test on real (spec §5.7 "utility").
+
+    A k-NN (``k`` = 5, Euclidean on :func:`encode_features` output, chunked distances) is trained
+    once on real rows and once on synthetic rows; both predict the same held-out real rows.
+    ``classification`` scores accuracy (majority vote, ties → the smallest label), ``regression``
+    R². ``ratio`` = synthetic / real (0 when the real score is not positive). The label is never a
+    feature: callers pass features without it.
+    """
+    metric = "accuracy" if task == "classification" else "r2"
+    on_real = _knn_score(real_x, real_y, test_x, test_y, task=task, k=k)
+    on_synth = _knn_score(synth_x, synth_y, test_x, test_y, task=task, k=k)
+    return {
+        "run": True,
+        "model": f"knn{k}",
+        "metric": metric,
+        "train_on_real": round(on_real, 4),
+        "train_on_synthetic": round(on_synth, 4),
+        "ratio": round(on_synth / on_real, 4) if on_real > 0 else 0.0,
+        "test_rows": len(test_x),
     }

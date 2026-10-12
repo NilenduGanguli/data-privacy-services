@@ -35,10 +35,12 @@ from dps.engine.metrics import (
     exact_row_matches,
     fidelity_report,
     generalize_qi,
+    membership_inference_proxy,
     nndr,
     qi_unique_overlap,
     qi_uniqueness,
     row_hash,
+    utility_tstr,
 )
 from dps.engine.policy import Policy
 from dps.engine.synth.constraints import ColumnSpec, ConstraintError, ConstraintSet
@@ -328,6 +330,61 @@ def _generalised(rows: list[Row], qi: list[tuple[str, str, str]]) -> list[dict[s
     return [{name: generalize_qi(r.get(name), how) for _, name, how in qi} for r in rows]
 
 
+def _too_small(holdout_rows: list[Row], settings: Settings) -> str | None:
+    if len(holdout_rows) < settings.mia_min_holdout:
+        return f"holdout has {len(holdout_rows)} rows (< {settings.mia_min_holdout})"
+    return None
+
+
+def _utility(
+    label: str | None,
+    columns: list[TabularColumn],
+    preview_source: list[Row],
+    synth_rows: list[Row],
+    holdout_rows: list[Row],
+    settings: Settings,
+) -> dict[str, Any]:
+    """Train on synthetic, test on real for the policy's ``utility_label`` (spec §5.7)."""
+    if not label:
+        return {"run": False, "reason": "no utility_label in the policy"}
+    target = next((c for c in columns if c.path == label), None)
+    if target is None:
+        return {"run": False, "reason": "utility_label is not a modelled column"}
+    small = _too_small(holdout_rows, settings)
+    if small:
+        return {"run": False, "reason": small}
+    features = [c for c in columns if c.path != label]
+    if not features:
+        return {"run": False, "reason": "no modelled feature column besides the label"}
+    kinds = {c.path: c.kind for c in features}
+    cap = settings.utility_max_rows
+
+    def side(rows: list[Row]) -> tuple[dict[str, list[Any]], list[Any]]:
+        kept = [r for r in rows if r.get(target.name) is not None][:cap]
+        return {c.path: [r.get(c.name) for r in kept] for c in features}, [
+            r.get(target.name) for r in kept
+        ]
+
+    real, real_y = side(preview_source)
+    synth, synth_y = side(synth_rows)
+    test, test_y = side(holdout_rows)
+    if not real_y or not synth_y or not test_y:
+        return {"run": False, "reason": "the label column is null in one of the samples"}
+    task: Literal["classification", "regression"] = (
+        "classification" if target.kind in ("categorical", "bool") else "regression"
+    )
+    out = utility_tstr(
+        encode_features(real, kinds),
+        real_y,
+        encode_features(synth, kinds, real),
+        synth_y,
+        encode_features(test, kinds, real),
+        test_y,
+        task=task,
+    )
+    return {**out, "label": label, "task": task}
+
+
 def measure(
     *,
     real_rows: list[Row],
@@ -341,8 +398,9 @@ def measure(
     settings: Settings,
     engine: str,
     preview_resamples: int,
+    utility_label: str | None = None,
 ) -> dict[str, Any]:
-    """Fidelity and privacy of the preview (value-free: numbers, column paths, counts)."""
+    """Fidelity, privacy and utility of the preview (value-free: numbers, paths, counts)."""
     kinds = {c.path: c.kind for c in columns}
 
     def by_path(rows: list[Row]) -> dict[str, list[Any]]:
@@ -368,6 +426,14 @@ def measure(
     names = [name for _, name, _ in qi]
     real_qi, synth_qi = _generalised(preview_source, qi), _generalised(synth_rows, qi)
     passed = bool(nn["measured"]) and nn["ratio"] >= settings.privacy_nndr_target
+    small = _too_small(holdout_rows, settings)
+    mia: dict[str, Any] = (
+        {"run": False, "reason": small}
+        if small or holdout_x is None
+        else membership_inference_proxy(train_x, holdout_x, synth_x, sample=2000, seed=0)
+    )
+    if mia.get("run"):
+        mia |= {"target": settings.mia_auc_target, "passed": mia["auc"] <= settings.mia_auc_target}
     return {
         "fidelity": {
             **fidelity,
@@ -393,11 +459,11 @@ def measure(
                 "synthetic": round(qi_uniqueness(synth_qi, names), 4),
                 "unique_overlap": qi_unique_overlap(real_qi, synth_qi, names),
             },
-            "membership_inference": {
-                "run": False,
-                "reason": f"not available for the {engine} engine",
-            },
+            "membership_inference": mia,
         },
+        "utility": _utility(
+            utility_label, columns, preview_source, synth_rows, holdout_rows, settings
+        ),
     }
 
 
@@ -497,6 +563,7 @@ async def prepare_tabular(
         settings=settings,
         engine=engine_name,
         preview_resamples=int(result.values_by_method.get(f"{engine_name}_resample", 0)),
+        utility_label=policy.synthesize.utility_label,
     )
     metrics["tabular"] = {
         "engine": engine_name,
@@ -513,6 +580,11 @@ async def prepare_tabular(
     if settings.privacy_nndr_enforce and not metrics["privacy"]["nndr"]["passed"]:
         raise TabularGateError(
             "privacy_gate", "nearest-neighbour distance ratio is below the configured target"
+        )
+    mia = metrics["privacy"]["membership_inference"]
+    if settings.privacy_nndr_enforce and mia.get("run") and not mia.get("passed"):
+        raise TabularGateError(
+            "privacy_gate", "the membership-inference proxy AUC is above the configured target"
         )
     engine_literal: Literal["copula", "mostly"] = "mostly" if engine_name == "mostly" else "copula"
     return TabularPrepared(

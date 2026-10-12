@@ -174,6 +174,7 @@ class SynthesizeConfig(BaseModel):
     llm_rewrite_text: bool = False
     constraints: list[TabularConstraint] = Field(default_factory=list)
     quasi_identifiers: list[ColumnPath] = Field(default_factory=list)  # "$.NAME" for the QI metric
+    utility_label: ColumnPath | None = None  # "$.NAME": train-on-synthetic/test-on-real label (M5)
 
 
 class ConsistencyConfig(BaseModel):
@@ -226,8 +227,9 @@ class Policy(BaseModel):
     def config_hash(self) -> str:
         """Stable sha256 of the policy for reports and evidence packs.
 
-        The M5 synthesize lists (``constraints``, ``quasi_identifiers``) count only when set, so
-        every hash recorded before M5 (presets, snapshots, evidence packs) still matches.
+        The M5 synthesize fields (``constraints``, ``quasi_identifiers``, ``utility_label``) count
+        only when set, so every hash recorded before M5 (presets, snapshots, evidence packs) still
+        matches.
         """
         data = self.model_dump(mode="json")
         for name in _OPTIONAL_SYNTHESIZE:
@@ -238,7 +240,7 @@ class Policy(BaseModel):
 
 
 #: ``synthesize`` fields (M5) left out of :meth:`Policy.config_hash` while empty.
-_OPTIONAL_SYNTHESIZE = ("constraints", "quasi_identifiers")
+_OPTIONAL_SYNTHESIZE = ("constraints", "quasi_identifiers", "utility_label")
 
 #: Sections whose values are whole method specs: an override replaces an entry, never merges
 #: into it (``{"method": "fpe_digits"}`` must not inherit the preset's ``keep_suffix``).

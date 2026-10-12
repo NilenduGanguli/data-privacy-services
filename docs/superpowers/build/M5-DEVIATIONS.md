@@ -202,6 +202,28 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   same persona name pools as the surrogates. The key `customer_id` keeps its values by the
   synthesize-mode key rule (contract §5.3) — see the report's open issues.
 
+## Task 6B — Utility (train on synthetic, test on real) and the membership-inference proxy
+
+- `dps/engine/metrics.py`: `membership_inference_proxy` returns `{"run": False, "reason"}` when
+  there is nothing to compare (no holdout or no synthetic row) instead of an AUC over empty sets; the
+  synthetic reference is capped at 10 000 rows like NNDR's. `utility_tstr` compares class labels by
+  their canonical text (`1`, `1.0` and `Decimal("1.00")` are one label) and reads regression labels
+  through `to_float`; R² of a constant test label is 0. The evidence's `utility` block is the one
+  Task 6 already copies from `progress.metrics` (no `evidence.py` change in this task).
+- `dps/layers/connectors/tabular.py` `_utility`: the real training side is the **preview source**
+  (the fit rows the synthetic preview was drawn for), not the whole fit sample, so both k-NNs train
+  on the same number of rows; the plan's reasons are kept and one is added ("the label column is
+  null in one of the samples"); the result carries `task` besides the plan's `label`. The
+  `privacy_gate` for the MIA proxy reads "the membership-inference proxy AUC is above the configured
+  target" (separate detail from the NNDR gate).
+- `dps/engine/policy.py`: `utility_label: ColumnPath | None` is validated as a column path and,
+  like Task 4's lists, left out of `config_hash` while unset (no recorded hash changes).
+- Tests: the plan's 6 plus `test_an_enforced_privacy_gate_also_checks_the_mia_proxy`,
+  `test_utility_label_is_hashed_only_when_set`, a regression label and a non-modelled label in
+  `test_measure_reports_utility_and_mia` (9). The fixture is a self-contained accounts table (the
+  plan reused Task 6's), imported helpers from `tests/test_tabular_prepare.py`; Task 6's
+  `test_prepare_returns_a_sealable_model_and_value_free_metrics` now expects the MIA proxy to run.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
