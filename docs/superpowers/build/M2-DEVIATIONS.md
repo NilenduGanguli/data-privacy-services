@@ -805,3 +805,34 @@ Review: `M2-G4-review-r1.md`, one blocking finding (B1). Contract change: §0 am
   `test_files_synthesize_group_and_tabular_rules`, `test_resolve_existing_targets_per_write_mode`,
   `test_same_table_and_run_plan_round_trip` and extra assertions (synthesize plans, plan
   defaults, `TYPE_RE`, `hmac_pseudonym` length): 22 tests (plan: 17).
+
+## Task 19 — PostgreSQL writer (in_place, append, table, ledger, collision precheck)
+
+- `dps/layers/connectors/postgres.py` `PostgresWriter._check_generated` — **no catalogue text is
+  interpolated into SQL.** The plan read the identity sequence with
+  `SELECT last_value, is_called FROM {seq}` (the sequence name from `pg_get_serial_sequence`
+  pasted into the statement); it now uses `pg_sequence_last_value($1::regclass)` with
+  `pg_sequence.seqstart`/`seqincrement` (next value = last + increment, or the start value when
+  the sequence was never called). A key default that is not a sequence (e.g.
+  `gen_random_uuid()`) passes; a composite key is `pk_strategy_invalid` for `generate`.
+- `prepare` maps driver failures instead of letting them escape raw: a missing privilege
+  (`InsufficientPrivilegeError`, e.g. `CREATE` on the schema) or schema is `target_invalid`,
+  other server errors `target_error` (retryable for network/server classes) or
+  `statement_timeout`. `truncate_insert` on an existing table also requires `TRUNCATE` (the plan
+  checked INSERT/UPDATE/SELECT only, so a missing TRUNCATE failed with a raw driver error after
+  the checks passed). The ledger table's own privileges (SELECT/INSERT/UPDATE/DELETE) are checked
+  after `CREATE TABLE IF NOT EXISTS` (it may have been created by another login), and a
+  concurrent create (`UniqueViolationError` on the catalogue) is tolerated.
+- `precheck_collisions`, `read_ledger` and `clear_ledger` map driver errors the same way
+  (value-free `target_error`); `write_batch` matches the retryable classes before
+  `PostgresError` (Task 15's rule: `TooManyConnectionsError` is a `PostgresError`).
+- The table-load staging table name is quoted (`_q`) and the writer keeps no unused `types`
+  cache. `PostgresConnector.writer` refuses a `files` target or one without an object
+  (`target_invalid`), as planned; `PostgresWriter.__init__` checks the object too (no `assert`).
+- Tests (`tests/connectors/test_postgres_write.py`): the plan's 5 plus
+  `test_upsert_load_keeps_rows_and_existing_target_privileges` (upsert into an existing table
+  keeps other rows), `test_composite_keys_update_and_precheck` (row-value `unnest` join, empty
+  key batches) and `test_write_errors_are_coded_and_value_free` (a too-long value: `target_error`
+  without the value), and extra assertions (no ledger for `table`, a refused batch leaves the
+  ledger mark, two partitions' marks, a created table's primary key, dry-run creates no ledger,
+  `create_if_missing: false`, a key without identity/default): 8 tests (plan: 5).

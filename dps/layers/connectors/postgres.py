@@ -1,4 +1,4 @@
-"""PostgreSQL connector (asyncpg) — read side (contract §4, spec §7 engine notes).
+"""PostgreSQL connector (asyncpg) — read side and writer (contract §4, spec §7 engine notes).
 
 Sessions. The read pool's sessions start with ``default_transaction_read_only=on``,
 ``statement_timeout`` (``DPS_CONNECTOR_STATEMENT_TIMEOUT_SECONDS``), ``lock_timeout=5s``,
@@ -14,12 +14,26 @@ string into a ``date``/``timestamptz``/``numeric`` parameter by itself. ``select
 deterministic, update-stable filter on a hash of the key; ``TABLESAMPLE`` is used only for
 discovery samples and key sampling (an in-place update moves tuples, which would change it).
 
+Writes (:class:`PostgresWriter`, on the separate read-write pool). For ``in_place`` and ``append``
+every ``write_batch`` is ONE transaction: lock the partition's row in the target's write ledger
+(``dps_write_ledger`` in the target schema or ``ledger_owner``), compare its batch number with the
+one this writer last saw (a mismatch means another holder wrote meanwhile → :class:`LedgerConflict`,
+nothing written), apply the rows, upsert the ledger mark, commit. The mark is therefore always the
+last applied batch, so a resumed partition never applies a batch twice (re-obfuscating an
+obfuscated row would corrupt it irreversibly). ``in_place`` is one set-based ``UPDATE … FROM
+unnest(…)`` (key columns never in the ``SET`` list); ``append`` is a binary ``COPY`` (a unique
+violation is :class:`PkCollision`); ``table`` stages rows in a session temp table with binary
+``COPY`` and upserts with ``INSERT … SELECT … ON CONFLICT (key)`` — idempotent, so it needs no
+ledger. Column types reach SQL casts only after :data:`~dps.layers.connectors.targets.TYPE_RE`.
+
 Errors carry a stable code and an exception class name only — never a driver message, a value, a
 key or a credential. Identifiers are interpolated only through ``selection.quote_ident``.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import ssl
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -32,6 +46,7 @@ import asyncpg
 
 from dps.config import Settings
 from dps.connections import Connection, Credentials
+from dps.db import rowcount
 from dps.engine.jsonpath import child_path
 from dps.jobs_models import Selection
 from dps.layers.connectors.base import (
@@ -43,7 +58,9 @@ from dps.layers.connectors.base import (
     Engine,
     JsonScalar,
     KeyRange,
+    LedgerMark,
     ObjectRef,
+    PrepareReport,
     ResolvedTarget,
     Row,
     TableShape,
@@ -51,6 +68,7 @@ from dps.layers.connectors.base import (
     decode_key,
 )
 from dps.layers.connectors.selection import compile_query, compile_where, quote_ident
+from dps.layers.connectors.targets import TYPE_RE, PrepareFailure
 from dps.secrets import SecretUnavailable, resolve_secret_ref
 
 PG_KINDS: dict[str, ColumnKind] = {
@@ -233,7 +251,7 @@ def _require_key(shape: TableShape) -> None:
 
 
 class PostgresConnector:
-    """``Connector`` for PostgreSQL (contract §4.2); ``writer()`` arrives with Task 19."""
+    """``Connector`` for PostgreSQL (contract §4.2): reads, and :class:`PostgresWriter`."""
 
     engine: Engine = "postgres"
 
@@ -769,7 +787,377 @@ class PostgresConnector:
             },
         )
 
-    # -- write side (Task 19) -------------------------------------------------------------------
+    # -- write side ----------------------------------------------------------------------------
     async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> BatchWriter:
-        """The PostgreSQL writer arrives with Task 19 (in_place, append, table, ledger)."""
-        raise ConnectorError("engine_unavailable", "the PostgreSQL writer is not available yet")
+        """A :class:`PostgresWriter` for an ``in_place``, ``append`` or ``table`` target.
+
+        Raises:
+            ConnectorError: ``target_invalid`` for a ``files`` target or one without an object.
+        """
+        if target.write_mode == "files" or target.object is None:
+            raise ConnectorError("target_invalid", "a PostgreSQL writer needs a table target")
+        return PostgresWriter(self, target, source_shape)
+
+
+#: The write ledger (contract §4.2 ``DPS_WRITE_LEDGER``; PostgreSQL folds names to lower case).
+LEDGER_TABLE = "dps_write_ledger"
+
+
+class LedgerConflict(ConnectorError):
+    """Another holder advanced this partition's ledger: nothing was written (stop quietly)."""
+
+    def __init__(self) -> None:
+        super().__init__("ledger_conflict", "another worker advanced this partition")
+
+
+class PkCollision(ConnectorError):
+    """An appended key already exists in the target (a unique violation; count-free)."""
+
+    def __init__(self) -> None:
+        super().__init__("pk_collision", "an appended key already exists in the target")
+
+
+def _target_error(exc: BaseException) -> ConnectorError:
+    """A write-side driver failure → ``target_error`` (retryable for server/network failures)."""
+    if isinstance(exc, _RETRYABLE):
+        return ConnectorError("target_error", type(exc).__name__, retryable=True)
+    if isinstance(exc, asyncpg.QueryCanceledError):
+        return ConnectorError("statement_timeout", "the statement exceeded the connector timeout")
+    return ConnectorError("target_error", type(exc).__name__)
+
+
+class PostgresWriter:
+    """``BatchWriter`` for PostgreSQL targets (module docstring: atomicity and resume)."""
+
+    def __init__(
+        self, connector: PostgresConnector, target: ResolvedTarget, source_shape: TableShape
+    ) -> None:
+        if target.object is None:
+            raise ConnectorError("target_invalid", "a PostgreSQL writer needs a table target")
+        self.c, self.t, self.src = connector, target, source_shape
+        self.owner, self.name = target.object.owner or "public", target.object.name
+        self.fqn = f"{_q(self.owner)}.{_q(self.name)}"
+        self.ledger = f"{_q(target.ledger_owner or self.owner)}.{LEDGER_TABLE}"
+        self._seen: dict[int, int] = {}
+        digest = hashlib.sha256(f"{target.job_id}:{self.fqn}".encode()).hexdigest()[:10]
+        self.stage = f"dps_stage_{digest}"
+
+    def _type(self, column: str) -> str:
+        shape = self.t.target_shape
+        if shape is not None:
+            data_type = shape.column(column).data_type
+        else:
+            data_type = self.t.column_types.get(column, "")
+        if not TYPE_RE.fullmatch(data_type):
+            raise PrepareFailure("target_invalid", "a column type cannot be used in generated SQL")
+        return data_type
+
+    async def _privilege(self, conn: asyncpg.Connection, relation: str, privilege: str) -> bool:
+        return bool(await conn.fetchval("SELECT has_table_privilege($1, $2)", relation, privilege))
+
+    async def _require(self, conn: asyncpg.Connection, *privileges: str) -> None:
+        for privilege in privileges:
+            if not await self._privilege(conn, self.fqn, privilege):
+                raise PrepareFailure(
+                    "target_invalid", f"the target login lacks {privilege} on the target table"
+                )
+
+    async def prepare(self, *, dry_run: bool) -> PrepareReport:
+        """Create (or truncate) a ``table`` target, or check privileges and create the ledger
+        for ``in_place``/``append``; ``dry_run`` only checks.
+
+        Raises:
+            PrepareFailure: ``target_invalid`` (missing table or privilege, no ledger possible),
+                ``pk_strategy_invalid`` (a generated key without identity/default, or a sequence
+                behind the table).
+            ConnectorError: ``target_error`` / ``statement_timeout`` from the server.
+        """
+        pool = await self.c.write_pool()
+        try:
+            async with pool.acquire() as conn:
+                return await self._prepare(conn, dry_run=dry_run)
+        except (PrepareFailure, ConnectorError):
+            raise
+        except asyncpg.InsufficientPrivilegeError:
+            raise PrepareFailure(
+                "target_invalid", "the target login lacks a privilege the write mode needs"
+            ) from None
+        except asyncpg.InvalidSchemaNameError:
+            raise PrepareFailure("target_invalid", "the target schema does not exist") from None
+        except (*_RETRYABLE, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+            raise _target_error(exc) from None
+
+    async def _prepare(self, conn: asyncpg.Connection, *, dry_run: bool) -> PrepareReport:
+        report = PrepareReport()
+        mode = self.t.write_mode
+        exists = bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", self.fqn))
+        if mode == "table":
+            if not exists:
+                if not self.t.create_if_missing:
+                    raise PrepareFailure("target_invalid", "the target table does not exist")
+                cols = ", ".join(
+                    f"{_q(n)} {self._type(n)}{' NOT NULL' if n in self.t.key else ''}"
+                    for n in self.t.write_columns
+                )
+                keys = ", ".join(_q(k) for k in self.t.key)
+                if not dry_run:
+                    await conn.execute(f"CREATE TABLE {self.fqn} ({cols}, PRIMARY KEY ({keys}))")
+                    report.created = True
+                report.checks.append({"name": "create_target", "ok": True, "dry_run": dry_run})
+                return report
+            needed = ["INSERT", "UPDATE", "SELECT"]
+            if self.t.table_load == "truncate_insert":
+                needed.append("TRUNCATE")
+            await self._require(conn, *needed)
+            report.existing_rows = await conn.fetchval(
+                "SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = $1::regclass",
+                self.fqn,
+            )
+            if self.t.table_load == "truncate_insert" and not dry_run:
+                await conn.execute(f"TRUNCATE {self.fqn}")
+                report.truncated = True
+            report.checks.append({"name": "existing_target", "ok": True})
+            return report
+        if not exists:
+            raise PrepareFailure("target_invalid", "the target table does not exist")
+        await self._require(conn, "UPDATE" if mode == "in_place" else "INSERT", "SELECT")
+        if mode == "append" and self.t.generated_key:
+            await self._check_generated(conn)
+        if mode == "append" and self.t.same_as_source:
+            top = await conn.fetchval(f"SELECT max({_q(self.t.key[0])}) FROM {self.fqn}")
+            report.append_upper = int(top) + 1 if top is not None else None
+        if not dry_run:
+            await self._create_ledger(conn)
+            report.ledger = True
+        report.checks.append({"name": "write_ledger", "ok": True, "dry_run": dry_run})
+        return report
+
+    async def _create_ledger(self, conn: asyncpg.Connection) -> None:
+        try:
+            await conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {self.ledger} (job_id text NOT NULL, "
+                "partition_no int NOT NULL, batch_no int NOT NULL, last_key jsonb NOT NULL, "
+                "rows bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now(), "
+                "PRIMARY KEY (job_id, partition_no))"
+            )
+        except asyncpg.UniqueViolationError:
+            pass  # a concurrent prepare created it first
+        except asyncpg.InsufficientPrivilegeError:
+            raise PrepareFailure("target_invalid", "cannot create the write ledger table") from None
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+            if not await self._privilege(conn, self.ledger, privilege):
+                raise PrepareFailure(
+                    "target_invalid", f"the target login lacks {privilege} on the write ledger"
+                )
+
+    async def _check_generated(self, conn: asyncpg.Connection) -> None:
+        shape = self.t.target_shape
+        if len(self.t.key) != 1 or shape is None:
+            raise PrepareFailure("pk_strategy_invalid", "generate needs a single-column key")
+        key = self.t.key[0]
+        info = shape.column(key)
+        if not (info.is_identity or info.has_default):
+            raise PrepareFailure(
+                "pk_strategy_invalid", "the key has no identity, default or sequence"
+            )
+        seq = await conn.fetchval("SELECT pg_get_serial_sequence($1, $2)", self.fqn, key)
+        if seq is None:
+            return  # a default that is not a sequence (e.g. gen_random_uuid()): nothing to compare
+        try:
+            row = await conn.fetchrow(
+                "SELECT pg_sequence_last_value($1::regclass) AS last, s.seqstart AS start, "
+                "s.seqincrement AS inc FROM pg_sequence s WHERE s.seqrelid = $1::regclass",
+                seq,
+            )
+        except asyncpg.InsufficientPrivilegeError:
+            raise PrepareFailure(
+                "target_invalid", "cannot read the key sequence (SELECT on it is needed)"
+            ) from None
+        if row is None:
+            return
+        nxt = row["start"] if row["last"] is None else row["last"] + row["inc"]
+        top = await conn.fetchval(f"SELECT max({_q(key)}) FROM {self.fqn}")
+        if top is not None and row["inc"] > 0 and nxt <= top:
+            raise PrepareFailure(
+                "pk_strategy_invalid", "the key sequence is behind the table's largest key"
+            )
+
+    async def precheck_collisions(self, keys: AsyncIterator[list[tuple[Any, ...]]]) -> int:
+        """How many of the streamed (transformed) keys already exist in the target."""
+        pool = await self.c.write_pool()
+        total = 0
+        try:
+            async with pool.acquire() as conn:
+                async for batch in keys:
+                    if not batch:
+                        continue
+                    if len(self.t.key) == 1:
+                        k = self.t.key[0]
+                        total += await conn.fetchval(
+                            f"SELECT count(*) FROM {self.fqn} "
+                            f"WHERE {_q(k)} = ANY($1::{self._type(k)}[])",
+                            [v[0] for v in batch],
+                        )
+                    else:
+                        arrays = [[v[i] for v in batch] for i in range(len(self.t.key))]
+                        unnest = ", ".join(
+                            f"${i + 1}::{self._type(k)}[]" for i, k in enumerate(self.t.key)
+                        )
+                        names = ", ".join(_q(k) for k in self.t.key)
+                        on = " AND ".join(f"t.{_q(k)} = u.{_q(k)}" for k in self.t.key)
+                        total += await conn.fetchval(
+                            f"SELECT count(*) FROM {self.fqn} t "
+                            f"JOIN unnest({unnest}) AS u({names}) ON {on}",
+                            *arrays,
+                        )
+        except (PrepareFailure, ConnectorError):
+            raise
+        except (*_RETRYABLE, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+            raise _target_error(exc) from None
+        return int(total)
+
+    async def read_ledger(self, job_id: str, partition_no: int) -> LedgerMark | None:
+        """The partition's last committed mark (also the base the next batch is checked against)."""
+        pool = await self.c.write_pool()
+        try:
+            async with pool.acquire() as conn:
+                if await conn.fetchval("SELECT to_regclass($1)", self.ledger) is None:
+                    self._seen[partition_no] = 0
+                    return None
+                row = await conn.fetchrow(
+                    f"SELECT batch_no, last_key::text AS k, rows FROM {self.ledger} "
+                    "WHERE job_id = $1 AND partition_no = $2",
+                    job_id,
+                    partition_no,
+                )
+        except (*_RETRYABLE, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+            raise _target_error(exc) from None
+        self._seen[partition_no] = row["batch_no"] if row else 0
+        if row is None:
+            return None
+        return LedgerMark(
+            job_id=job_id,
+            partition_no=partition_no,
+            batch_no=row["batch_no"],
+            last_key=json.loads(row["k"]),
+            rows=row["rows"],
+        )
+
+    async def write_batch(self, rows: list[Row], *, mark: LedgerMark) -> int:
+        """Write ``rows`` and (in_place/append) the ledger ``mark`` in one transaction."""
+        if not rows:
+            return 0
+        pool = await self.c.write_pool()
+        ledgered = self.t.write_mode in ("in_place", "append")
+        try:
+            async with pool.acquire() as conn, conn.transaction():
+                if ledgered:
+                    current = (
+                        await conn.fetchval(
+                            f"SELECT batch_no FROM {self.ledger} WHERE job_id = $1 "
+                            "AND partition_no = $2 FOR UPDATE",
+                            mark.job_id,
+                            mark.partition_no,
+                        )
+                        or 0
+                    )
+                    if current != self._seen.get(mark.partition_no, 0):
+                        raise LedgerConflict()
+                if self.t.write_mode == "in_place":
+                    written = await self._update(conn, rows)
+                elif self.t.write_mode == "append":
+                    written = await self._insert(conn, rows)
+                else:
+                    written = await self._upsert(conn, rows)
+                if ledgered:
+                    await conn.execute(
+                        f"INSERT INTO {self.ledger} (job_id, partition_no, batch_no, last_key, "
+                        "rows, updated_at) VALUES ($1, $2, $3, $4::jsonb, $5, now()) "
+                        "ON CONFLICT (job_id, partition_no) DO UPDATE SET "
+                        "batch_no = EXCLUDED.batch_no, last_key = EXCLUDED.last_key, "
+                        "rows = EXCLUDED.rows, updated_at = now()",
+                        mark.job_id,
+                        mark.partition_no,
+                        mark.batch_no,
+                        json.dumps(mark.last_key),
+                        mark.rows,
+                    )
+        except asyncpg.UniqueViolationError:
+            raise PkCollision() from None
+        except (LedgerConflict, PrepareFailure):
+            raise
+        except (*_RETRYABLE, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+            raise _target_error(exc) from None
+        if ledgered:
+            self._seen[mark.partition_no] = mark.batch_no
+        return written
+
+    async def _update(self, conn: asyncpg.Connection, rows: list[Row]) -> int:
+        names = list(self.t.key) + [c for c in self.t.write_columns if c not in self.t.key]
+        arrays = [[row.get(n) for row in rows] for n in names]
+        unnest = ", ".join(f"${i + 1}::{self._type(n)}[]" for i, n in enumerate(names))
+        sets = ", ".join(f"{_q(c)} = u.{_q(c)}" for c in names if c not in self.t.key)
+        on = " AND ".join(f"t.{_q(k)} = u.{_q(k)}" for k in self.t.key)
+        listed = ", ".join(_q(n) for n in names)
+        tag = await conn.execute(
+            f"UPDATE {self.fqn} AS t SET {sets} FROM unnest({unnest}) AS u({listed}) WHERE {on}",
+            *arrays,
+        )
+        return rowcount(tag)
+
+    async def _insert(self, conn: asyncpg.Connection, rows: list[Row]) -> int:
+        cols = list(self.t.write_columns)
+        tag = await conn.copy_records_to_table(
+            self.name,
+            schema_name=self.owner,
+            columns=cols,
+            records=[tuple(r.get(c) for c in cols) for r in rows],
+        )
+        return rowcount(tag)
+
+    async def _upsert(self, conn: asyncpg.Connection, rows: list[Row]) -> int:
+        cols = list(self.t.write_columns)
+        await conn.execute(
+            f"CREATE TEMP TABLE IF NOT EXISTS {_q(self.stage)} (LIKE {self.fqn} INCLUDING DEFAULTS) "
+            "ON COMMIT DELETE ROWS"
+        )
+        await conn.copy_records_to_table(
+            self.stage,
+            schema_name="pg_temp",
+            columns=cols,
+            records=[tuple(r.get(c) for c in cols) for r in rows],
+        )
+        listed = ", ".join(_q(c) for c in cols)
+        rest = [c for c in cols if c not in self.t.key]
+        action = (
+            "DO UPDATE SET " + ", ".join(f"{_q(c)} = EXCLUDED.{_q(c)}" for c in rest)
+            if rest
+            else "DO NOTHING"
+        )
+        conflict = ", ".join(_q(k) for k in self.t.key)
+        tag = await conn.execute(
+            f"INSERT INTO {self.fqn} ({listed}) SELECT {listed} FROM pg_temp.{_q(self.stage)} "
+            f"ON CONFLICT ({conflict}) {action}"
+        )
+        return rowcount(tag)
+
+    async def finish_partition(self, job_id: str, partition_no: int) -> dict[str, Any]:
+        """Nothing to upload for a database target."""
+        return {}
+
+    async def clear_ledger(self, job_id: str) -> int:
+        """Finalize: delete the job's ledger rows (the ledger table itself stays)."""
+        pool = await self.c.write_pool()
+        try:
+            async with pool.acquire() as conn:
+                if await conn.fetchval("SELECT to_regclass($1)", self.ledger) is None:
+                    return 0
+                return rowcount(
+                    await conn.execute(f"DELETE FROM {self.ledger} WHERE job_id = $1", job_id)
+                )
+        except (*_RETRYABLE, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+            raise _target_error(exc) from None
+
+    async def close(self) -> None:
+        """The connector owns the pools; nothing to release here."""
+        return None
