@@ -3,25 +3,42 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from dps.auth import require_scope
 from dps.engine.service import DetectResponse, PrivacyEngine
 from dps.layers.api.common import payload_from, policy_label, run_engine
+from dps.layers.api.ndjson import (
+    OPENAPI_NDJSON,
+    NdjsonEnvelope,
+    add_ndjson_route,
+    stream_lines,
+    wants_ndjson,
+)
 from dps.layers.api.schemas import DetectOut, EngineRequest
 from dps.ratelimit import enforce_rate_limit
 
 router = APIRouter(prefix="/api/v1", tags=["engine"])
+# The NDJSON-body twin is registered first: it matches only Content-Type application/x-ndjson.
+add_ndjson_route(router, "/detect", mode="detect", scope="detect")
 
 
 @router.post(
     "/detect",
     response_model=DetectOut,
     dependencies=[Depends(require_scope("detect")), Depends(enforce_rate_limit)],
+    openapi_extra=OPENAPI_NDJSON,
 )
-async def detect(body: EngineRequest, request: Request) -> DetectOut:
-    """Findings (types, locators, scores — never values) and the record's sensitivity."""
+async def detect(body: EngineRequest, request: Request) -> DetectOut | StreamingResponse:
+    """Findings (types, locators, scores — never values) and the record's sensitivity.
+
+    A ``data`` array with ``Accept: application/x-ndjson`` streams one line per element.
+    """
     engine: PrivacyEngine = request.app.state.engine
+    if wants_ndjson(request) and isinstance(body.data, list) and body.text is None:
+        envelope = NdjsonEnvelope(policy=body.policy, options=body.options)
+        return await stream_lines(request, mode="detect", envelope=envelope, items=body.data)
 
     async def call() -> DetectResponse:
         payload = payload_from(request, body.data, body.text)

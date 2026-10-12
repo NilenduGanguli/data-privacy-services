@@ -960,3 +960,71 @@ needed, the floor is untouched). Shortfalls:
   class still exists for real cards and stays a follow-up.
 - Threshold sweep: recall 0.953 from 0.3 to 0.6, 0.918 at 0.7, 0.909 at 0.8, 0.731 at 0.9; precision
   1.000 throughout.
+
+## Task 19A — NDJSON streaming of large arrays on the Layer 1 routes
+
+- **Routing (`dps/layers/api/ndjson.py`, `routers/{detect,transform}.py`).** The plan declares the
+  JSON routes' body as `Body(default=None)` plus an `openapi_extra` so an NDJSON body skips FastAPI's
+  JSON parsing. That would have replaced M0's typed `EngineRequest` / `RevealRequest` parameters with
+  hand-written validation (and an OpenAPI schema that `$ref`s a model no route declares any more).
+  Instead each streaming route gets an **NDJSON-body twin**: `add_ndjson_route(router, path, mode=,
+  scope=)` registers, *before* the JSON route, a route whose class `NdjsonBodyRoute` matches only
+  `Content-Type: application/x-ndjson` (same scope and rate-limit dependencies, hidden from
+  OpenAPI). The JSON routes keep M0's typed bodies, validation and 422 shapes unchanged; they branch
+  to `stream_lines` only for a `data` array (and no `text`) with `Accept: application/x-ndjson`,
+  and document the NDJSON alternative (request and 200 response content) through
+  `openapi_extra=OPENAPI_NDJSON`. Checked with FastAPI 0.143's `_IncludedRouter`: the twin keeps
+  its `matches` after `include_router`.
+- **`stream_lines` is `async`** (the plan shows a sync signature): request errors are mapped and
+  audited inside the same coroutine before the `StreamingResponse` is returned. New
+  `stream_request(request, mode=)` reads an NDJSON body inside that audited region, so a malformed
+  body is audited like every other rejection (M0 rule "every outcome … is audited").
+- **`read_ndjson` returns `Sequence[Any]`, not `list[Any]`:** `NdjsonItems` keeps the body once,
+  as bytes, with each item line's span, and parses an item when its chunk runs (every line is
+  still checked up front: UTF-8, JSON, not `null`). With a list, a body at the 256 MB default
+  would expand several-fold into Python objects while it streams — beyond the compose
+  `mem_limit` (1536m). Measured: 20,000 items (1.5 MB) obfuscated in 7.1 s through TestClient
+  (~0.35 ms/item).
+- **`/reveal` with a JSON array and `Accept: application/x-ndjson`** (`stream_reveal_array`): the
+  hints of a JSON obfuscation address the whole array (`$[i]…`, and a field-scoped subkey binds that
+  full path), so re-basing them per item would break field-scoped reveals. The array is revealed
+  as one document under M0's limits (exactly the JSON route's result) and streamed one line per
+  element (`revealed` counted from each hint's `$[i]` prefix). An NDJSON reveal body (the item
+  lines of an obfuscate stream) is processed per item, as the plan says.
+- **Request errors are coded HTTP errors before anything streams**, not error lines: an envelope
+  that is not an object of `policy`/`options` (`/reveal`: `key_material`; extra keys refused) →
+  400 `ndjson_invalid` "line 1 …"; a line that is not UTF-8 JSON or a `null` item → 400
+  `ndjson_invalid` "line N …"; too many items → 413 `ndjson_too_large`; an item over `max_items`
+  values → 413 `payload_too_large` "item N …"; nesting deeper than 100 → 422 `ndjson_invalid`; an
+  unknown policy, invalid key material, seed or `wrap_key` → 400 `bad_request`. Details carry line
+  or item numbers and rules only.
+- **Item failure codes:** `leakage` and `bad_request` as planned; a `CodedError` keeps its code and
+  an unexpected exception becomes `internal_error` / `"internal error"` (class name logged), audit
+  outcome `error`. A stream the client abandons is audited with outcome `aborted`.
+- **Line shapes:** header `{"type", "trace_id", "mode", "policy": {"name", "hash"}}` (+ `key_material`
+  for obfuscate, wrapped once when `options.wrap_key` is set; + `synthesis_seed` for synthesize
+  unless the scope is `request`; `/reveal` has no `policy`); item lines carry `result`, `findings`,
+  `reveal_hints` (obfuscate), `segments` (when `options.return_segments`), `record_sensitivity`
+  (detect, no `result`), `revealed` (reveal); the report line's `report` adds
+  `reversible_values` (obfuscate) and `revealed` (reveal) to the planned fields; `verification` is
+  `null` for detect and reveal.
+- **`dps/layers/api/common.py`:** `run_engine`'s error mapping, metrics and audit are factored into
+  `begin_call`, `end_call`, `map_engine_error` and `result_counts` (behaviour unchanged; M0's API
+  tests pass as they were) so a stream writes one audit event with summed counts.
+- **`.env.example` not changed** (the session's permission rules deny every tool access to `.env*`
+  paths, as in Task 1). Follow-up for whoever holds that permission — append:
+
+  ```bash
+  # NDJSON streaming on /detect, /obfuscate, /synthesize, /reveal (M1)
+  DPS_NDJSON_MAX_ITEMS=1000000
+  DPS_NDJSON_CHUNK_ITEMS=500
+  DPS_MAX_NDJSON_MB=256
+  ```
+- **Posture:** contract §10 says the NDJSON limits are "posture-checked like `max_items`"; M0's
+  `posture_problems` has no `max_items` rule, so there is nothing to mirror and none was added.
+- `HANDOFF.md` §4 gains the three settings (contract §0.6), with a memory note.
+- Tests (`tests/test_ndjson.py`, 12): the eight planned, plus scopes on the NDJSON twins and the
+  OpenAPI content types, `Accept`/`Content-Type` parsing (`q=0` is not acceptance), detect item
+  shape, and the separate NDJSON body limit (a 1.5 MB NDJSON body passes under `max_payload_mb=1`,
+  the same items as JSON get 413). The plan's "fail with `ModuleNotFoundError`" step failed instead
+  on behaviour (the tests drive HTTP only until the last two were added).

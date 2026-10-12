@@ -4,7 +4,8 @@ Middleware order (outermost first): security headers → CORS → body-size guar
 error guard → FastAPI. Auth and rate limiting are per-route dependencies. The compiled console
 (``frontend/dist``) is served from the same process with a strict CSP, as in the sibling services.
 The body-size guard is per route: ``max_payload_mb`` for the JSON routes, ``max_document_mb`` plus
-1 MiB of multipart overhead for ``/api/v1/documents/*``. OCR readiness is probed at startup and,
+1 MiB of multipart overhead for ``/api/v1/documents/*``, ``max_ndjson_mb`` for an NDJSON body on
+the four streaming routes. OCR readiness is probed at startup and,
 when OCR is configured, re-probed every ``ocr_probe_interval_seconds`` (never required).
 
 Nothing on the error paths quotes a request: 422 bodies list the field, the rule and the error
@@ -38,6 +39,7 @@ from dps.layers.api.common import (
     CodedHTTPException,
     coded_http_exception_handler,
 )
+from dps.layers.api.ndjson import NDJSON, STREAM_ROUTES
 from dps.layers.api.routers import (
     detect,
     documents,
@@ -95,14 +97,28 @@ class _BodyLimit:
     """413 ``payload_too_large`` for bodies over the route's limit — by ``Content-Length`` up
     front, or while streaming.
 
-    The limit is ``max_bytes`` for the JSON routes and ``document_max_bytes`` for
-    ``/api/v1/documents/*`` (multipart uploads). A chunked body has no length header, so the
-    receive channel counts bytes and raises a coded 413 once the limit is passed (FastAPI
-    re-raises an ``HTTPException`` from body parsing, JSON and multipart alike).
+    The limit is ``max_bytes`` for the JSON routes, ``document_max_bytes`` for
+    ``/api/v1/documents/*`` (multipart uploads) and ``ndjson_max_bytes`` for an
+    ``application/x-ndjson`` body on the four streaming routes. A chunked body has no length
+    header, so the receive channel counts bytes and raises a coded 413 once the limit is passed
+    (FastAPI re-raises an ``HTTPException`` from body parsing, JSON and multipart alike).
     """
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int, document_max_bytes: int) -> None:
+    def __init__(
+        self, app: ASGIApp, *, max_bytes: int, document_max_bytes: int, ndjson_max_bytes: int
+    ) -> None:
         self.app, self.max_bytes, self.document_max_bytes = app, max_bytes, document_max_bytes
+        self.ndjson_max_bytes = ndjson_max_bytes
+
+    def _limit(self, scope: Scope) -> int:
+        path = str(scope.get("path", ""))
+        if path.startswith(DOCUMENTS_PREFIX):
+            return self.document_max_bytes
+        if path in STREAM_ROUTES:
+            media = Headers(scope=scope).get("content-type", "").split(";", 1)[0]
+            if media.strip().lower() == NDJSON:
+                return self.ndjson_max_bytes
+        return self.max_bytes
 
     @staticmethod
     def _too_large(limit: int) -> str:
@@ -112,11 +128,7 @@ class _BodyLimit:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        limit = (
-            self.document_max_bytes
-            if str(scope.get("path", "")).startswith(DOCUMENTS_PREFIX)
-            else self.max_bytes
-        )
+        limit = self._limit(scope)
         length = Headers(scope=scope).get("content-length")
         if length and length.isdigit() and int(length) > limit:
             response = JSONResponse(
@@ -344,6 +356,7 @@ def create_app(
         _BodyLimit,
         max_bytes=settings.max_payload_bytes,
         document_max_bytes=settings.max_document_bytes + DOCUMENT_MULTIPART_OVERHEAD,
+        ndjson_max_bytes=settings.max_ndjson_bytes,
     )
     app.add_middleware(
         CORSMiddleware,

@@ -147,35 +147,40 @@ def payload_from(request: Request, data: Any | None, text: str | None) -> Payloa
     return payload
 
 
-def _audit_event(
-    request: Request,
-    *,
-    mode: str,
-    policy: str,
-    result: Any,
-    duration_ms: float,
-    outcome: str,
-    tid: str,
-) -> AuditEvent:
+def result_counts(result: Any) -> dict[str, Any]:
+    """The audit counts of an engine result (value-free: counts, type and method names)."""
     report = getattr(result, "report", None)
     findings = getattr(result, "findings", None) or []
     if report is not None and hasattr(report, "findings_total"):
         verification = report.verification
-        counts: dict[str, Any] = {
+        return {
             "findings_total": report.findings_total,
             "findings_by_type": dict(report.findings_by_type),
             "methods_used": dict(report.methods_used),
             "verification_passed": verification.passed if verification is not None else None,
             "reversible_values": report.reversible_values,
         }
-    else:  # detect results, and reports that are not engine reports (schema synthesis)
-        counts = {
-            "findings_total": len(findings),
-            "findings_by_type": dict(Counter(f.entity_type for f in findings)),
-        }
-        verification = getattr(report, "verification", None)
-        if verification is not None:
-            counts["verification_passed"] = verification.passed
+    # detect results, and reports that are not engine reports (schema synthesis)
+    counts: dict[str, Any] = {
+        "findings_total": len(findings),
+        "findings_by_type": dict(Counter(f.entity_type for f in findings)),
+    }
+    verification = getattr(report, "verification", None)
+    if verification is not None:
+        counts["verification_passed"] = verification.passed
+    return counts
+
+
+def _audit_event(
+    request: Request,
+    *,
+    mode: str,
+    policy: str,
+    counts: dict[str, Any],
+    duration_ms: float,
+    outcome: str,
+    tid: str,
+) -> AuditEvent:
     principal = getattr(request.state, "principal", None)
     return AuditEvent(
         trace_id=tid,
@@ -196,6 +201,62 @@ def _audit(request: Request, **fields: Any) -> None:
         request.app.state.audit.write(_audit_event(request, **fields))
     except Exception as exc:  # noqa: BLE001 - audit must not take the request down in M0 (strict mode arrives with M2)
         logger.warning("audit_write_failed", error=type(exc).__name__)
+
+
+def begin_call(request: Request) -> str:
+    """Start an audited call: the trace id (set on ``request.state``, bound to the log context)."""
+    tid = trace_id(request)
+    request.state.trace_id = tid
+    structlog.contextvars.bind_contextvars(trace_id=tid, route=request.url.path)
+    return tid
+
+
+def end_call(
+    request: Request,
+    *,
+    mode: str,
+    policy: str,
+    tid: str,
+    started: float,
+    outcome: str,
+    counts: dict[str, Any] | None = None,
+) -> None:
+    """Finish an audited call: request metrics and exactly one value-free audit event.
+
+    ``started`` is the call's ``time.perf_counter()`` at :func:`begin_call`; ``counts`` are
+    :func:`result_counts` (or a stream's sums), ``None`` for a call that produced nothing.
+    """
+    route = request.url.path
+    duration = (time.perf_counter() - started) * 1000
+    REQUESTS.labels(route, outcome).inc()
+    LATENCY.labels(route).observe(duration / 1000)
+    _audit(
+        request,
+        mode=mode,
+        policy=policy,
+        counts=counts or {},
+        duration_ms=duration,
+        outcome=outcome,
+        tid=tid,
+    )
+
+
+def map_engine_error(exc: Exception) -> tuple[str, HTTPException]:
+    """The audit outcome and the HTTP error for an exception raised by an engine call.
+
+    The engine's messages name rules, never values; an unexpected exception is logged by its
+    class name only and becomes a value-free 500.
+    """
+    if isinstance(exc, VerificationFailed):  # before EngineError, which it subclasses
+        return "verification_failed", CodedHTTPException(422, "leakage", str(exc))
+    if isinstance(exc, EngineError):
+        return "bad_request", CodedHTTPException(400, "bad_request", str(exc))
+    if isinstance(exc, CodedError):
+        return exc.code, CodedHTTPException(exc.status, exc.code, exc.detail)
+    if isinstance(exc, HTTPException):
+        return "rejected", exc
+    logger.error("engine_error", error=type(exc).__name__)
+    return "error", HTTPException(status_code=500, detail="internal error")
 
 
 @overload
@@ -231,10 +292,7 @@ async def run_engine[T](
     Returns:
         The engine's result and the trace id.
     """
-    tid = trace_id(request)
-    request.state.trace_id = tid
-    route = request.url.path
-    structlog.contextvars.bind_contextvars(trace_id=tid, route=route)
+    tid = begin_call(request)
     start = time.perf_counter()
     outcome = "ok"
     result: T | None = None
@@ -242,33 +300,19 @@ async def run_engine[T](
         raw = call()
         result = await raw if inspect.isawaitable(raw) else raw
         return result, tid
-    except VerificationFailed as exc:  # before EngineError, which it subclasses
-        outcome = "verification_failed"
-        raise CodedHTTPException(422, "leakage", str(exc)) from None
-    except EngineError as exc:
-        outcome = "bad_request"
-        raise CodedHTTPException(400, "bad_request", str(exc)) from None
-    except CodedError as exc:
-        outcome = exc.code
-        raise CodedHTTPException(exc.status, exc.code, exc.detail) from None
-    except HTTPException:
-        outcome = "rejected"
-        raise
-    except Exception as exc:  # noqa: BLE001 - mapped to a value-free 500
-        outcome = "error"
-        logger.error("engine_error", error=type(exc).__name__)
-        raise HTTPException(status_code=500, detail="internal error") from None
+    except Exception as exc:  # noqa: BLE001 - mapped to a coded, value-free HTTP error
+        outcome, error = map_engine_error(exc)
+        if error is exc:
+            raise
+        raise error from None
     finally:
-        duration = (time.perf_counter() - start) * 1000
-        REQUESTS.labels(route, outcome).inc()
-        LATENCY.labels(route).observe(duration / 1000)
-        _audit(
+        end_call(
             request,
             mode=mode,
             policy=policy_name,
-            result=result,
-            duration_ms=duration,
-            outcome=outcome,
             tid=tid,
+            started=start,
+            outcome=outcome,
+            counts=result_counts(result),
         )
         structlog.contextvars.unbind_contextvars("trace_id", "route")

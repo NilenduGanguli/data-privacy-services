@@ -153,6 +153,10 @@ class Settings(BaseSettings):
     redact_ocr_verify: bool = True  # re-read redacted pages with OCR when OCR is configured
     preview_dpi: int = Field(default=72, ge=36, le=150)
     max_preview_pages: int = Field(default=50, ge=0, le=500)
+    # --- NDJSON streaming on /detect, /obfuscate, /synthesize, /reveal (M1, contract §10) ---
+    ndjson_max_items: int = Field(default=1_000_000, ge=1, le=100_000_000)  # items per stream
+    ndjson_chunk_items: int = Field(default=500, ge=1, le=100_000)  # items per worker-thread hop
+    max_ndjson_mb: int = Field(default=256, ge=1, le=4096)  # body limit for application/x-ndjson
 
     @field_validator("env")
     @classmethod
@@ -218,6 +222,11 @@ class Settings(BaseSettings):
     def max_document_bytes(self) -> int:
         """``max_document_mb`` in bytes."""
         return self.max_document_mb * 1024 * 1024
+
+    @property
+    def max_ndjson_bytes(self) -> int:
+        """``max_ndjson_mb`` in bytes."""
+        return self.max_ndjson_mb * 1024 * 1024
 
     @property
     def ocr_configured(self) -> bool:
