@@ -57,9 +57,12 @@ def run_spec(
     snap_id: str,
     target: dict[str, Any],
     mode: str = "obfuscate",
+    *,
+    source: dict[str, Any] | None = None,
     **extra: Any,
 ) -> RunSpec:
-    """A run of ``obj`` with two-way parallelism, 1000-row partitions and 200-row batches."""
+    """A run of ``obj`` with two-way parallelism, 1000-row partitions and 200-row batches;
+    ``source`` merges extra source fields (a ``selection``, other batch sizes)."""
     return RunSpec.model_validate(
         {
             "mode": mode,
@@ -72,6 +75,7 @@ def run_spec(
                 "parallelism": 2,
                 "partition_rows": 1000,
                 "batch_rows": 200,
+                **(source or {}),
             },
             **extra,
         }

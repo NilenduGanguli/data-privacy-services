@@ -1790,3 +1790,38 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
 - Measured: `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py` → 2 passed in
   ≈ 25 s (three runs, before and after the fixes); with the app unreachable the module errors
   (`app unreachable — start: docker compose up -d app`).
+
+## Task 37 — M2 log-scan test
+
+- `tests/test_no_values_in_logs_m2.py`, adapted from the plan's module:
+  - **`print` detection is an AST check** (a call of the name `print`). The plan's substring test
+    `"print(" not in source` fails on seven modules that call `seed_fingerprint(` /
+    `key_fingerprint(` / `keyed_fingerprint(` (`jobs_models.py`, `jobs.py`, `groups.py`,
+    `secrets.py`, `base.py`, `submit.py`, `targets.py`), none of which prints.
+  - **modules:** the plan's list plus `dps/layers/api/errors.py` and `deps.py` (M2's API foundation,
+    Task 24, both log) and `dps/audit.py` (M2's `DbAuditSink`); 32 modules, one case each, and a
+    case that pins the list (≥ 30 modules, the core ones present). The audit line's `**event` splat
+    is the one allowed splat, with `set(AuditEvent.model_fields) <= _SAFE_FIELDS` as its own case.
+  - **stricter static rules:** the event literal must match the runtime's `_EVENT_NAME` (snake_case,
+    no run of 4+ digits), and no stdlib `logging.getLogger(…)` / `logging.<level>(…)` call (it would
+    bypass the allow-list, HANDOFF §8's access-log trap). A self-test feeds the scanner a snippet with
+    each refused form (format argument, f-string event, unsafe field, non-snake event, splat,
+    `print`, stdlib logger) and the two `*_fingerprint(` calls the plan's check misread.
+  - **dynamic case:** the logging set-up is a fixture that restores structlog's previous
+    configuration and the root level afterwards (the plan's version left JSON/DEBUG configured for
+    every later test). The selection carries a distinctive literal
+    (`email <> 'logscan-literal@example.invalid'`) that is scanned for — the plan's `'A%'` is too
+    short to scan. Scanned values: every value ≥ 6 characters of `full_name`, `email`,
+    `national_id`, `mobile`, `tax_id` of the **selected** rows (`full_name LIKE 'A%'`; the plan took
+    50 rows of any name), the job's DEK, the KEK setting, the literal and the two local passwords.
+    Added: the job must succeed, write exactly the selected rows, and log `discover_done`,
+    `prepare_done` and `finalize_done` (so the scan is not vacuous); the failure message gives a
+    count, never a value.
+- `tests/connectors/test_run_modes.py`: `run_spec(..., *, source=None, **extra)` merges `source`
+  into the default source fields (as the plan asks).
+- Mutation probe (scratch, not committed): a source row value logged through an allow-listed field
+  (`reason=`) or through a stdlib logger, injected into `PostgresConnector.read_partition`, makes the
+  dynamic case fail with "N values reached the logs" — 2 of 2 probes caught.
+- Measured: `pytest -q tests/test_no_values_in_logs_m2.py` → 36 passed (32 module cases, the list,
+  the scanner self-test, the audit fields, the full job in ≈ 0.8 s). No module needed a change and no
+  field was added to `_SAFE_FIELDS`.
