@@ -1811,9 +1811,10 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
     configuration and the root level afterwards (the plan's version left JSON/DEBUG configured for
     every later test). The selection carries a distinctive literal
     (`email <> 'logscan-literal@example.invalid'`) that is scanned for — the plan's `'A%'` is too
-    short to scan. Scanned values: every value ≥ 6 characters of `full_name`, `email`,
-    `national_id`, `mobile`, `tax_id` of the **selected** rows (`full_name LIKE 'A%'`; the plan took
-    50 rows of any name), the job's DEK, the KEK setting, the literal and the two local passwords.
+    short to scan. Scanned values: every value ≥ 6 characters of the per-customer columns of
+    **every** row of the table (corrected in the G8 r1 fix below; this entry first said the
+    **selected** rows, which missed rows discovery reads), the job's DEK, the KEK setting, the literal
+    and the two local passwords.
     Added: the job must succeed, write exactly the selected rows, and log `discover_done`,
     `prepare_done` and `finalize_done` (so the scan is not vacuous); the failure message gives a
     count, never a value.
@@ -1876,3 +1877,34 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
   the tag, which would silently pin an older commit once review fixes land on the branch). The tag
   follows M0's `v0.1.0-m0` pattern (the package version stays 0.1.0 in M2); HANDOFF and README name
   it. The `m2` tag created first was deleted at once (it was never pushed or used).
+
+## Review G8 r1 fixes (Tasks 36–38)
+
+- **B1 — the dynamic log scan covers every row discovery reads.** `test_a_full_job_logs_no_values`
+  built its scan list from the run's selected rows only (`full_name LIKE 'A%'`, 213 values in the
+  review's run), while discovery samples the whole 500-row table with no selection, so a value
+  discovery logged from an unselected row passed unseen (the reviewer's probe B). The Task 37 entry's
+  claim that this narrowing was stricter than the plan's `LIMIT 50` rows of any name was wrong: the
+  plan's rows did reach outside the selection. Now `_scan_list` takes every row of the table, and the
+  separate `written == selected` assertion stays as it was.
+  - Columns scanned: the per-customer ones of the `customers` fixture (`customer_id`, `full_name`,
+    `date_of_birth`, `national_id`, `tax_id`, `email`, `mobile`, `notes`), values of 6 characters or
+    more. The review allowed "the five columns or all columns"; this takes the five plus the other
+    per-row values (the key, which partition planning reads, the birth date and the notes). Left out,
+    with the reason in the module: the shared labels `id_type`, `country_code`, `segment`,
+    `kyc_status` (a few words such as `pending` that a log line may legitimately name as a state, so
+    a scan for them would fail on vocabulary, not on a leak), `risk_score` (under 6 characters),
+    `relationship_manager_id` (always NULL) and the two load timestamps (one value for every row).
+    The reviewer's probe A scanned all columns of all rows and found 0 hits, so the product is clean
+    under either choice.
+  - New self-test `test_the_scan_catches_a_value_discovery_logs_from_an_unselected_row` (`db`,
+    `pg_source`): it monkeypatches `PostgresConnector.sample` (discovery's read) to log the e-mail of
+    the first sampled row outside the selection through the allow-listed `reason=` field, runs the
+    same job, and requires the planted line to be present, the scan list to catch it, and the caught
+    value to belong to an unselected row. Written first and red against the old selected-rows scan
+    list ("the scan missed a value discovery logged from an unselected row"), green after the fix.
+  - The job flow is shared by both cases (`_run_logscan_job`), as are `_scan_list`, `_captured` and
+    `_leaked` (positions only, never values). The self-test's table and connection names have no
+    underscore (`logscanleak`), because a connection name must match `^[a-z0-9][a-z0-9-]{1,62}$`.
+- The tag `v0.1.0-m2` and HANDOFF's *Last verified* line (1098 passed) still describe `438cf86`; with
+  this fix `pytest -q` counts one more case (1099 passed, 2 skipped).

@@ -3,8 +3,10 @@
 Static part (offline): every log call in an M2 module is ``logger.<level>("<snake_case_event>",
 <allow-listed field>=…)``, with no positional format arguments, no ``print`` and no stdlib logger
 (which would bypass the allow-list). Dynamic part (``db``, ``pg_source``): a whole run job — discovery,
-prepare, partitions, finalize — logs nothing of the rows it read, its key, the KEK, the source
-password or the selection's literal, and every JSON line holds allow-listed fields only.
+prepare, partitions, finalize — logs nothing of the rows it read (every row of the table, since
+discovery samples it whole, not only the run's selection), its key, the KEK, the source password or
+the selection's literal, and every JSON line holds allow-listed fields only; a self-test plants a
+discovery-stage leak of an unselected row and checks the scan catches it.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -23,6 +25,7 @@ from dps.observability import _EVENT_NAME, _SAFE_FIELDS
 
 if TYPE_CHECKING:
     from dps.connections import Connection
+    from dps.layers.connectors.submit import RunSubmission
     from dps.worker import HandlerContext
     from tests.fixtures.sources import SourcePg
 
@@ -177,6 +180,89 @@ def json_logs() -> Iterator[io.StringIO]:
 
 #: A distinctive selection literal: it must reach the database as a bound parameter, never a log.
 LITERAL = "logscan-literal@example.invalid"
+#: The run's selection. Discovery reads the whole table (``sample_rows=500``, no selection), so the
+#: scan covers every row, not only these.
+SELECTED = "full_name LIKE 'A%'"
+#: The per-customer columns of the ``customers`` fixture table. Left out: the shared labels
+#: (``id_type``, ``country_code``, ``segment``, ``kyc_status``: a few words such as ``pending`` that a
+#: log line may name as a state), ``risk_score`` (under 6 characters), ``relationship_manager_id``
+#: (always NULL) and the load timestamps (one value for every row).
+CUSTOMER_COLUMNS = (
+    "customer_id",
+    "full_name",
+    "date_of_birth",
+    "national_id",
+    "tax_id",
+    "email",
+    "mobile",
+    "notes",
+)
+
+
+async def _customer_values(source_pg: SourcePg, table: str, where: str = "true") -> list[str]:
+    """Every value of 6 characters or more in ``CUSTOMER_COLUMNS`` of ``table``'s rows."""
+    rows = await source_pg.admin.fetch(
+        f'SELECT {", ".join(CUSTOMER_COLUMNS)} FROM "{source_pg.schema}"."{table}" WHERE {where}'
+    )
+    return [str(v) for r in rows for v in r.values() if v is not None and len(str(v)) >= 6]
+
+
+async def _scan_list(source_pg: SourcePg, table: str) -> list[str]:
+    """The customer values a job over ``table`` must never log: those of the rows it read, which
+    is every row (discovery samples the whole table, not the run's ``SELECTED`` rows)."""
+    return await _customer_values(source_pg, table)
+
+
+async def _run_logscan_job(
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: Callable[..., Awaitable[Connection]],
+    table: str,
+) -> RunSubmission:
+    """Discover a 500-row ``table``, accept the snapshot and run it (``SELECTED`` rows only, write
+    mode ``table``) into ``<table>_out`` on the UAT target; the run must succeed."""
+    from dps.auth import LOCAL_PRINCIPAL
+    from dps.jobs import JobState
+    from dps.layers.connectors.submit import submit_run
+    from tests.connectors.helpers import discover_and_accept, drive
+    from tests.connectors.test_run_modes import run_spec
+
+    obj = await source_pg.customers_table(rows=500, name=table)
+    src = await register_source("t1", name=f"src-{table}")
+    uat = await register_source(
+        "t1", ref="dps/src/test-pg-rw", roles={"target"}, name=f"uat-{table}"
+    )
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    sub = await submit_run(
+        run_spec(
+            src.id,
+            obj,
+            snap.id,
+            {
+                "write_mode": "table",
+                "connection_id": uat.id,
+                "object": {"owner": source_pg.schema, "name": f"{table}_out"},
+            },
+            source={"selection": {"where": f"{SELECTED} AND email <> '{LITERAL}'"}},
+        ),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    done = await drive(handler_ctx, "t1", sub.job.id)
+    assert done.state == JobState.succeeded, done.error_code
+    return sub
+
+
+def _captured(json_logs: io.StringIO, capsys: pytest.CaptureFixture[str]) -> str:
+    cap = capsys.readouterr()
+    return json_logs.getvalue() + cap.out + cap.err
+
+
+def _leaked(secrets_: list[str], captured: str) -> list[int]:
+    """Positions (never values) of the ``secrets_`` that occur in ``captured``."""
+    return [i for i, s in enumerate(secrets_) if s and s in captured]
 
 
 @pytest.mark.db
@@ -189,51 +275,18 @@ async def test_a_full_job_logs_no_values(
     json_logs: io.StringIO,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from dps.auth import LOCAL_PRINCIPAL
-    from dps.jobs import JobState
-    from dps.layers.connectors.submit import submit_run
-    from tests.connectors.helpers import discover_and_accept, drive
-    from tests.connectors.test_run_modes import run_spec
-
-    obj = await source_pg.customers_table(rows=500, name="logscan")
-    src = await register_source("t1", name="src-logscan")
-    uat = await register_source(
-        "t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat-logscan"
-    )
-    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
-    where = f"full_name LIKE 'A%' AND email <> '{LITERAL}'"
-    sub = await submit_run(
-        run_spec(
-            src.id,
-            obj,
-            snap.id,
-            {
-                "write_mode": "table",
-                "connection_id": uat.id,
-                "object": {"owner": source_pg.schema, "name": "logscan_out"},
-            },
-            source={"selection": {"where": where}},
-        ),
-        tenant_id="t1",
-        principal=LOCAL_PRINCIPAL,
-        settings=handler_ctx.settings,
-        kek=handler_ctx.kek,
-    )
-    done = await drive(handler_ctx, "t1", sub.job.id)
-    assert done.state == JobState.succeeded, done.error_code
+    sub = await _run_logscan_job(handler_ctx, source_pg, register_source, "logscan")
     assert sub.key_material is not None
+    captured = _captured(json_logs, capsys)
 
-    cap = capsys.readouterr()
-    captured = json_logs.getvalue() + cap.out + cap.err
-    rows = await source_pg.admin.fetch(
-        f'SELECT full_name, email, national_id, mobile, tax_id FROM "{source_pg.schema}".logscan '
-        "WHERE full_name LIKE 'A%'"
+    selected = await source_pg.admin.fetchval(
+        f'SELECT count(*) FROM "{source_pg.schema}".logscan WHERE {SELECTED}'
     )
     written = await source_pg.admin.fetchval(
         f'SELECT count(*) FROM "{source_pg.schema}".logscan_out'
     )
-    assert rows and written == len(rows), "the job must have read and written the selected rows"
-    values = [str(v) for r in rows for v in r.values() if v is not None and len(str(v)) >= 6]
+    assert selected and written == selected, "the job must have read and written the selected rows"
+    values = await _scan_list(source_pg, "logscan")
     secrets_ = [
         *values,
         sub.key_material["dek"],
@@ -242,7 +295,7 @@ async def test_a_full_job_logs_no_values(
         "dps_reader",  # the local source password equals its login
         "dps_writer",
     ]
-    leaked = [i for i, s in enumerate(secrets_) if s and s in captured]
+    leaked = _leaked(secrets_, captured)
     assert not leaked, f"{len(leaked)} values reached the logs"  # positions only, never values
     lines = [line for line in captured.splitlines() if line.startswith("{")]
     assert lines, "the job logged nothing to scan"
@@ -252,3 +305,45 @@ async def test_a_full_job_logs_no_values(
         assert set(record) <= _SAFE_FIELDS, set(record) - _SAFE_FIELDS
         events.add(record.get("event"))
     assert {"discover_done", "prepare_done", "finalize_done"} <= events
+
+
+@pytest.mark.db
+@pytest.mark.integration
+@pytest.mark.pg_source
+async def test_the_scan_catches_a_value_discovery_logs_from_an_unselected_row(
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: Callable[..., Awaitable[Connection]],
+    json_logs: io.StringIO,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Self-test of the dynamic scan: discovery samples the whole table, so a value it logs from a
+    row outside the run's selection — here an e-mail, through the allow-listed ``reason`` field —
+    must be caught. A scan of the selected rows alone missed it (M2 G8 review r1, B1)."""
+    from dps.layers.connectors.base import Row
+    from dps.layers.connectors.postgres import PostgresConnector
+    from dps.observability import get_logger
+
+    planted = get_logger("logscan_selftest")
+    sample = PostgresConnector.sample
+
+    async def leaky_sample(self: PostgresConnector, *args: Any) -> list[Row]:
+        rows = await sample(self, *args)
+        for row in rows:
+            name, email = row.get("full_name"), row.get("email")
+            if isinstance(name, str) and not name.startswith("A") and email:  # unselected row
+                planted.warning("planted_leak", reason=str(email))
+                break
+        return rows
+
+    monkeypatch.setattr(PostgresConnector, "sample", leaky_sample)
+    await _run_logscan_job(handler_ctx, source_pg, register_source, "logscanleak")
+    captured = _captured(json_logs, capsys)
+    assert '"planted_leak"' in captured, "discovery must have logged the planted line"
+
+    values = await _scan_list(source_pg, "logscanleak")
+    leaked = _leaked(values, captured)
+    assert leaked, "the scan missed a value discovery logged from an unselected row"
+    selected = set(await _customer_values(source_pg, "logscanleak", SELECTED))
+    assert any(values[i] not in selected for i in leaked), "the caught value must be unselected"
