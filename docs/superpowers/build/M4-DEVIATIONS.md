@@ -105,3 +105,30 @@ the lane rules).
   password-only userinfo, a non-http scheme and a start path outside `allow`) plus programmatic
   re-checks, inline auth where allowed, resolved limits, no-echo validation errors, the
   `JobSecret` field, the facts `repr` test and the preview request bounds: 20 tests (plan: 10).
+
+## Task 5 — Scan store
+
+- `dps/layers/scanner/store.py`: the planned interface and SQL. Decisions:
+  - **jsonb as Python objects.** `dps/db.py` registers a `json.dumps`/`json.loads` codec for
+    `json`/`jsonb` on every pool and on the migration connection, so (as the plan instructs in that
+    case) jsonb parameters are passed as Python objects, not pre-encoded text; the `::jsonb` casts
+    stay.
+  - `add_request_counts` merges rows with the same key in Python before the multi-row upsert:
+    PostgreSQL refuses `ON CONFLICT DO UPDATE` that touches one row twice in a statement
+    ("cannot affect row a second time"), which a guard batch with two identical keys would hit.
+  - `replace_fields` and `reset_scan` run in one transaction (a savepoint when the caller already
+    holds one); `replace_fields` refuses a record whose `page_no` differs from the argument
+    (`ValueError`, value-free).
+  - `summary_counts` also returns `pages_discovered` and `pages_queued` (two `count(*)`s; the API's
+    `ScanSummary` needs both); null aggregates come back as `{}`, every count as `int`.
+  - `list_pages`/`list_events` clamp `limit` to 1..1000; `list_requests` orders by page (log-wide
+    rows first), method, decision, reason, host.
+  - `export_artefacts` takes the newest artefact per kind (`DISTINCT ON`) and returns only the kinds
+    present.
+  - `insert_evidence` refuses a pack whose `tenant_id`/`job_id` differ from the arguments and stores
+    `pack.pack_version`. (M2's `save_evidence` also exists; Task 16 may use either.)
+  - `browser_workers_online` passes the window as `float` (`make_interval(secs => …)` takes
+    double precision).
+- `tests/scanner/test_store.py`: the plan's 7 tests plus the schema-name check, keyset paging of
+    pages, the RLS case on `get_page`, the in-batch duplicate key, `non_get_allowed` counting an
+    allowed POST (and not a HEAD), and export artefacts + evidence insertion: 11 tests (plan: 7).
