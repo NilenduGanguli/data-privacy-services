@@ -35,6 +35,21 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   policy refs, migrations 040–044, console components/pages, tools, docs). §10 rows and §12.1
   `deploy`/`ml` markers as the plan lists them.
 
+## Task 2 — Fidelity and privacy metrics
+
+- `dps/engine/metrics.py` `_nearest`: the plan took `sqrt(min(|q|² + |r|² − 2q·r))`. For values of
+  realistic magnitude (balances around 1e6) that expansion loses the exact zero of a copied row
+  (cancellation leaves ~1e-3), so `zero_distance_share` would read 0 for a verbatim copy. The nearest
+  row is still found on the expanded form, but its distance is recomputed directly (`‖q − r‖`), so a
+  copy measures exactly 0. New test `test_nndr_counts_exact_copies_of_large_values_as_zero_distance`
+  (fails on the plan's form).
+- `to_float` returns `None` for an int too large for a float (`OverflowError`) instead of raising;
+  `qi_unique_overlap` returns 0 without quasi-identifiers (the plan counted every synthetic row as
+  matching the empty key); `fidelity_report` adds `corr_within_limit` (additive; the evidence shows
+  the correlation limit like the column limits) and casts `within_limit` to a plain `bool`.
+- `tests/test_metrics.py`: `numpy` is taken from `pytest.importorskip` too (the module imports it
+  at the top), plus assertions for `to_float("12")`, NaN, bytes and dates in `canonical`.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
