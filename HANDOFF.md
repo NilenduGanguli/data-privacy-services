@@ -1,6 +1,6 @@
 # HANDOFF — data-privacy-services (DPS)
 
-Last verified: 2026-10-12 at the commit tagged `m2` (M2 complete: `2b38deb` + this documentation
+Last verified: 2026-10-12 at the commit tagged `v0.1.0-m2` (M2 complete: `2b38deb` + this documentation
 pass; M0 base tag `v0.1.0-m0`) · gates on this lane's stack (`COMPOSE_PROJECT_NAME` `dps-wt-m2`, image
 `data-privacy-services:m2`): `ruff check dps tests tools`, `ruff format --check dps tests tools`,
 `mypy dps` (82 files), `pytest -q` with the stack up (1098 passed, 2 skipped: the `ner` extra), console
@@ -454,6 +454,6 @@ the references the deployment's tenants may use (open issue, see the M2 build re
 
 ## 9. Next milestones
 
-M1 documents → **M2 jobs + PostgreSQL (done: tag `m2`; Postgres, worker, migrations, the jobs API and
+M1 documents → **M2 jobs + PostgreSQL (done: tag `v0.1.0-m2`; Postgres, worker, migrations, the jobs API and
 console)** → M3 Oracle + MongoDB → M4 UI
 scanner (browser worker image) → M5 hardening + showcase. Each adds a section here.

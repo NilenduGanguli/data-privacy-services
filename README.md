@@ -4,7 +4,7 @@ Data obfuscation and synthetic data generation for the enterprise — one Privac
 points (API, database connectors, UI scanner), two outcomes (reversible obfuscation, synthetic data),
 measurable privacy, and a hard rule that **no LLM ever sees raw PII**.
 
-**Status:** M2 shipped (tag `m2`) on top of M0 — the Layer 1 API (`/api/v1/detect`, `/obfuscate`,
+**Status:** M2 shipped (tag `v0.1.0-m2`) on top of M0 — the Layer 1 API (`/api/v1/detect`, `/obfuscate`,
 `/synthesize`, `/reveal`, policy tooling) and the Privacy Console (Overview, Playground), plus the job
 platform: connect a PostgreSQL source, discover and review its columns, and run partitioned,
 checkpointed, resumable masking jobs in four write modes (copy to a table, export files, in place,

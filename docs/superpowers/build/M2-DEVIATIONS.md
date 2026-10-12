@@ -1871,3 +1871,8 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
   `COMPOSE_PROJECT_NAME=dps-wt-m2-plain` on ports 8470/5471, removed afterwards with
   `docker compose -p dps-wt-m2-plain down -v` (that project only). The smoke test reports **24**
   checks (15 Layer 1 + 9 M2), not the plan's 22 (Task 27 deviation).
+- **Tag name `v0.1.0-m2`, not the plan's `m2`.** The lane's branch is `m2`; a tag of the same name makes
+  `m2` ambiguous (`warning: refname 'm2' is ambiguous`, and `git merge m2` / `git log m2` resolve to
+  the tag, which would silently pin an older commit once review fixes land on the branch). The tag
+  follows M0's `v0.1.0-m0` pattern (the package version stays 0.1.0 in M2); HANDOFF and README name
+  it. The `m2` tag created first was deleted at once (it was never pushed or used).
