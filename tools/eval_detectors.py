@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from dps.evaluation.corpus import generate_corpus, load_corpus, write_corpus
+from dps.evaluation.corpus import CorpusError, generate_corpus, load_corpus, write_corpus
 from dps.evaluation.scoring import evaluate, render_markdown
 
 
@@ -44,7 +44,11 @@ def main(argv: list[str] | None = None) -> int:
         for path in write_corpus(generate_corpus(args.seed, args.records), args.out):
             print(f"wrote {path}")
         return 0
-    records, digest = load_corpus(args.corpus)
+    try:
+        records, digest = load_corpus(args.corpus)
+    except CorpusError as err:  # value-free by construction: file name, line number, error types
+        print(f"eval_detectors: {err}", file=sys.stderr)
+        return 2
     report = evaluate(records, corpus_sha256=digest, min_score=args.min_score, ner=args.ner)
     if args.json:
         args.json.write_text(

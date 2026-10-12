@@ -7,6 +7,10 @@ arithmetic (CURP, RFC, NINO, NHS, SIN, Aadhaar), so every checksum-validated val
 otherwise the evaluation would measure the validators, not the detectors. Each label records which
 generator produced it. Records are text sentences or KYC-like JSON documents; every inserted value
 is labelled, and template text carries no personal data.
+
+``load_corpus`` also reads the bank's own labelled samples (real customer data), so a record that
+does not parse is reported by file name, line number and pydantic error *type* only: the models
+hide their input in errors, and no exception holding the line is chained.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from typing import Any, Literal
 
 import phonenumbers
 from faker import Faker
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from stdnum.mx import curp as mx_curp
 from stdnum.mx import rfc as mx_rfc
 
@@ -182,7 +186,13 @@ JSON_FIELDS: dict[str, tuple[tuple[str, str | None], ...]] = {
 NOTE_TEMPLATES = ("Follow-up with {EMAIL} requested.", "Card {CARD_PAN} replaced.", "No remarks.")
 
 
+class CorpusError(ValueError):
+    """A corpus line that cannot be read; the message never carries the line's content."""
+
+
 class Label(BaseModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     path: str = "$"
     start: int | None = None
     end: int | None = None
@@ -191,6 +201,8 @@ class Label(BaseModel):
 
 
 class CorpusRecord(BaseModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     id: str
     jurisdiction: str
     locale: str
@@ -486,17 +498,40 @@ def corpus_files(paths: Iterable[Path]) -> list[Path]:
     return out
 
 
+def _parse_lines(name: str, raw: bytes) -> list[CorpusRecord]:
+    """One record per non-blank line; a bad line raises a value-free :class:`CorpusError`.
+
+    Lines are split on ``\\n`` / ``\\r`` only (``bytes.splitlines``): U+2028, U+2029 and U+0085 may
+    sit unescaped inside a JSON string and must not split a record. The error is raised outside the
+    ``except`` block, so neither the pydantic error nor the ``UnicodeDecodeError`` (whose ``object``
+    is the whole line) is attached as ``__context__``.
+    """
+    records: list[CorpusRecord] = []
+    for line_no, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            records.append(CorpusRecord.model_validate_json(line.decode("utf-8")))
+            continue
+        except UnicodeDecodeError:
+            problem = "not valid UTF-8"
+        except ValidationError as err:
+            types = sorted({e["type"] for e in err.errors(include_url=False, include_input=False)})
+            problem = "not a valid corpus record: " + ", ".join(types)
+        raise CorpusError(f"{name} line {line_no}: {problem} (content not shown)")
+    return records
+
+
 def load_corpus(paths: Iterable[Path]) -> tuple[list[CorpusRecord], str]:
-    """Records from files or directories, and the sha256 over the file contents (sorted by name)."""
+    """Records from files or directories, and the sha256 over the file contents (sorted by name).
+
+    Raises :class:`CorpusError` naming the file and line of the first record that does not parse.
+    """
     files = corpus_files(paths)
     digest = hashlib.sha256()
     records: list[CorpusRecord] = []
     for path in sorted(files, key=lambda p: p.name):
         raw = path.read_bytes()
         digest.update(path.name.encode() + b"\0" + raw)
-        records += [
-            CorpusRecord.model_validate_json(line)
-            for line in raw.decode("utf-8").splitlines()
-            if line.strip()
-        ]
+        records += _parse_lines(path.name, raw)
     return records, digest.hexdigest()

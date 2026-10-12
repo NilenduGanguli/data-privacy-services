@@ -1194,3 +1194,60 @@ hash and `IdemEntry(body_sha256, trace_id, created)` only; a replay re-runs the 
   case is parametrised over seven replies, including an `LlmCallError`), plus the per-call field
   cap (`skipped` counted) and one labelling call per NDJSON stream. The fake gateways subclass
   `LlmGateway` with a configured `stellar` provider (a `stub` provider never labels, by rule).
+
+## Fix round 1 for Tasks 15, 19A–19D (review `M1-G5-review-r1`)
+
+The one blocking finding has tests that fail on the reviewed code (bd74d91) and pass after the fix.
+Existing public names and signatures are unchanged; `CorpusError` is new.
+
+**B1: a malformed line in a corpus file echoed raw corpus content** (`dps/evaluation/corpus.py`,
+`tools/eval_detectors.py`). `run --corpus` is the slot for the bank's own labelled samples, but
+`load_corpus` let pydantic's `ValidationError` (with `input_value`) and `UnicodeDecodeError`
+propagate, so a truncated line printed part of an SSN, and a wrongly typed field or a bad `kind`
+printed its value in full.
+
+- `Label` and `CorpusRecord` now set `model_config = ConfigDict(hide_input_in_errors=True)`.
+- New `CorpusError(ValueError)`. `load_corpus` parses each file with the new private
+  `_parse_lines`, which decodes and validates **one line at a time**. A line that is not UTF-8,
+  or that fails validation, raises `CorpusError("<file name> line <n>: <problem> (content not
+  shown)")`. The problem is either `not valid UTF-8` or `not a valid corpus record: <pydantic error
+  types>`, for example `json_invalid`, `int_parsing` or `literal_error`. Those type codes come from
+  pydantic's fixed vocabulary, and `include_input=False` drops the input. The error is raised
+  *outside* the `except` block. As a result, neither the pydantic error nor the
+  `UnicodeDecodeError` is attached as `__context__`; the latter's `.object` would hold the line,
+  and under the old code the whole file. The line number is the physical line, so blank lines are
+  counted. The file name is the operator's own path argument (only its base name is used).
+- **Line splitting changed (a fix found while writing the tests):** lines are now split with
+  `bytes.splitlines()`, which splits on `\n`, `\r` and `\r\n` only. Before, the whole file was
+  decoded and split with `str.splitlines()`, which also splits on U+2028, U+2029 and U+0085.
+  `write_corpus` (`ensure_ascii=False`) and JSON allow those characters unescaped inside a
+  string, so a record holding one was cut into two invalid halves. This would have hit a bank's
+  free text. It does not affect the committed corpus: its sha256, the 900 records and the
+  regenerated `docs/technical/detector-eval-m1.{json,md}` are byte-identical.
+- `tools/eval_detectors.py run` catches `CorpusError`, prints `eval_detectors: <message>` to stderr
+  and exits with code 2, without a traceback.
+- Tests (in `tests/test_eval_corpus.py`):
+  - `test_malformed_line_error_names_file_and_line_only`, parametrised over six cases: a truncated
+    line, a wrongly typed `start`, a bad `kind`, a bare JSON string, `labels` not a list, and
+    invalid UTF-8. Each case is a sentinel line after a good line and a blank line. The test
+    asserts that the sentinel and the SSN appear nowhere in the formatted traceback, the repr or
+    the args. It also asserts that there is no `__cause__` or `__context__`, and that the message
+    names `bank-private.jsonl line 3`.
+  - `test_record_models_hide_input_in_errors`.
+  - `test_unicode_line_separators_inside_values_do_not_split_a_record`.
+  - `test_cli_reports_a_malformed_corpus_without_values`: exit code 2, no value and no traceback on
+    stdout or stderr.
+
+  All nine fail on bd74d91.
+- The reviewer's probe files (`scratchpad/build/g5r1/priv/bad*.jsonl`) now give exit code 2 with
+  `literal_error`, `int_parsing` and `json_invalid` respectively, and no content.
+
+The review's non-blocking items N1–N9 are not addressed in this round. They stay open as the review
+describes them: N1 opaque prompt refs for T3, N2 validating T3 verdicts before format-preserving
+methods, N4 `.env.example`, N5 `OcrStatus.tsx` in Task 16, N6 an HMAC for the replay fingerprint,
+and N7 `asyncio.to_thread` for NDJSON validation.
+
+Count: 9 new tests. The unit suite went from 966 to 975 passed, with 6 skipped (the same optional
+extras and later-task services as before). The app does not import `dps.evaluation`, and these
+tasks add no integration tests or compose profile, so no lane containers were needed. The frontend
+is untouched.
