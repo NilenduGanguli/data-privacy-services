@@ -8,8 +8,12 @@ Error mapping (the engine's messages name rules, never values):
 - :class:`~dps.engine.service.EngineError` → 400 ``{"detail", "code": "bad_request"}``
 - :class:`~dps.errors.CodedError` → its own status and ``{"detail", "code"}`` (M1)
 - anything else → 500 ``internal error``; only the exception's class name is logged
+- a strict audit sink that cannot take the event (:class:`~dps.audit.AuditUnavailable`) → 503
+  ``audit unavailable``: nothing the engine produced is returned
 
-Every outcome, rejections included, is counted and audited (value-free).
+Every outcome, rejections included, is counted and audited (value-free). The audited and
+measured ``route`` is the route **template** (``/api/v1/jobs/{job_id}``), never the concrete path,
+and the audit event carries the HTTP status the request answers with.
 """
 
 from __future__ import annotations
@@ -26,9 +30,10 @@ from typing import Any, overload
 
 import structlog
 from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
-from dps.audit import AuditEvent
+from dps.audit import AuditEvent, AuditUnavailable
+from dps.auth import coded_http_exception_handler as coded_http_exception_handler  # one handler
 from dps.engine.policy import preset_names
 from dps.engine.service import EngineError, Payload, VerificationFailed
 from dps.errors import CodedError
@@ -47,6 +52,12 @@ _TRACE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _PRESET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
+def route_template(request: Request) -> str:
+    """The matched route's path template (``/api/v1/jobs/{job_id}``), else the request path."""
+    path = getattr(request.scope.get("route"), "path", None)
+    return path if isinstance(path, str) else request.url.path
+
+
 def trace_id(request: Request) -> str:
     """The caller's ``X-Request-ID`` when it is a safe identifier, else a fresh 16-hex id."""
     given = request.headers.get(TRACE_HEADER, "")
@@ -54,9 +65,12 @@ def trace_id(request: Request) -> str:
 
 
 class CodedHTTPException(HTTPException):
-    """An HTTPException rendered as ``{"detail", "code"}``.
+    """An HTTPException rendered as ``{"detail", "code"}`` (contract §8.2).
 
-    M2's ``DpsHttpError`` (contract §8.2) has the same wire shape and should subclass this class.
+    One wire format, several raise sites: this class (M1 routes), ``dps.auth``'s
+    ``CodedAuthHTTPException`` and M2's ``DpsHttpError`` (``{"detail", "code", **extra}``). Every
+    coded ``HTTPException`` is rendered by the one handler :func:`coded_http_exception_handler`,
+    which ``create_app`` registers for all ``HTTPException``s.
     """
 
     def __init__(
@@ -68,16 +82,6 @@ class CodedHTTPException(HTTPException):
     ) -> None:
         super().__init__(status_code=status_code, detail=detail, headers=headers)
         self.code = code
-
-
-async def coded_http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
-    """Registered in ``create_app`` for :class:`CodedHTTPException`."""
-    assert isinstance(exc, CodedHTTPException)
-    return JSONResponse(
-        {"detail": exc.detail, "code": exc.code},
-        status_code=exc.status_code,
-        headers=exc.headers,
-    )
 
 
 def policy_label(policy: str | dict[str, Any] | None, default: str) -> str:
@@ -180,37 +184,47 @@ def _audit_event(
     duration_ms: float,
     outcome: str,
     tid: str,
+    status_code: int,
 ) -> AuditEvent:
     principal = getattr(request.state, "principal", None)
     return AuditEvent(
         trace_id=tid,
-        route=request.url.path,
+        route=route_template(request),
         tenant_id=getattr(request.state, "tenant_id", "default"),
         key_id=principal.key_id if principal is not None else "anonymous",
         mode=mode,
         policy=policy,
         duration_ms=round(duration_ms, 2),
         outcome=outcome,
+        status=status_code,
         **counts,
     )
 
 
 def _audit(request: Request, **fields: Any) -> None:
-    """Write the audit event; a failure is logged (type only) and never fails the request."""
+    """Write the audit event.
+
+    Raises:
+        CodedHTTPException: 503 ``audit_unavailable`` when a strict sink refuses the event. Any
+            other sink failure is logged (type only) and never fails the request.
+    """
     try:
         request.app.state.audit.write(_audit_event(request, **fields))
-    except Exception as exc:  # noqa: BLE001 - audit must not take the request down in M0 (strict mode arrives with M2)
+    except AuditUnavailable as exc:
+        raise CodedHTTPException(503, "audit_unavailable", "audit unavailable") from exc
+    except Exception as exc:  # noqa: BLE001 - a non-strict sink failure never takes the request down
         logger.warning("audit_write_failed", error=type(exc).__name__)
 
 
 def begin_call(request: Request) -> str:
     """Start an audited call: the trace id (set on ``request.state``, bound to the log context).
 
-    A replay (:func:`with_idempotency`) keeps the original call's trace id.
+    A replay (:func:`with_idempotency`) keeps the original call's trace id. The bound ``route``
+    is the route template (:func:`route_template`), never the concrete path.
     """
     tid = getattr(request.state, "replay_trace_id", None) or trace_id(request)
     request.state.trace_id = tid
-    structlog.contextvars.bind_contextvars(trace_id=tid, route=request.url.path)
+    structlog.contextvars.bind_contextvars(trace_id=tid, route=route_template(request))
     return tid
 
 
@@ -223,16 +237,24 @@ def end_call(
     started: float,
     outcome: str,
     counts: dict[str, Any] | None = None,
+    status_code: int | None = None,
 ) -> None:
     """Finish an audited call: request metrics and exactly one value-free audit event.
 
     ``started`` is the call's ``time.perf_counter()`` at :func:`begin_call`; ``counts`` are
-    :func:`result_counts` (or a stream's sums), ``None`` for a call that produced nothing. A
-    successful replay is audited with outcome ``replayed``.
+    :func:`result_counts` (or a stream's sums), ``None`` for a call that produced nothing;
+    ``status_code`` is the HTTP status the request answers with (default: the route's success
+    status). A successful replay is audited with outcome ``replayed``.
+
+    Raises:
+        CodedHTTPException: 503 ``audit_unavailable`` when a strict audit sink refuses the event
+            (the caller returns nothing the engine produced).
     """
     if outcome == "ok" and getattr(request.state, "replay_trace_id", None):
         outcome = "replayed"
-    route = request.url.path
+    if status_code is None:
+        status_code = getattr(request.scope.get("route"), "status_code", None) or 200
+    route = route_template(request)
     duration = (time.perf_counter() - started) * 1000
     REQUESTS.labels(route, outcome).inc()
     LATENCY.labels(route).observe(duration / 1000)
@@ -244,6 +266,7 @@ def end_call(
         duration_ms=duration,
         outcome=outcome,
         tid=tid,
+        status_code=status_code,
     )
 
 
@@ -301,6 +324,7 @@ async def run_engine[T](
     tid = begin_call(request)
     start = time.perf_counter()
     outcome = "ok"
+    status_code: int | None = None  # the route's success status unless an error says otherwise
     result: T | None = None
     try:
         raw = call()
@@ -308,20 +332,25 @@ async def run_engine[T](
         return result, tid
     except Exception as exc:  # noqa: BLE001 - mapped to a coded, value-free HTTP error
         outcome, error = map_engine_error(exc)
+        status_code = error.status_code
         if error is exc:
             raise
         raise error from None
     finally:
-        end_call(
-            request,
-            mode=mode,
-            policy=policy_name,
-            tid=tid,
-            started=start,
-            outcome=outcome,
-            counts=result_counts(result),
-        )
-        structlog.contextvars.unbind_contextvars("trace_id", "route")
+        try:
+            # A strict sink's 503 replaces the result (or the error) being returned.
+            end_call(
+                request,
+                mode=mode,
+                policy=policy_name,
+                tid=tid,
+                started=start,
+                outcome=outcome,
+                counts=result_counts(result),
+                status_code=status_code,
+            )
+        finally:
+            structlog.contextvars.unbind_contextvars("trace_id", "route")
 
 
 async def with_idempotency[T](
@@ -373,15 +402,18 @@ async def with_idempotency[T](
                 ) from None
     except CodedHTTPException as exc:
         tid = begin_call(request)
-        end_call(
-            request,
-            mode=mode,
-            policy=policy,
-            tid=tid,
-            started=time.perf_counter(),
-            outcome=exc.code,
-        )
-        structlog.contextvars.unbind_contextvars("trace_id", "route")
+        try:
+            end_call(
+                request,
+                mode=mode,
+                policy=policy,
+                tid=tid,
+                started=time.perf_counter(),
+                outcome=exc.code,
+                status_code=exc.status_code,
+            )
+        finally:
+            structlog.contextvars.unbind_contextvars("trace_id", "route")
         raise
     if key is None or not cache.enabled:
         return await run()

@@ -6,6 +6,7 @@ configuration fails the process instead of serving traffic.
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
 from dps.config import Settings
@@ -69,6 +70,35 @@ def posture_problems(settings: Settings) -> list[str]:
         problems.append(
             "OCR is enabled (auto) but neither an Azure endpoint nor tesseract is available"
         )
+    problems.extend(_m2_problems(settings))
+    return problems
+
+
+def _m2_problems(settings: Settings) -> list[str]:
+    """Database-backed (M2) checks; only when jobs are enabled (``pg_host`` set).
+
+    An L1-only deployment (no metadata database) boots without a KEK or any database setting.
+    Messages name settings only, never a value (the KEK in particular).
+    """
+    if not settings.pg_host:
+        return []
+    problems: list[str] = []
+    if not settings.job_kek:
+        problems.append("DPS_JOB_KEK_FILE must provide the job KEK")
+    elif os.environ.get("DPS_JOB_KEK"):
+        problems.append("the job KEK must come from DPS_JOB_KEK_FILE, not a literal DPS_JOB_KEK")
+    if settings.inline_secrets_allowed:
+        problems.append("DPS_INLINE_SECRETS_ALLOWED must be false")
+    if not settings.rls_enabled:
+        problems.append("DPS_RLS_ENABLED must be true")
+    if settings.migrations_mode != "verify":
+        problems.append("DPS_MIGRATIONS_MODE must be verify")
+    if not settings.audit_strict:
+        problems.append("DPS_AUDIT_STRICT must be true")
+    if not settings.pg_ssl_root_cert:
+        problems.append("DPS_PG_SSL_ROOT_CERT is required when DPS_PG_HOST is set")
+    if settings.embedded_worker:
+        problems.append("DPS_EMBEDDED_WORKER must be false")
     return problems
 
 

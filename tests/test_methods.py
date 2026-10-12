@@ -224,6 +224,7 @@ def test_unknown_methods_are_method_errors() -> None:
         ("hmac_pseudonym", {"length": 0}),
         ("fpe_digits", {"keep_prefix": -1}),
         ("fpe_digits", {"keep_suffix": [4]}),
+        ("fpe_digits", {"leading_zero": "sideways"}),
         ("date_shift", {"window_days": 10**12}),
         ("date_shift", {"window_days": -5}),
         ("bucket", {"ranges": ["a", "b"]}),
@@ -395,3 +396,16 @@ def test_methods_tolerate_empty_values() -> None:
         assert out.value is not None
         if out.reversible:
             assert reverse_method(out.method, out.value, ctx("SSN"), out.reverse_params) == ""
+
+
+def test_fpe_digits_leading_zero_param() -> None:
+    # RotCipher maps a leading 7 to 0; "preserve" walks on to a token an integer column can hold.
+    legacy = run_method("fpe_digits", "7123456", ctx("CUSTOMER_ID"))
+    assert legacy.value == "0456789"  # no param: v0.1.0 behaviour, so old hints still reverse
+    assert reverse_method("fpe_digits", "0456789", ctx("CUSTOMER_ID"), {}) == "7123456"
+    explicit = ctx("CUSTOMER_ID", {"leading_zero": "any"})
+    assert run_method("fpe_digits", "7123456", explicit).value == "0456789"
+    keep = ctx("CUSTOMER_ID", {"leading_zero": "preserve"})
+    out = run_method("fpe_digits", "7123456", keep)
+    assert out.value == "3789012" and out.method == "fpe_digits" and out.reversible
+    assert reverse_method("fpe_digits", "3789012", keep, out.reverse_params) == "7123456"

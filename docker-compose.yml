@@ -1,16 +1,25 @@
-# Local stack. Default: the app (Layer 1 is stateless). Profile `docs` (or `full`) adds the Azure
-# Computer Vision Read v3.2 mock (Tesseract inside) that the documents routes use for scanned pages
-# and images. M2 adds Postgres (job metadata), a worker and source databases, M3 Oracle Free and
-# MongoDB, M4 the browser worker.
+# Local stack: the app, the metadata Postgres `dps-db`, the `migrate` one-shot and the `worker`
+# (M2); profile `docs` adds the Azure Computer Vision Read v3.2 mock (Tesseract inside) that the
+# documents routes use for scanned pages and images (M1); profile `sources` adds the demo source
+# Postgres, MinIO and the demo-secrets / seed-sources one-shots (M2); `full` is all of them. M3
+# adds Oracle Free and MongoDB, M4 the browser worker.
 #
-#   docker compose --profile docs up --build -d   # console + API on http://127.0.0.1:${DPS_APP_PORT:-8400}
-#   python tools/smoke_test.py                    # end-to-end checks (OCR checks need --profile docs)
-#   docker compose --profile docs down
+#   docker compose up --build -d       # console + API on http://127.0.0.1:${DPS_APP_PORT:-8400}
+#   docker compose --env-file docker/compose.sources.env --profile docs --profile sources up -d --build
+#                                      # + OCR mock, demo source (seeded), MinIO artefacts, demo secrets
+#   docker compose up -d --scale worker=3 worker          # more workers (no host ports)
+#   docker compose up -d dps-db        # metadata Postgres alone on 127.0.0.1:${DPS_DB_PORT:-5441}
+#   python tools/smoke_test.py         # end-to-end checks against it (waits for /health)
+#   docker compose --profile docs --profile sources down
 #
 # Without `--profile docs` the app still starts and /readyz reports the `ocr` component down (OCR is
 # never required); DPS_OCR_PROVIDER=tesseract selects the image's local Tesseract instead.
 # The mock is the cached image document_intelligence-azure-ocr-mock (built from ../mock_azure_ocr,
 # the directory DPS is nested in); a lane tags it ${DPS_IMAGE_TAG} like every image compose builds.
+#
+# Never use `up --wait`: it fails on the one-shots that exit 0 (migrate, minio-init, demo-secrets,
+# seed-sources); poll `docker compose ps` instead. `--env-file` replaces the default `.env`, so a
+# lane that keeps its ports in `.env` passes both: `--env-file .env --env-file docker/compose.sources.env`.
 #
 # Host ports bind 127.0.0.1 only. The key below is a local demo literal; staging/prod refuse
 # DPS_BOOTSTRAP_API_KEY and read DPS_API_KEYS_FILE instead.
@@ -26,13 +35,56 @@
 # title, "name is" or contact details). NER is not in this image (build with
 # --build-arg WITH_NER=1 to add Presidio + spaCy); without it every report's
 # verification.coverage says that free-text names without a cue are not detected or checked.
+# Shared by app, migrate and worker (contract §11). Credentials and the KEK are local-only demo
+# literals (role passwords equal the role names, contract §2.3); staging/prod read them from files.
+x-dps-env: &dps-env
+  DPS_ENV: local
+  DPS_LOG_LEVEL: INFO
+  DPS_PG_HOST: dps-db
+  DPS_PG_PORT: "5432"
+  DPS_PG_DATABASE: dps
+  DPS_PG_USER: dps_app
+  DPS_PG_PASSWORD: dps_app
+  DPS_PG_WORKER_USER: dps_worker_login
+  DPS_PG_WORKER_PASSWORD: dps_worker_login
+  DPS_PG_MIGRATION_USER: dps_owner
+  DPS_PG_MIGRATION_PASSWORD: dps_owner
+  DPS_MIGRATIONS_MODE: verify            # the migrate one-shot applies; app and worker verify
+  DPS_JOB_KEK: ${DPS_JOB_KEK:-ZHBzLWxvY2FsLWRlbW8ta2VrLTMyLWJ5dGVzLW9ubHk=}   # demo literal, local only
+  DPS_SECRET_DIR: /var/run/secrets/dps
+  DPS_ARTEFACT_STORE: ${DPS_ARTEFACT_STORE:-local}
+  DPS_ARTEFACT_DIR: /app/var/artefacts
+  DPS_S3_ENDPOINT_URL: ${DPS_S3_ENDPOINT_URL:-}
+  DPS_S3_ACCESS_KEY_ID: ${DPS_S3_ACCESS_KEY_ID:-}
+  DPS_S3_SECRET_ACCESS_KEY: ${DPS_S3_SECRET_ACCESS_KEY:-}
+  DPS_EXPORT_ROOT: /app/var/exports
+  DPS_FPE_ENABLED: ${DPS_FPE_ENABLED:-true}   # app and worker must agree (the worker transforms)
+  DPS_NER_ENABLED: "false"
+  DPS_LLM_PROVIDER: ${DPS_LLM_PROVIDER:-stub}
+  DPS_DEFAULT_LOCALE: ${DPS_DEFAULT_LOCALE:-en_IN}
+
+x-dps-volumes: &dps-volumes
+  - dps-artefacts:/app/var/artefacts
+  - dps-exports:/app/var/exports
+  - dps-secrets:/var/run/secrets/dps:ro
+
 services:
   app:
     build: .
     image: data-privacy-services:${DPS_IMAGE_TAG:-local}
     ports:
       - "127.0.0.1:${DPS_APP_PORT:-8400}:8400"
+    depends_on:
+      dps-db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      azure-ocr-mock:
+        condition: service_healthy
+        required: false            # without --profile docs the app starts and reports ocr "down"
+    volumes: *dps-volumes
     environment:
+      <<: *dps-env
       DPS_ENV: local
       DPS_LOG_LEVEL: INFO
       DPS_AUTH_ENABLED: "true"
@@ -59,10 +111,6 @@ services:
       DPS_OCR_HEALTH_PATH: ${DPS_OCR_HEALTH_PATH:-/health}
       DPS_MAX_DOCUMENT_MB: ${DPS_MAX_DOCUMENT_MB:-20}
       DPS_SCHEMA_MAX_ROWS: ${DPS_SCHEMA_MAX_ROWS:-10000}
-    depends_on:
-      azure-ocr-mock:
-        condition: service_healthy
-        required: false            # without --profile docs the app starts and reports ocr "down"
     # Hardening: read-only root filesystem (scratch space is a memory-backed /tmp), no Linux
     # capabilities, no privilege escalation, bounded memory.
     read_only: true
@@ -101,3 +149,229 @@ services:
       app: data-privacy-services
       component: ocr-mock
       env: local
+
+  # Applies pending migrations as dps_owner and exits 0 (contract §11.1); app and worker start
+  # after it and only verify.
+  migrate:
+    image: data-privacy-services:${DPS_IMAGE_TAG:-local}
+    pull_policy: never                    # built by `app` (same image)
+    command: ["python", "-m", "dps.migrate"]
+    environment:
+      <<: *dps-env
+      DPS_MIGRATIONS_MODE: auto
+    depends_on:
+      dps-db:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    labels:
+      app: data-privacy-services
+      component: migrate
+      env: local
+
+  # Claims discover/run/retention jobs and run partitions (contract §3.5). No host port: /health,
+  # /readyz and /metrics listen on 9400 inside the network. Scale with --scale worker=N.
+  worker:
+    image: data-privacy-services:${DPS_IMAGE_TAG:-local}
+    pull_policy: never                    # built by `app` (same image)
+    command: ["python", "-m", "dps.worker"]
+    environment:
+      <<: *dps-env
+      DPS_WORKER_CONCURRENCY: "4"
+      DPS_WORKER_METRICS_PORT: "9400"
+    volumes: *dps-volumes
+    depends_on:
+      dps-db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777          # files targets spool part files here
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9400/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      app: data-privacy-services
+      component: worker
+      env: local
+
+  # Metadata database (M2, contract §2.3/§11). 01_roles.sql creates the contract roles and the `dps`
+  # database on first start (empty volume); migrations run as dps_owner (`python -m dps.migrate`).
+  # Superuser postgres/postgres is a local-only demo literal.
+  dps-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+    command: ["postgres", "-c", "max_connections=200", "-c", "timezone=UTC"]
+    ports:
+      - "127.0.0.1:${DPS_DB_PORT:-5441}:5432"
+    volumes:
+      - dps-db-data:/var/lib/postgresql/data
+      - ./docker/dps-db/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1: the image's init-time server listens on the unix socket only, so the check
+      # turns healthy after 01_roles.sql has created the roles and the dps database.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d dps"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 768m
+    labels:
+      app: data-privacy-services
+      component: metadata-db
+      env: local
+
+  # Demo source database (M2, contract §11), profile `sources` (and `full`). 01_bank_schema.sql
+  # creates the `bank` database (10 tables in schema `bank`, target schemas bank_uat, bank_restore,
+  # bank_perf) and the local logins dps_reader/dps_writer (password = role name) on first start;
+  # rows come from tools/seed_sources.py. Superuser postgres/postgres is a local-only demo literal.
+  #   docker compose --profile sources up -d source-pg
+  source-pg:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+    command: ["postgres", "-c", "max_connections=200", "-c", "timezone=UTC", "-c", "shared_buffers=256MB"]
+    ports:
+      - "127.0.0.1:${DPS_SOURCE_PG_PORT:-5442}:5432"
+    volumes:
+      - source-pg-data:/var/lib/postgresql/data
+      - ./docker/source-pg/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1 as for dps-db: the init-time server listens on the unix socket only, so the
+      # check turns healthy after 01_bank_schema.sql has created the bank database.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d bank"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: source-db
+      env: local
+
+  # Object storage for artefacts and `files` exports (M2, contract §11/§13), profile `sources` (and
+  # `full`). minio-init is a one-shot that creates the buckets and exits 0. minioadmin/minioadmin is
+  # a local-only demo literal; the console listens on ${DPS_MINIO_CONSOLE_PORT:-9011}.
+  #   docker compose --profile sources up -d minio minio-init
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "127.0.0.1:${DPS_MINIO_PORT:-9010}:9000"
+      - "127.0.0.1:${DPS_MINIO_CONSOLE_PORT:-9011}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 512m
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: object-store
+      env: local
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/dps-artefacts &&
+        mc mb --ignore-existing local/dps-exports
+    mem_limit: 128m
+    restart: "no"
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: object-store-init
+      env: local
+
+  # Writes the demo secret_ref files into the dps-secrets volume (app and worker mount it
+  # read-only): dps/src/bank-pg-ro (dps_reader), dps/tgt/bank-uat and dps/src/bank-restore-rw
+  # (dps_writer), dps/s3/exports (MinIO). Demo literals; nothing is committed. `$$` is compose's
+  # escape for a literal `$` (else $d, $1 … would be interpolated from the host environment).
+  demo-secrets:
+    image: data-privacy-services:${DPS_IMAGE_TAG:-local}
+    pull_policy: never
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        set -e; d=/var/run/secrets/dps/dps;
+        w() { mkdir -p "$$d/$$1"; printf %s "$$2" > "$$d/$$1/username"; printf %s "$$3" > "$$d/$$1/password"; };
+        w src/bank-pg-ro dps_reader dps_reader;
+        w tgt/bank-uat dps_writer dps_writer;
+        w src/bank-restore-rw dps_writer dps_writer;
+        mkdir -p "$$d/s3/exports";
+        printf minioadmin > "$$d/s3/exports/access_key_id";
+        printf minioadmin > "$$d/s3/exports/secret_access_key";
+        chmod -R a+rX /var/run/secrets/dps
+    volumes:
+      - dps-secrets:/var/run/secrets/dps
+    restart: "no"
+    read_only: true
+    mem_limit: 128m
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: demo-secrets
+      env: local
+
+  # Seeds the 10-table bank schema (20 000 customers, seed 7) and the bank_restore copy; idempotent
+  # (a rerun prints "already seeded"). Values come from the surrogate engine: no real PII.
+  seed-sources:
+    image: data-privacy-services:${DPS_IMAGE_TAG:-local}
+    pull_policy: never
+    command: ["python", "tools/seed_sources.py", "--target", "postgres", "--dsn", "postgresql://postgres:postgres@source-pg:5432/bank", "--rows", "20000", "--seed", "7", "--restore-copy"]
+    depends_on:
+      source-pg:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    profiles: ["sources", "full"]
+    labels:
+      app: data-privacy-services
+      component: seed-sources
+      env: local
+
+volumes:
+  dps-db-data: {}
+  source-pg-data: {}
+  minio-data: {}
+  dps-artefacts: {}
+  dps-exports: {}
+  dps-secrets: {}

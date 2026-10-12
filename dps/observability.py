@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from structlog.typing import EventDict
 
 #: The only keys a log event may carry; every other key is dropped (spec §10 allow-list).
@@ -67,8 +67,9 @@ _SAFE_FIELDS = frozenset(
         "model",
         "env",
         "auth",
-        # audit events (dps.audit.AuditEvent)
+        # audit events (dps.audit.AuditEvent); action is a name such as job.cancel
         "ts",
+        "action",
         # documents, OCR and schema synthesis (M1): counts, names, hashes and infrastructure
         # hosts — never a value, a page's text or an OCR response body
         "format",
@@ -91,6 +92,30 @@ _SAFE_FIELDS = frozenset(
         "warnings",
         # T3 metadata labelling (M1): how many fields were sent and labelled — counts only
         "verdicts",
+        # metadata database (M2): migration file names (dps/db.py)
+        "migration",
+        # job queue and connectors (M2): ids, counts, phases, states and metadata names only;
+        # object_ref is a table name, never a row value
+        "job_id",
+        "partition_id",
+        "partition_no",
+        "state",
+        "kind",
+        "worker_id",
+        "batch_no",
+        "attempts",
+        "write_mode",
+        "connection_id",
+        "snapshot_id",
+        "evidence_id",
+        "group_id",
+        "partitions",
+        "elapsed_s",
+        "rows_per_s",
+        "object_ref",
+        "code",
+        "checks",
+        "lease_lost",
     }
 )
 
@@ -196,6 +221,16 @@ OCR_SECONDS = Histogram(
     "OCR call latency (analyze + polls)",
     buckets=(0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0),
 )
+
+# M2 job queue and connectors
+JOBS_CLAIMED = Counter("dps_jobs_claimed_total", "Job rows claimed", ["kind", "phase"])
+PARTITIONS_FINISHED = Counter(
+    "dps_partitions_finished_total", "Partitions reaching a state", ["state"]
+)
+LEASES_LOST = Counter("dps_leases_lost_total", "Fenced writes that found the lease gone", ["what"])
+ROWS_WRITTEN = Counter("dps_rows_written_total", "Rows written by L2 jobs", ["mode", "write_mode"])
+QUEUE_DEPTH = Gauge("dps_queue_depth", "Queue rows by table and state", ["table", "state"])
+AUDIT_DROPPED = Counter("dps_audit_dropped_total", "Audit events dropped on a saturated queue")
 
 
 def metrics_payload() -> tuple[bytes, str]:

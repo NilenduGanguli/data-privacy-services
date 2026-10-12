@@ -24,6 +24,11 @@ def _segment(key: str) -> str:
     return f"['{escaped}']"
 
 
+def child_path(parent: str, key: str) -> str:
+    """Path of ``key`` under ``parent`` (``$.name``, or ``$['odd key']`` when it needs quoting)."""
+    return parent + _segment(key)
+
+
 def flatten(obj: Any, prefix: str = "$") -> list[tuple[str, Scalar]]:
     """Every scalar leaf of ``obj`` with its path, in document order."""
     out: list[tuple[str, Scalar]] = []

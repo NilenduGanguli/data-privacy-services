@@ -1,5 +1,9 @@
 # HANDOFF — data-privacy-services (DPS)
 
+**Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
+— merged with `--no-ff`; the gates of the integrated tree are recorded in §11. The lane records
+of each milestone and of M0 follow unchanged.
+
 **M1 (v0.2.0) verified 2026-10-12 on branch `m1`** (lane `dps-wt-m1`: `DPS_APP_PORT=8401`,
 `DPS_OCR_PORT=5016`, `DPS_IMAGE_TAG=m1`) — see §10: `ruff format --check` / `ruff check` on
 `dps tests tools`, `mypy dps`, `pytest -q` (1009 passed, 4 skipped: `tesseract` ×2 without a host
@@ -8,7 +12,30 @@ binary, `ner` ×2), `cd frontend && npm test && npm run build`, `docker compose 
 `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` (131 passed, 2 skipped: the same
 `tesseract` cases, which pass inside the image), `DPS_SMOKE_REQUIRE_OCR=1 python
 tools/smoke_test.py` (25/25), `python tools/console_check.py` (84/84) and the detector report
-regenerated without a change in its numbers. The M0 record follows.
+regenerated without a change in its numbers.
+
+**M2 verified 2026-10-12** at the commit tagged `v0.1.0-m2` (M2 complete: `fca6cff`, after the
+verify r1 fixes `a77d38a` (selections refuse denied functions in attribute notation) and `fca6cff`
+(the wizard keeps In place closed while the snapshot rewrites a key), + this HANDOFF update; the tag
+moved here from `99ec8c0`; M0 base tag `v0.1.0-m0`) · gates re-run at `fca6cff` on this lane's
+rebuilt stack (`COMPOSE_PROJECT_NAME` `dps-wt-m2`, image `data-privacy-services:m2`): `ruff check dps
+tests tools`, `ruff format dps tests tools` (no change), `mypy dps` (82 files), `pytest -q` with the
+stack up (1152 passed, 2 skipped: the `ner` extra), console `npm run typecheck && npm test && npm run
+build` (58 Vitest cases), `docker compose --env-file .env --env-file docker/compose.sources.env
+--profile sources up -d --build` (app, worker, dps-db, source-pg, minio healthy; migrate, minio-init,
+demo-secrets, seed-sources exited 0; app `/readyz` `api-core`, `db`, `jobs` ok; worker
+`:9400/readyz` 200), `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"` (161
+passed), the six resume-after-kill cases, `python tools/smoke_test.py` (24/24), `python
+tools/demo_m2.py` (12 jobs succeeded, verification passed, 0 orphans), and the M2 log scan with the
+console browser check (`tests/test_no_values_in_logs_m2.py tests/console/test_console_m2.py`, 40
+passed, the console check's 3 among them). Carried from the first milestone-gate run (compose files,
+image build and tools as of `6ea0738`; since then product code changed only in
+`dps/layers/connectors/selection.py` and the console wizard): a plain `docker compose up -d --build`
+(no profile) under its own project and ports: app, worker, dps-db healthy, migrate exited 0,
+`/readyz` `db`/`jobs` ok, `GET /api/v1/jobs` 200, `DPS_SMOKE_M2=off python tools/smoke_test.py`
+15/15. Counts and timings in the M2 build report. The M0-only checks of that release (`WITH_NER=1`
+image, `linux/amd64` build, `DPS_FPE_ENABLED=false` stack, `coin_tls: verified`) were not repeated
+for M2.
 
 Last verified (M0): 2026-10-12 at `629f4db` = tag `v0.1.0-m0` (`48d9425`) + the post-M0 fixes (SEC-1 COIN
 mint TLS, O1/O2 locale and phone evidence, O5 session-only console key, lane-safe compose, the D2
@@ -30,10 +57,13 @@ deploy facts — image, ports, env, extras, probes, labels.
 
 | Artefact | Kind | Notes |
 |---|---|---|
-| `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001** |
-| `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents; extras `fpe` and `docs` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` (Playwright for `tools/console_check.py`, never in the image) |
+| `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001**. The same image runs three roles: `app` (uvicorn), `worker` (`python -m dps.worker`, M2) and `migrate` (`python -m dps.migrate`, M2) |
+| M2 job platform | API + console | `/api/v1` connections, jobs (discover, run with `table` / `files` / `in_place` / `append`, controls), snapshots, job groups, evidence and artefacts (`docs/technical/api-m2.md`); console pages Data sources & jobs (07), job detail (03), the five-step New-job wizard (06), the evidence pack (10) and the evidence list of Reports (09) |
+| `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents + the job platform; extras `fpe`, `docs`, `db`, `connectors` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` / `e2e` (Playwright 1.55.0 for `tools/console_check.py` and `tests/console/test_console_m2.py`, never in the image) |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `tools/smoke_test.py` | script | 25 end-to-end checks against a running stack (M0's 15 + 10 for documents, OCR and schema from M1); prints verdicts, never bodies |
+| `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
+| `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2) |
+| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
 
 ## 2. Build
 
@@ -43,36 +73,116 @@ docker build --platform linux/amd64 -t <registry>/data-privacy-services:<semver>
 docker build --build-arg WITH_NER=1 -t <registry>/data-privacy-services:<semver>-ner .
 ```
 
-Tag semver + git sha. No database, no volumes in M0. The image:
+Tag semver + git sha. The image (app, worker and migrate all run it):
 
 - stage 1 `node:22-slim`: `npm ci` (lockfile only, no `npm install` fallback) + `npm run build`;
 - stage 2 `python:3.12-slim`: `tesseract-ocr` + `tesseract-ocr-eng` from apt and
   `ENV DPS_OCR_PROVIDER=auto` (M1: local OCR when no Azure endpoint is configured),
   `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
-  `uv pip install --system --no-cache -e ".[fpe,docs]"` (`.[fpe,docs,ner]` + `en_core_web_sm` when `WITH_NER=1`),
-  the console dist at `/app/frontend/dist`;
+  `uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"` (`tabular` arrives with
+  M5 and is skipped with a note until then; `ner` + `en_core_web_sm` added when `WITH_NER=1`), the
+  console dist at `/app/frontend/dist`, `tools/` at `/app/tools`, and `/app/var/{artefacts,exports}`
+  owned by uid 10001;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
   (15 s interval, 15 s start period);
-- `ENTRYPOINT docker/entrypoint.sh` (M0: `exec "$@"`; M2 adds migrations) and
+- `ENTRYPOINT docker/entrypoint.sh` (runs `python -m dps.migrate` first when `DPS_MIGRATIONS_MODE=auto`,
+  `DPS_PG_HOST` is set and the command is `uvicorn` — single-container app runs; compose uses the
+  `migrate` one-shot) and
   `CMD uvicorn dps.app:create_app --factory --host 0.0.0.0 --port 8400 --no-access-log`.
 
 Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (arm64, M1 lane: the
-`docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB.
+`docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB. M2 lane
+(2026-10-12, arm64, without M1): 687 MB. The integrated image is in §11.
+
+Development install: `uv pip install -e ".[dev,fpe,docs,db,connectors,uitest,e2e]"` (`uitest` and
+`e2e` both pin Playwright 1.55.0, for the M1 and M2 console checks; then `python -m playwright install
+chromium`, a no-op when `~/Library/Caches/ms-playwright/chromium-1187` exists). The console's unit
+suites (`cd frontend && npm test`: `node --test` over `frontend/tests/*.test.ts` for M1, then Vitest
+over `frontend/src/**/*.test.ts` for the job helpers and the wizard reducer, M2) run in the gates, not
+in the image build.
 
 ## 3. Run locally (compose)
 
 ```bash
-docker compose --profile docs up --build -d       # http://127.0.0.1:8400, key dps_local_dev_key_change_me
-DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py  # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90), then 25 checks
-docker compose --profile docs down
+docker compose --env-file docker/compose.sources.env --profile docs --profile sources up -d --build
+docker compose ps                     # poll until dps-db, source-pg, minio, azure-ocr-mock, app, worker are
+                                      # healthy and migrate, minio-init, demo-secrets, seed-sources exited 0
+DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py   # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90),
+                                      # then 34 checks: 15 Layer 1 + 10 documents/OCR/schema (M1) + 9 job platform (M2)
+docker compose up -d --scale worker=3 worker                         # more workers
+docker compose --profile docs --profile sources down
 ```
 
-Two services:
+That is the whole local stack (profile `full` is the same set). Smaller stacks: plain `docker compose
+up --build -d` runs app, worker, metadata DB and migrate (then `DPS_SMOKE_M2=off python
+tools/smoke_test.py`: 25 checks with the two OCR checks skipped — the job checks need the
+`sources` profile's demo source); `--profile docs` adds the OCR mock, `--profile sources` the demo
+source, MinIO and the demo secrets.
 
-| Service | Image | Host port | Profile | Notes |
-|---|---|---|---|---|
-| `app` | `data-privacy-services:${DPS_IMAGE_TAG:-local}` (build `.`) | `127.0.0.1:${DPS_APP_PORT:-8400}:8400` | default | API + console |
-| `azure-ocr-mock` | `document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG:-latest}` (build `../mock_azure_ocr`) | `127.0.0.1:${DPS_OCR_PORT:-5016}:5000` | `docs`, `full` | Azure Computer Vision Read v3.2 contract with Tesseract inside (M1); healthcheck `/health`, `mem_limit: 768m` |
+
+**Measured throughput (M2, 2026-10-12; image of `17e14a2`, tools of `8204191`)** — `python
+tools/bench_connector.py --rows 200000 …` against this compose stack on an Apple-silicon Mac (18 CPUs; Docker Desktop VM with 12 CPUs and ~15 GiB),
+`DPS_FPE_ENABLED=true` (FF1), 200 000 synthetic customers (16 columns, 8 transformed), 4 partitions
+of 50 000 rows, 1 000-row batches, worker concurrency 4. Wall clock from submission to the terminal
+state (prepare, preflight and finalize included); results in `docs/technical/bench/`. The numbers
+are measured, not promised (spec §7):
+
+| Run | Workers | Rows/s | Wall |
+|---|---|---|---|
+| obfuscate → `table` (created UAT table) | 1 | 3 004 | 66.6 s |
+| obfuscate → `in_place` (`bench_restore` copy) | 1 | 3 196 | 62.6 s |
+| obfuscate → `files` (parquet to MinIO) | 1 | 2 912 | 68.7 s |
+| synthesize → `table` | 1 | 2 021 | 99.0 s |
+| obfuscate → `table` | 3 | 4 128 | 48.5 s |
+| obfuscate → `table`, 12 partitions (`--parallelism 12 --partition-rows 17000`) | 3 | 4 828 | 41.4 s |
+
+One worker process is bound by one Python interpreter (the transform runs in a thread under the
+GIL): more partitions per worker do not add throughput, more worker replicas do. `python
+tools/demo_m2.py` (10 tables into `bank_uat` under one job group, then in place and append) took
+30 s with 3 workers; every job succeeded with verification passed and every foreign key of the UAT
+copy found its parent.
+
+Ports (host side binds `127.0.0.1` only; every one is a lane variable, see "Lane-safe stacks"):
+`${DPS_APP_PORT:-8400}` app, `${DPS_DB_PORT:-5441}` dps-db, `${DPS_SOURCE_PG_PORT:-5442}` source-pg,
+`${DPS_MINIO_PORT:-9010}` / `${DPS_MINIO_CONSOLE_PORT:-9011}` MinIO, `${DPS_OCR_PORT:-5016}` the OCR mock;
+the worker's ops port 9400 stays inside the compose network.
+
+The M2 demo and checks against a running full stack:
+
+```bash
+python tools/smoke_test.py                                   # 24 checks (15 Layer 1 + 9 job platform)
+python tools/demo_m2.py                                      # 10 bank tables → bank_uat (one job group), in place, append
+python tools/reveal_rows.py --help                           # local reveal of output rows with the key (no network)
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"                      # integration gate
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after_kill.py
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py                # console vs mockups
+```
+
+The console check needs the demo connections the smoke test creates (`bank-pg-ro`, `bank-uat`,
+`bank-restore-rw`), runs a real wizard job into `bank_uat.customers_console`, walks In place on
+`bank_restore.customers` (blocked while the snapshot rewrites `customer_id`, then a dry run once the
+key is kept, so the restored copy is not written), and writes screenshots (dark and light, 1440 and 390
+px, beside the mockups) to `docs/superpowers/build/m2-console/` (git-ignored).
+
+Never `up --wait` (it fails on the one-shots that exit 0). `--env-file` replaces the default `.env`:
+a lane that keeps its ports and image tag in `.env` passes both files (`--env-file .env --env-file
+docker/compose.sources.env`). The first `seed-sources` run takes about a minute (20 000 customers,
+~370 000 rows); later runs print "already seeded".
+
+Services (host ports bind `127.0.0.1` only):
+
+| Service | Image | Host port → container | Notes |
+|---|---|---|---|
+| `app` | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | `${DPS_APP_PORT:-8400}` → 8400 | console + API |
+| `azure-ocr-mock` (M1, profiles `docs`/`full`) | `document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG:-latest}` (build `../mock_azure_ocr`) | `${DPS_OCR_PORT:-5016}` → 5000 | Azure Computer Vision Read v3.2 contract with Tesseract inside; healthcheck `/health`, `mem_limit: 768m` |
+| `dps-db` (M2) | `postgres:16-alpine` | `${DPS_DB_PORT:-5441}` → 5432 | metadata DB; `docker/dps-db/initdb/01_roles.sql` creates the contract roles (`dps_owner`, `dps_app_rw`, `dps_worker`, `dps_app`, `dps_worker_login`; local passwords = role name) and the `dps` database (owner `dps_owner`, timezone UTC) on first start; volume `dps-db-data`; superuser `postgres`/`postgres` (local only); healthy once `pg_isready -h 127.0.0.1 -d dps` answers |
+| `source-pg` (M2, profiles `sources`/`full`) | `postgres:16` | `${DPS_SOURCE_PG_PORT:-5442}` → 5432 | demo source; `docker/source-pg/initdb/01_bank_schema.sql` creates the `bank` database (schema `bank`: the 10 demo tables; `bank_uat`, `bank_restore`, `bank_perf` for table/in-place/append targets) and the local logins `dps_reader` (SELECT on `bank`) and `dps_writer` (owns the target schemas), password = role name, on first start; volume `source-pg-data`; superuser `postgres`/`postgres` (local only); healthy once `pg_isready -h 127.0.0.1 -d bank` answers |
+| `minio` (M2, profiles `sources`/`full`) | `minio/minio:latest` | `${DPS_MINIO_PORT:-9010}` → 9000, `${DPS_MINIO_CONSOLE_PORT:-9011}` → 9001 (console) | artefacts and `files` exports (`DPS_ARTEFACT_STORE=s3`); root user `minioadmin`/`minioadmin` (local only); volume `minio-data`; healthcheck `curl /minio/health/live` (the cached image ships curl) |
+| `minio-init` (M2, profiles `sources`/`full`) | `minio/mc:latest` | — | one-shot after `minio` is healthy: creates buckets `dps-artefacts` and `dps-exports`, exits 0 |
+| `migrate` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot `python -m dps.migrate` as `dps_owner` after `dps-db` is healthy, exits 0; app and worker wait for it (`service_completed_successfully`) and run with `DPS_MIGRATIONS_MODE=verify` |
+| `worker` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — (9400 inside the network) | `python -m dps.worker`, `DPS_WORKER_CONCURRENCY=4`; healthcheck urllib `:9400/health`; scalable (`--scale worker=N`); read-only root, 512 MB `/tmp` tmpfs (files spools), `mem_limit: 1g` |
+| `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) into the `dps-secrets` volume, which app and worker mount read-only at `/var/run/secrets/dps` |
+| `seed-sources` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot after `source-pg` is healthy: `python tools/seed_sources.py --target postgres --rows 20000 --seed 7 --restore-copy`; idempotent |
 
 The app talks to the mock as `http://azure-ocr-mock:5000` (`DPS_OCR_PROVIDER=azure`, key `mock-key`,
 a local demo literal) and `depends_on` it with `required: false`: **without `--profile docs` the app
@@ -87,6 +197,40 @@ under `DPS_SMOKE_REQUIRE_OCR=1` (the M1 milestone gate). `../mock_azure_ocr` is 
 repo is nested in; its build pulls `ghcr.io/astral-sh/uv:latest`, so offline, tag the cached image
 for the lane (`docker tag document_intelligence-azure-ocr-mock:latest
 document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG}`) and start without `--build`.
+
+`docker compose up -d dps-db` starts the metadata database alone (the `db` tests need nothing else).
+`docker compose --profile sources up -d source-pg` starts the demo source for the `pg_source` tests
+(`DPS_TEST_SOURCE_PG_DSN`, default `postgresql://postgres:postgres@127.0.0.1:${DPS_SOURCE_PG_PORT:-5442}/bank`;
+each test works in its own `t_<hex>` schema and drops it).
+`docker compose --profile sources up -d minio minio-init` starts object storage for the `s3` tests
+(`DPS_TEST_S3_ENDPOINT`, default `http://127.0.0.1:${DPS_MINIO_PORT:-9010}`, bucket `dps-artefacts`).
+Without Docker, `tools/scratch_pg.sh start meta` runs a Homebrew PostgreSQL 16 cluster on
+`${DPS_DB_PORT:-5441}` with the same roles (trust auth, timezone UTC, data under
+`${DPS_SCRATCH_DIR:-~/.cache/dps-scratch-pg}/meta-<port>`); `stop` and `status` likewise. `db`
+tests find the server through `DPS_TEST_PG_DSN` (default
+`postgresql://postgres:postgres@127.0.0.1:${DPS_DB_PORT:-5441}/postgres`); without it they skip,
+and with `DPS_TEST_REQUIRE_SERVICES=1` they fail.
+
+**Migrations (M2).** `python -m dps.migrate` applies `dps/migrations/NNN_*.sql` in order as the
+migration login (`DPS_PG_MIGRATION_USER`, `dps_owner` locally) under a per-schema advisory lock,
+records each file's sha256 in `<schema>.dps_migration_ledger`, then creates the audit-log partitions
+for this month and the next three. `--verify` only checks (runtime login, no DDL) and names every
+pending or changed file; `--maintain` also drops audit partitions older than
+`DPS_AUDIT_RETENTION_MONTHS`. Exit codes: 0 ok, 1 drift/pending or a failed run (class name and
+SQLSTATE only), 2 `DPS_PG_HOST` unset. Applied files are never edited: fix forward with a new number
+(M2 owns 001–019). Against the compose database:
+`DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
+**M2 compose environment** (`x-dps-env`, shared by app, migrate and worker): `DPS_PG_HOST=dps-db`, logins
+`dps_app` / `dps_worker_login` / `dps_owner` (local passwords = role name), `DPS_MIGRATIONS_MODE=verify`
+(`auto` for `migrate`), `DPS_JOB_KEK` = a local demo literal unless the shell sets one, `DPS_SECRET_DIR=/var/run/secrets/dps`,
+`DPS_ARTEFACT_DIR=/app/var/artefacts` and `DPS_EXPORT_ROOT=/app/var/exports` (named volumes
+`dps-artefacts`, `dps-exports`; the image creates `/app/var` owned by uid 10001), `DPS_FPE_ENABLED`
+(app and worker agree), `DPS_NER_ENABLED=false`. `docker/compose.sources.env` switches artefacts to
+MinIO (`DPS_ARTEFACT_STORE=s3`, `DPS_S3_ENDPOINT_URL=http://minio:9000`, `minioadmin`).
+Demo seeding: `python tools/seed_sources.py --target postgres [--dsn …] [--schema bank] [--rows 20000]
+[--seed 7] [--restore-copy] [--reset]` (DSN default from `DPS_TEST_SOURCE_PG_DSN` /
+`DPS_SOURCE_PG_PORT`; `--target oracle|mongo` exits 2 until M3; a schema seeded with other
+parameters exits 3 unless `--reset`; another `--schema` gets `<schema>_restore`/`<schema>_perf`).
 Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,
@@ -111,9 +255,11 @@ stack on this host, so `docker-compose.yml` fixes neither a host port nor an ima
 - give each lane its own `COMPOSE_PROJECT_NAME` so containers, networks and volumes stay apart:
 
 ```bash
-COMPOSE_PROJECT_NAME=dps-m2 DPS_IMAGE_TAG=m2 DPS_APP_PORT=8401 DPS_OCR_PORT=5017 docker compose --profile docs up --build -d
-DPS_APP_PORT=8401 python tools/smoke_test.py
-COMPOSE_PROJECT_NAME=dps-m2 docker compose --profile docs down
+COMPOSE_PROJECT_NAME=dps-lane2 DPS_IMAGE_TAG=lane2 DPS_APP_PORT=8401 DPS_DB_PORT=5451 DPS_OCR_PORT=5017 \
+  DPS_SOURCE_PG_PORT=5452 DPS_MINIO_PORT=9020 DPS_MINIO_CONSOLE_PORT=9021 \
+  docker compose --env-file docker/compose.sources.env --profile docs --profile sources up --build -d
+DPS_APP_PORT=8401 python tools/smoke_test.py      # plain stack (no --profile sources): DPS_SMOKE_M2=off
+COMPOSE_PROJECT_NAME=dps-lane2 docker compose --profile docs --profile sources down
 ```
 
 ## 4. Configuration (all `DPS_*`; `DPS_<NAME>_FILE` reads the value from a mounted file)
@@ -161,27 +307,68 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_IDEMPOTENCY_TTL_SECONDS` / `DPS_IDEMPOTENCY_MAX_ENTRIES` | 600 / 10,000 | `Idempotency-Key` on `/detect`, `/obfuscate`, `/synthesize`, `/reveal`, `/documents/*`, `/schema/synthesize`: a **replica-local** replay cache holding, per `sha256(tenant, key id, route, key)`, only the body's SHA-256, the original trace id and a timestamp — never key material, a seed or an output (decision D2). Same key + body within the TTL re-runs the engine and answers `Idempotent-Replay: true` with the original `trace_id` (audit outcome `replayed`); identical output only when the caller sent its own `consistency.key_material` / `synthesis_seed`. Same key + another body → 422 `idempotency_key_reused`; a malformed key → 422 `idempotency_key_invalid`. A retry on another replica, or after the TTL, runs as a first call. `0` disables the cache (a well-formed header is accepted and ignored) |
 | `DPS_NDJSON_MAX_ITEMS` / `DPS_NDJSON_CHUNK_ITEMS` / `DPS_MAX_NDJSON_MB` | 1,000,000 / 500 / 256 | NDJSON streaming on `/detect`, `/obfuscate`, `/synthesize`, `/reveal` (an `application/x-ndjson` body, or a JSON `data` array with `Accept: application/x-ndjson`): items per stream (413 `ndjson_too_large`), items per worker-thread hop, and the body limit for an NDJSON body on those four routes (JSON bodies keep `DPS_MAX_PAYLOAD_MB`); every item obeys `DPS_MAX_ITEMS`. The whole body is held in memory while it streams out, so keep `DPS_MAX_NDJSON_MB` well under the container's memory limit |
 
-Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
+**M2 settings (jobs + PostgreSQL; contract §10).** All default so Layer 1 runs without a database:
+an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture checks.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DPS_PG_HOST` / `_PORT` / `_DATABASE` / `_SCHEMA` | `""` / 5432 / `dps` / `dps` | schema must match `^[a-z_][a-z0-9_]{0,62}$` |
+| `DPS_PG_USER` / `_PASSWORD` | `dps_app` / — | API pool login |
+| `DPS_PG_WORKER_USER` / `_PASSWORD` | → `DPS_PG_USER` | worker pool login (`dps_worker_login` in compose) |
+| `DPS_PG_MIGRATION_USER` / `_PASSWORD` | → `DPS_PG_USER` | DDL login (`dps_owner` in compose) |
+| `DPS_PG_POOL_MIN` / `_MAX`, `DPS_PG_SSL_ROOT_CERT` | 2 / 16, — | the CA file turns on verified TLS (required in staging/prod) |
+| `DPS_RLS_ENABLED` | `true` | must stay `true` in staging/prod |
+| `DPS_MIGRATIONS_MODE` | `auto` | `auto` (apply at boot) \| `verify` (staging/prod) \| `off` (tests) |
+| `DPS_JOB_KEK` / `DPS_JOB_KEK_FILE`, `DPS_JOB_KEK_PREVIOUS` | — | base64 of exactly 32 bytes (`python -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())'`); staging/prod read it **only** from `_FILE` |
+| `DPS_JOB_LEASE_SECONDS`, `DPS_PARTITION_LEASE_SECONDS` | 300, 120 | queue leases |
+| `DPS_JOB_MAX_ATTEMPTS`, `DPS_PARTITION_MAX_ATTEMPTS` | 3, 5 | |
+| `DPS_JOB_RETRY_BASE_SECONDS` / `_MAX_SECONDS`, `DPS_JOB_POLL_INTERVAL_SECONDS`, `DPS_JOB_CLAIM_BATCH` | 30 / 3600, 2, 4 | |
+| `DPS_JOB_REAPER_INTERVAL_SECONDS`, `DPS_JOB_DRAIN_TIMEOUT_SECONDS` | 30, 30 | |
+| `DPS_JOB_TENANT_MAX_RUNNING` / `_MAX_QUEUED` | 8 / 1000 | per-tenant caps (a `dps_tenant` row overrides) |
+| `DPS_WORKER_CONCURRENCY`, `DPS_WORKER_METRICS_PORT`, `DPS_EMBEDDED_WORKER` | 4, 9400, `false` | metrics port 0 disables the worker's ops server; embedded worker refused in staging/prod |
+| `DPS_BATCH_ROWS`, `DPS_PARTITION_ROWS`, `DPS_MAX_PARTITIONS`, `DPS_DISCOVERY_SAMPLE_ROWS`, `DPS_PREFLIGHT_ROWS` | 1000, 50000, 256, 2000, 500 | |
+| `DPS_CONNECTOR_CONNECT_TIMEOUT_SECONDS` / `_STATEMENT_TIMEOUT_SECONDS` | 10 / 300 | |
+| `DPS_SECRET_DIR`, `DPS_INLINE_SECRETS_ALLOWED`, `DPS_INLINE_SECRET_TTL_HOURS` | `/var/run/secrets/dps`, `true`, 24 | inline credentials refused in staging/prod |
+| `DPS_RETENTION_DAYS`, `DPS_RETENTION_INTERVAL_HOURS`, `DPS_AUDIT_RETENTION_MONTHS` | 30, 6, 13 | |
+| `DPS_AUDIT_STRICT`, `DPS_AUDIT_QUEUE_MAX`, `DPS_AUDIT_FLUSH_BATCH`, `DPS_AUDIT_FLUSH_MS` | `false`, 10000, 200, 250 | strict audit required in staging/prod |
+| `DPS_ARTEFACT_STORE`, `DPS_ARTEFACT_DIR`, `DPS_EXPORT_ROOT` | `local`, `./var/artefacts`, `./var/exports` | `local` \| `s3`; `var/` is git-ignored |
+| `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
+| `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
+
+Declared but not read by the app: `DPS_HOST` (only the worker's ops server binds to it), `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`. The M1 document, OCR and
-schema settings above are validated (and posture-checked) from M1 Task 1 on and read as the document
-pipeline and routes land during M1.
+schema settings above are validated (and posture-checked) and read by the document pipeline and routes.
 
 Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
-(default `local`; the OCR mock `latest`) and the host-port variables `DPS_APP_PORT` (8400) and
-`DPS_OCR_PORT` (5016; the others arrive with their services, §3 "Lane-safe stacks").
-`DPS_SMOKE_REQUIRE_OCR=1` makes `tools/smoke_test.py` fail instead of skipping its OCR checks.
+(default `local`; the OCR mock `latest`) and the host-port variables `DPS_APP_PORT` (8400),
+`DPS_DB_PORT` (5441), `DPS_SOURCE_PG_PORT` (5442), `DPS_MINIO_PORT` (9010), `DPS_MINIO_CONSOLE_PORT`
+(9011) and `DPS_OCR_PORT` (5016; the others arrive with their services, §3 "Lane-safe stacks").
+`DPS_SMOKE_REQUIRE_OCR=1` makes `tools/smoke_test.py` fail instead of skipping its OCR checks;
+`DPS_SMOKE_M2=auto|on|off` selects its job-platform checks.
 
 ## 5. Probes and ops surfaces
 
 - `GET /health` — liveness, `{"status": "ok"}`.
 - `GET /readyz` — `{"ready", "components"}` with `api-core`, `llm-gateway` (`provider`, `coin_tls`
   `verified` / `insecure`), `ner`
-  (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`) and, from M1, `ocr`
+  (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`), from M1 `ocr`
   (`up` / `down` / `down:<status>` / `error` / `unconfigured` / `tesseract_missing`, with `provider`
   and `engine` — `azure-read-v3.2` or `tesseract-<major.minor>`; probed at
   startup and every `DPS_OCR_PROBE_INTERVAL_SECONDS` while OCR is configured; never required, since
-  JSON and text need no OCR); **503** only when a required component is down, and only `api-core`
-  is required (it turns false on shutdown).
+  JSON and text need no OCR), and from M2 `db` (`up` / `down` / `unconfigured`, with `migrations:
+  verified`) and `jobs` (ok when the DB is up, the migrations verify and the KEK is loaded); **503**
+  only when a required component is down, and only `api-core` is required (it turns false on
+  shutdown) — the engine and document routes never depend on the database. A database that is down
+  at boot is retried every 10 s; meanwhile the `/api/v1` job-platform routes answer 503 `{"detail",
+  "code": "db_unavailable"}`. RLS posture problems are logged as `rls_posture_problem` locally and
+  refuse boot in staging/prod.
+- Errors are one wire shape (contract §8.2): `{"detail", "code", …}` — M1's `CodedHTTPException` and
+  `dps.errors.CodedError`, M2's `DpsHttpError` (plus its `extra` fields) and the auth refusals with a
+  code are rendered by one handler; M0 routes keep `{"detail"}` where they have no code. A tenant id
+  starting with `_` (`_system`) is refused with 403 `tenant_reserved`, wildcard keys included; the
+  job platform takes lower-case tenant ids only (400 `tenant_invalid`). CORS allows
+  `GET POST PATCH DELETE OPTIONS`, the `Idempotency-Key` header, and exposes `Idempotent-Replay`.
+  `DPS_EMBEDDED_WORKER=true` (local only) runs a worker `Consumer` inside the app process.
 - `GET /metrics` — Prometheus: `dps_requests_total{route,outcome}`,
   `dps_request_seconds{route}`, `dps_findings_total{entity_type,detector}`,
   `dps_transforms_total{mode,method}`, `dps_llm_calls_total{provider,purpose,outcome}`,
@@ -204,6 +391,16 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   `<preset|custom>+inline:<hash12>` for an inline policy (M1; never the inline body).
   Logs go to stdout through an allow-list of field names; outside `local` they are JSON.
 - `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json`. Probe and metrics routes are not in the schema.
+- **Worker (M2).** `python -m dps.worker` claims `discover`, `run` (prepare/finalize, partitions)
+  and `retention` jobs with `DPS_WORKER_CONCURRENCY` tasks; it needs `DPS_PG_HOST` and `DPS_JOB_KEK`
+  (refuses to start without either, exit 1, no traceback). It serves `GET /health`, `GET /readyz`
+  (`db` = `SELECT 1`, `migrations` verified, `kek` loaded, `queue` claiming; 503 otherwise) and
+  `GET /metrics` on `${DPS_HOST}:${DPS_WORKER_METRICS_PORT}` (9400; 0 = off). SIGTERM/SIGINT drain:
+  stop claiming, wait `DPS_JOB_DRAIN_TIMEOUT_SECONDS` while heartbeats keep the leases, cancel and
+  release the rest without charging an attempt, unregister, exit 0. Every worker runs the reaper and
+  schedules at most one retention job per `DPS_RETENTION_INTERVAL_HOURS` across replicas (owner
+  `_system`); retention deletes expired terminal jobs with their artefacts, stale proposed/superseded
+  snapshots and expired inline secrets, purges leftover sealed keys, never the audit log or exports.
 
 ## 6. Security posture
 
@@ -212,7 +409,10 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   `DPS_SSL_CERT_FILE` and both URLs, Stellar/COIN URLs `https`, `DPS_COIN_TLS_INSECURE=true` only
   with `DPS_ALLOW_INSECURE_COIN_MINT=true`, audit on, and with `DPS_OCR_PROVIDER=azure` a
   `DPS_AZURE_VISION_KEY` and an `https` `DPS_AZURE_VISION_ENDPOINT` (M1). Messages name the setting,
-  never its value.
+  never its value. With `DPS_PG_HOST` set (M2) it also requires: the job KEK from `DPS_JOB_KEK_FILE`
+  (a literal `DPS_JOB_KEK` env var is refused), `DPS_INLINE_SECRETS_ALLOWED=false`,
+  `DPS_RLS_ENABLED=true`, `DPS_MIGRATIONS_MODE=verify`, `DPS_AUDIT_STRICT=true`,
+  `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`.
 - **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
   default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
@@ -224,16 +424,30 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 - Console API key: kept in `sessionStorage` (gone with the tab); the header's "Remember key on this
   device" moves it to `localStorage` and unticking removes it again. A key left in `localStorage` by
   the M0 console is moved into the tab's session on first load.
-- CORS: any origin, methods `GET POST OPTIONS`, headers `Content-Type X-API-KEY X-DPS-Tenant
-  X-Request-ID` (keys travel in headers, not cookies; to be narrowed in M5).
+- CORS: any origin, methods `GET POST PATCH DELETE OPTIONS` (M2), headers `Content-Type X-API-KEY
+  X-DPS-Tenant X-Request-ID Idempotency-Key` (keys travel in headers, not cookies; to be narrowed in
+  M5).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a
   500 `internal error` with only the exception class logged.
 
 ## 7. Secrets (names only)
 
-`DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`, `DPS_COIN_CLIENT_SECRET`, `DPS_COIN_SCOPE`, and from M1
-`DPS_AZURE_VISION_KEY` — mount them and use the `_FILE` form. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
+`DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`, `DPS_COIN_CLIENT_SECRET`, `DPS_COIN_SCOPE`, from M1
+`DPS_AZURE_VISION_KEY` — mount them and use the `_FILE` form. M2 adds `DPS_JOB_KEK(_FILE)` (`_FILE`
+only in staging/prod; `DPS_JOB_KEK_PREVIOUS` arrives with M5's rotation), `DPS_PG_PASSWORD(_FILE)`,
+`DPS_PG_WORKER_PASSWORD(_FILE)`, `DPS_PG_MIGRATION_PASSWORD(_FILE)` and
+`DPS_S3_SECRET_ACCESS_KEY(_FILE)` (with `DPS_S3_ACCESS_KEY_ID`), plus the connection `secret_ref`
+directories under `DPS_SECRET_DIR`: `dps/src/*` (sources), `dps/tgt/*` (targets), `dps/s3/*` (file
+stores). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
 set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
+
+Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
+`DPS_SECRET_DIR/<ref>/` from which only these files are read: `username`, `password`, `dsn`
+(Oracle), `uri` (Mongo), `access_key_id` + `secret_access_key` (S3), `storage_state.json` (M4) and
+`ca.pem` (a source's CA bundle). Inline credentials (dev only) are sealed with `DPS_JOB_KEK` into
+`dps_connection.secret_enc` and stop resolving after `DPS_INLINE_SECRET_TTL_HOURS`. A `secret_ref`
+is not tenant-scoped: any tenant with the `jobs` scope can name any mounted reference, so mount only
+the references the deployment's tenants may use (open issue, see the M2 build report).
 
 ## 8. Traps
 
@@ -241,9 +455,11 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 - The image installs `dps` **editable** on purpose: `dps/app.py` serves `<source root>/frontend/dist`.
   A wheel install into site-packages starts without the console (`frontend_disabled` in the log).
 - The console builds with `base: '/'` (M1): asset URLs are absolute (`/assets/…`, `/theme-init.js`)
-  so nested routes (`/playground/documents`, `/policies/:name`) load their bundles. Hosting the
-  console under a path prefix (`https://host/dps/`) needs a gateway rewrite of that prefix to the
-  root; M0's `./` only worked one segment deep.
+  so every nested route (`/playground/documents`, `/policies/:name`, `/data-sources/jobs/new`,
+  `/reports/evidence/<id>`) loads its bundles; the app also still resolves `…/assets/<file>` and root
+  files under any route prefix (M2 Task 24). Hosting the console under a path prefix
+  (`https://host/dps/`) needs a gateway rewrite of that prefix to the root; M0's `./` only worked one
+  segment deep.
 - FPE fallbacks: with `DPS_FPE_ENABLED=false` the plan turns `fpe_*` into `det_token` with reason
   `…|fallback:fpe_disabled`; `phone` stays `phone` in the plan and runs as `det_token`
   (`fallback:fpe_unavailable`). With FPE on, a domain under 10⁶ still falls back
@@ -258,6 +474,13 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 - Presidio is recall-only; identifiers with checksums come from the pattern tier regardless.
   Without the `ner` image, names in free text are not detected (key names still are).
 - The access log is off (`--no-access-log`): it is stdlib logging and bypasses the allow-list.
+- UK mobiles in the Ofcom drama range (`+44 7700 900xxx`, what the surrogate engine generates for
+  GB) are not detected as phones **in free text**. A job whose free-text column repeats such a
+  number from another column fails closed with `leakage` (the per-row sweep finds the column's
+  original in the output). The demo seed therefore keeps GB phones out of `customers.notes`; real
+  numbers are valid and detected. Open item for the detector owner (M2-DEVIATIONS, Task 27).
+- `docker compose --env-file X` replaces `.env` for interpolation: a lane passes `--env-file .env`
+  first, or its image tag and host ports fall back to the defaults (another lane's).
   Per-request evidence is the `audit` line and `/metrics`. Uvicorn's startup lines and, in the NER
   image, Presidio's `Loaded recognizer` lines are plain text (they carry no values).
 - `DPS_ENV=local` logs are console-rendered with ANSI colours in `docker compose logs`; use `dev` to
@@ -267,6 +490,43 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 - The root filesystem is read-only under compose: anything that writes must use `/tmp` (tmpfs) or a
   volume.
 - `/docs` loads Swagger UI from a public CDN; on an air-gapped network use `/api/v1/openapi.json`.
+- Selections are validated with **sqlglot 30.22.0** (`connectors` extra, `sqlglot>=26`). Node class
+  names drift between sqlglot releases (`AlterTable` → `Alter`, `walk()` yielding tuples, `Expr`
+  as the base type): `dps/layers/connectors/selection.py` looks classes up by name and its tests
+  pin the rejection codes, so after an upgrade run `pytest tests/connectors/test_selection.py`
+  and add renamed classes to `_node_types(...)` — never loosen a test. Oracle renders `DATE '…'` as
+  `TO_DATE(:l1, 'YYYY-MM-DD')` and intervals as `NUMTODSINTERVAL(:l1, 'DAY')`; those format/unit
+  strings are the only literals left in a compiled selection (plus `ORDER BY` positions and type
+  parameters). Denied functions (`DENIED_FUNCTION_PREFIXES`) are refused as calls and in PostgreSQL
+  attribute notation, where `t.f` and `(expr).f` call `f(t)`/`f(expr)`: a **qualified** name whose
+  last part starts with a denied prefix is `selection_function_denied`, so a qualified column such
+  as `a.utl_rate` or `c.ts_status` is refused too — reference it unqualified (an unqualified name
+  is never a call). `lo_*` calls are refused; in attribute position only the real large-object
+  function names are (`a.lo_limit` stays usable).
+- PostgreSQL sources (M2, `dps/layers/connectors/postgres.py`): every read runs in `BEGIN READ ONLY` on a
+  session with `statement_timeout` = `DPS_CONNECTOR_STATEMENT_TIMEOUT_SECONDS`, `lock_timeout=5s` and
+  `application_name = dps:<action>:<job id>` (what a DBA sees in `pg_stat_activity`). The pool
+  resets a session when a read releases it (`pg_advisory_unlock_all()`, `RESET ALL`), so no
+  session lock or setting outlives a read. Bind values are
+  coerced by the prepared statement's parameter types (a JSON string for a `date` column works; one
+  that is not a date fails with `selection_param_invalid`, no value in the message). A refused login
+  is `connection_failed` and not retried; network failures are. The connection test's advisory
+  `no_sql_string_functions` counts SQL-string/export functions (`dblink*`, `xpath_table`,
+  `pg_background_launch`, `aws_s3.query_export_to_s3`, …) the source login can execute: give the
+  source login none.
+- PostgreSQL targets (M2): `in_place`/`append` keep a write ledger, table `dps_write_ledger` in the
+  target schema (or `target.ledger_owner`), created at prepare — the target login needs `CREATE` on
+  that schema (or a pre-created ledger with SELECT/INSERT/UPDATE/DELETE). A finished job deletes its
+  ledger rows; a **failed** job keeps them, because a retry resumes from the ledger and must never
+  re-apply a batch. `in_place` refuses a transformed key (`pk_transform_in_place`: review the key to
+  `keep`) and any output that cannot fit an existing column: `det_token` on a bounded column is
+  `length_overflow` at prepare, and FPE needs ≥ 5 letters and 0 or ≥ 6 digits (a 4-digit PAN falls
+  back to `det_token` and fails the preflight on `char(10)`). `table` targets create planned text
+  columns as `text`, so they take any method. An `append` to the source table needs an `offset` of at
+  least `max(key) + 1 - min(selected key)`, or `generate` on an identity or an owned ascending sequence
+  that does not cycle; anything else fails prepare with `pk_strategy_invalid` (new rows would land in
+  key ranges still to be read). `ledger_conflict` on a *failed* partition means its ledger rows were
+  removed while the job ran: which batches were applied is unknown, so it is never written again.
 - Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py` (see
   "Lane-safe stacks", §3).
 - Synthesis under a `strict` policy is still refused, rarely, when a reshaped identifier (a keyed
@@ -276,10 +536,44 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
   in 3,000 to 5,000; retry without the seed (or with another one). Every other surrogate is re-drawn
   when it would hold another value of the record or a part of its names.
 
+- **M2 traps.**
+  - asyncpg does not coerce a JSON string into a typed parameter (a `date` bind given as
+    `"2024-01-01"` is refused by the driver); DPS coerces every bind by the prepared statement's
+    parameter types, and a value that does not parse is `selection_param_invalid` (no value in the
+    message).
+  - The contract's `DPS_WRITE_LEDGER` is the table `dps_write_ledger` (PostgreSQL folds unquoted names
+    to lower case); `ledger_owner` moves it to another schema.
+  - On resume the target's write ledger is authoritative over the partition checkpoint: a batch
+    committed with its ledger mark but not yet checkpointed is not applied again.
+  - `fpe_digits` on a value with fewer than 6 digits falls back to `det_token`, whose output does not
+    fit an integer column; discovery therefore suggests `keep` for such numeric keys
+    (`numeric_key_kept`) and `det_token` for short text identifiers (`fpe_domain_too_small`).
+  - Created target tables (`table` with `create_if_missing`) copy the column definitions only — no
+    foreign keys, indexes, defaults or constraints beyond the key.
+  - A superseded snapshot (an object accepted again) still drives the jobs that were submitted with
+    it; only a dropped or retyped column stops them (`snapshot_stale` at prepare).
+  - Homebrew PostgreSQL scratch clusters need `timezone = 'UTC'` (`tools/scratch_pg.sh` sets it);
+    tests compare timestamps across the driver and the server.
+  - The in-place (and every other generated) key is returned **once**, in the `POST /jobs/run`
+    answer; keep it. The evidence pack holds only its `kid`; a retry after the key was purged needs
+    it resubmitted (`key_material_required`).
+  - `DPS_EMBEDDED_WORKER=true` runs a worker inside the app process for local demos only; posture
+    refuses it in staging/prod.
+  - The console's step 3 review table has eight columns and scrolls sideways inside its card at
+    1440 px (Method, Anchor and Text pipeline are to the right).
+  - In place never rewrites a key column (`pk_transform_in_place`), and discovery maps an entity key
+    such as `bank_restore.customers.customer_id` (CUSTOMER_ID) to `fpe_digits`. The wizard's step 4
+    then shows a failed key check and stays closed; press **Change it in step 3**, **Run again**,
+    set the key's method to `keep` and accept the new snapshot (an accepted snapshot never changes).
+  - Run the integration gates one at a time against a lane's stack: the service tests share one
+    metadata database, one source database and one MinIO bucket with fixed keys (two concurrent runs
+    collide, e.g. on `tests/big.bin` in `tests/connectors/test_storage_s3.py`).
+
 ## 9. Next milestones
 
-M1 documents (shipped, §10) → M2 jobs + PostgreSQL (adds Postgres, worker, migrations) → M3 Oracle +
-MongoDB → M4 UI scanner (browser worker image) → M5 hardening + showcase. Each adds a section here.
+M1 documents (done: v0.2.0, §10) → **M2 jobs + PostgreSQL (done: tag `v0.1.0-m2`; Postgres, worker,
+migrations, the jobs API and console)** → integrated on `main` (§11) → M3 Oracle + MongoDB → M4 UI
+scanner (browser worker image) → M5 hardening + showcase. Each adds a section here.
 
 ## 10. M1 — documents and Layer 1 complete (v0.2.0)
 

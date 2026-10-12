@@ -24,7 +24,6 @@ dependencies = [
 ner = ["presidio-analyzer>=2.2.355", "spacy>=3.7"]
 fpe = ["fastfpe>=0.2.1"]        # FF1 (NIST SP 800-38G); enabled only with DPS_FPE_ENABLED=true
 vertex = ["google-genai>=1.0"]  # laptop path to Gemini; production goes through Stellar
-dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10", "types-PyYAML"]
 docs = [
     "pypdf>=5.0",
     "pdfplumber>=0.11.4",
@@ -33,7 +32,18 @@ docs = [
     "python-docx>=1.1",
     "pillow>=10.4",
 ]
+db = ["asyncpg>=0.29"]                                     # metadata DB + PostgreSQL connector
+connectors = ["sqlglot>=26", "pyarrow>=16", "boto3>=1.34"]  # M3 appends oracledb, pymongo>=4.13
 uitest = ["playwright==1.55.0"]  # console check only; matches mcr.microsoft.com/playwright:v1.55.0-noble (M4 pins the same)
+e2e = ["playwright==1.55.0"]                               # console browser check; same pin as M4's [scanner]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -55,16 +65,21 @@ known-first-party = ["dps"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = [
     "ner: needs the optional [ner] extra and spaCy models",
     "fpe: needs the optional [fpe] extra",
     "network: needs a live LLM gateway",
-    "browser: needs Playwright (M4)",
-    "integration: needs live databases (M2+)",
+    "browser: needs Playwright Chromium (M2 console check, M4 scanner)",
+    "integration: needs a live source/target container (always combined with a service marker)",
     "docs: needs the [docs] extra (pure Python; runs by default when installed)",
     "ocr: needs the Azure Read v3.2 mock at DPS_TEST_OCR_URL (docker compose --profile docs up -d azure-ocr-mock)",
     "tesseract: needs a tesseract binary on PATH (the app image has one; the Mac may not)",
+    "db: needs the metadata Postgres (DPS_TEST_PG_DSN, default 127.0.0.1:${DPS_DB_PORT:-5441})",
+    "pg_source: needs the demo source Postgres (DPS_TEST_SOURCE_PG_DSN, default 127.0.0.1:${DPS_SOURCE_PG_PORT:-5442})",
+    "s3: needs MinIO (DPS_TEST_S3_ENDPOINT, default http://127.0.0.1:${DPS_MINIO_PORT:-9010})",
+    "slow: takes more than 30 s (benchmarks, resume-after-kill)",
 ]
 
 [tool.mypy]

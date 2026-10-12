@@ -6,7 +6,7 @@ import hashlib
 from collections import Counter
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from dps.engine.taxonomy import Sensitivity
 
@@ -47,14 +47,34 @@ class Finding(BaseModel):
     value_hash: str | None = None
 
 
+#: Parameters every *new* plan entry gets when its method spec leaves them out (contract §6.5,
+#: amendment 2026-10-12). ``fpe_digits`` preserves the leading zero, so the same digits give the
+#: same token in a document, a text column and an integer or decimal column, and an integer
+#: column never drops a token's first digit. The default lives here, not in the method, so a
+#: reveal hint or reveal map without the param still means plain FF1 (tokens from v0.1.0).
+PLAN_PARAM_DEFAULTS: dict[str, dict[str, Any]] = {"fpe_digits": {"leading_zero": "preserve"}}
+
+
+def with_plan_defaults(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """``params`` plus :data:`PLAN_PARAM_DEFAULTS` for ``method`` that it does not set (a copy)."""
+    missing = {k: v for k, v in PLAN_PARAM_DEFAULTS.get(method, {}).items() if k not in params}
+    return {**params, **missing}
+
+
 class PlanEntry(BaseModel):
-    """One finding and the method the policy resolved for it."""
+    """One finding and the method the policy resolved for it (params completed with
+    :data:`PLAN_PARAM_DEFAULTS`, so reveal hints record them)."""
 
     finding: Finding
     method: str
     params: dict[str, Any] = Field(default_factory=dict)
     reason: str
     reversible: bool
+
+    @model_validator(mode="after")
+    def _plan_defaults(self) -> PlanEntry:
+        self.params = with_plan_defaults(self.method, self.params)
+        return self
 
 
 class Plan(BaseModel):

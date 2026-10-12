@@ -82,7 +82,7 @@ test('an error without a JSON body or code keeps the status text', async () => {
   stub(() => new Response('<html>bad gateway</html>', { status: 502, statusText: 'Bad Gateway' }));
   await assert.rejects(api.entities(auth), (e: unknown) => {
     assert.ok(e instanceof ApiError);
-    assert.equal(e.code, null);
+    assert.equal(e.code, undefined); // contract §14: ApiError(status, message, code?, extra?)
     assert.equal(errorText(e), '502: Bad Gateway');
     return true;
   });

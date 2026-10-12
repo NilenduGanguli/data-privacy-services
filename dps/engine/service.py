@@ -231,6 +231,14 @@ class PrivacyEngine:
         """Request locale, else the policy's pin (``locale.default``), else ``DPS_DEFAULT_LOCALE``."""
         return options.locale or policy.locale.default or self.settings.default_locale
 
+    def detector(self, policy: Policy, locale: str) -> Detector:
+        """The detector this engine would use for ``policy`` (L2 runs it over free-text columns)."""
+        return self._detector(policy, locale)
+
+    def surrogate_engine(self, seed: SynthesisSeed, locale: str) -> SurrogateEngine:
+        """A fresh, seeded surrogate engine (bounded persona cache: create one per batch)."""
+        return SurrogateEngine(seed_bytes(seed), default_locale=locale)
+
     def _detector(self, policy: Policy, locale: str) -> Detector:
         config = DetectorConfig(
             min_score=policy.detect.min_score,

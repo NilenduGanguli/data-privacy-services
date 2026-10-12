@@ -33,7 +33,7 @@ def test_obfuscate_plan_follows_policy_and_falls_back_without_fpe() -> None:
     by = {e.finding.entity_type: e for e in plan.entries}
     assert (
         by["SSN"].method == "fpe_digits"
-        and by["SSN"].params == {"keep_suffix": 4}
+        and by["SSN"].params == {"keep_suffix": 4, "leading_zero": "preserve"}
         and by["SSN"].reversible
     )
     assert by["EMAIL"].method == "email" and by["GADGET_ID"].method == "det_token"
@@ -137,4 +137,31 @@ def test_empty_findings_give_an_empty_low_plan() -> None:
         plan.entries == []
         and plan.record_sensitivity is Sensitivity.LOW
         and explain_plan(plan) == []
+    )
+
+
+def test_fpe_digits_entries_preserve_the_leading_zero_unless_the_policy_says_otherwise() -> None:
+    from dps.engine.findings import PlanEntry
+
+    policy = Policy(
+        treat={
+            "SSN": {"method": "fpe_digits", "keep_suffix": 4},
+            "ACCOUNT_NUMBER": {"method": "fpe_digits", "leading_zero": "any"},
+        }
+    )
+    findings = [_f("SSN", "$.ssn"), _f("ACCOUNT_NUMBER", "$.acct"), _f("EMAIL", "$.email")]
+    by = {
+        e.finding.entity_type: e
+        for e in build_plan(findings, policy, "obfuscate", fpe_enabled=True).entries
+    }
+    assert by["SSN"].params == {"keep_suffix": 4, "leading_zero": "preserve"}
+    assert by["ACCOUNT_NUMBER"].params == {"leading_zero": "any"}
+    assert by["EMAIL"].params == {}
+    # the policy object is not changed, and any PlanEntry built elsewhere gets the same default
+    assert policy.treat["SSN"].params == {"keep_suffix": 4}
+    entry = PlanEntry(finding=_f("SSN", "$.x"), method="fpe_digits", reason="t", reversible=True)
+    assert entry.params == {"leading_zero": "preserve"}
+    assert (
+        PlanEntry(finding=_f("SSN", "$.x"), method="det_token", reason="t", reversible=True).params
+        == {}
     )

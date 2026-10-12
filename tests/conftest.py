@@ -7,6 +7,8 @@ import pytest
 from dps.config import Settings
 from tests.services import require_service
 
+pytest_plugins = ["tests.fixtures.services", "tests.fixtures.db", "tests.fixtures.sources"]
+
 
 @pytest.fixture
 def settings() -> Settings:

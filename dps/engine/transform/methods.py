@@ -199,27 +199,53 @@ def _det_reverse(token: str, ctx: TransformContext) -> str:
     return _det_back(token, ctx, ctx.entity_type)
 
 
-def _keeps(ctx: TransformContext) -> tuple[int, int]:
+#: ``fpe_digits`` ``leading_zero``: ``any`` is plain FF1 (the v0.1.0 tokens; the default when a
+#: hint or plan entry has no such param); ``preserve`` cycle-walks so the token's first digit is
+#: 0 exactly when the value's is (an integer or decimal column then keeps every digit). Every
+#: plan entry defaults to ``preserve`` (``findings.PlanEntry``, contract §6.5).
+LEADING_ZERO_MODES = ("any", "preserve")
+
+
+def _keeps(ctx: TransformContext) -> tuple[int, int, bool]:
     return (
         _int_param(ctx, "fpe_digits", "keep_prefix", 0, 0, 64),
         _int_param(ctx, "fpe_digits", "keep_suffix", 0, 0, 64),
+        _choice_param(ctx, "fpe_digits", "leading_zero", "any", LEADING_ZERO_MODES) == "preserve",
     )
+
+
+_NOT_A_PERMUTATION = "fpe_digits: the cipher is not a permutation (cycle walk did not converge)"
 
 
 def _fpe_digits(value: str, ctx: TransformContext) -> str | object:
-    keep_prefix, keep_suffix = _keeps(ctx)
-    out = fpe.fpe_digits_encrypt(
-        ctx.cipher("fpe_digits"), value, keep_prefix=keep_prefix, keep_suffix=keep_suffix
-    )
+    keep_prefix, keep_suffix, preserve = _keeps(ctx)
+    cipher = ctx.cipher("fpe_digits")
+    try:
+        out = fpe.fpe_digits_encrypt(
+            cipher,
+            value,
+            keep_prefix=keep_prefix,
+            keep_suffix=keep_suffix,
+            preserve_leading_zero=preserve,
+        )
+    except fpe.CycleWalkError:
+        raise MethodError(_NOT_A_PERMUTATION) from None
     return _TOO_SMALL if out is None else out
 
 
 def _fpe_digits_reverse(token: str, ctx: TransformContext) -> str:
-    keep_prefix, keep_suffix = _keeps(ctx)
+    keep_prefix, keep_suffix, preserve = _keeps(ctx)
+    cipher = ctx.cipher("fpe_digits")
     try:
         return fpe.fpe_digits_decrypt(
-            ctx.cipher("fpe_digits"), token, keep_prefix=keep_prefix, keep_suffix=keep_suffix
+            cipher,
+            token,
+            keep_prefix=keep_prefix,
+            keep_suffix=keep_suffix,
+            preserve_leading_zero=preserve,
         )
+    except fpe.CycleWalkError:
+        raise MethodError(_NOT_A_PERMUTATION) from None
     except ValueError:
         raise MethodError("fpe_digits token cannot be reversed (domain too small)") from None
 
