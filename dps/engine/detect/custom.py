@@ -177,6 +177,13 @@ class PolicyCustomDetector:
             if d.sensitivity is not None:
                 register_entity(EntityInfo(d.entity_type, Family.OTHER, d.sensitivity, "declared"))
 
+    @property
+    def text_entities(self) -> frozenset[str]:
+        """The types its patterns and deny lists can find inside free text."""
+        return frozenset(r.supported_entity for r, *_ in self._patterns) | frozenset(
+            r.supported_entity for r, *_ in self._deny
+        )
+
     def declared(self, path: str) -> KeyCandidate | None:
         """The first declaration whose path equals or glob-matches ``path``."""
         for spec, glob in self._declared:

@@ -16,6 +16,13 @@ after its checkpoint (idempotent upserts) and ``files`` restarts from its lower 
 write ledger of a finished job, samples written rows for the evidence, stores the evidence pack,
 audits ``job.finalize`` and moves the job to its terminal state, purging the sealed key.
 
+The post-write sample re-reads up to 200 written rows and runs the detectors over every output
+column. A finding of MEDIUM or higher sensitivity in a column the snapshot called *not personal*
+(no entity, so nothing transformed it) contradicts the classification: the pack's verification is
+then ``review_required`` and ``passed`` is false in either verify mode, whatever the leakage sweep
+found (integrated verify r1, B1). Columns the snapshot classified and kept on purpose (a key kept in
+place, ``CITY: keep``) are reported apart and do not gate.
+
 Nothing here logs or stores a value, key, seed or selection literal; failures carry codes and
 exception class names only.
 """
@@ -25,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -41,9 +49,11 @@ from dps.connections import (
     load_credentials,
 )
 from dps.engine.batch import BatchResult, BatchTransformer, IncompatibleMethod, LeakageError
+from dps.engine.detect.ensemble import Detector
 from dps.engine.policy import Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_from_caller
+from dps.engine.taxonomy import Sensitivity
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobPhase, JobState, PartitionState
 from dps.jobs_models import (
@@ -63,6 +73,7 @@ from dps.layers.connectors.base import (
     KeyRange,
     LedgerConflict,
     LedgerMark,
+    PkGenerate,
     PkOffset,
     PkToken,
     PrepareReport,
@@ -101,6 +112,8 @@ logger = get_logger(__name__)
 
 #: Rows a ``finalize`` re-reads from a database target for the post-write detector sample.
 POST_SAMPLE_ROWS = 200
+#: Output kinds whose post-sample findings must reach discovery's bar to count (ids, amounts).
+_NUMERIC_KINDS = frozenset({"int", "decimal", "float"})
 #: Keys per streamed page of the append collision pre-check.
 PRECHECK_PAGE = 10_000
 #: How long a cancel-finalize waits before checking canceled partitions' leases again.
@@ -942,6 +955,98 @@ async def finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _retry(ctx, job, code, type(exc).__name__)
 
 
+def scan_written(
+    rows: list[dict[str, Any]],
+    shape: TableShape,
+    *,
+    written: set[str],
+    planned: set[str],
+    unclassified: set[str],
+    detector: Detector,
+    min_score: float,
+) -> dict[str, Any]:
+    """Counts of the post-write sample (value-free): cells with findings per column group.
+
+    ``detector_hits``: cells of transformed columns with a finding (expected: format-preserving
+    tokens still look like their type). ``kept_column_hits``: cells with a MEDIUM+ finding in
+    ``unclassified`` kept columns (the snapshot said *not personal*), and ``kept_columns`` their
+    names — what makes the verification ``review_required``. A numeric column counts only when its
+    sampled values reach discovery's own bar (one type's ``rate × mean score``, or all types'
+    together, at or above ``min_score``): a column of 12-digit ids holds a Verhoeff-valid
+    "Aadhaar" one time in ten by chance, which is ``numeric_noise_hits``, not personal data.
+    ``declared_kept_hits``: cells of columns classified but kept on purpose (never gating).
+    """
+    transformed = declared = 0
+    cells: Counter[str] = Counter()
+    present: Counter[str] = Counter()
+    whole: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    best: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        for column in shape.columns:
+            if column.name not in written:
+                continue
+            text = to_engine_text(row.get(column.name), column)
+            if not text:
+                continue
+            present[column.name] += 1
+            findings = detector.detect(data={column.name: text}).findings
+            if not findings:
+                continue
+            if column.name in planned:
+                transformed += 1
+                continue
+            sensitive = [f for f in findings if f.sensitivity.rank >= Sensitivity.MEDIUM.rank]
+            if not sensitive:
+                continue
+            if column.name not in unclassified:
+                declared += 1
+                continue
+            cells[column.name] += 1
+            scores = [f.score for f in sensitive if f.locator.whole]
+            for f in sensitive:
+                if f.locator.whole:
+                    whole[column.name][f.entity_type].append(f.score)
+            if scores:
+                best[column.name].append(max(scores))
+
+    def bar(name: str) -> float:
+        n = present[name]
+        rates = [len(v) / n * (sum(v) / len(v)) for v in whole[name].values() if v]
+        mixed = len(best[name]) / n * (sum(best[name]) / len(best[name])) if best[name] else 0.0
+        return max([*rates, mixed])
+
+    flagged = {
+        name
+        for name in cells
+        if shape.column(name).kind not in _NUMERIC_KINDS or bar(name) >= min_score
+    }
+    return {
+        "rows": len(rows),
+        "detector_hits": transformed,
+        "kept_column_hits": sum(cells[n] for n in flagged),
+        "kept_columns": sorted(flagged),
+        "numeric_noise_hits": sum(v for n, v in cells.items() if n not in flagged),
+        "declared_kept_hits": declared,
+    }
+
+
+def verification_outcome(
+    hits: int, leakage: bool, post_sample: dict[str, Any] | None
+) -> tuple[bool, str, bool]:
+    """``(passed, status, review_required)`` of a run's verification.
+
+    ``failed`` when the sweep caught an original (or refused a batch as leakage);
+    ``review_required`` when the post-write sample found personal data in a column the snapshot
+    called not personal; else ``passed``. Only ``passed`` passes.
+    """
+    review = int((post_sample or {}).get("kept_column_hits") or 0) > 0
+    if hits or leakage:
+        return False, "failed", review
+    if review:
+        return False, "review_required", True
+    return True, "passed", False
+
+
 async def _post_sample(
     ctx: HandlerContext,
     job: JobInternal,
@@ -949,6 +1054,7 @@ async def _post_sample(
     plan: RunPlan,
     source_conn: Connection,
     target_conn: Connection | None,
+    snapshot: ClassificationSnapshot | None,
 ) -> dict[str, Any]:
     """Re-read up to 200 written rows and run the detector over them (counts only)."""
     conn = source_conn if _same_connection(spec, source_conn) else target_conn
@@ -967,29 +1073,29 @@ async def _post_sample(
         if plan.target.write_mode == "in_place"
         else set(plan.target.write_columns) | set(plan.key)
     )
+    if isinstance(plan.target.pk_strategy, PkGenerate):
+        written -= set(plan.key)  # the target generates these keys; DPS wrote none of them
+    # columns the snapshot calls not personal; a column it does not know (a target-only column)
+    # counts as one too
+    classified = {
+        c.name for c in (snapshot.columns if snapshot else []) if c.entity_type or c.text_column
+    }
+    unclassified = {c.name for c in shape.columns} - classified - planned
     policy = _policy(ctx, spec, plan.policy_name)
     detector = ctx.engine.detector(policy, plan.locale)
-
-    def scan(sample: list[dict[str, Any]]) -> tuple[int, int]:
-        kept_hits = transformed_hits = 0
-        for row in sample:
-            for column in shape.columns:
-                if column.name not in written:
-                    continue
-                text = to_engine_text(row.get(column.name), column)
-                if not text:
-                    continue
-                if detector.detect(data={column.name: text}).findings:
-                    if column.name in planned:
-                        transformed_hits += 1
-                    else:
-                        kept_hits += 1
-        return kept_hits, transformed_hits
-
-    kept_hits, transformed_hits = await asyncio.to_thread(scan, rows)
-    count = len(rows)
-    rows.clear()  # the sample never outlives the count
-    return {"rows": count, "detector_hits": transformed_hits, "kept_column_hits": kept_hits}
+    try:
+        return await asyncio.to_thread(
+            scan_written,
+            rows,
+            shape,
+            written=written,
+            planned=planned,
+            unclassified=unclassified,
+            detector=detector,
+            min_score=policy.detect.min_score,
+        )
+    finally:
+        rows.clear()  # the sample never outlives the count
 
 
 async def _write_manifest(
@@ -1075,7 +1181,7 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             files = await _write_manifest(ctx, job, spec, plan, target_conn, parts)
         elif mode != "files":
             post_sample = await _best_effort(
-                _post_sample(ctx, job, spec, plan, source_conn, target_conn)
+                _post_sample(ctx, job, spec, plan, source_conn, target_conn, snapshot)
             )
     if plan is not None and mode in ("in_place", "append") and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
@@ -1122,7 +1228,16 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         job.id,
         phase=JobPhase.finalize,
         state=_TERMINAL[outcome],
-        progress={"outcome": outcome, "evidence_id": evidence_id, "stage": ""},
+        progress={
+            "outcome": outcome,
+            "evidence_id": evidence_id,
+            "stage": "",
+            # the job page shows the post-write review next to the leakage sweep
+            "verification": {
+                **job.progress.verification,
+                "kept_hits": int((post_sample or {}).get("kept_column_hits") or 0),
+            },
+        },
         error_code=first_error.error_code if first_error and not job.error_code else None,
         error=f"partition {first_error.no} failed" if first_error and not job.error_code else None,
         purge_secret=True,
@@ -1183,12 +1298,15 @@ async def _store_evidence(
     counters = progress.values_by_method
     hits = int(counters.get("verify:hits", 0)) + int(progress.verification.get("hits", 0))
     leakage = job.error_code == "leakage" or any(p.error_code == "leakage" for p in parts)
+    passed, status, review = verification_outcome(hits, leakage, post_sample)
     verification = {
         "mode": spec.options.verify,
         "batches": sum(p.batch_no for p in parts),
         "values_checked": int(progress.verification.get("checked", 0)),
         "hits": hits,
-        "passed": hits == 0 and not leakage,
+        "passed": passed,
+        "status": status,
+        "review_required": review,
         "post_sample": post_sample,
     }
     if ledger_cleared is not None:

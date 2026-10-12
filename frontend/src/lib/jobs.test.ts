@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
 import { evidenceSoFar, methodText, packTargetText, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
 import { confirmationKey, countKey, fqn, keyMethodsOf, runMethodFor, writtenObject, type WizardDraft } from './jobs';
+import { decisionReason, keptHitText, keptWithHits, verificationTone } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
@@ -34,6 +35,18 @@ describe('jobs helpers', () => {
     expect(needsDecision(column({ entity_type: 'EMAIL', confidence: 0.99, type_note: null }))).toBe(false);
     expect(heatTone(column({ sensitivity: 'CRITICAL' }))).toBe('crit');
     expect(heatTone(column({ entity_type: null }))).toBe('kept');
+  });
+  it('puts mixed columns and kept columns with detector hits in front of the reviewer', () => {
+    const mixed = column({ entity_type: 'MIXED_PII', confidence: 0.95, type_note: 'mixed_entities', value_entities: ['EMAIL', 'PHONE'] });
+    expect(needsDecision(mixed)).toBe(true);
+    expect(decisionReason(mixed)).toBe('Personal data of several types in one column (EMAIL, PHONE): every value is replaced whole.');
+    const kept = column({ entity_type: null, confidence: 0.36, type_note: 'kept_with_hits', value_entities: ['EMAIL'], value_hit_rate: 0.2 });
+    expect(needsDecision(kept) && keptWithHits(kept)).toBe(true);
+    expect(decisionReason(kept)).toContain('found EMAIL in 20 % of sampled rows');
+    expect(keptHitText(kept)).toBe('20 % hits');
+    const clean = column({ entity_type: null, type_note: null, value_entities: [] });
+    expect(keptWithHits(clean) || needsDecision(clean)).toBe(false);
+    expect(keptHitText(clean)).toBe('—');
   });
   it('never stores secrets, key material or filters in the saved draft', () => {
     const saved = JSON.stringify(draftForStorage(draft({ password: 'pw-123', keyMaterialJson: '{"dek":"x"}', where: "name = 'Ananya'" })));
@@ -112,7 +125,8 @@ describe('job detail helpers', () => {
     const e = evidenceSoFar(job({ progress: { rows_written: 40, partitions_total: 4, partitions_done: 3, partitions_failed: 1,
       values_by_method: { det_token: 30, keep: 50, fpe_digits: 10, 'fallback:fpe_domain_too_small': 4, 'fallback:fpe_disabled': 1, 'col:email': 30, 'verify:hits': 0 },
       verification: { checked: 40, hits: 0 } } }));
-    expect(e).toMatchObject({ rows: 40, values: 40, hits: 0, fallbacks: 5, dominantFallback: 'fpe_domain_too_small', done: 3, total: 4, failed: 1 });
+    expect(e).toMatchObject({ rows: 40, values: 40, hits: 0, keptHits: 0, fallbacks: 5, dominantFallback: 'fpe_domain_too_small', done: 3, total: 4, failed: 1 });
+    expect(evidenceSoFar(job({ progress: { verification: { checked: 40, hits: 0, kept_hits: 186 } } })).keptHits).toBe(186);
   });
 });
 
@@ -257,5 +271,13 @@ describe('evidence pack helpers', () => {
     expect(verificationText(false, 1)).toBe('failed · 1 leak caught');
     // a run stopped before its counters held a hit (a preflight leak, a fail-closed check)
     expect(verificationText(false, 0)).toBe('failed closed');
+  });
+  it('never words a review-required pack as passed (integrated verify r1, B1)', () => {
+    expect(verificationText(false, 0, true)).toBe('review required');
+    expect(verificationTone(false, 0, true)).toBe('amber');
+    expect(verificationText(false, 3, true)).toBe('failed · 3 leaks caught');
+    expect(verificationTone(false, 3, true)).toBe('rose');
+    expect(verificationTone(true, 0)).toBe('emerald');
+    expect(verificationTone(false, 0)).toBe('rose');
   });
 });

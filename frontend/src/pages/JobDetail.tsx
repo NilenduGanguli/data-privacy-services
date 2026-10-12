@@ -148,9 +148,11 @@ function PartitionsCard({ job, parts, keyCols }: { job: Job; parts: PartitionVie
 function EvidenceCard({ job }: { job: Job }): JSX.Element {
   const e = evidenceSoFar(job);
   const leaked = e.hits > 0 || job.error_code === 'leakage';
+  // the post-write sample found personal data in a column kept as not personal (finalize)
+  const review = !leaked && e.keptHits > 0;
   return (
     <div className="card">
-      <div className="card-head"><div className="card-title">Evidence so far</div><span className={`chip ${leaked ? 'rose' : 'emerald'}`}>{leaked ? 'leakage caught · failed closed' : 'verifier passing'}</span></div>
+      <div className="card-head"><div className="card-title">Evidence so far</div><span className={`chip ${leaked ? 'rose' : review ? 'amber' : 'emerald'}`}>{leaked ? 'leakage caught · failed closed' : review ? 'review required' : 'verifier passing'}</span></div>
       <div className="ev">
         <div className="box"><div className="l">Rows protected</div><div className="v">{fmtCount(e.rows)}</div></div>
         <div className="box"><div className="l">Values transformed</div><div className="v">{fmtCompact(e.values)}</div></div>
@@ -159,6 +161,9 @@ function EvidenceCard({ job }: { job: Job }): JSX.Element {
         <div className="box"><div className="l">Raw PII to LLM</div><div className="v ok">0</div></div>
         <div className="box"><div className="l">Partitions</div><div className="v">{e.done} / {e.total}{e.failed > 0 && <span className="faint" style={{ color: 'var(--rose)' }}> · {e.failed} failed</span>}</div></div>
       </div>
+      {review && (
+        <div className="callout amber" style={{ marginTop: 12, fontSize: 12 }} data-testid="review-required"><b>Review required.</b> The post-write sample found personal data in {fmtCount(e.keptHits)} {e.keptHits === 1 ? 'value' : 'values'} of columns the snapshot kept as not personal: they reached the target untransformed. Open the evidence pack, reclassify those columns and run again.</div>
+      )}
       {job.mode === 'synthesize' ? (
         <div className="callout violet" style={{ marginTop: 12, fontSize: 12 }}>Output is <b>synthetic — measured, not claimed anonymous</b>. The seed is held by the requesting team; DPS keeps no copy.</div>
       ) : (

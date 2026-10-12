@@ -1,8 +1,10 @@
 # HANDOFF — data-privacy-services (DPS)
 
 **Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
-— merged with `--no-ff`; the gates of the integrated tree are recorded in §11. The lane records
-of each milestone and of M0 follow unchanged.
+— merged with `--no-ff`; the gates of the integrated tree are recorded in §11, and the fixes of the
+integrated verification round 1 (raw PII kept as "not personal"; account numbers and customer ids
+in free text) with their gates in §11.1. The lane records of each milestone and of M0 follow
+unchanged.
 
 **M1 (v0.2.0) verified 2026-10-12 on branch `m1`** (lane `dps-wt-m1`: `DPS_APP_PORT=8401`,
 `DPS_OCR_PORT=5016`, `DPS_IMAGE_TAG=m1`) — see §10: `ruff format --check` / `ruff check` on
@@ -739,3 +741,65 @@ the M1 version; `v0.1.0-m2` is M2's lane tag).
    same `Idempotency-Key` is refused as `idempotency_key_reused`; mint a new key.
 4. New console CSS goes under its page root (`.<name>-page`); the M1 and M2 pages share short class
    names (`.m`, `.plan`, `.two`, `.grp`, `.stack`), so a global rule leaks into the other pages.
+
+### 11.1 Integrated verification r1 fixes (2026-10-12)
+
+`fix(integrate)` on top of `88eae2e`. Both findings were reproduced first (the new tests fail on the
+`88eae2e` tree: 6/6 in `tests/connectors/test_demo_pii_survival.py`; the statement text finds only
+one name).
+
+- **B1 — discovery kept PII columns as "not personal" and packs still said "verified · 0 leaks".**
+  - Discovery: when no single type reaches `min_score`, rows with *any* MEDIUM+ whole-value finding
+    count together; at the bar the column is `MIXED_PII` (`type_note: mixed_entities`,
+    `value_entities` names the types) and every value is replaced whole — `det_token` unbounded,
+    `hmac_pseudonym` (16) on a bounded column (a token would overflow it in place), `mask_partial`
+    below 16; `surrogate` when synthesizing. `value` beside `channel`/`contact_type` is mixed by its
+    name. New name cues: `*holder_name` and `<role>_name` (payee, counterparty, …), `line1` /
+    `address_line*` / `addr1`, `doc_number` / `document_no` (`NATIONAL_ID`). A kept column whose
+    sample still holds MEDIUM+ findings in ≥ 5 % of rows gets `kept_with_hits` (never "not
+    personal"); numeric columns below the bar are noise (random 12-digit ids pass Verhoeff 1 in 10).
+  - Finalize: the post-write sample counts MEDIUM+ findings in columns the snapshot kept *as not
+    personal* (`kept_column_hits`, `kept_columns`; numeric columns only at discovery's bar; keys the
+    target generates are not sampled). Any of them → `verification.status: review_required`,
+    `passed: false` (either verify mode); `review_required` is on `GET /evidence` rows and
+    `progress.verification.kept_hits` on the job. Columns classified but kept on purpose (`CITY:
+    keep`, a key kept in place) are `declared_kept_hits` and never gate.
+  - Console: wizard step 3 lists mixed and kept-with-hits columns under *Needs a decision*, the
+    Kept tile says "no personal data found" / "N with personal data found", a kept column with hits
+    shows its hit rate; the evidence chip, job detail, Reports chip and KPI (passed / review required
+    / failed) show amber "review required", never "verified · 0 leaks"; the pack's kept list splits
+    "kept, no entity" from "kept by the policy or the review". `tools/demo_m2.py` fails on a review.
+  - The demo (`bank-uat-refresh-vfix3`) after the fix: `bank_uat.contacts.value`, `kyc_documents
+    .doc_number`, `cards.cardholder_name`, `addresses.line1`, `transactions.counterparty_name` 0
+    values equal to a source value; in place `bank_restore.contacts` 0 of 40 000 values unchanged.
+    Kept by policy and shown as such: `addresses.city` (`CITY: keep`), `cards.expiry`,
+    `loan_applicants.employer_name` (`ORG_NAME: keep`).
+- **B2 — the redacted scanned KYC kept page 2's account number and customer id.**
+  `dps/engine/detect/patterns.py` gains *labelled* patterns — `A/c`, `Acct#`, `Account no.:`,
+  `cuenta` + 8–18 digits (`ACCOUNT_NUMBER`), `Customer ID`, `Cust. No.`, `Client id`, `CIF` + an id
+  (`CUSTOMER_ID`, also a bare `CUST-`/`CIF` prefix), and a line that starts `Address:`
+  (`STREET_ADDRESS`, to a `PIN code`/`Postcode`/`ZIP` cue or the line end); a labelled hit is
+  decisive over a checksum shape inside it. Names after a `NEFT/IMPS/RTGS/UPI/NACH/ACH /` narration
+  are a name cue. The coverage gaps of a verification now also name every type recognised only by
+  a field name (`types recognised only by a field name …`). The eval corpus has free-text account
+  numbers and customer ids, and the committed report an *In free text* table (`ACCOUNT_NUMBER`
+  85/85, `CUSTOMER_ID` 70/70). Page 2 (and page 1's address) of the redacted scan re-read by OCR:
+  0 findings.
+
+**Gates (final image, `down -v` then `up -d --build`, all profiles).** `ruff format --check` /
+`ruff check` on `dps tests tools` (251 files) · `mypy dps` (103 files) · `pytest -q` 1664 passed, 4
+skipped (`tesseract` ×2 on the host, presidio, NER model; the tesseract file in the image: 8 passed)
+· M1 gate `-m "docs or ocr"` 139 passed, 2 skipped · M2 gate `-m "db or pg_source or s3"` 170 passed
+· resume-after-kill 6 passed · `npm run typecheck && npm test && npm run build` (42 node + 62 Vitest)
+· `DPS_SMOKE_REQUIRE_OCR=1 tools/smoke_test.py` 34/34 · `tools/demo_m2.py` 12 jobs passed, 0 orphans
+· `tools/console_check.py` 84/84 · `tests/console` + M2 log scan 40 passed · eval report and corpus
+regenerate byte-identically · compose logs: 0 demo or source values, 0 key material;
+`dps_llm_raw_pii_sent_total 0`.
+
+**Traps (r1).**
+
+5. `MIXED_PII` and the labelled patterns change what discovery proposes: a snapshot accepted before
+   this fix keeps its old classification; run discovery again to get the new one.
+6. Synthetic names come from a finite pool: an appended synthesized table can hold a name that also
+   exists in the source (0 rows keep their own original); compare row for row, not by set.
+

@@ -134,7 +134,15 @@ def _summary(job: dict[str, Any], step: str) -> Step:
 def _verification(client: Client, step: Step) -> Step:
     if step.evidence_id != "-":
         pack = client.call("GET", f"/api/v1/evidence/{step.evidence_id}", "evidence")["pack"]
-        step.verification = "passed" if pack["verification"].get("passed") else "FAILED"
+        v = pack["verification"]
+        # review required (personal data in a column kept as not personal) is not a pass either
+        step.verification = (
+            "passed"
+            if v.get("passed")
+            else "REVIEW_REQUIRED"
+            if v.get("review_required") and not v.get("hits")
+            else "FAILED"
+        )
     return step
 
 
@@ -292,7 +300,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print_table(steps)
     print("orphans:", ", ".join(f"{k}={v}" for k, v in counts.items()))
-    failed = [s for s in steps if s.state not in ("succeeded", "ok") or s.verification == "FAILED"]
+    failed = [
+        s
+        for s in steps
+        if s.state not in ("succeeded", "ok") or s.verification in ("FAILED", "REVIEW_REQUIRED")
+    ]
     return 1 if failed else 0
 
 

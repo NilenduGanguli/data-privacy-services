@@ -29,7 +29,10 @@ not one, a part that appears from nowhere is.
 never checked. :func:`assess_coverage` says what the sweep could see — the detectors that ran,
 whether NER was on, how many free-text fields there were — and names each gap. With NER off a
 name in free text is found only next to a cue (title, "name is", contact details), so free text
-swept without NER is reported as a gap and the verdict is ``partial``, not ``passed``.
+swept without NER is reported as a gap and the verdict is ``partial``, not ``passed``. Some types
+have no free-text detector at all — they are recognised only by the JSON key or column that names
+them (a CVV, a voter id, a street address): free text is reported as a gap for them too, naming
+every such type (:func:`field_name_only_entities`), with NER on or off.
 ``status`` is ``failed`` (an original was found), ``partial`` (none found, coverage has gaps) or
 ``passed`` (none found, no gaps); ``passed`` stays the plain "no hits" flag.
 """
@@ -43,6 +46,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from dps.engine.detect.ner_presidio import NER_ENTITIES, PRESIDIO_TO_DPS
+from dps.engine.detect.patterns import CATALOGUE
+from dps.engine.detect.structural import structural_entities
 from dps.engine.findings import Finding
 from dps.engine.jsonpath import flatten, get_path
 
@@ -59,6 +65,39 @@ NER_GAP: dict[str, str] = {
         "next to a cue (a title, 'name is', contact details) are detected and checked"
     ),
 }
+#: The start of the gap statement for the types free text cannot show (followed by the types).
+NAME_ONLY_GAP_PREFIX = "types recognised only by a field name"
+#: Types the free-text tiers find without NER: the pattern catalogue (and its promotions), the
+#: phone matcher and the name cues.
+TEXT_ENTITIES: frozenset[str] = frozenset(
+    {s.entity_type for s in CATALOGUE}
+    | {s.promote_to for s in CATALOGUE if s.promote_to}
+    | {"PHONE", "PERSON_NAME"}
+)
+#: What NER adds in free text (names, places, nationalities, dates).
+NER_TEXT_ENTITIES: frozenset[str] = frozenset(PRESIDIO_TO_DPS[e] for e in NER_ENTITIES)
+#: Places: the NER gap statement names them (``free-text names and places``).
+_PLACES = frozenset({"CITY", "LOCATION"})
+
+
+def field_name_only_entities(*, ner: bool, text_entities: Iterable[str] = ()) -> tuple[str, ...]:
+    """The types a field name can suggest that no free-text detector finds, sorted.
+
+    ``ner`` adds what NER finds in text; ``text_entities`` adds a policy's custom recognizers.
+    """
+    found = TEXT_ENTITIES | _PLACES | frozenset(text_entities)
+    if ner:
+        found |= NER_TEXT_ENTITIES
+    return tuple(sorted(structural_entities() - found))
+
+
+def name_only_gap(entities: Iterable[str]) -> str:
+    """The gap statement for ``entities`` (type names only, never a value)."""
+    return f"{NAME_ONLY_GAP_PREFIX} (a JSON key or a column), never inside free text: " + ", ".join(
+        entities
+    )
+
+
 #: A JSON string with at least this many words is free text (a name could hide in it); a
 #: shorter one is a code, a label or a value its key describes (the structural tier's domain).
 FREE_TEXT_MIN_WORDS = 2
@@ -172,13 +211,16 @@ def assess_coverage(
     kept: set[tuple[str, int | None, int | None]],
     detectors: list[str],
     ner: NerState,
+    name_only: Iterable[str] | None = None,
 ) -> Coverage:
     """What the sweep could see for this input (counts and fixed statements, never a value).
 
     Free text is the text payload (when it has a word), or each JSON string leaf of at least
     :data:`FREE_TEXT_MIN_WORDS` words that was not replaced whole (a leaf replaced whole hides
     nothing; one kept in clear, or with span findings only, still could). Without NER (off or
-    failed to load), free text is a gap: a name there without a cue is never detected.
+    failed to load), free text is a gap: a name there without a cue is never detected. Free text
+    is also a gap for every type recognised only by a field name (``name_only``; by default
+    :func:`field_name_only_entities` for this NER state), and the statement names them all.
     """
     if text is not None:
         free = 1 if _free_text(text, 1) else 0
@@ -194,6 +236,11 @@ def assess_coverage(
             if not is_key and path not in replaced and _free_text(value, FREE_TEXT_MIN_WORDS)
         )
     gaps = [NER_GAP[ner]] if free and ner != "on" else []
+    unseen = tuple(
+        field_name_only_entities(ner=ner == "on") if name_only is None else sorted(name_only)
+    )
+    if free and unseen:
+        gaps.append(name_only_gap(unseen))
     return Coverage(
         detectors=detectors, ner=ner, free_text_fields=free, complete=not gaps, gaps=gaps
     )

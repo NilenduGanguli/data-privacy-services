@@ -60,6 +60,22 @@ Scope `jobs` unless stated. "prod" = the connection carries the tag `production`
 | `GET /evidence/{id}/html` | jobs (scan for scan packs) | → the printable pack (`text/html`, CSP `default-src 'none'; style-src 'unsafe-inline'`) | as above |
 | `GET /artefacts/{id}` | jobs or scan (by the owning job's kind) | → the bytes, streamed; `Content-Disposition` uses the artefact id | `artefact_not_found` 404, `storage_not_found` 404 |
 
+**Discovery classification** (per column of a snapshot): `entity_type` is the best entity whose
+`noisy_or(name score, hit rate × mean score)` reaches the policy's `min_score`. When none does,
+the rows with *any* whole-value finding of MEDIUM or higher sensitivity count together: at or above
+`min_score` the column is `MIXED_PII` (values of several types — an e-mail in one row, a phone in
+the next; `type_note: "mixed_entities"`), and every value is replaced whole: `det_token` on an
+unbounded column, `hmac_pseudonym` (16 characters) on a bounded one where a token could overflow,
+`mask_partial` below 16 characters; `surrogate` in synthesize mode. A column called `value`
+(`contact`, `detail`, …) beside a `channel` / `contact_type` column is a mixed contact value by its
+name. Otherwise a text column with span findings in 5 % of the rows is `FREE_TEXT`. A column kept
+with no entity whose values still carry MEDIUM+ findings in 5 % or more of the sampled rows keeps
+`value_hit_rate`, `value_entities` (type names) and `type_note: "kept_with_hits"` — the console
+lists it under *Needs a decision* and never as "not personal". `value_entities` names the MEDIUM+
+types found in the sample for every column. Name cues include `*holder_name`, `<role>_name`
+(payee, counterparty, beneficiary, …), `line1` / `address_line*`, and `doc_number` /
+`document_number` (`NATIONAL_ID`).
+
 Probes: `/readyz` gains `db` (`up` / `down` / `unconfigured`, `migrations: verified`) and `jobs` (ok
 when the database is up, the migrations verify and the KEK is loaded); only `api-core` is required.
 The worker serves `/health`, `/readyz` and `/metrics` on `DPS_WORKER_METRICS_PORT` (9400).
@@ -184,10 +200,22 @@ overrides}, consistency {scope, field_scoped, kid, seed_fingerprint, key_custody
 purged_at}}, columns [{path, entity_type, method, reversible, values, fallbacks}], reveal_map [{path,
 entity_type, method, params, anchor_path, reveal}], counts {rows_estimated, rows_read, rows_written,
 rows_skipped, partitions, batches, resumed_partitions}, verification {mode, batches, values_checked,
-hits, passed, post_sample {rows, detector_hits, kept_column_hits}}, fidelity/privacy/utility (M5),
+hits, passed, status (passed|review_required|failed), review_required, post_sample {rows,
+detector_hits, kept_column_hits, kept_columns, declared_kept_hits}}, fidelity/privacy/utility (M5),
 scan (M4), timings {started_at, finished_at, duration_s, rows_per_s}, partitions [{no, rows, attempts,
 resumed, state}], errors [{code, where}], config_hash` (sha256 of policy hash + snapshot hash +
 redacted spec).
+
+**Post-write sample.** Finalize re-reads up to 200 written rows and runs the detectors over every
+output column. `detector_hits` counts cells of transformed columns with a finding (expected:
+format-preserving output still looks like its type); `kept_column_hits` counts cells with a MEDIUM+
+finding in columns the accepted snapshot kept **as not personal** (no entity), and `kept_columns`
+names them; `declared_kept_hits` counts those in columns classified but kept on purpose (a key kept
+in place, `CITY: keep`). Any `kept_column_hits` make the verification `review_required` with
+`passed: false` in either verify mode — personal data reached the target untransformed — and the
+job's `progress.verification.kept_hits` carries the count to the job page; `failed` (sweep hits or a
+leakage refusal) wins over it. `GET /evidence` rows carry `review_required`; the console shows
+"review required" (amber), never "verified · 0 leaks".
 
 `pack_sha256` = sha256 of the canonical JSON (sorted keys, compact separators). Each pack is stored
 with a JSON and a printable HTML artefact (the console's Print / save as PDF uses the browser; the PDF

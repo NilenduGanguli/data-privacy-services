@@ -48,3 +48,17 @@ def test_checksum_types_meet_the_floor(current) -> None:  # noqa: ANN001
     for entity in FLOOR_TYPES:
         assert by[entity].precision is not None and by[entity].precision >= FLOOR, entity
         assert by[entity].recall is not None and by[entity].recall >= FLOOR, entity
+
+
+def test_free_text_rows_cover_labelled_identifiers(current) -> None:  # noqa: ANN001
+    """Account numbers and customer ids are evaluated inside free text, not only by key
+    (integrated verify r1, B2), and the committed report shows the free-text table."""
+    committed = json.loads(REPORT.read_text(encoding="utf-8"))
+    assert committed["by_type_free_text"] == current.model_dump(mode="json")["by_type_free_text"]
+    text = {s.entity_type: s for s in current.by_type_free_text}
+    for entity in ("ACCOUNT_NUMBER", "CUSTOMER_ID"):
+        assert text[entity].support >= 50, entity
+        assert text[entity].recall is not None and text[entity].recall >= FLOOR, entity
+        assert text[entity].precision is not None and text[entity].precision >= FLOOR, entity
+    markdown = REPORT.with_suffix(".md").read_text(encoding="utf-8")
+    assert "## In free text" in markdown and "| ACCOUNT_NUMBER |" in markdown

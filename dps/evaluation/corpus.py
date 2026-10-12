@@ -96,36 +96,42 @@ TEXT_TEMPLATES: dict[str, tuple[str, ...]] = {
         "The employer EIN {EIN} was verified for {PERSON_NAME} (DOB: {DATE_OF_BIRTH}).",
         "Customer mailed from {EMAIL}, server {IP_ADDRESS} logged the request.",
         "Card {CARD_PAN} expires {CARD_EXPIRY}; contact {PHONE}.",
+        "Debit from account no. {ACCOUNT_NUMBER} for customer ID {CUSTOMER_ID} was reversed.",
     ),
     "CA": (
         "{PERSON_NAME} provided SIN {SIN} and email {EMAIL}.",
         "Call {PERSON_NAME} on {PHONE}; card {CARD_PAN} was blocked on {DATE}.",
         "Social insurance number {SIN} belongs to the applicant born {DATE_OF_BIRTH} (DOB).",
         "Statement sent to {EMAIL}; login came from {IP_ADDRESS}.",
+        "Acct# {ACCOUNT_NUMBER} belongs to client no. {CUSTOMER_ID}.",
     ),
     "MX": (
         "El cliente {PERSON_NAME} con CURP {CURP} actualizó su RFC {RFC}.",
         "Escribir a {EMAIL} o llamar al {PHONE}; tarjeta {CARD_PAN}.",
         "CURP {CURP} verificada el {DATE} para {PERSON_NAME}.",
         "RFC {RFC} registrado; correo {EMAIL}.",
+        "Transferencia a la cuenta {ACCOUNT_NUMBER} del cliente {PERSON_NAME}.",
     ),
     "IN": (
         "{PERSON_NAME} submitted Aadhaar {AADHAAR} and PAN {PAN_IN} for KYC.",
         "Refund to IFSC {IFSC}; call {PHONE} or mail {EMAIL}.",
         "Aadhaar {AADHAAR} matched the DOB {DATE_OF_BIRTH} on record.",
         "PIN code {POSTAL_CODE} for card {CARD_PAN}; PAN {PAN_IN}.",
+        "A/c {ACCOUNT_NUMBER} of Customer ID {CUSTOMER_ID} was debited via NEFT.",
     ),
     "UK": (
         "{PERSON_NAME} gave NI number {NINO} and NHS {NHS_NUMBER}.",
         "Pay IBAN {IBAN} by {DATE}; email {EMAIL}.",
         "National insurance {NINO} confirmed; phone {PHONE}.",
         "Postcode {POSTAL_CODE} on file; card {CARD_PAN}.",
+        "Account number {ACCOUNT_NUMBER} closed; CIF {CUSTOMER_ID} archived.",
     ),
     "EU": (
         "Transfer to IBAN {IBAN} from IBAN {IBAN#2} cleared on {DATE}.",
         "Kontakt: {EMAIL}, Telefon {PHONE}.",
         "Paiement par carte {CARD_PAN} depuis {IP_ADDRESS}.",
         "{PERSON_NAME} updated IBAN {IBAN}; contact {EMAIL}.",
+        "Statement for A/C No. {ACCOUNT_NUMBER}, customer ref {CUSTOMER_ID}.",
     ),
 }
 #: JSON documents: key → entity type (None = a non-sensitive control field).
@@ -357,6 +363,11 @@ class ValueFactory:
             return f"{letters}0{rng.randint(0, 999999):06d}", "rule"
         if entity == "CUSTOMER_ID":
             return f"CUST-{rng.randint(100000, 999999)}", "rule"
+        if entity == "ACCOUNT_NUMBER":  # 9-16 digits, run together or printed in fours
+            digits = "".join(str(rng.randint(0, 9)) for _ in range(rng.randint(9, 16)))
+            if rng.random() < 0.5:
+                digits = " ".join(digits[i : i + 4] for i in range(0, len(digits), 4))
+            return digits, "rule"
         engine = self._engine(f"value|{entity}|{record_no}|{slot_no}|{attempt}")
         return engine.surrogate(
             entity, SURROGATE_TEMPLATES.get(entity, "x"), loc, "record"

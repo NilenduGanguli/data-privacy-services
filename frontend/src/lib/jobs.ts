@@ -187,11 +187,22 @@ export function total(map: Record<string, number> | null | undefined): number {
   return Object.values(map ?? {}).reduce((a, b) => a + (Number(b) || 0), 0);
 }
 
-const DECISION_NOTES = new Set(['fpe_domain_too_small', 'numeric_column', 'date_column', 'text_pipeline']);
+const DECISION_NOTES = new Set(['fpe_domain_too_small', 'numeric_column', 'date_column', 'text_pipeline', 'mixed_entities', 'kept_with_hits']);
 
-/** A column a reviewer should look at: low confidence, a fallback note, or free text. */
+/** A column a reviewer should look at: low confidence, a fallback note, free text, values of
+ *  several personal-data types, or a kept column the detectors still found personal data in. */
 export function needsDecision(col: ColumnClassification): boolean {
   return (!!col.entity_type && col.confidence < 0.8) || (!!col.type_note && DECISION_NOTES.has(col.type_note)) || col.text_column;
+}
+
+/** A kept column the detectors still found personal data in (never "not personal"). */
+export function keptWithHits(col: ColumnClassification): boolean {
+  return !col.entity_type && !col.text_column && (col.value_entities?.length ?? 0) > 0;
+}
+
+/** The confidence cell of a kept column: its detector hit rate when it has hits, else "—". */
+export function keptHitText(col: ColumnClassification): string {
+  return keptWithHits(col) ? `${Math.max(1, Math.round(col.value_hit_rate * 100))} % hits` : '—';
 }
 
 /** Heat-map tone: critical (rose), sensitive (amber), declared (teal), kept (muted). */
@@ -205,6 +216,9 @@ export function heatTone(col: ColumnClassification): 'crit' | 'sens' | 'decl' | 
 /** Why a column needs a decision, in words (value-free: rates and notes only). */
 export function decisionReason(col: ColumnClassification): string {
   if (col.text_column) return `Free text with personal data in ${Math.round(col.value_hit_rate * 100)} % of sampled rows.`;
+  const types = (col.value_entities ?? []).join(', ');
+  if (col.type_note === 'mixed_entities') return `Personal data of several types in one column${types ? ` (${types})` : ''}: every value is replaced whole.`;
+  if (col.type_note === 'kept_with_hits') return `Kept, but the detectors found ${types || 'personal data'} in ${Math.round(col.value_hit_rate * 100)} % of sampled rows. Classify it, or keep it on purpose.`;
   const note = typeNoteText(col.type_note);
   if (note) return note;
   return `The detectors agree on ${col.entity_type ?? 'this type'} with confidence ${col.confidence.toFixed(2)} only.`;
@@ -223,6 +237,8 @@ export function typeNoteText(note: string | null | undefined): string | null {
     case 'text_pipeline': return 'Free text: personal data inside it is replaced span by span.';
     case 'synthesize_key_kept': return 'Key or join column: synthesize mode keeps it so joins still work.';
     case 'synthesize_numeric': return 'Sensitive number: synthesize mode nulls or keeps it.';
+    case 'mixed_entities': return 'Personal data of several types in one column: every value is replaced whole.';
+    case 'kept_with_hits': return 'Kept, but the detectors found personal data in its sampled values.';
     default: return note ? note.replace(/_/g, ' ') : null;
   }
 }
@@ -766,13 +782,13 @@ export function partitionPct(p: { state: string; rows_written: number }, job: Jo
 }
 
 /** The Evidence-so-far tiles from the job's value-free counters. */
-export function evidenceSoFar(job: Job): { rows: number; values: number; hits: number; fallbacks: number; dominantFallback: string | null; done: number; total: number; failed: number } {
+export function evidenceSoFar(job: Job): { rows: number; values: number; hits: number; keptHits: number; fallbacks: number; dominantFallback: string | null; done: number; total: number; failed: number } {
   const { methods, fallbacks } = splitCounters(job.progress.values_by_method);
   const values = Object.entries(methods).filter(([m]) => m !== 'keep').reduce((a, [, v]) => a + v, 0);
   const hits = (job.progress.values_by_method['verify:hits'] ?? 0) + (job.progress.verification.hits ?? 0);
   const ranked = Object.entries(fallbacks).sort((a, b) => b[1] - a[1]);
   return {
-    rows: job.progress.rows_written, values, hits, fallbacks: total(fallbacks), dominantFallback: ranked[0]?.[0] ?? null,
+    rows: job.progress.rows_written, values, hits, keptHits: job.progress.verification.kept_hits ?? 0, fallbacks: total(fallbacks), dominantFallback: ranked[0]?.[0] ?? null,
     done: job.progress.partitions_done, total: job.progress.partitions_total, failed: job.progress.partitions_failed,
   };
 }
@@ -797,6 +813,8 @@ export function typeNoteShort(note: string | null | undefined): string | null {
     case 'date_column': return 'date → date_shift';
     case 'type_kept': return 'type kept';
     case 'binary_kept': return 'binary kept';
+    case 'mixed_entities': return 'mixed types → replaced whole';
+    case 'kept_with_hits': return 'kept · detector hits';
     case 'text_pipeline': return 'span-level text pipeline';
     case 'synthesize_key_kept': return 'key kept when synthesizing';
     case 'synthesize_numeric': return 'synthesize nulls or keeps';
@@ -891,12 +909,21 @@ export function shortSha(sha: string): string {
 
 /**
  * The verification chip of a pack (mockups 09, 10): "passed · 0 leaks", "failed · 2 leaks caught",
- * and "failed closed" for a run that stopped before its counters held a hit (a preflight leak).
+ * "failed closed" for a run that stopped before its counters held a hit (a preflight leak), and
+ * "review required" when the post-write sample found personal data in a column kept as not
+ * personal (never "passed": the output holds untransformed personal data).
  */
-export function verificationText(passed: boolean, hits: number): string {
+export function verificationText(passed: boolean, hits: number, review = false): string {
   if (passed) return `passed · ${fmtCount(hits)} leaks`;
   if (hits > 0) return `failed · ${fmtCount(hits)} ${hits === 1 ? 'leak' : 'leaks'} caught`;
+  if (review) return 'review required';
   return 'failed closed';
+}
+
+/** The chip tone of a verification: emerald passed, amber review required, rose failed. */
+export function verificationTone(passed: boolean, hits: number, review = false): 'emerald' | 'amber' | 'rose' {
+  if (passed) return 'emerald';
+  return review && hits === 0 ? 'amber' : 'rose';
 }
 
 /** Where a pack's run wrote, as its title shows it. */

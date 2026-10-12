@@ -1,39 +1,39 @@
 {
   "by_jurisdiction": {
     "CA": {
-      "f1": 0.9536,
+      "f1": 0.9623,
       "precision": 1.0,
-      "recall": 0.9114,
+      "recall": 0.9274,
       "records": 150
     },
     "EU": {
-      "f1": 0.9643,
+      "f1": 0.9709,
       "precision": 1.0,
-      "recall": 0.9311,
+      "recall": 0.9434,
       "records": 150
     },
     "IN": {
-      "f1": 0.9864,
+      "f1": 0.9884,
       "precision": 1.0,
-      "recall": 0.9731,
+      "recall": 0.977,
       "records": 150
     },
     "MX": {
-      "f1": 0.9847,
+      "f1": 0.9878,
       "precision": 1.0,
-      "recall": 0.9699,
+      "recall": 0.9758,
       "records": 150
     },
     "UK": {
-      "f1": 0.986,
+      "f1": 0.9888,
       "precision": 1.0,
-      "recall": 0.9724,
+      "recall": 0.9779,
       "records": 150
     },
     "US": {
-      "f1": 0.9753,
+      "f1": 0.9783,
       "precision": 1.0,
-      "recall": 0.9518,
+      "recall": 0.9576,
       "records": 150
     }
   },
@@ -45,8 +45,18 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 113,
-      "tp": 113
+      "support": 105,
+      "tp": 105
+    },
+    {
+      "entity_type": "ACCOUNT_NUMBER",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 85,
+      "tp": 85
     },
     {
       "entity_type": "CARD_EXPIRY",
@@ -55,8 +65,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 12,
-      "tp": 12
+      "support": 10,
+      "tp": 10
     },
     {
       "entity_type": "CARD_PAN",
@@ -65,8 +75,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 343,
-      "tp": 343
+      "support": 321,
+      "tp": 321
     },
     {
       "entity_type": "CURP",
@@ -75,8 +85,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 113,
-      "tp": 113
+      "support": 105,
+      "tp": 105
     },
     {
       "entity_type": "CUSTOMER_ID",
@@ -85,8 +95,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 450,
-      "tp": 450
+      "support": 520,
+      "tp": 520
     },
     {
       "entity_type": "DATE",
@@ -95,8 +105,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 89,
-      "tp": 89
+      "support": 71,
+      "tp": 71
     },
     {
       "entity_type": "DATE_OF_BIRTH",
@@ -105,8 +115,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 125,
-      "tp": 125
+      "support": 116,
+      "tp": 116
     },
     {
       "entity_type": "EIN",
@@ -115,8 +125,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 12,
-      "tp": 12
+      "support": 11,
+      "tp": 11
     },
     {
       "entity_type": "EMAIL",
@@ -125,8 +135,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 774,
-      "tp": 774
+      "support": 742,
+      "tp": 742
     },
     {
       "entity_type": "IBAN",
@@ -135,8 +145,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 225,
-      "tp": 225
+      "support": 210,
+      "tp": 210
     },
     {
       "entity_type": "IFSC",
@@ -145,18 +155,18 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 19,
-      "tp": 19
+      "support": 15,
+      "tp": 15
     },
     {
       "entity_type": "IP_ADDRESS",
-      "f1": 0.3934,
-      "fn": 37,
+      "f1": 0.4231,
+      "fn": 30,
       "fp": 0,
       "precision": 1.0,
-      "recall": 0.2449,
-      "support": 49,
-      "tp": 12
+      "recall": 0.2683,
+      "support": 41,
+      "tp": 11
     },
     {
       "entity_type": "ITIN",
@@ -165,8 +175,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 13,
-      "tp": 13
+      "support": 11,
+      "tp": 11
     },
     {
       "entity_type": "NHS_NUMBER",
@@ -175,8 +185,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 94,
-      "tp": 94
+      "support": 90,
+      "tp": 90
     },
     {
       "entity_type": "NINO",
@@ -185,8 +195,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 113,
-      "tp": 113
+      "support": 105,
+      "tp": 105
     },
     {
       "entity_type": "PAN_IN",
@@ -195,18 +205,18 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 112,
-      "tp": 112
+      "support": 105,
+      "tp": 105
     },
     {
       "entity_type": "PERSON_NAME",
-      "f1": 0.8614,
-      "fn": 151,
+      "f1": 0.8864,
+      "fn": 123,
       "fp": 0,
       "precision": 1.0,
-      "recall": 0.7565,
-      "support": 620,
-      "tp": 469
+      "recall": 0.796,
+      "support": 603,
+      "tp": 480
     },
     {
       "entity_type": "PHONE",
@@ -215,18 +225,18 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 345,
-      "tp": 345
+      "support": 321,
+      "tp": 321
     },
     {
       "entity_type": "POSTAL_CODE",
-      "f1": 1.0,
-      "fn": 0,
+      "f1": 0.9831,
+      "fn": 1,
       "fp": 0,
       "precision": 1.0,
-      "recall": 1.0,
-      "support": 36,
-      "tp": 36
+      "recall": 0.9667,
+      "support": 30,
+      "tp": 29
     },
     {
       "entity_type": "RFC",
@@ -235,8 +245,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 112,
-      "tp": 112
+      "support": 105,
+      "tp": 105
     },
     {
       "entity_type": "ROUTING_ABA",
@@ -245,8 +255,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 13,
-      "tp": 13
+      "support": 11,
+      "tp": 11
     },
     {
       "entity_type": "SIN",
@@ -255,8 +265,8 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 113,
-      "tp": 113
+      "support": 105,
+      "tp": 105
     },
     {
       "entity_type": "SSN",
@@ -265,8 +275,250 @@
       "fp": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "support": 88,
-      "tp": 88
+      "support": 86,
+      "tp": 86
+    }
+  ],
+  "by_type_free_text": [
+    {
+      "entity_type": "AADHAAR",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 30,
+      "tp": 30
+    },
+    {
+      "entity_type": "ACCOUNT_NUMBER",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 85,
+      "tp": 85
+    },
+    {
+      "entity_type": "CARD_EXPIRY",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 10,
+      "tp": 10
+    },
+    {
+      "entity_type": "CARD_PAN",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 246,
+      "tp": 246
+    },
+    {
+      "entity_type": "CURP",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 30,
+      "tp": 30
+    },
+    {
+      "entity_type": "CUSTOMER_ID",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 70,
+      "tp": 70
+    },
+    {
+      "entity_type": "DATE",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 71,
+      "tp": 71
+    },
+    {
+      "entity_type": "DATE_OF_BIRTH",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 41,
+      "tp": 41
+    },
+    {
+      "entity_type": "EIN",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 11,
+      "tp": 11
+    },
+    {
+      "entity_type": "EMAIL",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 292,
+      "tp": 292
+    },
+    {
+      "entity_type": "IBAN",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 60,
+      "tp": 60
+    },
+    {
+      "entity_type": "IFSC",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 15,
+      "tp": 15
+    },
+    {
+      "entity_type": "IP_ADDRESS",
+      "f1": 0.4231,
+      "fn": 30,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.2683,
+      "support": 41,
+      "tp": 11
+    },
+    {
+      "entity_type": "ITIN",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 11,
+      "tp": 11
+    },
+    {
+      "entity_type": "NHS_NUMBER",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 15,
+      "tp": 15
+    },
+    {
+      "entity_type": "NINO",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 30,
+      "tp": 30
+    },
+    {
+      "entity_type": "PAN_IN",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 30,
+      "tp": 30
+    },
+    {
+      "entity_type": "PERSON_NAME",
+      "f1": 0.3279,
+      "fn": 123,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.1961,
+      "support": 153,
+      "tp": 30
+    },
+    {
+      "entity_type": "PHONE",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 96,
+      "tp": 96
+    },
+    {
+      "entity_type": "POSTAL_CODE",
+      "f1": 0.9831,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.9667,
+      "support": 30,
+      "tp": 29
+    },
+    {
+      "entity_type": "RFC",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 30,
+      "tp": 30
+    },
+    {
+      "entity_type": "ROUTING_ABA",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 11,
+      "tp": 11
+    },
+    {
+      "entity_type": "SIN",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 30,
+      "tp": 30
+    },
+    {
+      "entity_type": "SSN",
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 11,
+      "tp": 11
     }
   ],
   "config": {
@@ -276,60 +528,60 @@
   },
   "confusion": [],
   "corpus": {
-    "labels": 3983,
+    "labels": 3924,
     "records": 900,
-    "sha256": "988a239f91ea5b59764a550d3aac23d69f550a1870d335a65100b6ad1fb00db2"
+    "sha256": "02875a40c3e6b083b11b3f35ab4cf71c83d4b41a87f5d8cb30820251b89d9887"
   },
   "engine_version": "0.2.0",
   "overall": {
-    "macro_f1": 0.9676,
-    "micro_f1": 0.9758,
+    "macro_f1": 0.9705,
+    "micro_f1": 0.98,
     "micro_precision": 1.0,
-    "micro_recall": 0.9528
+    "micro_recall": 0.9608
   },
   "report_version": "dps.detector-eval.v1",
   "thresholds": [
     {
-      "f1": 0.9758,
+      "f1": 0.98,
       "min_score": 0.3,
       "precision": 1.0,
-      "recall": 0.9528
+      "recall": 0.9608
     },
     {
-      "f1": 0.9758,
+      "f1": 0.98,
       "min_score": 0.4,
       "precision": 1.0,
-      "recall": 0.9528
+      "recall": 0.9608
     },
     {
-      "f1": 0.9758,
+      "f1": 0.98,
       "min_score": 0.5,
       "precision": 1.0,
-      "recall": 0.9528
+      "recall": 0.9608
     },
     {
-      "f1": 0.9758,
+      "f1": 0.98,
       "min_score": 0.6,
       "precision": 1.0,
-      "recall": 0.9528
+      "recall": 0.9608
     },
     {
-      "f1": 0.9599,
+      "f1": 0.9672,
       "min_score": 0.7,
       "precision": 1.0,
-      "recall": 0.9229
+      "recall": 0.9365
     },
     {
-      "f1": 0.9548,
+      "f1": 0.9631,
       "min_score": 0.8,
       "precision": 1.0,
-      "recall": 0.9136
+      "recall": 0.9289
     },
     {
-      "f1": 0.8449,
+      "f1": 0.9273,
       "min_score": 0.9,
       "precision": 1.0,
-      "recall": 0.7314
+      "recall": 0.8644
     }
   ]
 }

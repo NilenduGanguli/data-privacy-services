@@ -333,6 +333,10 @@ class ColumnClassification(BaseModel):
     synthesize_suggested: MethodSpec | None = None
     synthesize_method: MethodSpec | None = None
     type_note: str | None = None
+    #: Personal-data types (MEDIUM or higher) the detectors found in the sampled values, whatever
+    #: the column's classification: the members of a ``MIXED_PII`` column, or what a kept column
+    #: still holds (type names only, never a value).
+    value_entities: list[str] = Field(default_factory=list)
 
 
 class SnapshotOverride(BaseModel):

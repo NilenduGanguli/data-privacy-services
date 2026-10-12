@@ -136,6 +136,8 @@ class EvidenceSummary(BaseModel):
     policy: str | None = None
     ticket: str | None = None
     passed: bool
+    #: The post-write sample found personal data in a column the snapshot called not personal.
+    review_required: bool = False
     hits: int
     rows_written: int
     html_artefact_id: str | None = None
@@ -449,10 +451,23 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
     v = pack.verification
     hits = v.get("hits", 0)
     passed = bool(v.get("passed"))
-    status = (
-        f"<span class='chip ok'>verified · {e(hits)} leaks</span>"
-        if passed
-        else f"<span class='chip bad'>verification failed · {e(hits)} hits</span>"
+    post = v.get("post_sample") or {}
+    if passed:
+        status = f"<span class='chip ok'>verified · {e(hits)} leaks</span>"
+    elif v.get("review_required") and not hits:
+        status = (
+            f"<span class='chip warn'>review required · {e(post.get('kept_column_hits', 0))} "
+            "findings in columns kept as not personal</span>"
+        )
+    else:
+        status = f"<span class='chip bad'>verification failed · {e(hits)} hits</span>"
+    sweep_failed = bool(hits) or (not passed and not v.get("review_required"))
+    kept_note = (
+        f"<tr><th>Review required</th><td class=warn>The post-write sample found personal data in "
+        f"{e(', '.join(post.get('kept_columns') or []))}, which the snapshot kept as not "
+        "personal. Reclassify these columns and run again before using the output.</td></tr>"
+        if v.get("review_required")
+        else ""
     )
     sel = pack.source.get("selection") or {}
     cols = (
@@ -515,7 +530,7 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
 <h2>1 Summary</h2><div class=kpis>
 <div class=kpi>Rows written<b>{e(pack.counts.get("rows_written", 0))}</b><span class=muted>of {e(pack.counts.get("rows_read", 0))} read</span></div>
 <div class=kpi>Columns transformed<b>{len(pack.columns)}</b><span class=muted>{e(pack.counts.get("values_transformed", 0))} values</span></div>
-<div class=kpi>Leakage sweep<b class="{"ok" if passed else "bad"}">{e(hits)} hits</b><span class=muted>{e(v.get("values_checked", 0))} values checked</span></div>
+<div class=kpi>Leakage sweep<b class="{"bad" if sweep_failed else "ok"}">{e(hits)} hits</b><span class=muted>{e(v.get("values_checked", 0))} values checked</span></div>
 <div class=kpi>Raw values to LLM<b class=ok>0</b><span class=muted>{e(pack.timings.get("duration_s"))} s · {e(pack.counts.get("partitions", 0))} partitions</span></div></div>
 <h2>2 Configuration hashes</h2><table>
 <tr><th>Source</th><td>{e(pack.source.get("connection_name"))} · {e(pack.source.get("engine"))} {e(pack.source.get("server_version"))} · {e(pack.source.get("object"))}</td></tr>
@@ -532,7 +547,7 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
 {f"<table><tr><th>Error</th><th>Where</th></tr>{errors}</table>" if errors else ""}
 <h2>5 Verification</h2><table>
 <tr><th>Leakage sweep</th><td>{e(hits)} hits in {e(v.get("values_checked", 0))} values ({e(v.get("mode"))})</td></tr>
-<tr><th>Post-write sample</th><td>{e(v.get("post_sample"))}</td></tr>
+<tr><th>Post-write sample</th><td>{e(v.get("post_sample"))}</td></tr>{kept_note}
 <tr><th>Row counts</th><td>{e(pack.counts.get("rows_read", 0))} read · {e(pack.counts.get("rows_written", 0))} written · {e(pack.counts.get("rows_skipped", 0))} skipped</td></tr>
 <tr><th>Fallbacks</th><td>{e(v.get("fallbacks"))}</td></tr></table>
 {fidelity}
@@ -650,6 +665,8 @@ async def list_evidence(
             "pack->'target'->>'write_mode' AS write_mode, pack->'policy'->>'name' AS policy, "
             "pack->'purpose'->>'ticket' AS ticket, "
             "COALESCE((pack->'verification'->>'passed')::boolean, false) AS passed, "
+            "COALESCE((pack->'verification'->>'review_required')::boolean, false) "
+            "AS review_required, "
             "COALESCE((pack->'verification'->>'hits')::int, 0) AS hits, "
             "COALESCE((pack->'counts'->>'rows_written')::bigint, 0) AS rows_written "
             f"FROM {s}.dps_evidence WHERE {' AND '.join(where)} "

@@ -4,7 +4,7 @@ import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
 import {
   engineName, errorText, fmtCount, fmtDuration, fmtUtc, methodText, packTargetText, shortId, shortSha, shortType, typeNoteShort,
-  writeModeLabel, verificationText,
+  writeModeLabel, verificationText, verificationTone,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, EvidenceOut, Job } from '../lib/types';
 
@@ -69,6 +69,7 @@ export function EvidencePack(): JSX.Element {
   const v = p.verification ?? {};
   const hits = Number(v.hits ?? 0);
   const passed = !!v.passed;
+  const review = !!v.review_required;
   const src = p.source ?? {};
   const tgt = p.target ?? {};
   const files = (tgt.files ?? null) as Record<string, any> | null;
@@ -81,12 +82,17 @@ export function EvidencePack(): JSX.Element {
   const byPath = new Map(snapCols.map((c) => [c.path, c]));
   const overridden = new Set((snapshot?.overrides ?? []).map((o) => o.path));
   const kept = snapCols.filter((c) => !p.columns.some((pc) => pc.path === c.path));
+  // kept as not personal (no entity) vs classified and kept on purpose (CITY: keep, a key in place)
+  const keptNone = kept.filter((c) => !c.entity_type && !c.text_column);
+  const keptByPolicy = kept.filter((c) => c.entity_type || c.text_column);
   const totalCols = snapCols.length || p.columns.length;
   const counts = p.counts ?? {};
   const parts = p.partitions ?? [];
   const retries = parts.reduce((a, x) => a + Math.max(0, Number(x.attempts ?? 1) - 1), 0);
   const resumed = parts.filter((x) => Number(x.resumed ?? 0) > 0);
   const post = (v.post_sample ?? null) as Record<string, any> | null;
+  const keptHits = Number(post?.kept_column_hits ?? 0);
+  const flagged = (post?.kept_columns ?? []) as string[];
   const fallbacks = (v.fallbacks ?? {}) as Record<string, number>;
   const fbTotal = Object.values(fallbacks).reduce((a, b) => a + Number(b), 0);
   const day = new Date(p.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -113,7 +119,7 @@ export function EvidencePack(): JSX.Element {
             <div className="jid">Job {p.job_id} · {p.mode ?? p.job_kind} · purpose {p.purpose?.ticket ?? '—'}</div>
           </div>
           <div className="seal">
-            {passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : <span className="chip rose">verification {verificationText(false, hits)}</span>}
+            {passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : <span className={`chip ${verificationTone(false, hits, review)}`}>verification {verificationText(false, hits, review)}</span>}
             <span>Sealed {fmtUtc(p.created_at)}</span>
             <span>Pack <span className="mono">{p.id}</span> · sha256 <span className="mono">{shortSha(ev.pack_sha256)}</span></span>
             <span className={`chip ${synth ? 'violet' : 'teal'}`}>{p.label}</span>
@@ -134,14 +140,14 @@ export function EvidencePack(): JSX.Element {
         <Sec n={1} title="Summary">
           <p className="lead">
             On {day} DPS read {fmtCount(counts.rows_read ?? 0)} rows from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} rows to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
-            {passed ? 'The leakage sweep found no source value in the output.' : hits > 0 ? `The leakage sweep caught ${fmtCount(hits)} source ${hits === 1 ? 'value' : 'values'}; the affected batches were not written.` : 'The run failed closed before its verification counters held a hit; nothing of the failed unit was written.'}{' '}
+            {passed ? 'The leakage sweep found no source value in the output.' : hits > 0 ? `The leakage sweep caught ${fmtCount(hits)} source ${hits === 1 ? 'value' : 'values'}; the affected batches were not written.` : review ? `Review required: the output was written, and the post-write sample found personal data in ${flagged.length ? flagged.join(', ') : 'columns'} that the snapshot kept as not personal. Reclassify ${flagged.length === 1 ? 'it' : 'them'} and run again before using the output.` : 'The run failed closed before its verification counters held a hit; nothing of the failed unit was written.'}{' '}
             {synth ? 'The synthetic output has no key; DPS kept no seed.' : custody.returned ? 'The key that reverses the output was returned to the requesting team; DPS kept no copy.' : 'The run used the caller\'s key; DPS kept no copy.'}{outcomeWords}
           </p>
           <div className="stats">
             <div><div className="l">Rows written</div><div className="v">{fmtCount(counts.rows_written ?? 0)}</div><div className="s">{counts.rows_written === counts.rows_read ? '= rows read' : `of ${fmtCount(counts.rows_read ?? 0)} read`}</div></div>
-            <div><div className="l">Columns transformed</div><div className="v">{p.columns.length} of {totalCols}</div><div className="s">{totalCols - p.columns.length} kept, not personal</div></div>
+            <div><div className="l">Columns transformed</div><div className="v">{p.columns.length} of {totalCols}</div><div className="s">{totalCols - p.columns.length} kept{snapshot ? ` · ${keptByPolicy.length} by policy` : ''}{flagged.length ? ` · ${flagged.length} with personal data` : ''}</div></div>
             <div><div className="l">Values transformed</div><div className="v">{fmtCount(counts.values_transformed ?? 0)}</div><div className="s">nulls skipped</div></div>
-            <div><div className="l">Leakage sweep</div><div className={`v ${passed ? 'ok' : 'bad'}`}>{fmtCount(hits)} hits</div><div className="s">{fmtCount(Number(v.values_checked ?? 0))} values checked</div></div>
+            <div><div className="l">Leakage sweep</div><div className={`v ${passed || (review && !hits) ? 'ok' : 'bad'}`}>{fmtCount(hits)} hits</div><div className="s">{fmtCount(Number(v.values_checked ?? 0))} values checked</div></div>
             <div><div className="l">Duration</div><div className="v">{fmtDuration(Number(p.timings?.duration_s ?? 0))}</div><div className="s">{parts.length} {parts.length === 1 ? 'partition' : 'partitions'} · {retries} {retries === 1 ? 'retry' : 'retries'}</div></div>
             <div><div className="l">Raw values to LLM</div><div className="v ok">0</div><div className="s">no LLM call in this job</div></div>
           </div>
@@ -180,7 +186,7 @@ export function EvidencePack(): JSX.Element {
             })}
             {!p.columns.length && <tr><td colSpan={7} className="faint">No column was planned.</td></tr>}
           </tbody></table></div>
-          <p className="note">{kept.length ? `${kept.length} ${kept.length === 1 ? 'column' : 'columns'} kept as not personal: ${kept.map((c) => c.name).join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
+          <p className="note">{keptNone.length ? `${keptNone.length} ${keptNone.length === 1 ? 'column' : 'columns'} kept, no entity: ${keptNone.map((c) => c.name).join(', ')}. ` : ''}{keptByPolicy.length ? `${keptByPolicy.length} classified ${keptByPolicy.length === 1 ? 'column' : 'columns'} kept by the policy or the review: ${keptByPolicy.map((c) => `${c.name} (${c.entity_type})`).join(', ')}. ` : ''}{flagged.length ? `The post-write sample found personal data in ${flagged.join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
         </Sec>
 
         <Sec n={4} title="Execution" right={`${parts.length} ${parts.length === 1 ? 'partition' : 'partitions'}`}>
@@ -188,7 +194,7 @@ export function EvidencePack(): JSX.Element {
             <div><div className="t">{fmtUtc(p.timings?.started_at, true).replace(/^.*, /, '')}</div>Job started</div>
             <div className={resumed.length ? 'warn' : ''}><div className="t">{parts.length} {parts.length === 1 ? 'partition' : 'partitions'}</div>{resumed.length ? `${resumed.map((x) => `p${x.no}`).join(', ')} resumed from the last committed batch` : 'No lease was lost'}</div>
             <div><div className="t">{fmtUtc(p.timings?.finished_at, true).replace(/^.*, /, '')}</div>Last batch committed</div>
-            <div className={passed ? 'ok' : 'bad'}><div className="t">{fmtCount(Number(v.values_checked ?? 0))} values</div>Verification {passed ? 'passed' : 'failed closed'}</div>
+            <div className={passed ? 'ok' : review && !hits ? 'warn' : 'bad'}><div className="t">{fmtCount(Number(v.values_checked ?? 0))} values</div>Verification {passed ? 'passed' : review && !hits ? 'needs review: personal data in a kept column' : 'failed closed'}</div>
             <div className="ok"><div className="t">{fmtUtc(p.created_at, true).replace(/^.*, /, '')}</div>Pack sealed and hashed</div>
           </div>
           <div className="tbl-scroll"><table className="tbl doc stack c3" style={{ marginTop: 12 }}><thead><tr><th>Partition</th><th className="num">Rows</th><th className="num">Attempts</th><th className="num">Resumed</th><th>Result</th></tr></thead><tbody>
@@ -209,8 +215,8 @@ export function EvidencePack(): JSX.Element {
 
         <Sec n={5} title="Verification" right={`mode ${text(v.mode)}`} keep>
           <div className="tbl-scroll"><table className="tbl doc stack"><thead><tr><th>Check</th><th>Result</th><th>What was checked</th><th>Status</th></tr></thead><tbody>
-            <tr><td data-l="Check"><b>Leakage sweep</b></td><td className="m" data-l="Result">{fmtCount(hits)} hits</td><td className="wide" data-l="What">Every transformed value compared with the source values of its row before the batch was written ({fmtCount(Number(v.values_checked ?? 0))} values in {fmtCount(Number(v.batches ?? 0))} batches)</td><td data-l="Status"><span className={`chip ${passed ? 'emerald' : 'rose'}`}>{passed ? 'pass' : 'fail'}</span></td></tr>
-            <tr><td data-l="Check"><b>Post-write sample</b></td><td className="m" data-l="Result">{post && post.rows !== undefined ? `${fmtCount(post.kept_column_hits ?? 0)} in kept columns · ${fmtCount(post.detector_hits ?? 0)} in transformed columns` : 'not run'}</td><td className="wide" data-l="What">{post && post.rows !== undefined ? `${fmtCount(post.rows)} written rows read back and rescanned with the detectors. Findings in transformed columns are expected (format-preserving tokens still look like their type); a finding in a kept column deserves a look.` : 'No written rows to sample'}</td><td data-l="Status"><span className={`chip ${!post || post.rows === undefined ? 'slate' : Number(post.kept_column_hits ?? 0) === 0 ? 'emerald' : 'amber'}`}>{!post || post.rows === undefined ? 'skipped' : Number(post.kept_column_hits ?? 0) === 0 ? 'pass' : 'review'}</span></td></tr>
+            <tr><td data-l="Check"><b>Leakage sweep</b></td><td className="m" data-l="Result">{fmtCount(hits)} hits</td><td className="wide" data-l="What">Every transformed value compared with the source values of its row before the batch was written ({fmtCount(Number(v.values_checked ?? 0))} values in {fmtCount(Number(v.batches ?? 0))} batches)</td><td data-l="Status"><span className={`chip ${hits || (!passed && !review) ? 'rose' : 'emerald'}`}>{hits || (!passed && !review) ? 'fail' : 'pass'}</span></td></tr>
+            <tr><td data-l="Check"><b>Post-write sample</b></td><td className="m" data-l="Result">{post && post.rows !== undefined ? `${fmtCount(keptHits)} in columns kept as not personal${flagged.length ? ` (${flagged.join(', ')})` : ''} · ${fmtCount(post.detector_hits ?? 0)} in transformed columns` : 'not run'}</td><td className="wide" data-l="What">{post && post.rows !== undefined ? `${fmtCount(post.rows)} written rows read back and rescanned with the detectors. Findings in transformed columns are expected (format-preserving tokens still look like their type). Personal data in a column the snapshot kept as not personal means it reached the target untransformed: verification is not passed until it is reviewed.` : 'No written rows to sample'}</td><td data-l="Status"><span className={`chip ${!post || post.rows === undefined ? 'slate' : keptHits === 0 ? 'emerald' : 'amber'}`}>{!post || post.rows === undefined ? 'skipped' : keptHits === 0 ? 'pass' : 'review required'}</span></td></tr>
             <tr><td data-l="Check"><b>Row counts</b></td><td className="m" data-l="Result">{fmtCount(counts.rows_read ?? 0)} read · {fmtCount(counts.rows_written ?? 0)} written</td><td className="wide" data-l="What">{fmtCount(counts.rows_skipped ?? 0)} rows skipped{counts.rows_estimated ? ` · ${fmtCount(counts.rows_estimated)} estimated at prepare` : ''}</td><td data-l="Status"><span className={`chip ${counts.rows_read === counts.rows_written + (counts.rows_skipped ?? 0) ? 'emerald' : 'amber'}`}>{counts.rows_read === counts.rows_written + (counts.rows_skipped ?? 0) ? 'pass' : 'review'}</span></td></tr>
             <tr><td data-l="Check"><b>FPE fallbacks</b></td><td className="m" data-l="Result">{fmtCount(fbTotal)} values</td><td className="wide" data-l="What">{fbTotal ? Object.entries(fallbacks).map(([k, n]) => `${fmtCount(n)} × ${k.replace(/^(fallback:)+/, '')}`).join(' · ') : 'Every value ran its planned method'}</td><td data-l="Status"><span className="chip slate">recorded</span></td></tr>
             {v.write_ledger_cleared !== undefined && <tr><td data-l="Check"><b>Write ledger</b></td><td className="m" data-l="Result">{v.write_ledger_cleared ? 'cleared' : 'kept'}</td><td className="wide" data-l="What">The per-batch marks DPS keeps in the target to resume without writing twice</td><td data-l="Status"><span className="chip slate">recorded</span></td></tr>}

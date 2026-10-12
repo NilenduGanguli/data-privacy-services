@@ -3,7 +3,7 @@ import { HeatLegend, HeatMap } from '../../components/HeatMap';
 import { usePoll } from '../../hooks/usePoll';
 import { api, ApiError, type Auth } from '../../lib/api';
 import {
-  decisionReason, fmtCount, fqn, heatTone, isTerminal, METHOD_NAMES, methodText, needsDecision, overridesFor, parseCount, runMethodFor,
+  decisionReason, fmtCount, fqn, heatTone, isTerminal, keptHitText, keptWithHits, METHOD_NAMES, methodText, needsDecision, overridesFor, parseCount, runMethodFor,
   selectionOf, shortId, shortType, sourceObject, type ColumnEdit, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, ColumnClassification, MethodSpec } from '../../lib/types';
@@ -93,6 +93,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
   const cols = snapshot?.columns ?? [];
   const tally = { crit: 0, sens: 0, decl: 0, kept: 0 };
   for (const c of cols) tally[heatTone(c)] += 1;
+  const keptHits = cols.filter(keptWithHits).length;
   const decisions = cols.filter(needsDecision);
   const open = decisions.filter((c) => !reviewed.has(c.path));
   const editable = snapshot?.status === 'proposed';
@@ -129,7 +130,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
               <div className="cbox"><div className="l"><i style={{ background: 'var(--rose)' }} />Critical</div><div className="v">{tally.crit}</div><div className="s">government ids, accounts, cards</div></div>
               <div className="cbox"><div className="l"><i style={{ background: 'var(--amber)' }} />Sensitive</div><div className="v">{tally.sens}</div><div className="s">contact, identity, free text</div></div>
               <div className="cbox"><div className="l"><i style={{ background: 'var(--teal)' }} />Declared</div><div className="v">{tally.decl}</div><div className="s">declared fields of the policy</div></div>
-              <div className="cbox"><div className="l"><i style={{ background: 'var(--surface-3)', border: '1px solid var(--border-strong)' }} />Kept</div><div className="v">{tally.kept}</div><div className="s">not personal data</div></div>
+              <div className="cbox"><div className="l"><i style={{ background: 'var(--surface-3)', border: '1px solid var(--border-strong)' }} />Kept</div><div className="v">{tally.kept}</div><div className="s">{keptHits ? `${keptHits} with personal data found` : 'no personal data found'}</div></div>
             </div>
           </>
         )}
@@ -182,7 +183,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
                       <td><input className="input mono ent" list="entity-types" aria-label={`Entity of ${c.name}`} disabled={!editable}
                                  value={(value(c, 'entity_type', c.entity_type) as string | null) ?? ''} placeholder="kept"
                                  onChange={(e) => edit(c.path, { entity_type: e.target.value.trim().toUpperCase() || null })} /></td>
-                      <td className="mono">{c.entity_type ? c.confidence.toFixed(2) : '—'}</td>
+                      <td className="mono" title={keptWithHits(c) ? `Detectors found ${(c.value_entities ?? []).join(', ')} in sampled values` : undefined}>{c.entity_type ? c.confidence.toFixed(2) : keptHitText(c)}</td>
                       <td className="shapes" title={c.shapes.length ? `Value shapes (letters as x/X, digits as 9): ${c.shapes.join('  ')}` : undefined}>{c.shapes[0] ?? '—'}</td>
                       <td><select className="input mono" aria-label={`Method of ${c.name}`} disabled={!editable} value={m.method}
                                   onChange={(e) => edit(c.path, { method: methodChoice(e.target.value, c.method, c.suggested) })}>

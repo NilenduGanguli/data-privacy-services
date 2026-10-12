@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
-import { fmtCount, fmtUtc, shortId, verificationText, writeModeLabel } from '../lib/jobs';
+import { fmtCount, fmtUtc, shortId, verificationText, verificationTone, writeModeLabel } from '../lib/jobs';
 import type { EvidenceSummary } from '../lib/types';
 
 function apiMessage(e: unknown): string {
@@ -40,7 +40,8 @@ export function Reports(): JSX.Element {
   }
 
   const list = items ?? [];
-  const failed = list.filter((s) => !s.passed).length;
+  const review = list.filter((s) => !s.passed && s.review_required && !s.hits).length;
+  const failed = list.filter((s) => !s.passed).length - review;
   return (
     <main className="page reports-page">
       <div className="page-head">
@@ -48,7 +49,7 @@ export function Reports(): JSX.Element {
       </div>
       <div className="grid cols-3">
         <div className="card kpi"><div className="label">Evidence packs</div><div className="value">{items ? fmtCount(list.length) : '—'}{cursor ? '+' : ''}</div><div className="delta">{cursor ? 'loaded so far · older packs below' : 'kept under the tenant retention policy'}</div></div>
-        <div className="card kpi"><div className="label">Verification</div><div className="value">{items ? `${fmtCount(list.length - failed)} / ${fmtCount(failed)}` : '—'}</div><div className="delta">passed / failed{failed ? ' · failures failed closed' : ''}</div></div>
+        <div className="card kpi"><div className="label">Verification</div><div className="value">{items ? `${fmtCount(list.length - failed - review)} / ${fmtCount(review)} / ${fmtCount(failed)}` : '—'}</div><div className="delta">passed / review required / failed{failed ? ' · failures failed closed' : ''}</div></div>
         <div className="card kpi zero"><div className="label">Customer values stored</div><div className="value">0</div><div className="delta">counts, hashes and key ids only</div></div>
       </div>
 
@@ -63,7 +64,7 @@ export function Reports(): JSX.Element {
               <td data-l="Layer">Connectors</td>
               <td data-l="Mode">{s.mode ? <span className={`chip ${s.mode === 'synthesize' ? 'violet' : 'teal'}`}>{s.mode}</span> : '—'}</td>
               <td className="mono" data-l="Policy">{s.policy ?? '—'}</td>
-              <td data-l="Verification"><span className={`chip ${s.passed ? 'emerald' : 'rose'}`}>{verificationText(s.passed, s.hits)}</span></td>
+              <td data-l="Verification"><span className={`chip ${verificationTone(s.passed, s.hits, s.review_required)}`} title={s.review_required && !s.passed && !s.hits ? 'The post-write sample found personal data in a column kept as not personal' : undefined}>{verificationText(s.passed, s.hits, s.review_required)}</span></td>
               <td className="t" data-l="Created (UTC)">{fmtUtc(s.created_at, false).replace(' UTC', '')}</td>
               <td data-l="Download"><div className="dl">
                 <button className="btn btn-sm" type="button" disabled={busy === s.id} aria-label={`Download evidence pack ${shortId(s.job_id)} as JSON`} onClick={() => void downloadJson(s)}>JSON</button>

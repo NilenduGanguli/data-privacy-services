@@ -99,6 +99,12 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("dl number", "DRIVER_LICENSE", 0.7),
     ("licencia", "DRIVER_LICENSE", 0.6),
     ("national id", "NATIONAL_ID", 0.8),
+    # the number on an identity document (KYC): Aadhaar, SSN card, passport, … in one column
+    ("doc number", "NATIONAL_ID", 0.75),
+    ("doc no", "NATIONAL_ID", 0.7),
+    ("document number", "NATIONAL_ID", 0.75),
+    ("document no", "NATIONAL_ID", 0.75),
+    ("id doc number", "NATIONAL_ID", 0.75),
     ("identity number", "NATIONAL_ID", 0.6),
     ("id number", "NATIONAL_ID", 0.5),
     ("mrz", "MRZ", 0.9),
@@ -147,6 +153,19 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("addr", "STREET_ADDRESS", 0.7),
     ("direccion", "STREET_ADDRESS", 0.85),
     ("street", "STREET_ADDRESS", 0.6),
+    # numbered address lines (``line1``, ``address_line2``, ``addr1``): a word with its digit
+    ("address line1", "STREET_ADDRESS", 0.85),
+    ("address line2", "STREET_ADDRESS", 0.85),
+    ("address line3", "STREET_ADDRESS", 0.85),
+    ("address1", "STREET_ADDRESS", 0.8),
+    ("address2", "STREET_ADDRESS", 0.8),
+    ("addr1", "STREET_ADDRESS", 0.75),
+    ("addr2", "STREET_ADDRESS", 0.75),
+    ("street1", "STREET_ADDRESS", 0.75),
+    ("street2", "STREET_ADDRESS", 0.75),
+    ("line1", "STREET_ADDRESS", 0.75),
+    ("line2", "STREET_ADDRESS", 0.75),
+    ("line3", "STREET_ADDRESS", 0.7),
     ("postal code", "POSTAL_CODE", 0.9),
     ("postcode", "POSTAL_CODE", 0.9),
     ("zip", "POSTAL_CODE", 0.85),
@@ -169,6 +188,35 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("middle name", "PERSON_NAME", 0.85),
     ("nombre", "PERSON_NAME", 0.85),
     ("apellido", "PERSON_NAME", 0.85),
+    # a person's role before "name" says whose name it is (``cardholder_name``, ``payee_name``)
+    ("holder name", "PERSON_NAME", 0.85),
+    ("cardholder name", "PERSON_NAME", 0.9),
+    ("cardholder", "PERSON_NAME", 0.8),
+    ("card holder", "PERSON_NAME", 0.8),
+    ("account holder", "PERSON_NAME", 0.8),
+    ("accountholder name", "PERSON_NAME", 0.9),
+    ("counterparty name", "PERSON_NAME", 0.85),
+    ("beneficiary name", "PERSON_NAME", 0.85),
+    ("payee name", "PERSON_NAME", 0.85),
+    ("payer name", "PERSON_NAME", 0.85),
+    ("remitter name", "PERSON_NAME", 0.85),
+    ("nominee name", "PERSON_NAME", 0.85),
+    ("customer name", "PERSON_NAME", 0.85),
+    ("client name", "PERSON_NAME", 0.85),
+    ("applicant name", "PERSON_NAME", 0.85),
+    ("borrower name", "PERSON_NAME", 0.85),
+    ("guarantor name", "PERSON_NAME", 0.85),
+    ("contact name", "PERSON_NAME", 0.85),
+    ("owner name", "PERSON_NAME", 0.85),
+    ("member name", "PERSON_NAME", 0.85),
+    ("patient name", "PERSON_NAME", 0.85),
+    ("employee name", "PERSON_NAME", 0.85),
+    ("signatory name", "PERSON_NAME", 0.85),
+    ("guardian name", "PERSON_NAME", 0.85),
+    ("spouse name", "PERSON_NAME", 0.85),
+    ("father name", "PERSON_NAME", 0.85),
+    ("mother name", "PERSON_NAME", 0.85),
+    ("maiden name", "PERSON_NAME", 0.85),
     ("name", "PERSON_NAME", 0.55),
     ("gender", "GENDER", 0.8),
     ("sex", "GENDER", 0.8),
@@ -225,6 +273,11 @@ _COMPILED: tuple[tuple[re.Pattern[str], str, float, str], ...] = tuple(
     (re.compile(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])"), entity, score, phrase)
     for phrase, entity, score in _RULES
 )
+
+
+def structural_entities() -> frozenset[str]:
+    """Every entity type a field name can suggest (the rules above)."""
+    return frozenset(entity for _, entity, _ in _RULES)
 
 
 def classify_key(key: str) -> list[KeyCandidate]:

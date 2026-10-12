@@ -55,6 +55,9 @@ class EvalReport(BaseModel):
     config: dict[str, Any]
     overall: dict[str, float | None]
     by_type: list[TypeScore]
+    #: Spans inside free text only (text records and JSON free-text leaves): what a document,
+    #: an OCR page or a notes column can be swept for, as opposed to a field its key names.
+    by_type_free_text: list[TypeScore] = Field(default_factory=list)
     by_jurisdiction: dict[str, dict[str, float | int | None]]
     confusion: list[dict[str, Any]] = Field(default_factory=list)
     thresholds: list[dict[str, float | None]] = Field(default_factory=list)
@@ -129,6 +132,34 @@ def score_record(
     return counts, confusion
 
 
+def free_text_view(
+    record: CorpusRecord, findings: list[Finding]
+) -> tuple[CorpusRecord, list[Finding]]:
+    """The record's span labels and the findings inside free text (spans, or a text record)."""
+    labels = [label for label in record.labels if label.start is not None]
+    inside = [f for f in findings if record.kind == "text" or f.locator.start is not None]
+    return record.model_copy(update={"labels": labels}), inside
+
+
+def _scores(by_type: dict[str, Counts]) -> list[TypeScore]:
+    out = []
+    for entity, c in sorted(by_type.items()):
+        p, r = _ratio(c.tp, c.tp + c.fp), _ratio(c.tp, c.tp + c.fn)
+        out.append(
+            TypeScore(
+                entity_type=entity,
+                tp=c.tp,
+                fp=c.fp,
+                fn=c.fn,
+                support=c.tp + c.fn,
+                precision=p,
+                recall=r,
+                f1=_f1(p, r),
+            )
+        )
+    return out
+
+
 def _detect(record: CorpusRecord, detectors: dict[str, Detector]) -> list[Finding]:
     detector = detectors[record.locale]
     if record.kind == "text":
@@ -155,32 +186,22 @@ def evaluate(
     }
     predictions = [(r, _detect(r, detectors)) for r in records]
     by_type: dict[str, Counts] = {}
+    by_text: dict[str, Counts] = {}
     by_jurisdiction: dict[str, Counts] = {}
     confusion: Counter[tuple[str, str]] = Counter()
     for record, findings in predictions:
-        counts, conf = score_record(record, [f for f in findings if f.score >= min_score])
+        kept = [f for f in findings if f.score >= min_score]
+        counts, conf = score_record(record, kept)
         confusion += conf
         for entity, c in counts.items():
             by_type.setdefault(entity, Counts()).add(c)
             by_jurisdiction.setdefault(record.jurisdiction, Counts()).add(c)
+        for entity, c in score_record(*free_text_view(record, kept))[0].items():
+            by_text.setdefault(entity, Counts()).add(c)
     total = Counts()
     for c in by_type.values():
         total.add(c)
-    scores = []
-    for entity, c in sorted(by_type.items()):
-        p, r = _ratio(c.tp, c.tp + c.fp), _ratio(c.tp, c.tp + c.fn)
-        scores.append(
-            TypeScore(
-                entity_type=entity,
-                tp=c.tp,
-                fp=c.fp,
-                fn=c.fn,
-                support=c.tp + c.fn,
-                precision=p,
-                recall=r,
-                f1=_f1(p, r),
-            )
-        )
+    scores = _scores(by_type)
     micro_p, micro_r = _ratio(total.tp, total.tp + total.fp), _ratio(total.tp, total.tp + total.fn)
     f1s = [s.f1 for s in scores if s.support and s.f1 is not None]
     thresholds = []
@@ -214,6 +235,7 @@ def evaluate(
             "macro_f1": round(sum(f1s) / len(f1s), 4) if f1s else None,
         },
         by_type=scores,
+        by_type_free_text=_scores(by_text),
         by_jurisdiction=jurisdictions,
         confusion=[
             {"label": a, "predicted": b, "count": n} for (a, b), n in sorted(confusion.items())
@@ -260,6 +282,23 @@ def render_markdown(report: EvalReport) -> str:
         f"{_fmt(s.recall)} | {_fmt(s.f1)} |"
         for s in report.by_type
     ]
+    if report.by_type_free_text:
+        lines += [
+            "",
+            "## In free text",
+            "",
+            "Spans inside free text only — text records and the `notes` field of JSON records: "
+            "what a document, an OCR page or a notes column is swept for. A type that appears "
+            "only in the table above is found by its field name alone.",
+            "",
+            "| entity type | support | TP | FP | FN | precision | recall | F1 |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {s.entity_type} | {s.support} | {s.tp} | {s.fp} | {s.fn} | {_fmt(s.precision)} | "
+            f"{_fmt(s.recall)} | {_fmt(s.f1)} |"
+            for s in report.by_type_free_text
+        ]
     lines += [
         "",
         "## By jurisdiction",

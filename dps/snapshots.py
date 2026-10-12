@@ -61,6 +61,9 @@ _KINDS = frozenset(
     }
 )
 FREE_TEXT = "FREE_TEXT"
+#: A column whose values are personal data of several types (an e-mail in one row, a phone
+#: number in the next): every value is replaced whole (integrated verify r1, B1).
+MIXED_PII = "MIXED_PII"
 
 
 class SnapshotStateError(Exception):

@@ -10,6 +10,20 @@ planned per row at run time). Binary, LOB-binary and ObjectId columns are classi
 and always kept. The anchor (contract §6.2) is the first column, by M0's ``ANCHOR_ENTITIES``
 priority (ties: the key column, then column order), whose entity is an anchor entity.
 
+**Mixed columns** (integrated verify r1, B1). Per-entity scoring misses a column whose values are
+personal data of several types — ``contacts.value`` holds an e-mail in one row and a mobile number
+in the next, ``kyc_documents.doc_number`` an Aadhaar, an SSN or a CURP — because no single type
+reaches the threshold. When no entity passes, the rows with *any* whole-value finding of MEDIUM or
+higher sensitivity are counted together: ``noisy_or(name cue, any_rate × mean best score)`` at or
+above ``min_score`` makes the column ``MIXED_PII``, and every value is replaced whole
+(``det_token``; ``hmac_pseudonym`` on a bounded column, where a token would not fit;
+``mask_partial`` below 16 characters). A column called ``value`` (``contact``, ``detail``, …)
+next to a ``channel`` / ``contact_type`` column is a mixed contact value by its name. A kept
+column whose sampled values still carry such findings in at least 5 % of the rows is never
+presented as "not personal": it keeps ``value_entities`` and ``value_hit_rate`` and the note
+``kept_with_hits`` (a decision for the reviewer). A numeric column below the bar is noise (random
+12-digit ids pass the Aadhaar checksum one time in ten) and reports no hits.
+
 Only value **shapes** (``Xxxxx Xxxxxxx``, ``9999 9999``) are kept; the sample never leaves the
 worker and is dropped as soon as the snapshot is built. Errors carry codes only.
 """
@@ -28,7 +42,7 @@ from dps import db, jobs
 from dps.connections import ConnectionStoreError, get_connection, load_credentials
 from dps.engine.batch import KEYLESS_METHODS
 from dps.engine.detect.ensemble import Detector
-from dps.engine.detect.structural import classify_key
+from dps.engine.detect.structural import classify_key, normalize_key
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import EngineError
 from dps.engine.taxonomy import Sensitivity, entity_info
@@ -56,7 +70,7 @@ from dps.layers.connectors.registry import open_connector
 from dps.layers.connectors.selection import SelectionError, validate_selection
 from dps.observability import get_logger
 from dps.secrets import SealError, SecretUnavailable, open_json
-from dps.snapshots import FREE_TEXT, content_hash, create_snapshot
+from dps.snapshots import FREE_TEXT, MIXED_PII, content_hash, create_snapshot
 
 if TYPE_CHECKING:
     from dps.worker import HandlerContext
@@ -93,6 +107,19 @@ TEXT_OUTPUT_METHODS = frozenset(
 NUMERIC_SAFE_METHODS = frozenset({"fpe_digits", "keep", "null", "noise"})
 DATE_SAFE_METHODS = frozenset({"date_shift", "keep", "null", "surrogate"})
 TEXT_SPAN_MIN_RATE = 0.05
+#: A kept column whose values carry MEDIUM+ findings in this share of the rows is a decision.
+KEPT_HIT_MIN_RATE = 0.05
+#: ``hmac_pseudonym``'s output length: a mixed value in a bounded column at least this long.
+PSEUDONYM_LENGTH = 16
+#: Name evidence that a column is a polymorphic contact value: its name, next to a column that
+#: says which channel each row is (``contacts(channel, value)``).
+MIXED_VALUE_NAMES = frozenset(
+    {"value", "val", "contact", "contact value", "contact detail", "contact details", "detail"}
+)
+CHANNEL_NAMES = frozenset(
+    {"channel", "contact channel", "contact type", "contact method", "medium", "channel type"}
+)
+MIXED_NAME_SCORE = 0.7
 _TEXT_KINDS = frozenset({"text", "lob_text"})
 _NUMERIC_KINDS = frozenset({"int", "decimal", "float"})
 _DIGITS = re.compile(r"\d")
@@ -144,6 +171,8 @@ def suggest_methods(
         return MethodSpec(method="det_token"), MethodSpec(method="surrogate"), "text_pipeline"
     obf, syn = policy.method_for(entity, "obfuscate"), policy.method_for(entity, "synthesize")
     note: str | None = None
+    if entity == MIXED_PII:
+        obf, note = policy.treat.get(MIXED_PII) or mixed_method(column), "mixed_entities"
     if (
         policy.synthesize.keep_non_sensitive
         and entity not in policy.synthesize.overrides
@@ -178,6 +207,33 @@ def suggest_methods(
     return obf, syn, note
 
 
+def mixed_method(column: ColumnInfo) -> MethodSpec:
+    """Whole-value replacement for a ``MIXED_PII`` column that fits it.
+
+    ``det_token`` (reversible with the key) when the column is unbounded; on a bounded column a
+    token would overflow (a worst case of ``ceil((4·L + 16)·8/5)`` characters), so a keyed
+    ``hmac_pseudonym`` of :data:`PSEUDONYM_LENGTH` characters, and ``mask_partial`` (every letter
+    and digit masked, length kept) when even that does not fit.
+    """
+    if column.length is None:
+        return MethodSpec(method="det_token")
+    if column.length >= PSEUDONYM_LENGTH:
+        return MethodSpec(method="hmac_pseudonym", params={"length": PSEUDONYM_LENGTH})
+    return MethodSpec(method="mask_partial", params={"keep_last": 0})
+
+
+def _mixed_name_score(column: ColumnInfo, shape: TableShape) -> float:
+    """:data:`MIXED_NAME_SCORE` for ``value`` (…) next to a ``channel`` (…) column, else 0."""
+    if normalize_key(column.name) not in MIXED_VALUE_NAMES:
+        return 0.0
+    siblings = {normalize_key(c.name) for c in shape.columns if c.name != column.name}
+    return MIXED_NAME_SCORE if siblings & CHANNEL_NAMES else 0.0
+
+
+def _sensitive(entity: str) -> bool:
+    return entity_info(entity).sensitivity.rank >= Sensitivity.MEDIUM.rank
+
+
 def classify_columns(
     shape: TableShape, rows: list[Row], *, policy: Policy, detector: Detector, fpe_enabled: bool
 ) -> list[ColumnClassification]:
@@ -194,6 +250,12 @@ def classify_columns(
         detectors: dict[str, set[str]] = defaultdict(set)
         span_rows = 0
         span_detectors: set[str] = set()
+        # rows with a MEDIUM+ whole-value finding of any type (their best score), rows with a
+        # MEDIUM+ finding anywhere, and the types and detectors behind them
+        any_whole: list[float] = []
+        sensitive_rows = 0
+        seen: set[str] = set()
+        seen_detectors: set[str] = set()
         for text in values:
             result = detector.detect(data={column.name: text})
             spans = [f for f in result.findings if not f.locator.whole]
@@ -204,6 +266,14 @@ def classify_columns(
             if spans:
                 span_rows += 1
                 span_detectors.update(d.split(":")[0] for f in spans for d in f.detectors)
+            sensitive = [f for f in result.findings if _sensitive(f.entity_type)]
+            if sensitive:
+                sensitive_rows += 1
+                seen.update(f.entity_type for f in sensitive)
+                seen_detectors.update(d.split(":")[0] for f in sensitive for d in f.detectors)
+            best_whole = [f.score for f in sensitive if f.locator.whole]
+            if best_whole:
+                any_whole.append(max(best_whole))
         names = {k.entity_type: k.score for k in classify_key(column.path)}
         scores: dict[str, float] = {}
         for candidate in set(whole) | set(names):
@@ -215,12 +285,32 @@ def classify_columns(
             scores.items(), key=lambda kv: kv[1], default=(None, 0.0)
         )
         entity = best[0] if best[1] >= policy.detect.min_score else None
+        confidence = best[1]
         span_rate = span_rows / len(values) if values else 0.0
+        sensitive_rate = sensitive_rows / len(values) if values else 0.0
         text_column = False
+        mixed = False
+        if entity is None and not by_name_only:
+            name_cue = _mixed_name_score(column, shape)
+            any_rate = len(any_whole) / len(values) if values else 0.0
+            any_mean = sum(any_whole) / len(any_whole) if any_whole else 0.0
+            mixed_score = _noisy_or(name_cue, any_rate * any_mean)
+            if mixed_score >= policy.detect.min_score:
+                entity, confidence, mixed = MIXED_PII, mixed_score, True
         if entity is None and column.kind in _TEXT_KINDS and span_rate >= TEXT_SPAN_MIN_RATE:
             entity, text_column = FREE_TEXT, True
         if text_column:
             hit_rate, used = span_rate, span_detectors
+        elif mixed:
+            hit_rate = len(any_whole) / len(values) if values else 0.0
+            used = seen_detectors | ({"structural"} if _mixed_name_score(column, shape) else set())
+        elif entity is None and column.kind in _NUMERIC_KINDS:
+            # ids and amounts below the bar: a 12-digit id is a Verhoeff-valid "Aadhaar" one time
+            # in ten by chance — noise, not personal data (the post-write sample agrees)
+            hit_rate, used, seen = 0.0, set(), set()
+        elif entity is None:
+            # kept: what the detectors still found in it (never presented as "not personal")
+            hit_rate, used = sensitive_rate, seen_detectors
         else:
             hit_rate = len(whole.get(entity or "", [])) / len(values) if values else 0.0
             used = detectors.get(entity or "", set()) | (
@@ -235,6 +325,11 @@ def classify_columns(
             min_digits=min(digit_counts) if digit_counts else None,
             text_column=text_column,
         )
+        if entity is None and seen and sensitive_rate >= KEPT_HIT_MIN_RATE:
+            note = "kept_with_hits"
+        sensitivity = entity_info(entity).sensitivity if entity else None
+        if mixed and seen:
+            sensitivity = Sensitivity.max_of(entity_info(e).sensitivity for e in seen)
         out.append(
             ColumnClassification(
                 path=column.path,
@@ -243,8 +338,8 @@ def classify_columns(
                 kind=column.kind,
                 is_key=column.is_key,
                 entity_type=entity,
-                confidence=round(min(1.0, 0.5 + span_rate) if text_column else best[1], 3),
-                sensitivity=entity_info(entity).sensitivity if entity else None,
+                confidence=round(min(1.0, 0.5 + span_rate) if text_column else confidence, 3),
+                sensitivity=sensitivity,
                 detectors=sorted(used),
                 value_hit_rate=round(hit_rate, 3),
                 null_rate=round(1 - present / len(rows), 3) if rows else 0.0,
@@ -257,6 +352,7 @@ def classify_columns(
                 synthesize_suggested=syn,
                 synthesize_method=syn,
                 type_note=note,
+                value_entities=sorted(seen),
             )
         )
     for anchor_entity in ANCHOR_ENTITIES:

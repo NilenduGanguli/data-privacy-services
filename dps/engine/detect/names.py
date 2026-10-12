@@ -10,7 +10,9 @@ Cruz``) is a ``PERSON_NAME`` when a cue says so:
   ``applicant``, ``beneficiary``, ``cliente``, ``titular``, …) need two or more name words;
 * **contact** details right after it — ``Ananya Krishnan (ananya.k@…, +91 …)``, ``<…@…>``,
   ``, +91 …`` (two or more name words);
-* **possessive** followed by a personal attribute — ``Ananya Krishnan's Aadhaar``.
+* **possessive** followed by a personal attribute — ``Ananya Krishnan's Aadhaar``;
+* **payment narration** — the payee or remitter of ``NEFT/Ananya Krishnan/…`` (also ``IMPS``,
+  ``RTGS``, ``UPI``, ``NACH``, ``ACH``; two or more name words, so ``NEFT/HDFC BANK/`` is not one).
 
 Without a cue nothing is reported: capitalised words alone are headings, places and products as
 often as names. NER (tier T2) is the general answer and is optional; with it off, these cues are
@@ -72,6 +74,8 @@ _WEAK_LEADIN = re.compile(
     r"\s*[:,\-]?\s*$",
     re.IGNORECASE,
 )
+#: A bank-statement narration code right before a name: ``NEFT/<name>/…`` (the slash ends it).
+_NARRATION = re.compile(r"\b(?:NEFT|IMPS|RTGS|UPI|NACH|ACH)\s*/\s*$", re.IGNORECASE)
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
 _PHONE = re.compile(r"\+?\(?\d(?:[ \-.()]{0,2}\d){7,14}")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}")
@@ -136,7 +140,11 @@ def _words(text: str) -> list[_Word]:
     out: list[_Word] = []
     for m in _TOKEN.finditer(text):
         raw, start = m.group(0), m.start()
-        if start > 0 and text[start - 1] not in _LEFT_OK:
+        if (
+            start > 0
+            and text[start - 1] not in _LEFT_OK
+            and not (text[start - 1] == "/" and _NARRATION.search(text[max(0, start - 12) : start]))
+        ):
             continue
         dot = raw.endswith(".")
         core = raw[:-1] if dot else raw
@@ -224,6 +232,8 @@ def _cue(text: str, words: list[_Word], run: list[int], n_names: int) -> tuple[s
         return None
     if _WEAK_LEADIN.search(before):
         return "cue:lead-in", WEAK_SCORE
+    if _NARRATION.search(before):
+        return "cue:narration", WEAK_SCORE
     last = words[run[-1]]
     if last.possessive and _PERSONAL_NOUN.match(text, last.end + 2):
         return "cue:possessive", POSSESSIVE_SCORE
