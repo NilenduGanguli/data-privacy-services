@@ -490,6 +490,12 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
         )
     target_text = pack.target.get("object") or (pack.target.get("files") or {}).get("prefix")
     files = pack.target.get("files") or {}
+    files_row = (
+        f"<tr><th>Files</th><td>{e(files.get('format'))} · {e(files.get('objects'))} objects · "
+        f"{e(files.get('rows'))} rows · manifest {e(files.get('manifest_artefact_id'))}</td></tr>\n"
+        if files
+        else ""
+    )
     fidelity = (
         f"<h2>6 Synthetic fidelity and privacy</h2><table><tr><th>Fidelity</th>"
         f"<td class=mono>{e(pack.fidelity)}</td></tr><tr><th>Privacy</th>"
@@ -514,8 +520,7 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
 <h2>2 Configuration hashes</h2><table>
 <tr><th>Source</th><td>{e(pack.source.get("connection_name"))} · {e(pack.source.get("engine"))} {e(pack.source.get("server_version"))} · {e(pack.source.get("object"))}</td></tr>
 <tr><th>Target</th><td>{e(pack.target.get("connection_name"))} · {e(target_text)} · {e(pack.target.get("write_mode"))}{" · created" if pack.target.get("created") else ""}{" · truncated" if pack.target.get("truncated") else ""}</td></tr>
-<tr><th>Files</th><td>{e(files.get("format"))} · {e(files.get("objects"))} objects · manifest {e(files.get("manifest_artefact_id"))}</td></tr>
-<tr><th>Policy</th><td class=mono>{e(pack.policy.get("name"))} · {e(pack.policy.get("hash"))}</td></tr>
+{files_row}<tr><th>Policy</th><td class=mono>{e(pack.policy.get("name"))} · {e(pack.policy.get("hash"))}</td></tr>
 <tr><th>Snapshot</th><td class=mono>{e(pack.snapshot.get("id"))} · {e(pack.snapshot.get("content_hash"))} · accepted by {e(pack.snapshot.get("accepted_by"))} · {e(pack.snapshot.get("overrides"))} overrides</td></tr>
 <tr><th>Configuration</th><td class=mono>{e(pack.config_hash)}</td></tr>
 <tr><th>Engine</th><td class=mono>{e(pack.engine_version)} · image {e(pack.image_digest or "unset")}</td></tr>

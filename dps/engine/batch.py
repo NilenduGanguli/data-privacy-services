@@ -56,9 +56,15 @@ from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import PrivacyEngine
 from dps.engine.synth.surrogates import SynthesisSeed
 from dps.engine.taxonomy import entity_info, record_sensitivity
-from dps.engine.transform.apply import ApplyOptions, apply_plan
-from dps.engine.transform.crypto import KeyMaterial
-from dps.engine.transform.methods import METHODS
+from dps.engine.transform.apply import (
+    ApplyOptions,
+    RevealHint,
+    _keyed_anchor,
+    apply_plan,
+    reveal,
+)
+from dps.engine.transform.crypto import KeyMaterial, key_check_value
+from dps.engine.transform.methods import ISO_DATE, ISO_DATETIME, METHODS, MethodError
 from dps.engine.verify import NAME_ENTITY, Verification, name_parts, normalise
 from dps.layers.connectors.base import (
     ColumnInfo,
@@ -485,3 +491,173 @@ def plans_digest(columns: list[ColumnPlan]) -> str:
     return json.dumps(
         [c.model_dump(mode="json") for c in columns], sort_keys=True, separators=(",", ":")
     )
+
+
+# --- reveal (contract §6.2; ``tools/reveal_rows.py``) -------------------------------------------
+
+
+def _phone_prefix(token: str, params: dict[str, Any]) -> int:
+    """Length of the country code a ``phone`` token kept verbatim (0 when none was kept)."""
+    import phonenumbers
+
+    if params.get("keep_country_code", True) is False or not token.strip().startswith("+"):
+        return 0
+    try:
+        return len(str(phonenumbers.parse(token, None).country_code))
+    except phonenumbers.NumberParseException:
+        return 0
+
+
+def _candidates(
+    entry: dict[str, Any], token: str, column: ColumnInfo, anchor: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """``(method, reverse params)`` to try, ``det_token`` first: it authenticates, so it settles
+    whether the value ran a fallback (det_token instead of FPE) before an FPE inverse, which
+    would decrypt anything, is tried."""
+    method, params = entry["method"], entry.get("params") or {}
+    out: list[tuple[str, dict[str, Any]]] = [("det_token", {})]
+    if method == "email":
+        domain = params.get("domain", "keep")
+        out += [("email", {"sub": "det_token", "domain": domain})]
+        out += [("email", {"sub": "fpe_text", "domain": domain})]
+    elif method == "phone":
+        first = _phone_prefix(token, params)
+        out += [("phone", {"keep_prefix": n}) for n in dict.fromkeys([first, 0, 1, 2, 3])]
+    elif method == "date_shift":
+        fmt = {"date": ISO_DATE, "timestamp": ISO_DATETIME}.get(column.kind)
+        out += [("date_shift", {"anchor": anchor, **({"fmt": fmt} if fmt else {})})]
+    elif method != "det_token":
+        out += [(method, {})]
+    return out
+
+
+def _reproduces(
+    entry: dict[str, Any], column: ColumnInfo, plain: str, token: str, options: ApplyOptions
+) -> bool:
+    """True when the forward plan maps ``plain`` back to ``token`` (fallbacks included)."""
+    finding = Finding(
+        locator=Locator(path=column.path),
+        entity_type=entry["entity_type"],
+        score=1.0,
+        detectors=["snapshot"],
+        sensitivity=entity_info(entry["entity_type"]).sensitivity,
+        value_hash=hash_value(plain),
+    )
+    plan = Plan(
+        mode="obfuscate",
+        record_sensitivity=record_sensitivity([entry["entity_type"]]),
+        entries=[
+            PlanEntry(
+                finding=finding,
+                method=entry["method"],
+                params=dict(entry.get("params") or {}),
+                reason="reveal-check",
+                reversible=True,
+            )
+        ],
+    )
+    try:
+        out = apply_plan(plan=plan, options=options, data={column.name: plain})
+    except MethodError:
+        return False
+    return out.output.get(column.name) == token
+
+
+def _reveal_value(
+    entry: dict[str, Any],
+    value: Any,
+    column: ColumnInfo,
+    *,
+    key: KeyMaterial,
+    options: ApplyOptions,
+    raw_anchor: str,
+    field_scoped: bool,
+) -> Any:
+    token = to_engine_text(value, column)
+    if not token:
+        return value
+    if entry.get("text_column"):
+        doc = reveal(output={column.name: token}, key=key, hints=[], options=options)
+        return from_engine_text(doc[column.name], column)
+    anchor = _keyed_anchor(raw_anchor, key)
+    kcv = key.kcv or key_check_value(key)
+    check = dataclasses.replace(options, anchor=raw_anchor)
+    for method, reverse_params in _candidates(entry, token, column, anchor):
+        hint = RevealHint(
+            path=column.path,
+            entity_type=entry["entity_type"],
+            method=method,
+            params=dict(entry.get("params") or {}),
+            reverse_params=reverse_params,
+            anchor=anchor,
+            kid=key.kid,
+            kcv=kcv,
+            field_scoped=field_scoped,
+        )
+        try:
+            plain = reveal(output={column.name: token}, key=key, hints=[hint], options=options)
+        except MethodError:
+            continue
+        text = str(plain[column.name])
+        if _reproduces(entry, column, text, token, check):
+            return from_engine_text(text, column)
+    raise MethodError(f"the value at {column.path} could not be revealed with this key material")
+
+
+def reveal_row(
+    row: Row,
+    *,
+    reveal_map: list[dict[str, Any]],
+    shape: TableShape,
+    key: KeyMaterial,
+    engine: PrivacyEngine,
+    policy: Policy,
+    anchor: tuple[str, str] | None,
+) -> Row:
+    """Reveal one L2 output row with the caller's key and an evidence pack's ``reveal_map``.
+
+    The anchor's inputs (the anchor column, else the key columns) are revealed first and the row
+    anchor is recomputed from them, as ``date_shift`` needs it (contract §6.2). Entries with
+    ``reveal: false`` and columns not in the map are returned as they are. Each whole value is
+    tried as ``det_token`` first (an FPE fallback) and then as its method, and a candidate is
+    accepted only when the forward method maps it back to the stored token, so a fallback or an
+    ambiguous parameter can never reveal a wrong value silently. Free-text columns reveal their
+    envelopes.
+
+    Raises:
+        MethodError: a value does not reveal under ``key`` (another key, a tampered token);
+            the message names the path, never the value.
+    """
+    out = dict(row)
+    entries = [e for e in reveal_map if e.get("reveal")]
+    if not entries:
+        return out
+    by_path = {c.path: c for c in shape.columns}
+    options = ApplyOptions(
+        policy=policy,
+        key=key,
+        surrogates=None,
+        fpe_enabled=engine.fpe_enabled,
+        cipher_factory=engine.cipher_factory,
+        token_style="envelope",
+        locale=policy.locale.default or engine.settings.default_locale,
+    )
+    field_scoped = policy.consistency.field_scoped
+    first = {anchor[0]} if anchor else set(shape.key)
+    known = [e for e in entries if e["path"] in by_path]
+    inputs = [e for e in known if by_path[e["path"]].name in first]
+    rest = [e for e in known if by_path[e["path"]].name not in first]
+    for group in (inputs, rest):
+        raw = row_anchor(out, shape, anchor)  # recomputed once the anchor inputs are revealed
+        for entry in group:
+            column = by_path[entry["path"]]
+            out[column.name] = _reveal_value(
+                entry,
+                out.get(column.name),
+                column,
+                key=key,
+                options=options,
+                raw_anchor=raw,
+                field_scoped=field_scoped,
+            )
+    return out

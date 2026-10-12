@@ -899,3 +899,79 @@ Review: `M2-G4-review-r1.md`, one blocking finding (B1). Contract change: §0 am
   `test_a_failed_prepare_still_makes_a_pack` (offline) and `test_list_pages_newest_first` (db);
   the db test also reads both artefacts back and checks another tenant sees nothing:
   6 offline + 2 db = 8 (plan: 4).
+
+## Task 22 — Run handlers, submission and job groups
+
+- **Plan tests that could never pass, corrected (intent kept).** The in-place tests submitted a
+  discovered customers snapshot unchanged, but discovery suggests `fpe_digits` for `customer_id`
+  (`CUSTOMER_ID`), `det_token` for `national_id varchar(18)` and `fpe_text` for `tax_id char(10)`.
+  Contract §5.3 refuses a transformed key in place (`pk_transform_in_place`, rule 8 of Task 18 —
+  not weakened), a `det_token` cannot fit `varchar(18)` (`length_overflow`), and a PAN has 4 digits,
+  below the FPE domain, so `fpe_text` falls back to `det_token` and fails the preflight on
+  `char(10)`. `tests/connectors/test_run_modes.py` therefore reviews the snapshot first
+  (`IN_PLACE_REVIEW`: key `keep`, `national_id` → `fpe_digits`, `tax_id` → `mask_partial`), as an
+  owner must; `test_row_count_mismatch_fails_before_any_write` uses the same review (it would
+  otherwise stop at submit). The round-trip test now compares **whole rows** (every revealed and
+  kept column equals the source; the one-way `tax_id` keeps its last four characters) instead of
+  only the reveal-map columns of one row.
+- `dps/engine/batch.py` `reveal_row` — **a reveal can never return a wrong value silently.** The
+  plan retried `det_token` only when the recorded method raised `MethodError`, but FPE inverses
+  (and `phone` with a wrong kept prefix) decrypt anything without an error. Each whole value is now
+  tried as `det_token` first (AES-SIV authenticates: it settles whether the value ran a fallback),
+  then as its method (email: `sub` det_token, then fpe_text; phone: the token's country-code
+  length, then 0–3), and a candidate is accepted only when the forward plan (`apply_plan`, same
+  key, params and row anchor) maps it back to the stored token. The anchor's inputs (anchor
+  column, else the key columns) are revealed first; the `date_shift` anchor is
+  `_keyed_anchor(row_anchor(...), key)` (Task 16 note); free-text columns reveal their envelopes.
+- `dps/layers/connectors/jobs_run.py`, finalize:
+  - **A failed in_place/append job keeps its write ledger** (the plan cleared it at every
+    finalize). A retry resumes from the ledger mark; with the ledger gone a resumed partition would
+    restart from a checkpoint that can be one batch behind and re-obfuscate that batch. Succeeded
+    and canceled jobs (not retryable) clear it. HANDOFF §8 says so.
+  - The post-write sample and the ledger cleanup are best effort: a target or secret failure is
+    recorded in the evidence (`post_sample: {"error": code}`, `write_ledger_cleared: false`)
+    instead of retrying finalize until the job is dead-lettered without an evidence pack. The
+    files manifest is not best effort (loaders need it). In place, the sample scans every column
+    of the table (kept columns are output too).
+  - A finalize that is retried after storing the pack reuses it (packs are append-only, one per
+    job). A failed partition's code becomes the job's `error_code` when prepare set none.
+- `prepare`: projected columns that are not in the accepted snapshot (added since review) are
+  `snapshot_stale` unless `options.unclassified` is `keep` (the plan copied them unreviewed into
+  table/append/files targets; in place they are not written). A missing connection is
+  `connection_missing`, an invalid inline policy `policy_invalid`, a registry error its own code, a
+  PVC path outside `DPS_EXPORT_ROOT` `target_invalid`, a storage error at prepare fails the job.
+  `_spec` refuses a stored selection with binds but no `spec_enc` (`secret_unavailable`, as
+  discovery does). The length check lives in `resolve_target` (Task 18).
+- **Files targets** (`targets.resolve_target`): planned text-like columns are unbounded `text`
+  (a file has no column length; the plan kept the source length, so a `det_token` output on
+  `varchar(18)` failed the preflight with `length_overflow` — found by the parquet run test), and
+  `column_types` records the written columns' types for the manifest. The `FilesWriter` columns are
+  the source `ColumnInfo`s (their declared types decide Parquet `timestamp` with/without zone);
+  the plan's `ColumnPlan.output_column()` carries no declared type.
+- `dps/layers/connectors/submit.py`: the wrap key is validated before the job exists (the plan
+  noted the gap); the redacted spec also records `consistency.caller_seed` (the evidence's
+  `key_custody.returned`); `submit_discover` refuses a target-only or file connection
+  (`connection_role`) and non-PostgreSQL sources in M2 (`engine_unavailable`); run selections are
+  always sealed. `seal_retry_secret` answers `key_material_required` when the body has no material
+  for the job's mode.
+- `dps/groups.py`: names follow the connection-name pattern (`ValueError` otherwise; the API
+  validates first); creating a group inserts the tenant's `dps_tenant` row like connections do.
+- Counters: warn-mode verification hits are checkpointed as `verify:hits` (evidence `hits`).
+  `RuntimeCache.job_ids()` added (ops/tests); `RunRuntime.close` is best effort.
+- `dps/layers/connectors/evidence.py`: the HTML "Files" row is printed for files targets only
+  (with the row count); found when checking the rendered page.
+- Tests: `tests/connectors/helpers.py` loads each claimed partition's own job (the plan ran every
+  claimed partition with the driven job), `register_pvc` points `export_root` at a per-test
+  directory (keyword `base_path`), `json_from_export` is synchronous, `db_key_enc` returns the
+  sealed bytes or `None`; `SourcePg.customers_table` takes `name`. Added
+  `test_in_place_resume_never_applies_a_batch_twice` (the checkpoint of batch 2 is lost after its
+  write: the resumed partition takes the ledger mark, and every row still reveals to its source),
+  `test_in_place_refuses_a_transformed_key_at_submit`, submission tests in `tests/db/test_groups.py`
+  (group key mismatch / not found, idempotent replay returns no key, a bad wrap key leaves no job,
+  RSA wrapping, `connection_not_found`, `kek_unconfigured`, `key_material_invalid`, retry secrets)
+  and reveal tests for fallbacks, a reversibly transformed anchor and a wrong key:
+  4 offline + 4 db + 10 integration = 18 (plan: 11).
+- `dps/layers/connectors/files.py` gains `manifest_bytes` (the serialisation `write_manifest`
+  uses), so finalize stores the same bytes as the `manifest` artefact without reading the object
+  back. HANDOFF §8 gains the PostgreSQL-target trap (ledger, `CREATE` on the target schema, in-place
+  review rules).

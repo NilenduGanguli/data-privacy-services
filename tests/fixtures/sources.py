@@ -133,10 +133,11 @@ class SourcePg:
             await self.admin.copy_records_to_table(name, records=rows, schema_name=self.schema)
         return ObjectRef(owner=self.schema, name=name)
 
-    async def customers_table(self, rows: int = 300) -> ObjectRef:
-        """``customers`` with the demo DDL (``01_bank_schema.sql``, without its foreign key) and
-        ``rows`` deterministic synthetic rows from the surrogate engine (fixed seed, no real PII)."""
-        return await self.table("customers", CUSTOMERS_DDL, customers_records(rows))
+    async def customers_table(self, rows: int = 300, name: str = "customers") -> ObjectRef:
+        """``<name>`` (default ``customers``) with the demo DDL (``01_bank_schema.sql``, without
+        its foreign key) and ``rows`` deterministic synthetic rows from the surrogate engine
+        (fixed seed, no real PII)."""
+        return await self.table(name, CUSTOMERS_DDL, customers_records(rows))
 
     def connection(
         self, *, user: str = "dps_reader", roles: tuple[str, ...] = ("source",)

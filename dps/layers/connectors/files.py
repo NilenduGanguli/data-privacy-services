@@ -380,9 +380,15 @@ def build_manifest(
     }
 
 
+def manifest_bytes(manifest: dict[str, Any]) -> bytes:
+    """The manifest as written (sorted keys, indented UTF-8 JSON)."""
+    return json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False).encode("utf-8")
+
+
 async def write_manifest(
     store: ObjectStore, base_key: str, manifest: dict[str, Any]
 ) -> StoredObject:
     """Write ``<base_key>/manifest.json`` (call it last, after every part is uploaded)."""
-    data = json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False).encode("utf-8")
-    return await store.put(f"{base_key}/manifest.json", data, content_type="application/json")
+    return await store.put(
+        f"{base_key}/manifest.json", manifest_bytes(manifest), content_type="application/json"
+    )

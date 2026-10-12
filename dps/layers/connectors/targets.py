@@ -493,10 +493,11 @@ def _check_lengths(plans: list[ColumnPlan], source_shape: TableShape) -> None:
             )
 
 
-def _created_plans(plans: list[ColumnPlan], source_shape: TableShape) -> list[ColumnPlan]:
+def _unbounded_plans(plans: list[ColumnPlan], source_shape: TableShape) -> list[ColumnPlan]:
+    """Planned text-like columns become unbounded ``text`` (created tables, file targets)."""
     out = []
     for p in plans:
-        if created_column_type(source_shape.column(p.name), p) == "text":
+        if source_shape.column(p.name).kind in _TEXT_OUTPUT_KINDS:
             p = p.model_copy(
                 update={"kind": "text", "length": None, "precision": None, "scale": None}
             )
@@ -537,9 +538,19 @@ def resolve_target(
         "key": list(source_shape.key),
     }
     if t.write_mode == "files":
+        # file columns are unbounded: a planned text-like column is ``text`` (a fallback token is
+        # longer than the value); the types are for the manifest only, never SQL
+        types = {
+            n: "text"
+            if n in planned and source_shape.column(n).kind in _TEXT_OUTPUT_KINDS
+            else source_shape.column(n).data_type
+            for n in projection
+        }
         return (
-            ResolvedTarget(**common, files=t.files, write_columns=list(projection)),
-            plans,
+            ResolvedTarget(
+                **common, files=t.files, write_columns=list(projection), column_types=types
+            ),
+            _unbounded_plans(plans, source_shape),
         )
     if t.write_mode == "table":
         if t.object is None:
@@ -557,7 +568,7 @@ def resolve_target(
                 write_columns=list(projection),
                 column_types=types,
             )
-            return resolved, _created_plans(plans, source_shape)
+            return resolved, _unbounded_plans(plans, source_shape)
         _check_existing(target_shape, source_shape, projection, planned)
         if not target_shape.key or set(target_shape.key) != set(source_shape.key):
             raise PrepareFailure(

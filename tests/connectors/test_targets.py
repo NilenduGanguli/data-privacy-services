@@ -542,6 +542,9 @@ def test_resolve_existing_targets_per_write_mode() -> None:
     resolved, out = _resolve(files, None, plans_for("files"), tgt=PVC)
     assert resolved.object is None and resolved.files is not None and resolved.engine == "pvc"
     assert resolved.write_columns == projection
+    assert resolved.column_types["customer_id"] == "bigint"  # declared types for the manifest
+    assert resolved.column_types["full_name"] == "text"  # planned text: unbounded in a file
+    assert next(p for p in out if p.name == "full_name").length is None
 
 
 def test_same_table_and_run_plan_round_trip() -> None:

@@ -120,6 +120,7 @@ def test_html_escapes_everything_and_has_no_scripts() -> None:
     assert "<script" not in page and "&lt;script&gt;" in page and pack_sha256(pack) in page
     assert "pseudonymised — still personal data" in page and "Signatures" in page
     assert "Checkpoint positions" in page and "@media print" in page
+    assert "<th>Files</th>" not in page  # a table target has no files row
     synth = build_pack(evidence_inputs(mode="synthesize"))
     synth_page = render_html(synth, sha=pack_sha256(synth))
     assert "synthetic — measured, not claimed anonymous" in synth_page

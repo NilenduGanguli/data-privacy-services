@@ -283,6 +283,15 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   `no_sql_string_functions` counts SQL-string/export functions (`dblink*`, `xpath_table`,
   `pg_background_launch`, `aws_s3.query_export_to_s3`, …) the source login can execute: give the
   source login none.
+- PostgreSQL targets (M2): `in_place`/`append` keep a write ledger, table `dps_write_ledger` in the
+  target schema (or `target.ledger_owner`), created at prepare — the target login needs `CREATE` on
+  that schema (or a pre-created ledger with SELECT/INSERT/UPDATE/DELETE). A finished job deletes its
+  ledger rows; a **failed** job keeps them, because a retry resumes from the ledger and must never
+  re-apply a batch. `in_place` refuses a transformed key (`pk_transform_in_place`: review the key to
+  `keep`) and any output that cannot fit an existing column: `det_token` on a bounded column is
+  `length_overflow` at prepare, and FPE needs ≥ 5 letters and 0 or ≥ 6 digits (a 4-digit PAN falls
+  back to `det_token` and fails the preflight on `char(10)`). `table` targets create planned text
+  columns as `text`, so they take any method.
 - Port 8400 busy: `DPS_APP_PORT=8401` for both `docker compose up` and `tools/smoke_test.py` (see
   "Lane-safe stacks", §3).
 - Synthesis under a `strict` policy is still refused, rarely, when a reshaped identifier (a keyed
