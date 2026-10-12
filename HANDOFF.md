@@ -596,6 +596,13 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     SQL*Plus buffering, and Oracle 23ai refuses the joined text with `ORA-03405`.
   - Oracle 23ai reports a missing object privilege as `ORA-41900` (`missing INSERT privilege`,
     …), 19c as `ORA-01031`; tests accept both.
+  - python-oracledb 26.0.0 thin: a call over `call_timeout` normally fails with `DPY-4024` and the
+    session stays usable, but when the server cannot answer the break (PL/SQL asleep) the driver
+    closes the connection (`DPY-4011`), and **setting `call_timeout` on that connection crashes the
+    process (SIGBUS)**. `OraclePool.acquire` drops a session whose rollback fails; code must never
+    reuse a connection after a driver error inside a checkout. Oracle 23ai's `ORA-00001` message
+    quotes the duplicate row's values, which is why only driver codes leave `dps/layers/connectors/
+    oracle.py` (`connector_error`).
 
 ## 9. Next milestones
 

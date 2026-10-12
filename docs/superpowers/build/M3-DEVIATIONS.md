@@ -228,3 +228,50 @@ plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as b
   `ColumnInfo(..., **dict[str, int | None])` (the unpacked dict could fill `pseudo`). Typing only — the
   same dict at run time; the unit suite is green (the PG integration tests were not run in this lane:
   no `source-pg` was started for an annotation-only change).
+
+## Task 4 — Oracle session pool, value-free driver errors, fetch types
+
+- `dps/layers/connectors/oracle.py` `connector_error`: the plan's one connection-class set (all
+  `connection_failed`, retryable) is split by what a retry can fix, matching M2's PostgreSQL
+  connector (`_LOGIN_REFUSED` not retryable, network failures retryable):
+  - refused logins `ORA-01017`, `ORA-01045`, `ORA-28000`, `ORA-28001`, `ORA-28040` →
+    `connection_failed`, **not retryable**. Why: a retried wrong password counts towards the
+    profile's `FAILED_LOGIN_ATTEMPTS` (default 10) and locks the bank's service account; a locked or
+    expired account cannot be fixed by retrying.
+  - unreachable/lost: the plan's `ORA-12505/12514/12541/12170`, `TNS-12541`, `DPY-6000/6001/6005`,
+    `DPY-4011` plus `ORA-12537/12547`, `ORA-03113/03114/03135` (lost mid-call), `DPY-1001` (not
+    connected), `DPY-6003`, `DPY-4005` (pool wait timed out) → `connection_failed`, retryable.
+  - call timeouts `DPY-4024` (thin), `ORA-03156` / `ORA-01013` (thick) → `statement_timeout`
+    (contract §5.3 code; M2's PG maps its statement timeout the same way), not retryable.
+  The plan's tests are kept (`test_connection_class_codes` checks the code only); new tests pin the
+  retry split and the timeout code.
+- `_DRIVER_CODE` also accepts `PLS-nnnnn` (PL/SQL compile errors from the ledger DDL block); anything
+  else stays `ORA-unknown`.
+- `OraclePool.acquire` turns a failure to open or check out a session (`create_pool` is lazy, so
+  this is where a login fails) into `connector_error("connection_failed", exc)` raised `from None`
+  (plan: the raw driver error escaped `acquire`, carrying its message). `module` and `action` are
+  capped at 64 characters like `client_identifier`. `easy_connect` raises `ConnectorError(
+  "connection_invalid", "host and service_name must be plain names")` (value-free detail).
+- **Measured driver behaviour** (python-oracledb 26.0.0 thin on Oracle 23.26 Free), now in the module
+  docstring, HANDOFF §8 and `tests/connectors/test_oracle_session_live.py`:
+  - a long SQL call over `call_timeout` fails with `DPY-4024` and the session stays usable; a call
+    the server cannot break (PL/SQL `DBMS_SESSION.SLEEP`) ends with the driver closing the connection
+    (`DPY-4011`), and **setting `call_timeout` on that closed connection crashes the process with
+    SIGBUS** (reproduced in a scratch script). The pool's rollback-on-release raises `DPY-1001` for
+    it and the session is dropped, so it never returns to the pool; the live test proves the next
+    checkout is fresh and the process survives.
+  - an unknown service surfaces as `DPY-6005` in thin mode (the listener's ORA-12514 is wrapped).
+  - Oracle 23ai's `ORA-00001` message quotes the duplicate row's value — the live test shows the raw
+    driver text containing the sentinel and the `ConnectorError` without it.
+- `tests/connectors/test_oracle_session.py`: the plan's tests (formatted to 100 columns) plus: close is
+  forced and idempotent, size 0 refused, the block's own exception still rolls back and releases,
+  `acquire` failures are value-free, more unknown driver shapes, `easy_connect` default port and
+  missing host/service (38 tests).
+- `tests/connectors/test_oracle_session_live.py` (new, `integration` + `oracle`): session tags
+  (`MODULE`/`ACTION`/`CLIENT_IDENTIFIER`) and `NLS_SORT`/`NLS_COMP = BINARY` read back from the
+  server; release rolls back an uncommitted insert; both timeout shapes above; refused login
+  (`ORA-01017`, not retryable, password not in the error), closed port (retryable), unknown service;
+  value-free `ORA-00001` and `ORA-00942`; fetch types (NUMBER(12) → int, NUMBER(14,2) and NUMBER →
+  Decimal exact above 2**53, BINARY_DOUBLE → float, CLOB/NCLOB of > 4000 bytes with astral characters
+  → whole str, BLOB → bytes, `IS JSON` VARCHAR2 and CLOB → str, not dict).
+- `ConnectorError.detail` already existed (Task 1 audit): no M2 touch in `base.py`.
