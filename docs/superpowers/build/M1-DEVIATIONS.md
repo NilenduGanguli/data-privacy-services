@@ -1609,3 +1609,9 @@ for CVV", "Run on the engine", "Re-run plan", …) and test ids (`policy-header`
     onto itself, and the sweep then refuses it, which is correct. This is an availability gap in
     M0's `email` method, not a leak. Two- and three-letter and realistic local parts passed in the runs made here (one call each, plus 5 streams of 3).
   - `.env.example` still lacks the M1 lines (the permission rule of Tasks 1 and 19A–19D).
+- **The `v0.2.0` tag is not created in this commit; it is left to the release step.** M0's plan also
+  tagged at the end of its last task, yet `v0.1.0-m0` sits on the post-verification commit
+  (`48d9425`, after three fix commits). Tagging before the M1 review would need a forced move if a
+  fix round follows. Command for the release step, on the final verified commit:
+  `git tag -a v0.2.0 -m "M1: documents and Layer 1 complete"`. The lane stack was stopped with
+  `docker compose --profile docs down`, as the plan's Step 5 says.
