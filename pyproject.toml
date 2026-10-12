@@ -36,6 +36,8 @@ db = ["asyncpg>=0.29"]                                     # metadata DB + Postg
 connectors = ["sqlglot>=26", "pyarrow>=16", "boto3>=1.34"]  # M3 appends oracledb, pymongo>=4.13
 uitest = ["playwright==1.55.0"]  # console check only; matches mcr.microsoft.com/playwright:v1.55.0-noble (M4 pins the same)
 e2e = ["playwright==1.55.0"]                               # console browser check; same pin as M4's [scanner]
+tabular = ["numpy>=2.0", "scipy>=1.13"]                     # M5: Gaussian-copula engine + metrics
+synth-ml = ["mostlyai[local]>=4.5", "pandas>=2.2"]          # M5: optional engine; never in an image
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
@@ -80,6 +82,8 @@ markers = [
     "pg_source: needs the demo source Postgres (DPS_TEST_SOURCE_PG_DSN, default 127.0.0.1:${DPS_SOURCE_PG_PORT:-5442})",
     "s3: needs MinIO (DPS_TEST_S3_ENDPOINT, default http://127.0.0.1:${DPS_MINIO_PORT:-9010})",
     "slow: takes more than 30 s (benchmarks, resume-after-kill)",
+    "deploy: needs the kustomize binary (renders deploy/openshift)",
+    "ml: needs the optional [synth-ml] extra (MOSTLY AI SDK)",
 ]
 
 [tool.mypy]

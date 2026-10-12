@@ -79,8 +79,10 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
 - stage 2 `python:3.12-slim`: `tesseract-ocr` + `tesseract-ocr-eng` from apt and
   `ENV DPS_OCR_PROVIDER=auto` (M1: local OCR when no Azure endpoint is configured),
   `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
-  `uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"` (`tabular` arrives with
-  M5 and is skipped with a note until then; `ner` + `en_core_web_sm` added when `WITH_NER=1`), the
+  `uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"` (`tabular` = M5's
+  `numpy>=2.0` + `scipy>=1.13` for the Gaussian-copula engine and the fidelity/privacy metrics;
+  `ner` + `en_core_web_sm` added when `WITH_NER=1`; the optional `synth-ml` extra, MOSTLY AI, is
+  never installed in an image), the
   console dist at `/app/frontend/dist`, `tools/` at `/app/tools`, and `/app/var/{artefacts,exports}`
   owned by uid 10001;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
@@ -94,7 +96,8 @@ Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (ar
 `docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB. M2 lane
 (2026-10-12, arm64, without M1): 687 MB. The integrated image is in §11.
 
-Development install: `uv pip install -e ".[dev,fpe,docs,db,connectors,uitest,e2e]"` (`uitest` and
+Development install: `uv pip install -e ".[dev,fpe,docs,db,connectors,tabular,uitest,e2e]"` (`tabular`
+is M5's numpy + scipy; the unit tests of the copula engine and the metrics skip without it; `uitest` and
 `e2e` both pin Playwright 1.55.0, for the M1 and M2 console checks; then `python -m playwright install
 chromium`, a no-op when `~/Library/Caches/ms-playwright/chromium-1187` exists). The console's unit
 suites (`cd frontend && npm test`: `node --test` over `frontend/tests/*.test.ts` for M1, then Vitest
@@ -337,6 +340,27 @@ an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture che
 | `DPS_ARTEFACT_STORE`, `DPS_ARTEFACT_DIR`, `DPS_EXPORT_ROOT` | `local`, `./var/artefacts`, `./var/exports` | `local` \| `s3`; `var/` is git-ignored |
 | `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
 | `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
+
+**M5 settings (contract §10; tabular synthesis, tokenization, keys, posture).** All have defaults;
+the posture rules that tighten them in staging/prod arrive with M5's posture task.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DPS_SYNTH_TABULAR_ENGINE` | `copula` | comma list of enabled tabular engines: `copula`, `mostly` (needs the `synth-ml` extra); `""` = tabular synthesis off; anything else is refused |
+| `DPS_COPULA_FIT_ROWS` / `_HOLDOUT_ROWS` / `_METRICS_ROWS` | 100,000 / 20,000 / 5,000 | rows fitted at prepare / extra rows held out (never fitted) to measure privacy / preview rows run through the real batch transformer |
+| `DPS_COPULA_RARE_FLOOR` / `DPS_COPULA_MAX_RESAMPLE` | 0.01 / 8 | categories below this share are never emitted (within [0, 0.2]); redraws per row before a batch fails closed with `exact_row_match` (≥ 1) |
+| `DPS_FIDELITY_COLUMN_LIMIT` / `DPS_FIDELITY_CORR_LIMIT` | 0.05 / 0.10 | KS/TVD per column and mean correlation delta shown as "within limit" in the evidence |
+| `DPS_PRIVACY_NNDR_TARGET` / `DPS_PRIVACY_NNDR_ENFORCE` | 0.95 / `false` | `true`: an NNDR ratio below the target fails prepare (`privacy_gate`) |
+| `DPS_MOSTLY_POOL_ROWS` / `DPS_MOSTLY_MAX_TRAINING_MINUTES` | 20,000 / 10 | optional MOSTLY engine |
+| `DPS_MOSTLY_DP_ENABLED` / `_DP_MAX_EPSILON` / `_DP_DELTA` | `false` / 5.0 / 1e-5 | MOSTLY differential-privacy training (epsilon > 0, 0 < delta < 1) |
+| `DPS_UTILITY_MAX_ROWS` / `DPS_MIA_MIN_HOLDOUT` / `DPS_MIA_AUC_TARGET` | 5,000 / 50 / 0.60 | train-on-synthetic/test-on-real budget; the membership-inference proxy needs this many holdout rows and passes at or below the AUC target |
+| `DPS_TOKENIZER_PROVIDER` | `""` | `external_tokenize` adapter: `""` (off) or `http` |
+| `DPS_TOKENIZER_URL` / `DPS_TOKENIZER_TOKEN` (`_FILE`) / `DPS_TOKENIZER_CA_FILE` | — | the bank tokenization service (http(s) with a host; the error never echoes the URL), its bearer token (prefer `DPS_TOKENIZER_TOKEN_FILE`) and CA bundle |
+| `DPS_TOKENIZER_TIMEOUT_SECONDS` / `_BATCH` / `_RETRIES` | 10 / 500 / 2 | |
+| `DPS_KEY_CACHE_SECONDS` / `DPS_KEY_MAX_TTL_DAYS` / `DPS_KEY_ROTATION_MAX_AGE_DAYS` / `DPS_KEY_ROTATION_MAX_GRACE_HOURS` | 30 / 365 / 90 / 168 | DB-backed API keys |
+| `DPS_REPORT_PDF_ENABLED` / `DPS_ROLLUP_RETENTION_DAYS` | `true` / 400 | |
+| `DPS_EGRESS_TLS_REQUIRED` / `DPS_CORS_ORIGINS` | `false` / `*` | posture: `true` and explicit origins in staging/prod; origins are a comma list, `""` = same-origin only |
+| `DPS_VERIFY_WARN_ALLOWED` / `DPS_LLM_EGRESS_CHECK` | `true` / `strict` | posture: `false` / `strict` in staging/prod; `strict` or `warn` only |
 
 Declared but not read by the app: `DPS_HOST` (only the worker's ops server binds to it), `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`. The M1 document, OCR and

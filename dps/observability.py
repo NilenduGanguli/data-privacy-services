@@ -116,6 +116,17 @@ _SAFE_FIELDS = frozenset(
         "code",
         "checks",
         "lease_lost",
+        # M5: tabular synthesis, adapters, retention and keys — counts, ids, engine and gate
+        # names only (a fitted model, a seed or a token never has a field of its own)
+        "columns",
+        "resamples",
+        "adapter",
+        "deleted",
+        "tenants",
+        "artefact_id",
+        "gate",
+        "key_count",
+        "grace_hours",
     }
 )
 
@@ -231,6 +242,15 @@ LEASES_LOST = Counter("dps_leases_lost_total", "Fenced writes that found the lea
 ROWS_WRITTEN = Counter("dps_rows_written_total", "Rows written by L2 jobs", ["mode", "write_mode"])
 QUEUE_DEPTH = Gauge("dps_queue_depth", "Queue rows by table and state", ["table", "state"])
 AUDIT_DROPPED = Counter("dps_audit_dropped_total", "Audit events dropped on a saturated queue")
+
+# M5 tabular synthesis, external tokenization and DB-backed API keys
+TABULAR_RESAMPLES = Counter(
+    "dps_tabular_resamples_total", "Synthetic rows resampled to avoid an exact real row"
+)
+EXTERNAL_CALLS = Counter(
+    "dps_external_token_calls_total", "Calls to the tokenization service", ["op", "outcome"]
+)
+KEYS_LOADED = Gauge("dps_auth_keys_loaded", "Active DB-backed API keys in this process's snapshot")
 
 
 def metrics_payload() -> tuple[bytes, str]:
