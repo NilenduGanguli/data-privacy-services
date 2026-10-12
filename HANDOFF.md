@@ -117,7 +117,7 @@ That is the whole local stack (profile `full` is the same set). Smaller stacks: 
 up --build -d` runs app, worker, metadata DB and migrate (then `DPS_SMOKE_M2=off python
 tools/smoke_test.py`: 25 checks with the two OCR checks skipped — the job checks need the
 `sources` profile's demo source); `--profile docs` adds the OCR mock, `--profile sources` the demo
-source, MinIO and the demo secrets.
+source, MinIO and the demo secrets. M3's sources alone: `docker compose --profile oracle --profile sources up -d oracle mongo`, then poll `docker compose ps` until both are healthy (never `up --wait`, which fails on the exited one-shots) and run `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle or mongo"` with the lane's port variables exported.
 
 
 **Measured throughput (M2, 2026-10-12; image of `17e14a2`, tools of `8204191`)** — `python
@@ -181,8 +181,10 @@ Services (host ports bind `127.0.0.1` only):
 | `minio-init` (M2, profiles `sources`/`full`) | `minio/mc:latest` | — | one-shot after `minio` is healthy: creates buckets `dps-artefacts` and `dps-exports`, exits 0 |
 | `migrate` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot `python -m dps.migrate` as `dps_owner` after `dps-db` is healthy, exits 0; app and worker wait for it (`service_completed_successfully`) and run with `DPS_MIGRATIONS_MODE=verify` |
 | `worker` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — (9400 inside the network) | `python -m dps.worker`, `DPS_WORKER_CONCURRENCY=4`; healthcheck urllib `:9400/health`; scalable (`--scale worker=N`); read-only root, 512 MB `/tmp` tmpfs (files spools), `mem_limit: 1g` |
-| `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) into the `dps-secrets` volume, which app and worker mount read-only at `/var/run/secrets/dps` |
+| `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) into the `dps-secrets` volume, which app and worker mount read-only at `/var/run/secrets/dps`; M3 adds `dps/src/oracle-crm-ro` (`dps_ro`), `dps/src/oracle-crm-owner` (`crm`), `dps/tgt/oracle-crm-masked` (`crm_masked`), `dps/src/oracle-loans-owner` (`loans`) — each with `username`, `password` and `dsn` `oracle:1521/FREEPDB1` — and `dps/src/mongo-crm`, `dps/tgt/mongo-crm-uat` (`uri` only, `mongodb://mongo:27017/<db>?directConnection=true`) |
 | `seed-sources` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot after `source-pg` is healthy: `python tools/seed_sources.py --target postgres --rows 20000 --seed 7 --restore-copy`; idempotent |
+| `oracle` (M3, profiles `oracle`/`full`) | `gvenzl/oracle-free:23-slim-faststart` (Oracle Database 23.26 Free) | `${DPS_ORACLE_PORT:-1522}` → 1521 | service `FREEPDB1` (`127.0.0.1:${DPS_ORACLE_PORT:-1522}/FREEPDB1` on the host, `oracle:1521/FREEPDB1` in the network); `docker/oracle/initdb/01_crm.sql` runs once per **fresh container** as SYS: users `CRM` (owner of `CUSTOMERS`, `INTERACTIONS`, `KYC_DOCUMENTS`, `ADDRESS_HISTORY`, `CUSTOMER_EVENTS`), `CRM_MASKED` (table-load target), `LOANS` (`APPLICANTS`) and `DPS_RO` (CREATE SESSION + SELECT on those six tables only); tables are created empty. Passwords = user name, SYSTEM `dps_local_oracle` (local only). Healthy once `healthcheck.sh` passes, which returns 4 until the init script has finished (faststart: ~30 s, allow 1–3 min); `mem_limit: 2700m`; no volume, so `docker compose down` resets the demo |
+| `mongo` (M3, profiles `sources`/`full`) | `mongo:7` | `${DPS_MONGO_PORT:-27018}` → 27017 | `--replSet rs0 --bind_ip_all`: a one-member replica set (the member is `localhost:27017`, so clients use `directConnection=true`); the healthcheck runs `rs.initiate` on first start and is healthy only as a writable primary (transactions need it: `in_place`/`append`). No auth (local only); `mem_limit: 1g`; data lives in the image's anonymous volumes (`docker compose rm -sfv mongo` resets it) |
 
 The app talks to the mock as `http://azure-ocr-mock:5000` (`DPS_OCR_PROVIDER=azure`, key `mock-key`,
 a local demo literal) and `depends_on` it with `required: false`: **without `--profile docs` the app
@@ -356,7 +358,7 @@ schema settings above are validated (and posture-checked) and read by the docume
 Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
 (default `local`; the OCR mock `latest`) and the host-port variables `DPS_APP_PORT` (8400),
 `DPS_DB_PORT` (5441), `DPS_SOURCE_PG_PORT` (5442), `DPS_MINIO_PORT` (9010), `DPS_MINIO_CONSOLE_PORT`
-(9011) and `DPS_OCR_PORT` (5016; the others arrive with their services, §3 "Lane-safe stacks").
+(9011), `DPS_OCR_PORT` (5016), `DPS_ORACLE_PORT` (1522) and `DPS_MONGO_PORT` (27018; the others arrive with their services, §3 "Lane-safe stacks"). The M3 tests read `DPS_TEST_ORACLE_DSN` / `DPS_TEST_ORACLE_USER` / `DPS_TEST_ORACLE_PASSWORD` (default `127.0.0.1:${DPS_ORACLE_PORT:-1522}/FREEPDB1`, `system`, `dps_local_oracle`) and `DPS_TEST_MONGO_URI` (default `mongodb://127.0.0.1:${DPS_MONGO_PORT:-27018}/?directConnection=true`).
 `DPS_SMOKE_REQUIRE_OCR=1` makes `tools/smoke_test.py` fail instead of skipping its OCR checks;
 `DPS_SMOKE_M2=auto|on|off` selects its job-platform checks.
 
@@ -452,7 +454,9 @@ only in staging/prod; `DPS_JOB_KEK_PREVIOUS` arrives with M5's rotation), `DPS_P
 `DPS_PG_WORKER_PASSWORD(_FILE)`, `DPS_PG_MIGRATION_PASSWORD(_FILE)` and
 `DPS_S3_SECRET_ACCESS_KEY(_FILE)` (with `DPS_S3_ACCESS_KEY_ID`), plus the connection `secret_ref`
 directories under `DPS_SECRET_DIR`: `dps/src/*` (sources), `dps/tgt/*` (targets), `dps/s3/*` (file
-stores). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
+stores; M3's local demo refs are `dps/src/oracle-crm-ro`, `dps/src/oracle-crm-owner`,
+`dps/tgt/oracle-crm-masked`, `dps/src/oracle-loans-owner`, `dps/src/mongo-crm`,
+`dps/tgt/mongo-crm-uat`; an Oracle ref adds a `dsn` file, a Mongo ref a `uri` file). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
 set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
 
 Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
@@ -582,6 +586,16 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   - Run the integration gates one at a time against a lane's stack: the service tests share one
     metadata database, one source database and one MinIO bucket with fixed keys (two concurrent runs
     collide, e.g. on `tests/big.bin` in `tests/connectors/test_storage_s3.py`).
+- **M3 stack traps.**
+  - `docker compose up --wait` fails on the exited one-shots (contract §11): start, then poll
+    health. Oracle reports `unhealthy` for good when its init script failed (the entrypoint stops
+    at the first error under `WHENEVER SQLERROR EXIT`): read `docker compose logs oracle`, fix the
+    script, then `docker compose rm -sf oracle` and start it again (init runs once per fresh
+    container).
+  - In `docker/oracle/initdb/*.sql` a statement's `;` must end its line: a comment after it keeps
+    SQL*Plus buffering, and Oracle 23ai refuses the joined text with `ORA-03405`.
+  - Oracle 23ai reports a missing object privilege as `ORA-41900` (`missing INSERT privilege`,
+    …), 19c as `ORA-01031`; tests accept both.
 
 ## 9. Next milestones
 

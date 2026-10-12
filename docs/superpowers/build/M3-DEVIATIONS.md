@@ -116,3 +116,57 @@ plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as b
   `partition_no`, `batch_no`, `rows`, `object_ref` were already present (M1/M2); added `op`,
   `driver_code`, `members`, `pairs`, `coverage`, `passed`, `sampled`. M2 defines no connector-call
   counter, so `CONNECTOR_CALLS` and `CONSISTENCY_CHECKS` are new as planned.
+
+## Task 2 — Local stack: Oracle Free, MongoDB replica set, demo schemas, secret refs
+
+- **Demo secret refs are written by M2's `demo-secrets` one-shot, not committed** (plan:
+  `docker/secrets/local/<name>/{username,password,dsn|uri}` committed and bind-mounted at
+  `/var/run/secrets/dps/local:ro` into app and worker; refs `local/<name>`). Files: `docker-compose.yml`
+  (`demo-secrets` command), no `docker/secrets/local/`. Why: M2 built the demo refs as a one-shot
+  that writes into the `dps-secrets` volume ("nothing is committed", contract §11 as revised for M2),
+  which is exactly the alternative the plan's open question 11 offers; a second, committed tree
+  bind-mounted *inside* the read-only `dps-secrets` mount would split the demo refs over two
+  mechanisms; and the queued SEC-2 fix (tenant-scoped `secret_ref`, applied at integration) moves
+  every demo ref under the demo tenant in that one-shot, so M3's refs must live where M2's do. Names
+  follow M2's `dps/src|tgt/...` scheme with the plan's leaf names: `dps/src/oracle-crm-ro` (`dps_ro`),
+  `dps/src/oracle-crm-owner` (`crm`), `dps/tgt/oracle-crm-masked` (`crm_masked`),
+  `dps/src/oracle-loans-owner` (`loans`) — each `username`, `password`, `dsn` =
+  `oracle:1521/FREEPDB1` — and `dps/src/mongo-crm`, `dps/tgt/mongo-crm-uat` (`uri` =
+  `mongodb://mongo:27017/crm|crm_uat?directConnection=true`; no username/password, the local replica
+  set has no auth). Later tasks that name `local/oracle-crm-ro` etc. (smoke test, Task 21) use these
+  refs; the e2e tests' own `m3/...` refs under a temporary secret dir are unaffected.
+- `tests/test_compose_m3.py`: `test_app_and_worker_mount_local_secret_refs_read_only` became
+  `test_app_and_worker_read_the_demo_refs_read_only` (the M2 `dps-secrets` mount, `DPS_SECRET_DIR`, and
+  no `depends_on` on `oracle`/`mongo`); `test_secret_refs_hold_no_production_shapes` became two tests:
+  the one-shot's script names only the in-network hosts `oracle` and `mongo`, and
+  `test_demo_secret_refs_resolve_to_credentials` runs the one-shot's shell command against a temp dir
+  and reads every M3 ref back through `dps.connections.load_credentials` (username, password, `dsn` /
+  `uri` in `Credentials.extra`). The same command was also run once in the app image's `/bin/sh`
+  (dash; `data-privacy-services:m2`) into a scratch dir: all 22 files written as expected.
+- `docker-compose.yml`: host ports are `127.0.0.1:${DPS_ORACLE_PORT:-1522}:1521` and
+  `127.0.0.1:${DPS_MONGO_PORT:-27018}:27017` (plan: literal 1522 / 27018). Why: contract §0 amendment
+  2026-10-12; `tests/test_compose.py` requires the variable form. The tests assert those forms.
+- `docker-compose.yml`: `labels` written as a block mapping like the M2 services (same keys/values).
+  The `app`/`worker` volume lists and `DPS_SECRET_DIR` are unchanged (M2 already mounts `dps-secrets`
+  at `/var/run/secrets/dps:ro` and sets `DPS_SECRET_DIR`).
+- `docker/oracle/initdb/01_crm.sql`: **bug fix** — the plan put comments after the `;` of two `GRANT`
+  statements on the same line. SQL*Plus only ends a statement at a `;` that ends its line, so it kept
+  buffering, sent `GRANT … TO CRM_MASKED; -- … GRANT … TO LOANS;` as one statement, Oracle 23ai
+  refused it (`ORA-03405: End of query reached; no additional text should follow`) and the
+  entrypoint stopped (`WHENEVER SQLERROR EXIT`): the container stayed `unhealthy` with half the users
+  created. The comments now sit on their own lines; `test_init_sql_creates_contract_users_and_tables`
+  asserts no `;` is followed by a `--` comment, and also that `DPS_RO` gets only `CREATE SESSION` and
+  `SELECT`.
+- `tests/test_m3_stack.py` (new, markers `integration` + `oracle` / `mongo`): the plan's Step 7 manual
+  checks as repeatable tests — `DPS_RO` sees exactly the six demo tables (with `TAX_ID CHAR(10)`,
+  `NOTES CLOB`, `LAST_CONTACT_AT TIMESTAMP(9)`) and an `INSERT` is refused; the per-session fixture
+  schema is least-privilege (`ORA-00942` before `grant_select`, rows after); the Mongo node is the
+  `rs0` writable primary and a transaction aborts and commits. Oracle 23ai reports the refused insert
+  as `ORA-41900` (missing INSERT privilege) where 19c says `ORA-01031`; the test accepts both.
+- `HANDOFF.md`: §3 services table (`oracle`, `mongo`; `demo-secrets` row lists the M3 refs) and the
+  M3-only start command, §4 compose-only variables (`DPS_ORACLE_PORT`, `DPS_MONGO_PORT`) and the M3
+  `DPS_TEST_*` variables, §7 the ref names, §8 traps (`up --wait`, a failed Oracle init, the SQL*Plus
+  `;` rule, `ORA-41900`). Mongo has no named volume (the image's anonymous volumes; `docker compose
+  rm -sfv mongo` resets it), like Oracle's "no volume" reset.
+- Contract: no change. §11 already names the `oracle`/`mongo` services, `docker/oracle/initdb/01_crm.sql`
+  and the `demo-secrets` one-shot; the plan's §11 mount of `docker/secrets/local` is not made (above).

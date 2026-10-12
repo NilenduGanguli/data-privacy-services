@@ -2,7 +2,9 @@
 # (M2); profile `docs` adds the Azure Computer Vision Read v3.2 mock (Tesseract inside) that the
 # documents routes use for scanned pages and images (M1); profile `sources` adds the demo source
 # Postgres, MinIO and the demo-secrets / seed-sources one-shots (M2); `full` is all of them. M3
-# adds Oracle Free and MongoDB, M4 the browser worker.
+# adds Oracle Free (profile `oracle`, ${DPS_ORACLE_PORT:-1522}) and the MongoDB replica set (profile
+# `sources`, ${DPS_MONGO_PORT:-27018}); M4 the browser worker.
+#   docker compose --profile oracle --profile sources up -d oracle mongo   # M3 sources alone
 #
 #   docker compose up --build -d       # console + API on http://127.0.0.1:${DPS_APP_PORT:-8400}
 #   docker compose --env-file docker/compose.sources.env --profile docs --profile sources up -d --build
@@ -316,8 +318,12 @@ services:
 
   # Writes the demo secret_ref files into the dps-secrets volume (app and worker mount it
   # read-only): dps/src/bank-pg-ro (dps_reader), dps/tgt/bank-uat and dps/src/bank-restore-rw
-  # (dps_writer), dps/s3/exports (MinIO). Demo literals; nothing is committed. `$$` is compose's
-  # escape for a literal `$` (else $d, $1 … would be interpolated from the host environment).
+  # (dps_writer), dps/s3/exports (MinIO); M3 adds the Oracle refs dps/src/oracle-crm-ro (dps_ro),
+  # dps/src/oracle-crm-owner (crm), dps/tgt/oracle-crm-masked (crm_masked),
+  # dps/src/oracle-loans-owner (loans) — username, password and dsn — and the MongoDB refs
+  # dps/src/mongo-crm and dps/tgt/mongo-crm-uat (uri only: the local replica set has no auth).
+  # Demo literals; nothing is committed. `$$` is compose's escape for a literal `$` (else $d, $1 …
+  # would be interpolated from the host environment).
   demo-secrets:
     image: data-privacy-services:${DPS_IMAGE_TAG:-local}
     pull_policy: never
@@ -333,6 +339,15 @@ services:
         mkdir -p "$$d/s3/exports";
         printf minioadmin > "$$d/s3/exports/access_key_id";
         printf minioadmin > "$$d/s3/exports/secret_access_key";
+        o() { w "$$1" "$$2" "$$2"; printf %s "$$ORA_DSN" > "$$d/$$1/dsn"; };
+        ORA_DSN=oracle:1521/FREEPDB1;
+        o src/oracle-crm-ro dps_ro;
+        o src/oracle-crm-owner crm;
+        o tgt/oracle-crm-masked crm_masked;
+        o src/oracle-loans-owner loans;
+        m() { mkdir -p "$$d/$$1"; printf %s "mongodb://mongo:27017/$$2?directConnection=true" > "$$d/$$1/uri"; };
+        m src/mongo-crm crm;
+        m tgt/mongo-crm-uat crm_uat;
         chmod -R a+rX /var/run/secrets/dps
     volumes:
       - dps-secrets:/var/run/secrets/dps
@@ -366,6 +381,58 @@ services:
     labels:
       app: data-privacy-services
       component: seed-sources
+      env: local
+
+  # Oracle Database Free (M3, contract §11), profile `oracle` (and `full`). On a fresh container's
+  # first start the image runs docker/oracle/initdb/01_crm.sql as SYS in FREEPDB1 (users CRM,
+  # CRM_MASKED, LOANS, DPS_RO; the CRM and LOANS demo tables, empty) and reports unhealthy (exit 4)
+  # until that script is done; first start takes 1-3 min. No volume: `docker compose down` resets
+  # the demo. SYS/SYSTEM password and the users' passwords (= user name) are local demo literals.
+  #   docker compose --profile oracle up -d oracle
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    profiles: ["oracle", "full"]
+    environment:
+      ORACLE_PASSWORD: dps_local_oracle          # SYS/SYSTEM, local demo literal (contract §11)
+    volumes:
+      - ./docker/oracle/initdb:/container-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${DPS_ORACLE_PORT:-1522}:1521"
+    mem_limit: 2700m                             # idles at ~2.5 GiB (Wega measurement)
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]            # exit 4 while init scripts run → unhealthy until done
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+      start_interval: 2s
+    labels:
+      app: data-privacy-services
+      component: source-oracle
+      env: local
+
+  # MongoDB 7 as a one-member replica set (M3, contract §11), profile `sources` (and `full`):
+  # in_place and append writes run in transactions, which need a replica set. The healthcheck
+  # initiates the set on first run and is healthy only once the node is a writable primary.
+  # Clients connect with directConnection=true (the member is registered as localhost:27017).
+  # No auth (local demo only).
+  #   docker compose --profile sources up -d mongo
+  mongo:
+    image: mongo:7
+    profiles: ["sources", "full"]
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "127.0.0.1:${DPS_MONGO_PORT:-27018}:27017"
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "try { rs.status() } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]}) } if (!db.hello().isWritablePrimary) { quit(1) } print('ok')"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    labels:
+      app: data-privacy-services
+      component: source-mongo
       env: local
 
 volumes:
