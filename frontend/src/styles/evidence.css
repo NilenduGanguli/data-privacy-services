@@ -92,8 +92,9 @@
     .print-only { display: block; }
     & a { color: #000; text-decoration: none; }
     .doc-head { border-bottom-width: 1.5pt; flex-wrap: nowrap; }
-    .doc-head > div:first-child { flex: 1 1 auto !important; }
-    .seal { flex: none; }
+    .doc-head > div:first-child { flex: 1 1 0 !important; min-width: 0; }
+    .seal { flex: 0 1 auto; max-width: 45%; }
+    .seal span { overflow-wrap: anywhere; }
     .snap { table-layout: fixed; }
     .snap .m { word-break: break-word; font-size: 8pt; }
     & section.keep { break-inside: avoid; page-break-inside: avoid; }

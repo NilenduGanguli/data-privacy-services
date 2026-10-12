@@ -156,3 +156,25 @@ select.input { appearance: auto; }
   .page { padding: 16px 16px 32px; }
   .page-head { flex-wrap: wrap; align-items: flex-start; }
 }
+
+/* --- print (M2 Task 35): the evidence pack page is the PDF look; console chrome is dropped --- */
+@page { size: A4; margin: 14mm 13mm 16mm; }
+@media print {
+  :root, :root[data-theme="dark"], :root[data-theme="light"] {
+    --bg: #fff; --bg-tint: #fff; --surface: #fff; --surface-2: #fff; --surface-3: #e4e4e4;
+    --border: #bdbdbd; --border-strong: #8a8a8a; --ink: #000; --ink-2: #1f1f1f; --ink-3: #4a4a4a;
+    --teal: #000; --teal-soft: transparent; --teal-border: #000;
+    --amber: #000; --amber-soft: transparent; --amber-border: #000;
+    --emerald: #000; --emerald-soft: transparent; --emerald-border: #000;
+    --rose: #000; --rose-soft: transparent; --rose-border: #000;
+    --violet: #000; --violet-soft: transparent; --shadow-md: none; --shadow-lg: none;
+  }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { background: #fff; height: auto; }
+  body { font-size: 9pt; color: #000; }
+  .sidebar, .topbar, .no-print { display: none !important; }
+  .shell, .main { display: block; min-height: 0; }
+  .page { padding: 0; display: block; }
+  section { break-inside: avoid; }
+  .tbl-scroll { overflow: visible; }
+}

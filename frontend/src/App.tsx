@@ -1,10 +1,12 @@
 import { Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import { EvidencePack } from './pages/EvidencePack';
 import { JobDetail } from './pages/JobDetail';
 import { Jobs } from './pages/Jobs';
 import { JobWizard } from './pages/JobWizard';
 import { Overview } from './pages/Overview';
 import { Playground } from './pages/Playground';
+import { Reports } from './pages/Reports';
 
 function Soon({ title }: { title: string }): JSX.Element {
   return (
@@ -29,7 +31,8 @@ export function App(): JSX.Element {
         <Route path="/data-sources/jobs/new" element={<JobWizard />} />
         <Route path="/data-sources/jobs/:jobId" element={<JobDetail />} />
         <Route path="/scanner" element={<Soon title="UI scanner (M4)" />} />
-        <Route path="/reports" element={<Soon title="Reports & audit (M5)" />} />
+        <Route path="/reports" element={<Reports />} />
+        <Route path="/reports/evidence/:evidenceId" element={<EvidencePack />} />
         <Route path="/admin" element={<Soon title="Admin (M5)" />} />
         <Route path="*" element={<Soon title="Page not found" />} />
       </Route>

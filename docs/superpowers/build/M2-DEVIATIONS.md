@@ -1591,3 +1591,35 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   **Open job** → "Run · partitions" live → evidence link after the run; Pause / Resume / the Cancel
   dialog on a 200,000-row bench job (4 live partitions with rows/s and checkpoint fingerprints). No
   horizontal scroll at 1440/390 px. Screenshots holding the once-only test key were deleted.
+
+## Task 35 — Evidence pack page (mockup 10) and Reports evidence list (mockup 09)
+
+- `lib/jobs.ts`, `jobs.test.ts` (added to the commit): `shortSha` and `packTargetText`, tested
+  first (1 Vitest case, 29 in all). `styles/evidence.css` (added): print layout of the head (the
+  title takes the free width, the seal at most 45 %).
+- Section headings render "1 Summary" with a space between number and title (the Task 36 check
+  finds them by that text). Numbering as planned: section 6 only when `fidelity`/`privacy` exist
+  (M5), so an M2 pack shows 1–5, 7, 8.
+- Data: besides `GET /evidence/{id}` the page reads the job (`expires_at` → "Pack kept until") and
+  the pack's snapshot (column types, confidence, which columns were overridden, the kept columns);
+  both are optional — without them the pack's own columns are shown. Requested by shows the key id
+  the pack holds (`requested_by`); the data owner signature box names the snapshot's `accepted_by`;
+  DPO and change approver are blanks.
+- Verification table: the post-write sample counts findings in **kept** columns (pass when 0,
+  "review" otherwise) and reports the findings in transformed columns as expected (format-preserving
+  tokens still match their detectors) — `detector_hits` counts findings, not source values.
+- **Download JSON** saves the `evidence_json` artefact (`dps-evidence-<pack>.json`; its sha256 is the
+  printed one — checked in the browser), **Open HTML** saves the stored `evidence_html` artefact (as
+  planned: a download, since artefacts are fetched with the API key), **Print or save as PDF** calls
+  `window.print()`.
+- `styles.css` print rules: the plan's (`.sidebar, .topbar, .no-print` hidden, `.page` unpadded,
+  `section { break-inside: avoid }`) plus the mockup's black-on-white token override, `@page A4`
+  margins, the shell un-gridded and scroll containers unclipped. The mockup's `@page` margin boxes
+  with the job id are left out (CSS cannot take the id from the page).
+- Reports: KPI tiles count the loaded packs ("+" while older pages exist); **JSON** fetches the pack
+  for its artefact id, then downloads; **Open** goes to the evidence page (the mockup's PDF button
+  is M5). The M5 sections are one card saying so, with no placeholder data.
+- Browser check: the Task 36 path end to end (wizard → job → evidence pack sections 1–5, 7, 8 →
+  Reports "Evidence packs"), the JSON download hashed to the printed sha256, the HTML download, a
+  print-media PDF (A4, console chrome hidden), the Reports JSON download; no horizontal scroll at
+  1440/390 px, no page errors.

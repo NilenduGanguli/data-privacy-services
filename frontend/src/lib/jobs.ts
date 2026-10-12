@@ -799,3 +799,22 @@ export async function seedFingerprint(seedB64: string): Promise<string | null> {
     return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
   } catch { return null; }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Evidence pack (mockup 10) and Reports (mockup 09).
+
+/** `6ec5e6dd…d73b`: the first 8 and last 4 hex of a sha256. */
+export function shortSha(sha: string): string {
+  return sha.length > 12 ? `${sha.slice(0, 8)}…${sha.slice(-4)}` : sha;
+}
+
+/** Where a pack's run wrote, as its title shows it. */
+export function packTargetText(target: Record<string, any>, source: Record<string, any>): string {
+  if (target.write_mode === 'files') {
+    const f = (target.files ?? {}) as Record<string, any>;
+    const fmt = String(f.format ?? 'files');
+    return `${fmt === 'parquet' ? 'Parquet' : fmt.toUpperCase()} files · ${f.prefix || 'store root'}`;
+  }
+  if (target.write_mode === 'in_place') return `${target.object ?? source.object ?? '—'} (in place)`;
+  return String(target.object ?? '—');
+}

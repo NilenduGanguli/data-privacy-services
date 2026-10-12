@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
-import { evidenceSoFar, methodText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
+import { evidenceSoFar, methodText, packTargetText, shortSha, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
@@ -221,5 +221,14 @@ describe('seed fingerprint', () => {
     // sha256(b'seed') = 19b25856e1c150ca834cffc8b59b23adbd0ec0389e58eb22b3b64768098d002b
     expect(await seedFingerprint('c2VlZA==')).toBe('19b25856e1c150ca');
     expect(await seedFingerprint('c2VlZA')).toBe('19b25856e1c150ca');
+  });
+});
+
+describe('evidence pack helpers', () => {
+  it('shortens the pack hash and names the target like the pack', () => {
+    expect(shortSha('6ec5e6ddf67837f2b91df0fea306b9db0fcd146c58a7d233c79d6bae6ab7d73b')).toBe('6ec5e6dd…d73b');
+    expect(packTargetText({ write_mode: 'table', object: 'bank_uat.customers' }, { object: 'bank.customers' })).toBe('bank_uat.customers');
+    expect(packTargetText({ write_mode: 'in_place', object: 'bank_restore.contacts' }, { object: 'bank_restore.contacts' })).toBe('bank_restore.contacts (in place)');
+    expect(packTargetText({ write_mode: 'files', object: null, files: { format: 'parquet', prefix: 'exports/x' } }, {})).toBe('Parquet files · exports/x');
   });
 });
