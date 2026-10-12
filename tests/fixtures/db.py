@@ -82,6 +82,61 @@ def make_db_settings(admin_dsn: str, database: str, **overrides: object) -> Sett
     return Settings(**base)  # type: ignore[arg-type]
 
 
+def worker_env(settings: Settings, tmp_path: Path) -> dict[str, str]:
+    """The ``DPS_*`` environment of a ``python -m dps.worker`` subprocess on the test database.
+
+    Logins and the KEK are the local test values; the secret, artefact and export directories are
+    the settings' own when absolute (the test's ``source_secrets`` live there), else folders under
+    ``tmp_path``. Queue timings are fast (lease 6 s / 10 s, reaper 1 s) so a killed worker's
+    partitions come back within seconds. The ops server is off (port 0) unless a test sets
+    ``DPS_WORKER_METRICS_PORT``; it binds 127.0.0.1. Run the subprocess with ``cwd=tmp_path`` so a
+    ``.env`` in the working tree cannot change its settings.
+    """
+    from dps.engine.transform import fpe
+
+    def folder(value: str, name: str) -> str:
+        path = Path(value)
+        return str(path if path.is_absolute() else tmp_path / name)
+
+    worker_user, worker_password = settings.pg_worker_login
+    migration_user, migration_password = settings.pg_migration_login
+    return {
+        "DPS_ENV": "local",
+        "DPS_HOST": "127.0.0.1",
+        "DPS_PG_HOST": settings.pg_host,
+        "DPS_PG_PORT": str(settings.pg_port),
+        "DPS_PG_DATABASE": settings.pg_database,
+        "DPS_PG_SCHEMA": settings.pg_schema,
+        "DPS_PG_USER": settings.pg_user,
+        "DPS_PG_PASSWORD": settings.pg_password,
+        "DPS_PG_WORKER_USER": worker_user,
+        "DPS_PG_WORKER_PASSWORD": worker_password,
+        "DPS_PG_MIGRATION_USER": migration_user,
+        "DPS_PG_MIGRATION_PASSWORD": migration_password,
+        "DPS_PG_SSL_ROOT_CERT": "",
+        "DPS_MIGRATIONS_MODE": "off",
+        "DPS_JOB_KEK": base64.b64encode(TEST_KEK).decode(),
+        "DPS_SECRET_DIR": folder(settings.secret_dir, "secrets"),
+        "DPS_ARTEFACT_STORE": "local",
+        "DPS_ARTEFACT_DIR": folder(settings.artefact_dir, "artefacts"),
+        "DPS_EXPORT_ROOT": folder(settings.export_root, "exports"),
+        "DPS_LLM_PROVIDER": "stub",
+        "DPS_NER_ENABLED": "false",
+        "DPS_FPE_ENABLED": "true" if fpe.fpe_available() else "false",
+        "DPS_AUDIT_STRICT": "false",
+        "DPS_EMBEDDED_WORKER": "false",
+        "DPS_WORKER_METRICS_PORT": "0",
+        "DPS_WORKER_CONCURRENCY": "2",
+        "DPS_JOB_POLL_INTERVAL_SECONDS": "0.2",
+        "DPS_JOB_REAPER_INTERVAL_SECONDS": "1",
+        "DPS_JOB_RETRY_BASE_SECONDS": "0.5",
+        "DPS_JOB_RETRY_MAX_SECONDS": "2",
+        "DPS_PARTITION_LEASE_SECONDS": "6",
+        "DPS_JOB_LEASE_SECONDS": "10",
+        "DPS_JOB_DRAIN_TIMEOUT_SECONDS": "5",
+    }
+
+
 async def create_database(admin_dsn: str, name: str) -> None:
     """(Re)create ``name`` owned by ``dps_owner``; creates the contract roles when missing."""
     conn = await asyncpg.connect(admin_dsn)

@@ -172,7 +172,7 @@ an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture che
 | `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
 | `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
 
-Declared but not read in M0: `DPS_HOST`, `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
+Declared but not read by the app: `DPS_HOST` (only the worker's ops server binds to it), `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`.
 
 Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
@@ -195,6 +195,16 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   id, mode, policy label, outcome, counts, methods, verification, duration — never a value or a key).
   Logs go to stdout through an allow-list of field names; outside `local` they are JSON.
 - `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json`. Probe and metrics routes are not in the schema.
+- **Worker (M2).** `python -m dps.worker` claims `discover`, `run` (prepare/finalize, partitions)
+  and `retention` jobs with `DPS_WORKER_CONCURRENCY` tasks; it needs `DPS_PG_HOST` and `DPS_JOB_KEK`
+  (refuses to start without either, exit 1, no traceback). It serves `GET /health`, `GET /readyz`
+  (`db` = `SELECT 1`, `migrations` verified, `kek` loaded, `queue` claiming; 503 otherwise) and
+  `GET /metrics` on `${DPS_HOST}:${DPS_WORKER_METRICS_PORT}` (9400; 0 = off). SIGTERM/SIGINT drain:
+  stop claiming, wait `DPS_JOB_DRAIN_TIMEOUT_SECONDS` while heartbeats keep the leases, cancel and
+  release the rest without charging an attempt, unregister, exit 0. Every worker runs the reaper and
+  schedules at most one retention job per `DPS_RETENTION_INTERVAL_HOURS` across replicas (owner
+  `_system`); retention deletes expired terminal jobs with their artefacts, stale proposed/superseded
+  snapshots and expired inline secrets, purges leftover sealed keys, never the audit log or exports.
 
 ## 6. Security posture
 

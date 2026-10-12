@@ -1055,3 +1055,66 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   after the re-claim's `reset_partition_progress` (an overcount; no data effect). A claim token (e.g.
   the claim's `attempts`) in the fence would close it; Task 23 (worker loop, lost-task cancellation)
   is the natural place.
+
+## Task 23 — Worker process and retention
+
+- `dps/worker.py` `Consumer` — **closes the open G5 item (a zombie and a re-claimed holder on the
+  same worker).** The queue fences by `locked_by` only, so when a partition's lease expired and this
+  same worker claimed it again while the old task still ran, both tasks passed every fenced write
+  and the plan's `_parts[part_id] = task` silently replaced the old task (its done-callback then
+  removed the *new* task from the map). A claim of a row whose earlier task is still running now
+  cancels that task and the new task waits for it to end before its handler starts
+  (`_guard(coro, predecessor)`); done-callbacks only remove their own task. Test
+  `test_a_partition_reclaimed_by_the_same_worker_cancels_the_zombie_first` (events
+  `first:start, first:canceled, second:start`). Same rule for job rows.
+- `Consumer.run` does not cancel the claim loop mid-round (plan: all four loops cancelled before the
+  drain). A cancel landing between `claim_jobs` committing and the task being spawned left the row
+  leased until its lease expired (an attempt charged by the reaper); found by
+  `test_a_job_without_a_handler_is_released_untouched`. The claim loop now finishes its round and
+  exits (cancelled after `CLAIM_STOP_SECONDS = 10` only if the DB hangs). The **heartbeat keeps
+  running during the drain** (plan: cancelled before it), so the leases of tasks that are finishing
+  within `job_drain_timeout_seconds` do not expire under them; it stops before the release.
+- A claimed job row whose phase has no handler is released (no attempt charged, as planned) and the
+  loop then waits out the poll interval instead of being woken by its own release notification
+  (otherwise a misconfigured worker spins claim/release). Logged as `no_handler` (ids, kind, phase).
+- A claimed partition whose job row has vanished is released (plan: skipped, leaving it leased).
+- LISTEN connection: checked every 5 s (`is_closed()`), reconnect after 5 s; the plan waited on the
+  stop event only and never noticed a dropped connection (polling still covered it).
+- Reaper: `QUEUE_DEPTH` gauges are set for every known state (0 when absent), so a state that
+  empties does not keep its last value.
+- `build_context(settings, *, audit=None)` — optional keyword (additive) so the embedded worker
+  (Task 24) shares the app's sink; contract §3.5 updated in this commit. `health_app(settings,
+  consumer)` is public (the ops app `serve_health` serves). `serve_health` binds `settings.host`
+  (`DPS_HOST`, default `0.0.0.0`; the tests use 127.0.0.1) instead of a literal `0.0.0.0`, runs a
+  `uvicorn.Server` subclass that installs no signal handlers (uvicorn 0.54's `capture_signals` would
+  replace the worker's SIGTERM handler and re-raise the signal on exit), and shuts the server down
+  gracefully when cancelled. `/readyz` components: `db` (`SELECT 1` on the worker pool),
+  `migrations` (`verify_migrations`, every mode), `kek` (32 bytes loaded), `queue` (`claiming` /
+  `draining` / `stopped`, in-flight count, role).
+- `main()` exits with a one-line message (exit 1, no traceback) when `DPS_PG_HOST` or `DPS_JOB_KEK`
+  is missing; the `if __name__ == "__main__"` block runs `dps.worker.main` from the canonical module
+  (`python -m` loads the file a second time as `__main__`, which would give handlers a second
+  `HandlerContext` class). `_amain` closes the pools in `finally` and stops the audit sink and the
+  health server even when the consumer raises. The audit sink is started/stopped through an
+  `isinstance(DbAuditSink)` check instead of `type: ignore`.
+- `dps/retention.py`: as specified, plus: a `proposed`/`superseded` snapshot that a live
+  (queued/running/waiting/paused) job still names is kept (a retried prepare re-reads it); a dry run
+  ends with `outcome: "dry_run"` and counts keys only on terminal jobs it would not delete (a real
+  run deletes those jobs before purging keys, so the two counts agree); `updated_at` is bumped on
+  purged connections and jobs; a transient failure (DB, storage) requeues the job with backoff
+  (`retention_error` or the storage code; every step is idempotent); an invalid stored spec fails it
+  with `spec_invalid`. Ids are ordered by `expires_at`, and the 500-per-tenant cap is `JOBS_PER_TENANT`.
+- `tests/fixtures/db.py` `worker_env`: besides the plan's variables, `DPS_HOST=127.0.0.1`,
+  `DPS_PG_SCHEMA`, an empty `DPS_PG_SSL_ROOT_CERT`, `DPS_ARTEFACT_STORE=local`,
+  `DPS_AUDIT_STRICT=false`, `DPS_EMBEDDED_WORKER=false`, `DPS_WORKER_METRICS_PORT=0` (tests that
+  want the ops server set a free port) and `DPS_JOB_DRAIN_TIMEOUT_SECONDS=5`; a relative
+  `secret_dir`/`artefact_dir`/`export_root` becomes a folder under `tmp_path`. Subprocess workers
+  run with `cwd=tmp_path` so the lane's `.env` in the worktree cannot change their settings.
+- `tests/db/test_worker_process.py` truncates the session database afterwards (`worker_db`
+  fixture): the worker process registers itself and schedules a `_system` retention job, which
+  later tests (e.g. `ensure_retention_job` in the same interval bucket) would otherwise find.
+- Tests: consumer 4 (plan 2: + no-handler release, + same-worker re-claim), retention 3 (plan 1:
+  + dry run, + live material kept), worker process 2 (plan 1: + refuses to start without a KEK):
+  9 (plan 4).
+- `HANDOFF.md` §4/§5: the worker command, its ops server, drain and retention; `DPS_HOST` is now read
+  by the worker's ops server.
