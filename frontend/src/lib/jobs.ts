@@ -187,7 +187,7 @@ export function total(map: Record<string, number> | null | undefined): number {
   return Object.values(map ?? {}).reduce((a, b) => a + (Number(b) || 0), 0);
 }
 
-const DECISION_NOTES = new Set(['fpe_domain_too_small', 'numeric_column', 'date_column', 'text_pipeline', 'mixed_entities', 'kept_with_hits']);
+const DECISION_NOTES = new Set(['fpe_domain_too_small', 'numeric_column', 'date_column', 'text_pipeline', 'mixed_entities', 'kept_with_hits', 'length_overflow', 'length_kept']);
 
 /** A column a reviewer should look at: low confidence, a fallback note, free text, values of
  *  several personal-data types, or a kept column the detectors still found personal data in. */
@@ -219,6 +219,8 @@ export function decisionReason(col: ColumnClassification): string {
   const types = (col.value_entities ?? []).join(', ');
   if (col.type_note === 'mixed_entities') return `Personal data of several types in one column${types ? ` (${types})` : ''}: every value is replaced whole.`;
   if (col.type_note === 'kept_with_hits') return `Kept, but the detectors found ${types || 'personal data'} in ${Math.round(col.value_hit_rate * 100)} % of sampled rows. Classify it, or keep it on purpose.`;
+  if (col.type_note === 'length_overflow') return `The suggested ${col.suggested.method} output (or the token FPE falls back to on these values) is longer than ${col.data_type} allows. A copy to a new table or files takes it; In place and Append to this table refuse it. To write it back here, choose a method that keeps the length (fpe_digits, mask_partial, or hmac_pseudonym with a shorter length).`;
+  if (col.type_note === 'length_kept') return `Tokens would not fit ${col.data_type}, so format-preserving encryption of every digit keeps the length (reversible with the key).`;
   const note = typeNoteText(col.type_note);
   if (note) return note;
   return `The detectors agree on ${col.entity_type ?? 'this type'} with confidence ${col.confidence.toFixed(2)} only.`;
@@ -239,6 +241,8 @@ export function typeNoteText(note: string | null | undefined): string | null {
     case 'synthesize_numeric': return 'Sensitive number: synthesize mode nulls or keeps it.';
     case 'mixed_entities': return 'Personal data of several types in one column: every value is replaced whole.';
     case 'kept_with_hits': return 'Kept, but the detectors found personal data in its sampled values.';
+    case 'length_overflow': return 'The suggested output is longer than the column allows: In place and Append to this table refuse it.';
+    case 'length_kept': return 'Tokens would not fit the column, so format-preserving encryption keeps the length.';
     default: return note ? note.replace(/_/g, ' ') : null;
   }
 }
@@ -819,6 +823,8 @@ export function typeNoteShort(note: string | null | undefined): string | null {
     case 'binary_kept': return 'binary kept';
     case 'mixed_entities': return 'mixed types → replaced whole';
     case 'kept_with_hits': return 'kept · detector hits';
+    case 'length_overflow': return 'output too long for the column';
+    case 'length_kept': return 'too long as a token → fpe_digits';
     case 'text_pipeline': return 'span-level text pipeline';
     case 'synthesize_key_kept': return 'key kept when synthesizing';
     case 'synthesize_numeric': return 'synthesize nulls or keeps';

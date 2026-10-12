@@ -552,8 +552,16 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
   ledger rows; a **failed** job keeps them, because a retry resumes from the ledger and must never
   re-apply a batch. `in_place` refuses a transformed key (`pk_transform_in_place`: review the key to
   `keep`) and any output that cannot fit an existing column: `det_token` on a bounded column is
-  `length_overflow` at prepare, and FPE needs ≥ 5 letters and 0 or ≥ 6 digits (a 4-digit PAN falls
-  back to `det_token` and fails the preflight on `char(10)`). `table` targets create planned text
+  `length_overflow`, and FPE needs ≥ 5 letters and 0 or ≥ 6 digits (a 4-digit PAN falls back to
+  `det_token`, which cannot fit `char(10)`). Since verify r2 issue 2 this is caught **before a job
+  exists**: discovery never suggests such a method silently (digits-only values with FPE on get
+  `fpe_digits`, note `length_kept`; anything else keeps the policy's method under the note
+  `length_overflow`, listed under *Needs a decision* with the reason), and `POST /jobs/run` (and
+  `POST /jobs/run/validate`, which wizard step 5 asks) refuses an In place or same-table Append with
+  422 `length_overflow` naming every column whose static worst case exceeds its length or whose
+  `length_overflow` suggestion the reviewer kept. Prepare still checks existing `table` targets and
+  names every overflowing column. Discovery predicts FPE fallbacks with
+  `fpe.text_domain_ok` / `fpe.digits_domain_ok` (keeps included: SSN `keep_suffix: 4` leaves 5 digits). `table` targets create planned text
   columns as `text`, so they take any method. An `append` to the source table needs an `offset` of at
   least `max(key) + 1 - min(selected key)`, or `generate` on an identity or an owned ascending sequence
   that does not cycle; anything else fails prepare with `pk_strategy_invalid` (new rows would land in

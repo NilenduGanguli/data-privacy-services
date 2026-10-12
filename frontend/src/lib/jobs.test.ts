@@ -315,3 +315,17 @@ describe('the real outcome of a run that did not finish (N3)', () => {
     expect(verificationTone(true, 0, false, 'succeeded')).toBe('emerald');
   });
 });
+
+describe('bounded columns at discovery (M2 verify r2, issue 2)', () => {
+  it('puts a method that cannot fit its column under Needs a decision, with the reason', async () => {
+    const { typeNoteShort } = await import('./jobs');
+    const overflow = column({ name: 'national_id', data_type: 'character varying(18)', entity_type: 'NATIONAL_ID', confidence: 0.95, type_note: 'length_overflow' });
+    expect(needsDecision(overflow)).toBe(true);
+    expect(decisionReason(overflow)).toMatch(/character varying\(18\)/);
+    expect(decisionReason(overflow)).toMatch(/In place/);
+    const kept = column({ name: 'national_id', data_type: 'character varying(18)', entity_type: 'NATIONAL_ID', confidence: 0.95, type_note: 'length_kept' });
+    expect(needsDecision(kept)).toBe(true);
+    expect(decisionReason(kept)).toMatch(/keeps the length/);
+    expect(typeNoteShort('length_overflow')).toBe('output too long for the column');
+  });
+});

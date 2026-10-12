@@ -579,3 +579,66 @@ def test_same_table_and_run_plan_round_trip() -> None:
     )
     again = RunPlan.model_validate(plan.model_dump(mode="json"))
     assert again == plan and again.prepare == {}
+
+
+def _with(snap: Any, name: str, **update: Any) -> Any:
+    """``snap`` with column ``name`` of its classification changed."""
+    return snap.model_copy(
+        update={
+            "columns": [c.model_copy(update=update) if c.name == name else c for c in snap.columns]
+        }
+    )
+
+
+def test_in_place_and_same_table_append_refuse_outputs_that_cannot_fit(
+    settings: Settings,
+) -> None:
+    """M2 verify r2 issue 2: a method whose output cannot fit the column it writes back into is
+    refused when the run is submitted (and by POST /jobs/run/validate), naming every such column,
+    instead of failing the job at prepare with length_overflow."""
+    snap = accepted_snapshot("c_src", "bank.customers")
+    token = MethodSpec(method="det_token")
+    bad = _with(_with(snap, "full_name", method=token), "email", method=token)
+    in_place = spec(write_mode="in_place", confirm_write=True)
+    with pytest.raises(SpecError) as err:
+        _check(in_place, bad, settings=settings, target_conn=None)
+    assert (err.value.code, err.value.status) == ("length_overflow", 422)
+    detail = err.value.detail
+    assert "$.full_name" in detail and "$.email" in detail and "det_token" in detail
+    assert "794" in detail and "character varying(120)" in detail and "step 3" in detail
+    same = spec(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    assert _code(same, settings, bad) == ("length_overflow", 422)
+    # a copy to a new table or files has unbounded text columns: not refused here
+    _check(spec(**UAT_TABLE), bad, settings=settings)
+    # discovery flagged a method that falls back to tokens on these values (PAN fpe_text into
+    # char(10)): refused while the reviewer keeps the suggestion, allowed once it is changed
+    flagged = _with(snap, "full_name", type_note="length_overflow")
+    assert _code(in_place, settings, flagged, target_conn=None) == ("length_overflow", 422)
+    changed = _with(flagged, "full_name", method=MethodSpec(method="mask_partial"))
+    _check(in_place, changed, settings=settings, target_conn=None)
+    # an unbounded column takes any token
+    unbounded = _with(snap, "notes", method=token)
+    _check(in_place, unbounded, settings=settings, target_conn=None)
+
+
+def test_prepare_names_every_column_that_cannot_fit_an_existing_target() -> None:
+    snap = accepted_snapshot("c_src", "bank.customers")
+    token = MethodSpec(method="det_token")
+    bad = _with(_with(snap, "full_name", method=token), "email", method=token)
+    projection = [c.name for c in bad.shape.columns]
+    plans = build_column_plans(
+        bad, mode="obfuscate", write_mode="table", pk_strategy=None, projection=projection
+    )
+    with pytest.raises(PrepareFailure) as err:
+        resolve_target(
+            spec(**UAT_TABLE),
+            job_id="j_1",
+            source_conn=SRC,
+            target_conn=UAT,
+            source_shape=bad.shape,
+            target_shape=bad.shape,
+            plans=plans,
+            projection=projection,
+        )
+    assert err.value.code == "length_overflow"
+    assert "$.full_name" in err.value.detail and "$.email" in err.value.detail

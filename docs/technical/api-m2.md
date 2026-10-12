@@ -149,6 +149,7 @@ The worker serves `/health`, `/readyz` and `/metrics` on `DPS_WORKER_METRICS_POR
 | `connection_role` 422 | the source lacks `source`, the target lacks `target` |
 | `group_key_mismatch` 409 · `group_not_found` 404 | the key's `kid` is not the group's, or `field_scoped` with a group; unknown group |
 | `tabular_invalid` 422 · `engine_not_tabular` 422 | `options.tabular` other than `none` (M5) |
+| `length_overflow` 422 | in place or append to the same table: a planned column whose output cannot fit the column it is written back into (the static worst case of `det_token` / `hmac_pseudonym`, or a discovery `length_overflow` suggestion the reviewer kept, e.g. PAN `fpe_text` that runs as a token); the detail names every such column, method, length and type |
 | `key_method_not_injective`, `method_needs_key`, `text_method_invalid`, `engine_unavailable`, `wrap_key_invalid`, `key_material_invalid` 422 | a reviewed method that cannot run here (a non-injective method on a key, a keyed method without a key, a text method on a non-text column, a missing engine), a bad wrap key, bad key material |
 | `kek_unconfigured` 503 | sealing needed and `DPS_JOB_KEK` unset |
 | `queue_full` 429 | the tenant's queued jobs reached `DPS_JOB_TENANT_MAX_QUEUED` |

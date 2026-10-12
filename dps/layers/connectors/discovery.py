@@ -24,6 +24,15 @@ presented as "not personal": it keeps ``value_entities`` and ``value_hit_rate`` 
 ``kept_with_hits`` (a decision for the reviewer). A numeric column below the bar is noise (random
 12-digit ids pass the Aadhaar checksum one time in ten) and reports no hits.
 
+**Bounded columns** (M2 verify r2, issue 2). A method whose output cannot fit a bounded text
+column — ``det_token`` (worst case ``ceil((4·L + 16)·8/5)``), an ``hmac_pseudonym`` longer than
+the column, or an FPE method whose sampled values fall back to ``det_token`` with tokens longer
+than the column (PAN ``fpe_text`` into ``char(10)``) — is never suggested silently: when every
+sampled value is digits (and punctuation) with enough digits and FPE is on, ``fpe_digits`` keeps
+the length (``length_kept``); otherwise the column keeps the policy's method under
+``length_overflow``, a decision for the reviewer, and an In place or same-table Append run is
+refused at submission until the method is changed (``targets.validate_run``).
+
 Only value **shapes** (``Xxxxx Xxxxxxx``, ``9999 9999``) are kept; the sample never leaves the
 worker and is dropped as soon as the snapshot is built. Errors carry codes only.
 """
@@ -33,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
@@ -46,6 +56,7 @@ from dps.engine.detect.structural import classify_key, normalize_key
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import EngineError
 from dps.engine.taxonomy import Sensitivity, entity_info
+from dps.engine.transform import fpe
 from dps.engine.transform.apply import ANCHOR_ENTITIES
 from dps.ids import PREFIX_SNAPSHOT, new_id
 from dps.jobs import ClaimedJob, JobPhase, JobState
@@ -68,6 +79,7 @@ from dps.layers.connectors.base import (
 )
 from dps.layers.connectors.registry import open_connector
 from dps.layers.connectors.selection import SelectionError, validate_selection
+from dps.layers.connectors.targets import det_token_length, method_worst_case
 from dps.observability import get_logger
 from dps.secrets import SealError, SecretUnavailable, open_json
 from dps.snapshots import FREE_TEXT, MIXED_PII, content_hash, create_snapshot
@@ -121,6 +133,10 @@ CHANNEL_NAMES = frozenset(
 )
 MIXED_NAME_SCORE = 0.7
 _TEXT_KINDS = frozenset({"text", "lob_text"})
+#: Column kinds whose catalogue length bounds what is written back (``varchar(n)``, ``char(n)``).
+_BOUNDED_KINDS = frozenset({"text", "char"})
+#: A phone number's kept country code is at most three digits (the fallback check assumes three).
+_COUNTRY_CODE_MAX = 3
 _NUMERIC_KINDS = frozenset({"int", "decimal", "float"})
 _DIGITS = re.compile(r"\d")
 _SHAPE_MAX = 24
@@ -142,6 +158,69 @@ def _noisy_or(*scores: float) -> float:
     return round(1.0 - acc, 3)
 
 
+def _falls_back(method: MethodSpec, value: str, fpe_enabled: bool) -> bool:
+    """True when ``method`` runs as ``det_token`` on ``value`` (``methods.run_method``)."""
+    name = method.method
+    if name in ("fpe_digits", "fpe_text", "phone") and not fpe_enabled:
+        return True
+    if name == "fpe_text":
+        return not fpe.text_domain_ok(value)
+    if name == "fpe_digits":
+        params = method.params
+        prefix, suffix = params.get("keep_prefix", 0), params.get("keep_suffix", 0)
+        if not isinstance(prefix, int) or not isinstance(suffix, int):
+            return True
+        return not fpe.digits_domain_ok(value, keep_prefix=prefix, keep_suffix=suffix)
+    if name == "phone":
+        cc = _COUNTRY_CODE_MAX if value.strip().startswith("+") else 0
+        return not fpe.digits_domain_ok(value, keep_prefix=cc)
+    return False
+
+
+def overflow_length(
+    method: MethodSpec, column: ColumnInfo, values: Sequence[str], *, fpe_enabled: bool
+) -> int | None:
+    """The longest output of ``method`` that cannot fit ``column`` (``None``: it fits, the column
+    is unbounded, or the length is only known by measuring — the preflight's job).
+
+    ``det_token`` / ``hmac_pseudonym``: their static worst case (``targets.method_worst_case``,
+    the rule a run is refused by). FPE methods: the ``det_token`` output of each sampled value
+    FPE cannot encrypt.
+    """
+    limit = column.length
+    if limit is None or column.kind not in _BOUNDED_KINDS:
+        return None
+    worst = method_worst_case(method, limit)
+    if worst is not None:
+        return worst if worst > limit else None
+    longest = max(
+        (det_token_length(v) for v in values if _falls_back(method, v, fpe_enabled)), default=0
+    )
+    return longest if longest > limit else None
+
+
+def _fit_length(
+    obf: MethodSpec,
+    note: str | None,
+    column: ColumnInfo,
+    values: Sequence[str],
+    *,
+    fpe_enabled: bool,
+) -> tuple[MethodSpec, str | None]:
+    """Never suggest a method whose output cannot fit a bounded column (module docstring)."""
+    if overflow_length(obf, column, values, fpe_enabled=fpe_enabled) is None:
+        return obf, note
+    digits_only = bool(values) and all(not any(ch.isalpha() for ch in v) for v in values)
+    keeps = MethodSpec(method="fpe_digits")
+    if (
+        fpe_enabled
+        and digits_only
+        and overflow_length(keeps, column, values, fpe_enabled=True) is None
+    ):
+        return keeps, "length_kept"
+    return obf, "length_overflow"
+
+
 def suggest_methods(
     entity: str | None,
     column: ColumnInfo,
@@ -150,6 +229,7 @@ def suggest_methods(
     fpe_enabled: bool,
     min_digits: int | None,
     text_column: bool,
+    values: Sequence[str] = (),
 ) -> tuple[MethodSpec, MethodSpec, str | None]:
     """``(obfuscate, synthesize, type_note)`` for one column.
 
@@ -160,7 +240,10 @@ def suggest_methods(
     ``date_shift``/``keep``/``null``/``surrogate`` (else ``date_shift``, ``date_column``);
     ``uuid``/``bool`` → ``keep`` (``type_kept``). Synthesize mode keeps key and join columns
     (``synthesize_key_kept``), nulls or keeps sensitive numerics (``synthesize_numeric``) and
-    only uses keyless methods (else ``surrogate``).
+    only uses keyless methods (else ``surrogate``). On a bounded text column, a method whose
+    output cannot fit (``values`` are the sampled texts) becomes ``fpe_digits``
+    (``length_kept``) when every value is digits and FPE is on, else stays under
+    ``length_overflow`` for the reviewer (module docstring).
     """
     keep = MethodSpec(method="keep")
     if entity is None:
@@ -204,6 +287,8 @@ def suggest_methods(
         )
     if syn.method not in KEYLESS_METHODS:
         syn = MethodSpec(method="surrogate")
+    if column.kind in _BOUNDED_KINDS and obf.method != "keep":
+        obf, note = _fit_length(obf, note, column, values, fpe_enabled=fpe_enabled)
     return obf, syn, note
 
 
@@ -324,6 +409,7 @@ def classify_columns(
             fpe_enabled=fpe_enabled,
             min_digits=min(digit_counts) if digit_counts else None,
             text_column=text_column,
+            values=values,
         )
         if entity is None and seen and sensitive_rate >= KEPT_HIT_MIN_RATE:
             note = "kept_with_hits"

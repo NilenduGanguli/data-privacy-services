@@ -11,7 +11,10 @@ detail): ``kek_unconfigured`` · ``engine_unavailable`` · ``snapshot_not_accept
 ``pk_strategy_invalid`` (token key not reversible, synthesize token, same-table token/prefix or a
 key that is not one integer column, an offset on a non-integer key or a prefix on a non-text key)
 · ``target_invalid`` (table, files) · ``key_method_not_injective`` · ``method_needs_key`` ·
-``text_method_invalid`` · ``group_not_found`` / ``group_key_mismatch`` · ``tabular_invalid``.
+``text_method_invalid`` · ``length_overflow`` (in place and same-table append write each value
+back into its own column: a method whose output cannot fit it is refused here, every such column
+named, instead of failing the job at prepare) · ``group_not_found`` / ``group_key_mismatch`` ·
+``tabular_invalid``.
 
 A same-table append re-reads its own new rows unless every new key sorts above every selected
 key; only one integer key with ``generate`` (an owned, ascending, non-cycling sequence ahead of the
@@ -315,6 +318,8 @@ def validate_run(
     if mode == "append":
         _check_append(spec, snapshot)
     _check_target(spec, source_conn, target_conn)
+    if mode == "in_place" or (mode == "append" and is_same_table(spec)):
+        _check_written_lengths(spec, snapshot)
     token_keys = mode == "append" and isinstance(target.pk_strategy, PkToken)
     if mode in ("table", "files") or token_keys:
         for c in keys:
@@ -402,6 +407,28 @@ def created_column_type(column: ColumnInfo, plan: ColumnPlan | None) -> str:
     return column.data_type
 
 
+def det_token_length(value: str) -> int:
+    """Characters of ``det_token``'s output for ``value``: its UTF-8 bytes plus the 16-byte
+    AES-SIV tag, in unpadded base32."""
+    return math.ceil((len(value.encode("utf-8")) + 16) * 8 / 5)
+
+
+def det_token_worst_case(length: int) -> int:
+    """``det_token``'s longest output for a value of ``length`` characters (4 UTF-8 bytes each)."""
+    return math.ceil((4 * length + 16) * 8 / 5)
+
+
+def method_worst_case(method: MethodSpec, length: int | None) -> int | None:
+    """Longest possible output of ``method`` on a column of ``length``, when it is known
+    statically: ``det_token`` (:func:`det_token_worst_case`) and ``hmac_pseudonym`` (its
+    ``length``, default 16). Others: ``None`` (the preflight measures them)."""
+    if method.method == "det_token" and length:
+        return det_token_worst_case(length)
+    if method.method == "hmac_pseudonym":
+        return int(method.params.get("length", 16))
+    return None
+
+
 def worst_case_length(plan: ColumnPlan, source: ColumnInfo) -> int | None:
     """Longest possible output for methods whose output length is known statically.
 
@@ -409,11 +436,52 @@ def worst_case_length(plan: ColumnPlan, source: ColumnInfo) -> int | None:
     tag, in base32. ``hmac_pseudonym``: its ``length`` (default 16). Others: ``None`` (the
     preflight measures them).
     """
-    if plan.method.method == "det_token" and source.length:
-        return math.ceil((4 * source.length + 16) * 8 / 5)
-    if plan.method.method == "hmac_pseudonym":
-        return int(plan.method.params.get("length", 16))
-    return None
+    return method_worst_case(plan.method, source.length)
+
+
+def _check_written_lengths(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
+    """In place and same-table append write each value back into its own column: refuse every
+    planned column whose output cannot fit it (value-free detail naming each one)."""
+    plans = build_column_plans(
+        snapshot,
+        mode=spec.mode,
+        write_mode=spec.target.write_mode,
+        pk_strategy=spec.target.pk_strategy,
+        projection=sorted(_projection(spec, snapshot)),
+    )
+    by_name = {c.name: c for c in snapshot.columns}
+    problems: list[str] = []
+    for p in plans:
+        column = snapshot.shape.column(p.name)
+        if column.length is None:
+            continue
+        worst = method_worst_case(p.method, column.length)
+        if worst is not None and worst > column.length:
+            problems.append(
+                f"{p.path} ({p.method.method}, up to {worst} characters, into {column.data_type})"
+            )
+            continue
+        classified = by_name.get(p.name)
+        if (
+            spec.mode == "obfuscate"
+            and classified is not None
+            and classified.type_note == "length_overflow"
+            and classified.method == classified.suggested
+        ):
+            problems.append(
+                f"{p.path} ({p.method.method} falls back to det_token on the sampled values, "
+                f"whose tokens do not fit {column.data_type})"
+            )
+    if problems:
+        where = "in place" if spec.target.write_mode == "in_place" else "append to the same table"
+        raise _fail(
+            "length_overflow",
+            422,
+            f"{where} writes each value back into its own column, and these outputs cannot fit: "
+            + "; ".join(problems)
+            + ". Choose a method that keeps the length in step 3 (fpe_digits, mask_partial, or "
+            "hmac_pseudonym with a shorter length), or copy to a new table.",
+        )
 
 
 def apply_pk_strategy(rows: list[Row], *, strategy: PkStrategy, key: list[str]) -> list[Row]:
@@ -485,13 +553,19 @@ def _target_plans(plans: list[ColumnPlan], target_shape: TableShape) -> list[Col
 
 
 def _check_lengths(plans: list[ColumnPlan], source_shape: TableShape) -> None:
+    problems = []
     for p in plans:
         worst = worst_case_length(p, source_shape.column(p.name))
         if worst is not None and p.length is not None and worst > p.length:
-            raise PrepareFailure(
-                "length_overflow",
-                f"{p.path}: the worst-case output ({worst}) exceeds the column length ({p.length})",
+            problems.append(
+                f"{p.path} ({p.method.method}: up to {worst} characters, the column takes "
+                f"{p.length})"
             )
+    if problems:
+        raise PrepareFailure(
+            "length_overflow",
+            "the worst-case output exceeds the target column length: " + "; ".join(problems),
+        )
 
 
 def _unbounded_plans(plans: list[ColumnPlan], source_shape: TableShape) -> list[ColumnPlan]:

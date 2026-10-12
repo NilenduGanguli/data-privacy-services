@@ -191,16 +191,31 @@ def fpe_digits_decrypt(
     return out
 
 
+def digits_domain_ok(text: str, *, keep_prefix: int = 0, keep_suffix: int = 0) -> bool:
+    """True when :func:`fpe_digits_encrypt` can encrypt ``text`` with these keeps (no key needed:
+    discovery uses it to predict which values fall back to ``det_token``)."""
+    if keep_prefix < 0 or keep_suffix < 0:
+        return False
+    middle = len(_digit_positions(text)) - keep_prefix - keep_suffix
+    return middle >= 0 and domain_ok(10, middle)
+
+
+def text_domain_ok(text: str) -> bool:
+    """True when :func:`fpe_text_encrypt` can encrypt ``text``: at least five ASCII letters, and
+    either no digit or at least six (no key needed; discovery predicts fallbacks with it)."""
+    letters = sum(1 for ch in text if ch in LOWER or ch in UPPER)
+    digits = len(_digit_positions(text))
+    return domain_ok(26, letters) and (digits == 0 or domain_ok(10, digits))
+
+
 # --- text (letters + digits, case pattern kept) ----------------------------------------------
 def _fpe_text(cipher: Cipher, text: str, *, decrypt: bool) -> str | None:
+    if not text_domain_ok(text):
+        return None
     letter_pos = [i for i, ch in enumerate(text) if ch in LOWER or ch in UPPER]
     digit_pos = _digit_positions(text)
     letters = "".join(text[i].lower() for i in letter_pos)
     digits = "".join(text[i] for i in digit_pos)
-    if not domain_ok(26, len(letters)):
-        return None
-    if digits and not domain_ok(10, len(digits)):
-        return None
     op = cipher.decrypt if decrypt else cipher.encrypt
     coded_letters = op(LOWER, letters)
     coded_digits = op(DIGITS, digits) if digits else ""

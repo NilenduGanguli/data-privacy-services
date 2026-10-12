@@ -455,6 +455,12 @@ def test_run_validate_answers_what_the_run_would_without_queueing(seeded) -> Non
     confirmed = {"write_mode": "in_place", "confirm_write": True}
     no_admin = c.post(url, json=_run(prod, seeded["snap_prod"], confirmed), headers=JOBS)
     assert no_admin.status_code == 403 and no_admin.json()["code"] == "admin_scope_required"
+    # M2 verify r2 issue 2: tokens that cannot fit the columns they are written back into are
+    # refused before a job exists, every such column named (the run answers the same)
+    for route in (url, "/api/v1/jobs/run"):
+        tokens = c.post(route, json=_run(prod, seeded["snap_prod"], confirmed), headers=FULL)
+        assert tokens.status_code == 422 and tokens.json()["code"] == "length_overflow"
+        assert "$.ssn" in tokens.json()["detail"] and "$.full_name" in tokens.json()["detail"]
     table = {
         "write_mode": "table",
         "connection_id": seeded["uat"],
