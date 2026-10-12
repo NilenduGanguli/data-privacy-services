@@ -4,6 +4,7 @@ import { canConfirmWrite, fmtCount } from '../lib/jobs';
 export interface ConfirmWriteProps {
   mode: 'in_place' | 'append';
   objectFqn: string;
+  /** The rows the selection matches; null (not counted yet) keeps Confirm off: the confirmation names the count. */
   rows: number | null;
   production: boolean;
   /** Whether the console's key holds `admin`; null when the console cannot tell (the server decides). */
@@ -35,7 +36,8 @@ export function ConfirmWriteModal(p: ConfirmWriteProps): JSX.Element {
   const input = useRef<HTMLInputElement>(null);
   const titleId = useId();
   const inputId = useId();
-  const blocked = !!p.blockedReason || (p.production && p.adminScope === false);
+  const uncounted = p.rows === null;
+  const blocked = !!p.blockedReason || (p.production && p.adminScope === false) || uncounted;
   const ok = canConfirmWrite(typed, p.objectFqn, blocked);
   const rows = p.rows === null ? 'the selected' : fmtCount(p.rows);
   const key = p.keyColumns?.length ? p.keyColumns.join(', ') : 'its key';
@@ -100,6 +102,7 @@ export function ConfirmWriteModal(p: ConfirmWriteProps): JSX.Element {
           <div className="callout rose" style={{ marginTop: 10, fontSize: 12.5 }}><b>You can&apos;t confirm with this key.</b> It lacks the admin scope that production writes need.</div>
         )}
         {p.blockedReason && <div className="callout rose" style={{ marginTop: 10, fontSize: 12.5 }}><b>You can&apos;t confirm yet.</b> {p.blockedReason}</div>}
+        {uncounted && !p.blockedReason && <div className="callout rose" style={{ marginTop: 10, fontSize: 12.5 }}><b>You can&apos;t confirm yet.</b> DPS has not counted the selected rows, and the confirmation names that count.</div>}
         <div className="typebox">
           <div>
             <label className="lbl" htmlFor={inputId}>Type <span className="mono" style={{ color: 'var(--ink)' }}>{p.objectFqn}</span> to confirm</label>

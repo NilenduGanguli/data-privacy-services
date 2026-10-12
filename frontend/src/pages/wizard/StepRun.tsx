@@ -3,8 +3,8 @@ import { Link, useNavigate } from 'react-router-dom';
 import { KeyMaterialCard } from '../../components/KeyMaterialCard';
 import { api, ApiError, type Auth } from '../../lib/api';
 import {
-  buildRunSpec, fmtCount, fqn, heatTone, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups, seedFingerprint,
-  shortId, sourceObject, writeModeLabel, writtenObject, type Step, type WizardDraft,
+  buildRunSpec, fmtCount, fqn, heatTone, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
+  seedFingerprint, shortId, sourceObject, writeModeLabel, writtenObject, type Step, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, JobGroup, Preset, RunOut } from '../../lib/types';
 import { clearSavedDraft, type WizardAction } from './state';
@@ -29,6 +29,7 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
   const set = (patch: Partial<WizardDraft>) => dispatch({ type: 'set', patch });
   const syn = d.mode === 'synthesize';
   const group = groups.find((g) => g.id === d.groupId) ?? null;
+  const confirmed = isWriteConfirmed(d);
 
   useEffect(() => { api.presets(auth).then(setPresets).catch(() => setPresets([])); }, [auth]);
   useEffect(() => { api.groups.list(auth).then((p) => setGroups(p.items)).catch(() => setGroups([])); }, [auth]);
@@ -51,7 +52,7 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
   const purposeOk = d.ticket.trim().length >= 3 && legalBasisText(d).length >= 3;
   const blocked: string[] = [];
   if (!d.snapshotAccepted) blocked.push('The classification snapshot is not accepted (step 3).');
-  if (needsConfirmation(d.writeMode) && !d.typed) blocked.push(`${d.writeMode === 'in_place' ? 'In place' : 'Append'} changes ${fqn(writtenObject(d))}: confirm the write in step 4.`);
+  if (needsConfirmation(d.writeMode) && !confirmed) blocked.push(`${d.writeMode === 'in_place' ? 'In place' : 'Append'} changes ${fqn(writtenObject(d))}: confirm the write in step 4.`);
   if (d.keyChoice === 'group' && (!d.groupId || match !== 'matched')) blocked.push(`Load the ${syn ? 'seed' : 'key'} file of the chosen job group.`);
   if (!purposeOk) blocked.push('Enter the ticket (3 characters or more) for the purpose.');
   const counts = { crit: 0, sens: 0, decl: 0, kept: 0 };
@@ -106,6 +107,7 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
             <span className="ct">Synthesize <span className="chip violet">one-way</span></span>
             <span className="cd">Replaces values with realistic fakes that pass each value's own rules. There is no path back.</span></label>
         </div>
+        {confirmed && <div className="help">Your {d.writeMode === 'in_place' ? 'In place' : 'Append'} confirmation is for {syn ? 'Synthesize' : 'Obfuscate'}. Choosing the other mode withdraws it and takes you back to step 4 to confirm again.</div>}
       </div>
 
       <div className="card">
@@ -182,14 +184,14 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
         <div className="summ"><span className="k">Source</span><span>PostgreSQL · <span className="mono">{fqn(sourceObject(d))}</span> via <span className="mono">{d.connectionName}</span>{d.production && <span className="chip amber" style={{ marginLeft: 6 }}>production</span>}</span><button className="linkbtn" type="button" onClick={() => go(1)}>Edit</button></div>
         <div className="summ"><span className="k">Rows</span><span>{d.rows !== null ? `${fmtCount(d.rows)} rows` : `about ${fmtCount(d.shape?.row_estimate ?? null)} rows`} · {d.columns?.length ?? d.shape?.columns.length ?? '—'} columns · {d.parallelism} partitions</span><button className="linkbtn" type="button" onClick={() => go(2)}>Edit</button></div>
         <div className="summ"><span className="k">Discovery</span><span>{counts.crit} critical · {counts.sens} sensitive · {counts.decl} declared · {counts.kept} kept · {overrides} {overrides === 1 ? 'override' : 'overrides'}</span><button className="linkbtn" type="button" onClick={() => go(3)}>Edit</button></div>
-        <div className="summ"><span className="k">Write</span><span>{writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)} · <span className="mono">{d.writeMode === 'files' ? d.filesPrefix : fqn(d.writeMode === 'table' ? { owner: d.targetOwner || null, name: d.targetTable } : writtenObject(d))}</span>{d.typed ? ' · confirmed' : ''}</span><button className="linkbtn" type="button" onClick={() => go(4)}>Edit</button></div>
+        <div className="summ"><span className="k">Write</span><span>{writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)} · <span className="mono">{d.writeMode === 'files' ? d.filesPrefix : fqn(d.writeMode === 'table' ? { owner: d.targetOwner || null, name: d.targetTable } : writtenObject(d))}</span>{confirmed ? ` · confirmed for ${fmtCount(d.rows)} rows` : ''}</span><button className="linkbtn" type="button" onClick={() => go(4)}>Edit</button></div>
         <div className="summ"><span className="k">Key</span><span>{d.keyChoice === 'group' ? `Reuse the ${syn ? 'seed' : 'key'} of ${group?.name ?? 'a job group'}${!syn && group ? ` · ${group.kid}` : ''}` : `New ${syn ? 'seed' : 'key'}, returned once with the job`}</span><span /></div>
         <div className="summ"><span className="k">Purpose</span><span><span className="mono">{d.ticket || '—'}</span> · {legalBasisText(d)}</span><span /></div>
         {blocked.length > 0 && <div className="callout rose" style={{ marginTop: 12, fontSize: 12.5 }}><b>Run job is off until these are resolved.</b> {blocked.join(' ')}</div>}
       </div>
 
       <div className="runbar">
-        <div style={{ flex: '1 1 340px' }}><div style={{ fontWeight: 700 }}>{d.typed ? `Writes to ${fqn(writtenObject(d))} after you press Run job` : 'Nothing is written to the source'}</div>
+        <div style={{ flex: '1 1 340px' }}><div style={{ fontWeight: 700 }}>{confirmed ? `Writes to ${fqn(writtenObject(d))} after you press Run job` : 'Nothing is written to the source'}</div>
           <div className="faint sm">A dry run reads and transforms a sample, runs the leakage sweep and writes nothing. You can pause from Jobs; a paused job resumes from its last checkpoint.</div></div>
         <div className="rowx"><button className="btn" type="button" disabled={!!busy || blocked.length > 0} onClick={() => void submit(true)}>Dry run (no writes)</button>
           <button className="btn btn-primary" type="button" disabled={!!busy || blocked.length > 0} onClick={() => void submit(false)}>{busy === 'run' ? 'Submitting…' : 'Run job'}</button></div>

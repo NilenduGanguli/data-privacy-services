@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CheckList } from '../../components/CheckList';
 import { api, ApiError, type Auth } from '../../lib/api';
-import { fmtClock, fmtCount, fqn, selectionOf, shortType, sourceObject, type WizardDraft } from '../../lib/jobs';
+import { countKey, fmtClock, fmtCount, fqn, selectionOf, shortType, sourceObject, type WizardDraft } from '../../lib/jobs';
 import type { Check, ObjectRef } from '../../lib/types';
 import { canLeave, type WizardAction } from './state';
 
@@ -47,9 +47,10 @@ export function StepSelect({ d, dispatch, auth, onNext, onBack }: {
     if (!connectionId || !d.table) return;
     setChecking(true); setRefusal(null);
     const started = performance.now();
+    const key = countKey(d);   // the reducer drops the answer if the selection changes meanwhile
     try {
       const count = await api.connections.count(auth, connectionId, sourceObject(d), selectionOf(d));
-      dispatch({ type: 'counted', count, at: new Date().toISOString(), seconds: (performance.now() - started) / 1000 });
+      dispatch({ type: 'counted', count, at: new Date().toISOString(), seconds: (performance.now() - started) / 1000, key });
     } catch (e) {
       if (e instanceof ApiError) setRefusal({ message: e.message, code: e.code, checks: Array.isArray(e.extra.checks) ? (e.extra.checks as Check[]) : [] });
       else setRefusal({ message: String(e), checks: [] });
@@ -104,7 +105,7 @@ export function StepSelect({ d, dispatch, auth, onNext, onBack }: {
         <div className="between" style={{ marginTop: 12 }}>
           {d.count ? <span className="chip emerald">Valid</span>
             : refusal ? <span className="chip rose">Not accepted{refusal.code ? ` · ${refusal.code}` : ''}</span>
-              : <span className="faint sm">{filterText.trim() ? 'Check the filter before you continue.' : 'No filter: every row is read.'}</span>}
+              : <span className="faint sm">{filterText.trim() ? 'Check the filter before you continue.' : 'No filter: every row is read. In place and Append count the rows before you confirm.'}</span>}
           <button className="btn btn-sm" type="button" disabled={checking || !d.table} onClick={() => void check()}>Check</button>
         </div>
         {checking && <div className="skeleton" style={{ marginTop: 10 }} />}

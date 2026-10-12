@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CheckList } from '../../components/CheckList';
 import { ConfirmWriteModal } from '../../components/ConfirmWriteModal';
 import { api, ApiError, type Auth } from '../../lib/api';
 import {
-  fmtClock, fmtCount, fqn, methodFor, needsConfirmation, oneWayColumns, parseCount, sourceObject, writtenObject, type WizardDraft,
+  confirmationKey, countKey, fmtClock, fmtCount, fqn, isWriteConfirmed, methodFor, needsConfirmation, oneWayColumns, parseCount, selectionOf,
+  sourceObject, writtenObject, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, Connection, ConnectionSpec, ConnectionTestResult, WriteMode } from '../../lib/types';
 import { canLeave, targetReady, type WizardAction } from './state';
@@ -64,7 +65,11 @@ const MODES: { mode: WriteMode; title: string; chip: string; tone: string }[] = 
   { mode: 'files', title: 'Export files', chip: 'source unchanged', tone: 'slate' },
 ];
 
-/** Step 4 · Target and write mode: where protected rows go; in place / append need a typed confirmation. */
+/**
+ * Step 4 · Target and write mode: where protected rows go. In place / Append need a typed confirmation
+ * that names the row count, so the rows the selection matches are counted here when step 2 did not
+ * (an empty filter); the run sends that count as `expected_rows`.
+ */
 export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnectionsChanged, onNext, onBack }: {
   d: WizardDraft; dispatch: React.Dispatch<WizardAction>; auth: Auth; connections: Connection[]; snapshot: ClassificationSnapshot | null;
   onConnectionsChanged: () => void; onNext: () => void; onBack: () => void;
@@ -74,6 +79,8 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addStore, setAddStore] = useState(false);
+  const [countError, setCountError] = useState<string | null>(null);
+  const [countAttempt, setCountAttempt] = useState(0);
   const set = (patch: Partial<WizardDraft>) => dispatch({ type: 'set', patch });
   const src = fqn(sourceObject(d));
   const rows = d.rows ?? d.shape?.row_estimate ?? null;
@@ -85,8 +92,24 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
   const sameTable = d.writeMode === 'append' && d.appendTarget === 'same';
   const textKey = keyInfo.some((c) => c && (c.kind === 'text' || c.kind === 'char'));
   const rewritten = snapshot ? snapshot.columns.filter((c) => !c.is_key && methodFor(c, d.mode).method !== 'keep').length : undefined;
-  const confirmed = needsConfirmation(d.writeMode) && !!d.typed;
+  const confirmed = isWriteConfirmed(d);
   const written = fqn(writtenObject(d));
+  // In place / Append confirm a row count: count the selection when step 2 did not (no filter typed)
+  const needCount = needsConfirmation(d.writeMode) && d.rows === null && !!d.connectionId && !!d.table;
+  const counting = needCount && countError === null;
+  const ck = countKey(d);
+
+  useEffect(() => {
+    if (!needCount || !d.connectionId) return;
+    let live = true;
+    const started = performance.now();
+    setCountError(null);
+    api.connections.count(auth, d.connectionId, sourceObject(d), selectionOf(d))
+      .then((count) => { if (live) dispatch({ type: 'counted', count, at: new Date().toISOString(), seconds: (performance.now() - started) / 1000, key: ck }); })
+      .catch((e) => { if (live) setCountError(apiMessage(e)); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth, needCount, ck, countAttempt]);
 
   function choose(mode: WriteMode): void {
     dispatch({ type: 'writeMode', mode });
@@ -251,13 +274,27 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
       )}
 
       {needsConfirmation(d.writeMode) && (
-        <div className="card">
+        <div className="card" data-testid="write-confirmation">
+          {d.confirmLapsed && !confirmed && (
+            <div className="callout amber" style={{ fontSize: 12.5, marginBottom: 10 }}><b>Your earlier confirmation no longer applies.</b> What it covered changed after you confirmed: the rows, the filter, the columns, the mode, the key strategy, the batch size or the partitions. Read the dialog again and confirm.</div>
+          )}
           {confirmed ? (
-            <div className="callout emerald" style={{ fontSize: 12.5 }}><b>Confirmed at {fmtClock(d.confirmedAt, false)}.</b> Nothing is written yet. The job writes to {written} only after you press Run job in step 5.{' '}
+            <div className="callout emerald" style={{ fontSize: 12.5 }}><b>Confirmed at {fmtClock(d.confirmedAt, false)}</b> for {fmtCount(d.rows)} rows in {d.mode === 'synthesize' ? 'Synthesize (one-way)' : 'Obfuscate'} mode. Nothing is written yet. The job writes to {written} only after you press Run job in step 5. Changing the rows, the columns, the mode or the write settings withdraws this confirmation.{' '}
               <button className="linkbtn" type="button" onClick={() => dispatch({ type: 'unconfirm' })}>Undo</button></div>
           ) : (
-            <div className="between"><span className="muted" style={{ fontSize: 13 }}>{d.writeMode === 'in_place' ? `In place changes ${src}.` : `Append adds rows to ${written || 'the table'}.`} Read what happens and type the table name to confirm.</span>
-              <button className="btn btn-warn" type="button" disabled={!written} onClick={() => setModal(true)}>Confirm</button></div>
+            <>
+              <div className="between"><span className="muted" style={{ fontSize: 13 }}>{d.writeMode === 'in_place' ? `In place changes ${src}.` : `Append adds rows to ${written || 'the table'}.`} Read what happens and type the table name to confirm. The confirmation is for {d.mode === 'synthesize' ? 'Synthesize (one-way)' : 'Obfuscate'} mode; choosing the other mode in step 5 asks you to confirm again.</span>
+                <button className="btn btn-warn" type="button" disabled={!written || d.rows === null} onClick={() => setModal(true)}>Confirm</button></div>
+              <div className="kv" style={{ marginTop: 10 }} aria-live="polite">
+                {d.rows !== null
+                  ? <><b>{fmtCount(d.rows)} rows match the selection</b> <span className="faint">· counted at {fmtClock(d.countedAt, false)}</span></>
+                  : counting ? 'Counting the rows the selection matches. The confirmation names this count and the job is refused if more rows match when it runs.' : null}
+              </div>
+              {countError && (
+                <div className="callout rose" style={{ marginTop: 10, fontSize: 12.5 }}><b>DPS could not count the selected rows.</b> {countError} In place and Append are confirmed with a row count.{' '}
+                  <button className="linkbtn" type="button" onClick={() => setCountAttempt((n) => n + 1)}>Count again</button></div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -268,7 +305,7 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
           oneWay={snapshot ? oneWayColumns(snapshot, d.mode) : []} partitions={d.parallelism} batchRows={d.batchRows}
           pkText={d.writeMode === 'append' ? pkText : undefined} rowEstimate={d.writeMode === 'append' && sameTable ? d.shape?.row_estimate : null}
           blockedReason={d.writeMode === 'in_place' && !writable ? `${d.connectionName} has no target role, so DPS cannot write through it.` : null}
-          onCancel={() => setModal(false)} onConfirm={(typed) => { dispatch({ type: 'confirm', typed, at: new Date().toISOString() }); setModal(false); }} />
+          onCancel={() => setModal(false)} onConfirm={(typed) => { dispatch({ type: 'confirm', typed, at: new Date().toISOString(), key: confirmationKey(d) }); setModal(false); }} />
       )}
 
       <div className="wfoot"><button className="btn" type="button" onClick={onBack}>Back</button>

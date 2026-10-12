@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
 import { evidenceSoFar, methodText, packTargetText, shortSha, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
+import { confirmationKey, countKey, fqn, writtenObject, type WizardDraft } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
+
+/** The draft after its rows were counted and the write was confirmed in the dialog (as the wizard does). */
+function confirmed(d: WizardDraft, rows: number): WizardDraft {
+  const c = wizardReducer(d, { type: 'counted', count: { rows, checks: [], runs_as: null, binds: 0 }, at: '2026-10-12T09:00:00Z', seconds: 0.1, key: countKey(d) });
+  return wizardReducer(c, { type: 'confirm', typed: fqn(writtenObject(c)), at: '2026-10-12T09:01:00Z', key: confirmationKey(c) });
+}
 
 describe('jobs helpers', () => {
   it('labels statuses like the jobs mockup', () => {
@@ -35,7 +42,7 @@ describe('jobs helpers', () => {
     expect(saved).not.toContain('Ananya');
   });
   it('builds the run spec and gates the write confirmation', () => {
-    const spec = buildRunSpec(draft({ writeMode: 'in_place', typed: 'bank_restore.contacts', rows: 412560 }));
+    const spec = buildRunSpec(confirmed(draft({ writeMode: 'in_place' }), 412560));
     expect(spec.target).toMatchObject({ write_mode: 'in_place', confirm_write: true, expected_rows: 412560 });
     expect(canConfirmWrite('bank_restore.contacts', 'bank_restore.contacts', false)).toBe(true);
     expect(canConfirmWrite('bank_restore.contact', 'bank_restore.contacts', false)).toBe(false);
@@ -185,11 +192,11 @@ describe('run spec per write mode (steps 4-5)', () => {
     expect(t).not.toHaveProperty('pk_strategy');
   });
   it('appends to the same table without an object and with the key strategy', () => {
-    const t = buildRunSpec(draft({ writeMode: 'append', appendTarget: 'same', pkKind: 'offset', pkOffset: '900,000,000', typed: 'bank_restore.contacts', rows: 10 })).target;
+    const t = buildRunSpec(confirmed(draft({ writeMode: 'append', appendTarget: 'same', pkKind: 'offset', pkOffset: '900,000,000' }), 10)).target;
     expect(t).not.toHaveProperty('object');
     expect(t).toMatchObject({ write_mode: 'append', pk_strategy: { kind: 'offset', offset: 900000000 }, confirm_write: true, expected_rows: 10 });
-    const named = buildRunSpec(draft({ writeMode: 'append', appendTarget: 'named', targetOwner: 'bank_perf', targetTable: 'contacts_x', pkKind: 'generate', typed: 'bank_perf.contacts_x' })).target;
-    expect(named).toMatchObject({ object: { owner: 'bank_perf', name: 'contacts_x' }, pk_strategy: { kind: 'generate' }, confirm_write: true });
+    const named = buildRunSpec(confirmed(draft({ writeMode: 'append', appendTarget: 'named', targetOwner: 'bank_perf', targetTable: 'contacts_x', pkKind: 'generate' }), 7)).target;
+    expect(named).toMatchObject({ object: { owner: 'bank_perf', name: 'contacts_x' }, pk_strategy: { kind: 'generate' }, confirm_write: true, expected_rows: 7 });
   });
   it('exports files without an object', () => {
     const t = buildRunSpec(draft({ writeMode: 'files', filesConnectionId: 'c_s3', filesFormat: 'csv', filesPrefix: 'exports/contacts', filesCompression: 'gzip' })).target;

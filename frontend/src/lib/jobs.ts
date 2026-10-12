@@ -5,7 +5,7 @@
  * counts, codes and hashes only.
  */
 import type {
-  ClassificationSnapshot, ColumnClassification, ConnectionTestResult, CountOut, Job, MethodSpec, ObjectRef, RunSpec, Selection,
+  ClassificationSnapshot, ColumnClassification, ConnectionTestResult, CountOut, Job, MethodSpec, ObjectRef, PkStrategy, RunSpec, Selection,
   SnapshotOverride, TableShape, TargetSpec, WriteMode,
 } from './types';
 
@@ -347,7 +347,8 @@ export interface WizardDraft {
   count: CountOut | null;
   countedAt: string | null;
   countSeconds: number | null;
-  rows: number | null;                    // rows the selection matches (expected_rows)
+  rows: number | null;                    // rows the selection matches (expected_rows); transient
+  countedKey: string | null;              // transient: `countKey` of the selection `count`/`rows` were taken for
   columns: string[] | null;               // null = every column
   maxRows: string;
   sampleRows: string;
@@ -374,6 +375,8 @@ export interface WizardDraft {
   batchRows: number | null;
   typed: string;                          // transient: the confirmed object name ('' = not confirmed)
   confirmedAt: string | null;             // transient
+  confirmedKey: string | null;            // transient: `confirmationKey` of what the dialog showed when confirmed
+  confirmLapsed: boolean;                 // transient: a confirmation was withdrawn because what it covered changed
   // 5 · review and run
   mode: 'obfuscate' | 'synthesize';
   policy: string | null;                  // preset chosen at step 5 (null = the snapshot's)
@@ -400,11 +403,11 @@ export function emptyDraft(draftId: string = newDraftId()): WizardDraft {
     newName: '', credMode: 'secret_ref', secretRef: '', host: '', port: '5432', database: '', username: '', password: '',
     production: false, targetConnectionId: null, test: null, testedAt: null,
     owner: '', table: '', shape: null, selMode: 'where', where: '', query: '', params: {}, count: null, countedAt: null,
-    countSeconds: null, rows: null, columns: null, maxRows: '', sampleRows: '2000', parallelism: 4,
+    countSeconds: null, rows: null, countedKey: null, columns: null, maxRows: '', sampleRows: '2000', parallelism: 4,
     discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null,
     writeMode: null, targetOwner: '', targetTable: '', tableLoad: 'truncate_insert', createIfMissing: true,
     appendTarget: 'same', pkKind: 'offset', pkOffset: '', pkPrefix: '', filesConnectionId: null, filesFormat: 'parquet',
-    filesPrefix: '', filesCompression: 'snappy', batchRows: null, typed: '', confirmedAt: null,
+    filesPrefix: '', filesCompression: 'snappy', batchRows: null, typed: '', confirmedAt: null, confirmedKey: null, confirmLapsed: false,
     mode: 'obfuscate', policy: null, keyChoice: 'new', groupId: null, keyMaterialJson: '',
     ticket: '', legalBasis: LEGAL_BASES[0], purposeNote: '',
   };
@@ -417,8 +420,14 @@ export function newDraftId(): string {
   return `d_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
-/** Fields that never leave React state: credentials, key material, filters, binds, confirmation. */
-const TRANSIENT = ['password', 'keyMaterialJson', 'where', 'query', 'params', 'count', 'typed', 'confirmedAt'] as const;
+/**
+ * Fields that never leave React state: credentials, key material, filters, binds, the row count taken
+ * for a filter (meaningless once the filter is gone) and the write confirmation.
+ */
+const TRANSIENT = [
+  'password', 'keyMaterialJson', 'where', 'query', 'params', 'count', 'countedAt', 'countSeconds', 'rows', 'countedKey',
+  'typed', 'confirmedAt', 'confirmedKey', 'confirmLapsed',
+] as const;
 
 /** The draft as `localStorage['dps.jobDraft']` may hold it (contract §14). */
 export function draftForStorage(d: WizardDraft): Partial<WizardDraft> {
@@ -466,6 +475,48 @@ export function selectionOf(d: WizardDraft): Selection {
   return sel;
 }
 
+/**
+ * What a row count depends on: the connection, the source object and the rows the selection matches
+ * (filter, binds, row cap; not the column subset). A count holds only while this is unchanged.
+ */
+export function countKey(d: WizardDraft): string {
+  const { columns: _columns, ...rows } = selectionOf(d);
+  return JSON.stringify({ connection: d.connectionId, object: fqn(sourceObject(d)), selection: rows });
+}
+
+/** The append run's primary-key strategy. */
+export function pkStrategyOf(d: Pick<WizardDraft, 'pkKind' | 'pkOffset' | 'pkPrefix'>): PkStrategy {
+  if (d.pkKind !== 'offset') return { kind: d.pkKind };
+  return d.pkPrefix.trim() ? { kind: 'offset', prefix: d.pkPrefix.trim() } : { kind: 'offset', offset: parseCount(d.pkOffset) };
+}
+
+/**
+ * Everything an In place / Append confirmation covers: what the dialog states (object, row count, mode,
+ * columns rewritten, batch size, partitions, key strategy, production) and what decides it (connection,
+ * selection, snapshot). A confirmation stands only while this equals the key stored when it was given.
+ * The step 5 preset is not part of it: the reviewed snapshot decides each column's method.
+ */
+export function confirmationKey(d: WizardDraft): string {
+  return JSON.stringify({
+    connection: d.connectionId, source: fqn(sourceObject(d)), selection: selectionOf(d), rows: d.rows, snapshot: d.snapshotId,
+    mode: d.mode, write_mode: d.writeMode, object: fqn(writtenObject(d)),
+    append_target: d.writeMode === 'append' ? d.appendTarget : null,
+    pk_strategy: d.writeMode === 'append' ? pkStrategyOf(d) : null,
+    batch_rows: d.writeMode === 'in_place' ? d.batchRows : null,
+    parallelism: d.parallelism, production: d.production,
+  });
+}
+
+/**
+ * The draft holds a standing In place / Append confirmation: given in the dialog for a counted
+ * selection, for the typed object name, and nothing it covered has changed since.
+ */
+export function isWriteConfirmed(d: WizardDraft): boolean {
+  return needsConfirmation(d.writeMode) && d.rows !== null && d.countedKey === countKey(d)
+    && d.confirmedKey !== null && d.confirmedKey === confirmationKey(d)
+    && canConfirmWrite(d.typed, fqn(writtenObject(d)), false);
+}
+
 /** "2,000" → 2000; '' or junk → null. */
 export function parseCount(text: string): number | null {
   const n = Number(String(text).replace(/[,\s_]/g, ''));
@@ -480,18 +531,15 @@ export function legalBasisText(d: Pick<WizardDraft, 'legalBasis' | 'purposeNote'
 
 function targetOf(d: WizardDraft): TargetSpec {
   const mode = d.writeMode ?? 'table';
-  const confirmed = needsConfirmation(mode) && canConfirmWrite(d.typed, fqn(writtenObject(d)), false);
+  const confirmed = isWriteConfirmed(d);
   switch (mode) {
     case 'in_place':
       return { write_mode: 'in_place', confirm_write: confirmed, expected_rows: d.rows };
     case 'append': {
-      const pk = d.pkKind === 'offset'
-        ? (d.pkPrefix.trim() ? { kind: 'offset' as const, prefix: d.pkPrefix.trim() } : { kind: 'offset' as const, offset: parseCount(d.pkOffset) })
-        : { kind: d.pkKind };
       return {
         write_mode: 'append',
         ...(d.appendTarget === 'named' ? { object: writtenObject(d) } : {}),
-        pk_strategy: pk,
+        pk_strategy: pkStrategyOf(d),
         confirm_write: confirmed,
         expected_rows: d.rows,
       };

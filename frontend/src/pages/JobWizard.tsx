@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
-import { draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, newDraftId, sourceObject, specPreview, writeModeLabel, type Step, type WizardDraft } from '../lib/jobs';
+import { draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel, type Step, type WizardDraft } from '../lib/jobs';
 import type { ClassificationSnapshot, Connection } from '../lib/types';
 import { StepConnect } from './wizard/StepConnect';
 import { StepDiscover } from './wizard/StepDiscover';
@@ -36,7 +36,7 @@ function stepSub(step: Step, d: WizardDraft): string {
     case 1: return d.connectionId ? `PostgreSQL · ${d.connectionName}` : 'PostgreSQL';
     case 2: return d.shape ? `${d.count ? fmtCount(d.count.rows) : `~${fmtCount(d.shape.row_estimate)}`} rows · ${d.columns?.length ?? d.shape.columns.length} columns` : '';
     case 3: return d.snapshotId ? (d.snapshotAccepted ? 'snapshot accepted' : 'review pending') : '';
-    case 4: return d.writeMode ? `${writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)}${d.typed ? ' · confirmed' : ''}` : '';
+    case 4: return d.writeMode ? `${writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)}${isWriteConfirmed(d) ? ' · confirmed' : ''}` : '';
     case 5: return d.ticket ? `${d.mode} · ${d.ticket}` : '';
     default: return '';
   }

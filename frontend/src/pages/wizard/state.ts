@@ -3,9 +3,16 @@
  * filters and the write confirmation live only here (React state); `draftForStorage` is the only
  * shape that reaches localStorage. Every action that changes what is read clears what was derived
  * from it (a new table drops the filter, the count and the discovery; a new filter drops the count).
+ *
+ * Two bindings hold after every action, whatever the action (`bind`): a row count stands only for the
+ * selection it was taken for (`countKey`), and an In place / Append confirmation stands only while
+ * everything it covered is unchanged (`confirmationKey`: rows, filter, columns, mode, write mode,
+ * object, key strategy, batch size, partitions). A confirmation needs a row count (spec §7 / D3).
  */
 import { useReducer } from 'react';
-import { emptyDraft, needsConfirmation, canConfirmWrite, fqn, writtenObject, type Step, type WizardDraft } from '../../lib/jobs';
+import {
+  canConfirmWrite, confirmationKey, countKey, emptyDraft, fqn, isWriteConfirmed, needsConfirmation, writtenObject, type Step, type WizardDraft,
+} from '../../lib/jobs';
 import type { ClassificationSnapshot, Connection, ConnectionTestResult, CountOut, TableShape, WriteMode } from '../../lib/types';
 
 export const DRAFT_KEY = 'dps.jobDraft';
@@ -24,25 +31,46 @@ export type WizardAction =
   | { type: 'shape'; shape: TableShape | null }
   | { type: 'selMode'; mode: 'where' | 'query' }
   | { type: 'filter'; text: string }
-  | { type: 'counted'; count: CountOut; at: string; seconds: number }
+  /** `key` is the `countKey` of the draft the count was asked for; a stale answer is ignored. */
+  | { type: 'counted'; count: CountOut; at: string; seconds: number; key: string }
   | { type: 'columns'; columns: string[] | null }
   | { type: 'discovering'; jobId: string }
   | { type: 'snapshot'; snapshot: ClassificationSnapshot }
   | { type: 'writeMode'; mode: WriteMode }
-  | { type: 'confirm'; typed: string; at: string }
+  /** `key` is the `confirmationKey` of the draft the dialog was drawn for; a stale one is refused. */
+  | { type: 'confirm'; typed: string; at: string; key: string }
   | { type: 'unconfirm' }
   | { type: 'restore'; draft: Partial<WizardDraft> }
   | { type: 'reset'; draftId?: string };
 
+const NO_COUNT: Partial<WizardDraft> = { count: null, countedAt: null, countSeconds: null, rows: null, countedKey: null };
+const NO_CONFIRMATION: Partial<WizardDraft> = { typed: '', confirmedAt: null, confirmedKey: null };
+
 /** What a new source table or connection invalidates: filter, count, discovery, confirmation. */
 const CLEAR_SELECTION: Partial<WizardDraft> = {
-  where: '', query: '', params: {}, count: null, countedAt: null, countSeconds: null, rows: null, columns: null,
-  discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, typed: '', confirmedAt: null,
+  where: '', query: '', params: {}, ...NO_COUNT, columns: null,
+  discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, ...NO_CONFIRMATION,
 };
 const CLEAR_TABLE: Partial<WizardDraft> = { ...CLEAR_SELECTION, table: '', shape: null };
 const CLEAR_SOURCE: Partial<WizardDraft> = { ...CLEAR_TABLE, owner: '', test: null, testedAt: null };
 
+/** Actions that withdraw a confirmation on purpose (no "no longer applies" note). */
+const DELIBERATE = new Set<WizardAction['type']>(['unconfirm', 'writeMode', 'restore', 'reset']);
+
 export function wizardReducer(d: WizardDraft, a: WizardAction): WizardDraft {
+  return bind(d, reduce(d, a), a);
+}
+
+/** Enforce the count and confirmation bindings on the reduced draft. */
+function bind(prev: WizardDraft, next: WizardDraft, a: WizardAction): WizardDraft {
+  let out = next;
+  if ((out.count !== null || out.rows !== null || out.countedKey !== null) && out.countedKey !== countKey(out)) out = { ...out, ...NO_COUNT };
+  if ((out.typed || out.confirmedAt !== null || out.confirmedKey !== null) && !isWriteConfirmed(out)) out = { ...out, ...NO_CONFIRMATION };
+  if (!out.confirmLapsed && !DELIBERATE.has(a.type) && isWriteConfirmed(prev) && !isWriteConfirmed(out)) out = { ...out, confirmLapsed: true };
+  return out;
+}
+
+function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
   switch (a.type) {
     case 'set':
       return { ...d, ...a.patch };
@@ -78,29 +106,33 @@ export function wizardReducer(d: WizardDraft, a: WizardAction): WizardDraft {
     case 'shape':
       return { ...d, shape: a.shape };
     case 'selMode':
-      return a.mode === d.selMode ? d : { ...d, selMode: a.mode, count: null, countedAt: null, countSeconds: null, rows: null };
+      return a.mode === d.selMode ? d : { ...d, selMode: a.mode, ...NO_COUNT };
     case 'filter':
-      return d.selMode === 'where'
-        ? { ...d, where: a.text, count: null, countedAt: null, countSeconds: null, rows: null }
-        : { ...d, query: a.text, count: null, countedAt: null, countSeconds: null, rows: null };
+      return d.selMode === 'where' ? { ...d, where: a.text, ...NO_COUNT } : { ...d, query: a.text, ...NO_COUNT };
     case 'counted':
-      return { ...d, count: a.count, countedAt: a.at, countSeconds: a.seconds, rows: a.count.rows };
+      if (a.key !== countKey(d)) return d;   // the selection changed while the count was running
+      return { ...d, count: a.count, countedAt: a.at, countSeconds: a.seconds, rows: a.count.rows, countedKey: a.key };
     case 'columns':
       return { ...d, columns: a.columns };
     case 'discovering':
-      return { ...d, discoverJobId: a.jobId, snapshotId: null, snapshotAccepted: false, policyName: null, typed: '', confirmedAt: null };
+      return { ...d, discoverJobId: a.jobId, snapshotId: null, snapshotAccepted: false, policyName: null, ...NO_CONFIRMATION };
     case 'snapshot':
       return { ...d, snapshotId: a.snapshot.id, snapshotAccepted: a.snapshot.status === 'accepted', policyName: a.snapshot.policy_name };
     case 'writeMode':
-      return a.mode === d.writeMode ? d : { ...d, writeMode: a.mode, typed: '', confirmedAt: null };
+      return a.mode === d.writeMode ? d : { ...d, writeMode: a.mode, ...NO_CONFIRMATION, confirmLapsed: false };
     case 'confirm': {
-      const blocked = !needsConfirmation(d.writeMode);
-      return canConfirmWrite(a.typed, fqn(writtenObject(d)), blocked) ? { ...d, typed: a.typed.trim(), confirmedAt: a.at } : d;
+      // only with a row count, for the name of the written object, in the dialog drawn for this draft
+      const blocked = !needsConfirmation(d.writeMode) || d.rows === null || a.key !== confirmationKey(d);
+      return canConfirmWrite(a.typed, fqn(writtenObject(d)), blocked)
+        ? { ...d, typed: a.typed.trim(), confirmedAt: a.at, confirmedKey: a.key, confirmLapsed: false }
+        : d;
     }
     case 'unconfirm':
-      return { ...d, typed: '', confirmedAt: null };
+      return { ...d, ...NO_CONFIRMATION, confirmLapsed: false };
     case 'restore':
-      return { ...d, ...a.draft, password: '', keyMaterialJson: '', where: '', query: '', params: {}, count: null, typed: '', confirmedAt: null };
+      return {
+        ...d, ...a.draft, password: '', keyMaterialJson: '', where: '', query: '', params: {}, ...NO_COUNT, ...NO_CONFIRMATION, confirmLapsed: false,
+      };
     case 'reset':
       return emptyDraft(a.draftId);
     default:
@@ -114,7 +146,7 @@ export function canLeave(step: Step, d: WizardDraft): boolean {
     case 1: return !!d.connectionId && !!d.test?.ok;
     case 2: return !!d.table && !!d.shape && (!(d.selMode === 'where' ? d.where : d.query).trim() || !!d.count);
     case 3: return !!d.snapshotId && d.snapshotAccepted;
-    case 4: return targetReady(d) && (!needsConfirmation(d.writeMode) || !!d.typed);
+    case 4: return targetReady(d) && (!needsConfirmation(d.writeMode) || isWriteConfirmed(d));
     default: return true;
   }
 }

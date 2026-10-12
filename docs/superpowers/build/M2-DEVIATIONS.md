@@ -1516,6 +1516,8 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   in step 2 and step 4.
 - Step 2 requires a **Check** only when a filter was typed (no filter = every row, nothing to check);
   the count's `runs_as` statement is shown as returned (it lists the projected columns, Task 24).
+  *Narrowed by Review G7 r1:* this holds for Copy to a table and Export files only; In place and
+  Append always count the selection (step 4 counts it when step 2 did not).
   The console has no UI for named bind parameters: literals are bound by the server
   (`parameterize_literals`), and `params` stays empty.
 - `CheckList` shows the `connect` check's detail `tls`/`plain` as "over TLS"/"without TLS".
@@ -1623,3 +1625,61 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   Reports "Evidence packs"), the JSON download hashed to the printed sha256, the HTML download, a
   print-media PDF (A4, console chrome hidden), the Reports JSON download; no horizontal scroll at
   1440/390 px, no page errors.
+
+## Review G7 r1 fixes (Tasks 29–35)
+
+Both blocking findings were in the D3 write confirmation of the wizard. Each fix has Vitest cases
+that failed first (`frontend/src/pages/wizard/state.test.ts`, 17 cases; 15 failed against the old
+reducer with the new helpers stubbed, among them the reviewer's cases A–D on their assertions).
+
+- **B1 — In place / Append are confirmed with a row count.** The Task 32 deviation ("a Check only
+  when a filter was typed") is rejected for these two modes. Step 4 counts the selection
+  (`POST /connections/{id}/count`, read-only) as soon as In place or Append is chosen and `rows` is
+  unknown (an empty filter), shows "N rows match the selection" with the time, and offers **Count
+  again** with the server's message when the count fails. **Confirm** stays disabled until the count
+  is known; `ConfirmWriteModal` also refuses to confirm with `rows = null` (defence in depth), and
+  the reducer's `confirm` action refuses a draft without `rows`. A standing confirmation therefore
+  always sends `confirm_write: true` with `expected_rows`, so the server's `row_count_mismatch` guard
+  is always on for these writes.
+- **B2 — a confirmation is bound to what it confirmed.** `lib/jobs.ts` adds `confirmationKey(d)`
+  (connection, source object, selection including filter, binds, column subset and row cap, row
+  count, snapshot, mode, write mode, written object, append destination, primary-key strategy, In
+  place batch size, partitions, production) and `isWriteConfirmed(d)`. The `confirm` action stores
+  the key of the draft the dialog was drawn for (`WizardDraft.confirmedKey`) and refuses a key that is
+  not the current draft's. After **every** action the reducer withdraws a confirmation whose key no
+  longer matches (`bind` in `state.ts`), whatever the action — so `set` patches of `mode`, `pk*`,
+  `batchRows`, `parallelism`, `maxRows` or the destination are covered without listing them.
+  `canLeave(4)`, StepRun's blocked list, its summary and run bar, the stepper and `targetOf`'s
+  `confirm_write` all use `isWriteConfirmed`. The step 5 preset is deliberately not in the key: the
+  reviewed snapshot decides each column's method (`build_column_plans` takes no policy) and the
+  dialog does not name the preset, so changing it would only bounce the operator back to step 4.
+- Case C in the UI: choosing the other mode in step 5 withdraws the confirmation, and the wizard's
+  existing "farthest reachable step" rule returns to step 4, which shows "Your earlier confirmation
+  no longer applies …" (`WizardDraft.confirmLapsed`, set when an action other than Undo, a write-mode
+  change, restore or reset withdraws a standing confirmation). The dialog then shows the Synthesize
+  wording ("no path back"). Step 4 and step 5 say which mode the confirmation is for.
+- **A row count is bound to its selection.** `countKey(d)` (connection, object, filter, binds, row
+  cap; not the column subset) is stored with the count (`WizardDraft.countedKey`); the `counted`
+  action carries the key of the selection that was counted and is ignored when the selection changed
+  while the count ran, and any action that changes the selection drops the count. New consequence:
+  changing **Max rows** in step 2 drops the count (the server caps the count at `max_rows`), so a
+  typed filter needs **Check** again.
+- `WizardAction` changes (no contract name; contract §14 does not list the reducer's actions):
+  `counted` and `confirm` now carry `key`. New transient `WizardDraft` fields `countedKey`,
+  `confirmedKey`, `confirmLapsed`. `draftForStorage` additionally drops `rows`, `countedAt`,
+  `countSeconds` (a count without its filter is meaningless; a restored draft counts again) and the
+  three new fields. `pkStrategyOf(d)` is extracted from `targetOf` (shared with the key).
+- Two Task 34 Vitest cases built a "confirmed" draft by setting `typed` directly; that is no longer a
+  confirmation by design, so they now count and confirm through the reducer (and the named-append
+  case asserts `expected_rows`). 46 Vitest cases in all.
+- Browser check (private Playwright 1.55 against a Vite dev server proxying to the lane app on 8400;
+  read-only — the only POST was the count): `?snapshot=` deep link to the accepted
+  `bank_restore.contacts` snapshot → step 4 → In place counted "40,000 rows match the selection" with
+  no filter → dialog "Confirm: overwrite 40,000 rows in bank_restore.contacts" / "Write 40,000 rows
+  in place" → step 5 spec target `{in_place, confirm_write: true, expected_rows: 40000}` →
+  Synthesize → back on step 4 with the lapse note, **Next** disabled, spec `confirm_write: false`,
+  and the dialog in its one-way wording. No page errors, no horizontal scroll at 1440 and 390 px.
+- Not changed (review §5 non-blocking items, left open): `username` in the saved draft, the replay
+  wording after an idempotent retry, `email` with `domain: generalize` counted as reversible,
+  `targetReady('append')` ignoring the target role, StepDiscover dropping edits during a PATCH, and
+  the dev-only `npm audit` advisories.
