@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
-import { evidenceSoFar, methodText, overridesFor, partitionPct, shortType, stepperState } from './jobs';
+import { evidenceSoFar, methodText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
@@ -174,5 +174,52 @@ describe('review overrides (step 3)', () => {
   it('reclassifies a kept column and turns the text pipeline on', () => {
     const out = overridesFor(snap(), { '$.segment': { entity_type: 'ORG_NAME' }, '$.email': { text_column: true } });
     expect(out).toEqual([{ path: '$.segment', entity_type: 'ORG_NAME' }, { path: '$.email', text_column: true }]);
+  });
+});
+
+describe('run spec per write mode (steps 4-5)', () => {
+  const key = JSON.stringify({ alg: 'A256SIV', kid: 'k_group', dek: 'AAAA', kcv: null, wrapped_dek: null, wrap: null, consistency_scope: 'key', created_at: '2026-10-12T09:00:00Z' });
+  it('copies to a table without a primary-key strategy', () => {
+    const t = buildRunSpec(draft({ writeMode: 'table', tableLoad: 'upsert' })).target;
+    expect(t).toMatchObject({ write_mode: 'table', connection_id: 'c_tgt', object: { owner: 'bank_uat', name: 'contacts' }, table_load: 'upsert', create_if_missing: true });
+    expect(t).not.toHaveProperty('pk_strategy');
+  });
+  it('appends to the same table without an object and with the key strategy', () => {
+    const t = buildRunSpec(draft({ writeMode: 'append', appendTarget: 'same', pkKind: 'offset', pkOffset: '900,000,000', typed: 'bank_restore.contacts', rows: 10 })).target;
+    expect(t).not.toHaveProperty('object');
+    expect(t).toMatchObject({ write_mode: 'append', pk_strategy: { kind: 'offset', offset: 900000000 }, confirm_write: true, expected_rows: 10 });
+    const named = buildRunSpec(draft({ writeMode: 'append', appendTarget: 'named', targetOwner: 'bank_perf', targetTable: 'contacts_x', pkKind: 'generate', typed: 'bank_perf.contacts_x' })).target;
+    expect(named).toMatchObject({ object: { owner: 'bank_perf', name: 'contacts_x' }, pk_strategy: { kind: 'generate' }, confirm_write: true });
+  });
+  it('exports files without an object', () => {
+    const t = buildRunSpec(draft({ writeMode: 'files', filesConnectionId: 'c_s3', filesFormat: 'csv', filesPrefix: 'exports/contacts', filesCompression: 'gzip' })).target;
+    expect(t).toEqual({ write_mode: 'files', connection_id: 'c_s3', files: { format: 'csv', prefix: 'exports/contacts', compression: 'gzip' } });
+  });
+  it('reuses a job group key from the loaded file', () => {
+    const spec = buildRunSpec(draft({ keyChoice: 'group', groupId: 'grp_1', keyMaterialJson: JSON.stringify({ group: {}, key_material: JSON.parse(key), synthesis_seed: { alg: 'x', seed: 'c2VlZA==' } }) }));
+    expect(spec.group_id).toBe('grp_1');
+    expect(spec.consistency.key_material).toMatchObject({ kid: 'k_group' });
+    expect(spec.consistency).not.toHaveProperty('synthesis_seed');
+    expect(specPreview(draft({ keyChoice: 'group', groupId: 'grp_1', keyMaterialJson: key })).consistency).toEqual({ scope: 'key', group: 'grp_1', kid: 'k_group' });
+    expect(JSON.stringify(specPreview(draft({ keyChoice: 'group', groupId: 'grp_1', keyMaterialJson: key })))).not.toContain('AAAA');
+  });
+  it('never sends key material in synthesize mode', () => {
+    const spec = buildRunSpec(draft({ mode: 'synthesize', keyChoice: 'group', groupId: 'grp_1', keyMaterialJson: JSON.stringify({ key_material: JSON.parse(key), synthesis_seed: { alg: 'x', seed: 'c2VlZA==' } }) }));
+    expect(spec.consistency).not.toHaveProperty('key_material');
+    expect(spec.consistency.synthesis_seed).toMatchObject({ seed: 'c2VlZA==' });
+    expect(buildRunSpec(draft({ mode: 'synthesize' })).consistency).toEqual({ scope: 'key' });
+  });
+  it('lists one-way columns and groups the plan by method', () => {
+    const snap = { columns: [column({ name: 'pin', method: { method: 'generalize', params: {} } }), column({ name: 'email' }), column({ name: 'seg', entity_type: null, method: { method: 'keep', params: {} } })] };
+    expect(oneWayColumns(snap, 'obfuscate')).toEqual([{ name: 'pin', method: 'generalize' }]);
+    expect(planGroups(snap, 'obfuscate')).toEqual({ groups: [['email', ['email']], ['generalize', ['pin']]], kept: ['seg'] });
+  });
+});
+
+describe('seed fingerprint', () => {
+  it('matches the server (first 16 hex of sha256 of the raw seed)', async () => {
+    // sha256(b'seed') = 19b25856e1c150ca834cffc8b59b23adbd0ec0389e58eb22b3b64768098d002b
+    expect(await seedFingerprint('c2VlZA==')).toBe('19b25856e1c150ca');
+    expect(await seedFingerprint('c2VlZA')).toBe('19b25856e1c150ca');
   });
 });

@@ -3,10 +3,12 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
 import { draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, newDraftId, sourceObject, specPreview, writeModeLabel, type Step, type WizardDraft } from '../lib/jobs';
-import type { Connection } from '../lib/types';
+import type { ClassificationSnapshot, Connection } from '../lib/types';
 import { StepConnect } from './wizard/StepConnect';
 import { StepDiscover } from './wizard/StepDiscover';
+import { StepRun } from './wizard/StepRun';
 import { StepSelect } from './wizard/StepSelect';
+import { StepTarget } from './wizard/StepTarget';
 import { DRAFT_KEY, loadSavedDraft, reachable, useWizard, wizardReducer } from './wizard/state';
 
 const STEP_TITLES: Record<Step, string> = { 1: 'Connect', 2: 'Select data', 3: 'Discover', 4: 'Target and write mode', 5: 'Review and run' };
@@ -40,17 +42,6 @@ function stepSub(step: Step, d: WizardDraft): string {
   }
 }
 
-/** Steps that arrive with the next tasks of the plan render a note in the meantime. */
-function Pending({ step, onBack }: { step: Step; onBack: () => void }): JSX.Element {
-  return (
-    <section className="panel">
-      <div className="panel-head"><h2>{step} · {STEP_TITLES[step]}</h2></div>
-      <div className="card"><p className="muted" style={{ margin: 0 }}>This step is not available yet.</p></div>
-      <div className="wfoot"><button className="btn" type="button" onClick={onBack}>Back</button></div>
-    </section>
-  );
-}
-
 /** New job (mockup 06): five steps on the left, guarantees and the job specification on the right. */
 export function JobWizard(): JSX.Element {
   const auth = useAuth();
@@ -67,7 +58,15 @@ export function JobWizard(): JSX.Element {
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [connections, setConnections] = useState<Connection[]>([]);
+  const [snapshot, setSnapshot] = useState<ClassificationSnapshot | null>(null);
   const reach = reachable(d);
+
+  // steps 4 and 5 read the accepted snapshot (key, one-way columns, plan)
+  useEffect(() => {
+    if (!d.snapshotId || !d.snapshotAccepted) { setSnapshot(null); return; }
+    if (snapshot?.id === d.snapshotId && snapshot.status === 'accepted') return;
+    api.snapshots.get(auth, d.snapshotId).then(setSnapshot).catch(() => setSnapshot(null));
+  }, [auth, d.snapshotId, d.snapshotAccepted, snapshot]);
 
   const loadConnections = useCallback(() => {
     api.connections.list(auth, 200).then((p) => setConnections(p.items)).catch(() => setConnections([]));
@@ -152,7 +151,8 @@ export function JobWizard(): JSX.Element {
           {d.step === 1 && <StepConnect d={d} dispatch={dispatch} auth={auth} connections={connections} onConnectionsChanged={loadConnections} onNext={() => go(2)} />}
           {d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} onNext={() => go(3)} onBack={() => go(1)} />}
           {d.step === 3 && <StepDiscover d={d} dispatch={dispatch} auth={auth} onNext={() => go(4)} onBack={() => go(2)} />}
-          {d.step >= 4 && <Pending step={d.step} onBack={() => go((d.step - 1) as Step)} />}
+          {d.step === 4 && <StepTarget d={d} dispatch={dispatch} auth={auth} connections={connections} snapshot={snapshot} onConnectionsChanged={loadConnections} onNext={() => go(5)} onBack={() => go(3)} />}
+          {d.step === 5 && <StepRun d={d} dispatch={dispatch} auth={auth} snapshot={snapshot} go={go} onBack={() => go(4)} />}
         </div>
 
         <aside className="rail" aria-label="Job specification">

@@ -1555,3 +1555,39 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   `bank_restore.contacts` sent exactly one override (`{"path": "$.customer_id", "method":
   {"method": "redact", "params": {}}}`), and the deep link reopened that proposed snapshot with
   "1 overrides".
+
+## Task 34 — New-job wizard, steps 4–5 (target, confirmation, run, key card)
+
+- `lib/jobs.ts`: `REVERSIBLE_METHODS` (the engine's reversible set), `oneWayColumns`, `planGroups`,
+  `seedFingerprint` (WebCrypto; the server's first 16 hex of sha256 of the raw seed, URL-safe or
+  padded base64). 7 Vitest cases (28 in all): the plan's `buildRunSpec` cases per write mode (they
+  pass on the Task 29 builder: tests written for this task, red only for the new helpers), the
+  one-way / plan helpers and a fingerprint value checked against `dps.secrets.seed_fingerprint`.
+- The wizard shell loads the accepted snapshot once for steps 4 and 5 (key columns, one-way columns,
+  rewritten-column count, plan by method). The step placeholder of Task 32 is gone.
+- Step 4: In place without the `target` role shows the amber callout and keeps **Next** disabled;
+  **Confirm** still opens the dialog, which explains the block (no target role) and keeps the write
+  button disabled (the Task 36 check opens the dialog on the read-only `bank-pg-ro`). The modal's
+  production note says DPS checks the admin scope at Run job (`adminScope = null`, Task 29). **Check
+  target** runs `test {role: target, object, write_mode}` (a file store: the put/delete probe); it is
+  not required to continue. Append: a text key offers a key **prefix**, an integer key an **offset**;
+  Token is disabled for the same table and in synthesize mode with the reason. "Add a file store"
+  creates an `s3` (bucket, endpoint, secret name) or `pvc` (base path) target-only connection.
+  In-place **Commit every** sets `source.batch_rows` (empty = service default).
+- Step 5: the policy select defaults to the snapshot's policy (sent only when another preset is
+  chosen); the group key/seed file is read with `File.text()` into React state and checked against
+  the group (`kid`, or the seed fingerprint); the Idempotency-Key is one `crypto.randomUUID()` per
+  submission (kept across retries of the same kind of submission, dropped after an answer), so a
+  double click cannot start two jobs. After **Run job** the form is replaced by the queued callout
+  with **Open in Jobs** / **Open job** and the once-only key card; the saved draft is cleared. A dry
+  run opens the job detail.
+- `styles/wizard.css`: a choice card's radio now covers the card (invisible, `inset: 0`): with the
+  mockup's `pointer-events: none` input, Playwright's `check()` on a card label timed out ("<span
+  class=ct> intercepts pointer events"). `styles/components.css`: page-head actions take the full
+  width on phones (the live job page's four buttons overflowed to 461 px).
+- Browser check (private Playwright, lane stack): the plan's Task 36 wizard path end to end — In
+  place on `bank-pg-ro` opens the dialog with the write button disabled, Copy to a table to
+  `bank_uat.customers_console_t34` via `bank-uat`, ticket, **Run job** → "shown once" key card →
+  **Open job** → "Run · partitions" live → evidence link after the run; Pause / Resume / the Cancel
+  dialog on a 200,000-row bench job (4 live partitions with rows/s and checkpoint fingerprints). No
+  horizontal scroll at 1440/390 px. Screenshots holding the once-only test key were deleted.

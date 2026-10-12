@@ -761,3 +761,41 @@ export function overridesFor(snapshot: ClassificationSnapshot, edits: Record<str
   }
   return [...out.values()];
 }
+
+// ---------------------------------------------------------------------------------------------
+// Steps 4-5: one-way columns, the plan by method, the seed fingerprint check.
+
+/** Methods the key reverses (dps.engine.transform.methods: `reversible`). */
+export const REVERSIBLE_METHODS = new Set(['date_shift', 'det_token', 'email', 'external_tokenize', 'fpe_digits', 'fpe_text', 'phone']);
+
+/** Transformed columns whose method has no way back (the in-place confirmation lists them). */
+export function oneWayColumns(snapshot: Pick<ClassificationSnapshot, 'columns'>, mode: 'obfuscate' | 'synthesize'): { name: string; method: string }[] {
+  return snapshot.columns
+    .filter((c) => c.entity_type || c.text_column)
+    .map((c) => ({ name: c.name, method: c.text_column && mode === 'obfuscate' ? 'det_token' : methodFor(c, mode).method }))
+    .filter((c) => c.method !== 'keep' && !REVERSIBLE_METHODS.has(c.method));
+}
+
+/** The snapshot's columns grouped by method for a mode (step 5 "Plan"), kept columns apart. */
+export function planGroups(snapshot: Pick<ClassificationSnapshot, 'columns'>, mode: 'obfuscate' | 'synthesize'): { groups: [string, string[]][]; kept: string[] } {
+  const by = new Map<string, string[]>();
+  const kept: string[] = [];
+  for (const c of snapshot.columns) {
+    const method = c.text_column && mode === 'obfuscate' ? 'text pipeline' : methodFor(c, mode).method;
+    if (method === 'keep' || (!c.entity_type && !c.text_column)) { kept.push(c.name); continue; }
+    by.set(method, [...(by.get(method) ?? []), c.name]);
+  }
+  return { groups: [...by.entries()].sort((a, b) => a[0].localeCompare(b[0])), kept };
+}
+
+/** First 16 hex of sha256(raw seed), as DPS stores it for a job group; null without WebCrypto. */
+export async function seedFingerprint(seedB64: string): Promise<string | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return null;
+  try {
+    const text = seedB64.trim().replace(/-/g, '+').replace(/_/g, '/');
+    const raw = Uint8Array.from(atob(text + '='.repeat((4 - (text.length % 4)) % 4)), (ch) => ch.charCodeAt(0));
+    const digest = new Uint8Array(await subtle.digest('SHA-256', raw));
+    return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+  } catch { return null; }
+}

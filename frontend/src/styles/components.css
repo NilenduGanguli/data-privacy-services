@@ -90,6 +90,7 @@
   .hm { grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); }
 }
 @media (max-width: 760px) {
+  .page-head > .head-actions { flex: 1 1 100%; }
   .confirm { padding: 14px; }
   .ck { grid-template-columns: 20px minmax(0, 1fr); } .ck .meta { grid-column: 2; white-space: normal; }
 }

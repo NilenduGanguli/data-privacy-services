@@ -41,7 +41,9 @@
   .choices.c3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .choice { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); cursor: pointer; transition: border-color .12s, background .12s; min-width: 0; }
   .choice:hover { border-color: var(--border-strong); }
-  .choice input { position: absolute; opacity: 0; pointer-events: none; }
+  /* the radio covers its card, invisible: a click anywhere on the card (or on the input itself) selects it */
+  .choice input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+  .choice input:disabled { cursor: not-allowed; }
   .choice:has(input:focus-visible) { outline: 2px solid var(--teal); outline-offset: 2px; }
   .choice .radio { position: absolute; top: 15px; right: 15px; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
   .choice:has(input:checked) { border-color: var(--teal-border); background: var(--teal-soft); box-shadow: inset 0 0 0 1px var(--teal-border); }
