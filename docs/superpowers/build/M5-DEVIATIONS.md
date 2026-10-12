@@ -254,6 +254,76 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   EXTRAS=synth-ml` does not exist (the Dockerfile has `WITH_NER` only); adding a build argument is
   an image change — deferred to the images task (below).
 
+## Task 7B — MOSTLY differential privacy and linked (multi-table, sequential) generation
+
+- **Process note:** `dps/engine/synth/linked.py` was written before its offline tests in this task;
+  the validation, `prepare_linked`, job-flow and DP-threading layers were test-first (each test seen
+  failing for the missing interface first).
+- `dps/engine/synth/mostly.py`: `DpConfig` (frozen), `model_configuration(minutes, dp)` and
+  `dp_report(dp)` beside the plan's `_dp_configuration`; the `Trainer` takes the DP budget as a
+  fourth argument (Task 7's fakes take it too); `MostlySampler.dp` records the evidence block and is
+  sealed with the pool. `achieved_epsilon` is always `null`: reading it needs the real SDK, whose
+  API for it is not verified in this lane.
+- `dps/engine/synth/linked.py` — interface changed for two tables that may share column names:
+  `LinkedPool.fit(parent: LinkedTable, child: LinkedTable, *, layout, subjects, seed,
+  max_training_minutes, dp, trainer=None, locale)`; a `LinkedTable` carries the in-memory sample of
+  its modelled and link columns, the kinds and scales, the output columns, the key column and kind,
+  and its `SensitiveColumn`s. The pool holds the **output** rows: new keys (parent `1..n` or
+  `S00000001…`, child `1..m` or `C00000001…`), the child's foreign key = the generated parent key,
+  modelled values, surrogates, and null for every column that is neither modelled nor sensitive
+  (free text included). Surrogates are anchored on the generated **subject**
+  (`linked:parent:<generated id>`) for both tables (plan: `linked:<table>:<id>`), so one subject's
+  persona is coherent across its parent and child rows; their input is a value-shaped placeholder
+  (`_pseudo_original`: the column's value shape, or a date for date columns), never a real value;
+  a surrogate that does not read as its column's type is null. `from_bytes(data, seed)` keeps the
+  sampler signature (the seed is unused: the pool is already generated). `new_key`,
+  `PARENT_INDEX`, `sequence_lengths(rows, fk, keys=None)` (zeros counted when `keys` is given).
+- Layout rules (prepare, `tabular_invalid`): one key column in **each** table, `parent_key` = the
+  parent's key, the link columns present, the foreign key not the child's key, integer or text keys
+  (others cannot take generated ids), and `order_by` neither sensitive, free text nor
+  non-orderable. A **sensitive foreign key is allowed** (plan: refused): discovery classifies the
+  usual link column (`customer_id`) as `CUSTOMER_ID`, and its values are re-numbered before
+  training and replaced in the output, so they reach neither the trainer nor the files.
+- `validate_run(..., child_snapshot=None)` (`targets.py`, contract §5.3) and `submit_run` loads the
+  child snapshot. `tabular_dp: false` is always allowed (it only switches a deployment default off);
+  `true` (or `linked`) without `tabular="mostly"` is `tabular_invalid`.
+- `dps/layers/connectors/tabular.py` `prepare_linked`: a keyed 20 % of the sampled parents is held
+  out; their children are the membership-inference non-members. NNDR and the MIA proxy run on the
+  child's modelled columns (`privacy.nndr_table = "child"`); **exact rows are rejected** (the plan
+  named no rule for linked output): a generated row equal to a sampled real row on every written
+  non-key, non-link column (sensitive and null columns included) is dropped — a dropped parent takes
+  its children — and counted in `privacy.exact_row_rejections`, so `exact_row_matches` is 0; when
+  every generated row of a table is rejected, prepare fails with `leakage`. Like the copula's reject
+  set, this knows only the sampled rows (`test_generated_rows_equal_to_real_rows_are_rejected`;
+  the integration run found a rejected transaction about one run in three). `fidelity = {engine, score (mean),
+  tables: {parent, child}, measured_on}`; `utility` is not run for linked generation and there is
+  no quasi-identifier block; `tabular.columns` is `{parent, child}` (a list for the row path) — the
+  console/PDF tasks must read both shapes. The single-table MOSTLY prepare records `tabular.dp`
+  too (`prepare_tabular(..., dp=)`, `jobs_run._dp_config`).
+- `dps/layers/connectors/jobs_run.py`: the linked branch runs in `prepare` right after the source
+  checks (the 1:1 projection, count, plans and preflight do not apply); the two tables' value-free
+  descriptions (`object`, `dir`, `columns` with types, `rows`) travel in
+  `RunPlan.prepare["linked"]`. `_run_linked_partition` bypasses the runtime cache: each call has its
+  own writer and spool folder, a restarted partition resets its progress and rewrites its
+  (deterministic) objects; the checkpoint's `last_key` is a row position, never a value;
+  `values_by_method["mostly"]` counts rows written. Layout: `<connection prefix>/<files.prefix>/
+  <table>/<job_id>/part-…` (plan: `<prefix>/<table>/<job_id>/…`, which put the table above the
+  files prefix) and one manifest at `<connection prefix>/<files.prefix>/<job_id>/manifest.json`
+  with `linked: true` and `tables: {parent, child: {object, dir, columns, objects, rows_total}}`.
+  A dry run measures and stops.
+- `dps/config.py` `mostly_linked_child_rows = 200_000` (`tests/test_config_m5.py`, HANDOFF §4 row,
+  contract §10 row). The HANDOFF trap went to §8 "Traps" (the plan says §11; §11 here is the M1+M2
+  integration record) together with two tabular traps found in Task 6.
+- Tests: `tests/test_mostly_linked.py` 14 offline + 1 `ml` (plan 6 + 1) and an **integration test**
+  not in the plan, `tests/connectors/test_linked_files.py`: customers + transactions in the lane's
+  `source-pg` → a PVC files target through the real job flow, with the SDK trainer replaced by a
+  stand-in that draws each column independently from the training sample (rare text categories
+  left out, as MOSTLY's rare-category protection does) because the `synth-ml` extra is not
+  installed. It compares the output with the source: no source key, name, e-mail, national id, tax
+  id, mobile number or memo reaches the files, keys are new, referential integrity and sequence
+  order hold, and the pack records DP and the linked block. Generated names may coincide with
+  source names by chance (≤ 10 % allowed; same persona pools, placeholder input — see Task 6).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -268,3 +338,8 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
 - Task 7 → Task 24: an `EXTRAS` (or `WITH_SYNTH_ML`) build argument for a bank-built image with the
   `synth-ml` extra; the MOSTLY SDK call (`_sdk_trainer`) has never run against the real SDK here —
   run the `ml` tests where the extra is installed.
+- Task 7B: the MOSTLY linked SDK call (`_sdk_linked_trainer`: table config keys, `generate(...)
+  .data()` returning both tables, the context foreign key) and `achieved_epsilon` are unverified
+  without the extra — run `pytest -m ml tests/test_mostly_linked.py` where it is installed. The
+  console (Task 21) and PDF (Task 14) must render `tabular.linked`, `tabular.dp` and the
+  `{parent, child}` shapes of `tabular.columns` and `fidelity.tables`.

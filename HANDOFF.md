@@ -355,6 +355,7 @@ the posture rules that tighten them in staging/prod arrive with M5's posture tas
 | `DPS_PRIVACY_NNDR_TARGET` / `DPS_PRIVACY_NNDR_ENFORCE` | 0.95 / `false` | `true`: an NNDR ratio below the target fails prepare (`privacy_gate`) |
 | `DPS_MOSTLY_POOL_ROWS` / `DPS_MOSTLY_MAX_TRAINING_MINUTES` | 20,000 / 10 | optional MOSTLY engine |
 | `DPS_MOSTLY_DP_ENABLED` / `_DP_MAX_EPSILON` / `_DP_DELTA` | `false` / 5.0 / 1e-5 | MOSTLY differential-privacy training (epsilon > 0, 0 < delta < 1) |
+| `DPS_MOSTLY_LINKED_CHILD_ROWS` | 200,000 | MOSTLY linked generation: most child rows read for training (children of the sampled parents, keyset pages) |
 | `DPS_UTILITY_MAX_ROWS` / `DPS_MIA_MIN_HOLDOUT` / `DPS_MIA_AUC_TARGET` | 5,000 / 50 / 0.60 | train-on-synthetic/test-on-real budget; the membership-inference proxy needs this many holdout rows and passes at or below the AUC target |
 | `DPS_TOKENIZER_PROVIDER` | `""` | `external_tokenize` adapter: `""` (off) or `http` |
 | `DPS_TOKENIZER_URL` / `DPS_TOKENIZER_TOKEN` (`_FILE`) / `DPS_TOKENIZER_CA_FILE` | — | the bank tokenization service (http(s) with a host; the error never echoes the URL), its bearer token (prefer `DPS_TOKENIZER_TOKEN_FILE`) and CA bundle |
@@ -597,6 +598,15 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   - Run the integration gates one at a time against a lane's stack: the service tests share one
     metadata database, one source database and one MinIO bucket with fixed keys (two concurrent runs
     collide, e.g. on `tests/big.bin` in `tests/connectors/test_storage_s3.py`).
+  - **M5 tabular synthesis** (`options.tabular`): the copula model is fitted on a sample of the
+    selection; the same seed reproduces the same target only when the whole selection fits in the
+    sample (`DPS_COPULA_FIT_ROWS + DPS_COPULA_HOLDOUT_ROWS`), because a larger table is sampled at
+    random. A table whose every non-key value combination occurs in the data cannot be synthesized
+    row by row (every draw equals a real row): prepare fails with `leakage` and says so.
+  - **M5 linked generation** (`options.linked`, MOSTLY engine) writes a *new* dataset with new
+    keys (`1..n`, `S00000001…`, `C00000001…`): joins back to production keys are impossible by
+    design, and free-text and other unmodelled, non-sensitive columns are written as null. It needs
+    the `synth-ml` extra (never in the default image).
 
 ## 9. Next milestones
 

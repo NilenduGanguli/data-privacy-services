@@ -34,7 +34,9 @@ COLS: dict[str, list[Any]] = {
 KINDS = {"$.BALANCE": "decimal", "$.SEGMENT": "categorical", "$.OPENED": "date"}
 
 
-def fake_trainer(data: dict[str, list[Any]], size: int, minutes: int) -> list[dict[str, Any]]:
+def fake_trainer(
+    data: dict[str, list[Any]], size: int, minutes: int, dp: Any = None
+) -> list[dict[str, Any]]:
     # what pandas hands back: floats for decimals, ISO strings/Timestamps for dates, NaN for nulls
     return [
         {"BALANCE": float(i) + 0.125, "SEGMENT": "B", "OPENED": f"2021-06-0{1 + i % 9}"}
@@ -98,7 +100,9 @@ def test_values_are_coerced_to_their_column_kind() -> None:
         "$.C": "categorical",
     }
 
-    def trainer(data: dict[str, list[Any]], size: int, minutes: int) -> list[dict[str, Any]]:
+    def trainer(
+        data: dict[str, list[Any]], size: int, minutes: int, dp: Any = None
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "N": 4.6,
@@ -141,7 +145,9 @@ def test_values_are_coerced_to_their_column_kind() -> None:
 
 
 def test_bad_generator_output_and_blobs_fail_without_values() -> None:
-    def garbage(data: dict[str, list[Any]], size: int, minutes: int) -> list[dict[str, Any]]:
+    def garbage(
+        data: dict[str, list[Any]], size: int, minutes: int, dp: Any = None
+    ) -> list[dict[str, Any]]:
         return [{"OPENED": "not-a-date-4111111111111111"}]
 
     with pytest.raises(TabularUnavailable) as err:
@@ -156,7 +162,12 @@ def test_bad_generator_output_and_blobs_fail_without_values() -> None:
     assert "4111" not in str(err.value)
     with pytest.raises(TabularUnavailable):
         MostlySampler.fit(
-            COLS, KINDS, seed=SEED, pool_rows=5, max_training_minutes=1, trainer=lambda d, s, m: []
+            COLS,
+            KINDS,
+            seed=SEED,
+            pool_rows=5,
+            max_training_minutes=1,
+            trainer=lambda d, s, m, dp: [],
         )
     for blob in (b"", b"not zlib", base64.b64encode(b"x")):
         with pytest.raises(TabularUnavailable):
@@ -195,7 +206,9 @@ async def test_prepare_with_the_mostly_engine_records_the_pool(
     from dps.layers.connectors.tabular import load_sampler
     from tests.test_tabular_prepare import _prepare, _rows
 
-    def trainer(data: dict[str, list[Any]], size: int, minutes: int) -> list[dict[str, Any]]:
+    def trainer(
+        data: dict[str, list[Any]], size: int, minutes: int, dp: Any = None
+    ) -> list[dict[str, Any]]:
         rng = np.random.default_rng(size)
         balances = rng.lognormal(8, 1, size)
         return [
@@ -203,10 +216,21 @@ async def test_prepare_with_the_mostly_engine_records_the_pool(
         ]
 
     monkeypatch.setattr(mostly_module, "_sdk_trainer", trainer)
+    dp = mostly_module.DpConfig(max_epsilon=3.0, delta=1e-6)
     prepared, seed = await _prepare(
-        _rows(600), engine_name="mostly", synth_tabular_engine="copula,mostly", mostly_pool_rows=200
+        _rows(600),
+        engine_name="mostly",
+        synth_tabular_engine="copula,mostly",
+        mostly_pool_rows=200,
+        dp=dp,
     )
     m = prepared.metrics
+    assert m["tabular"]["dp"] == {
+        "enabled": True,
+        "max_epsilon": 3.0,
+        "delta": 1e-6,
+        "achieved_epsilon": None,
+    }
     assert prepared.engine == "mostly" and m["tabular"]["engine"] == "mostly"
     assert m["tabular"]["pool_rows"] == 200 and m["privacy"]["exact_row_matches"] == 0
     assert m["fidelity"]["engine"] == "mostly" and m["privacy"]["membership_inference"]["run"]

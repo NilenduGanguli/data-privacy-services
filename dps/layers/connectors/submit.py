@@ -199,6 +199,8 @@ async def submit_run(
         else (source if spec.target.connection_id else None)
     )
     snapshot = await get_snapshot(tenant_id, spec.snapshot_id)
+    linked = spec.options.linked
+    child_snapshot = await get_snapshot(tenant_id, linked.child_snapshot_id) if linked else None
     group = await get_group(tenant_id, spec.group_id) if spec.group_id else None
     if spec.group_id and group is None:
         raise SpecError("group_not_found", 404, "job group not found")
@@ -211,6 +213,7 @@ async def submit_run(
         settings=settings,
         kek=kek,
         group=(group.kid, group.seed_fingerprint) if group else None,
+        child_snapshot=child_snapshot,
     )
     engine = cast(Engine, source.engine)
     selection = _bind(spec.source.selection, engine, snapshot.shape if snapshot else None)

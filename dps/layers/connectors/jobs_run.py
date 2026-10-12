@@ -19,6 +19,13 @@ secret with the fitted model (``jobs.reseal_secret``) and stores the value-free 
 ``progress.metrics``; partitions load the sealed model (and the policy's constraints) once per
 runtime.
 
+**Linked generation** (M5 Task 7B, ``options.linked``): ``prepare`` trains the MOSTLY generator on
+the parent and child tables, measures and gates the generated dataset, seals it as the job's
+tabular model and adds two partitions (0 = parent, 1 = child). Each partition writes its table's
+generated rows to its own folder of the files target (``<files.prefix>/<table>/<job_id>/part-…``);
+a restarted partition rewrites its objects (deterministic content). ``finalize`` writes one
+manifest (``<files.prefix>/<job_id>/manifest.json``) with a ``tables`` map.
+
 ``finalize`` (one fenced job row) decides the outcome, writes the files manifest last, clears the
 write ledger of a finished job, samples written rows for the evidence, stores the evidence pack,
 audits ``job.finalize`` and moves the job to its terminal state, purging the sealed key.
@@ -31,10 +38,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
@@ -89,6 +99,7 @@ from dps.layers.connectors.evidence import EvidenceInputs, build_pack, save_evid
 from dps.layers.connectors.files import (
     FilesWriter,
     build_manifest,
+    effective_compression,
     manifest_bytes,
     write_manifest,
 )
@@ -412,6 +423,11 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             raise PrepareFailure("no_key", "the table has no primary key or unique not-null index")
         selection = spec.source.selection
         validate_selection(selection, cast(Engine, source.engine), shape)
+        if spec.options.linked is not None:
+            await _prepare_linked(
+                ctx, job, spec, secret, snapshot, policy, source, shape, source_conn, target_conn
+            )
+            return
         projection = [
             c.name
             for c in shape.columns
@@ -642,6 +658,7 @@ async def _prepare_tabular(
             make_transformer=make,
             anchor_of=lambda row: row_anchor(row, shape, None),
             projection=plan.projection,
+            dp=_dp_config(ctx, spec),
         )
     except TabularGateError as exc:
         raise PrepareFailure(exc.code, exc.detail) from None
@@ -665,6 +682,188 @@ async def _prepare_tabular(
         columns=len(prepared.metrics["tabular"]["columns"]),
     )
     return resealed, sampler, constraints, prepared.metrics
+
+
+def _dp_config(ctx: HandlerContext, spec: RunSpec) -> Any:
+    """The MOSTLY differential-privacy budget of this run (``options.tabular_dp``, else the
+    deployment default), or ``None``; the copula takes none."""
+    from dps.engine.synth.mostly import DpConfig
+
+    settings = ctx.settings
+    wanted = spec.options.tabular_dp
+    enabled = settings.mostly_dp_enabled if wanted is None else wanted
+    if spec.options.tabular != "mostly" or not enabled:
+        return None
+    return DpConfig(max_epsilon=settings.mostly_dp_max_epsilon, delta=settings.mostly_dp_delta)
+
+
+def _linked_dirs(parent: str, child: str) -> tuple[str, str]:
+    """Folder names of the two generated tables (their object names, kept apart)."""
+    return parent, child if child != parent else f"{child}_child"
+
+
+def _linked_writer(
+    store: ObjectStore,
+    spec: RunSpec,
+    target_conn: Connection,
+    job_id: str,
+    table: dict[str, Any],
+    *,
+    spool: str = "",
+) -> FilesWriter:
+    """A files writer for one generated table: ``<files.prefix>/<table dir>/<job_id>/part-…``."""
+    files = spec.target.files
+    assert files is not None  # validate_run: linked generation writes files
+    prefix = "/".join(p for p in (files.prefix.strip("/"), table["dir"]) if p)
+    columns = [
+        ColumnInfo(path=f"$.{c['name']}", name=c["name"], data_type=c["data_type"], kind=c["kind"])
+        for c in table["columns"]
+    ]
+    root = Path(tempfile.gettempdir()) / "dps-spool" / job_id / f"linked-{spool or table['dir']}"
+    return FilesWriter(
+        store,
+        files.model_copy(update={"prefix": prefix}),
+        job_id=job_id,
+        base_prefix=target_conn.params.prefix,
+        columns=columns,
+        spool_root=root,
+    )
+
+
+async def _prepare_linked(
+    ctx: HandlerContext,
+    job: ClaimedJob,
+    spec: RunSpec,
+    secret: JobSecret,
+    snapshot: ClassificationSnapshot,
+    policy: Policy,
+    source: Connector,
+    shape: TableShape,
+    source_conn: Connection,
+    target_conn: Connection | None,
+) -> None:
+    """Task 7B: train and gate the linked generator, seal its pool, add the two partitions."""
+    from dps.layers.connectors.tabular import TabularGateError, prepare_linked
+
+    settings = ctx.settings
+    linked = spec.options.linked
+    assert linked is not None
+    if spec.target.write_mode != "files" or target_conn is None or spec.target.files is None:
+        raise PrepareFailure("tabular_invalid", "linked generation writes a files target")
+    if not secret.synthesis_seed:
+        raise SecretUnavailable()
+    async with db.acquire_queue(job.tenant_id) as conn:
+        child_snapshot = await get_snapshot(job.tenant_id, linked.child_snapshot_id, conn=conn)
+    if child_snapshot is None or child_snapshot.status != "accepted":
+        raise PrepareFailure("snapshot_stale", "the child table's accepted snapshot is gone")
+    child_shape = await source.describe(linked.child)
+    _check_snapshot(child_snapshot, child_shape)
+    try:
+        store = await open_target_store(target_conn, settings, kek=ctx.kek)
+    except ValueError:
+        raise PrepareFailure("target_invalid", "the files target is not usable") from None
+    dp = _dp_config(ctx, spec)
+    await _stage(ctx, job, "training the linked generator")
+    selection = spec.source.selection
+    try:
+        prepared = await prepare_linked(
+            settings=settings,
+            connector=source,
+            parent_shape=shape,
+            parent_snapshot=snapshot,
+            child_shape=child_shape,
+            child_snapshot=child_snapshot,
+            linked=linked,
+            selection=selection,
+            params=selection.params,
+            seed=seed_bytes(seed_from_caller(secret.synthesis_seed)),
+            dp=dp,
+            locale=policy.locale.default or settings.default_locale,
+        )
+    except TabularGateError as exc:
+        raise PrepareFailure(exc.code, exc.detail) from None
+    parent_dir, child_dir = _linked_dirs(shape.object.name, child_shape.object.name)
+    tables = {
+        "parent": {
+            "object": shape.object.fqn(),
+            "dir": parent_dir,
+            "columns": prepared.parent_columns,
+            "rows": prepared.parent_rows,
+        },
+        "child": {
+            "object": child_shape.object.fqn(),
+            "dir": child_dir,
+            "columns": prepared.child_columns,
+            "rows": prepared.child_rows,
+        },
+    }
+    probe = _linked_writer(store, spec, target_conn, job.id, tables["parent"], spool="probe")
+    try:
+        await probe.prepare(dry_run=spec.options.dry_run)
+    finally:
+        await probe.close()
+    resealed = secret.model_copy(update={"tabular_model": prepared.model_b64})
+    sealed = seal_json(ctx.kek, resealed, aad=f"dps_job.key:{job.id}")
+    if not await jobs.reseal_secret(ctx.worker_id, job.id, sealed):
+        raise _Lost()
+    projection = [c["name"] for c in prepared.parent_columns]
+    resolved, _ = resolve_target(
+        spec,
+        job_id=job.id,
+        source_conn=source_conn,
+        target_conn=target_conn,
+        source_shape=shape,
+        target_shape=None,
+        plans=[],
+        projection=projection,
+    )
+    plan = RunPlan(
+        columns=[],
+        anchor=None,
+        key=list(shape.key),
+        projection=projection,
+        target=resolved,
+        source_object=shape.object.fqn(),
+        policy_name=policy.name,
+        policy_hash=policy.config_hash(),
+        snapshot_id=snapshot.id,
+        snapshot_hash=snapshot.content_hash,
+        locale=policy.locale.default or settings.default_locale,
+        batch_rows=spec.source.batch_rows or settings.batch_rows,
+        prepare={
+            "created": False,
+            "truncated": False,
+            "collisions": 0,
+            "existing_rows": None,
+            "linked": tables,
+        },
+    )
+    base: dict[str, Any] = {
+        "rows_estimated": prepared.parent_rows + prepared.child_rows,
+        "stage": "",
+        "metrics": prepared.metrics,
+    }
+    if spec.options.dry_run:
+        if not await jobs.advance_job(
+            ctx.worker_id,
+            job.id,
+            phase=JobPhase.finalize,
+            state=JobState.queued,
+            plan=plan.model_dump(mode="json"),
+            progress={**base, "outcome": "dry_run"},
+        ):
+            raise _Lost()
+        return
+    added = await jobs.add_partitions(
+        ctx.worker_id,
+        job.id,
+        [KeyRange(), KeyRange()],
+        plan=plan.model_dump(mode="json"),
+        progress=base,
+    )
+    if added != 2:
+        raise _Lost()
+    logger.info("prepare_done", job_id=job.id, partitions=2, rows=base["rows_estimated"])
 
 
 async def _runtime_tabular(
@@ -881,6 +1080,9 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
     try:
         if part.job_id != job.id:
             raise ValueError("the partition belongs to another job")
+        if job.plan and (job.plan.get("prepare") or {}).get("linked"):
+            await _run_linked_partition(ctx, job, part)
+            return
         runtime = await RUNTIMES.get(ctx, job)
         await _run_partition(ctx, job, runtime, part)
     except _Lost:
@@ -918,6 +1120,102 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
     finally:
         if runtime is not None:
             RUNTIMES.release(job.id)
+
+
+async def _run_linked_partition(
+    ctx: HandlerContext, job: JobInternal, part: ClaimedPartition
+) -> None:
+    """Write one generated table of a linked job (0 = parent, 1 = child) to the files target.
+
+    The rows come from the sealed pool, so a restarted partition rewrites the same objects; each
+    call has its own writer and spool folder.
+    """
+    from dps.engine.synth.mostly import TabularUnavailable
+    from dps.layers.connectors.tabular import load_linked_pool
+
+    spec, secret = _spec(ctx, job), _secret(ctx, job)
+    plan = RunPlan.model_validate(job.plan)
+    role = "parent" if part.partition_no == 0 else "child"
+    table = plan.prepare["linked"][role]
+    if not secret.tabular_model or not secret.synthesis_seed:
+        raise SecretUnavailable()
+    try:
+        pool = load_linked_pool(
+            secret.tabular_model, seed_bytes(seed_from_caller(secret.synthesis_seed))
+        )
+    except TabularUnavailable:
+        raise PrepareFailure(
+            "tabular_invalid", "the sealed linked pool could not be read"
+        ) from None
+    rows: list[dict[str, Any]] = pool.parent_rows if role == "parent" else pool.child_rows
+    _, target_conn = await _connections(job, spec)
+    if target_conn is None:
+        raise PrepareFailure("target_invalid", "the files target is gone")
+    try:
+        store = await open_target_store(target_conn, ctx.settings, kek=ctx.kek)
+    except ValueError:
+        raise PrepareFailure("target_invalid", "the files target is not usable") from None
+    worker = ctx.worker_id
+    writer = _linked_writer(
+        store,
+        spec,
+        target_conn,
+        job.id,
+        table,
+        spool=f"p{part.partition_no}-{uuid.uuid4().hex[:8]}",
+    )
+    position = ColumnInfo(path="$.__row", name="__row", data_type="bigint", kind="int")
+    try:
+        if (part.batch_no > 0 or part.attempts > 1) and not await jobs.reset_partition_progress(
+            worker, part.id
+        ):
+            raise _Lost()
+        batch_no = 0
+        size = max(1, plan.batch_rows)
+        for start in range(0, len(rows), size):
+            chunk = rows[start : start + size]
+            batch_no += 1
+            encoded = encode_key((start + len(chunk),), [position])  # a row position, no value
+            written = await writer.write_batch(
+                chunk,
+                mark=LedgerMark(
+                    job_id=job.id,
+                    partition_no=part.partition_no,
+                    batch_no=batch_no,
+                    last_key=encoded,
+                    rows=start + len(chunk),
+                ),
+            )
+            ROWS_WRITTEN.labels("synthesize", "files").inc(written)
+            if not await jobs.checkpoint(
+                worker,
+                part.id,
+                last_key=encoded,
+                batch_no=batch_no,
+                rows_read=len(chunk),
+                rows_written=written,
+                rows_skipped=0,
+                values_by_method={"mostly": written},
+                verify_checked=0,
+            ):
+                if await jobs.partition_control(worker, part.id) == "cancel":
+                    await jobs.abandon_partition(worker, part.id)
+                raise _Lost()
+            control = await jobs.partition_control(worker, part.id)
+            if control == "pause":
+                await jobs.release(worker, job_ids=[], partition_ids=[part.id])
+                return
+            if control == "cancel":
+                await jobs.abandon_partition(worker, part.id)
+                return
+            if control == "lost":
+                raise _Lost()
+        meta = await writer.finish_partition(job.id, part.partition_no, batch_no=batch_no)
+        meta["table"] = role
+        if not await jobs.finish_partition(worker, part.id, PartitionState.done, meta=meta):
+            raise _Lost()
+    finally:
+        await writer.close()
 
 
 async def _fail_partition(
@@ -1169,6 +1467,8 @@ async def _write_manifest(
 ) -> dict[str, Any]:
     assert spec.target.files is not None
     store = await open_target_store(target_conn, ctx.settings, kek=ctx.kek)
+    if plan.prepare.get("linked"):
+        return await _write_linked_manifest(ctx, job, spec, plan, target_conn, parts, store)
     files = [f for p in parts for f in (p.meta.get("files") or [])]
     columns = [
         ColumnInfo(
@@ -1201,6 +1501,71 @@ async def _write_manifest(
     )
     return {
         "objects": len(files),
+        "rows": manifest["rows_total"],
+        "manifest_artefact_id": artefact,
+        "manifest_key": stored.key,
+        "compression": manifest["compression"],
+    }
+
+
+async def _write_linked_manifest(
+    ctx: HandlerContext,
+    job: JobInternal,
+    spec: RunSpec,
+    plan: RunPlan,
+    target_conn: Connection,
+    parts: list[_Partition],
+    store: ObjectStore,
+) -> dict[str, Any]:
+    """One manifest for a linked job: ``tables`` = {parent, child: object, dir, columns,
+    objects, rows_total}; written last, at ``<files.prefix>/<job_id>/manifest.json``."""
+    files_spec = spec.target.files
+    assert files_spec is not None
+    now = datetime.now(UTC)
+    tables: dict[str, Any] = {}
+    for no, role in enumerate(("parent", "child")):
+        table = plan.prepare["linked"][role]
+        columns = [
+            ColumnInfo(
+                path=f"$.{c['name']}", name=c["name"], data_type=c["data_type"], kind=c["kind"]
+            )
+            for c in table["columns"]
+        ]
+        part_files = [f for p in parts if p.no == no for f in (p.meta.get("files") or [])]
+        one = build_manifest(
+            job_id=job.id, spec=files_spec, columns=columns, parts=part_files, created_at=now
+        )
+        tables[role] = {
+            "object": table["object"],
+            "dir": table["dir"],
+            "columns": one["columns"],
+            "objects": one["objects"],
+            "rows_total": one["rows_total"],
+        }
+    manifest = {
+        "manifest_version": "dps.files.v1",
+        "job_id": job.id,
+        "format": files_spec.format,
+        "compression": effective_compression(files_spec),
+        "linked": True,
+        "tables": tables,
+        "rows_total": sum(t["rows_total"] for t in tables.values()),
+        "created_at": now.isoformat(),
+    }
+    base = FilesWriter(
+        store, files_spec, job_id=job.id, base_prefix=target_conn.params.prefix, columns=[]
+    ).base_key()
+    stored = await write_manifest(store, base, manifest)
+    artefact = await ctx.artefacts.save(
+        tenant_id=job.tenant_id,
+        job_id=job.id,
+        kind="manifest",
+        data=manifest_bytes(manifest),
+        content_type="application/json",
+        meta={"object_key": stored.key, "sha256": stored.sha256},
+    )
+    return {
+        "objects": sum(len(t["objects"]) for t in tables.values()),
         "rows": manifest["rows_total"],
         "manifest_artefact_id": artefact,
         "manifest_key": stored.key,

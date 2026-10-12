@@ -13,7 +13,9 @@ key that is not one integer column, an offset on a non-integer key or a prefix o
 · ``target_invalid`` (table, files) · ``key_method_not_injective`` · ``method_needs_key`` ·
 ``text_method_invalid`` · ``group_not_found`` / ``group_key_mismatch`` · ``tabular_invalid``
 (M5: tabular synthesis outside synthesize mode, into an ``in_place``/``append`` write, or with an
-engine this deployment has not enabled).
+engine this deployment has not enabled; differential privacy or linked generation without the
+``mostly`` engine; a linked generation that does not write files, names the source object as its
+child, or lacks the child's accepted snapshot).
 
 A same-table append re-reads its own new rows unless every new key sorts above every selected
 key; only one integer key with ``generate`` (an owned, ascending, non-cycling sequence ahead of the
@@ -251,9 +253,25 @@ def _check_target(spec: RunSpec, source_conn: Connection, target_conn: Connectio
             raise _fail(invalid, 422, "an append target must be a database connection")
 
 
-def _check_tabular(spec: RunSpec, settings: Settings) -> None:
-    """M5 tabular synthesis: synthesize mode, a table or files target, an enabled engine."""
-    engine = spec.options.tabular
+def _check_tabular(
+    spec: RunSpec,
+    settings: Settings,
+    *,
+    source_conn: Connection,
+    child_snapshot: ClassificationSnapshot | None,
+) -> None:
+    """M5 tabular synthesis: synthesize mode, a table or files target, an enabled engine;
+    differential privacy and linked generation with the MOSTLY engine only (Task 7B)."""
+    options = spec.options
+    engine = options.tabular
+    if options.tabular_dp and engine != "mostly":
+        raise _fail(
+            "tabular_invalid", 422, "differential privacy is an option of the mostly engine"
+        )
+    if options.linked is not None and engine != "mostly":
+        raise _fail("tabular_invalid", 422, "linked generation needs the mostly engine")
+    if engine == "none":
+        return
     if spec.mode != "synthesize" or spec.target.write_mode in _DATABASE_WRITES:
         raise _fail(
             "tabular_invalid",
@@ -271,6 +289,32 @@ def _check_tabular(spec: RunSpec, settings: Settings) -> None:
             raise _fail(
                 "tabular_invalid", 422, "the synth-ml extra is not installed on this deployment"
             )
+    if options.linked is not None:
+        _check_linked(spec, source_conn=source_conn, child_snapshot=child_snapshot)
+
+
+def _check_linked(
+    spec: RunSpec, *, source_conn: Connection, child_snapshot: ClassificationSnapshot | None
+) -> None:
+    """Linked generation writes files and needs the accepted snapshot of another table."""
+    linked = spec.options.linked
+    assert linked is not None
+    if spec.target.write_mode != "files":
+        raise _fail("tabular_invalid", 422, "linked generation writes a files target")
+    if _same_object(linked.child, spec.source.object):
+        raise _fail("tabular_invalid", 422, "the linked child must be another table")
+    if (
+        child_snapshot is None
+        or child_snapshot.status != "accepted"
+        or child_snapshot.id != linked.child_snapshot_id
+        or child_snapshot.connection_id != spec.source.connection_id
+        or child_snapshot.object_ref != _object_ref(linked.child, source_conn.engine)
+    ):
+        raise _fail(
+            "tabular_invalid",
+            422,
+            "linked generation needs the accepted snapshot of the child table",
+        )
 
 
 def validate_run(
@@ -283,8 +327,11 @@ def validate_run(
     settings: Settings,
     kek: bytes | None = None,
     group: GroupKeys | None = None,
+    child_snapshot: ClassificationSnapshot | None = None,
 ) -> None:
     """Refuse a run DPS must not start (module docstring for the order and codes).
+
+    ``child_snapshot`` is the accepted snapshot a linked generation names (M5 Task 7B).
 
     Raises:
         SpecError: the first rule the spec breaks, with its code and HTTP status.
@@ -365,8 +412,9 @@ def validate_run(
                 "text_method_invalid", 422, f"{c.path}: free-text columns are tokenized (det_token)"
             )
     _check_group(spec, group)
-    if spec.options.tabular != "none":
-        _check_tabular(spec, settings)
+    options = spec.options
+    if options.tabular != "none" or options.tabular_dp or options.linked is not None:
+        _check_tabular(spec, settings, source_conn=source_conn, child_snapshot=child_snapshot)
 
 
 def build_column_plans(

@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict
 from dps.config import Settings
 from dps.engine.batch import BatchTransformer, LeakageError, TabularSampler
 from dps.engine.metrics import (
+    canonical,
     encode_features,
     exact_row_matches,
     fidelity_report,
@@ -234,8 +235,9 @@ def fit_sampler(
     settings: Settings,
     reject_rows: list[Row],
     reject_columns: list[str],
+    dp: Any = None,
 ) -> TabularSampler:
-    """Fit ``engine`` on ``train`` (CPU-bound or a local training run: run it in a thread).
+    """Fit ``engine`` on ``train`` (``dp``: the MOSTLY engine's ``DpConfig``, Task 7B) (CPU-bound or a local training run: run it in a thread).
 
     Raises:
         CopulaError: the copula cannot be fitted; TabularUnavailable: the MOSTLY engine cannot
@@ -255,6 +257,7 @@ def fit_sampler(
             scales={c.path: c.scale or 0 for c in columns},
             reject_rows=reject_rows,
             reject_columns=reject_columns,
+            dp=dp,
         )
     return GaussianCopula.fit(
         data,
@@ -503,6 +506,7 @@ async def prepare_tabular(
     make_transformer: Callable[[TabularSampler, ConstraintSet | None], BatchTransformer],
     anchor_of: Callable[[Row], str],
     projection: Sequence[str] | None = None,
+    dp: Any = None,
 ) -> TabularPrepared:
     """Fit, preview, measure and gate. Never writes.
 
@@ -547,6 +551,7 @@ async def prepare_tabular(
             settings=settings,
             reject_rows=rows,
             reject_columns=reject_columns,
+            dp=dp,
         )
     except (CopulaError, TabularUnavailable) as exc:
         raise TabularGateError("tabular_invalid", str(exc)) from exc
@@ -599,6 +604,7 @@ async def prepare_tabular(
     if engine_name == "mostly":
         # with more source rows than pool rows, synthetic rows repeat (Task 7)
         metrics["tabular"]["pool_rows"] = int(getattr(sampler, "pool_rows", 0))
+        metrics["tabular"]["dp"] = dict(getattr(sampler, "dp", {"enabled": False}))
     if metrics["privacy"]["exact_row_matches"]:
         raise TabularGateError("leakage", "synthetic preview rows equal real rows")
     if settings.privacy_nndr_enforce and not metrics["privacy"]["nndr"]["passed"]:
@@ -616,3 +622,378 @@ async def prepare_tabular(
         model_b64=base64.b64encode(sampler.to_bytes()).decode("ascii"),
         metrics=metrics,
     )
+
+
+# -- MOSTLY linked generation (Task 7B) -------------------------------------------------------
+
+#: Keyset page size when reading the child table for training.
+LINKED_PAGE_ROWS = 10_000
+_ORDERABLE = frozenset({"int", "decimal", "float", "date", "timestamp"})
+
+
+class LinkedPrepared(BaseModel):
+    """What ``prepare`` seals (``model_b64``, a :class:`~dps.engine.synth.linked.LinkedPool`),
+    stores in ``progress.metrics`` and writes per table (output columns: name, type, kind)."""
+
+    model_config = _HIDDEN
+    model_b64: str
+    metrics: dict[str, Any]
+    parent_columns: list[dict[str, str]]
+    child_columns: list[dict[str, str]]
+    parent_rows: int
+    child_rows: int
+
+
+def _key_kind(shape: TableShape, name: str) -> str | None:
+    column = shape.column(name)
+    if column.kind == "int" or (column.kind == "decimal" and not column.scale):
+        return "int"
+    if column.kind in ("text", "char"):
+        return "text"
+    return None
+
+
+def _output_columns(shape: TableShape) -> list[dict[str, str]]:
+    return [
+        {"name": c.name, "data_type": c.data_type, "kind": c.kind}
+        for c in shape.columns
+        if _top_level(c.path)
+    ]
+
+
+def _check_layout(
+    linked: Any,
+    parent_shape: TableShape,
+    child_shape: TableShape,
+    child_snapshot: ClassificationSnapshot,
+) -> None:
+    invalid = "tabular_invalid"
+    if len(parent_shape.key) != 1 or len(child_shape.key) != 1:
+        raise TabularGateError(invalid, "linked generation needs one key column in each table")
+    if linked.parent_key != parent_shape.key[0]:
+        raise TabularGateError(invalid, "parent_key must be the parent table's key column")
+    child_names = {c.name for c in child_shape.columns}
+    for name in (linked.foreign_key, linked.order_by):
+        if name is not None and name not in child_names:
+            raise TabularGateError(invalid, f"the child table has no column {name}")
+    if linked.foreign_key == child_shape.key[0]:
+        raise TabularGateError(invalid, "the foreign key cannot be the child's key")
+    if _key_kind(parent_shape, parent_shape.key[0]) is None or (
+        _key_kind(child_shape, child_shape.key[0]) is None
+    ):
+        raise TabularGateError(invalid, "linked generation writes integer or text keys only")
+    if linked.order_by is not None:
+        review = next((c for c in child_snapshot.columns if c.name == linked.order_by), None)
+        if review is not None and (review.entity_type is not None or review.text_column):
+            raise TabularGateError(invalid, f"order_by {linked.order_by} is classified sensitive")
+        if KIND_MAP.get(child_shape.column(linked.order_by).kind) not in _ORDERABLE:
+            raise TabularGateError(invalid, f"order_by {linked.order_by} is not a number or date")
+
+
+def _sensitive(
+    shape: TableShape, snapshot: ClassificationSnapshot, links: set[str]
+) -> dict[str, Any]:
+    from dps.engine.synth.linked import SensitiveColumn
+
+    out: dict[str, Any] = {}
+    for cc in snapshot.columns:
+        if (
+            cc.entity_type is None
+            or cc.text_column
+            or cc.is_key
+            or cc.name in links
+            or cc.name in shape.key
+            or not _top_level(cc.path)
+        ):
+            continue
+        out[cc.name] = SensitiveColumn(
+            cc.entity_type, shape.column(cc.name).kind, cc.shapes[0] if cc.shapes else None
+        )
+    return out
+
+
+def _by_path(rows: list[Row], names: list[str]) -> dict[str, list[Any]]:
+    return {f"$.{n}": [r.get(n) for r in rows] for n in names}
+
+
+async def prepare_linked(
+    *,
+    settings: Settings,
+    connector: Connector,
+    parent_shape: TableShape,
+    parent_snapshot: ClassificationSnapshot,
+    child_shape: TableShape,
+    child_snapshot: ClassificationSnapshot,
+    linked: Any,
+    selection: Any,
+    params: dict[str, Any],
+    seed: bytes,
+    dp: Any,
+    locale: str,
+    trainer: Any = None,
+) -> LinkedPrepared:
+    """Sample parents and their children, train, generate, measure and gate (never writes).
+
+    ``linked`` is the run's :class:`~dps.jobs_models.LinkedSpec`, ``dp`` a
+    :class:`~dps.engine.synth.mostly.DpConfig` or ``None``.
+
+    Raises:
+        TabularGateError: ``tabular_invalid`` (layout, keys, too few parents, the generator),
+            ``leakage`` (a generated row equals a sampled real row) or ``privacy_gate``.
+    """
+    from dps.engine.batch import row_anchor
+    from dps.engine.metrics import ks_statistic
+    from dps.engine.synth.linked import LinkedLayout, LinkedPool, LinkedTable, sequence_lengths
+    from dps.jobs_models import Selection
+    from dps.layers.connectors.base import KeyRange
+
+    if "mostly" not in settings.tabular_engines:
+        raise TabularGateError("tabular_invalid", "the mostly engine is not enabled")
+    _check_layout(linked, parent_shape, child_shape, child_snapshot)
+    fk, order_by, pk = linked.foreign_key, linked.order_by, linked.parent_key
+    links = {fk} | ({order_by} if order_by else set())
+    pcols = [c for c in tabular_columns(parent_shape, parent_snapshot)[0] if c.name != pk]
+    ccols = [c for c in tabular_columns(child_shape, child_snapshot)[0] if c.name != fk]
+    if order_by is not None and order_by not in {c.name for c in ccols}:
+        column = child_shape.column(order_by)
+        ccols.append(
+            TabularColumn(
+                path=column.path,
+                name=column.name,
+                kind=KIND_MAP[column.kind],
+                scale=column.scale,
+                precision=column.precision,
+            )
+        )
+    sampled = await connector.sample(
+        parent_shape, selection, params, settings.copula_fit_rows + settings.copula_holdout_rows
+    )
+    if len(sampled) < MIN_ROWS:
+        raise TabularGateError(
+            "tabular_invalid",
+            f"linked generation needs at least {MIN_ROWS} sampled parents, got {len(sampled)}",
+        )
+    parents, anchors = keyed_order(
+        sampled, [row_anchor(r, parent_shape, None) for r in sampled], seed
+    )
+    del sampled
+    train, holdout = split_holdout(parents, anchors, seed, max_holdout=settings.copula_holdout_rows)
+    train_keys = {canonical(r.get(pk)) for r in train}
+    holdout_keys = {canonical(r.get(pk)) for r in holdout}
+    train_children: list[Row] = []
+    holdout_children: list[Row] = []
+    async for batch in connector.read_partition(
+        child_shape, Selection(), {}, KeyRange(), after_key=None, batch=LINKED_PAGE_ROWS
+    ):
+        for row in batch:
+            key = canonical(row.get(fk))
+            if key in train_keys:
+                train_children.append(row)
+            elif key in holdout_keys:
+                holdout_children.append(row)
+        if len(train_children) + len(holdout_children) >= settings.mostly_linked_child_rows:
+            break
+    parent_table = LinkedTable(
+        role="parent",
+        columns={n: [r.get(n) for r in train] for n in [pk, *(c.name for c in pcols)]},
+        kinds={c.name: c.kind for c in pcols},
+        output=[c["name"] for c in _output_columns(parent_shape)],
+        key=pk,
+        key_kind=_key_kind(parent_shape, pk) or "int",
+        scales={c.name: c.scale or 0 for c in pcols},
+        sensitive=_sensitive(parent_shape, parent_snapshot, set()),
+    )
+    child_key = child_shape.key[0]
+    child_table = LinkedTable(
+        role="child",
+        columns={n: [r.get(n) for r in train_children] for n in [fk, *(c.name for c in ccols)]},
+        kinds={c.name: c.kind for c in ccols},
+        output=[c["name"] for c in _output_columns(child_shape)],
+        key=child_key,
+        key_kind=_key_kind(child_shape, child_key) or "int",
+        scales={c.name: c.scale or 0 for c in ccols},
+        sensitive=_sensitive(child_shape, child_snapshot, links),
+    )
+    layout = LinkedLayout(parent_key=pk, foreign_key=fk, order_by=order_by)
+    try:
+        pool = await asyncio.to_thread(
+            LinkedPool.fit,
+            parent_table,
+            child_table,
+            layout=layout,
+            subjects=linked.subjects,
+            seed=seed,
+            max_training_minutes=settings.mostly_max_training_minutes,
+            dp=dp,
+            trainer=trainer,
+            locale=locale,
+        )
+    except TabularUnavailable as exc:
+        raise TabularGateError("tabular_invalid", str(exc)) from exc
+    # exact rows over every written non-key, non-link column (sensitive and null ones too): a
+    # generated row equal to a sampled real row is dropped (a dropped parent takes its children)
+    preject = [n for n in parent_table.output if n != pk]
+    creject = [n for n in child_table.output if n not in {child_key, fk}]
+    real_parents = {row_hash(r, preject) for r in parents}
+    real_children = {row_hash(r, creject) for r in [*train_children, *holdout_children]}
+    generated = (len(pool.parent_rows), len(pool.child_rows))
+    dropped = {r[pk] for r in pool.parent_rows if row_hash(r, preject) in real_parents}
+    pool.parent_rows = [r for r in pool.parent_rows if r[pk] not in dropped]
+    pool.child_rows = [
+        r
+        for r in pool.child_rows
+        if r[fk] not in dropped and row_hash(r, creject) not in real_children
+    ]
+    rejections = generated[0] + generated[1] - len(pool.parent_rows) - len(pool.child_rows)
+    if (generated[0] and not pool.parent_rows) or (generated[1] and not pool.child_rows):
+        raise TabularGateError(
+            "leakage",
+            "every generated row of a table equalled a sampled real row; nothing was written",
+        )
+
+    def measure_linked() -> dict[str, Any]:
+        pnames, cnames = [c.name for c in pcols], [c.name for c in ccols]
+        pkinds = {f"$.{c.name}": c.kind for c in pcols}
+        ckinds = {f"$.{c.name}": c.kind for c in ccols}
+        tables = {
+            "parent": fidelity_report(
+                _by_path(train, pnames),
+                _by_path(pool.parent_rows, pnames),
+                pkinds,
+                column_limit=settings.fidelity_column_limit,
+                corr_limit=settings.fidelity_corr_limit,
+            ),
+            "child": fidelity_report(
+                _by_path(train_children, cnames),
+                _by_path(pool.child_rows, cnames),
+                ckinds,
+                column_limit=settings.fidelity_column_limit,
+                corr_limit=settings.fidelity_corr_limit,
+            ),
+        }
+        source_lengths = sequence_lengths(train_children, fk, [r.get(pk) for r in train])
+        synthetic_lengths = sequence_lengths(
+            pool.child_rows, fk, [r.get(pk) for r in pool.parent_rows]
+        )
+        matches = exact_row_matches(real_parents, pool.parent_rows, preject) + exact_row_matches(
+            real_children, pool.child_rows, creject
+        )
+        reference = _by_path(train_children, cnames)
+        train_x = encode_features(reference, ckinds)
+        synth_x = encode_features(_by_path(pool.child_rows, cnames), ckinds, reference)
+        holdout_x = (
+            encode_features(_by_path(holdout_children, cnames), ckinds, reference)
+            if len(holdout_children) >= 10
+            else None
+        )
+        nn = nndr(train_x, synth_x, sample=2000, seed=0, holdout=holdout_x)
+        small = _too_small(holdout_children, settings)
+        mia: dict[str, Any] = (
+            {"run": False, "reason": small}
+            if small or holdout_x is None
+            else membership_inference_proxy(train_x, holdout_x, synth_x, sample=2000, seed=0)
+        )
+        if mia.get("run"):
+            mia |= {
+                "target": settings.mia_auc_target,
+                "passed": mia["auc"] <= settings.mia_auc_target,
+            }
+        scores = [t["score"] for t in tables.values()]
+        return {
+            "fidelity": {
+                "engine": "mostly",
+                "score": round(sum(scores) / len(scores), 4),
+                "tables": tables,
+                "measured_on": {
+                    "real_parents": len(train),
+                    "real_children": len(train_children),
+                    "synthetic_parents": len(pool.parent_rows),
+                    "synthetic_children": len(pool.child_rows),
+                    "basis": "the generated dataset this job writes",
+                },
+            },
+            "privacy": {
+                "enforced": True,
+                "engine": "mostly",
+                "measured": True,
+                "exact_row_matches": matches,
+                "exact_row_rejections": rejections,
+                "nndr": {
+                    **nn,
+                    "target": settings.privacy_nndr_target,
+                    "passed": bool(nn["measured"]) and nn["ratio"] >= settings.privacy_nndr_target,
+                },
+                "nndr_enforced": settings.privacy_nndr_enforce,
+                "nndr_table": "child",
+                "membership_inference": mia,
+                "dp": pool.dp,
+            },
+            "utility": {"run": False, "reason": "not measured for linked generation"},
+            "tabular": {
+                "engine": "mostly",
+                "columns": {"parent": [c.path for c in pcols], "child": [c.path for c in ccols]},
+                "fit_rows": len(train),
+                "child_fit_rows": len(train_children),
+                "holdout_rows": len(holdout),
+                "dp": pool.dp,
+                "linked": {
+                    "parent": parent_shape.object.fqn(),
+                    "child": child_shape.object.fqn(),
+                    "subjects": len(pool.parent_rows),
+                    "child_rows": len(pool.child_rows),
+                    "ordered": order_by is not None,
+                    "sequence_length": {
+                        "source_mean": round(sum(source_lengths) / max(1, len(source_lengths)), 4),
+                        "synthetic_mean": round(
+                            sum(synthetic_lengths) / max(1, len(synthetic_lengths)), 4
+                        ),
+                        "ks": round(ks_statistic(source_lengths, synthetic_lengths), 4),
+                    },
+                },
+            },
+        }
+
+    metrics = await asyncio.to_thread(measure_linked)
+    privacy = metrics["privacy"]
+    if privacy["exact_row_matches"]:
+        raise TabularGateError("leakage", "generated rows equal sampled real rows")
+    if settings.privacy_nndr_enforce and not privacy["nndr"]["passed"]:
+        raise TabularGateError(
+            "privacy_gate", "nearest-neighbour distance ratio is below the configured target"
+        )
+    mia = privacy["membership_inference"]
+    if settings.privacy_nndr_enforce and mia.get("run") and not mia.get("passed"):
+        raise TabularGateError(
+            "privacy_gate", "the membership-inference proxy AUC is above the configured target"
+        )
+    return LinkedPrepared(
+        model_b64=base64.b64encode(pool.to_bytes()).decode("ascii"),
+        metrics=metrics,
+        parent_columns=_output_columns(parent_shape),
+        child_columns=_output_columns(child_shape),
+        parent_rows=len(pool.parent_rows),
+        child_rows=len(pool.child_rows),
+    )
+
+
+def load_linked_pool(model_b64: str, seed: bytes) -> Any:
+    """The sealed :class:`~dps.engine.synth.linked.LinkedPool` (cached per process by digest).
+
+    Raises:
+        TabularUnavailable: the bytes are not a linked pool.
+    """
+    from dps.engine.synth.linked import LinkedPool
+
+    key = ("linked", hashlib.sha256(model_b64.encode("ascii")).hexdigest(), "")
+    cached = _LINKED_CACHE.get(key)
+    if cached is not None:
+        _LINKED_CACHE.move_to_end(key)
+        return cached
+    pool = LinkedPool.from_bytes(base64.b64decode(model_b64), seed)
+    _LINKED_CACHE[key] = pool
+    while len(_LINKED_CACHE) > _CACHE_MAX:
+        _LINKED_CACHE.popitem(last=False)
+    return pool
+
+
+_LINKED_CACHE: OrderedDict[tuple[str, str, str], Any] = OrderedDict()

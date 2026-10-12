@@ -213,6 +213,22 @@ class Purpose(BaseModel):
     legal_basis: str = Field(min_length=3, max_length=256)
 
 
+_COLUMN_NAME = r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$"
+
+
+class LinkedSpec(BaseModel):
+    """MOSTLY linked generation (M5 Task 7B, contract §5.3): a parent (the run's source object)
+    and a child table linked to it, generated together as a new dataset written to files."""
+
+    model_config = _HIDDEN
+    child: ObjectRef  # on the source connection
+    child_snapshot_id: str  # the child's accepted snapshot (sensitive columns, kinds)
+    parent_key: str = Field(pattern=_COLUMN_NAME)  # the parent's single key column
+    foreign_key: str = Field(pattern=_COLUMN_NAME)  # the child column referencing parent_key
+    order_by: str | None = Field(default=None, pattern=_COLUMN_NAME)  # sequence order (child)
+    subjects: int = Field(default=1000, ge=10, le=100_000)  # generated parents
+
+
 class RunOptions(BaseModel):
     """Dry run, verification strictness, unclassified columns, tabular synthesis (M5)."""
 
@@ -221,6 +237,8 @@ class RunOptions(BaseModel):
     verify: Literal["strict", "warn"] = "strict"
     unclassified: Literal["detect", "keep", "redact"] = "detect"
     tabular: Literal["none", "copula", "mostly"] = "none"
+    tabular_dp: bool | None = None  # M5: MOSTLY differential privacy; None → DPS_MOSTLY_DP_ENABLED
+    linked: LinkedSpec | None = None  # M5: MOSTLY linked (multi-table, sequential) generation
 
 
 class RunSpec(BaseModel):

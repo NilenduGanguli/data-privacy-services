@@ -8,8 +8,13 @@ rows, synthetic rows repeat (the evidence records ``tabular.pool_rows``); fideli
 measured on the preview exactly as for the copula. The pool is synthetic but derived from real
 data, so it is sealed with the job KEK exactly like the copula model and purged with the key.
 
+**Differential privacy** (Task 7B): with a :class:`DpConfig` the trainer adds the SDK's
+differential-privacy block to the table's model configuration (:func:`_dp_configuration` is the
+only place that names its keys); the sampler records ``dp`` for the evidence (``tabular.dp``).
+
 The SDK is never imported at module import time (:func:`mostly_available` checks without importing
-torch); :func:`_sdk_trainer` is the only function that touches it. Errors never quote a value.
+torch); :func:`_sdk_trainer` (and :func:`dps.engine.synth.linked._sdk_linked_trainer`) are the only
+functions that touch it. Errors never quote a value.
 """
 
 from __future__ import annotations
@@ -25,11 +30,23 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, ClassVar
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from dps.engine.metrics import row_digest
 
 FORMAT = "dps.mostly.v1"
-#: ``(columns by name, rows to generate, training minutes) → generated rows``.
-Trainer = Callable[[dict[str, list[Any]], int, int], list[dict[str, Any]]]
+
+
+class DpConfig(BaseModel):
+    """The SDK's differential-privacy budget for one training run (spec §5.6)."""
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+    max_epsilon: float = Field(gt=0)
+    delta: float = Field(gt=0, lt=1)
+
+
+#: ``(columns by name, rows to generate, training minutes, DP budget or None) → generated rows``.
+Trainer = Callable[[dict[str, list[Any]], int, int, DpConfig | None], list[dict[str, Any]]]
 _find_spec = importlib.util.find_spec  # module attribute so tests can simulate a missing extra
 _NULL_TEXT = frozenset({"NaT", "nan", "NaN", "<NA>", "None"})
 
@@ -46,7 +63,35 @@ def mostly_available() -> bool:
         return False
 
 
-def _sdk_trainer(data: dict[str, list[Any]], size: int, minutes: int) -> list[dict[str, Any]]:
+def _dp_configuration(dp: DpConfig) -> dict[str, Any]:
+    """The SDK's ``DifferentialPrivacyConfig`` block for a table's model configuration — the only
+    place that names its keys (verify them with ``help()`` in the ``ml`` run)."""
+    return {"differential_privacy": {"max_epsilon": dp.max_epsilon, "delta": dp.delta}}
+
+
+def model_configuration(minutes: int, dp: DpConfig | None) -> dict[str, Any]:
+    """A table's ``tabular_model_configuration``: the training budget and, with DP, its block."""
+    config: dict[str, Any] = {"max_training_time": minutes}
+    if dp is not None:
+        config |= _dp_configuration(dp)
+    return config
+
+
+def dp_report(dp: DpConfig | None, achieved_epsilon: float | None = None) -> dict[str, Any]:
+    """The evidence's ``tabular.dp`` block (value-free)."""
+    if dp is None:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "max_epsilon": dp.max_epsilon,
+        "delta": dp.delta,
+        "achieved_epsilon": achieved_epsilon,
+    }
+
+
+def _sdk_trainer(
+    data: dict[str, list[Any]], size: int, minutes: int, dp: DpConfig | None = None
+) -> list[dict[str, Any]]:
     """Train a local generator and draw ``size`` rows.
 
     The only function that touches the SDK for one table — if an SDK release renames a
@@ -69,7 +114,7 @@ def _sdk_trainer(data: dict[str, list[Any]], size: int, minutes: int) -> list[di
                     {
                         "name": "rows",
                         "data": pd.DataFrame(data),
-                        "tabular_model_configuration": {"max_training_time": minutes},
+                        "tabular_model_configuration": model_configuration(minutes, dp),
                     }
                 ],
             },
@@ -168,8 +213,10 @@ class MostlySampler:
         seed: bytes,
         reject: set[int],
         reject_columns: Sequence[str],
+        dp: dict[str, Any] | None = None,
     ) -> None:
         self._names, self._pool = list(names), pool
+        self.dp: dict[str, Any] = dict(dp or {"enabled": False})
         self._pick_key = hashlib.blake2b(seed, digest_size=32, person=b"dps.mostly.pick").digest()
         self._reject_key = hashlib.blake2b(seed, digest_size=32, person=b"dps.mostly.rej").digest()
         self._reject = reject
@@ -188,8 +235,10 @@ class MostlySampler:
         reject_rows: Sequence[Mapping[str, Any]] = (),
         reject_columns: Sequence[str] = (),
         trainer: Trainer | None = None,
+        dp: DpConfig | None = None,
     ) -> MostlySampler:
-        """Train on ``columns`` (path ``$.NAME`` → values) and generate the pool.
+        """Train on ``columns`` (path ``$.NAME`` → values) and generate the pool (with ``dp``, under
+        the SDK's differential privacy).
 
         Raises:
             TabularUnavailable: the extra is missing, the generator returned no row, or a value
@@ -197,11 +246,13 @@ class MostlySampler:
         """
         names = sorted(p[2:] for p in columns)
         data = {p[2:]: list(v) for p, v in columns.items()}
-        raw = (trainer or _sdk_trainer)(data, pool_rows, max_training_minutes)
+        raw = (trainer or _sdk_trainer)(data, pool_rows, max_training_minutes, dp)
         if not raw:
             raise TabularUnavailable("the MOSTLY AI generator returned no rows")
         pool = coerce_rows(raw, names, kinds, scales or {})
-        sampler = cls(names, pool, seed=seed, reject=set(), reject_columns=reject_columns)
+        sampler = cls(
+            names, pool, seed=seed, reject=set(), reject_columns=reject_columns, dp=dp_report(dp)
+        )
         if sampler.reject_columns:
             sampler._reject = {sampler.row_digest(r) for r in reject_rows}
         return sampler
@@ -250,6 +301,7 @@ class MostlySampler:
             "pool": [[_encode(v) for v in r] for r in self._pool],
             "reject": sorted(self._reject),
             "reject_columns": self.reject_columns,
+            "dp": self.dp,
         }
         return zlib.compress(json.dumps(body, separators=(",", ":")).encode("utf-8"), 6)
 
@@ -274,6 +326,7 @@ class MostlySampler:
                 seed=seed,
                 reject={int(x) for x in body["reject"]},
                 reject_columns=[str(c) for c in body["reject_columns"]],
+                dp=body.get("dp") if isinstance(body.get("dp"), dict) else None,
             )
         except TabularUnavailable:
             raise

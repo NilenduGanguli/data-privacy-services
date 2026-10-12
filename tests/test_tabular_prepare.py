@@ -185,6 +185,7 @@ async def _prepare(
     policy: Policy | None = None,
     seed: Any = None,
     engine_name: str = "copula",
+    dp: Any = None,
     **kw: Any,
 ) -> tuple[TabularPrepared, Any]:
     settings = _settings(**kw)
@@ -218,6 +219,7 @@ async def _prepare(
         object_fqn="bank.customers",
         make_transformer=make,
         anchor_of=_anchor,
+        dp=dp,
     )
     return out, seed
 

@@ -291,6 +291,7 @@ class Settings(BaseSettings):
     mostly_dp_enabled: bool = False
     mostly_dp_max_epsilon: float = Field(default=5.0, gt=0)
     mostly_dp_delta: float = Field(default=1e-5, gt=0, lt=1)
+    mostly_linked_child_rows: int = Field(default=200_000, ge=1)  # child rows read for linked fit
 
     @field_validator("env")
     @classmethod

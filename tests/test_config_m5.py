@@ -28,6 +28,7 @@ def test_m5_defaults() -> None:
     assert (s.utility_max_rows, s.mia_min_holdout, s.mia_auc_target) == (5_000, 50, 0.60)
     assert s.mostly_dp_enabled is False
     assert (s.mostly_dp_max_epsilon, s.mostly_dp_delta) == (5.0, 1e-5)
+    assert s.mostly_linked_child_rows == 200_000  # Task 7B
 
 
 @pytest.mark.parametrize(
