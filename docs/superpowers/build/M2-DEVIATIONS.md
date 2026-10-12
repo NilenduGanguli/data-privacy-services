@@ -864,3 +864,38 @@ Review: `M2-G4-review-r1.md`, one blocking finding (B1). Contract change: §0 am
   partition in two batches) plus `test_partitions_are_independent_and_deterministic`,
   `test_writer_protocol_no_ops_probe_and_value_conversion`, `test_a_failing_store_fails_the_probe`;
   the s3 test uses `zstd` and checks the probe: 9 offline + 1 s3 = 10 (plan: 6).
+
+## Task 21 — Evidence pack (build, hash, HTML, store)
+
+- `dps/layers/connectors/evidence.py`: the contract §7.1 model plus `label` and `mode` (as
+  planned); `fidelity`, `privacy`, `utility` and `scan` default to `None` (M4/M5 fill them).
+  Additions and decisions, each covered by a test:
+  - **Column params are printed only for reversible methods.** `columns[*].params` and
+    `reveal_map[*].params` carry the parameters reveal needs (`keep_suffix`, `domain`,
+    `window_days`, `leading_zero` …); a one-way method's params are left out because a policy or
+    review may put literal values there (`dictionary` `values`, a `redact` label) — the leakage
+    test in Task 22 deliberately puts a customer's name into a `dictionary` override.
+  - `reveal_map` entries also carry `text_column` (free-text columns reveal through their
+    envelopes, not a whole-value hint), and `reveal` is computed by the public
+    `anchor_recoverable(plan)`: false for `date_shift` when the anchor column (or, without one,
+    a key column) is transformed one-way or replaced by an append `generate`/`offset`.
+  - Counter keys are split as contract §3.3 defines (`method`, `fallback:<note>`, `col:<column>`)
+    plus `verify:hits` (warn-mode hits; Task 22 records them). `counts` adds
+    `values_transformed` (method counters except `keep`); `verification` gets `fallbacks`
+    (per-note totals; per-column fallbacks are not tracked, so `columns[*].fallbacks` is `None`).
+  - `source.selection` also carries `query_template` / `mongo_filter_template` (templates from the
+    redacted spec); `target` carries `connection_name`, `truncated`, `collisions`,
+    `existing_rows` and, for files, `{format, compression, prefix, objects, rows,
+    manifest_artefact_id}`. A pack can be built without a plan or snapshot (a prepare that failed
+    early).
+  - HTML: the plan's page plus an errors table, the files row, a viewport meta tag and a narrow
+    screen rule; every interpolation goes through one escaping helper (`None` prints as "—").
+- `save_evidence` returns the row's `created_at`; `get_evidence` finds the JSON artefact by
+  `meta->>'evidence_id'` (as planned) within the same tenant and job; `list_evidence` returns
+  `target` as the target object or, for files, the prefix. Both read through the API pool.
+- `tests/connectors/factories.py`: `evidence_inputs(mode, *, connection_name, outcome, tenant)`.
+- Tests: the plan's 3 + 1 plus `test_pack_sections_follow_the_run`,
+  `test_reveal_map_marks_date_shift_without_a_recoverable_anchor`,
+  `test_a_failed_prepare_still_makes_a_pack` (offline) and `test_list_pages_newest_first` (db);
+  the db test also reads both artefacts back and checks another tenant sees nothing:
+  6 offline + 2 db = 8 (plan: 4).

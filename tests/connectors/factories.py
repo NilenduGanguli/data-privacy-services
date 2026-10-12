@@ -14,6 +14,7 @@ from dps.layers.connectors.base import ColumnInfo, Row, TableShape
 
 if TYPE_CHECKING:
     from dps.connections import Connection
+    from dps.layers.connectors.evidence import EvidenceInputs
 
 _ENGINE = PrivacyEngine(
     Settings(_env_file=None, llm_provider="stub", ner_enabled=False, fpe_enabled=False)
@@ -263,4 +264,208 @@ def accepted_snapshot(
         created_at=now,
         accepted_at=now,
         accepted_by="owner-key",
+    )
+
+
+def evidence_inputs(
+    mode: str = "obfuscate",
+    *,
+    connection_name: str = "bank-pg-ro",
+    outcome: str = "succeeded",
+    tenant: str = "t1",
+) -> EvidenceInputs:
+    """A finished ``table`` run of ``bank.customers`` into ``bank_uat.customers``: a redacted spec
+    (where template ``"created_at" >= :l1``), a run plan for ``full_name`` (fpe_text), ``email``
+    (email) and ``dob`` (date_shift, anchored on ``customer_id``), the accepted snapshot, two
+    done partitions and a passed verification. Value-free by construction."""
+    from datetime import timedelta
+
+    from dps.engine.batch import ColumnPlan
+    from dps.jobs import JobInternal, JobKind, JobPhase, JobState, PartitionState, PartitionView
+    from dps.jobs_models import JobProgress
+    from dps.layers.connectors.base import ResolvedTarget
+    from dps.layers.connectors.evidence import EvidenceInputs
+    from dps.layers.connectors.targets import RunPlan
+
+    snap = accepted_snapshot("c_src", "bank.customers", tenant=tenant)
+    shape = snap.shape
+    obfuscate = mode == "obfuscate"
+    methods = {
+        "full_name": ("PERSON_NAME", MethodSpec(method="fpe_text")),
+        "email": ("EMAIL", MethodSpec(method="email", params={"domain": "keep"})),
+        "dob": ("DATE_OF_BIRTH", MethodSpec(method="date_shift", params={"window_days": 365})),
+    }
+    plans = [
+        ColumnPlan(
+            path=shape.column(name).path,
+            name=name,
+            entity_type=entity,
+            method=method if obfuscate else MethodSpec(method="surrogate"),
+            text_column=False,
+            reversible=obfuscate,
+            kind=shape.column(name).kind,
+            length=None if shape.column(name).kind == "text" else shape.column(name).length,
+        )
+        for name, (entity, method) in methods.items()
+    ]
+    job_id = new_id("j")
+    projection = [c.name for c in shape.columns]
+    target = ResolvedTarget(
+        job_id=job_id,
+        write_mode="table",
+        connection_id="c_uat",
+        engine="postgres",
+        object=ObjectRef(owner="bank_uat", name="customers"),
+        key=["customer_id"],
+        write_columns=projection,
+        column_types={c.name: c.data_type for c in shape.columns},
+    )
+    prepare = {"created": True, "truncated": False, "collisions": 0, "existing_rows": None}
+    plan = RunPlan(
+        columns=plans,
+        anchor=["customer_id", "CUSTOMER_ID"],
+        key=["customer_id"],
+        projection=projection,
+        target=target,
+        source_object="bank.customers",
+        policy_name=snap.policy_name,
+        policy_hash=snap.policy_hash,
+        snapshot_id=snap.id,
+        snapshot_hash=snap.content_hash,
+        locale="en_IN",
+        batch_rows=1000,
+        prepare=prepare,
+    )
+    kid = "k_" + "3f" * 8 if obfuscate else None
+    spec: dict[str, Any] = {
+        "mode": mode,
+        "snapshot_id": snap.id,
+        "source": {
+            "connection_id": "c_src",
+            "object": {"owner": "bank", "name": "customers"},
+            "selection": {
+                "where": '"created_at" >= :l1',
+                "params": {"l1": "<bound>"},
+                "query": None,
+                "columns": None,
+                "max_rows": None,
+                "sample": None,
+                "mongo_filter": None,
+            },
+            "parallelism": 2,
+            "batch_rows": None,
+            "partition_rows": None,
+        },
+        "target": {
+            "write_mode": "table",
+            "connection_id": "c_uat",
+            "object": {"owner": "bank_uat", "name": "customers"},
+            "create_if_missing": True,
+            "table_load": "truncate_insert",
+            "pk_strategy": None,
+            "files": None,
+            "ledger_owner": None,
+            "confirm_write": False,
+            "expected_rows": None,
+        },
+        "policy": None,
+        "consistency": {
+            "scope": "key",
+            "field_scoped": False,
+            "kid": kid,
+            "caller_key": False,
+            "seed_fingerprint": None if obfuscate else "0123456789abcdef",
+            "wrapped": False,
+        },
+        "group_id": None,
+        "purpose": {"ticket": "CHG-48213", "legal_basis": "legitimate interest"},
+        "options": {
+            "dry_run": False,
+            "verify": "strict",
+            "unclassified": "detect",
+            "tabular": "none",
+        },
+    }
+    now = datetime.now(UTC)
+    counters = {"col:full_name": 2500, "col:email": 2500, "col:dob": 2400}
+    if obfuscate:
+        counters |= {"fpe_text": 2500, "email": 2500, "date_shift": 2400}
+        counters["fallback:fpe_domain_too_small"] = 2
+    else:
+        counters["surrogate"] = 7400
+    progress = JobProgress(
+        rows_estimated=2500,
+        rows_read=2500,
+        rows_written=2500,
+        partitions_total=2,
+        partitions_done=2,
+        values_by_method=counters,
+        verification={"checked": 7400},
+    )
+    job = JobInternal(
+        id=job_id,
+        tenant_id=tenant,
+        kind=JobKind.run,
+        state=JobState.running,
+        phase=JobPhase.finalize,
+        mode=mode,
+        connection_id="c_src",
+        target_connection_id="c_uat",
+        object_ref="bank.customers",
+        snapshot_id=snap.id,
+        spec=spec,
+        purpose=spec["purpose"],
+        kid=kid,
+        progress=progress,
+        created_by="k2",
+        created_at=now,
+        updated_at=now,
+        started_at=now - timedelta(seconds=30),
+        attempts=1,
+        max_attempts=3,
+    )
+    partitions = [
+        PartitionView(
+            partition_no=i,
+            state=PartitionState.done,
+            rows_read=1250,
+            rows_written=1250,
+            rows_skipped=0,
+            batch_no=2,
+            attempts=1 + i,
+            resumed=i,
+            checkpoint_fp="a1b2c3d4",
+            started_at=now,
+            finished_at=now,
+            updated_at=now,
+            error_code=None,
+            rows_per_second=100.0,
+        )
+        for i in range(2)
+    ]
+    verification = {
+        "mode": "strict",
+        "batches": 4,
+        "values_checked": 7400,
+        "hits": 0,
+        "passed": True,
+        "post_sample": {"rows": 200, "detector_hits": 3, "kept_column_hits": 0},
+    }
+    return EvidenceInputs(
+        job=job,
+        spec=spec,
+        plan=plan,
+        snapshot=snap,
+        source_conn=make_connection("c_src", roles=["source"], name=connection_name),
+        target_conn=make_connection("c_uat", roles=["target"], name="bank-uat"),
+        partitions=partitions,
+        outcome=outcome,  # type: ignore[arg-type]
+        server_version="16.4",
+        prepare=prepare,
+        files=None,
+        verification=verification,
+        key_custody={"returned": obfuscate, "wrapped": False, "purged_at": now.isoformat()},
+        errors=[],
+        engine_version="0.1.0",
+        image_digest=None,
     )
