@@ -27,5 +27,7 @@ application_default_credentials.json
 data/
 # M2 artefacts, exports and local secret dirs (DPS_ARTEFACT_DIR, DPS_EXPORT_ROOT, DPS_SECRET_DIR)
 var/
+# Console browser-check screenshots (tests/console, M2 Task 36; linked from the build report)
+docs/superpowers/build/m2-console/
 # Claude session config (local)
 .claude/

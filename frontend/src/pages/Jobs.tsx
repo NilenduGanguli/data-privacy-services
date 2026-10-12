@@ -130,7 +130,7 @@ function JobRow({ job, auth, engine, proposed, snapshot, open, onToggle, onRetri
           <div className="src"><EngineBadge engine={engine} /><div>
             <div className="obj">{job.object_ref ?? '—'}</div>
             {job.kind === 'discover' ? <div className="faint sm">discovery · classification snapshot</div>
-              : wm === 'table' || (wm === 'files') ? <div className="to">→ {target}</div>
+              : wm === 'table' || (wm === 'files') ? <div className="to">{'→\u00a0'}{target}</div>
                 : <div className="faint sm">{target}</div>}
             {job.group_id && <div className="grp">group {shortId(job.group_id)}</div>}
           </div></div>

@@ -175,7 +175,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
                     <tr key={c.path} className={edits[c.path] || c.override || focus === c.path ? 'edited' : ''}>
                       <td className="mono">{c.name}{c.is_key && <span className="faint sm"> · key</span>}</td>
                       <td className="faint" title={c.data_type}>{shortType(c.data_type)}</td>
-                      <td><input className="input mono" list="entity-types" aria-label={`Entity of ${c.name}`} disabled={!editable}
+                      <td><input className="input mono ent" list="entity-types" aria-label={`Entity of ${c.name}`} disabled={!editable}
                                  value={(value(c, 'entity_type', c.entity_type) as string | null) ?? ''} placeholder="kept"
                                  onChange={(e) => edit(c.path, { entity_type: e.target.value.trim().toUpperCase() || null })} /></td>
                       <td className="mono">{c.entity_type ? c.confidence.toFixed(2) : '—'}</td>

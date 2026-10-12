@@ -96,6 +96,7 @@
   .review .input { padding: 6px 8px; font-size: 12px; min-width: 120px; }
   .review .shapes { font-family: var(--mono); font-size: 11px; color: var(--ink-3); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .review .input.mono { min-width: 110px; max-width: 150px; }
+  .review .input.ent { min-width: calc(18ch + 30px); max-width: none; } /* entity names in full, beside the datalist arrow */
   .review tr.edited td:first-child { box-shadow: inset 3px 0 0 var(--teal); }
 
   /* write modes */

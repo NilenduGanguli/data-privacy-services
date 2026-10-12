@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
-import { evidenceSoFar, methodText, packTargetText, shortSha, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
+import { evidenceSoFar, methodText, packTargetText, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
 import { confirmationKey, countKey, fqn, writtenObject, type WizardDraft } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
@@ -237,5 +237,12 @@ describe('evidence pack helpers', () => {
     expect(packTargetText({ write_mode: 'table', object: 'bank_uat.customers' }, { object: 'bank.customers' })).toBe('bank_uat.customers');
     expect(packTargetText({ write_mode: 'in_place', object: 'bank_restore.contacts' }, { object: 'bank_restore.contacts' })).toBe('bank_restore.contacts (in place)');
     expect(packTargetText({ write_mode: 'files', object: null, files: { format: 'parquet', prefix: 'exports/x' } }, {})).toBe('Parquet files · exports/x');
+  });
+  it('words the verification outcome without claiming leaks it did not count', () => {
+    expect(verificationText(true, 0)).toBe('passed · 0 leaks');
+    expect(verificationText(false, 2)).toBe('failed · 2 leaks caught');
+    expect(verificationText(false, 1)).toBe('failed · 1 leak caught');
+    // a run stopped before its counters held a hit (a preflight leak, a fail-closed check)
+    expect(verificationText(false, 0)).toBe('failed closed');
   });
 });

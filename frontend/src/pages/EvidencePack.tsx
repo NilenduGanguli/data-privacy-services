@@ -4,7 +4,7 @@ import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
 import {
   engineName, errorText, fmtCount, fmtDuration, fmtUtc, methodText, packTargetText, shortId, shortSha, shortType, typeNoteShort,
-  writeModeLabel,
+  writeModeLabel, verificationText,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, EvidenceOut, Job } from '../lib/types';
 
@@ -113,7 +113,7 @@ export function EvidencePack(): JSX.Element {
             <div className="jid">Job {p.job_id} · {p.mode ?? p.job_kind} · purpose {p.purpose?.ticket ?? '—'}</div>
           </div>
           <div className="seal">
-            {passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : <span className="chip rose">verification failed · {fmtCount(hits)} {hits === 1 ? 'leak' : 'leaks'} caught</span>}
+            {passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : <span className="chip rose">verification {verificationText(false, hits)}</span>}
             <span>Sealed {fmtUtc(p.created_at)}</span>
             <span>Pack <span className="mono">{p.id}</span> · sha256 <span className="mono">{shortSha(ev.pack_sha256)}</span></span>
             <span className={`chip ${synth ? 'violet' : 'teal'}`}>{p.label}</span>
@@ -134,7 +134,7 @@ export function EvidencePack(): JSX.Element {
         <Sec n={1} title="Summary">
           <p className="lead">
             On {day} DPS read {fmtCount(counts.rows_read ?? 0)} rows from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} rows to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
-            {passed ? 'The leakage sweep found no source value in the output.' : `The leakage sweep caught ${fmtCount(hits)} source ${hits === 1 ? 'value' : 'values'}; the affected batches were not written.`}{' '}
+            {passed ? 'The leakage sweep found no source value in the output.' : hits > 0 ? `The leakage sweep caught ${fmtCount(hits)} source ${hits === 1 ? 'value' : 'values'}; the affected batches were not written.` : 'The run failed closed before its verification counters held a hit; nothing of the failed unit was written.'}{' '}
             {synth ? 'The synthetic output has no key; DPS kept no seed.' : custody.returned ? 'The key that reverses the output was returned to the requesting team; DPS kept no copy.' : 'The run used the caller\'s key; DPS kept no copy.'}{outcomeWords}
           </p>
           <div className="stats">

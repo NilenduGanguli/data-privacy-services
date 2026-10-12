@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
-import { fmtCount, fmtUtc, shortId, writeModeLabel } from '../lib/jobs';
+import { fmtCount, fmtUtc, shortId, verificationText, writeModeLabel } from '../lib/jobs';
 import type { EvidenceSummary } from '../lib/types';
 
 function apiMessage(e: unknown): string {
@@ -63,7 +63,7 @@ export function Reports(): JSX.Element {
               <td data-l="Layer">Connectors</td>
               <td data-l="Mode">{s.mode ? <span className={`chip ${s.mode === 'synthesize' ? 'violet' : 'teal'}`}>{s.mode}</span> : '—'}</td>
               <td className="mono" data-l="Policy">{s.policy ?? '—'}</td>
-              <td data-l="Verification">{s.passed ? <span className="chip emerald">passed · {fmtCount(s.hits)} leaks</span> : <span className="chip rose">failed · {fmtCount(s.hits)} {s.hits === 1 ? 'leak' : 'leaks'} caught</span>}</td>
+              <td data-l="Verification"><span className={`chip ${s.passed ? 'emerald' : 'rose'}`}>{verificationText(s.passed, s.hits)}</span></td>
               <td className="t" data-l="Created (UTC)">{fmtUtc(s.created_at, false).replace(' UTC', '')}</td>
               <td data-l="Download"><div className="dl">
                 <button className="btn btn-sm" type="button" disabled={busy === s.id} aria-label={`Download evidence pack ${shortId(s.job_id)} as JSON`} onClick={() => void downloadJson(s)}>JSON</button>

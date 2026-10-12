@@ -5,7 +5,7 @@
   .step-sep { flex: 1 1 12px; width: auto; min-width: 10px; max-width: 28px; margin: 0 8px; }
   .stepper { flex-wrap: wrap; row-gap: 8px; }
   .stepper .step .faint { font-weight: 500; white-space: nowrap; }
-  #cls td:last-child { min-width: 180px; font-size: 12px; }
+  #cls td:last-child { min-width: 136px; font-size: 12px; } /* wraps inside the card at 1440 px */
   & a.step:hover { color: var(--teal); }
   #cls td, #cls th { padding-left: 8px; padding-right: 8px; }
   #cls td:nth-child(2) { white-space: nowrap; font-size: 12px; }

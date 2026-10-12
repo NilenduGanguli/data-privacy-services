@@ -857,6 +857,16 @@ export function shortSha(sha: string): string {
   return sha.length > 12 ? `${sha.slice(0, 8)}…${sha.slice(-4)}` : sha;
 }
 
+/**
+ * The verification chip of a pack (mockups 09, 10): "passed · 0 leaks", "failed · 2 leaks caught",
+ * and "failed closed" for a run that stopped before its counters held a hit (a preflight leak).
+ */
+export function verificationText(passed: boolean, hits: number): string {
+  if (passed) return `passed · ${fmtCount(hits)} leaks`;
+  if (hits > 0) return `failed · ${fmtCount(hits)} ${hits === 1 ? 'leak' : 'leaks'} caught`;
+  return 'failed closed';
+}
+
 /** Where a pack's run wrote, as its title shows it. */
 export function packTargetText(target: Record<string, any>, source: Record<string, any>): string {
   if (target.write_mode === 'files') {

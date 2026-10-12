@@ -1730,3 +1730,63 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
   empty step 1. The reviewer's `probe-m2-G7-resubmit-r2.py` now stops at "element is not enabled" on
   the step 4 button. **Open job** right after the key card navigates with no prompt; **Dry run**
   still opens the job page. 1440 and 390 px, no page errors, no horizontal scroll.
+
+## Task 36 — Console browser check against the mockups
+
+- `tests/console/test_console_m2.py`, adapted from the plan's module:
+  - **endpoints** follow the lane-safe rule (contract §0 amendment): the app is
+    `require_service("app")` (`DPS_TEST_APP_URL`, else `DPS_APP_PORT`), the source DSN
+    `require_service("source-pg")`; both skip, or fail under `DPS_TEST_REQUIRE_SERVICES=1`. The key is
+    `DPS_TEST_API_KEY` → `DPS_API_KEY` → `DPS_BOOTSTRAP_API_KEY` → the compose demo literal (as the
+    tools). A module fixture checks `GET /connections` for `bank-pg-ro` and `bank-uat` and skips/fails
+    with "run python tools/smoke_test.py first" instead of a 30 s select timeout.
+  - **storage:** the init script puts the key in `sessionStorage` (the post-M0 O5 rule; the plan's
+    `localStorage` copy is migrated by the console anyway), sets `dps.theme=dark`, removes a saved
+    `dps.jobDraft` (a restored draft would open another step) and is wrapped in `try` (it also runs
+    on the `file://` mockups).
+  - **customer values:** names, e-mails, national ids and mobiles (values ≥ 6 characters) of the
+    first 200 `country_code = 'IN'` customers — the rows the wizard selects — instead of 25 names of
+    any country; read through `asyncpg` in a worker thread (Playwright's sync API keeps an event loop
+    running in the test thread, so `asyncio.run` there raises). The assertion message carries a
+    count only. Checked on the jobs page, step 3, the finished job page, the evidence pack and
+    Reports (plan: three of them).
+  - **Playwright 1.55:** `select_option(label=…)` takes strings only (Task 32 finding), so
+    `label="bank-pg-ro"` / `label="bank-uat"` (option texts are the exact names).
+  - **extra assertions:** the in-place write button stays disabled *after* the typed confirmation
+    (`bank-pg-ro` has no target role), the evidence pack shows "Verification passed", and no
+    uncaught page exception on any console page (class names only; the mockups are not counted).
+  - **screenshots:** besides `<page>-desktop.png` / `-mobile.png` (dark), each page gets
+    `<page>-desktop-light.png` (the DoD asks for Vault tokens in dark and light; the theme is the
+    `data-theme` attribute, as in the mockups), mockups get `-mockup.png` and `-mockup-light.png`
+    (`?light`), mockup 06 is shot per step through its own stepper (`06-wizard-<n>-mockup.png`, plus
+    `06-wizard-4-confirm-mockup.png` with In place chosen), the job page twice (live and finished:
+    `03-job-detail`, `03-job-detail-done`) and step 4 after the target is set
+    (`06-wizard-4-target`). No shot is taken while the once-only key card is on screen.
+  - `docs/superpowers/build/m2-console/` is git-ignored (`.gitignore`, as the plan says the executor
+    does).
+- Visual comparison (Step 3) — fixed in the pages, re-shot after an image rebuild:
+  - Jobs: the "→" of a copy/export target sat alone on a line above a long target name
+    (`frontend/src/pages/Jobs.tsx`: a no-break space joins it to the name, as the mockup shows it).
+  - Job detail: the reviewed-snapshot table was wider than its card at 1440 px and clipped its
+    Evidence column (`styles/job-detail.css`: the column's minimum width 180 → 136 px; it now wraps
+    inside the card like the mockup).
+  - Wizard step 3: the review table's entity inputs cut entity names (`CUSTOMER_I`, `DATE_OF_BIF`)
+    (`StepDiscover.tsx` class `ent`, `styles/wizard.css`: `min-width: calc(18ch + 30px)` — room for
+    18 characters beside Chromium's datalist arrow).
+  - Reports and the evidence pack: a failed pack whose counters hold no hit (a preflight leak, for
+    instance the Task 27 smoke failure) read "failed · 0 leaks caught" / "The leakage sweep caught 0
+    source values". New `verificationText(passed, hits)` in `lib/jobs.ts` ("failed closed" when no
+    hit was counted; Vitest case first, red on the missing helper; 52 cases in all), used by both
+    pages; the evidence pack's sentence says the run failed closed before its counters held a hit.
+- Visual comparison — differences kept (by scope or by design), recorded in the build report:
+  M0's topbar (tenant/key fields instead of the crumb and worker pill), native `select` chevrons
+  (M0), job groups / consistency panels / cross-system joins tile (M3), Oracle and MongoDB content
+  (M3), the synthetic companion, fidelity/privacy and PDF (M5), the Reports filters, charts and
+  audit log (M5), the in-place confirmation as a modal dialog (plan/contract §14 `ConfirmWriteModal`)
+  instead of the mockup's inline card, target checks in step 4 instead of step 1 (the target is
+  chosen in step 4), the step 3 review table (plan Task 33; not in the mockup) which scrolls inside
+  its card at 1440 px because of its eight columns, and the FPE-fallback tile counting values (the
+  progress counters hold no per-column fallback).
+- Measured: `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py` → 2 passed in
+  ≈ 25 s (three runs, before and after the fixes); with the app unreachable the module errors
+  (`app unreachable — start: docker compose up -d app`).
