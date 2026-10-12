@@ -1,21 +1,28 @@
 """POST /api/v1/documents/{detect,obfuscate,synthesize} — multipart ``file`` + JSON form field
 ``request`` (contract §9, M1).
 
-Every outcome is audited (mode ``document.<mode>``), refusals included: the request JSON and the
-upload are read inside ``run_engine``, so an invalid ``request`` field or an oversized upload is
-counted and audited like an engine error (policy ``-`` when the request could not be parsed).
+Every outcome is audited (mode ``document.<mode>``), refusals included: an invalid ``request``
+field or an oversized upload is raised inside ``run_engine``, so it is counted and audited like an
+engine error (policy ``-`` when the request could not be parsed). ``Idempotency-Key`` is honoured
+(contract §9); the fingerprint is the file's digest plus the ``request`` field.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from pydantic import ValidationError
 
 from dps.auth import require_scope
-from dps.layers.api.common import CodedHTTPException, policy_label, run_engine
+from dps.layers.api.common import (
+    CodedHTTPException,
+    policy_label,
+    run_engine,
+    with_idempotency,
+)
 from dps.layers.api.schemas import DetectOut, TransformOut
 from dps.layers.documents import DocumentOutcome, DocumentPipeline
 from dps.layers.documents.models import (
@@ -76,15 +83,19 @@ async def _run(
     settings = request.app.state.settings
     pipeline: DocumentPipeline = request.app.state.documents
     refusal: CodedHTTPException | None = None
+    content = b""
     try:
         body = _parse(raw)
+        # Read before the idempotency check (its fingerprint covers the file); a refusal is
+        # still raised inside run_engine, so it is audited like any other.
+        content = await _read(file, settings.max_document_bytes)
     except CodedHTTPException as exc:
         body, refusal = DocumentRequest(), exc
+    policy = "-" if refusal else policy_label(body.policy, settings.default_policy)
 
     async def call() -> DocumentOutcome:
         if refusal is not None:
             raise refusal
-        content = await _read(file, settings.max_document_bytes)
         return await pipeline.run(
             mode=mode,
             content=content,
@@ -93,12 +104,13 @@ async def _run(
             request=body,
         )
 
-    return await run_engine(
-        request,
-        mode=f"document.{mode}",
-        policy_name="-" if refusal else policy_label(body.policy, settings.default_policy),
-        call=call,
-    )
+    async def run() -> tuple[DocumentOutcome, str]:
+        return await run_engine(request, mode=f"document.{mode}", policy_name=policy, call=call)
+
+    # The multipart envelope (boundaries) differs between clients' retries, so the fingerprint
+    # is the file's digest plus the ``request`` field, not the raw body.
+    fingerprint = hashlib.sha256(content).digest() + (raw or "").encode("utf-8")
+    return await with_idempotency(request, fingerprint, run, mode=f"document.{mode}", policy=policy)
 
 
 def _transform_out(outcome: DocumentOutcome, trace_id: str) -> DocumentTransformOut:

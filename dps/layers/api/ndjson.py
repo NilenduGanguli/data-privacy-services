@@ -40,7 +40,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, overload
+from typing import Any, Literal, TypeGuard, overload
 
 import structlog
 from fastapi import APIRouter, Depends, Request
@@ -81,6 +81,7 @@ from dps.layers.api.common import (
     map_engine_error,
     payload_from,
     policy_label,
+    with_idempotency,
 )
 from dps.observability import get_logger
 from dps.ratelimit import enforce_rate_limit
@@ -163,6 +164,11 @@ def wants_ndjson(request: Request) -> bool:
         if quality > 0:
             return True
     return False
+
+
+def streams_array(data: Any, text: str | None, request: Request) -> TypeGuard[list[Any]]:
+    """True for a JSON request whose ``data`` is an array, sent with an NDJSON ``Accept``."""
+    return isinstance(data, list) and text is None and wants_ndjson(request)
 
 
 class NdjsonBodyRoute(APIRoute):
@@ -598,6 +604,7 @@ async def _lines(request: Request, stream: _Stream, policy: str, tid: str) -> As
             {"type": "report", "items": totals.items, "report": totals.report(stream.mode)}
         )
     finally:
+        request.state.stream_outcome = outcome  # with_idempotency records only an ``ok`` stream
         end_call(
             request,
             mode=stream.mode,
@@ -740,7 +747,10 @@ def add_ndjson_route(router: APIRouter, path: str, *, mode: StreamMode, scope: s
     """
 
     async def handler(request: Request) -> StreamingResponse:
-        return await stream_request(request, mode=mode)
+        async def run() -> StreamingResponse:
+            return await stream_request(request, mode=mode)
+
+        return await with_idempotency(request, await request.body(), run, mode=mode)
 
     handler.__name__ = f"{mode}_ndjson"
     router.add_api_route(

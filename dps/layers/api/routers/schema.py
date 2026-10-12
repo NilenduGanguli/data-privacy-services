@@ -3,7 +3,8 @@
 Profiling (DDL parsing, detection over a sample), execution and the sample's leakage sweep are
 CPU-bound and run in worker threads. The sweep fails closed: when a generated row holds a value of
 a sample field DPS judged sensitive, nothing is returned (422 ``leakage``). Size limits are coded:
-413 ``ddl_too_large`` / ``sample_too_large`` / ``too_many_rows``.
+413 ``ddl_too_large`` / ``sample_too_large`` / ``too_many_rows``. ``/schema/synthesize`` honours
+``Idempotency-Key`` (contract §9); a replay is identical only with the caller's ``seed``.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from dps.engine.synth.surrogates import (
     seed_from_caller,
 )
 from dps.engine.verify import Verification
-from dps.layers.api.common import run_engine
+from dps.layers.api.common import run_engine, with_idempotency
 from dps.ratelimit import enforce_rate_limit
 
 router = APIRouter(prefix="/api/v1/schema", tags=["schema"])
@@ -239,5 +240,10 @@ async def schema_synthesize(body: SchemaSynthesizeRequest, request: Request) -> 
             report=report,
         )
 
-    out, trace_id = await run_engine(request, mode="schema.synthesize", policy_name="-", call=call)
-    return out.model_copy(update={"trace_id": trace_id})
+    async def run() -> SchemaSynthesizeOut:
+        out, trace_id = await run_engine(
+            request, mode="schema.synthesize", policy_name="-", call=call
+        )
+        return out.model_copy(update={"trace_id": trace_id})
+
+    return await with_idempotency(request, await request.body(), run, mode="schema.synthesize")

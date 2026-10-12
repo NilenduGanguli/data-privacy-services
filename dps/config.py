@@ -157,6 +157,10 @@ class Settings(BaseSettings):
     ndjson_max_items: int = Field(default=1_000_000, ge=1, le=100_000_000)  # items per stream
     ndjson_chunk_items: int = Field(default=500, ge=1, le=100_000)  # items per worker-thread hop
     max_ndjson_mb: int = Field(default=256, ge=1, le=4096)  # body limit for application/x-ndjson
+    # --- Idempotency-Key on the L1 routes (M1, contract §9/§10): a replica-local replay cache of
+    # fingerprints (scope hash, body hash, trace id, time) — never key material; 0 disables it ---
+    idempotency_ttl_seconds: int = Field(default=600, ge=0, le=86_400)
+    idempotency_max_entries: int = Field(default=10_000, ge=1, le=1_000_000)
 
     @field_validator("env")
     @classmethod

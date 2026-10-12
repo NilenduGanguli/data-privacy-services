@@ -1028,3 +1028,51 @@ needed, the floor is untouched). Shortfalls:
   shape, and the separate NDJSON body limit (a 1.5 MB NDJSON body passes under `max_payload_mb=1`,
   the same items as JSON get 413). The plan's "fail with `ModuleNotFoundError`" step failed instead
   on behaviour (the tests drive HTTP only until the last two were added).
+
+## Task 19B — `Idempotency-Key` on the Layer 1 routes
+
+As amended on 2026-10-12 (decision D2, contract §9 "L1 replay custody"): the cache keeps the scope
+hash and `IdemEntry(body_sha256, trace_id, created)` only; a replay re-runs the engine.
+
+- **`with_idempotency(request, body, run, *, mode="-", policy="-")`** (`common.py`): the plan's
+  three positional parameters plus two keywords that name the audit event of a refused header —
+  `idempotency_key_invalid` and `idempotency_key_reused` are audited (outcome = the code) like every
+  other rejection, before anything runs. It imports `dps.layers.api.idempotency` inside the
+  function: that module builds on `common.CodedHTTPException`, so a module-level import would be
+  circular.
+- **Replay plumbing:** `with_idempotency` sets `request.state.replay_trace_id` before `run`;
+  `begin_call` uses it as the trace id and `end_call` turns outcome `ok` into `replayed`, so JSON
+  routes, NDJSON streams, documents and schema synthesis all replay the same way. The response
+  header comes from a small ASGI middleware (`_ReplayHeader`, innermost) that reads
+  `request.state.idempotent_replay` at `http.response.start` (set only after `run` succeeded, so a
+  replay that fails carries no header) — a route returning a model cannot set headers otherwise.
+  Checked against a live `uvicorn` as well as TestClient.
+- **Streams are recorded at the end:** an NDJSON stream's 200 is sent before its items run, so
+  `with_idempotency` wraps the `StreamingResponse` body and records the entry only when the stream
+  ended with its report line (`request.state.stream_outcome == "ok"`, set by the stream). A stream
+  that ended with an error line leaves no entry, like any failed call.
+- **Documents fingerprint:** `sha256(file bytes) ‖ request field` (fixed 32-byte prefix, so the two
+  parts cannot be confused). The upload is now read *before* `run_engine` (the fingerprint needs
+  it); a refusal while reading (`document_too_large`, `invalid_request`) is still raised inside
+  `run_engine`'s call, so it is audited exactly as before.
+- **`IdempotencyCache.put` keeps a live entry** for the same scope (of two concurrent first calls,
+  the first to finish wins, as the plan says); `get` refreshes LRU order but never `created` (the TTL
+  runs from the first call's completion). `IdempotencyConflict` is the exception `get` raises on a
+  body mismatch. Extra names: `IDEMPOTENCY_HEADER`, `REPLAY_HEADER`, `route_template`, property
+  `enabled`.
+- **TTL 0:** the header is still validated (contract §9: it must match the pattern) and then
+  ignored — "accepted and ignored" applies to well-formed keys.
+- `/schema/generator-spec` and `/policies/*` do not honour the header (contract §9 lists the L1
+  engine routes, `/documents/*` and `/schema/synthesize` only).
+- **`.env.example` not changed** (same permission rule as Tasks 1 and 19A). Follow-up — append:
+
+  ```bash
+  # Idempotency-Key on the L1 routes (M1): replica-local fingerprints only, never key material
+  DPS_IDEMPOTENCY_TTL_SECONDS=600
+  DPS_IDEMPOTENCY_MAX_ENTRIES=10000
+  ```
+- `HANDOFF.md` §4 gains the two settings and the custody rule.
+- Tests (`tests/test_idempotency_l1.py`, 13): the eleven planned plus `test_disabled_cache_…` and
+  `test_streams_replay_and_cors_names_the_headers` (NDJSON replay keeps the header's trace id;
+  CORS allows `Idempotency-Key` and exposes `Idempotent-Replay`). Confirmed failing first on the
+  previous commit (`ModuleNotFoundError: dps.layers.api.idempotency`, run from a `git archive` copy).

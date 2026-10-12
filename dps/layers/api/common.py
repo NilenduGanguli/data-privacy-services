@@ -21,12 +21,12 @@ import re
 import time
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from typing import Any, overload
 
 import structlog
 from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from dps.audit import AuditEvent
 from dps.engine.policy import preset_names
@@ -204,8 +204,11 @@ def _audit(request: Request, **fields: Any) -> None:
 
 
 def begin_call(request: Request) -> str:
-    """Start an audited call: the trace id (set on ``request.state``, bound to the log context)."""
-    tid = trace_id(request)
+    """Start an audited call: the trace id (set on ``request.state``, bound to the log context).
+
+    A replay (:func:`with_idempotency`) keeps the original call's trace id.
+    """
+    tid = getattr(request.state, "replay_trace_id", None) or trace_id(request)
     request.state.trace_id = tid
     structlog.contextvars.bind_contextvars(trace_id=tid, route=request.url.path)
     return tid
@@ -224,8 +227,11 @@ def end_call(
     """Finish an audited call: request metrics and exactly one value-free audit event.
 
     ``started`` is the call's ``time.perf_counter()`` at :func:`begin_call`; ``counts`` are
-    :func:`result_counts` (or a stream's sums), ``None`` for a call that produced nothing.
+    :func:`result_counts` (or a stream's sums), ``None`` for a call that produced nothing. A
+    successful replay is audited with outcome ``replayed``.
     """
+    if outcome == "ok" and getattr(request.state, "replay_trace_id", None):
+        outcome = "replayed"
     route = request.url.path
     duration = (time.perf_counter() - started) * 1000
     REQUESTS.labels(route, outcome).inc()
@@ -316,3 +322,91 @@ async def run_engine[T](
             counts=result_counts(result),
         )
         structlog.contextvars.unbind_contextvars("trace_id", "route")
+
+
+async def with_idempotency[T](
+    request: Request,
+    body: bytes,
+    run: Callable[[], Awaitable[T]],
+    *,
+    mode: str = "-",
+    policy: str = "-",
+) -> T:
+    """Honour ``Idempotency-Key`` around a Layer 1 call (contract §9, decision D2).
+
+    ``body`` is what the call's fingerprint covers: the raw request body (multipart: the file's
+    digest and the ``request`` field). A retry with the same key and body within the TTL re-runs
+    ``run`` as a replay — the original trace id, audit outcome ``replayed``, header
+    ``Idempotent-Replay: true``; nothing from the response is cached. A first call is recorded
+    after it succeeds (a stream, when it ends with its report line). ``mode`` and ``policy`` name
+    the audit event of a refused header.
+
+    Raises:
+        CodedHTTPException: 422 ``idempotency_key_invalid`` (malformed header) or
+            ``idempotency_key_reused`` (same key, another body) — audited, nothing run.
+    """
+    # Imported here: dps.layers.api.idempotency builds on this module's CodedHTTPException.
+    from dps.layers.api.idempotency import (
+        IdemEntry,
+        IdempotencyCache,
+        IdempotencyConflict,
+        parse_idempotency_key,
+        scope_of,
+    )
+
+    cache: IdempotencyCache = request.app.state.idempotency
+    key: str | None = None
+    entry: IdemEntry | None = None
+    scope = digest = ""
+    try:
+        key = parse_idempotency_key(request)
+        if key is not None and cache.enabled:
+            scope = scope_of(request, key)
+            digest = hashlib.sha256(body).hexdigest()
+            try:
+                entry = cache.get(scope, digest)
+            except IdempotencyConflict:
+                raise CodedHTTPException(
+                    422,
+                    "idempotency_key_reused",
+                    "this Idempotency-Key was already used with a different request body",
+                ) from None
+    except CodedHTTPException as exc:
+        tid = begin_call(request)
+        end_call(
+            request,
+            mode=mode,
+            policy=policy,
+            tid=tid,
+            started=time.perf_counter(),
+            outcome=exc.code,
+        )
+        structlog.contextvars.unbind_contextvars("trace_id", "route")
+        raise
+    if key is None or not cache.enabled:
+        return await run()
+    if entry is not None:
+        request.state.replay_trace_id = entry.trace_id
+    result = await run()
+    if entry is not None:
+        request.state.idempotent_replay = True  # the app's middleware sets the response header
+        return result
+
+    def record() -> None:
+        cache.put(scope, IdemEntry(digest, request.state.trace_id, cache.clock()))
+
+    if isinstance(result, StreamingResponse):
+        result.body_iterator = _record_when_complete(request, result.body_iterator, record)
+    else:
+        record()
+    return result
+
+
+async def _record_when_complete(
+    request: Request, lines: AsyncIterable[Any], record: Callable[[], None]
+) -> AsyncIterator[Any]:
+    """Pass a stream through; record its idempotency entry only when it ended ``ok``."""
+    async for line in lines:
+        yield line
+    if getattr(request.state, "stream_outcome", None) == "ok":
+        record()

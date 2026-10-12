@@ -1,7 +1,7 @@
 """FastAPI application factory. Run with ``uvicorn dps.app:create_app --factory``.
 
 Middleware order (outermost first): security headers → CORS → body-size guard → value-free
-error guard → FastAPI. Auth and rate limiting are per-route dependencies. The compiled console
+error guard → idempotent-replay header → FastAPI. Auth and rate limiting are per-route dependencies. The compiled console
 (``frontend/dist``) is served from the same process with a strict CSP, as in the sibling services.
 The body-size guard is per route: ``max_payload_mb`` for the JSON routes, ``max_document_mb`` plus
 1 MiB of multipart overhead for ``/api/v1/documents/*``, ``max_ndjson_mb`` for an NDJSON body on
@@ -39,6 +39,7 @@ from dps.layers.api.common import (
     CodedHTTPException,
     coded_http_exception_handler,
 )
+from dps.layers.api.idempotency import IDEMPOTENCY_HEADER, REPLAY_HEADER, IdempotencyCache
 from dps.layers.api.ndjson import NDJSON, STREAM_ROUTES
 from dps.layers.api.routers import (
     detect,
@@ -148,6 +149,27 @@ class _BodyLimit:
             return message
 
         await self.app(scope, counting_receive, send)
+
+
+class _ReplayHeader:
+    """``Idempotent-Replay: true`` on the response of a replayed call (``with_idempotency`` marks
+    the request state before the response starts)."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        state = scope.setdefault("state", {})  # the dict ``request.state`` writes into
+
+        async def send_with_flag(message: Message) -> None:
+            if message["type"] == "http.response.start" and state.get("idempotent_replay"):
+                MutableHeaders(scope=message)[REPLAY_HEADER] = "true"
+            await send(message)
+
+        await self.app(scope, receive, send_with_flag)
 
 
 class _ValueFreeErrors:
@@ -347,10 +369,16 @@ def create_app(
     app.state.audit = audit_sink or (LogAuditSink() if settings.audit_enabled else NullAuditSink())
     app.state.ocr = ocr
     app.state.documents = DocumentPipeline(engine, settings, ocr)
+    # Fingerprints only (contract §9, decision D2): never key material, a seed or an output.
+    app.state.idempotency = IdempotencyCache(
+        ttl_seconds=settings.idempotency_ttl_seconds,
+        max_entries=settings.idempotency_max_entries,
+    )
     app.add_exception_handler(CodedHTTPException, coded_http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_error)
 
     # add_middleware prepends: the last one added is the outermost.
+    app.add_middleware(_ReplayHeader)
     app.add_middleware(_ValueFreeErrors)
     app.add_middleware(
         _BodyLimit,
@@ -362,7 +390,14 @@ def create_app(
         CORSMiddleware,
         allow_origins=["*"],
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type", API_KEY_HEADER, TENANT_HEADER, TRACE_HEADER],
+        allow_headers=[
+            "Content-Type",
+            API_KEY_HEADER,
+            TENANT_HEADER,
+            TRACE_HEADER,
+            IDEMPOTENCY_HEADER,
+        ],
+        expose_headers=[REPLAY_HEADER],
     )
     app.add_middleware(_SecurityHeaders, hsts=settings.env != "local")
 
