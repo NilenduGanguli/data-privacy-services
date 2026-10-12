@@ -50,6 +50,21 @@ TIMEOUT_MS = 180_000
 failures: list[str] = []
 
 
+#: A disabled button "looks it" when it is drawn unlike its enabled self: faded, or another
+#: background or text colour (the console's one disabled look, from mockup 06, greys it out).
+LOOKS_DISABLED = """b => {
+  if (!b.disabled) return false;
+  const on = b.cloneNode(true);
+  on.disabled = false;
+  b.parentNode.appendChild(on);
+  const [x, y] = [getComputedStyle(b), getComputedStyle(on)];
+  const differs = Number(x.opacity) < Number(y.opacity) || x.backgroundColor !== y.backgroundColor
+    || x.color !== y.color;
+  on.remove();
+  return differs;
+}"""
+
+
 def check(name: str, ok: bool) -> None:
     """Print one verdict (never a value) and remember a failure."""
     print(f"{'PASS' if ok else 'FAIL'}  {name}", flush=True)
@@ -139,7 +154,7 @@ def policies_flow(page: Page, tag: str) -> None:
     publish = page.get_by_role("button", name="Publish", exact=True)
     check(
         f"{tag} policies: Publish is disabled and looks it (policy store: M5)",
-        bool(publish.evaluate("b => b.disabled && Number(getComputedStyle(b).opacity) < 1")),
+        bool(publish.evaluate(LOOKS_DISABLED)),
     )
     page.get_by_label("Obfuscate method for CVV").select_option("det_token")
     check(
