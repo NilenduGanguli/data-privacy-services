@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildRunSpec, confirmationKey, countKey, draftForStorage, fqn, isWriteConfirmed, writtenObject, type WizardDraft } from '../../lib/jobs';
 import { draft } from '../../lib/fixtures';
 import type { ColumnInfo, TableShape } from '../../lib/types';
-import { canLeave, wizardReducer, type WizardAction } from './state';
+import { canLeave, isSubmitted, reachable, wizardReducer, type WizardAction } from './state';
 
 // The D3 write confirmation (spec §7, contract §14): In place and Append are confirmed with the row count
 // the selection matches, and a confirmation covers exactly what the operator read in the dialog.
@@ -137,5 +137,60 @@ describe('a confirmation covers only what it confirmed (B2)', () => {
     expect(saved).not.toContain("'IN'");
     expect(saved).not.toContain('confirmedKey');
     expect(saved).not.toContain('countedKey');
+  });
+});
+
+describe('a submitted run closes the draft (B3)', () => {
+  /** In place on the whole table, counted, confirmed, purpose entered, on step 5. */
+  const ready = (): WizardDraft => run(confirm(counted(base(), 40000)), { type: 'step', step: 5 }, { type: 'set', patch: { ticket: 'CHG-48190' } });
+  const submitted = (): WizardDraft => wizardReducer(ready(), { type: 'submitted', jobId: 'j_01K7ZQ3R8D5W2N6X4H1VTB7F9Q' });
+
+  it('withdraws the confirmation it used and closes every step', () => {
+    expect(isWriteConfirmed(ready())).toBe(true);
+    const d = submitted();
+    expect(isSubmitted(d)).toBe(true);
+    expect(d.submittedJobId).toBe('j_01K7ZQ3R8D5W2N6X4H1VTB7F9Q');
+    expect(d.step).toBe(5);
+    expect(isWriteConfirmed(d)).toBe(false);
+    expect(d).toMatchObject({ typed: '', confirmedAt: null, confirmedKey: null, confirmLapsed: false, keyMaterialJson: '' });
+    for (const s of [1, 2, 3, 4] as const) expect(canLeave(s, d)).toBe(false);
+    expect(buildRunSpec(d).target).toMatchObject({ write_mode: 'in_place', confirm_write: false });
+  });
+  it('closes a Copy to a table run too (its key card is as once-only)', () => {
+    const d = wizardReducer(base({ writeMode: 'table', step: 5 }), { type: 'submitted', jobId: 'j_2' });
+    expect(canLeave(4, d)).toBe(false);
+    expect(isSubmitted(d)).toBe(true);
+  });
+  it('refuses every action except Start a new job: no step change, no re-confirmation, no unlock', () => {
+    const d = submitted();
+    const again: WizardAction[] = [
+      { type: 'step', step: 4 },
+      { type: 'step', step: 5 },
+      { type: 'confirm', typed: fqn(writtenObject(d)), at: '2026-10-12T09:05:00Z', key: confirmationKey(d) },
+      { type: 'set', patch: { submittedJobId: null } },
+      { type: 'set', patch: { typed: 'bank.customers', confirmedAt: '2026-10-12T09:05:00Z', confirmedKey: confirmationKey(d) } },
+      { type: 'counted', count: { rows: 40000, checks: [], runs_as: null, binds: 0 }, at: '2026-10-12T09:05:00Z', seconds: 0.1, key: countKey(d) },
+      { type: 'writeMode', mode: 'append' },
+      { type: 'restore', draft: JSON.parse(JSON.stringify(draftForStorage(ready()))) },
+      { type: 'submitted', jobId: 'j_other' },
+    ];
+    for (const a of again) expect(wizardReducer(d, a)).toBe(d);
+  });
+  it('a second run starts from a new draft and needs a new confirmation', () => {
+    const fresh = run(submitted(), { type: 'reset', draftId: 'd_00000002' });
+    expect(isSubmitted(fresh)).toBe(false);
+    expect(fresh).toMatchObject({ draftId: 'd_00000002', step: 1, rows: null, typed: '', confirmedKey: null });
+    // the same in-place target rebuilt from the saved fields and counted again is not confirmed
+    const rebuilt = counted(run(fresh, { type: 'set', patch: JSON.parse(JSON.stringify(draftForStorage(ready()))) }), 40000);
+    expect(isWriteConfirmed(rebuilt)).toBe(false);
+    expect(canLeave(4, rebuilt)).toBe(false);
+    expect(reachable(rebuilt)).toBe(4);
+    expect(buildRunSpec(rebuilt).target).toMatchObject({ confirm_write: false });
+    expect(canLeave(4, confirm(rebuilt))).toBe(true);
+  });
+  it('the saved draft never holds the submitted job, and a restored one is open', () => {
+    expect(JSON.stringify(draftForStorage(submitted()))).not.toContain('submittedJobId');
+    const restored = wizardReducer(draft({ owner: '', table: '' }), { type: 'restore', draft: { submittedJobId: 'j_forged' } as Partial<WizardDraft> });
+    expect(isSubmitted(restored)).toBe(false);
   });
 });

@@ -1683,3 +1683,50 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
   wording after an idempotent retry, `email` with `domain: generalize` counted as reversible,
   `targetReady('append')` ignoring the target role, StepDiscover dropping edits during a PATCH, and
   the dev-only `npm audit` advisories.
+
+## Review G7 r2 fixes (Tasks 29–35)
+
+- **B3 — a submitted run closes the wizard.** Before, the answer of **Run job** (the job and its
+  once-only key) lived only in `StepRun`'s local state, the stepper stayed open and the confirmation
+  stayed standing: one click on step 4 unmounted the key card, and step 5 re-armed **Run job** with
+  the old confirmation and a new Idempotency-Key (a second in-place/append write with no new
+  confirmation; `row_count_mismatch` cannot catch it because the count is unchanged). Now:
+  - `state.ts` adds the `submitted` action (`{ type: 'submitted'; jobId }`) and `isSubmitted(d)`.
+    `submitted` withdraws the confirmation (`NO_CONFIRMATION`, without the lapse note), drops the
+    loaded key file and any password, and sets `WizardDraft.submittedJobId` (new transient field,
+    also dropped by `draftForStorage`; `restore` never brings it back). While it is set the reducer
+    refuses **every** action except `reset`, and `canLeave(step)` is false for every step, so no step
+    change, re-confirmation, recount or unlock is possible; a second write starts from a new draft
+    and a new confirmation. This holds for every write mode, not only In place / Append: the
+    once-only key of a Copy to a table or Export files run is as easy to lose.
+  - `JobWizard` owns the submission (moved out of `StepRun`): the Idempotency-Key, a synchronous
+    in-flight guard (a double click before the re-render sends one request; the answer holding the
+    key is never replaced), the request state (the stepper, **Back**, the **Edit** links and **Save
+    draft** are disabled while a run is in flight) and the answer, in memory only. Once submitted,
+    the new `wizard/RunResult.tsx` replaces the steps: the queued callout with **Open in Jobs** /
+    **Open job** (unchanged accessible names), the key or seed card, and **Start a new job** (the
+    only way back to an open draft: `reset`). The stepper shows steps 1–4 done and every step
+    disabled; the head's **Cancel** / **Save draft** and the restored-draft callout are hidden; the
+    rail shows the specification as submitted ("As submitted for job …", `confirm_write: true`)
+    instead of the closed draft's.
+  - The optional guard is implemented: while a returned key or seed is not marked "I have stored
+    the key", **Start a new job** is disabled with the reason, and closing or reloading the tab asks
+    first (`beforeunload`). `KeyMaterialCard` gains an optional `onStoredChange` prop for this. The
+    links **Open job** / **Open in Jobs** are deliberately not held: they are how the operator
+    follows the job (Task 36 clicks **Open job** right after the key card), and a `BrowserRouter`
+    app cannot block in-app navigation without a data router.
+  - `StepRun` takes `run: RunSubmission` (`busy`, `error`, `submit`) instead of submitting itself; a
+    dry run still opens the job detail.
+- Vitest: 5 new cases in `state.test.ts` (22 there, 51 in all). With only the new field and
+  `isSubmitted` stubbed, 4 failed (confirmation still standing after `submitted`, the Copy to a table
+  draft still open, actions still applied to a submitted draft, `submittedJobId` in the saved draft);
+  the fifth (a reset draft needs a new count and confirmation) guards the way back.
+- Browser check (private Playwright 1.55, a private Vite dev server proxying to the lane app on 8400;
+  `POST /jobs/run` answered locally with a fake key, so nothing was written): In place on
+  `bank_restore.contacts`, 40,000 rows counted and confirmed, **Run job** double-clicked → one request
+  (`confirm_write: true`, `expected_rows: 40000`); the key card stays after a forced click on step 4
+  (every step button disabled, no step 4 heading); no **Run job** button; a reload is held by the
+  `beforeunload` prompt; **Start a new job** is disabled until "I have stored the key", then opens an
+  empty step 1. The reviewer's `probe-m2-G7-resubmit-r2.py` now stops at "element is not enabled" on
+  the step 4 button. **Open job** right after the key card navigates with no prompt; **Dry run**
+  still opens the job page. 1440 and 390 px, no page errors, no horizontal scroll.

@@ -8,6 +8,11 @@
  * selection it was taken for (`countKey`), and an In place / Append confirmation stands only while
  * everything it covered is unchanged (`confirmationKey`: rows, filter, columns, mode, write mode,
  * object, key strategy, batch size, partitions). A confirmation needs a row count (spec §7 / D3).
+ *
+ * A confirmation is used once. A successful Run job (`submitted`) withdraws it and closes the draft:
+ * every step is closed and every action except `reset` (Start a new job) is refused, so the stepper
+ * cannot bring Run job back under the same confirmation, and the once-only key card (held by
+ * `JobWizard`) stays on screen. A second write starts from a new draft and a new confirmation.
  */
 import { useReducer } from 'react';
 import {
@@ -41,6 +46,8 @@ export type WizardAction =
   | { type: 'confirm'; typed: string; at: string; key: string }
   | { type: 'unconfirm' }
   | { type: 'restore'; draft: Partial<WizardDraft> }
+  /** Run job (not a dry run) created `jobId`: the confirmation is used and the draft is closed. */
+  | { type: 'submitted'; jobId: string }
   | { type: 'reset'; draftId?: string };
 
 const NO_COUNT: Partial<WizardDraft> = { count: null, countedAt: null, countSeconds: null, rows: null, countedKey: null };
@@ -55,9 +62,10 @@ const CLEAR_TABLE: Partial<WizardDraft> = { ...CLEAR_SELECTION, table: '', shape
 const CLEAR_SOURCE: Partial<WizardDraft> = { ...CLEAR_TABLE, owner: '', test: null, testedAt: null };
 
 /** Actions that withdraw a confirmation on purpose (no "no longer applies" note). */
-const DELIBERATE = new Set<WizardAction['type']>(['unconfirm', 'writeMode', 'restore', 'reset']);
+const DELIBERATE = new Set<WizardAction['type']>(['unconfirm', 'writeMode', 'restore', 'submitted', 'reset']);
 
 export function wizardReducer(d: WizardDraft, a: WizardAction): WizardDraft {
+  if (isSubmitted(d) && a.type !== 'reset') return d;   // a submitted draft only starts over
   return bind(d, reduce(d, a), a);
 }
 
@@ -132,7 +140,10 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
     case 'restore':
       return {
         ...d, ...a.draft, password: '', keyMaterialJson: '', where: '', query: '', params: {}, ...NO_COUNT, ...NO_CONFIRMATION, confirmLapsed: false,
+        submittedJobId: null,
       };
+    case 'submitted':
+      return { ...d, ...NO_CONFIRMATION, confirmLapsed: false, password: '', keyMaterialJson: '', step: 5, submittedJobId: a.jobId };
     case 'reset':
       return emptyDraft(a.draftId);
     default:
@@ -140,8 +151,14 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
   }
 }
 
+/** Run job created a job from this draft: nothing in it can change or run again until `reset`. */
+export function isSubmitted(d: WizardDraft): boolean {
+  return d.submittedJobId !== null;
+}
+
 /** Whether the step after `step` may open (the Next buttons and the stepper use this). */
 export function canLeave(step: Step, d: WizardDraft): boolean {
+  if (isSubmitted(d)) return false;
   switch (step) {
     case 1: return !!d.connectionId && !!d.test?.ok;
     case 2: return !!d.table && !!d.shape && (!(d.selMode === 'where' ? d.where : d.query).trim() || !!d.count);

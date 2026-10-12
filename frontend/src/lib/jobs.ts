@@ -377,6 +377,7 @@ export interface WizardDraft {
   confirmedAt: string | null;             // transient
   confirmedKey: string | null;            // transient: `confirmationKey` of what the dialog showed when confirmed
   confirmLapsed: boolean;                 // transient: a confirmation was withdrawn because what it covered changed
+  submittedJobId: string | null;          // transient: the job Run job created; the draft is closed until Start a new job
   // 5 · review and run
   mode: 'obfuscate' | 'synthesize';
   policy: string | null;                  // preset chosen at step 5 (null = the snapshot's)
@@ -408,7 +409,7 @@ export function emptyDraft(draftId: string = newDraftId()): WizardDraft {
     writeMode: null, targetOwner: '', targetTable: '', tableLoad: 'truncate_insert', createIfMissing: true,
     appendTarget: 'same', pkKind: 'offset', pkOffset: '', pkPrefix: '', filesConnectionId: null, filesFormat: 'parquet',
     filesPrefix: '', filesCompression: 'snappy', batchRows: null, typed: '', confirmedAt: null, confirmedKey: null, confirmLapsed: false,
-    mode: 'obfuscate', policy: null, keyChoice: 'new', groupId: null, keyMaterialJson: '',
+    submittedJobId: null, mode: 'obfuscate', policy: null, keyChoice: 'new', groupId: null, keyMaterialJson: '',
     ticket: '', legalBasis: LEGAL_BASES[0], purposeNote: '',
   };
 }
@@ -422,11 +423,11 @@ export function newDraftId(): string {
 
 /**
  * Fields that never leave React state: credentials, key material, filters, binds, the row count taken
- * for a filter (meaningless once the filter is gone) and the write confirmation.
+ * for a filter (meaningless once the filter is gone), the write confirmation and the submitted job.
  */
 const TRANSIENT = [
   'password', 'keyMaterialJson', 'where', 'query', 'params', 'count', 'countedAt', 'countSeconds', 'rows', 'countedKey',
-  'typed', 'confirmedAt', 'confirmedKey', 'confirmLapsed',
+  'typed', 'confirmedAt', 'confirmedKey', 'confirmLapsed', 'submittedJobId',
 ] as const;
 
 /** The draft as `localStorage['dps.jobDraft']` may hold it (contract §14). */

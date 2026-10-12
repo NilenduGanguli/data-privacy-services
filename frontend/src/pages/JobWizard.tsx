@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
-import { draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel, type Step, type WizardDraft } from '../lib/jobs';
-import type { ClassificationSnapshot, Connection } from '../lib/types';
+import {
+  buildRunSpec, draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel,
+  type Step, type WizardDraft,
+} from '../lib/jobs';
+import type { ClassificationSnapshot, Connection, RunOut } from '../lib/types';
+import { RunResult } from './wizard/RunResult';
 import { StepConnect } from './wizard/StepConnect';
 import { StepDiscover } from './wizard/StepDiscover';
-import { StepRun } from './wizard/StepRun';
+import { StepRun, type RunSubmission } from './wizard/StepRun';
 import { StepSelect } from './wizard/StepSelect';
 import { StepTarget } from './wizard/StepTarget';
-import { DRAFT_KEY, loadSavedDraft, reachable, useWizard, wizardReducer } from './wizard/state';
+import { clearSavedDraft, DRAFT_KEY, isSubmitted, loadSavedDraft, reachable, useWizard, wizardReducer } from './wizard/state';
 
 const STEP_TITLES: Record<Step, string> = { 1: 'Connect', 2: 'Select data', 3: 'Discover', 4: 'Target and write mode', 5: 'Review and run' };
 
@@ -42,9 +46,20 @@ function stepSub(step: Step, d: WizardDraft): string {
   }
 }
 
-/** New job (mockup 06): five steps on the left, guarantees and the job specification on the right. */
+function apiError(e: unknown): { message: string; code?: string } {
+  return e instanceof ApiError ? { message: e.message, code: e.code } : { message: e instanceof Error ? e.message : String(e) };
+}
+
+/**
+ * New job (mockup 06): five steps on the left, guarantees and the job specification on the right.
+ * The wizard owns the submission: the Idempotency-Key (one per submission, kept across retries of the
+ * same kind), the request in flight (the stepper is locked meanwhile) and the answer of Run job — the
+ * job and its once-only key, in memory only. Once a run is submitted the draft is closed (`submitted`)
+ * and `RunResult` replaces the steps until Start a new job.
+ */
 export function JobWizard(): JSX.Element {
   const auth = useAuth();
+  const navigate = useNavigate();
   const [params] = useSearchParams();
   const deepSnapshot = params.get('snapshot');
   const restoredFrom = useRef<Partial<WizardDraft> | null>(null);
@@ -59,7 +74,15 @@ export function JobWizard(): JSX.Element {
   const [copied, setCopied] = useState(false);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [snapshot, setSnapshot] = useState<ClassificationSnapshot | null>(null);
+  const [busy, setBusy] = useState<'run' | 'dry' | null>(null);
+  const [runError, setRunError] = useState<{ message: string; code?: string } | null>(null);
+  /** The answer of Run job and the specification it was given (without key material). Memory only. */
+  const [submission, setSubmission] = useState<{ out: RunOut; spec: Record<string, unknown> } | null>(null);
+  const idem = useRef<{ key: string; dry: boolean } | null>(null);
+  const inFlight = useRef(false);   // set synchronously: a second click before the re-render sends nothing
   const reach = reachable(d);
+  const submitted = isSubmitted(d);
+  const frozen = submitted || busy !== null;   // no step changes while a run is in flight or after it
 
   // steps 4 and 5 read the accepted snapshot (key, one-way columns, plan)
   useEffect(() => {
@@ -100,11 +123,38 @@ export function JobWizard(): JSX.Element {
   }, [auth, deepSnapshot, dispatch]);
 
   // a restored draft opens on the farthest step it can still show
-  useEffect(() => { if (d.step > reach) dispatch({ type: 'step', step: reach }); }, [d.step, reach, dispatch]);
-  useEffect(() => { window.scrollTo({ top: 0 }); }, [d.step]);
+  useEffect(() => { if (!frozen && d.step > reach) dispatch({ type: 'step', step: reach }); }, [d.step, reach, frozen, dispatch]);
+  useEffect(() => { window.scrollTo({ top: 0 }); }, [d.step, submitted]);
 
-  const go = (step: Step) => { if (step <= reach) dispatch({ type: 'step', step }); };
-  const preview = useMemo(() => specPreview(d), [d]);
+  const go = (step: Step) => { if (!frozen && step <= reach) dispatch({ type: 'step', step }); };
+  const preview = useMemo(() => submission?.spec ?? specPreview(d), [d, submission]);
+
+  async function submit(dry: boolean): Promise<void> {
+    if (inFlight.current || submitted) return;
+    inFlight.current = true;
+    setBusy(dry ? 'dry' : 'run'); setRunError(null);
+    try {
+      if (!idem.current || idem.current.dry !== dry) idem.current = { key: globalThis.crypto.randomUUID(), dry };
+      const spec = buildRunSpec(d);
+      spec.options = { ...spec.options, dry_run: dry };
+      const shown = { ...specPreview(d), options: spec.options };   // the rail keeps what was sent
+      const out = await api.jobs.run(auth, spec, idem.current.key);
+      idem.current = null;
+      clearSavedDraft();
+      if (dry) { navigate(`/data-sources/jobs/${out.job.id}`); return; }
+      restoredFrom.current = null;
+      setSubmission((held) => held ?? { out, spec: shown });   // never replace an answer that holds the key
+      dispatch({ type: 'submitted', jobId: out.job.id });   // the confirmation is used; the draft is closed
+    } catch (e) { setRunError(apiError(e)); } finally { inFlight.current = false; setBusy(null); }
+  }
+  const run: RunSubmission = { busy, error: runError, submit: (dry) => { void submit(dry); } };
+
+  /** Start a new job: forget the answer (and its key) and open an empty draft. */
+  function startOver(): void {
+    setSubmission(null); setRunError(null); setSavedAt(null);
+    idem.current = null; restoredFrom.current = null;
+    dispatch({ type: 'reset' });
+  }
 
   function saveDraft(): void {
     try {
@@ -118,6 +168,7 @@ export function JobWizard(): JSX.Element {
   }
 
   const steps: Step[] = [1, 2, 3, 4, 5];
+  const shownReach: Step = submitted ? 5 : reach;   // a submitted draft shows every step done and none open
   return (
     <main className={`page wizard-page${d.mode === 'synthesize' ? ' mode-syn' : ''}`}>
       <div className="faint sm rowx">
@@ -126,10 +177,10 @@ export function JobWizard(): JSX.Element {
       </div>
       <div className="page-head">
         <div><h1>New job{d.table ? ` · ${fqn(sourceObject(d))}` : ''}</h1><p>Protect a table in five steps. DPS reads only the discovery sample until you press Run job, and writes nothing before then.</p></div>
-        <div className="head-actions"><Link className="btn btn-ghost" to="/data-sources">Cancel</Link><button className="btn" type="button" onClick={saveDraft}>Save draft</button></div>
+        {!submitted && <div className="head-actions"><Link className="btn btn-ghost" to="/data-sources">Cancel</Link><button className="btn" type="button" disabled={busy !== null} onClick={saveDraft}>Save draft</button></div>}
       </div>
       {linkError && <div className="err">Could not open the snapshot: {linkError}</div>}
-      {restoredFrom.current && (
+      {restoredFrom.current && !submitted && (
         <div className="callout amber" style={{ fontSize: 12.5 }}>Restored the saved draft <span className="mono">{d.draftId}</span>. Credentials, keys and filters are not saved: re-enter them.{' '}
           <button type="button" className="linkbtn" onClick={() => { restoredFrom.current = null; try { localStorage.removeItem(DRAFT_KEY); } catch { /* private mode */ } dispatch({ type: 'reset' }); }}>Start a new draft</button></div>
       )}
@@ -138,8 +189,8 @@ export function JobWizard(): JSX.Element {
         {steps.map((s, i) => (
           <div key={s} style={{ display: 'contents' }}>
             {i > 0 && <div className="step-sep" />}
-            <button type="button" className={`step${d.step === s ? ' on' : s < reach ? ' done' : ''}`} disabled={s > reach} aria-current={d.step === s ? 'step' : undefined} onClick={() => go(s)}>
-              <span className="n">{s < reach && d.step !== s ? '✓' : s}</span>
+            <button type="button" className={`step${d.step === s ? ' on' : s < shownReach ? ' done' : ''}`} disabled={frozen || s > reach} aria-current={d.step === s ? 'step' : undefined} onClick={() => go(s)}>
+              <span className="n">{s < shownReach && d.step !== s ? '✓' : s}</span>
               <span className="lbl"><span className="t">{STEP_TITLES[s]}</span>{stepSub(s, d) && <span className="sub">{stepSub(s, d)}</span>}</span>
             </button>
           </div>
@@ -148,11 +199,12 @@ export function JobWizard(): JSX.Element {
 
       <div className="wiz">
         <div className="wiz-main">
-          {d.step === 1 && <StepConnect d={d} dispatch={dispatch} auth={auth} connections={connections} onConnectionsChanged={loadConnections} onNext={() => go(2)} />}
-          {d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} onNext={() => go(3)} onBack={() => go(1)} />}
-          {d.step === 3 && <StepDiscover d={d} dispatch={dispatch} auth={auth} onNext={() => go(4)} onBack={() => go(2)} />}
-          {d.step === 4 && <StepTarget d={d} dispatch={dispatch} auth={auth} connections={connections} snapshot={snapshot} onConnectionsChanged={loadConnections} onNext={() => go(5)} onBack={() => go(3)} />}
-          {d.step === 5 && <StepRun d={d} dispatch={dispatch} auth={auth} snapshot={snapshot} go={go} onBack={() => go(4)} />}
+          {submitted && d.submittedJobId && <RunResult jobId={d.submittedJobId} out={submission?.out ?? null} writeMode={d.writeMode} onNewJob={startOver} />}
+          {!submitted && d.step === 1 && <StepConnect d={d} dispatch={dispatch} auth={auth} connections={connections} onConnectionsChanged={loadConnections} onNext={() => go(2)} />}
+          {!submitted && d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} onNext={() => go(3)} onBack={() => go(1)} />}
+          {!submitted && d.step === 3 && <StepDiscover d={d} dispatch={dispatch} auth={auth} onNext={() => go(4)} onBack={() => go(2)} />}
+          {!submitted && d.step === 4 && <StepTarget d={d} dispatch={dispatch} auth={auth} connections={connections} snapshot={snapshot} onConnectionsChanged={loadConnections} onNext={() => go(5)} onBack={() => go(3)} />}
+          {!submitted && d.step === 5 && <StepRun d={d} dispatch={dispatch} auth={auth} snapshot={snapshot} go={go} onBack={() => go(4)} run={run} />}
         </div>
 
         <aside className="rail" aria-label="Job specification">
@@ -169,7 +221,7 @@ export function JobWizard(): JSX.Element {
             <div className="card-head"><div className="card-title">Job specification</div>
               <div className="rowx"><span className="pill mono" style={{ fontSize: 11 }}>POST /api/v1/jobs/run</span><button className="btn btn-sm" type="button" onClick={() => void copySpec()}>{copied ? 'Copied' : 'Copy JSON'}</button></div></div>
             <JsonPane value={preview} />
-            <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>Filters appear as entered, bound parameters as &lt;bound&gt;. Key material is never part of the specification.</div>
+            <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>{submitted ? `As submitted for job ${d.submittedJobId}. ` : ''}Filters appear as entered, bound parameters as &lt;bound&gt;. Key material is never part of the specification.</div>
           </div>
         </aside>
       </div>

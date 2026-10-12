@@ -7,9 +7,12 @@ type Seed = { alg: string; seed: string; created_at: string };
 /**
  * The once-only key (obfuscate) or seed (synthesize) of a submitted job. It lives in React state
  * only: Copy JSON and Download hand it to the operator, nothing writes it to storage, and ticking
- * "I have stored the key" hides the JSON from the page.
+ * "I have stored the key" hides the JSON from the page (and is reported through `onStoredChange`, so the
+ * page can hold its exits until the operator has the key).
  */
-export function KeyMaterialCard({ keyMaterial, seed, jobId }: { keyMaterial?: KeyMaterial | null; seed?: Seed | null; jobId: string }): JSX.Element | null {
+export function KeyMaterialCard({ keyMaterial, seed, jobId, onStoredChange }: {
+  keyMaterial?: KeyMaterial | null; seed?: Seed | null; jobId: string; onStoredChange?: (stored: boolean) => void;
+}): JSX.Element | null {
   const [stored, setStored] = useState(false);
   const [copied, setCopied] = useState(false);
   const material = keyMaterial ?? seed;
@@ -40,7 +43,7 @@ export function KeyMaterialCard({ keyMaterial, seed, jobId }: { keyMaterial?: Ke
       </div>
       {!stored && <pre className="pane" style={{ marginTop: 12 }} aria-label={isKey ? 'Key JSON' : 'Seed JSON'}>{text}</pre>}
       <label className="stored" style={{ marginTop: 10 }}>
-        <input type="checkbox" checked={stored} onChange={(e) => setStored(e.target.checked)} />
+        <input type="checkbox" checked={stored} onChange={(e) => { setStored(e.target.checked); onStoredChange?.(e.target.checked); }} />
         I have stored the {isKey ? 'key' : 'seed'}{stored ? ` (${filename} or your vault)` : ''}
       </label>
       {isKey && <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>Without it the output cannot be revealed, and a retry after the key was purged asks for this file.</div>}

@@ -1,31 +1,32 @@
-import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { KeyMaterialCard } from '../../components/KeyMaterialCard';
-import { api, ApiError, type Auth } from '../../lib/api';
+import { useEffect, useState } from 'react';
+import { api, type Auth } from '../../lib/api';
 import {
-  buildRunSpec, fmtCount, fqn, heatTone, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
-  seedFingerprint, shortId, sourceObject, writeModeLabel, writtenObject, type Step, type WizardDraft,
+  fmtCount, fqn, heatTone, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
+  seedFingerprint, sourceObject, writeModeLabel, writtenObject, type Step, type WizardDraft,
 } from '../../lib/jobs';
-import type { ClassificationSnapshot, JobGroup, Preset, RunOut } from '../../lib/types';
-import { clearSavedDraft, type WizardAction } from './state';
+import type { ClassificationSnapshot, JobGroup, Preset } from '../../lib/types';
+import type { WizardAction } from './state';
 
-function apiError(e: unknown): { message: string; code?: string } {
-  return e instanceof ApiError ? { message: e.message, code: e.code } : { message: e instanceof Error ? e.message : String(e) };
+/** A submission in flight (`JobWizard` owns it, so it outlives this step) and its last error. */
+export interface RunSubmission {
+  busy: 'run' | 'dry' | null;
+  error: { message: string; code?: string } | null;
+  submit: (dry: boolean) => void;
 }
 
-/** Step 5 · Review and run: mode, policy, key or seed, purpose, summary, Dry run / Run job. */
-export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
+/**
+ * Step 5 · Review and run: mode, policy, key or seed, purpose, summary, Dry run / Run job. The answer
+ * of Run job (the job and its once-only key) is held by `JobWizard`, which then shows `RunResult`.
+ */
+export function StepRun({ d, dispatch, auth, snapshot, go, onBack, run }: {
   d: WizardDraft; dispatch: React.Dispatch<WizardAction>; auth: Auth; snapshot: ClassificationSnapshot | null; go: (s: Step) => void; onBack: () => void;
+  run: RunSubmission;
 }): JSX.Element {
-  const navigate = useNavigate();
   const [presets, setPresets] = useState<Preset[]>([]);
   const [groups, setGroups] = useState<JobGroup[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
   const [match, setMatch] = useState<'none' | 'matched' | 'mismatch' | 'invalid'>('none');
-  const [busy, setBusy] = useState<'run' | 'dry' | null>(null);
-  const [error, setError] = useState<{ message: string; code?: string } | null>(null);
-  const [result, setResult] = useState<RunOut | null>(null);
-  const idem = useRef<{ key: string; dry: boolean } | null>(null);
+  const { busy, error } = run;
   const set = (patch: Partial<WizardDraft>) => dispatch({ type: 'set', patch });
   const syn = d.mode === 'synthesize';
   const group = groups.find((g) => g.id === d.groupId) ?? null;
@@ -58,39 +59,10 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
   const counts = { crit: 0, sens: 0, decl: 0, kept: 0 };
   for (const c of snapshot?.columns ?? []) counts[heatTone(c)] += 1;
 
-  async function submit(dry: boolean): Promise<void> {
-    setBusy(dry ? 'dry' : 'run'); setError(null);
-    if (!idem.current || idem.current.dry !== dry) idem.current = { key: globalThis.crypto.randomUUID(), dry };
-    try {
-      const spec = buildRunSpec(d);
-      spec.options = { ...spec.options, dry_run: dry };
-      const out = await api.jobs.run(auth, spec, idem.current.key);
-      idem.current = null;
-      clearSavedDraft();
-      if (dry) { navigate(`/data-sources/jobs/${out.job.id}`); return; }
-      setResult(out);
-      set({ keyMaterialJson: '' });
-    } catch (e) { setError(apiError(e)); } finally { setBusy(null); }
-  }
-
   async function loadFile(f: File): Promise<void> {
     const text = await f.text();
     setFileName(f.name);
     set({ keyMaterialJson: text });   // React state only; never stored
-  }
-
-  if (result) {
-    const id = result.job.id;
-    return (
-      <section className="panel" aria-labelledby="h5s">
-        <div className="panel-head"><h2 id="h5s">5 · Review and run</h2></div>
-        <div className="callout emerald" style={{ fontSize: 13 }}><b>Job {shortId(id)} queued.</b> {result.job.progress.partitions_total ? `${result.job.progress.partitions_total} partitions are waiting.` : 'A worker prepares the run plan and its partitions.'}{' '}
-          <Link to="/data-sources" style={{ color: 'var(--teal)', fontWeight: 700 }}>Open in Jobs</Link> · <Link to={`/data-sources/jobs/${id}`} style={{ color: 'var(--teal)', fontWeight: 700 }}>Open job</Link></div>
-        {(result.key_material || result.synthesis_seed)
-          ? <KeyMaterialCard keyMaterial={result.key_material} seed={result.synthesis_seed} jobId={id} />
-          : <div className="card"><p className="muted" style={{ margin: 0 }}>The job runs with the {syn ? 'seed' : 'key'} you loaded; DPS returned none and keeps none.</p></div>}
-      </section>
-    );
   }
 
   return (
@@ -181,10 +153,10 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
 
       <div className="card">
         <div className="card-head"><div className="card-title">Ready to run</div><span className={`chip ${blocked.length ? 'amber' : 'emerald'}`}>{blocked.length ? `${blocked.length} to resolve` : 'all checks passed'}</span></div>
-        <div className="summ"><span className="k">Source</span><span>PostgreSQL · <span className="mono">{fqn(sourceObject(d))}</span> via <span className="mono">{d.connectionName}</span>{d.production && <span className="chip amber" style={{ marginLeft: 6 }}>production</span>}</span><button className="linkbtn" type="button" onClick={() => go(1)}>Edit</button></div>
-        <div className="summ"><span className="k">Rows</span><span>{d.rows !== null ? `${fmtCount(d.rows)} rows` : `about ${fmtCount(d.shape?.row_estimate ?? null)} rows`} · {d.columns?.length ?? d.shape?.columns.length ?? '—'} columns · {d.parallelism} partitions</span><button className="linkbtn" type="button" onClick={() => go(2)}>Edit</button></div>
-        <div className="summ"><span className="k">Discovery</span><span>{counts.crit} critical · {counts.sens} sensitive · {counts.decl} declared · {counts.kept} kept · {overrides} {overrides === 1 ? 'override' : 'overrides'}</span><button className="linkbtn" type="button" onClick={() => go(3)}>Edit</button></div>
-        <div className="summ"><span className="k">Write</span><span>{writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)} · <span className="mono">{d.writeMode === 'files' ? d.filesPrefix : fqn(d.writeMode === 'table' ? { owner: d.targetOwner || null, name: d.targetTable } : writtenObject(d))}</span>{confirmed ? ` · confirmed for ${fmtCount(d.rows)} rows` : ''}</span><button className="linkbtn" type="button" onClick={() => go(4)}>Edit</button></div>
+        <div className="summ"><span className="k">Source</span><span>PostgreSQL · <span className="mono">{fqn(sourceObject(d))}</span> via <span className="mono">{d.connectionName}</span>{d.production && <span className="chip amber" style={{ marginLeft: 6 }}>production</span>}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(1)}>Edit</button></div>
+        <div className="summ"><span className="k">Rows</span><span>{d.rows !== null ? `${fmtCount(d.rows)} rows` : `about ${fmtCount(d.shape?.row_estimate ?? null)} rows`} · {d.columns?.length ?? d.shape?.columns.length ?? '—'} columns · {d.parallelism} partitions</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(2)}>Edit</button></div>
+        <div className="summ"><span className="k">Discovery</span><span>{counts.crit} critical · {counts.sens} sensitive · {counts.decl} declared · {counts.kept} kept · {overrides} {overrides === 1 ? 'override' : 'overrides'}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(3)}>Edit</button></div>
+        <div className="summ"><span className="k">Write</span><span>{writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)} · <span className="mono">{d.writeMode === 'files' ? d.filesPrefix : fqn(d.writeMode === 'table' ? { owner: d.targetOwner || null, name: d.targetTable } : writtenObject(d))}</span>{confirmed ? ` · confirmed for ${fmtCount(d.rows)} rows` : ''}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(4)}>Edit</button></div>
         <div className="summ"><span className="k">Key</span><span>{d.keyChoice === 'group' ? `Reuse the ${syn ? 'seed' : 'key'} of ${group?.name ?? 'a job group'}${!syn && group ? ` · ${group.kid}` : ''}` : `New ${syn ? 'seed' : 'key'}, returned once with the job`}</span><span /></div>
         <div className="summ"><span className="k">Purpose</span><span><span className="mono">{d.ticket || '—'}</span> · {legalBasisText(d)}</span><span /></div>
         {blocked.length > 0 && <div className="callout rose" style={{ marginTop: 12, fontSize: 12.5 }}><b>Run job is off until these are resolved.</b> {blocked.join(' ')}</div>}
@@ -193,12 +165,12 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack }: {
       <div className="runbar">
         <div style={{ flex: '1 1 340px' }}><div style={{ fontWeight: 700 }}>{confirmed ? `Writes to ${fqn(writtenObject(d))} after you press Run job` : 'Nothing is written to the source'}</div>
           <div className="faint sm">A dry run reads and transforms a sample, runs the leakage sweep and writes nothing. You can pause from Jobs; a paused job resumes from its last checkpoint.</div></div>
-        <div className="rowx"><button className="btn" type="button" disabled={!!busy || blocked.length > 0} onClick={() => void submit(true)}>Dry run (no writes)</button>
-          <button className="btn btn-primary" type="button" disabled={!!busy || blocked.length > 0} onClick={() => void submit(false)}>{busy === 'run' ? 'Submitting…' : 'Run job'}</button></div>
+        <div className="rowx"><button className="btn" type="button" disabled={!!busy || blocked.length > 0} onClick={() => run.submit(true)}>Dry run (no writes)</button>
+          <button className="btn btn-primary" type="button" disabled={!!busy || blocked.length > 0} onClick={() => run.submit(false)}>{busy === 'run' ? 'Submitting…' : 'Run job'}</button></div>
       </div>
       {error && <div className="err">{error.message}{error.code && <span className="mono"> · {error.code}</span>}</div>}
 
-      <div className="wfoot"><button className="btn" type="button" onClick={onBack}>Back</button><span className="hint">Step 5 of 5</span></div>
+      <div className="wfoot"><button className="btn" type="button" disabled={!!busy} onClick={onBack}>Back</button><span className="hint">Step 5 of 5</span></div>
     </section>
   );
 }
