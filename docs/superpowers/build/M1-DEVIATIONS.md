@@ -1251,3 +1251,56 @@ Count: 9 new tests. The unit suite went from 966 to 975 passed, with 6 skipped (
 extras and later-task services as before). The app does not import `dps.evaluation`, and these
 tasks add no integration tests or compose profile, so no lane containers were needed. The frontend
 is untouched.
+
+## Task 16 — Demo documents and the console foundation
+
+- `tools/make_demo_docs.py` — **the Aadhaar-shaped number is Verhoeff arithmetic on an issued first
+  digit (2-9)**, seeded from the same `SEED` (`_aadhaar(seed)`), instead of
+  `engine.surrogate("AADHAAR", …)`. Why: the surrogate engine's Aadhaar numbers start with 1 on
+  purpose (UIDAI never issues them), and the detector's AADHAAR pattern (`[2-9]…`) and stdnum's
+  validator rightly ignore them, so with the plan's value the demo letter's "Your Aadhaar No." was
+  never detected and stayed unboxed in the redacted PDF (checked: detect on the plan's
+  `kyc-text.pdf` found no `AADHAAR`). The evaluation corpus (Task 15) solved the same problem the
+  same way. Every other value is the plan's (surrogate engine, seed 7). The module docstring says so.
+- `tools/make_demo_docs.py` gains `build() -> dict[str, bytes]` (every document by file name,
+  nothing written); `main()` writes `build()`'s output. Why: the test compares the committed files
+  with a fresh build without touching the working tree. Public functions gained docstrings.
+- Tests (the plan's Task 16 has none; written first, each failing on a missing module or file):
+  - `tests/test_demo_docs.py` (17, marker `docs`; one also `ocr`): the tool is reproducible; the
+    committed text-built files (`kyc-text.pdf`, `kyc.docx`, `kyc.txt`, `customers.csv`) are
+    byte-identical to a fresh build; the committed rasters (`kyc-scanned.pdf`, `id-card.png`) are
+    checked by structure (2 A4 pages; 1654 × 2339 px) because another platform's PDFium/JPEG build
+    may differ by a few bytes, and `frontend/public/demo/kyc-scanned.pdf` equals the committed scan;
+    the scan has no text layer (0 characters, 0 text operators); the values are rule-valid and
+    synthetic (Verhoeff Aadhaar, PAN, Luhn card on the test IIN, RFC 2606 domains); 20 CSV rows; the
+    DOCX zip carries the fixed timestamp; the engine finds AADHAAR, PAN_IN, CARD_PAN, EMAIL and PHONE
+    in the text PDF and the DOCX (the TXT has no phone, the CSV no Aadhaar/PAN, as the plan writes
+    them); without OCR the scan's pages are `unreadable`; and, against the lane's OCR mock, the scan
+    and the PNG read page for page like the text PDF and the scan's redaction passes its OCR re-read.
+  - `tests/test_console_yaml.py` (1): runs `frontend/src/lib/yaml.ts` under Node (type stripping)
+    over every preset and its inline-draft form and loads the output with PyYAML: equal to the input.
+    Skips without Node ≥ 22.6.
+  - `frontend/tests/{yaml,api,ocr}.test.ts` (18, `node:test`) and the script
+    `"test": "node --experimental-transform-types --no-warnings --test \"tests/*.test.ts\""` in
+    `frontend/package.json`. No new dependency (Node 22's own runner; `--experimental-transform-types`
+    because `ApiError` uses parameter properties). Files under `frontend/tests/` are outside
+    `tsconfig.json`'s `include`, so `tsc` does not see `node:test`.
+- `frontend/src/lib/ocr.ts` (new): `ocrState`, `ocrConfigured`, `ocrEngineLabel`, `ocrNote`.
+  `OcrStatus.tsx` imports them and re-exports the plan's `ocrState` and `OcrState`. Why: Node cannot
+  load `.tsx`, so logic the tests need lives in `.ts`; and the review hand-off N5 / Task 19C: the
+  plan predates local Tesseract, so its component showed a rose `tesseract_missing` chip and the
+  "Read v3.2 contract" note on a Tesseract deployment. Now `unconfigured` and `tesseract_missing`
+  both read "OCR not configured", `tesseract-5.5` reads "Local Tesseract 5.5 · up" with the note
+  "runs inside this service, no network call". `OcrState` gains `provider`.
+- `frontend/vite.config.ts`: besides the plan's `base: '/'`, the dev-server proxy target reads
+  `DPS_APP_PORT` (default 8400) — the contract's lane-safe rule for a literal host port.
+- `HANDOFF.md` §8 (the `base: '/'` trap the plan says is recorded there: a path prefix needs a
+  gateway rewrite) and `README.md` Develop (`npm test`, `tools/make_demo_docs.py`, `demo/documents`):
+  contract §0.6; not in the plan's file list.
+- Observation, not changed (engine scope, review G3-r2 N12): under the compose configuration (NER
+  off) the demo statement's account number (`ACCOUNT_NUMBER` is detected from field names only),
+  street address and payee name are not detected, so they stay visible in the redacted demo PDF; the
+  sweep cannot see them either.
+- Count: Python 977 → 995 passed, 4 skipped (tesseract binary ×2, `ner` ×2; lane OCR mock up);
+  frontend 18 `node:test` cases; `npm run build`: 41 modules, `dist/index.html` references
+  `/assets/…` and `/theme-init.js`, `dist/demo/kyc-scanned.pdf` present.

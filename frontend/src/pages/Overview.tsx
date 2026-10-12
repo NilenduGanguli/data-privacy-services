@@ -17,7 +17,7 @@ export function Overview(): JSX.Element {
   return (
     <main className="page">
       <div className="page-head">
-        <div><h1>Protection posture</h1><p>Milestone M0 · Layer 1 is live; connectors and the UI scanner arrive with M2–M4.</p></div>
+        <div><h1>Protection posture</h1><p>Milestone M1 · Layer 1 complete: JSON, text and documents (OCR, redacted PDFs), schema synthesis. Connectors and the UI scanner arrive with M2–M4.</p></div>
         <Link className="btn btn-primary" to="/playground">Open playground</Link>
       </div>
       <div className="grid cols-4">

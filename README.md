@@ -33,10 +33,14 @@ or Synthesize.
 uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e ".[dev,fpe,docs]"
 pytest -q && ruff check dps tests tools && mypy dps
 DPS_AUTH_ENABLED=false DPS_LLM_PROVIDER=stub uvicorn dps.app:create_app --factory --port 8400
-cd frontend && npm ci && npm run dev             # console on :5174, API calls proxied to :8400
+cd frontend && npm ci && npm run dev             # console on :5174, API calls proxied to :${DPS_APP_PORT:-8400}
+cd frontend && npm test                          # console unit tests (node:test, Node >= 22.6, no extra deps)
+python tools/make_demo_docs.py                   # regenerate the committed synthetic demo documents
 ```
 
 `npm run build` writes `frontend/dist`, which the API process serves at `/` when it exists.
+`demo/documents/` holds synthetic KYC documents in every supported format (text and scanned PDF,
+PNG, DOCX, TXT, CSV); the console's "Load demo KYC scan" serves `frontend/public/demo/kyc-scanned.pdf`.
 Optional extras: `ner` (Presidio + spaCy, higher recall on names and places), `fpe` (FF1
 format-preserving encryption, used only with `DPS_FPE_ENABLED=true`), `docs` (M1 documents:
 pypdf, pdfplumber, pypdfium2, reportlab, python-docx, Pillow), `uitest` (Playwright 1.55.0 for the

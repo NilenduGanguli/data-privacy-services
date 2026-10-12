@@ -208,7 +208,10 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 - `uvicorn dps.app:create_app --factory` — there is no module-level `app`.
 - The image installs `dps` **editable** on purpose: `dps/app.py` serves `<source root>/frontend/dist`.
   A wheel install into site-packages starts without the console (`frontend_disabled` in the log).
-- Routes in the console are one segment deep (`base: './'`).
+- The console builds with `base: '/'` (M1): asset URLs are absolute (`/assets/…`, `/theme-init.js`)
+  so nested routes (`/playground/documents`, `/policies/:name`) load their bundles. Hosting the
+  console under a path prefix (`https://host/dps/`) needs a gateway rewrite of that prefix to the
+  root; M0's `./` only worked one segment deep.
 - FPE fallbacks: with `DPS_FPE_ENABLED=false` the plan turns `fpe_*` into `det_token` with reason
   `…|fallback:fpe_disabled`; `phone` stays `phone` in the plan and runs as `det_token`
   (`fallback:fpe_unavailable`). With FPE on, a domain under 10⁶ still falls back
