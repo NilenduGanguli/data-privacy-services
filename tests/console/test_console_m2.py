@@ -165,7 +165,8 @@ def wizard_mockups(pg: Any) -> None:
         pg.screenshot(path=str(SHOTS / f"06-wizard-{step}-mockup.png"), full_page=True)
         if step == 4:
             pg.evaluate("document.querySelector('input[name=wm][value=in_place]').click()")
-            pg.wait_for_timeout(150)
+            pg.wait_for_timeout(700)  # the mockup scrolls its confirmation into view
+            pg.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
             pg.screenshot(path=str(SHOTS / "06-wizard-4-confirm-mockup.png"), full_page=True)
             pg.evaluate("document.querySelector('input[name=wm][value=table]').click()")
 
