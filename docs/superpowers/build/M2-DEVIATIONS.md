@@ -1463,3 +1463,33 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
 - Browser check (private Playwright 1.55.0, Vite dev server proxied to this lane's stack, 57 jobs of
   the smoke/demo/bench runs): `/data-sources` and `/` render with live stats, no console errors, no
   horizontal scroll at 1440 and 390 px.
+
+## Task 31 — Job detail page (mockup 03)
+
+- `frontend/src/lib/jobs.ts`, `jobs.test.ts` (added to the commit): `stepperState`/`DetailStep`,
+  `partitionPct`, `evidenceSoFar`, `shortType` (`character varying(120)` → `varchar(120)`, full type
+  in the title) and `typeNoteShort`, tested first (4 Vitest cases, 14 in all); `methodText` shows a
+  `true` param by its name (`phone · keep_country_code`).
+- `frontend/src/styles/components.css`, `jobs.css`, `job-detail.css` (added to the commit): scroll
+  containers (`.tbl-scroll`, `.twrap`) are positioned — an absolutely positioned `.sr` header label
+  inside a scrolled table otherwise escaped it and widened the page to 512 px on a phone; the stepper
+  wraps and its separators shrink; the evidence column keeps 180 px.
+- Head: the title adds the engine name (`PostgreSQL · bank.customers → bank_uat.customers`); the
+  line shows the write mode, the policy (`plan.policy_name`, else the spec's, else the snapshot's),
+  purpose and group; a third line has the full job id and times. **Jobs** goes back to the list.
+  **Evidence pack** is a link only once `progress.evidence_id` exists (before that a disabled button
+  "Evidence pack (when finished)"), so the page has exactly one link with that name.
+- Retry: one panel for both cases — **Retry job** without a file first; a 409
+  `key_material_required` keeps the panel open with the explanation and **Load key file** (read
+  with `File.text()` into component state, sent only inside the retry body as `consistency`).
+- Partitions: the right column shows `batch N` while running, else a state chip, plus "lease
+  reclaimed, resumed" and `#<checkpoint_fp>` (never a key); rows/s from `PartitionView`. The card is
+  rendered from the start with "Partitions appear when the job has prepared its run plan." so the
+  title "Run · partitions" is there while the job prepares (the Task 36 check waits for it).
+- Evidence so far: a job failed with `leakage` shows "leakage caught · failed closed" even when the
+  counters hold no hit (a preflight failure records the code, not a counter). The "Cross-system
+  joins" tile of the mockup is M3 (job groups); its place shows Partitions done/total as planned.
+- Snapshot table: kept columns collapse behind "+ N more columns kept" (a toggle); the footer names
+  the snapshot as plain text, not a link (one "Evidence pack" link per page). Discover jobs show the
+  snapshot list (**Review and accept** for proposed ones) and the first snapshot's table.
+- `synthesize_*` type notes are hidden on obfuscate jobs (they describe the synthesize method).

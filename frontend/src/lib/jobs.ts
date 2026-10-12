@@ -297,7 +297,8 @@ export function methodFor(col: ColumnClassification, mode: 'obfuscate' | 'synthe
 /** `fpe_digits keep_suffix 4` — method name and its params, value-free. */
 export function methodText(m: MethodSpec | null | undefined): string {
   if (!m) return '—';
-  const params = Object.entries(m.params ?? {}).filter(([k]) => k !== 'leading_zero').map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
+  const params = Object.entries(m.params ?? {}).filter(([k]) => k !== 'leading_zero')
+    .map(([k, v]) => (v === true ? k : v === false ? `no ${k}` : `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`));
   return params.length ? `${m.method} · ${params.join(', ')}` : m.method;
 }
 
@@ -656,4 +657,68 @@ export function filterJobs(jobs: Job[], f: JobFilters, ctx: { proposed: Set<stri
 export function pushSample(buf: [string, number][], sample: [string, number], max = 60): [string, number][] {
   const next = [...buf, sample];
   return next.length > max ? next.slice(next.length - max) : next;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Job detail (mockup 03).
+
+export type DetailStep = 'connect' | 'discover' | 'review' | 'target' | 'run' | 'evidence' | 'done';
+
+/** The stepper's current step: prepare → Target, partitions → Run, finalize → Evidence. */
+export function stepperState(job: Job): DetailStep {
+  if (job.kind === 'discover') return job.state === 'succeeded' ? 'review' : 'discover';
+  if (job.state === 'succeeded') return 'done';
+  switch (job.phase) {
+    case 'prepare': return 'target';
+    case 'partitions': return 'run';
+    case 'finalize': return 'evidence';
+    default: return 'run';
+  }
+}
+
+/** A partition's bar: rows written against its share of the estimate (done = 100). */
+export function partitionPct(p: { state: string; rows_written: number }, job: Job): number {
+  if (p.state === 'done') return 100;
+  const { rows_estimated: est, partitions_total: n } = job.progress;
+  if (!est || !n) return 0;
+  return Math.min(100, Math.floor((p.rows_written / (est / n)) * 100));
+}
+
+/** The Evidence-so-far tiles from the job's value-free counters. */
+export function evidenceSoFar(job: Job): { rows: number; values: number; hits: number; fallbacks: number; dominantFallback: string | null; done: number; total: number; failed: number } {
+  const { methods, fallbacks } = splitCounters(job.progress.values_by_method);
+  const values = Object.entries(methods).filter(([m]) => m !== 'keep').reduce((a, [, v]) => a + v, 0);
+  const hits = (job.progress.values_by_method['verify:hits'] ?? 0) + (job.progress.verification.hits ?? 0);
+  const ranked = Object.entries(fallbacks).sort((a, b) => b[1] - a[1]);
+  return {
+    rows: job.progress.rows_written, values, hits, fallbacks: total(fallbacks), dominantFallback: ranked[0]?.[0] ?? null,
+    done: job.progress.partitions_done, total: job.progress.partitions_total, failed: job.progress.partitions_failed,
+  };
+}
+
+/** Catalogue type names shortened for tables (`character varying(120)` → `varchar(120)`). */
+export function shortType(dataType: string): string {
+  return dataType
+    .replace(/^character varying/, 'varchar')
+    .replace(/^character\b/, 'char')
+    .replace(/^timestamp(\(\d+\))? with time zone$/, 'timestamptz$1')
+    .replace(/^timestamp(\(\d+\))? without time zone$/, 'timestamp$1')
+    .replace(/^double precision$/, 'float8');
+}
+
+/** `type_note` codes in a few words (the snapshot table's evidence column). */
+export function typeNoteShort(note: string | null | undefined): string | null {
+  switch (note) {
+    case 'fpe_domain_too_small': return 'domain < 10⁶ → no FPE';
+    case 'fpe_disabled': return 'FPE off → det_token';
+    case 'numeric_column': return 'numeric → null or keep';
+    case 'numeric_key_kept': return 'numeric key kept';
+    case 'date_column': return 'date → date_shift';
+    case 'type_kept': return 'type kept';
+    case 'binary_kept': return 'binary kept';
+    case 'text_pipeline': return 'span-level text pipeline';
+    case 'synthesize_key_kept': return 'key kept when synthesizing';
+    case 'synthesize_numeric': return 'synthesize nulls or keeps';
+    default: return note ? note.replace(/_/g, ' ') : null;
+  }
 }

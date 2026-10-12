@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
+import { evidenceSoFar, methodText, partitionPct, shortType, stepperState } from './jobs';
 import { draft, job, column } from './fixtures';
 
 describe('jobs helpers', () => {
@@ -75,3 +76,33 @@ describe('jobs page filters', () => {
   });
 });
 
+describe('job detail helpers', () => {
+  it('highlights the stepper step of the job phase', () => {
+    expect(stepperState(job({ state: 'running', phase: 'prepare' }))).toBe('target');
+    expect(stepperState(job({ state: 'waiting', phase: 'partitions' }))).toBe('run');
+    expect(stepperState(job({ state: 'queued', phase: 'finalize' }))).toBe('evidence');
+    expect(stepperState(job({ state: 'succeeded', phase: 'finalize' }))).toBe('done');
+    expect(stepperState(job({ kind: 'discover', state: 'running', phase: 'discover' }))).toBe('discover');
+    expect(stepperState(job({ kind: 'discover', state: 'succeeded', phase: 'discover' }))).toBe('review');
+  });
+  it('sizes partition bars from the per-partition share of the estimate', () => {
+    const j = job({ progress: { rows_estimated: 1000, partitions_total: 4 } });
+    const p = { partition_no: 0, state: 'running' as const, rows_read: 0, rows_written: 125, rows_skipped: 0, batch_no: 1, attempts: 1, resumed: 0, checkpoint_fp: null, started_at: null, finished_at: null, updated_at: '', error_code: null, rows_per_second: null };
+    expect(partitionPct(p, j)).toBe(50);
+    expect(partitionPct({ ...p, rows_written: 900 }, j)).toBe(100);
+    expect(partitionPct({ ...p, state: 'done', rows_written: 10 }, j)).toBe(100);
+    expect(partitionPct(p, job())).toBe(0);
+  });
+  it('shortens catalogue types and method params for the snapshot table', () => {
+    expect(shortType('character varying(120)')).toBe('varchar(120)');
+    expect(shortType('timestamp with time zone')).toBe('timestamptz');
+    expect(shortType('bigint')).toBe('bigint');
+    expect(methodText({ method: 'phone', params: { keep_country_code: true, leading_zero: 'preserve' } })).toBe('phone · keep_country_code');
+  });
+  it('sums the evidence-so-far tiles from value-free counters', () => {
+    const e = evidenceSoFar(job({ progress: { rows_written: 40, partitions_total: 4, partitions_done: 3, partitions_failed: 1,
+      values_by_method: { det_token: 30, keep: 50, fpe_digits: 10, 'fallback:fpe_domain_too_small': 4, 'fallback:fpe_disabled': 1, 'col:email': 30, 'verify:hits': 0 },
+      verification: { checked: 40, hits: 0 } } }));
+    expect(e).toMatchObject({ rows: 40, values: 40, hits: 0, fallbacks: 5, dominantFallback: 'fpe_domain_too_small', done: 3, total: 4, failed: 1 });
+  });
+});

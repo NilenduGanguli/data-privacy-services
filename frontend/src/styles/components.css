@@ -17,7 +17,8 @@
 .linkbtn:hover { text-decoration: underline; }
 .head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .page-head > .head-actions { flex: none; }
-.tbl-scroll { overflow-x: auto; }
+/* positioned, so an absolutely positioned .sr label inside a scrolled table is clipped with it */
+.tbl-scroll { overflow-x: auto; position: relative; }
 .tbl .s2 { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
 .callout.emerald { border-color: var(--emerald); background: var(--emerald-soft); }
 .callout.rose { border-color: var(--rose); background: var(--rose-soft); }
