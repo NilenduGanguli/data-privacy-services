@@ -911,3 +911,52 @@ tenant's inline policy registers its recognizers' types, so tenant `wealth` rece
 Count: 4 new tests, one of which replaces an old one (net +3). Suite 901 → 904 passed, 4 skipped
 (unit). Tasks 11–14 add no
 integration tests and no compose profile, so no lane containers were needed; the frontend is untouched.
+
+## Task 15 — Detector evaluation harness, labelled corpus, committed report
+
+The plan's corpus generator was written against the M0 *plan*; the M0 surrogate engine as built
+deliberately draws several identifiers from never-issued ranges, which the checksum validators (and
+the detectors) rightly reject. With the plan's code `generate_corpus` raised
+`RuntimeError: no rule-valid SIN after 25 attempts`, then the same for `AADHAAR`. The plan's own
+rule ("for identifiers whose surrogates are deliberately invalid … check-digit arithmetic, so every
+checksum-validated value is rule-valid — otherwise the evaluation would measure the validators, not
+the detectors") is applied to the cases it did not list:
+
+- `dps/evaluation/corpus.py` `_sin`: a Luhn-valid SIN whose first digit is 1–7 (M0's surrogates
+  start with 0; stdnum refuses 0 and 8). Generator `rule`.
+- `dps/evaluation/corpus.py` `_aadhaar`: a Verhoeff-valid, 12-digit Aadhaar starting 2–9 (M0's
+  surrogates start with 1, which UIDAI never issues and stdnum refuses). Generator `rule`.
+- `dps/evaluation/corpus.py` `ValueFactory._phone` and `_valid`: **phone numbers must be valid in
+  the jurisdiction's region** (`phonenumbers.is_valid_number`), and the surrogate template is the
+  region's own example mobile number. The plan's templates (`+1 201 555 0100` / `201 555 0100` for
+  every locale) put NANP numbers into UK, Indian and Mexican texts, and under `en_GB` the national
+  template made the surrogate engine return Ofcom's drama *mobile* range (07700 900xxx), which
+  libphonenumber does not accept: 20 of 38 `en_GB` phones were "missed" (PHONE recall 0.942), a
+  measurement of the validity check, not of the detector. UK numbers now come from Ofcom's drama
+  *landline* range (`020 7946 0xxx`, valid and fictional; generator `rule`); every other region
+  keeps the surrogate engine (NANP 555-01xx, numbers near the example elsewhere). PHONE recall is
+  now 1.000 over 345 labels.
+- `dps/evaluation/corpus.py` `CARD_EXPIRY`: a seeded `MM/YY` with year 27–34 (generator `rule`)
+  instead of the surrogate, whose year is `datetime.now().year + 1..4`: regenerating the corpus in a
+  later year would otherwise change it. Generation is now byte-identical across processes
+  (checked with `PYTHONHASHSEED` 0, 1, 12345: one sha256) and across years.
+- The module docstring names the added rule generators; two docstring/markdown lines were
+  reflowed to stay within 100 columns (the rendered markdown text is unchanged).
+
+**Measured (committed `docs/technical/detector-eval-m1.{json,md}`, corpus sha256 `988a239f…`):**
+900 records, 3 983 labels, min score 0.6, NER off — micro precision 1.000, micro recall 0.953,
+micro F1 0.976, macro F1 0.968. Every `FLOOR_TYPES` entry is 1.000/1.000 (no template change was
+needed, the floor is untouched). Shortfalls:
+
+- `IP_ADDRESS` recall 0.245 (12/49): the detector defect the plan predicted — an IPv4 address at the
+  end of a sentence (`… from 10.84.170.64.`) is missed (the M0 pattern's lookahead rejects the full
+  stop). All 37 misses are sentence-final (CA and EU templates). **Follow-up (detector, not M1):**
+  accept a trailing full stop that is not followed by a digit.
+- `PERSON_NAME` recall 0.756: all 151 misses are free-text names without a cue (JSON names are found
+  structurally, 450/450). Free text needs the NER tier (`run --ner`, `[ner]` extra).
+- The plan's second predicted defect (a card whose last 12 digits form a Verhoeff-valid Aadhaar
+  reported as `AADHAAR`) does not occur: no confusions at all. M0's card surrogates use the test IIN
+  `411111`, so the trailing 12 digits start with `1`, which the Aadhaar validator refuses. The defect
+  class still exists for real cards and stays a follow-up.
+- Threshold sweep: recall 0.953 from 0.3 to 0.6, 0.918 at 0.7, 0.909 at 0.8, 0.731 at 0.9; precision
+  1.000 throughout.
