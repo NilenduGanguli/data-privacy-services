@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -177,7 +178,9 @@ def _split_counters(
     hits = 0
     for key, value in counters.items():
         if key.startswith("fallback:"):
-            fallbacks[key.removeprefix("fallback:")] = int(value)
+            # counters stored before verify r2 issue 3 could read fallback:fallback:<reason>
+            reason = re.sub(r"^(?:fallback:)+", "", key)
+            fallbacks[reason] = fallbacks.get(reason, 0) + int(value)
         elif key.startswith("col:"):
             columns[key.removeprefix("col:")] = int(value)
         elif key == "verify:hits":

@@ -149,3 +149,34 @@ def test_a_failed_run_never_reads_as_verified() -> None:
     done = build_pack(evidence_inputs(mode="obfuscate"))
     assert done.verification["passed"] is True
     assert "verified · 0 leaks" in render_html(done, sha=pack_sha256(done))
+
+
+def test_fallback_counters_carry_the_prefix_once() -> None:
+    """M2 verify r2 issue 3: the engine's fallback notes already start with ``fallback:``; the job
+    counters used to read ``fallback:fallback:fpe_domain_too_small``."""
+    from dps.engine.batch import BatchResult
+    from dps.engine.verify import Verification
+    from dps.layers.connectors.evidence import _split_counters
+    from dps.layers.connectors.jobs_run import _counters
+
+    result = BatchResult(
+        rows=[],
+        values_by_method={"det_token": 4, "fpe_text": 2},
+        fallbacks={"fallback:fpe_domain_too_small": 3, "fallback:fpe_unavailable": 1},
+        verification=Verification(passed=True, checked=6),
+        values_by_column={"tax_id": 3},
+    )
+    counters = _counters(result)
+    assert counters == {
+        "det_token": 4,
+        "fpe_text": 2,
+        "fallback:fpe_domain_too_small": 3,
+        "fallback:fpe_unavailable": 1,
+        "col:tax_id": 3,
+    }
+    assert not any(k.startswith("fallback:fallback:") for k in counters)
+    # counters stored before the fix still read as one reason in the pack
+    _, fallbacks, _, _ = _split_counters(
+        {"fallback:fallback:fpe_domain_too_small": 5, "fallback:fpe_domain_too_small": 2}
+    )
+    assert fallbacks == {"fpe_domain_too_small": 7}

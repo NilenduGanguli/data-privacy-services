@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable
@@ -246,6 +247,10 @@ def _transformer(
     )
 
 
+#: Leading ``fallback:`` prefixes of an engine note (``fallback:fpe_domain_too_small``).
+_REPEATED_FALLBACK = re.compile(r"^(?:fallback:)+")
+
+
 def _same_connection(spec: RunSpec, source: Connection) -> bool:
     return spec.target.write_mode in ("in_place", "append") and spec.target.connection_id in (
         None,
@@ -272,9 +277,15 @@ def _files_writer(
 
 
 def _counters(result: BatchResult) -> dict[str, int]:
+    """The job's value-free counters of one batch. The engine's fallback notes already read
+    ``fallback:<reason>``; the prefix is added only where it is missing (never twice)."""
+    fallbacks: dict[str, int] = {}
+    for note, count in result.fallbacks.items():
+        key = f"fallback:{_REPEATED_FALLBACK.sub('', note)}"
+        fallbacks[key] = fallbacks.get(key, 0) + count
     counters = {
         **result.values_by_method,
-        **{f"fallback:{k}": v for k, v in result.fallbacks.items()},
+        **fallbacks,
         **{f"col:{k}": v for k, v in result.values_by_column.items()},
     }
     if result.verification.hits:
