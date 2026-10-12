@@ -836,3 +836,31 @@ Review: `M2-G4-review-r1.md`, one blocking finding (B1). Contract change: §0 am
   without the value), and extra assertions (no ledger for `table`, a refused batch leaves the
   ledger mark, two partitions' marks, a created table's primary key, dry-run creates no ledger,
   `create_if_missing: false`, a key without identity/default): 8 tests (plan: 5).
+
+## Task 20 — Files writer and manifest
+
+- `dps/layers/connectors/files.py`: as planned, with these changes (each has a test):
+  - **Deterministic gzip.** Text formats are gzipped through `GzipFile(mtime=0)`; the plan's
+    `gzip.open` stamps the current time into the header, so a resumed partition would rewrite
+    its object with different bytes and a different sha256 (the plan promises deterministic
+    content). `test_partitions_are_independent_and_deterministic` compares the hashes.
+  - `snappy`/`zstd` are Parquet codecs: a CSV/JSONL target with them (the `FilesSpec` default is
+    `snappy`) is written uncompressed, and the manifest records the **effective** compression
+    (`effective_compression`); the plan did not say what text formats do with them.
+  - Uploads stream each part file in 1 MiB chunks (`ObjectStore.put` takes an async iterator;
+    S3 goes multipart above 16 MiB) instead of `read_bytes()`, which held a whole part (up to a
+    million rows) in memory.
+  - Parquet: `decimal128(p, s)` only for a declared precision ≤ 38, else exact text (the plan's
+    rule; an unconstrained `numeric` has no precision, so it is text too); string columns convert
+    any non-string driver value (UUID, JSON, other types) to its text form; batches go through
+    `Table.from_pydict` with the schema. JSONL keeps non-finite floats as strings (JSON has no
+    NaN).
+  - `prepare` turns a refused probe into `PrepareFailure("target_invalid")` with the storage
+    code; the probe object is `<base>/dps-probe.txt`. `close()` discards unfinished spools.
+    The manifest carries `manifest_version: dps.files.v1` and objects sorted by key; a column's
+    `type` is its declared type (else its kind). An empty partition returns `{"files": []}`.
+- Tests: the plan's 4 + 1 (`test_formats_round_trip` also covers JSONL+gzip and checks the
+  extension, the date column and the timestamp type; the split test writes the resumed
+  partition in two batches) plus `test_partitions_are_independent_and_deterministic`,
+  `test_writer_protocol_no_ops_probe_and_value_conversion`, `test_a_failing_store_fails_the_probe`;
+  the s3 test uses `zstd` and checks the probe: 9 offline + 1 s3 = 10 (plan: 6).
