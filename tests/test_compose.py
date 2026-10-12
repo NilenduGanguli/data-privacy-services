@@ -28,11 +28,36 @@ def test_every_host_port_is_loopback_and_lane_safe() -> None:
             assert HOST_PORT.match(port), (name, port)
 
 
+#: The one-shots of contract §11 (M2): they run once, exit 0 and are waited for with
+#: ``condition: service_completed_successfully`` — their exit code is their health check.
+ONE_SHOTS = {"migrate", "minio-init", "demo-secrets", "seed-sources"}
+
+
 def test_every_service_has_a_healthcheck_a_memory_limit_and_labels() -> None:
-    for name, service in _services().items():
-        assert service.get("healthcheck", {}).get("test"), name
+    services = _services()
+    # A one-shot is a service that never restarts; each one is named here, so a new one is a
+    # deliberate change (and keeps every long-running service under the healthcheck rule).
+    assert {name for name, s in services.items() if s.get("restart") == "no"} == ONE_SHOTS
+    for name, service in services.items():
         assert service.get("mem_limit"), name
         assert service.get("labels", {}).get("app") == "data-privacy-services", name
+        if name in ONE_SHOTS:
+            assert "ports" not in service and not service.get("healthcheck"), name
+        else:
+            assert service.get("healthcheck", {}).get("test"), name
+
+
+def test_one_shots_are_awaited_until_they_exit_0() -> None:
+    services = _services()
+    for name, service in services.items():
+        for dep, rule in (service.get("depends_on") or {}).items():
+            if dep in ONE_SHOTS:
+                assert rule["condition"] == "service_completed_successfully", (name, dep)
+    # app and worker only verify migrations (contract §11.1): both wait for the migrate one-shot.
+    for name in ("app", "worker"):
+        assert services[name]["depends_on"]["migrate"]["condition"] == (
+            "service_completed_successfully"
+        )
 
 
 def test_the_ocr_mock_is_the_cached_image_under_the_docs_and_full_profiles() -> None:
@@ -73,11 +98,21 @@ def test_the_app_keeps_its_m0_hardening() -> None:
     assert app["security_opt"] == ["no-new-privileges:true"]
 
 
+def _installed_extras(dockerfile: str) -> list[set[str]]:
+    """The extras of every ``uv pip install … -e ".[…]"`` line of the Dockerfile."""
+    return [set(m.split(",")) for m in re.findall(r'-e "\.\[([a-z_,-]+)\]"', dockerfile)]
+
+
 def test_the_image_installs_the_docs_extra_and_builds_the_console_on_node_22() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text("utf-8")
     assert "FROM node:22-slim AS frontend" in dockerfile
-    assert '-e ".[fpe,docs]"' in dockerfile
-    assert '-e ".[fpe,docs,ner]"' in dockerfile
+    installs = _installed_extras(dockerfile)
+    # Both branches of the WITH_NER switch: M1's documents (contract §11.1) and M2's job
+    # platform (app, worker and migrate run this one image); [ner] only with WITH_NER=1.
+    assert len(installs) == 2
+    for extras in installs:
+        assert {"fpe", "docs", "db", "connectors"} <= extras, extras
+    assert sum("ner" in extras for extras in installs) == 1
 
 
 def test_the_build_context_leaves_out_demo_documents_and_tests() -> None:
