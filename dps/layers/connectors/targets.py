@@ -265,9 +265,12 @@ def _check_tabular(spec: RunSpec, settings: Settings) -> None:
             "tabular_invalid", 422, f"tabular engine {engine} is not enabled on this deployment"
         )
     if engine == "mostly":
-        raise _fail(
-            "tabular_invalid", 422, "the synth-ml extra is not installed on this deployment"
-        )
+        from dps.engine.synth.mostly import mostly_available  # needs the tabular extra only
+
+        if not mostly_available():
+            raise _fail(
+                "tabular_invalid", 422, "the synth-ml extra is not installed on this deployment"
+            )
 
 
 def validate_run(

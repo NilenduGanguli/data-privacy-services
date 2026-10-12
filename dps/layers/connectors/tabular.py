@@ -45,6 +45,7 @@ from dps.engine.metrics import (
 from dps.engine.policy import Policy
 from dps.engine.synth.constraints import ColumnSpec, ConstraintError, ConstraintSet
 from dps.engine.synth.copula import CopulaError, GaussianCopula
+from dps.engine.synth.mostly import TabularUnavailable
 from dps.engine.synth.personas import seed_int
 from dps.jobs_models import ClassificationSnapshot
 from dps.layers.connectors.base import Connector, Row, TableShape
@@ -234,13 +235,27 @@ def fit_sampler(
     reject_rows: list[Row],
     reject_columns: list[str],
 ) -> TabularSampler:
-    """Fit ``engine`` on ``train`` (CPU-bound: run it in a thread).
+    """Fit ``engine`` on ``train`` (CPU-bound or a local training run: run it in a thread).
 
     Raises:
-        CopulaError: the copula cannot be fitted (value-free).
+        CopulaError: the copula cannot be fitted; TabularUnavailable: the MOSTLY engine cannot
+            run (value-free).
     """
     data = {c.path: [r.get(c.name) for r in train] for c in columns}
     kinds = {c.path: c.kind for c in columns}
+    if engine == "mostly":
+        from dps.engine.synth.mostly import MostlySampler  # the optional synth-ml extra
+
+        return MostlySampler.fit(
+            data,
+            kinds,
+            seed=seed,
+            pool_rows=settings.mostly_pool_rows,
+            max_training_minutes=settings.mostly_max_training_minutes,
+            scales={c.path: c.scale or 0 for c in columns},
+            reject_rows=reject_rows,
+            reject_columns=reject_columns,
+        )
     return GaussianCopula.fit(
         data,
         kinds,
@@ -256,7 +271,7 @@ def load_sampler(engine: str, model_b64: str, seed: bytes) -> TabularSampler:
     """Deserialise a sealed model (cached per process; the cache key holds digests only).
 
     Raises:
-        CopulaError: the bytes are not a model of the engine's format.
+        CopulaError / TabularUnavailable: the bytes are not a model of the engine's format.
     """
     key = (
         engine,
@@ -268,7 +283,13 @@ def load_sampler(engine: str, model_b64: str, seed: bytes) -> TabularSampler:
         _CACHE.move_to_end(key)
         return cached
     data = base64.b64decode(model_b64)
-    sampler: TabularSampler = GaussianCopula.from_bytes(data, seed)
+    sampler: TabularSampler
+    if engine == "mostly":
+        from dps.engine.synth.mostly import MostlySampler
+
+        sampler = MostlySampler.from_bytes(data, seed)
+    else:
+        sampler = GaussianCopula.from_bytes(data, seed)
     _CACHE[key] = sampler
     while len(_CACHE) > _CACHE_MAX:
         _CACHE.popitem(last=False)
@@ -527,7 +548,7 @@ async def prepare_tabular(
             reject_rows=rows,
             reject_columns=reject_columns,
         )
-    except CopulaError as exc:
+    except (CopulaError, TabularUnavailable) as exc:
         raise TabularGateError("tabular_invalid", str(exc)) from exc
     written = set(sampler.columns)
     excluded += [
@@ -575,6 +596,9 @@ async def prepare_tabular(
         "holdout_rows": len(holdout),
         "preview_rows": len(preview),
     }
+    if engine_name == "mostly":
+        # with more source rows than pool rows, synthetic rows repeat (Task 7)
+        metrics["tabular"]["pool_rows"] = int(getattr(sampler, "pool_rows", 0))
     if metrics["privacy"]["exact_row_matches"]:
         raise TabularGateError("leakage", "synthetic preview rows equal real rows")
     if settings.privacy_nndr_enforce and not metrics["privacy"]["nndr"]["passed"]:

@@ -224,6 +224,36 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   plan reused Task 6's), imported helpers from `tests/test_tabular_prepare.py`; Task 6's
   `test_prepare_returns_a_sealable_model_and_value_free_metrics` now expects the MIA proxy to run.
 
+## Task 7 — Optional MOSTLY AI engine (`synth-ml` extra)
+
+- `dps/engine/synth/mostly.py`: the plan's pool sampler, with these changes (each tested offline):
+  - generated values that their column cannot hold (`datetime.fromisoformat` / `float()` errors,
+    whose messages quote the value) become a value-free `TabularUnavailable`
+    (`coerce_rows`; `test_bad_generator_output_and_blobs_fail_without_values`); `coerce` is public
+    (Task 7B's linked pool uses it) and also reads `"NaN"`/`"None"` and a float NaN as null;
+  - `from_bytes` maps `zlib.error`/JSON/shape errors to `TabularUnavailable("unsupported pool
+    format")` (the blob is sealed, so this is robustness, not a security boundary);
+  - `mostly_available()` also treats an `ImportError`/`ValueError` from `find_spec` (a broken
+    parent package) as "not available".
+- `dps/layers/connectors/tabular.py`: `fit_sampler`/`load_sampler` gain the MOSTLY branch (lazy import),
+  `prepare_tabular` maps `TabularUnavailable` to `tabular_invalid` and records `tabular.pool_rows`;
+  `dps/layers/connectors/jobs_run.py` maps an unreadable pool to `tabular_invalid` like an unreadable
+  copula; `dps/layers/connectors/targets.py` refuses `mostly` with `tabular_invalid` unless
+  `mostly_available()` (Task 6 refused it unconditionally).
+- The SDK call is the plan's (`MostlyAI(local=True, local_dir=…)`, `train(config=…, start=True,
+  wait=True)`, `generate(…).data()`), **not verified against a real SDK in this lane**: the extra
+  (torch ≈ 2 GB) is not installed, so `test_real_sdk_trains_and_generates` (`ml`) skips. Run
+  `uv pip install -e ".[synth-ml]" && pytest -q -m ml tests/test_mostly.py` on a machine with the
+  extra before enabling the engine anywhere.
+- Tests: the plan's 4 plus `test_values_are_coerced_to_their_column_kind`,
+  `test_bad_generator_output_and_blobs_fail_without_values`,
+  `test_prepare_with_the_mostly_engine_records_the_pool` (prepare with the engine's trainer
+  monkeypatched) and `test_validation_needs_the_extra` (8; 1 skips without the extra).
+  `tests/test_tabular_prepare.py::_prepare` takes `engine_name`.
+- `HANDOFF.md` §2: the `synth-ml` opt-in sentence. The plan's `docker build --build-arg
+  EXTRAS=synth-ml` does not exist (the Dockerfile has `WITH_NER` only); adding a build argument is
+  an image change — deferred to the images task (below).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -235,3 +265,6 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   rare/unique real rows instead stays a privacy decision for the final stage (not taken here).
 - Task 5 → Task 6 (closed in Task 6): `ConstraintError` maps to `incompatible_method` at prepare
   (with the one-integer-key pre-check) and in partitions; integer precision 4/9/18 is passed.
+- Task 7 → Task 24: an `EXTRAS` (or `WITH_SYNTH_ML`) build argument for a bank-built image with the
+  `synth-ml` extra; the MOSTLY SDK call (`_sdk_trainer`) has never run against the real SDK here —
+  run the `ml` tests where the extra is installed.

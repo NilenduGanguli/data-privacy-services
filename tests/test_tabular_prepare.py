@@ -184,6 +184,7 @@ async def _prepare(
     plans: list[ColumnPlan] = PLANS,
     policy: Policy | None = None,
     seed: Any = None,
+    engine_name: str = "copula",
     **kw: Any,
 ) -> tuple[TabularPrepared, Any]:
     settings = _settings(**kw)
@@ -206,7 +207,7 @@ async def _prepare(
 
     out = await prepare_tabular(
         settings=settings,
-        engine_name="copula",
+        engine_name=engine_name,
         connector=FakeConnector(rows),  # type: ignore[arg-type]
         shape=shape,
         selection=None,

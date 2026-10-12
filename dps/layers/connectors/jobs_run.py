@@ -677,6 +677,7 @@ async def _runtime_tabular(
 ) -> tuple[TabularSampler, ConstraintSet | None]:
     """The sealed model and its constraints for this job's partitions (once per runtime)."""
     from dps.engine.synth.copula import CopulaError
+    from dps.engine.synth.mostly import TabularUnavailable
     from dps.layers.connectors.tabular import runtime_sampler
 
     if not secret.synthesis_seed or not secret.tabular_model:
@@ -695,7 +696,7 @@ async def _runtime_tabular(
             snapshot=snapshot,
             object_fqn=plan.source_object,
         )
-    except CopulaError:
+    except (CopulaError, TabularUnavailable):
         raise PrepareFailure(
             "tabular_invalid", "the sealed tabular model could not be read"
         ) from None

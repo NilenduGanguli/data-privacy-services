@@ -82,7 +82,9 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
   `uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"` (`tabular` = M5's
   `numpy>=2.0` + `scipy>=1.13` for the Gaussian-copula engine and the fidelity/privacy metrics;
   `ner` + `en_core_web_sm` added when `WITH_NER=1`; the optional `synth-ml` extra, MOSTLY AI, is
-  never installed in an image), the
+  never installed in an image built from this Dockerfile: adding it is a bank-side opt-in after the
+  licence and image-size review (torch ≈ 2 GB; `uv pip install -e ".[synth-ml]"` in a derived
+  image), and without it `options.tabular="mostly"` is refused with `tabular_invalid`), the
   console dist at `/app/frontend/dist`, `tools/` at `/app/tools`, and `/app/var/{artefacts,exports}`
   owned by uid 10001;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
