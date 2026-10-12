@@ -4,10 +4,12 @@ import pytest
 
 from dps.engine.policy import (
     METHOD_NAMES,
+    REVERSIBLE_METHODS,
     MethodSpec,
     Policy,
     list_presets,
     load_preset,
+    preset_summaries,
     resolve_policy,
 )
 
@@ -187,3 +189,24 @@ def test_dpdp_policy_hash_is_unchanged_by_the_optional_locale() -> None:
     assert load_preset("dpdp-pseudonymise").config_hash() == (
         "18f2ecaf465bc0e9e6127acf1811637f8c996fb23488a108a0efcf4fc7fcb98e"
     )
+
+
+def test_preset_summaries_carry_hash_mode_and_reversibility() -> None:
+    items = {p["name"]: p for p in preset_summaries()}
+    assert (
+        items["gdpr-pseudonymise"]["mode"] == "obfuscate"
+        and items["gdpr-pseudonymise"]["reversible"] is True
+    )
+    assert (
+        items["synthetic-strict"]["mode"] == "synthesize"
+        and items["analytics-safe"]["reversible"] is False
+    )
+    assert all(
+        len(p["hash"]) == 64 and p["version"] >= 1 and p["description"] for p in items.values()
+    )
+
+
+def test_reversible_methods_match_the_method_registry() -> None:
+    from dps.engine.transform.methods import METHODS  # imports this module: keep it local
+
+    assert {name for name, m in METHODS.items() if m.reversible} == REVERSIBLE_METHODS

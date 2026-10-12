@@ -783,3 +783,38 @@ at the Task 13 routes) and one quadratic path; each fix has a test that fails on
   coincide too. Fail-closed, as the plan specifies; a policy decision is needed.
 - Count: 10 tests (plan 5). Suite 879 → 889 passed, 4 skipped. Route timings on this Mac: a 10 000-row
   synthesis from a spec answers in 0.36 s (823 KiB of JSON).
+
+## Task 14 — Entities route, recognizer test route, allow-lists, preset summaries
+
+- `dps/engine/detect/custom.py`: each compiled pattern and deny-list matcher carries its recognizer's
+  allow-list (`frozenset`), instead of the plan's `self._allow` keyed by recognizer **name**. Nothing
+  makes recognizer names unique, so with two recognizers named alike the plan's dict let one's
+  allow-list silence (or fail to silence) the other's hits
+  (`test_allow_lists_are_per_recognizer_even_with_one_name`). The allow-list is matched exactly
+  (case-sensitive) against `m.group(0)`, for pattern and deny-list hits alike, as the plan says; blank
+  entries are refused like blank deny-list entries (one validator for both). The module docstring
+  documents the field. Additive: an inline policy with recognizers now dumps `allow_list: []`, so its
+  `config_hash()` differs from M0's for the same input (no hash is persisted before M2).
+- `dps/engine/policy.py` `REVERSIBLE_METHODS` also holds `external_tokenize`, which the method registry
+  marks reversible (`Method("external_tokenize", True, …)`); the plan's set omitted it.
+  `transform/methods.py` imports `policy.py`, so the set cannot be derived there; a test keeps the two
+  equal (`test_reversible_methods_match_the_method_registry`). No shipped preset uses the method, so
+  every preset's `reversible` value is the plan's.
+- `dps/layers/api/routers/entities.py`:
+  - `GET /entities` also has the rate-limit dependency (M0's `GET /policies/presets` has it) and reads
+    each entry through `entity_info`, so a built-in entry wins even if the open registry was mutated
+    (the taxonomy's own rule); the plan sorted `TAXONOMY.values()` directly.
+  - `POST /policies/test-recognizer` also refuses more than 50 patterns (`invalid_recognizer`): the
+    plan bounds the text and each pattern because Python's `re` has no timeout, but not how many
+    patterns run over the text.
+- `dps/layers/api/routers/policies.py`: the presets route's return type is `list[dict[str, Any]]`.
+- Extra tests: the allow-list on deny-list hits and blank entries, per-recognizer allow-lists,
+  registry parity, the pattern cap with value-free errors, and registered custom types listed by
+  `/entities` with `builtin: false`.
+- **Open:** the taxonomy registry is process-wide (M0), so `GET /entities` lists custom types (and
+  their `custom:<recognizer name>` descriptions) registered by any tenant's policy — names only, never
+  values; the plan asks for "the live taxonomy incl. registered custom types". A pathological regex
+  (catastrophic backtracking) can still hold a worker thread on this route, as on M0's `/detect` with
+  an inline recognizer.
+- Count: plan 7 new tests (custom 1, policy 1, entities 5); added 5 more. Suite 889 → 901 passed,
+  4 skipped; `tests/test_api.py` (M0) unchanged and green.

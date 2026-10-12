@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from dps.auth import require_scope
-from dps.engine.policy import list_presets
+from dps.engine.policy import preset_summaries
 from dps.engine.service import EngineError, PlanResponse, PrivacyEngine
 from dps.layers.api.common import payload_from, policy_label, run_engine
 from dps.layers.api.schemas import PlanOut, PlanRequest, PolicyOut, ValidatePolicyRequest
@@ -18,9 +20,9 @@ router = APIRouter(prefix="/api/v1/policies", tags=["policies"])
 @router.get(
     "/presets", dependencies=[Depends(require_scope("detect")), Depends(enforce_rate_limit)]
 )
-def presets() -> list[dict[str, str]]:
-    """Every preset's name and description."""
-    return list_presets()
+def presets() -> list[dict[str, Any]]:
+    """Every preset's name, description, version, config hash, mode and reversibility."""
+    return preset_summaries()
 
 
 @router.post(
