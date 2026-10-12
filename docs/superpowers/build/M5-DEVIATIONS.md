@@ -102,9 +102,52 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   positivity on decimals, value-free range/then errors, date/text/null conditions, the skipped
   condition column and the hash/alias round trip.
 
+## Task 5 — Tabular sampling and exact-row rejection in `BatchTransformer`
+
+- `dps/engine/batch.py` `LeakageError`: M2's class takes a hit count (`LeakageError(hits)`, message
+  "leakage: N original value(s) …"; `jobs_run` reads `.code`/`str(exc)`). It gains a keyword
+  `rule`; `LeakageError(1, rule="exact_row_match")` has the message `exact_row_match` (the plan's
+  `LeakageError("exact_row_match")` would have put a string into `hits`). Code stays `leakage`.
+- **Tabular anchor**: the plan reused the anchor M2 hands `ApplyOptions`, which with an entity anchor
+  column is `<ENTITY>:<hash>` — shared by every row of the same customer (e.g. all accounts of one
+  `CUSTOMER_ID`), so those rows would have been drawn identically (a fidelity defect and duplicate
+  synthetic rows). The sampler is keyed by the row's key anchor (`row:<hash(key)>`, §6.2's no-anchor
+  form), unique per row; with no anchor column it is the same string as the plan's
+  (`test_rows_sharing_an_entity_anchor_still_get_their_own_draws`). Contract §6.6 says so.
+- `BatchTransformer.__init__` refuses (value-free `ValueError`) a sampler outside synthesize mode, on
+  a table without a key, or one that would write a key column, a planned column or a column the
+  table lacks (contract §6.6: the sampler covers non-key, non-sensitive columns only; overwriting a
+  key would break partitions and the ledger); and a negative `max_resample`.
+- `TabularSampler.engine` and `.columns` are read-only properties in the protocol, so
+  `GaussianCopula.engine: ClassVar[str]` satisfies it under mypy (checked); the other members are the
+  plan's. `ConstraintSet` is imported under `TYPE_CHECKING` only (`batch.py` stays importable without
+  the `tabular` extra).
+- Counters: `values_by_method["<engine>"]` (non-null sampled values, also into `TRANSFORMS` with the
+  engine as the method label), `"<engine>_resample"` only when there were redraws (into
+  `dps_tabular_resamples_total` only), and `values_by_column` counts the sampled columns (additive;
+  M2's evidence reads only planned columns, Task 6 can show the rest). The integer key for `unique`
+  constraints is read only when a sampler is set.
+- `tests/test_batch_tabular.py`: `ColumnPlan` needs M2's `name` field; tests added for fit/holdout
+  rejection, unique constraints receiving the key, the sampler-column refusals, the anchor choice,
+  and three with the real `GaussianCopula` (no output row equals a real row and the output is
+  deterministic; the copula's own reject set forces redraws; a table whose every value combination is
+  real fails closed with `exact_row_match`).
+- Contract §6.4 lists M2's existing `anchor`/`verify` keywords beside the two new ones; §6.6 carries
+  the extended protocol, the `fit` keywords of Task 3 and the behaviour sentence.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
 - Task 1: `Dockerfile`'s comment still says the `[tabular]` extra "arrives with M5" and is skipped;
   the install line already names the extra, so the image now gets numpy + scipy. The comment and the
   image size measurement belong to Task 24 (images), which this lane does not run.
+- Task 5 → Task 6 (open): a table whose non-key columns have few distinct values (every combination
+  occurs in the real data) cannot pass exact-row rejection: almost every draw equals some real row
+  and the batch fails closed (`test_a_table_whose_every_combination_is_real_fails_closed`). Task 6's
+  prepare preview meets this first and should fail the job with a clear code (or the design may
+  choose to reject only matches of rare/unique real rows — a privacy decision, not taken here).
+- Task 5 → Task 6 (open): `ConstraintError` (a `unique` rule on a table without a single integer
+  key, a key outside the rule's domain) raised inside `transform` reaches `jobs_run`'s generic
+  handler (`internal_error`, retried). Task 6 should check `ConstraintSet.needs_key_int` against the
+  table key at prepare and map `ConstraintError` to a value-free 4xx code; it must also pass
+  `ColumnSpec.precision` 4/9/18 for `smallint`/`integer`/`bigint` (Task 4 note).

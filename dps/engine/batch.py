@@ -32,6 +32,14 @@ there that starts with ``0`` would be stored without that digit and reveal would
 number. Any reversible output the target column would store differently (a dropped leading zero,
 a decimal re-scaled to the column's scale) fails the batch with ``incompatible_method`` instead
 of being written.
+
+**Tabular synthesis** (M5, contract §6.6). With a :class:`TabularSampler` (synthesize mode only),
+after the planned columns are transformed the sampler's columns (non-key, unplanned) are
+overwritten with one synthetic draw per row, keyed by the row's key anchor
+(``row:<hash(key)>``, unique per row even when rows share an entity anchor), then the policy's
+constraints run, and a row equal on every reject column to a real row — of the fit sample, the
+holdout or the batch's own sources — is redrawn (the stream salted by ``attempt``). More than
+``max_resample`` redraws for one row fails the batch closed: ``LeakageError("exact_row_match")``.
 """
 
 from __future__ import annotations
@@ -39,7 +47,9 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections import Counter
-from typing import Any, Literal, Protocol, cast
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -75,7 +85,10 @@ from dps.layers.connectors.base import (
     from_engine_text,
     to_engine_text,
 )
-from dps.observability import FINDINGS, TRANSFORMS, VERIFY_FAIL
+from dps.observability import FINDINGS, TABULAR_RESAMPLES, TRANSFORMS, VERIFY_FAIL
+
+if TYPE_CHECKING:  # the constraints module needs the [tabular] extra; M2 jobs run without it
+    from dps.engine.synth.constraints import ConstraintSet
 
 #: Methods that need no key material (usable in synthesize mode).
 KEYLESS_METHODS = frozenset(
@@ -111,9 +124,30 @@ _HIDDEN = ConfigDict(hide_input_in_errors=True)
 
 
 class TabularSampler(Protocol):
-    """M5's per-row tabular sampler (contract §6.6); M2 always passes ``None``."""
+    """M5's per-row tabular sampler (contract §6.6): ``GaussianCopula``, or the MOSTLY pool.
+
+    Rows are keyed by column **name**; the same model, seed, anchor and attempt always give the
+    same row. ``row_digest``/``is_rejected`` decide exact-row matches over the sampler's reject
+    columns (the non-key output columns).
+    """
+
+    @property
+    def engine(self) -> str: ...  # "copula" | "mostly"
+
+    @property
+    def columns(self) -> list[str]: ...  # column NAMES the sampler writes
 
     def sample_row(self, anchor: str) -> dict[str, Any]: ...
+
+    def sample_rows(self, anchors: Sequence[str], *, attempt: int = 0) -> list[dict[str, Any]]: ...
+
+    def row_digest(self, row: Mapping[str, Any]) -> int: ...
+
+    def is_rejected(
+        self, row: Mapping[str, Any], *, extra: AbstractSet[int] = frozenset()
+    ) -> bool: ...
+
+    def to_bytes(self) -> bytes: ...
 
 
 class ColumnPlan(BaseModel):
@@ -168,15 +202,16 @@ class BatchResult(BaseModel):
 
 
 class LeakageError(Exception):
-    """The per-row sweep found originals in the output under ``strict``; nothing is written."""
+    """The per-row sweep found originals in the output under ``strict``, or a synthetic row kept
+    equalling a real row (``rule="exact_row_match"``, the message is then the rule alone); nothing
+    is written. Value-free."""
 
     code = "leakage"
 
-    def __init__(self, hits: int) -> None:
-        super().__init__(
-            f"leakage: {hits} original value(s) found in the transformed batch; nothing was written"
-        )
-        self.hits = hits
+    def __init__(self, hits: int, *, rule: str | None = None) -> None:
+        message = f"leakage: {hits} original value(s) found in the transformed batch; "
+        super().__init__(rule if rule is not None else message + "nothing was written")
+        self.hits, self.rule = hits, rule
 
 
 class IncompatibleMethod(Exception):
@@ -279,13 +314,17 @@ class BatchTransformer:
         tabular: TabularSampler | None = None,
         anchor: tuple[str, str] | None = None,
         verify: Literal["strict", "warn"] = "strict",
+        constraints: ConstraintSet | None = None,
+        max_resample: int = 8,
     ) -> None:
         """Validate the mode's prerequisites and the plans against ``shape``.
 
         Raises:
             ValueError: obfuscate without key material, synthesize without a seed, a plan (or
                 the anchor) naming a column the table does not have, or a plan whose method
-                params lack their plan defaults (copied around :class:`ColumnPlan`'s validator).
+                params lack their plan defaults (copied around :class:`ColumnPlan`'s validator);
+                a tabular sampler outside synthesize mode, on a table without a key, or writing
+                a key column, a planned column or a column the table does not have.
             IncompatibleMethod: ``incompatible_method`` for a synthesize-mode method that needs
                 key material, or ``fpe_digits`` without ``leading_zero: preserve`` on a numeric
                 column.
@@ -319,10 +358,30 @@ class BatchTransformer:
         known = {c.name for c in shape.columns}
         if any(c.name not in known for c in columns) or (anchor and anchor[0] not in known):
             raise ValueError("a column plan names a column the table does not have")
+        if tabular is not None:
+            if mode != "synthesize":
+                raise ValueError("tabular sampling runs in synthesize mode only")
+            if not shape.key:
+                raise ValueError("tabular sampling needs a table key")
+            writable = known - set(shape.key) - {c.name for c in columns}
+            if any(name not in writable for name in tabular.columns):
+                raise ValueError(
+                    "the tabular sampler writes a key column, a planned column or a column "
+                    "the table does not have"
+                )
+        if max_resample < 0:
+            raise ValueError("max_resample must not be negative")
         self.engine, self.policy, self.mode = engine, policy, mode
         self.shape, self.key, self.seed, self.locale = shape, key, seed, locale
         self.anchor, self.verify_mode = anchor, verify
         self.unclassified, self.tabular = unclassified, tabular
+        self.constraints, self.max_resample = constraints, max_resample
+        self._int_key = False
+        if tabular is not None and len(shape.key) == 1 and shape.key[0] in known:
+            key_column = shape.column(shape.key[0])
+            self._int_key = key_column.kind == "int" or (
+                key_column.kind == "decimal" and not key_column.scale
+            )
         self.whole = [c for c in columns if not c.text_column]
         self.text = [c for c in columns if c.text_column]
         self.detector = engine.detector(policy, locale) if self.text else None
@@ -392,7 +451,13 @@ class BatchTransformer:
         findings_seen: Counter[tuple[str, str]] = Counter()
         hits: list[dict[str, str]] = []
         checked = 0
+        tabular_anchors: list[str] = []
+        key_ints: list[int | None] = []
         for row in rows:
+            if self.tabular is not None:
+                # keyed by the row key: rows sharing an entity anchor still get their own draws
+                tabular_anchors.append(row_anchor(row, self.shape, None))
+                key_ints.append(self._key_int(row))
             doc: dict[str, str] = {}
             for col in self.whole + self.text:
                 text = to_engine_text(row.get(col.name), self.shape.column(col.name))
@@ -468,6 +533,15 @@ class BatchTransformer:
                 inputs = {self.out_cols[name].path: doc[name] for name in searched}
                 hits += verify_row(originals, outputs, inputs=inputs)
             out_rows.append(out)
+        resample_counts: dict[str, int] = {}
+        if self.tabular is not None:
+            written, resamples = self._apply_tabular(rows, out_rows, tabular_anchors, key_ints)
+            engine_name = self.tabular.engine
+            methods[engine_name] += sum(written.values())
+            per_column.update(written)
+            if resamples:
+                resample_counts[f"{engine_name}_resample"] = resamples
+                TABULAR_RESAMPLES.inc(resamples)
         for method, count in methods.items():
             TRANSFORMS.labels(self.mode, method).inc(count)
         for (entity, detector), count in findings_seen.items():
@@ -479,11 +553,63 @@ class BatchTransformer:
                 raise LeakageError(len(hits))
         return BatchResult(
             rows=out_rows,
-            values_by_method=dict(methods),
+            values_by_method={**methods, **resample_counts},
             fallbacks=dict(notes),
             verification=verification,
             values_by_column=dict(per_column),
         )
+
+    def _key_int(self, row: Row) -> int | None:
+        """The row's single integer key (for ``unique`` constraints), else ``None``."""
+        if not self._int_key:
+            return None
+        value = row.get(self.shape.key[0])
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+
+    def _apply_tabular(
+        self,
+        sources: list[Row],
+        outputs: list[Row],
+        anchors: list[str],
+        key_ints: list[int | None],
+    ) -> tuple[Counter[str], int]:
+        """Overwrite the sampler's columns with synthetic values, enforce constraints, and redraw
+        any row equal to a real row (fit sample, holdout, or a source row of this batch) on every
+        reject column. More than ``max_resample`` redraws for one row fails the batch closed.
+
+        Returns ``(non-null values written per column, redraws)``.
+
+        Raises:
+            LeakageError: ``exact_row_match`` — a row stayed equal to a real row.
+            ConstraintError: a ``unique`` rule without a usable integer key (value-free).
+        """
+        sampler = self.tabular
+        if sampler is None or not outputs:
+            return Counter(), 0
+        sampled = sampler.sample_rows(anchors)
+        batch_digests = frozenset(sampler.row_digest(src) for src in sources)
+        written: Counter[str] = Counter()
+        rejections = 0
+        for i, out in enumerate(outputs):
+            candidate, attempt = sampled[i], 0
+            while True:
+                out.update(candidate)
+                if self.constraints is not None:
+                    self.constraints.apply(out, key_int=key_ints[i])
+                if not sampler.is_rejected(out, extra=batch_digests):
+                    break
+                attempt += 1
+                if attempt > self.max_resample:
+                    raise LeakageError(1, rule="exact_row_match")
+                rejections += 1
+                candidate = sampler.sample_rows([anchors[i]], attempt=attempt)[0]
+            written.update(name for name, value in candidate.items() if value is not None)
+        return written, rejections
 
 
 def plans_digest(columns: list[ColumnPlan]) -> str:
