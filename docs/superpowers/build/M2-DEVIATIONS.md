@@ -1527,3 +1527,31 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   expression, Check): "3 of 3 checks passed", a `FOR UPDATE` filter refused with the failing check
   and the server's message (no SQL echoed), `country_code = 'IN'` → "12,069 rows match"; no
   horizontal scroll at 1440/390 px.
+
+## Task 33 — New-job wizard, step 3 (discover and review)
+
+- `lib/jobs.ts`: `overridesFor(snapshot, edits)` and `ColumnEdit`; 3 Vitest cases (21 in all): only
+  changed fields are sent, an anchor clears the others (including an anchor kept by an earlier
+  override, which the server's per-path merge would otherwise re-apply after the new one), and a
+  kept column can be reclassified / switched to the text pipeline.
+- Review edits accumulate per column and are PATCHed after 400 ms of quiet; the answer replaces the
+  snapshot and the edits are dropped (the server merges overrides per path). **Accept snapshot** is
+  disabled while a change is unsaved. An accepted or superseded snapshot is read-only.
+- Entity column: free text with a datalist of the snapshot's entity types — `GET /entities` is M1
+  and this lane has no M1 (the plan's fallback). Method selects list the 17 engine methods; picking
+  the snapshot's or the suggestion's method keeps its params, any other starts with no params (the
+  run's `ColumnPlan` completes the defaults). The text-pipeline box is enabled for text/LOB/JSON
+  columns, the anchor radio for classified columns only (`override_anchor_invalid` otherwise).
+- Examples show the first stored value shape (all shapes in the title), never values.
+- "Needs a decision" **Accept** marks the column reviewed in the page only (it keeps the suggestion,
+  so there is nothing to send); **Change** scrolls to the review table and marks the row.
+- Detector line: NER on/off comes from `/readyz` (`ner` component). Discovery sends
+  `DiscoverSpec.mode` (the wizard's mode) and the sample size clamped to 50–50,000.
+- `?snapshot=<id>`: the shell loads the snapshot and its connection, uses the connection's stored
+  `last_test` when it passed (else tests the source again, value-free), restores owner, table and
+  shape from the snapshot and opens step 3. A saved draft is not restored on a deep link.
+- Browser check: discovery of `bank.customers` (sample 2,000, 16 heat-map cells, 1 decision: the
+  free-text `notes`), acceptance shows "classification snapshot snap_…"; a method change on
+  `bank_restore.contacts` sent exactly one override (`{"path": "$.customer_id", "method":
+  {"method": "redact", "params": {}}}`), and the deep link reopened that proposed snapshot with
+  "1 overrides".

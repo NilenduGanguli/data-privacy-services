@@ -92,7 +92,8 @@
   .decide .mono { overflow-wrap: anywhere; }
   .review td { vertical-align: middle; padding: 8px; }
   .review .input { padding: 6px 8px; font-size: 12px; min-width: 120px; }
-  .review .shapes { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .review .shapes { font-family: var(--mono); font-size: 11px; color: var(--ink-3); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .review .input.mono { min-width: 110px; max-width: 150px; }
   .review tr.edited td:first-child { box-shadow: inset 3px 0 0 var(--teal); }
 
   /* write modes */

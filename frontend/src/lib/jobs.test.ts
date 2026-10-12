@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
-import { evidenceSoFar, methodText, partitionPct, shortType, stepperState } from './jobs';
+import { evidenceSoFar, methodText, overridesFor, partitionPct, shortType, stepperState } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
-import type { Connection, CountOut } from './types';
+import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
 
 describe('jobs helpers', () => {
@@ -144,5 +144,35 @@ describe('wizard state (steps 1-2)', () => {
     const d = draft({ shape: null, test: null });
     expect(reachable(d)).toBe(1);
     expect(canLeave(2, draft({ shape: { object: { owner: 'bank', name: 'customers' }, columns: [], key: ['id'], key_source: 'primary_key', row_estimate: 10 }, where: 'a = 1', count: null }))).toBe(false);
+  });
+});
+
+describe('review overrides (step 3)', () => {
+  const snap = (): ClassificationSnapshot => ({
+    id: 'snap_1', tenant_id: 'default', job_id: 'j_d', connection_id: 'c_src', engine: 'postgres', object_ref: 'bank.customers',
+    status: 'proposed', policy_name: 'gdpr-pseudonymise', policy_hash: 'h', sample_rows: 2000, content_hash: 'c',
+    created_at: '2026-10-12T09:00:00Z', accepted_at: null, accepted_by: null, overrides: [{ path: '$.dob', anchor: true }],
+    shape: { object: { owner: 'bank', name: 'customers' }, columns: [], key: ['customer_id'], key_source: 'primary_key', row_estimate: 10 },
+    columns: [
+      column({ path: '$.customer_id', name: 'customer_id', entity_type: 'CUSTOMER_ID', is_key: true, anchor: false }),
+      column({ path: '$.dob', name: 'dob', entity_type: 'DATE_OF_BIRTH', anchor: true }),
+      column({ path: '$.email', name: 'email' }),
+      column({ path: '$.segment', name: 'segment', entity_type: null, sensitivity: null, suggested: { method: 'keep', params: {} }, method: { method: 'keep', params: {} } }),
+    ],
+  });
+  it('sends only the fields that changed', () => {
+    const out = overridesFor(snap(), {
+      '$.email': { entity_type: 'EMAIL', method: { method: 'det_token', params: {} }, text_column: false },
+      '$.segment': { method: { method: 'keep', params: {} } },
+    });
+    expect(out).toEqual([{ path: '$.email', method: { method: 'det_token', params: {} } }]);
+  });
+  it('setting an anchor clears the anchor of every other column', () => {
+    const out = overridesFor(snap(), { '$.customer_id': { anchor: true } });
+    expect(out).toEqual([{ path: '$.customer_id', anchor: true }, { path: '$.dob', anchor: false }]);
+  });
+  it('reclassifies a kept column and turns the text pipeline on', () => {
+    const out = overridesFor(snap(), { '$.segment': { entity_type: 'ORG_NAME' }, '$.email': { text_column: true } });
+    expect(out).toEqual([{ path: '$.segment', entity_type: 'ORG_NAME' }, { path: '$.email', text_column: true }]);
   });
 });

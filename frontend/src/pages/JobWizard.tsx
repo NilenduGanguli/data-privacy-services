@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, newDraftId, sourceObject, specPreview, writeModeLabel, type Step, type WizardDraft } from '../lib/jobs';
 import type { Connection } from '../lib/types';
 import { StepConnect } from './wizard/StepConnect';
+import { StepDiscover } from './wizard/StepDiscover';
 import { StepSelect } from './wizard/StepSelect';
 import { DRAFT_KEY, loadSavedDraft, reachable, useWizard, wizardReducer } from './wizard/state';
 
@@ -53,9 +54,12 @@ function Pending({ step, onBack }: { step: Step; onBack: () => void }): JSX.Elem
 /** New job (mockup 06): five steps on the left, guarantees and the job specification on the right. */
 export function JobWizard(): JSX.Element {
   const auth = useAuth();
+  const [params] = useSearchParams();
+  const deepSnapshot = params.get('snapshot');
   const restoredFrom = useRef<Partial<WizardDraft> | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
   const [d, dispatch] = useWizard(() => {
-    const saved = loadSavedDraft();
+    const saved = deepSnapshot ? null : loadSavedDraft();
     if (!saved) return emptyDraft();
     restoredFrom.current = saved;
     return wizardReducer(emptyDraft(typeof saved.draftId === 'string' ? saved.draftId : newDraftId()), { type: 'restore', draft: saved });
@@ -69,6 +73,32 @@ export function JobWizard(): JSX.Element {
     api.connections.list(auth, 200).then((p) => setConnections(p.items)).catch(() => setConnections([]));
   }, [auth]);
   useEffect(() => { loadConnections(); }, [loadConnections]);
+
+  // ?snapshot=<id> (Jobs "Review N columns"): open step 3 on that snapshot, its connection and object restored
+  useEffect(() => {
+    if (!deepSnapshot) return;
+    let live = true;
+    (async () => {
+      try {
+        const snap = await api.snapshots.get(auth, deepSnapshot);
+        const conn = await api.connections.get(auth, snap.connection_id);
+        const test = conn.last_test?.ok ? conn.last_test : await api.connections.test(auth, conn.id, { role: 'source' });
+        if (!live) return;
+        const dot = snap.object_ref.indexOf('.');
+        dispatch({ type: 'set', patch: {
+          connMode: 'saved', connectionId: conn.id, connectionName: conn.name, connectionTags: conn.tags, connectionRoles: conn.roles,
+          production: conn.tags.includes('production'), test, testedAt: new Date().toISOString(),
+          owner: dot > 0 ? snap.object_ref.slice(0, dot) : '', table: dot > 0 ? snap.object_ref.slice(dot + 1) : snap.object_ref,
+          shape: snap.shape, discoverJobId: snap.job_id, snapshotId: snap.id, snapshotAccepted: snap.status === 'accepted',
+          policyName: snap.policy_name, sampleRows: String(snap.sample_rows),
+        } });
+        dispatch({ type: 'step', step: 3 });
+      } catch (e) {
+        if (live) setLinkError(e instanceof ApiError ? `${e.message}${e.code ? ` (${e.code})` : ''}` : String(e));
+      }
+    })();
+    return () => { live = false; };
+  }, [auth, deepSnapshot, dispatch]);
 
   // a restored draft opens on the farthest step it can still show
   useEffect(() => { if (d.step > reach) dispatch({ type: 'step', step: reach }); }, [d.step, reach, dispatch]);
@@ -99,6 +129,7 @@ export function JobWizard(): JSX.Element {
         <div><h1>New job{d.table ? ` · ${fqn(sourceObject(d))}` : ''}</h1><p>Protect a table in five steps. DPS reads only the discovery sample until you press Run job, and writes nothing before then.</p></div>
         <div className="head-actions"><Link className="btn btn-ghost" to="/data-sources">Cancel</Link><button className="btn" type="button" onClick={saveDraft}>Save draft</button></div>
       </div>
+      {linkError && <div className="err">Could not open the snapshot: {linkError}</div>}
       {restoredFrom.current && (
         <div className="callout amber" style={{ fontSize: 12.5 }}>Restored the saved draft <span className="mono">{d.draftId}</span>. Credentials, keys and filters are not saved: re-enter them.{' '}
           <button type="button" className="linkbtn" onClick={() => { restoredFrom.current = null; try { localStorage.removeItem(DRAFT_KEY); } catch { /* private mode */ } dispatch({ type: 'reset' }); }}>Start a new draft</button></div>
@@ -120,7 +151,8 @@ export function JobWizard(): JSX.Element {
         <div className="wiz-main">
           {d.step === 1 && <StepConnect d={d} dispatch={dispatch} auth={auth} connections={connections} onConnectionsChanged={loadConnections} onNext={() => go(2)} />}
           {d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} onNext={() => go(3)} onBack={() => go(1)} />}
-          {d.step >= 3 && <Pending step={d.step} onBack={() => go((d.step - 1) as Step)} />}
+          {d.step === 3 && <StepDiscover d={d} dispatch={dispatch} auth={auth} onNext={() => go(4)} onBack={() => go(2)} />}
+          {d.step >= 4 && <Pending step={d.step} onBack={() => go((d.step - 1) as Step)} />}
         </div>
 
         <aside className="rail" aria-label="Job specification">

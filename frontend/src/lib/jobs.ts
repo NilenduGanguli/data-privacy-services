@@ -5,8 +5,8 @@
  * counts, codes and hashes only.
  */
 import type {
-  ColumnClassification, ConnectionTestResult, CountOut, Job, MethodSpec, ObjectRef, RunSpec, Selection, TableShape,
-  TargetSpec, WriteMode,
+  ClassificationSnapshot, ColumnClassification, ConnectionTestResult, CountOut, Job, MethodSpec, ObjectRef, RunSpec, Selection,
+  SnapshotOverride, TableShape, TargetSpec, WriteMode,
 } from './types';
 
 export type Tone = 'teal' | 'amber' | 'emerald' | 'rose' | 'violet' | 'slate';
@@ -721,4 +721,43 @@ export function typeNoteShort(note: string | null | undefined): string | null {
     case 'synthesize_numeric': return 'synthesize nulls or keeps';
     default: return note ? note.replace(/_/g, ' ') : null;
   }
+}
+// ---------------------------------------------------------------------------------------------
+// Review overrides (step 3).
+
+export interface ColumnEdit { entity_type?: string | null; method?: MethodSpec; synthesize_method?: MethodSpec; text_column?: boolean; anchor?: boolean }
+
+const sameMethod = (a: MethodSpec | null | undefined, b: MethodSpec | null | undefined): boolean =>
+  !!a && !!b && a.method === b.method && JSON.stringify(a.params ?? {}) === JSON.stringify(b.params ?? {});
+
+/**
+ * The overrides a review sends: per edited column only the fields that differ from the snapshot;
+ * an anchor set on one column clears the anchor of every other column (and of earlier overrides).
+ */
+export function overridesFor(snapshot: ClassificationSnapshot, edits: Record<string, ColumnEdit>): SnapshotOverride[] {
+  const byPath = new Map(snapshot.columns.map((c) => [c.path, c]));
+  const out = new Map<string, SnapshotOverride>();
+  let anchorPath: string | null = null;
+  for (const [path, edit] of Object.entries(edits)) {
+    const col = byPath.get(path);
+    if (!col) continue;
+    const o: SnapshotOverride = { path };
+    if (edit.entity_type !== undefined && (edit.entity_type || null) !== col.entity_type) o.entity_type = edit.entity_type || null;
+    if (edit.method && !sameMethod(edit.method, col.method)) o.method = edit.method;
+    if (edit.synthesize_method && !sameMethod(edit.synthesize_method, col.synthesize_method)) o.synthesize_method = edit.synthesize_method;
+    if (edit.text_column !== undefined && edit.text_column !== col.text_column) o.text_column = edit.text_column;
+    if (edit.anchor !== undefined && edit.anchor !== col.anchor) {
+      o.anchor = edit.anchor;
+      if (edit.anchor) anchorPath = path;
+    }
+    if (Object.keys(o).length > 1) out.set(path, o);
+  }
+  if (anchorPath) {
+    const earlier = new Set(snapshot.overrides.filter((o) => o.anchor).map((o) => o.path));
+    for (const c of snapshot.columns) {
+      if (c.path === anchorPath || !(c.anchor || earlier.has(c.path))) continue;
+      out.set(c.path, { ...(out.get(c.path) ?? { path: c.path }), anchor: false });
+    }
+  }
+  return [...out.values()];
 }
