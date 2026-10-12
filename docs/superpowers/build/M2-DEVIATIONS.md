@@ -2060,4 +2060,13 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
     is not changed", the confirmation is accepted, step 5 shows "all checks passed", and
     `POST /jobs/run` (a dry run, so the restored copy is not written) answers below 400 and opens
     the job. Screenshots `06-wizard-4-in-place-key-*` (git-ignored); no horizontal scroll at 390 px.
+- Release (DoD 10): every gate was re-run at `fca6cff` on the rebuilt lane stack (`sources`
+  profile): `ruff format`/`ruff check`/`mypy dps` (82 files) clean; `pytest -q` 1152 passed,
+  2 skipped (the `ner` extra); `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"`
+  161 passed; resume-after-kill 6 passed; log scan + console check 40 passed; smoke 24/24;
+  `tools/demo_m2.py` 12 jobs succeeded with verification passed and 0 orphans; console typecheck,
+  58 Vitest cases and build; app and worker `/readyz` 200. HANDOFF's *Last verified* paragraph
+  names `fca6cff`, and the annotated tag `v0.1.0-m2` was re-pointed (`git tag -f -a`, never pushed)
+  from `99ec8c0` to the commit carrying this entry. The plain-stack check (DoD 2) is carried from
+  `6ea0738`: compose files, the image build and tools have not changed since.
 
