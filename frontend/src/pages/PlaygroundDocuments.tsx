@@ -113,7 +113,7 @@ export function PlaygroundDocuments(): JSX.Element {
   const presetNames = (presets.length ? presets.map((p) => p.name) : ['gdpr-pseudonymise']).filter((n) => !n.startsWith('synthetic'));
 
   return (
-    <main className="page">
+    <main className="page documents-page">
       <div className="page-head">
         <div><h1>Try the engine</h1><p>Drop a document. OCR reads scanned pages; detection, redaction and tokens run inside DPS. The LLM never sees a value.</p></div>
         <div className="head-actions">

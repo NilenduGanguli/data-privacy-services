@@ -100,7 +100,7 @@ export function Policies(): JSX.Element {
   const declaredRows = [...(doc?.detect.declared_fields ?? []).map((d) => ({ d, isDraft: false })), ...draft.declared.map((d) => ({ d, isDraft: true }))];
   const modeLabel = (p: PresetSummary): string => (p.mode === 'synthesize' ? 'one-way' : p.reversible ? 'reversible' : 'irreversible');
   return (
-    <main className="page">
+    <main className="page policies-page">
       <div className="page-head">
         <div><h1>Policies</h1><p>A policy decides what is detected and what happens to each entity type. Every request, job and evidence pack records the hash it ran with.</p></div>
         <div className="head-actions">

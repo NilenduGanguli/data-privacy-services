@@ -264,6 +264,12 @@ def test_wizard_to_evidence(page: Any, app_url: str, customer_values: list[str])
     shoot(page, "03-job-detail")
     page.get_by_role("link", name="Evidence pack").wait_for(timeout=240_000)
     shoot(page, "03-job-detail-done")
+    # M1's page rules (the Policies tables' 760 px minimum width) must not reach the job pages
+    # (integration of M1 and M2): the reviewed-snapshot table sizes to its card's content.
+    min_width = page.locator("#cls").evaluate("t => getComputedStyle(t).minWidth")
+    assert min_width in ("0px", "auto"), (
+        f"job detail: the classification table is held at {min_width}"
+    )
     no_values(page, customer_values)
     # Evidence pack (mockup 10)
     page.get_by_role("link", name="Evidence pack").click()
