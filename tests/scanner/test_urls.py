@@ -75,6 +75,13 @@ def test_redaction_never_keeps_a_query_key_that_is_itself_a_value() -> None:
     assert out == "http://h/x?<k>=<v>&<k>=<v>&ok=<v>"
     assert "ananya" not in out
 
+    def digits(text: str) -> str | None:  # a key made of plain characters can still be a value
+        return "ACCOUNT_NUMBER" if text.isdigit() and len(text) >= 8 else None
+
+    keyed = redact_url("http://h/x?50100234567812=on&page=2", digits)
+    assert keyed == "http://h/x?<k>=<v>&page=<v>"
+    assert "50100234567812" not in keyed
+
 
 def test_a_malformed_port_is_never_echoed_and_never_raises() -> None:
     assert canonical("http://h:99999/x") is None

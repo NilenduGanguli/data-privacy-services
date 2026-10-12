@@ -29,9 +29,10 @@ the lane rules).
 ## Task 2 — URL toolkit
 
 - `dps/layers/scanner/urls.py`: the plan's code, plus:
-  - `redact_url` also turns a query **key** the classifier recognises into `<k>` (the plan only
-    checked the key's characters, so `?ananya.k%40x.in=1` would have stored a customer's e-mail
-    as a key). Test `test_redaction_never_keeps_a_query_key_that_is_itself_a_value`.
+  - `redact_url` also turns a query **key** the classifier recognises into `<k>`. The plan only
+    checked the key's characters, so a key made of plain characters that is itself a value (an
+    account number used as a key, `?50100234567812=on`) would have been stored verbatim. Test
+    `test_redaction_never_keeps_a_query_key_that_is_itself_a_value`.
   - A malformed port (`http://h:99999/x`) never raises from `template`, `redact_url` or
     `redact_origin` (urllib's `.port` raises `ValueError` there; a guard that redacts arbitrary
     request URLs must not crash on one); `canonical` returns `None` and `Origin.of` raises
