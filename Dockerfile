@@ -20,6 +20,14 @@ FROM python:3.12-slim
 LABEL org.opencontainers.image.title="data-privacy-services" \
       org.opencontainers.image.description="Data Privacy Services: Layer 1 API and Privacy Console"
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+# Local OCR (M1, spec §6 "local Tesseract when unset"): with DPS_OCR_PROVIDER=auto (this image's
+# default) scanned pages go to the tesseract CLI unless an Azure Read endpoint and key are
+# configured; compose's docs profile selects azure (the Read v3.2 mock). English data only
+# (tesseract-ocr-eng); add tesseract-ocr-<lang> packages and DPS_TESSERACT_LANGS for others.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+ENV DPS_OCR_PROVIDER=auto
 # uv pinned to an exact release (never :latest).
 COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /usr/local/bin/uv
 WORKDIR /app

@@ -36,7 +36,9 @@ docker build --build-arg WITH_NER=1 -t <registry>/data-privacy-services:<semver>
 Tag semver + git sha. No database, no volumes in M0. The image:
 
 - stage 1 `node:22-slim`: `npm ci` (lockfile only, no `npm install` fallback) + `npm run build`;
-- stage 2 `python:3.12-slim`: `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
+- stage 2 `python:3.12-slim`: `tesseract-ocr` + `tesseract-ocr-eng` from apt and
+  `ENV DPS_OCR_PROVIDER=auto` (M1: local OCR when no Azure endpoint is configured),
+  `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
   `uv pip install --system --no-cache -e ".[fpe,docs]"` (`.[fpe,docs,ner]` + `en_core_web_sm` when `WITH_NER=1`),
   the console dist at `/app/frontend/dist`;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
@@ -44,7 +46,8 @@ Tag semver + git sha. No database, no volumes in M0. The image:
 - `ENTRYPOINT docker/entrypoint.sh` (M0: `exec "$@"`; M2 adds migrations) and
   `CMD uvicorn dps.app:create_app --factory --host 0.0.0.0 --port 8400 --no-access-log`.
 
-Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB.
+Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (arm64, M1 lane: the
+`docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB.
 
 ## 3. Run locally (compose)
 
@@ -113,7 +116,8 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_MAX_PAYLOAD_MB` / `DPS_MAX_TEXT_CHARS` / `DPS_MAX_ITEMS` | 8 / 1,000,000 / 10,000 | 413 beyond (JSON-route body bytes by header or while streaming, `payload_too_large`; text characters, documents' canonical text included; JSON leaf values) |
 | `DPS_RATE_LIMIT_ENABLED` / `_RPS` / `_BURST` | `true` / 50 / 100 | token bucket per API key, per process; 429 + `Retry-After` |
 | `DPS_AUDIT_ENABLED` | `true` | `false` only locally; refused in staging/prod |
-| `DPS_OCR_PROVIDER` | `""` | M1 documents: `""`/`off` (no OCR), `azure` (Read v3.2: the compose mock, the org gateway, Azure), `tesseract`, `auto` (the last two behave as `off` until M1 Task 19C); staging/prod with `azure` need a key and an `https` endpoint |
+| `DPS_OCR_PROVIDER` | `""` (the image: `auto`) | M1 documents — `""`/`off`: no OCR; `azure`: Read v3.2 (the compose mock, the org gateway, Azure) when endpoint and key are set, else none; `tesseract`: the local CLI (`/readyz` `ocr: tesseract_missing` without the binary); `auto` (the image's `ENV`): azure when endpoint and key are set, else tesseract when `DPS_TESSERACT_CMD` is on `PATH`, else none. Staging/prod: azure (also via `auto`) needs a key and an `https` endpoint; `auto` that resolves to none is refused; Tesseract is allowed (local, no egress) |
+| `DPS_TESSERACT_CMD` / `DPS_TESSERACT_LANGS` / `DPS_TESSERACT_TIMEOUT_SECONDS` | `tesseract` / `eng` / 60 | local OCR: the binary (name on `PATH` or a path), its languages (`eng`, `eng+spa`, …; the image ships `eng` only) and one page's time limit (the process group is killed beyond it: `ocr_timeout`). Page image on stdin, TSV on stdout; Tesseract's stderr is never read (it can echo recognised text). `DPS_OCR_MAX_CONCURRENCY` bounds parallel runs. `/readyz` `ocr.engine` is `tesseract-<major.minor>` |
 | `DPS_AZURE_VISION_ENDPOINT` / `DPS_AZURE_VISION_KEY` | — | Read v3.2 base URL (locally `http://127.0.0.1:${DPS_OCR_PORT:-5016}`, in compose `http://azure-ocr-mock:5000`) and its `Ocp-Apim-Subscription-Key`; prefer `DPS_AZURE_VISION_KEY_FILE` |
 | `DPS_OCR_TIMEOUT_SECONDS` / `DPS_OCR_POLL_INTERVAL_SECONDS` | 60 / 0.5 | one OCR call (analyze + polls) / poll spacing |
 | `DPS_OCR_HEALTH_PATH` / `DPS_OCR_PROBE_INTERVAL_SECONDS` | `/health` / 30 | readiness probe of the OCR endpoint (`/_gw/health` behind azure-gateway-api; `""` = no probe; interval `0` = once at startup) |

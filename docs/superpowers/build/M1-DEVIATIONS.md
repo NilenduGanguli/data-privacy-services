@@ -1076,3 +1076,62 @@ hash and `IdemEntry(body_sha256, trace_id, created)` only; a replay re-runs the 
   `test_streams_replay_and_cors_names_the_headers` (NDJSON replay keeps the header's trace id;
   CORS allows `Idempotency-Key` and exposes `Idempotent-Replay`). Confirmed failing first on the
   previous commit (`ModuleNotFoundError: dps.layers.api.idempotency`, run from a `git archive` copy).
+
+## Task 19C — Local Tesseract OCR when no Azure endpoint is configured
+
+- **`tests/test_config.py`:** the invalid-values case `("ocr_provider", "paddle")` was already in
+  place (Task 1 accepted `tesseract` from the start), so only `test_ocr_engine_resolution` (plus a
+  bad-values case for the three new settings) was added. Both config tests that read the
+  `ocr_provider` default now `monkeypatch.delenv("DPS_OCR_PROVIDER")`, because the app image sets
+  `auto` and the tests also run there.
+- **`dps/config.py`:** `tesseract_langs` is validated (`^[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*$`) — it is
+  passed to the CLI as an argument, and a value starting with `-` would be read as an option;
+  `tesseract_cmd` must be non-empty. `ocr_engine` follows the plan's table exactly; `auto` with an
+  endpoint but no key falls to Tesseract.
+- **`dps/layers/documents/ocr.py`:** `TesseractOcrClient` runs in its own process group
+  (`start_new_session=True`) and a timeout — or a cancelled/failed read — kills the **whole
+  group** (`os.killpg`): with only `proc.kill()`, a child process holding the pipes made
+  `proc.wait()` block until the child exited (found by `test_a_slow_tesseract_is_killed…`, 5 s
+  instead of 0.3 s). Stderr goes to `DEVNULL` (never read at all); the version probe reads stdout
+  only. `engine` is `"tesseract"` until `probe()` reads `tesseract --version`
+  (`tesseract-<major.minor>`; startup always probes). `parse_tsv` fails closed (`ocr_protocol`) on
+  a missing header, a non-numeric field, a non-finite confidence or a missing page row, like
+  `parse_read_result`. Metrics use engine label `tesseract`. `refresh_ocr_readiness` reports a
+  client's `unconfigured_detail` (`tesseract_missing`) instead of `unconfigured`.
+- **`dps/posture.py`:** the azure key/https rules also apply when `auto` *resolves* to azure (the
+  key and the pages leave the same way); `auto` resolving to none is a problem, as planned.
+  Tests added in `tests/test_posture.py` (not in the plan's file list).
+- **Demo scan:** `demo/documents/kyc-scanned.pdf` does not exist yet (Task 16 makes the demo
+  documents, and Task 16 is not built on this branch). The two `tesseract` tests use
+  `tests.documents.fixtures.scanned_pdf` with six synthetic KYC lines (26 words, so "≥ 20 words"
+  holds) and render page 1 with Task 5's renderer + `encode_png`.
+- **`frontend/src/components/OcrStatus.tsx` not changed:** the component does not exist yet (Task
+  16 creates it). Hand-off for Task 16: show "Local Tesseract" when `components.ocr.engine` starts
+  with `tesseract` (`/readyz` reports e.g. `{"ok": true, "detail": "up", "provider": "auto",
+  "engine": "tesseract-5.5"}`, or `detail: "tesseract_missing"`).
+- **Image (`Dockerfile`):** `tesseract-ocr tesseract-ocr-eng` and `ENV DPS_OCR_PROVIDER=auto` in the
+  runtime stage. `python:3.12-slim` is Debian 13 here (not bookworm): Tesseract **5.5.0**,
+  leptonica 1.84.1; the apt layer is **107 MB** (arm64), not ~30 MB. The default compose stack
+  therefore OCRs scanned pages locally (checked live on the lane stack: `/readyz`
+  `ocr: up, engine tesseract-5.5`; a scanned KYC PDF → `ocr_pages [1]`, SSN/EMAIL/CARD found,
+  redacted PDF re-read by Tesseract with 0 hits; `tools/smoke_test.py` 15/15).
+- **In-image test run (bind-mounted, no test stage):** compose's `app` service is read-only and
+  non-root, so `docker compose run … app python -m pytest` cannot install pytest. The tests ran
+  with `docker run --rm --user root -v "$PWD/tests:/app/tests:ro" --entrypoint sh
+  data-privacy-services:${DPS_IMAGE_TAG}` installing `pytest`/`pytest-asyncio` into that throwaway
+  container: `-m tesseract tests/documents/test_ocr_tesseract.py` with
+  `DPS_TEST_REQUIRE_SERVICES=1 DPS_TEST_REQUIRE_TESSERACT=1` → **2 passed**; `tests/documents`,
+  `tests/test_config.py`, `tests/test_posture.py` (`-m "not ocr"`, `DPS_OCR_PROVIDER` unset) → 225
+  passed, 1 skipped. M0/M1 unit tests that read the `ocr_provider` default (e.g.
+  `test_ocr_client.py::test_builder_picks_the_client`) assume `DPS_OCR_PROVIDER` is unset, so in
+  the image they run with `env -u DPS_OCR_PROVIDER`.
+- `pyproject.toml` registers the `tesseract` marker; `HANDOFF.md` §2 (image contents, size) and §4
+  (provider table, three settings).
+- **`.env.example` not changed** (permission rule, as before). Follow-up — append:
+
+  ```bash
+  # Local OCR (M1): used for DPS_OCR_PROVIDER=tesseract, or auto without an Azure endpoint
+  DPS_TESSERACT_CMD=tesseract
+  DPS_TESSERACT_LANGS=eng
+  DPS_TESSERACT_TIMEOUT_SECONDS=60
+  ```

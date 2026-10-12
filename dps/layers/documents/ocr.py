@@ -1,4 +1,4 @@
-"""OCR through the Azure Computer Vision Read v3.2 wire contract.
+"""OCR through the Azure Computer Vision Read v3.2 wire contract, or a local Tesseract.
 
 ``POST {endpoint}/vision/v3.2/read/analyze`` (image bytes) → ``202`` + ``Operation-Location`` →
 ``GET`` it until ``status`` is ``succeeded`` or ``failed``. The same client talks to the compose
@@ -8,12 +8,21 @@ page images (it rasterises PDFs itself), so results are read from ``readResults[
 Safety: the subscription key is sent only to the configured endpoint's origin — an
 ``Operation-Location`` on another host is refused; errors carry a code, the stage and the HTTP
 status, never a response body or the key.
+
+``TesseractOcrClient`` (spec §6 "local Tesseract when unset", M1 Task 19C) runs the ``tesseract``
+CLI on the page image and parses its TSV into the same :class:`OcrPage`, so the pipeline's
+geometry, hybrid merge and redaction re-read are unchanged; it never reads Tesseract's stderr.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
+import os
+import re
+import shutil
+import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -399,11 +408,210 @@ class AzureReadClient:
         await self._client.aclose()
 
 
+#: ``tesseract … tsv`` columns (Tesseract 4/5): one row per page, block, paragraph, line and word.
+TSV_COLUMNS = (
+    "level",
+    "page_num",
+    "block_num",
+    "par_num",
+    "line_num",
+    "word_num",
+    "left",
+    "top",
+    "width",
+    "height",
+    "conf",
+    "text",
+)
+_TSV_PAGE, _TSV_WORD = 1, 5
+
+
+def parse_tsv(tsv: str) -> OcrPage:
+    """Tesseract's TSV output → :class:`OcrPage` (unit ``pixel``, as for an image sent to Azure).
+
+    The level-1 row gives the page size; each level-5 row with text is a word (polygon from its
+    box, ``confidence = conf / 100``, ``None`` when ``conf`` is negative, ``line`` = the ordinal
+    of its ``(block, paragraph, line)``). Fails closed with ``ocr_protocol`` on anything else:
+    no header, a row that is not numeric where it must be, or no page row — a shape this parser
+    does not know never reads as "a page without words".
+    """
+    try:
+        return _parse_tsv(tsv)
+    except OcrError:
+        raise
+    except (ValueError, IndexError, OverflowError):
+        raise _protocol("the tesseract output had an unexpected shape") from None
+
+
+def _parse_tsv(tsv: str) -> OcrPage:
+    rows = [row for row in tsv.split("\n") if row.strip("\r")]
+    if not rows or tuple(rows[0].rstrip("\r").split("\t")) != TSV_COLUMNS:
+        raise _protocol("the tesseract output had no TSV header")
+    width = height = None
+    words: list[OcrWord] = []
+    lines: dict[tuple[int, int, int], int] = {}
+    for row in rows[1:]:
+        cols = row.rstrip("\r").split("\t", len(TSV_COLUMNS) - 1)
+        if len(cols) == len(TSV_COLUMNS) - 1:
+            cols.append("")  # a row without text may end at the conf column
+        if len(cols) != len(TSV_COLUMNS):
+            raise _protocol("a tesseract TSV row had the wrong number of columns")
+        level = int(cols[0])
+        left, top, w, h = (int(c) for c in cols[6:10])
+        if level == _TSV_PAGE:
+            width, height = float(w), float(h)
+            continue
+        if level != _TSV_WORD:
+            continue
+        text = cols[11].strip()
+        if not text:
+            continue
+        conf = float(cols[10])
+        if not math.isfinite(conf):
+            raise _protocol("a tesseract confidence was not a finite number")
+        line = lines.setdefault((int(cols[2]), int(cols[3]), int(cols[4])), len(lines))
+        x0, y0, x1, y1 = float(left), float(top), float(left + w), float(top + h)
+        words.append(
+            OcrWord(
+                text=text,
+                polygon=(x0, y0, x1, y0, x1, y1, x0, y1),
+                confidence=None if conf < 0 else conf / 100.0,
+                line=line,
+            )
+        )
+    if width is None or height is None:
+        raise _protocol("the tesseract output had no page row")
+    return OcrPage(width=width, height=height, unit="pixel", angle=0.0, words=words)
+
+
+def _kill_group(proc: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
+_VERSION = re.compile(r"tesseract\s+v?(\d+)\.(\d+)")
+
+
+class TesseractOcrClient:
+    """Local OCR through the ``tesseract`` CLI (no Python wrapper): the page image on stdin, TSV
+    on stdout, bounded by ``timeout_s`` and a semaphore of ``max_concurrency``.
+
+    Errors are :class:`OcrError` codes only — ``ocr_unconfigured`` (binary missing),
+    ``ocr_timeout`` (process killed), ``ocr_failed`` (non-zero exit), ``ocr_protocol`` (output of
+    an unknown shape). Tesseract's stderr is never read: it can echo recognised text.
+    """
+
+    #: The readiness detail when the binary is missing (``refresh_ocr_readiness``).
+    unconfigured_detail = "tesseract_missing"
+
+    def __init__(self, *, cmd: str, langs: str, timeout_s: float, max_concurrency: int) -> None:
+        self._cmd = cmd
+        self._langs = langs
+        self._timeout = timeout_s
+        self._sem = asyncio.Semaphore(max_concurrency)
+        self.engine = "tesseract"  # "tesseract-<major.minor>" once probe() has read the version
+
+    def _binary(self) -> str | None:
+        return shutil.which(self._cmd)
+
+    def configured(self) -> bool:
+        """True when the binary resolves (on ``PATH``, or the configured path)."""
+        return self._binary() is not None
+
+    async def read(self, image: bytes, *, content_type: str = "image/png") -> OcrPage:
+        """OCR one page image (PNG or JPEG). Raises :class:`OcrError`."""
+        binary = self._binary()
+        if binary is None:
+            raise OcrError("ocr_unconfigured", "the tesseract binary is not available")
+        async with self._sem:
+            started = time.monotonic()
+            outcome = "error"
+            try:
+                out = await self._run(binary, image)
+                page = parse_tsv(out.decode("utf-8", errors="replace"))
+                outcome = "ok"
+                return page
+            except OcrError as exc:
+                outcome = exc.code
+                raise
+            finally:
+                OCR_CALLS.labels("tesseract", outcome).inc()
+                OCR_SECONDS.observe(max(time.monotonic() - started, 0.0))
+
+    async def _run(self, binary: str, image: bytes) -> bytes:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                "stdin",
+                "stdout",
+                "-l",
+                self._langs,
+                "--psm",
+                "3",
+                "tsv",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,  # its own process group: a timeout kills every child
+            )
+        except OSError as exc:
+            raise OcrError(
+                "ocr_failed", f"tesseract could not start ({type(exc).__name__})"
+            ) from None
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(image), timeout=self._timeout)
+        except TimeoutError:
+            _kill_group(proc)
+            await proc.wait()
+            raise OcrError("ocr_timeout", f"no result within {self._timeout:.0f}s") from None
+        except BaseException:  # cancelled (the request went away) or failed: never leave it running
+            _kill_group(proc)
+            raise
+        if proc.returncode != 0:
+            raise OcrError("ocr_failed", f"tesseract exited with status {proc.returncode}")
+        return out
+
+    async def probe(self) -> tuple[bool, str]:
+        """``(ok, detail)`` for /readyz: ``tesseract --version`` exits 0 → ``(True, "up")``."""
+        binary = self._binary()
+        if binary is None:
+            return False, self.unconfigured_detail
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                "--version",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,  # older releases print the version on stderr
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        except (OSError, TimeoutError):
+            return False, "down"
+        if proc.returncode != 0:
+            return False, f"down:{proc.returncode}"
+        match = _VERSION.search(out.decode("utf-8", errors="replace"))
+        if match:
+            self.engine = f"tesseract-{match.group(1)}.{match.group(2)}"
+        return True, "up"
+
+    async def aclose(self) -> None:
+        return None
+
+
 def build_ocr_client(settings: Settings) -> OcrClient:
-    """:class:`AzureReadClient` when the azure provider has an endpoint and a key, else
-    :class:`NullOcrClient`. TLS to the gateway trusts ``DPS_SSL_CERT_FILE`` when set (the
+    """The client for ``settings.ocr_engine``: :class:`AzureReadClient` (endpoint and key set),
+    :class:`TesseractOcrClient` (``tesseract``, or ``auto`` without Azure and with the binary),
+    else :class:`NullOcrClient`. TLS to the gateway trusts ``DPS_SSL_CERT_FILE`` when set (the
     corporate CA the Stellar client already uses)."""
-    if not settings.ocr_configured:
+    engine = settings.ocr_engine
+    if engine == "tesseract":
+        return TesseractOcrClient(
+            cmd=settings.tesseract_cmd,
+            langs=settings.tesseract_langs,
+            timeout_s=settings.tesseract_timeout_seconds,
+            max_concurrency=settings.ocr_max_concurrency,
+        )
+    if engine != "azure":
         return NullOcrClient()
     return AzureReadClient(
         endpoint=settings.azure_vision_endpoint,
@@ -419,7 +627,8 @@ def build_ocr_client(settings: Settings) -> OcrClient:
 async def refresh_ocr_readiness(ocr: OcrClient, settings: Settings) -> None:
     """Set the ``ocr`` readiness component. It is never *required*: JSON and text need no OCR."""
     if not ocr.configured():
-        READINESS.set("ocr", False, "unconfigured", provider=settings.ocr_provider or "none")
+        detail = getattr(ocr, "unconfigured_detail", "unconfigured")
+        READINESS.set("ocr", False, detail, provider=settings.ocr_provider or "none")
         return
     ok, detail = await ocr.probe()
     READINESS.set("ocr", ok, detail, provider=settings.ocr_provider, engine=ocr.engine)

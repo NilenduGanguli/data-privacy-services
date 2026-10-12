@@ -64,6 +64,7 @@ markers = [
     "integration: needs live databases (M2+)",
     "docs: needs the [docs] extra (pure Python; runs by default when installed)",
     "ocr: needs the Azure Read v3.2 mock at DPS_TEST_OCR_URL (docker compose --profile docs up -d azure-ocr-mock)",
+    "tesseract: needs a tesseract binary on PATH (the app image has one; the Mac may not)",
 ]
 
 [tool.mypy]

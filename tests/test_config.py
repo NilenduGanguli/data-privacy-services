@@ -64,7 +64,8 @@ def test_validation_errors_never_echo_the_input() -> None:
     assert "s3cr3t-pw" not in str(bad_url.value) and "s3cr3t-pw" not in str(bad_int.value)
 
 
-def test_m1_document_defaults() -> None:
+def test_m1_document_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DPS_OCR_PROVIDER", raising=False)  # the app image sets auto
     s = Settings(_env_file=None)
     assert (s.ocr_provider, s.max_document_mb, s.max_document_pages, s.pdf_render_dpi) == (
         "",
@@ -107,3 +108,47 @@ def test_bad_ocr_endpoint_is_not_echoed() -> None:
     with pytest.raises(ValueError) as exc:
         Settings(_env_file=None, azure_vision_endpoint="ftp://user:s3cret-pw@ocr")
     assert "s3cret-pw" not in str(exc.value)
+
+
+def test_ocr_engine_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    import dps.config as config
+
+    monkeypatch.delenv("DPS_OCR_PROVIDER", raising=False)  # the app image sets auto
+    found = {"tesseract": "/usr/bin/tesseract"}
+    monkeypatch.setattr(config.shutil, "which", lambda cmd: found.get(cmd))
+    azure = {"azure_vision_endpoint": "http://ocr:5000", "azure_vision_key": "k"}
+
+    def engine(**kw: object) -> str:
+        return Settings(_env_file=None, **kw).ocr_engine  # type: ignore[arg-type]
+
+    assert engine() == "none" and engine(ocr_provider="off") == "none"
+    assert engine(ocr_provider="azure") == "none"
+    assert engine(ocr_provider="azure", **azure) == "azure"
+    assert engine(ocr_provider="tesseract") == "tesseract"
+    assert engine(ocr_provider="tesseract", tesseract_cmd="missing") == "tesseract"
+    assert engine(ocr_provider="auto", **azure) == "azure"
+    assert engine(ocr_provider="auto") == "tesseract"
+    assert engine(ocr_provider="auto", tesseract_cmd="missing") == "none"
+    assert engine(ocr_provider="auto", azure_vision_endpoint="http://ocr:5000") == "tesseract"
+    s = Settings(_env_file=None)
+    assert (s.tesseract_cmd, s.tesseract_langs, s.tesseract_timeout_seconds) == (
+        "tesseract",
+        "eng",
+        60,
+    )
+    assert Settings(_env_file=None, ocr_provider="auto", **azure).ocr_configured is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tesseract_langs", "-c tessedit_write_images=1"),
+        ("tesseract_langs", "eng spa"),
+        ("tesseract_langs", ""),
+        ("tesseract_timeout_seconds", "0"),
+        ("tesseract_cmd", ""),
+    ],
+)
+def test_tesseract_settings_refuse_bad_values(field: str, value: str) -> None:
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **{field: value})

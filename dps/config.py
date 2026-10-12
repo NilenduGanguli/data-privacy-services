@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
@@ -131,8 +132,8 @@ class Settings(BaseSettings):
 
     # --- documents and schema (M1, contract §10) ---
     # "" | off (no OCR) | azure (Read v3.2: mock, org gateway, Azure) | tesseract (local CLI) |
-    # auto (azure if configured, else tesseract) — tesseract and auto arrive in M1 Task 19C and
-    # behave as off until then.
+    # auto (azure when an endpoint and key are set, else tesseract when the binary is on PATH;
+    # the image's default) — see ``ocr_engine``.
     ocr_provider: str = ""
     azure_vision_endpoint: str = ""  # http://azure-ocr-mock:5000 locally; the org gateway in prod
     azure_vision_key: str = ""  # DPS_AZURE_VISION_KEY_FILE in prod; Ocp-Apim-Subscription-Key
@@ -153,6 +154,11 @@ class Settings(BaseSettings):
     redact_ocr_verify: bool = True  # re-read redacted pages with OCR when OCR is configured
     preview_dpi: int = Field(default=72, ge=36, le=150)
     max_preview_pages: int = Field(default=50, ge=0, le=500)
+    # --- local Tesseract OCR (M1 Task 19C, contract §10): the CLI, its languages, one page's
+    # time limit; used for ocr_provider=tesseract, or auto without an Azure endpoint ---
+    tesseract_cmd: str = Field(default="tesseract", min_length=1)
+    tesseract_langs: str = Field(default="eng", pattern=r"^[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*$")
+    tesseract_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     # --- NDJSON streaming on /detect, /obfuscate, /synthesize, /reveal (M1, contract §10) ---
     ndjson_max_items: int = Field(default=1_000_000, ge=1, le=100_000_000)  # items per stream
     ndjson_chunk_items: int = Field(default=500, ge=1, le=100_000)  # items per worker-thread hop
@@ -238,6 +244,25 @@ class Settings(BaseSettings):
         return self.ocr_provider == "azure" and bool(
             self.azure_vision_endpoint and self.azure_vision_key
         )
+
+    @property
+    def ocr_engine(self) -> Literal["azure", "tesseract", "none"]:
+        """The OCR engine ``ocr_provider`` resolves to (contract §10).
+
+        ``""``/``off`` → none; ``azure`` → azure with an endpoint and a key, else none;
+        ``tesseract`` → tesseract (readiness reports a missing binary); ``auto`` → azure with an
+        endpoint and a key, else tesseract when ``tesseract_cmd`` is on ``PATH``, else none.
+        """
+        azure = bool(self.azure_vision_endpoint and self.azure_vision_key)
+        if self.ocr_provider == "azure":
+            return "azure" if azure else "none"
+        if self.ocr_provider == "tesseract":
+            return "tesseract"
+        if self.ocr_provider == "auto":
+            if azure:
+                return "azure"
+            return "tesseract" if shutil.which(self.tesseract_cmd) else "none"
+        return "none"
 
     @property
     def ner_languages_list(self) -> list[str]:

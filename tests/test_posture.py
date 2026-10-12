@@ -142,3 +142,16 @@ def test_azure_ocr_needs_key_and_https_in_production() -> None:
         )
     )
     assert not any("AZURE" in p for p in ok)
+
+
+def test_local_tesseract_is_allowed_and_auto_must_resolve(monkeypatch) -> None:  # noqa: ANN001
+    import dps.config as config
+
+    monkeypatch.setattr(config.shutil, "which", lambda cmd: None)
+    nothing = posture_problems(_prod(ocr_provider="auto"))
+    assert any("OCR is enabled (auto)" in p for p in nothing)
+    assert not any("OCR" in p for p in posture_problems(_prod(ocr_provider="tesseract")))
+    plain = _prod(ocr_provider="auto", azure_vision_endpoint="http://gw:8080", azure_vision_key="k")
+    assert any("DPS_AZURE_VISION_ENDPOINT" in p for p in posture_problems(plain))
+    monkeypatch.setattr(config.shutil, "which", lambda cmd: "/usr/bin/tesseract")
+    assert not any("OCR" in p for p in posture_problems(_prod(ocr_provider="auto")))
