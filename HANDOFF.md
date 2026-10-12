@@ -607,6 +607,14 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     TIMESTAMP(1-6) writes silently lose microseconds and a keyset over a TIMESTAMP(6) key re-reads
     the same rows forever. Every TIMESTAMP(0-6) bind (values and key bounds) goes through
     `oracle_sql.input_type` → `"timestamp"` → `setinputsizes(oracledb.DB_TYPE_TIMESTAMP)`.
+  - python-oracledb 26.0.0 thin on 23ai: a `MERGE … USING (SELECT :v … FROM dual)` refuses a CLOB
+    or BLOB bind longer than 32,767 bytes (`ORA-01461`; INSERT and UPDATE take such strings), and an
+    `executemany` whose column mixes temporary LOBs (`conn.createlob`) with `str` values **stores
+    NULL for the LOBs without an error**. `OracleWriter` binds a MERGE batch's LOB column as
+    temporary LOBs for every row when any value is over the limit, never for some rows only.
+  - Oracle `SAMPLE (p) SEED (s)` is not one stable row set: `COUNT(*)` and keyset pages of the same
+    clause saw 81 and 72 of 200 rows. A selection's `sample` is a hash of the key instead
+    (`oracle_sql.sample_filter`), so counts, partitions and resumed pages agree.
 
 ## 9. Next milestones
 

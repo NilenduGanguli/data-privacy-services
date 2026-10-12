@@ -409,3 +409,17 @@ def test_fpe_digits_leading_zero_param() -> None:
     out = run_method("fpe_digits", "7123456", keep)
     assert out.value == "3789012" and out.method == "fpe_digits" and out.reversible
     assert reverse_method("fpe_digits", "3789012", keep, out.reverse_params) == "7123456"
+
+
+def test_date_shift_keeps_sub_microsecond_digits() -> None:
+    c = ctx("DATE_OF_BIRTH", {"window_days": 365}, anchor="CUSTOMER_ID:abc")
+    out = run_method("date_shift", "2025-01-01T10:00:00.123456789", c)
+    assert out.method == "date_shift"
+    assert out.value is not None and out.value.endswith(".123456789")
+    assert out.value[:10] != "2025-01-01"
+    back = reverse_method("date_shift", out.value, c, out.reverse_params)
+    assert back == "2025-01-01T10:00:00.123456789"
+    zero = run_method("date_shift", "2025-01-01T10:00:00.000000123", c)
+    assert zero.value is not None and zero.value.endswith(".000000123")
+    plain = run_method("date_shift", "2025-01-01T10:00:00.123456", c)  # the M0 path, unchanged
+    assert plain.value is not None and plain.value.endswith(".123456") and len(plain.value) == 26

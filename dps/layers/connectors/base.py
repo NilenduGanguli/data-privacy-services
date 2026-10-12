@@ -416,9 +416,11 @@ def from_engine_text(text: str | None, column: ColumnInfo) -> Any:
             raise IncompatibleValue(kind) from None
     if kind == "timestamp":
         try:
-            return datetime.fromisoformat(text)
+            parsed = datetime.fromisoformat(text)
         except ValueError:
             raise IncompatibleValue(kind) from None
+        # Oracle TIMESTAMP(7-9) travels as FF9 text (contract §4.2): a datetime keeps microseconds
+        return text if (column.ts_precision or 6) > 6 else parsed
     if kind == "uuid":
         try:
             return uuid.UUID(text)

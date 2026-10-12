@@ -428,3 +428,31 @@ plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as b
   created-target widening, `table` + `upsert`, `target_missing`, a missing/behind sequence, and the
   `files` refusal. Tests that write changed values assert that no source value of a changed column
   survived in the target (Stage A lesson 1).
+
+## Task 7 — the Oracle pitfalls as tests
+
+- **Red as planned, one M2 touch:** only `from_engine_text` truncated FF9 text (`datetime.
+  fromisoformat` keeps microseconds). `dps/layers/connectors/base.py`: a `timestamp` column with
+  `ts_precision > 6` returns the validated text unchanged (still `IncompatibleValue` when it does not
+  parse). `decode_key` and `to_engine_text` were already right (Task 1 audit). This also lets M2's
+  codec round-trip check (`to_engine_text(from_engine_text(t)) == t`) accept a `date_shift` on a
+  TIMESTAMP(9) column instead of failing it with `incompatible_method`.
+- **`date_shift` needed no change (M0 not touched):** M0's ISO-datetime rule already shifts the date and
+  keeps the time tail verbatim, so `…T10:00:00.123456789` keeps `789` and reveals exactly. The plan's
+  test is in `tests/test_methods.py` and pins it; the plan's `_split_submicro` code was not added.
+- **New measured pitfall, fixed in `OracleWriter`:** the CLOB round-trip test failed through the writer
+  with `ORA-01461`. Measured with a scratch probe (python-oracledb 26.0.0 thin, 23ai): a `MERGE …
+  USING (SELECT :v … FROM dual)` refuses a CLOB bind of more than 32,767 UTF-8 bytes (32,767 ASCII
+  characters pass, 32,768 fail; 8,191 emoji = 32,764 bytes pass, 8,192 fail), while `INSERT` and
+  `UPDATE` take 140,000-character strings; and an `executemany` whose CLOB column mixes temporary LOBs
+  with `str` values stored **NULL** for the LOB rows without an error. `_merge_lob_binds` therefore
+  binds a MERGE batch's CLOB/NCLOB/BLOB column as temporary LOBs (`conn.createlob`) for every row when
+  any value is over the limit (UTF-16 bytes for NCLOB), never for some rows only. The test writes a
+  second batch mixing 32,767 / 32,768-byte / NULL / short / 140K values and reads every one back
+  exactly. HANDOFF §8 records both traps (and the `SAMPLE … SEED` one from Task 5).
+- `test_oracle_char_key_paging` also cuts a partition at an rstripped CHAR bound, and checks the
+  in-place count in the table; `test_oracle_timestamp9_key_paging` also updates all 66 burst rows in
+  place by their nanosecond keys (`UPDATE … WHERE TS = TO_TIMESTAMP(:k, FF9)`); the CLOB test asserts
+  that the e-mail it masked is absent from the target (`DBMS_LOB.INSTR` = 0). The `IS JSON` CLOB case
+  is kept as a fourth measured pitfall (the plan's).
+- `tests/connectors/test_codec_m3.py` adds a microsecond `TIMESTAMP(6)` case (still a `datetime`).

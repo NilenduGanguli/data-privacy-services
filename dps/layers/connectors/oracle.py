@@ -937,6 +937,9 @@ _NO_TABLE: Final = "ORA-00942"
 _DUPLICATE: Final = "ORA-00001"
 #: A value longer than its column / a number above its precision: the batch can never succeed.
 _TOO_LARGE: Final = frozenset({"ORA-12899", "ORA-01438"})
+#: A MERGE (``USING (SELECT :v … FROM dual)``) refuses a CLOB/BLOB bind longer than this many bytes
+#: (ORA-01461, measured on 23ai with python-oracledb 26.0.0 thin; INSERT and UPDATE take them).
+_MERGE_LOB_BIND_MAX: Final = 32_767
 _SEQ_SQL: Final = (
     "SELECT increment_by, cycle_flag FROM all_sequences "
     "WHERE sequence_owner = :o AND sequence_name = :s"
@@ -945,6 +948,41 @@ _IDENTITY_SQL: Final = (
     "SELECT generation_type, sequence_name FROM all_tab_identity_cols "
     "WHERE owner = :o AND table_name = :t AND column_name = :c"
 )
+
+
+def _bind_bytes(value: Any, input_type: str) -> int:
+    """Bytes a LOB bind sends: UTF-8 (CLOB), UTF-16 (NCLOB, the national character set), raw."""
+    if isinstance(value, str):
+        return len(value.encode("utf-16-le" if input_type == "nclob" else "utf-8"))
+    if isinstance(value, bytes | bytearray | memoryview):
+        return len(value)
+    return 0
+
+
+def _merge_lob_binds(conn: Any, cols: list[ColumnInfo], params: list[tuple[Any, ...]]) -> list[Any]:
+    """Bind every value of a LOB column as a temporary LOB when one of them is too long for MERGE.
+
+    Measured: a MERGE refuses a CLOB/BLOB bind over 32767 bytes (ORA-01461), and an
+    ``executemany`` whose column mixes temporary LOBs with ``str`` values stores NULL for the
+    LOBs without an error. So a column is converted for the whole batch or not at all.
+    """
+    convert: list[tuple[int, Any]] = []
+    for i, col in enumerate(cols):
+        kind = osql.input_type(col)
+        if kind in ("clob", "nclob", "blob") and any(
+            _bind_bytes(row[i], kind) > _MERGE_LOB_BIND_MAX for row in params
+        ):
+            convert.append((i, INPUT_TYPES[kind]))
+    if not convert:
+        return list(params)
+    out: list[Any] = []
+    for row in params:
+        values = list(row)
+        for i, lob_type in convert:
+            if values[i] is not None:
+                values[i] = conn.createlob(lob_type, values[i])
+        out.append(tuple(values))
+    return out
 
 
 def _det_token_width(length: int | None) -> int | None:
@@ -979,6 +1017,7 @@ class OracleWriter:
         )
         self._live: TableShape | None = None
         self._stmt: tuple[str, list[ColumnInfo]] | None = None
+        self._merge = mode == "table" and source_shape.key_source in ("primary_key", "unique_index")
 
     # -- column sets ------------------------------------------------------------------------------
     def _pseudo(self, name: str) -> bool:
@@ -1333,7 +1372,7 @@ class OracleWriter:
                 if set_cols
                 else ("", [])
             )
-        elif mode == "table" and self._src.key_source in ("primary_key", "unique_index"):
+        elif self._merge:
             merged = cols + [k for k in keys if k.name not in {c.name for c in cols}]
             stmt = (osql.merge_sql(self._obj, merged, [k.name for k in keys]), merged)
         else:
@@ -1392,6 +1431,8 @@ class OracleWriter:
             if sql and params:
                 if any(size is not None for size in sizes):
                     cur.setinputsizes(*sizes)
+                if self._merge:
+                    params = _merge_lob_binds(conn, cols, params)
                 try:
                     cur.executemany(sql, params)
                 except oracledb.DatabaseError as exc:
