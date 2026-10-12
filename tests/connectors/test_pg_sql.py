@@ -126,3 +126,56 @@ def test_kinds_cover_the_common_types() -> None:
     assert PG_KINDS["int8"] == "int" and PG_KINDS["bpchar"] == "char"
     assert PG_KINDS["jsonb"] == "json" and PG_KINDS["bytea"] == "binary"
     assert PG_KINDS["timestamptz"] == "timestamp" and PG_KINDS["uuid"] == "uuid"
+
+
+def _self_signed_pem() -> str:
+    from datetime import timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dps-test-ca")])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def test_the_ca_bundle_reference_resolves_in_the_connections_own_tenant(tmp_path) -> None:  # noqa: ANN001
+    import ssl
+
+    from dps.config import Settings
+    from dps.connections import Credentials
+    from dps.layers.connectors.base import ConnectorError
+    from dps.layers.connectors.postgres import PostgresConnector
+    from tests.connectors.factories import make_connection
+
+    folder = tmp_path / "t1" / "dps" / "ca" / "bank"
+    folder.mkdir(parents=True)
+    (folder / "ca.pem").write_text(_self_signed_pem())
+    settings = Settings(_env_file=None, secret_dir=str(tmp_path))
+    params = {
+        "host": "127.0.0.1",
+        "port": 5432,
+        "database": "bank",
+        "options": {"sslmode": "verify-full", "sslrootcert_ref": "dps/ca/bank"},
+    }
+    own = make_connection("c_1", roles=["source"], params=params, tenant_id="t1")
+    ctx = PostgresConnector(own, Credentials(), settings, action="test")._ssl()
+    assert isinstance(ctx, ssl.SSLContext) and ctx.check_hostname
+    other = make_connection("c_2", roles=["source"], params=params, tenant_id="t2")
+    with pytest.raises(ConnectorError) as err:  # t2's folder has no such CA bundle
+        PostgresConnector(other, Credentials(), settings, action="test")._ssl()
+    assert err.value.code == "secret_unavailable"

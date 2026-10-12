@@ -27,6 +27,7 @@ from dps.layers.connectors.base import (  # noqa: F401 - re-exported (contract Â
     TableShape,
     WriteMode,
 )
+from dps.secrets import SECRET_REF_PATTERN
 
 OPTION_KEYS = frozenset(
     {
@@ -100,7 +101,8 @@ class ConnectionSpec(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,62}$")
     engine: Literal["postgres", "oracle", "mongo", "s3", "pvc"]
     params: ConnectionParams
-    secret_ref: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9/_.-]{0,200}$")
+    #: Relative to the tenant's folder ``DPS_SECRET_DIR/<tenant_id>/``, or ``_shared/<path>``.
+    secret_ref: str | None = Field(default=None, pattern=SECRET_REF_PATTERN)
     credentials: InlineCredentials | None = None
     roles: set[ConnRole] = Field(default_factory=_source_only)
     tags: list[str] = Field(default_factory=list, max_length=16)

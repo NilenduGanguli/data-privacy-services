@@ -183,7 +183,7 @@ Services (host ports bind `127.0.0.1` only):
 | `minio-init` (M2, profiles `sources`/`full`) | `minio/mc:latest` | — | one-shot after `minio` is healthy: creates buckets `dps-artefacts` and `dps-exports`, exits 0 |
 | `migrate` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot `python -m dps.migrate` as `dps_owner` after `dps-db` is healthy, exits 0; app and worker wait for it (`service_completed_successfully`) and run with `DPS_MIGRATIONS_MODE=verify` |
 | `worker` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — (9400 inside the network) | `python -m dps.worker`, `DPS_WORKER_CONCURRENCY=4`; healthcheck urllib `:9400/health`; scalable (`--scale worker=N`); read-only root, 512 MB `/tmp` tmpfs (files spools), `mem_limit: 1g` |
-| `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) into the `dps-secrets` volume, which app and worker mount read-only at `/var/run/secrets/dps` |
+| `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) under the demo tenant's folder `default/` of the `dps-secrets` volume (refs are tenant-scoped), which app and worker mount read-only at `/var/run/secrets/dps`; it removes an older volume's top-level `dps/` folder |
 | `seed-sources` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot after `source-pg` is healthy: `python tools/seed_sources.py --target postgres --rows 20000 --seed 7 --restore-copy`; idempotent |
 
 The app talks to the mock as `http://azure-ocr-mock:5000` (`DPS_OCR_PROVIDER=azure`, key `mock-key`,
@@ -442,17 +442,28 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 only in staging/prod; `DPS_JOB_KEK_PREVIOUS` arrives with M5's rotation), `DPS_PG_PASSWORD(_FILE)`,
 `DPS_PG_WORKER_PASSWORD(_FILE)`, `DPS_PG_MIGRATION_PASSWORD(_FILE)` and
 `DPS_S3_SECRET_ACCESS_KEY(_FILE)` (with `DPS_S3_ACCESS_KEY_ID`), plus the connection `secret_ref`
-directories under `DPS_SECRET_DIR`: `dps/src/*` (sources), `dps/tgt/*` (targets), `dps/s3/*` (file
-stores). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
+directories under each tenant's folder `DPS_SECRET_DIR/<tenant_id>/`: `dps/src/*` (sources),
+`dps/tgt/*` (targets), `dps/s3/*` (file stores), and `DPS_SECRET_DIR/_shared/*` for a secret
+several tenants may use. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
 set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
 
 Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
-`DPS_SECRET_DIR/<ref>/` from which only these files are read: `username`, `password`, `dsn`
-(Oracle), `uri` (Mongo), `access_key_id` + `secret_access_key` (S3), `storage_state.json` (M4) and
-`ca.pem` (a source's CA bundle). Inline credentials (dev only) are sealed with `DPS_JOB_KEK` into
-`dps_connection.secret_enc` and stop resolving after `DPS_INLINE_SECRET_TTL_HOURS`. A `secret_ref`
-is not tenant-scoped: any tenant with the `jobs` scope can name any mounted reference, so mount only
-the references the deployment's tenants may use (open issue, see the M2 build report).
+**under the caller's tenant folder**, `DPS_SECRET_DIR/<tenant_id>/<ref>/` (the tenant comes from the
+authenticated request, never from the reference), from which only these files are read:
+`username`, `password`, `dsn` (Oracle), `uri` (Mongo), `access_key_id` + `secret_access_key` (S3),
+`storage_state.json` (M4) and `ca.pem` (a source's CA bundle; `options.sslrootcert_ref` follows the
+same rules). A reference `_shared/<ref>` names `DPS_SECRET_DIR/_shared/<ref>/` and resolves only
+for the tenants listed, one per line (`#` comments), in that folder's `tenants` file. Refused when
+a connection is created or updated: a reference whose first segment names another top-level folder
+(another tenant's) → 403 `secret_ref_foreign_tenant`; an unlisted or missing shared reference → 403
+`secret_ref_not_shared`; a malformed one (empty, `.`/`..`/hidden/`_` segments, upper case) → 422
+`secret_ref_invalid`. Loading credentials applies the same rules again (and refuses a symlink that
+leaves the tenant's folder), answering `secret_unavailable`. A tenant-scoped reference need not exist
+when the connection is registered. **Upgrade note:** move every mounted reference from
+`DPS_SECRET_DIR/<ref>/` to `DPS_SECRET_DIR/<tenant_id>/<ref>/` (the stored `secret_ref` values do not
+change); a leftover top-level folder such as `dps/` makes every tenant's `dps/…` reference refused
+as another tenant's. Inline credentials (dev only) are sealed with `DPS_JOB_KEK` into
+`dps_connection.secret_enc` and stop resolving after `DPS_INLINE_SECRET_TTL_HOURS`.
 
 ## 8. Traps
 

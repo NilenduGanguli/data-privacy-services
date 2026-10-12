@@ -281,3 +281,12 @@ describe('evidence pack helpers', () => {
     expect(verificationTone(false, 0)).toBe('rose');
   });
 });
+
+describe('secret reference codes (SEC-2)', () => {
+  it('explains the tenant-scoped secret_ref refusals in words', async () => {
+    const { errorText } = await import('./jobs');
+    expect(errorText('secret_ref_foreign_tenant')).toMatch(/another tenant/);
+    expect(errorText('secret_ref_not_shared')).toMatch(/does not list this tenant/);
+    expect(errorText('secret_ref_invalid')).toMatch(/not a valid relative path/);
+  });
+});

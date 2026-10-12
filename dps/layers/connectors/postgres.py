@@ -285,7 +285,11 @@ class PostgresConnector:
         if mode in ("verify-ca", "verify-full"):
             ref = self.conn.params.options.get("sslrootcert_ref")
             try:
-                cadata = resolve_secret_ref(ref, self.settings).get("ca.pem") if ref else None
+                cadata = (
+                    resolve_secret_ref(self.conn.tenant_id, ref, self.settings).get("ca.pem")
+                    if ref
+                    else None
+                )
             except SecretUnavailable:
                 raise ConnectorError(
                     "secret_unavailable", "the CA bundle reference does not resolve"

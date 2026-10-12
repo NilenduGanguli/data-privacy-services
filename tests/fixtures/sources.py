@@ -241,19 +241,25 @@ def source_pg_sync() -> Iterator[SourcePgSync]:
         asyncio.run(teardown())
 
 
-def write_source_secrets(root: Path) -> Path:
-    """Write the local ``secret_ref`` directories under ``root`` (contract §5.1):
-    ``dps/src/test-pg`` = dps_reader, ``dps/src/test-pg-rw`` = dps_writer,
-    ``dps/src/test-pg-admin`` = postgres (local demo logins; password = login)."""
-    for ref, login in (
-        ("dps/src/test-pg", "dps_reader"),
-        ("dps/src/test-pg-rw", "dps_writer"),
-        ("dps/src/test-pg-admin", "postgres"),
-    ):
-        folder = root / ref
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "username").write_text(login + "\n", encoding="utf-8")
-        (folder / "password").write_text(login + "\n", encoding="utf-8")
+#: The tenants the suite's connections use; each gets its own copy of the source secrets.
+SECRET_TENANTS = ("t1", "t2")
+
+
+def write_source_secrets(root: Path, tenants: tuple[str, ...] = SECRET_TENANTS) -> Path:
+    """Write the local ``secret_ref`` directories under each tenant's folder of ``root``
+    (contract §5.1, refs are tenant-scoped): ``<tenant>/dps/src/test-pg`` = dps_reader,
+    ``…/test-pg-rw`` = dps_writer, ``…/test-pg-admin`` = postgres (local demo logins;
+    password = login)."""
+    for tenant in tenants:
+        for ref, login in (
+            ("dps/src/test-pg", "dps_reader"),
+            ("dps/src/test-pg-rw", "dps_writer"),
+            ("dps/src/test-pg-admin", "postgres"),
+        ):
+            folder = root / tenant / ref
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "username").write_text(login + "\n", encoding="utf-8")
+            (folder / "password").write_text(login + "\n", encoding="utf-8")
     return root
 
 

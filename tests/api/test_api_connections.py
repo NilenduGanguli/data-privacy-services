@@ -3,6 +3,7 @@ objects and the wizard's count with its selection checklist."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -64,6 +65,46 @@ def test_connection_crud_scopes_and_secrecy(api_client) -> None:  # noqa: ANN001
     assert [e.outcome for e in created] == ["ok", "rejected", "rejected", "ok"]
     assert all(e.route == "/api/v1/connections" for e in created)
     assert {e.action for e in sink.events} >= {"connection.update", "connection.delete"}
+
+
+def test_secret_refs_are_scoped_to_the_callers_tenant(api_client) -> None:  # noqa: ANN001
+    c, sink = api_client
+    root = Path(c.app.state.settings.secret_dir)
+    only_t1 = root / "t1" / "dps" / "src" / "t1-only"
+    only_t1.mkdir(parents=True)
+    (only_t1 / "username").write_text("dps_reader")
+    (only_t1 / "password").write_text("t1-only-pw-distinct")
+    t2 = {**JOBS, "X-DPS-Tenant": "t2"}
+    body = {"name": "steal", "engine": "postgres", "params": PG, "roles": ["source"]}
+    refused = c.post(
+        "/api/v1/connections", json={**body, "secret_ref": "t1/dps/src/t1-only"}, headers=t2
+    )
+    assert refused.status_code == 403 and refused.json()["code"] == "secret_ref_foreign_tenant"
+    assert "t1-only" not in refused.text
+    # the same name in t2 is t2's own secret folder, which holds no such secret
+    made = c.post("/api/v1/connections", json={**body, "secret_ref": "dps/src/t1-only"}, headers=t2)
+    assert made.status_code == 201
+    tested = c.post(
+        f"/api/v1/connections/{made.json()['id']}/test", json={"role": "source"}, headers=t2
+    )
+    assert tested.status_code == 200 and tested.json()["error_code"] == "secret_unavailable"
+    redirect = c.patch(
+        f"/api/v1/connections/{made.json()['id']}",
+        json={"secret_ref": "t1/dps/src/t1-only"},
+        headers=t2,
+    )
+    assert redirect.status_code == 403 and redirect.json()["code"] == "secret_ref_foreign_tenant"
+    shared = c.post(
+        "/api/v1/connections", json={**body, "secret_ref": "_shared/dps/src/t1-only"}, headers=t2
+    )
+    assert shared.status_code == 403 and shared.json()["code"] == "secret_ref_not_shared"
+    traversal = c.post(
+        "/api/v1/connections", json={**body, "secret_ref": "dps/../t1/dps/src/t1-only"}, headers=t2
+    )
+    assert traversal.status_code == 422
+    assert "t1-only-pw-distinct" not in str([e.model_dump() for e in sink.events])
+    rejected = [e for e in sink.events if e.outcome == "rejected"]
+    assert {e.status for e in rejected} >= {403} and all(e.tenant_id == "t2" for e in rejected)
 
 
 def test_reserved_and_upper_case_tenants_never_reach_the_database(api_client) -> None:  # noqa: ANN001

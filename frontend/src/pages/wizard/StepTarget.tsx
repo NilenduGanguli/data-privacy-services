@@ -46,7 +46,8 @@ function AddStore({ auth, onCreated }: { auth: Auth; onCreated: (c: Connection) 
           <>
             <div><label className="lbl" htmlFor="st-bucket">Bucket</label><input className="input mono" id="st-bucket" value={bucket} onChange={(e) => setBucket(e.target.value)} spellCheck={false} /></div>
             <div><label className="lbl" htmlFor="st-endpoint">Endpoint (optional)</label><input className="input mono" id="st-endpoint" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://s3.ap-south-1.amazonaws.com" spellCheck={false} /></div>
-            <div><label className="lbl" htmlFor="st-secret">Secret name</label><input className="input mono" id="st-secret" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="dps/s3/exports" spellCheck={false} /></div>
+            <div><label className="lbl" htmlFor="st-secret">Secret name</label><input className="input mono" id="st-secret" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="dps/s3/exports" spellCheck={false} />
+              <div className="help">In this tenant&apos;s secret folder, or <span className="mono">_shared/…</span> when shared with it.</div></div>
           </>
         ) : (
           <div><label className="lbl" htmlFor="st-base">Base path</label><input className="input mono" id="st-base" value={base} onChange={(e) => setBase(e.target.value)} placeholder="exports/loans" spellCheck={false} /></div>

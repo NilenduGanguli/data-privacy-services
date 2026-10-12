@@ -315,9 +315,13 @@ services:
       env: local
 
   # Writes the demo secret_ref files into the dps-secrets volume (app and worker mount it
-  # read-only): dps/src/bank-pg-ro (dps_reader), dps/tgt/bank-uat and dps/src/bank-restore-rw
-  # (dps_writer), dps/s3/exports (MinIO). Demo literals; nothing is committed. `$$` is compose's
-  # escape for a literal `$` (else $d, $1 … would be interpolated from the host environment).
+  # read-only). Secret refs are tenant-scoped (DPS_SECRET_DIR/<tenant_id>/<ref>/), so the files go
+  # under the demo tenant `default` (the tenant of the bootstrap key without an X-DPS-Tenant
+  # header): dps/src/bank-pg-ro (dps_reader), dps/tgt/bank-uat and dps/src/bank-restore-rw
+  # (dps_writer), dps/s3/exports (MinIO). It also removes the pre-scoping top-level `dps` folder
+  # of an older volume (a top-level folder that is not the caller's tenant is refused as another
+  # tenant's). Demo literals; nothing is committed. `$$` is compose's escape for a literal `$`
+  # (else $d, $1 … would be interpolated from the host environment).
   demo-secrets:
     image: data-privacy-services:${DPS_IMAGE_TAG:-local}
     pull_policy: never
@@ -325,7 +329,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        set -e; d=/var/run/secrets/dps/dps;
+        set -e; rm -rf /var/run/secrets/dps/dps; d=/var/run/secrets/dps/default/dps;
         w() { mkdir -p "$$d/$$1"; printf %s "$$2" > "$$d/$$1/username"; printf %s "$$3" > "$$d/$$1/password"; };
         w src/bank-pg-ro dps_reader dps_reader;
         w tgt/bank-uat dps_writer dps_writer;

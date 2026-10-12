@@ -6,7 +6,8 @@ import type { Connection, ConnectionSpec } from '../../lib/types';
 import type { WizardAction } from './state';
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{1,62}$/;
-const SECRET_RE = /^[a-z0-9][a-z0-9/_.-]{0,200}$/;
+/** A secret reference (server: `dps.secrets.SECRET_REF_PATTERN`): relative to the tenant's secret folder, or `_shared/…`. */
+const SECRET_RE = /^(?:_shared\/)?[a-z0-9][a-z0-9/_.-]{0,200}$/;
 
 function DbIcon(): JSX.Element {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M3 14h18M9 9v11" /></svg>;
@@ -18,7 +19,7 @@ function newConnectionProblem(d: WizardDraft): string | null {
   if (!d.host.trim() || !d.database.trim()) return 'Host and database are required.';
   const port = Number(d.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return 'Port must be a number from 1 to 65535.';
-  if (d.credMode === 'secret_ref' && !SECRET_RE.test(d.secretRef)) return 'Secret name: lower-case letters, digits and / _ . - only.';
+  if (d.credMode === 'secret_ref' && !SECRET_RE.test(d.secretRef)) return 'Secret name: lower-case letters, digits and / _ . - only, relative to this tenant\'s secret folder (or under _shared/).';
   if (d.credMode === 'inline' && (!d.username.trim() || !d.password)) return 'Username and password are required.';
   return null;
 }
@@ -128,7 +129,7 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
               <div>
                 <label className="lbl" htmlFor="nc-secret">Secret name</label>
                 <input className="input mono" id="nc-secret" value={d.secretRef} onChange={(e) => set({ secretRef: e.target.value })} placeholder="dps/src/bank-dev-ro" spellCheck={false} />
-                <div className="help">The job stores only this name. Workers read the secret from the mounted store when they start; it never appears in the console, the logs or the evidence pack.</div>
+                <div className="help">The job stores only this name. It is read from this tenant&apos;s own secret folder (<span className="mono">&lt;secret dir&gt;/&lt;tenant&gt;/{d.secretRef.trim() || 'dps/src/bank-dev-ro'}</span>), or from <span className="mono">_shared/…</span> when that secret lists this tenant; another tenant&apos;s secrets cannot be named. Workers read the secret when they start; it never appears in the console, the logs or the evidence pack.</div>
               </div>
             ) : (
               <div>

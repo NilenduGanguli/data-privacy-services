@@ -125,3 +125,16 @@ def test_the_build_context_leaves_out_demo_documents_and_tests() -> None:
     # The console's demo scan reaches the image through frontend/public, which is not ignored.
     assert (ROOT / "frontend" / "public" / "demo" / "kyc-scanned.pdf").is_file()
     assert not any(entry.startswith("frontend") and entry != "frontend/dist" for entry in ignored)
+
+
+def test_demo_secrets_are_written_under_the_demo_tenant() -> None:
+    """Secret refs are tenant-scoped (SEC-2): the demo files live under the bootstrap key's
+    tenant, and the pre-scoping top-level ``dps`` folder of an older volume is removed (it would
+    be refused as another tenant's folder)."""
+    from dps.auth import DEFAULT_TENANT
+
+    script = " ".join(_services()["demo-secrets"]["command"])
+    assert f"d=/var/run/secrets/dps/{DEFAULT_TENANT}/dps;" in script
+    assert "rm -rf /var/run/secrets/dps/dps;" in script
+    for ref in ("src/bank-pg-ro", "tgt/bank-uat", "src/bank-restore-rw", "s3/exports"):
+        assert ref in script

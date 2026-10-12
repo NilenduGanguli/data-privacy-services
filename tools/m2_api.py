@@ -16,7 +16,8 @@ import httpx
 
 #: In-network endpoints of the compose stack (the app and the worker resolve these names).
 SOURCE_PG = {"host": "source-pg", "port": 5432, "database": "bank"}
-#: The demo connections (contract §11; their secrets are written by the demo-secrets one-shot).
+#: The demo connections (contract §11; their secrets are written by the demo-secrets one-shot under
+#: the demo tenant's folder ``DPS_SECRET_DIR/default/``: secret refs are tenant-scoped).
 CONNECTIONS: dict[str, dict[str, Any]] = {
     "bank-pg-ro": {
         "engine": "postgres",

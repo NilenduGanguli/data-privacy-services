@@ -1,7 +1,9 @@
 """Connection registry (contract §5.1): ``dps_connection`` rows under the tenant GUC.
 
 A connection names *where* data lives (``params``) and *how to authenticate*: a ``secret_ref``
-(files under ``DPS_SECRET_DIR/<ref>/``, the production path) or inline credentials (dev only,
+(files under the tenant's ``DPS_SECRET_DIR/<tenant_id>/<ref>/``, or an allow-listed
+``_shared/<ref>/``; checked when stored and again when loaded, see :mod:`dps.secrets`; the
+production path) or inline credentials (dev only,
 ``DPS_INLINE_SECRETS_ALLOWED``), sealed with the job KEK into ``secret_enc`` (AAD
 ``dps_connection.secret:<id>``) and purged after ``DPS_INLINE_SECRET_TTL_HOURS``. ``pvc`` file
 targets take neither. Credentials are only ever opened by :func:`load_credentials`; the public
@@ -29,8 +31,11 @@ from dps.jobs import ACTIVE_JOB_STATES, decode_cursor, encode_cursor
 from dps.jobs_models import ConnectionParams, ConnectionSpec, ConnRole, InlineCredentials
 from dps.layers.connectors.base import ConnectionTestResult, ConnEngine
 from dps.secrets import (
+    SECRET_REF_PATTERN,
     SealError,
+    SecretRefRefused,
     SecretUnavailable,
+    check_secret_ref,
     open_json,
     resolve_secret_ref,
     seal_json,
@@ -98,7 +103,7 @@ class ConnectionPatch(BaseModel):
     model_config = _HIDDEN
     name: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{1,62}$")
     params: ConnectionParams | None = None
-    secret_ref: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9/_.-]{0,200}$")
+    secret_ref: str | None = Field(default=None, pattern=SECRET_REF_PATTERN)
     credentials: InlineCredentials | None = None
     roles: set[ConnRole] | None = None
     tags: list[str] | None = None
@@ -139,6 +144,20 @@ def _require_inline_allowed(settings: Settings, kek: bytes | None) -> bytes:
     return kek
 
 
+def _check_refs(
+    tenant_id: str, secret_ref: str | None, params: ConnectionParams, settings: Settings
+) -> None:
+    """The connection's secret references (``secret_ref``, ``options.sslrootcert_ref``) must be
+    the tenant's own or shared with it (:func:`dps.secrets.check_secret_ref`)."""
+    for ref in (secret_ref, params.options.get("sslrootcert_ref")):
+        if not ref:
+            continue
+        try:
+            check_secret_ref(tenant_id, ref, settings)
+        except SecretRefRefused as exc:
+            raise ConnectionStoreError(exc.code, exc.status, exc.detail) from None
+
+
 def _seal(
     kek: bytes, credentials: InlineCredentials, connection_id: str, settings: Settings
 ) -> tuple[bytes, datetime]:
@@ -170,7 +189,9 @@ async def create_connection(
     created_by: str | None,
 ) -> Connection:
     """Insert a connection (inline credentials sealed). Raises :class:`ConnectionStoreError`:
-    ``inline_secrets_disabled`` 422, ``kek_unconfigured`` 503, ``connection_name_taken`` 409."""
+    ``inline_secrets_disabled`` 422, ``kek_unconfigured`` 503, ``connection_name_taken`` 409,
+    ``secret_ref_invalid`` 422, ``secret_ref_foreign_tenant`` / ``secret_ref_not_shared`` 403."""
+    _check_refs(tenant_id, spec.secret_ref, spec.params, settings)
     sealing_kek = _require_inline_allowed(settings, kek) if spec.credentials is not None else None
     conn_id = new_id(PREFIX_CONNECTION)
     sealed: bytes | None = None
@@ -258,7 +279,8 @@ async def update_connection(
     blob, neither keeps what is stored. Changing ``params`` or the secret clears ``last_test``
     and ``capabilities`` (the old test no longer describes the connection). Raises
     :class:`ConnectionStoreError` (``connection_invalid`` 422, ``inline_secrets_disabled`` 422,
-    ``kek_unconfigured`` 503, ``connection_name_taken`` 409).
+    ``kek_unconfigured`` 503, ``connection_name_taken`` 409, the ``secret_ref_*`` codes of
+    :func:`create_connection` for a reference the patch sets).
     """
     s = db.schema_ident()
     async with db.acquire(tenant_id) as conn, conn.transaction():
@@ -298,6 +320,8 @@ async def update_connection(
         except ValidationError as exc:
             first = exc.errors()[0].get("msg", "invalid") if exc.errors() else "invalid"
             raise ConnectionStoreError("connection_invalid", 422, str(first)) from None
+        if patch.secret_ref is not None or patch.params is not None:
+            _check_refs(tenant_id, secret_ref, spec.params, settings)
         stale = secret_changed or patch.params is not None
         try:
             await conn.execute(
@@ -386,7 +410,7 @@ async def load_credentials(
     if c.engine == "pvc":
         return Credentials()
     if c.secret_ref:
-        files = resolve_secret_ref(c.secret_ref, settings)
+        files = resolve_secret_ref(c.tenant_id, c.secret_ref, settings)
         return Credentials(
             username=files.pop("username", ""),
             password=SecretStr(files.pop("password", "")),

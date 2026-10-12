@@ -30,7 +30,7 @@ PG = {"host": "source-pg", "port": 5432, "database": "bank"}
 
 
 async def test_secret_ref_and_inline_round_trip(migrated_db, kek, tmp_path) -> None:  # noqa: ANN001
-    d = tmp_path / "dps" / "src" / "bank-pg-ro"
+    d = tmp_path / "t1" / "dps" / "src" / "bank-pg-ro"
     d.mkdir(parents=True)
     (d / "username").write_text("dps_reader")
     (d / "password").write_text("dps_reader")
@@ -278,3 +278,115 @@ async def test_creating_a_connection_registers_the_tenant(migrated_db, kek) -> N
         assert (
             await conn.fetchval("SELECT count(*) FROM dps.dps_tenant WHERE tenant_id = 't9'") == 1
         )
+
+
+def _write_secret(root, tenant: str, ref: str) -> None:  # noqa: ANN001
+    folder = root / tenant / ref
+    folder.mkdir(parents=True)
+    (folder / "username").write_text("dps_reader")
+    (folder / "password").write_text("t1-only-password")
+
+
+async def test_a_tenant_cannot_create_update_or_use_another_tenants_secret_ref(
+    migrated_db,
+    kek,
+    tmp_path,  # noqa: ANN001
+) -> None:
+    _write_secret(tmp_path, "t1", "dps/src/bank-pg-ro")
+    (tmp_path / "t2").mkdir()
+    settings = migrated_db.model_copy(update={"secret_dir": str(tmp_path)})
+    own = await create_connection(
+        "t1",
+        ConnectionSpec(name="pg", engine="postgres", params=PG, secret_ref="dps/src/bank-pg-ro"),
+        settings=settings,
+        kek=kek,
+        created_by=None,
+    )
+    assert (await load_credentials(own, settings=settings, kek=kek)).username == "dps_reader"
+    foreign = ConnectionSpec(
+        name="pg", engine="postgres", params=PG, secret_ref="t1/dps/src/bank-pg-ro"
+    )
+    with pytest.raises(ConnectionStoreError) as err:  # create: refused by its tenant prefix
+        await create_connection("t2", foreign, settings=settings, kek=kek, created_by=None)
+    assert (err.value.code, err.value.status) == ("secret_ref_foreign_tenant", 403)
+    assert "t1" not in err.value.detail and "bank-pg-ro" not in err.value.detail
+    # the same name in t2 is t2's own (missing) secret: stored, but it never opens t1's files
+    same_name = await create_connection(
+        "t2",
+        foreign.model_copy(update={"secret_ref": "dps/src/bank-pg-ro"}),
+        settings=settings,
+        kek=kek,
+        created_by=None,
+    )
+    with pytest.raises(SecretUnavailable):
+        await load_credentials(same_name, settings=settings, kek=kek)
+    with pytest.raises(ConnectionStoreError) as err:  # update: refused the same way
+        await update_connection(
+            "t2",
+            same_name.id,
+            ConnectionPatch(secret_ref="t1/dps/src/bank-pg-ro"),
+            settings=settings,
+            kek=kek,
+        )
+    assert (err.value.code, err.value.status) == ("secret_ref_foreign_tenant", 403)
+    for bad in ("_shared/dps/src/bank-pg-ro", "dps/./src"):
+        with pytest.raises(ConnectionStoreError) as err:
+            await update_connection(
+                "t2", same_name.id, ConnectionPatch(secret_ref=bad), settings=settings, kek=kek
+            )
+        assert err.value.code in ("secret_ref_not_shared", "secret_ref_invalid")
+    # a CA bundle reference is a secret reference too
+    with pytest.raises(ConnectionStoreError) as err:
+        await create_connection(
+            "t2",
+            ConnectionSpec(
+                name="pg-ca",
+                engine="postgres",
+                params={**PG, "options": {"sslrootcert_ref": "t1/dps/src/bank-pg-ro"}},
+                secret_ref="dps/src/x",
+            ),
+            settings=settings,
+            kek=kek,
+            created_by=None,
+        )
+    assert err.value.code == "secret_ref_foreign_tenant"
+    # defence in depth: a row that names another tenant's folder (planted past the API) is refused
+    async with db.acquire("t2") as conn:
+        await conn.execute(
+            "UPDATE dps.dps_connection SET secret_ref = $2 WHERE id = $1",
+            same_name.id,
+            "t1/dps/src/bank-pg-ro",
+        )
+    planted = await get_connection("t2", same_name.id)
+    assert planted is not None
+    with pytest.raises(SecretUnavailable):
+        await load_credentials(planted, settings=settings, kek=kek)
+
+
+async def test_a_shared_secret_ref_works_only_for_listed_tenants(
+    migrated_db,
+    kek,
+    tmp_path,  # noqa: ANN001
+) -> None:
+    _write_secret(tmp_path, "_shared", "s3/exports")
+    settings = migrated_db.model_copy(update={"secret_dir": str(tmp_path)})
+    spec = ConnectionSpec(
+        name="exports",
+        engine="s3",
+        params={"bucket": "dps-exports"},
+        secret_ref="_shared/s3/exports",
+        roles={"target"},
+    )
+    with pytest.raises(ConnectionStoreError) as err:
+        await create_connection("t1", spec, settings=settings, kek=kek, created_by=None)
+    assert (err.value.code, err.value.status) == ("secret_ref_not_shared", 403)
+    (tmp_path / "_shared" / "s3" / "exports" / "tenants").write_text("t1\n")
+    made = await create_connection("t1", spec, settings=settings, kek=kek, created_by=None)
+    assert (await load_credentials(made, settings=settings, kek=kek)).username == "dps_reader"
+    with pytest.raises(ConnectionStoreError) as err:
+        await create_connection("t2", spec, settings=settings, kek=kek, created_by=None)
+    assert err.value.code == "secret_ref_not_shared"
+    # the allow-list is read again when credentials load: a tenant taken off it loses access
+    (tmp_path / "_shared" / "s3" / "exports" / "tenants").write_text("t3\n")
+    with pytest.raises(SecretUnavailable):
+        await load_credentials(made, settings=settings, kek=kek)

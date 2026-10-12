@@ -83,8 +83,13 @@ The worker serves `/health`, `/readyz` and `/metrics` on `DPS_WORKER_METRICS_POR
 ## Request bodies
 
 ```json
-// POST /connections (ConnectionSpec): secret_ref names a directory under DPS_SECRET_DIR; inline
-// credentials (dev only) are sealed with DPS_JOB_KEK and expire after DPS_INLINE_SECRET_TTL_HOURS.
+// POST /connections (ConnectionSpec): secret_ref names a directory under the caller's tenant
+// folder, DPS_SECRET_DIR/<tenant_id>/<ref>/ (here the demo tenant `default`:
+// /var/run/secrets/dps/default/dps/src/bank-pg-ro/), or _shared/<ref> for a folder whose
+// `tenants` file lists the tenant. A ref whose first segment names another tenant's folder is 403
+// secret_ref_foreign_tenant; an unlisted shared ref 403 secret_ref_not_shared; a malformed one 422
+// secret_ref_invalid. Inline credentials (dev only) are sealed with DPS_JOB_KEK and expire after
+// DPS_INLINE_SECRET_TTL_HOURS.
 {"name": "bank-pg-ro", "engine": "postgres",
  "params": {"host": "source-pg", "port": 5432, "database": "bank"},
  "secret_ref": "dps/src/bank-pg-ro", "roles": ["source"], "tags": ["production"]}
