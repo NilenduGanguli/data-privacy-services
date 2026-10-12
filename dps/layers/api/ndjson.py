@@ -83,6 +83,7 @@ from dps.layers.api.common import (
     map_engine_error,
     payload_from,
     policy_label,
+    route_template,
     with_idempotency,
 )
 from dps.observability import get_logger
@@ -602,11 +603,32 @@ async def _prepare(
 
 async def _lines(request: Request, stream: _Stream, policy: str, tid: str) -> AsyncIterator[bytes]:
     """Header, item lines chunk by chunk (each chunk on a worker thread), then the report — or
-    the error line that ends the stream. Writes the stream's one audit event when it ends."""
+    the error line that ends the stream. Writes the stream's one audit event when it ends.
+
+    A complete stream is audited **before** its report line: a strict audit sink that refuses
+    the event (``DPS_AUDIT_STRICT``, M2; 503 ``audit_unavailable`` on the JSON routes) ends the
+    stream with an ``audit_unavailable`` error line instead, so no unaudited stream carries a
+    report — and the replay cache records only streams that end ``ok``.
+    """
     started = time.perf_counter()
-    structlog.contextvars.bind_contextvars(trace_id=tid, route=request.url.path)
+    structlog.contextvars.bind_contextvars(trace_id=tid, route=route_template(request))
     totals = _Totals(llm_calls=stream.llm_calls)
     outcome = "aborted"  # the client went away before the stream finished
+    audited = False
+
+    def audit(result: str) -> None:
+        nonlocal audited
+        audited = True
+        end_call(
+            request,
+            mode=stream.mode,
+            policy=policy,
+            tid=tid,
+            started=started,
+            outcome=result,
+            counts=totals.audit_counts(),
+        )
+
     try:
         yield _dumps(stream.header)
         for offset in range(0, len(stream.items), stream.chunk_items):
@@ -627,21 +649,23 @@ async def _lines(request: Request, stream: _Stream, policy: str, tid: str) -> As
                     }
                 )
                 return
+        try:
+            audit("ok")
+        except CodedHTTPException as exc:  # a strict sink refused the event: fail closed
+            outcome = exc.code
+            yield _dumps({"type": "error", "index": None, "code": exc.code, "detail": exc.detail})
+            return
         outcome = "ok"
         yield _dumps(
             {"type": "report", "items": totals.items, "report": totals.report(stream.mode)}
         )
     finally:
         request.state.stream_outcome = outcome  # with_idempotency records only an ``ok`` stream
-        end_call(
-            request,
-            mode=stream.mode,
-            policy=policy,
-            tid=tid,
-            started=started,
-            outcome=outcome,
-            counts=totals.audit_counts(),
-        )
+        if not audited:
+            try:
+                audit(outcome)
+            except CodedHTTPException:  # strict sink refused: the stream already ended unreported
+                logger.warning("stream_audit_refused", outcome=outcome)
         structlog.contextvars.unbind_contextvars("trace_id", "route")
 
 

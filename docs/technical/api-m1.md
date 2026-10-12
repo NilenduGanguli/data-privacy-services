@@ -263,7 +263,12 @@ line is one item (for `/reveal`, an item line of an earlier obfuscate stream, `{
   errors (envelope, limits, policy, key material) are coded HTTP errors before anything streams.
 - **Limits**: `DPS_NDJSON_MAX_ITEMS` items (413 `ndjson_too_large`), `DPS_MAX_NDJSON_MB` for an
   NDJSON body, and `DPS_MAX_ITEMS` values per item (413 `payload_too_large`, naming the item).
-- One audit event per stream (counts summed; outcome `aborted` when the client goes away).
+- One audit event per stream (counts summed; outcome `aborted` when the client goes away). A
+  complete stream is audited before its `report` line: with `DPS_AUDIT_STRICT=true` (M2) a sink
+  that cannot take the event ends the stream with `{"type": "error", "index": null, "code":
+  "audit_unavailable", "detail": "audit unavailable"}` instead of the report (the JSON routes
+  answer 503 `audit_unavailable`), and the replay cache does not record it. A stream without a
+  `report` line is never complete.
 - A JSON array sent to `/reveal` with `Accept: application/x-ndjson` is revealed as one document
   (its hints address the whole array) and streamed one line per element.
 
