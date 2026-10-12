@@ -162,9 +162,28 @@ def test_the_anchor_is_keyed_and_stable_per_key_and_business_key() -> None:
     assert other_key.anchor != first.anchor
 
 
+class DigitAffineCipher:
+    """Per character i -> 3i + 5 in the alphabet: digit 5 -> 0, and twice is not the identity."""
+
+    def encrypt(self, alphabet: str, plaintext: str) -> str:
+        n = len(alphabet)
+        return "".join(alphabet[(3 * alphabet.index(c) + 5) % n] for c in plaintext)
+
+    def decrypt(self, alphabet: str, ciphertext: str) -> str:
+        n = len(alphabet)
+        inv = pow(3, -1, n)
+        return "".join(alphabet[(inv * (alphabet.index(c) - 5)) % n] for c in ciphertext)
+
+
 def test_int_tokens_that_would_lose_a_leading_zero_stay_strings() -> None:
     rot5 = lambda k, t: RotCipher(5)  # noqa: E731 - 5 -> 0: the 14-digit account starts with 0
-    policy, _, key, res = _obfuscate(cipher_factory=rot5)
+    # v0.1.0 tokens (``leading_zero: any``, plain FF1): the safety net keeps a zero-led token a str
+    policy, plan = _plan(SAMPLE, "gdpr-pseudonymise", "obfuscate")
+    for entry in plan.entries:
+        if entry.method == "fpe_digits":
+            entry.params = {**entry.params, "leading_zero": "any"}
+    key = generate_key_material("key")
+    res = apply_plan(data=SAMPLE, plan=plan, options=_opts(policy, key, cipher_factory=rot5))
     assert res.output["account_number"] == "05655789012367"
     back = reveal(
         output=res.output,
@@ -173,6 +192,25 @@ def test_int_tokens_that_would_lose_a_leading_zero_stay_strings() -> None:
         options=_opts(policy, key, cipher_factory=rot5),
     )
     assert back == SAMPLE and isinstance(back["account_number"], int)
+
+
+def test_plans_preserve_the_leading_zero_so_int_tokens_stay_ints() -> None:
+    # M2 review G4 r1 (B1): every plan entry defaults to ``leading_zero: preserve``
+    affine = lambda k, t: DigitAffineCipher()  # noqa: E731 - 5 -> 0 on the first step
+    policy, plan, key, res = _obfuscate(cipher_factory=affine)
+    account = next(e for e in plan.entries if e.finding.locator.path == "$.account_number")
+    assert account.params["leading_zero"] == "preserve"
+    token = res.output["account_number"]
+    assert isinstance(token, int) and len(str(token)) == 14 and token != SAMPLE["account_number"]
+    hint = next(h for h in res.reveal_hints if h.path == "$.account_number")
+    assert hint.params["leading_zero"] == "preserve"  # recorded, so reveal walks back
+    back = reveal(
+        output=res.output,
+        key=key,
+        hints=res.reveal_hints,
+        options=_opts(policy, key, cipher_factory=affine),
+    )
+    assert back == SAMPLE
 
 
 def test_reveal_refuses_hints_from_another_key() -> None:

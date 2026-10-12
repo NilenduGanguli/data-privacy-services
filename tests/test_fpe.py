@@ -6,6 +6,7 @@ from dps.engine.transform.fpe import (
     DIGITS,
     LOWER,
     Ff1,
+    cycle_walk_leading_zero,
     domain_ok,
     fpe_available,
     fpe_digits_decrypt,
@@ -108,3 +109,90 @@ def test_non_ascii_letters_pass_through() -> None:
     assert out is not None and out[3] == "é" and out[6:8] == "úñ"
     assert fpe_text_decrypt(RotCipher(), out) == "José Núñez"
     assert fpe_text_encrypt(RotCipher(), "अनन्या") is None  # no ASCII letters: falls back
+
+
+# --- M2 review G4 r1 (B1): a numeric column cannot hold a leading zero -----------------------
+class AffineCipher:
+    """A keyed permutation of n-digit strings, x -> (7x + 3) mod 10**n (7 is coprime with 10)."""
+
+    def encrypt(self, alphabet: str, plaintext: str) -> str:
+        n = len(plaintext)
+        return f"{(7 * int(plaintext) + 3) % 10**n:0{n}d}"
+
+    def decrypt(self, alphabet: str, ciphertext: str) -> str:
+        n = len(ciphertext)
+        return f"{(pow(7, -1, 10**n) * (int(ciphertext) - 3)) % 10**n:0{n}d}"
+
+
+class StuckCipher:
+    """Not a permutation: every input encrypts to all zeros."""
+
+    def encrypt(self, alphabet: str, plaintext: str) -> str:
+        return "0" * len(plaintext)
+
+    decrypt = encrypt
+
+
+def test_preserve_leading_zero_walks_past_a_zero_led_output() -> None:
+    # RotCipher maps 7 -> 0: plain FF1 output would lose its first digit in an integer column.
+    assert fpe_digits_encrypt(RotCipher(), "7123456") == "0456789"
+    out = fpe_digits_encrypt(RotCipher(), "7123456", preserve_leading_zero=True)
+    assert out == "3789012"  # one more step of the same permutation
+    assert fpe_digits_decrypt(RotCipher(), out, preserve_leading_zero=True) == "7123456"
+    assert fpe_digits_decrypt(RotCipher(), "0456789") == "7123456"  # v0.1.0 tokens still reverse
+    # outputs that already start with a non-zero digit are the plain FF1 tokens
+    assert fpe_digits_encrypt(RotCipher(), "-12345678", preserve_leading_zero=True) == "-45678901"
+
+
+def test_cycle_walk_is_a_bijection_that_keeps_the_leading_zero_class() -> None:
+    cipher = AffineCipher()
+    domain = [f"{i:03d}" for i in range(1000)]
+    coded = [cycle_walk_leading_zero(lambda d: cipher.encrypt(DIGITS, d), x) for x in domain]
+    assert sorted(coded) == domain  # a permutation of the whole domain
+    assert all((x[0] == "0") == (y[0] == "0") for x, y in zip(domain, coded, strict=True))
+    back = [cycle_walk_leading_zero(lambda d: cipher.decrypt(DIGITS, d), y) for y in coded]
+    assert back == domain
+    assert any(cipher.encrypt(DIGITS, x)[0] == "0" and x[0] != "0" for x in domain)
+
+
+def test_preserve_leading_zero_with_a_kept_prefix_is_plain_ff1() -> None:
+    for text in ("4532 7811 2290 4417", "7123456789"):
+        plain = fpe_digits_encrypt(RotCipher(), text, keep_prefix=1)
+        assert plain == fpe_digits_encrypt(
+            RotCipher(), text, keep_prefix=1, preserve_leading_zero=True
+        )
+
+
+def test_a_cipher_that_is_not_a_permutation_cannot_loop_forever() -> None:
+    with pytest.raises(ValueError) as err:
+        fpe_digits_encrypt(StuckCipher(), "12345678", preserve_leading_zero=True)
+    assert "12345678" not in str(err.value)
+
+
+@pytest.mark.fpe
+def test_real_ff1_preserve_leading_zero_on_eight_digit_ids() -> None:
+    pytest.importorskip("fastfpe")
+    import random
+
+    cipher = Ff1(bytes(range(32)), tweak="CUSTOMER_ID")
+    rng = random.Random(20261012)
+    ids = [str(rng.randrange(10_000_000, 100_000_000)) for _ in range(400)]
+    plain = [fpe_digits_encrypt(cipher, i) for i in ids]
+    kept = [fpe_digits_encrypt(cipher, i, preserve_leading_zero=True) for i in ids]
+    assert sum(1 for p in plain if p and p[0] == "0") >= 10  # the defect: ~1 in 10
+    assert all(k is not None and len(k) == 8 and k[0] != "0" for k in kept)
+    assert len(set(kept)) == len(ids)
+    # tokens that did not start with 0 are unchanged, so earlier tokens and joins stay valid
+    assert all(k == p for k, p in zip(kept, plain, strict=True) if p and p[0] != "0")
+    assert all(
+        fpe_digits_decrypt(cipher, k, preserve_leading_zero=True) == i
+        for i, k in zip(ids, kept, strict=True)
+        if k
+    )
+    # a string with a leading zero keeps one (account numbers held as text)
+    zero_led = [f"0{i[1:]}" for i in ids[:50]]
+    coded = [fpe_digits_encrypt(cipher, z, preserve_leading_zero=True) for z in zero_led]
+    assert all(c is not None and c[0] == "0" for c in coded)
+    assert [fpe_digits_decrypt(cipher, c, preserve_leading_zero=True) for c in coded if c] == (
+        zero_led
+    )

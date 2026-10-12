@@ -24,6 +24,14 @@ against its own transformed outputs only (kept and unplanned columns are never s
 A whole-batch sweep would flag a short original inside another row's realistic surrogate or FPE
 output and fail healthy jobs at L2 volumes. Under ``strict`` any hit raises :class:`LeakageError`
 and the batch is not written. Errors and hits carry paths, entity types and counts — never values.
+
+**Reversible outputs survive the column** (contract §6.5, amendment 2026-10-12). ``fpe_digits``
+plans default to ``leading_zero: preserve`` (:class:`ColumnPlan`, like every plan entry), and an
+integer, decimal or float column refuses any other setting (``incompatible_method``): a token
+there that starts with ``0`` would be stored without that digit and reveal would return another
+number. Any reversible output the target column would store differently (a dropped leading zero,
+a decimal re-scaled to the column's scale) fails the batch with ``incompatible_method`` instead
+of being written.
 """
 
 from __future__ import annotations
@@ -33,9 +41,16 @@ import json
 from collections import Counter
 from typing import Any, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from dps.engine.findings import Finding, Locator, Plan, PlanEntry, hash_value
+from dps.engine.findings import (
+    Finding,
+    Locator,
+    Plan,
+    PlanEntry,
+    hash_value,
+    with_plan_defaults,
+)
 from dps.engine.planner import build_plan
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import PrivacyEngine
@@ -80,6 +95,8 @@ LOCALE_BY_COUNTRY = {
     "MX": "es_MX",
 }
 _FPE = frozenset({"fpe_digits", "fpe_text"})
+#: Output kinds whose values are numbers: an ``fpe_digits`` token must keep its leading digit.
+NUMERIC_KINDS = frozenset({"int", "decimal", "float"})
 #: Minimum normalised lengths: an unchanged whole value, and a value (or a name part) found
 #: elsewhere in the row's outputs.
 EXACT_MIN, CONTAIN_MIN = 4, 8
@@ -110,6 +127,14 @@ class ColumnPlan(BaseModel):
     length: int | None
     precision: int | None = None
     scale: int | None = None
+
+    @model_validator(mode="after")
+    def _plan_defaults(self) -> ColumnPlan:
+        # a new MethodSpec: the snapshot's or the policy's object is never changed
+        params = with_plan_defaults(self.method.method, self.method.params)
+        if params != self.method.params:
+            self.method = self.method.model_copy(update={"params": params})
+        return self
 
     def output_column(self) -> ColumnInfo:
         """The target column as the value codec sees it."""
@@ -252,10 +277,12 @@ class BatchTransformer:
         """Validate the mode's prerequisites and the plans against ``shape``.
 
         Raises:
-            ValueError: obfuscate without key material, synthesize without a seed, or a plan
-                (or the anchor) naming a column the table does not have.
+            ValueError: obfuscate without key material, synthesize without a seed, a plan (or
+                the anchor) naming a column the table does not have, or a plan whose method
+                params lack their plan defaults (copied around :class:`ColumnPlan`'s validator).
             IncompatibleMethod: ``incompatible_method`` for a synthesize-mode method that needs
-                key material.
+                key material, or ``fpe_digits`` without ``leading_zero: preserve`` on a numeric
+                column.
         """
         if mode == "synthesize":
             if seed is None:
@@ -269,6 +296,20 @@ class BatchTransformer:
                 raise IncompatibleMethod(bad[0], "incompatible_method")
         elif key is None:
             raise ValueError("obfuscate mode needs key material")
+        if any(
+            c.method.params != with_plan_defaults(c.method.method, c.method.params) for c in columns
+        ):
+            # a plan copied around its validator: the reveal map would not show what ran
+            raise ValueError("a column plan lacks its method defaults; build it with ColumnPlan()")
+        lossy = [
+            c.path
+            for c in columns
+            if c.method.method == "fpe_digits"
+            and c.kind in NUMERIC_KINDS
+            and c.method.params.get("leading_zero") != "preserve"
+        ]
+        if lossy:
+            raise IncompatibleMethod(lossy[0], "incompatible_method")
         known = {c.name for c in shape.columns}
         if any(c.name not in known for c in columns) or (anchor and anchor[0] not in known):
             raise ValueError("a column plan names a column the table does not have")
@@ -403,15 +444,20 @@ class BatchTransformer:
                 methods.update(applied.methods_used)
                 notes.update(applied.notes)
                 outputs: dict[str, str | None] = {}
+                reversible = {h.path for h in applied.reveal_hints}
                 for name in searched:
                     value = applied.output.get(name)
                     text = None if value is None else str(value)
                     column = self.out_cols[name]
                     outputs[column.path] = text
                     try:
-                        out[name] = from_engine_text(text, column)
+                        stored = from_engine_text(text, column)
                     except IncompatibleValue as exc:
                         raise IncompatibleMethod(column.path, exc.code) from None
+                    if column.path in reversible and to_engine_text(stored, column) != text:
+                        # the column would change a token reveal must read back exactly
+                        raise IncompatibleMethod(column.path, "incompatible_method")
+                    out[name] = stored
                 checked += _checked(originals)
                 inputs = {self.out_cols[name].path: doc[name] for name in searched}
                 hits += verify_row(originals, outputs, inputs=inputs)

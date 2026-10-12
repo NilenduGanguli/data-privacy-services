@@ -390,3 +390,173 @@ def test_synthesize_free_text_keeps_low_sensitivity_spans_without_a_hit() -> Non
     notes = result.rows[0]["notes"]
     assert "2024-01-05" in notes and "ann.k@" not in notes  # the DATE is kept by the policy
     assert result.verification.passed and result.values_by_method == {"keep": 1, "surrogate": 1}
+
+
+# --- M2 review G4 r1 (B1): fpe_digits on int/decimal columns must stay revealable ------------
+REAL_FF1 = PrivacyEngine(
+    Settings(
+        _env_file=None,
+        llm_provider="stub",
+        fpe_enabled=True,
+        ner_enabled=False,
+        default_locale="en_IN",
+    )
+)
+AMOUNTS = TableShape(
+    object=ObjectRef(owner="bank", name="accounts"),
+    columns=[
+        ColumnInfo(path="$.id", name="id", data_type="bigint", kind="int", is_key=True),
+        ColumnInfo(
+            path="$.amt",
+            name="amt",
+            data_type="numeric(14,2)",
+            kind="decimal",
+            precision=14,
+            scale=2,
+        ),
+    ],
+    key=["id"],
+    key_source="primary_key",
+)
+
+
+def _numeric_plans(shape: TableShape, **params: Any) -> list[ColumnPlan]:
+    out = []
+    for name, entity in (("id", "CUSTOMER_ID"), ("amt", "AMOUNT")):
+        col = shape.column(name)
+        out.append(
+            ColumnPlan(
+                path=col.path,
+                name=name,
+                entity_type=entity,
+                method=MethodSpec(method="fpe_digits", **params),
+                text_column=False,
+                reversible=True,
+                kind=col.kind,
+                length=None,
+                precision=col.precision,
+                scale=col.scale,
+            )
+        )
+    return out
+
+
+def _numeric_transformer(
+    engine: PrivacyEngine, key: KeyMaterial, cols: list[ColumnPlan]
+) -> BatchTransformer:
+    return BatchTransformer(
+        engine,
+        policy=load_preset("gdpr-pseudonymise"),
+        mode="obfuscate",
+        columns=cols,
+        shape=AMOUNTS,
+        key=key,
+        seed=None,
+        locale="en_IN",
+    )
+
+
+def _reveal_column(
+    engine: PrivacyEngine, key: KeyMaterial, col: ColumnPlan, rows: list[Row]
+) -> list[str]:
+    """Reveal one column the way Task 22's reveal_row will: per-path hints from the plan."""
+    from dps.engine.transform.apply import RevealHint
+    from dps.engine.transform.crypto import key_check_value
+    from dps.layers.connectors.base import to_engine_text
+
+    opts = ApplyOptions(
+        policy=load_preset("gdpr-pseudonymise"),
+        key=key,
+        surrogates=None,
+        fpe_enabled=True,
+        cipher_factory=engine.cipher_factory,
+    )
+    hint = RevealHint(
+        path=col.path,
+        entity_type=col.entity_type,
+        method=col.method.method,
+        params=col.method.params,
+        kid=key.kid,
+        kcv=key_check_value(key),
+    )
+    info = AMOUNTS.column(col.name)
+    out = []
+    for row in rows:
+        doc = {col.name: to_engine_text(row[col.name], info)}
+        out.append(reveal(output=doc, key=key, hints=[hint], options=opts)[col.name])
+    return out
+
+
+def test_column_plans_default_fpe_digits_to_a_preserved_leading_zero() -> None:
+    cols = _numeric_plans(AMOUNTS)
+    assert all(c.method.params == {"leading_zero": "preserve"} for c in cols)
+    keep4 = _numeric_plans(AMOUNTS, keep_suffix=4)[0]
+    assert keep4.method.params == {"keep_suffix": 4, "leading_zero": "preserve"}
+    text = plan("full_name", "PERSON_NAME", "fpe_digits", "text", leading_zero="any")
+    assert text.method.params == {"leading_zero": "any"}  # a text column may keep v0.1.0 tokens
+
+
+def test_fpe_digits_without_a_preserved_leading_zero_is_refused_on_numeric_columns() -> None:
+    with pytest.raises(IncompatibleMethod) as err:
+        _numeric_transformer(
+            ENGINE, generate_key_material("key"), _numeric_plans(AMOUNTS, leading_zero="any")
+        )
+    assert err.value.code == "incompatible_method" and err.value.path == "$.id"
+    # a plan copied around the validator would run with params its reveal map does not show
+    bare = _numeric_plans(AMOUNTS)[0].model_copy(update={"method": MethodSpec(method="fpe_digits")})
+    with pytest.raises(ValueError):
+        _numeric_transformer(ENGINE, generate_key_material("key"), [bare])
+
+
+def test_a_zero_led_fpe_output_keeps_every_digit_of_an_int_key() -> None:
+    # RotCipher maps a leading 7 to 0: the plain token 03333334 would be stored as 3333334.
+    key = generate_key_material("key")
+    rows = [{"id": 70_000_001, "amt": Decimal("71234.56")}]
+    out = _numeric_transformer(ENGINE, key, _numeric_plans(AMOUNTS)).transform(rows).rows[0]
+    assert out["id"] == 36_666_667 and out["amt"] == Decimal("37890.12")
+    cols = _numeric_plans(AMOUNTS)
+    assert _reveal_column(ENGINE, key, cols[0], [out]) == ["70000001"]
+    assert _reveal_column(ENGINE, key, cols[1], [out]) == ["71234.56"]
+
+
+def test_a_reversible_output_the_column_would_change_is_refused() -> None:
+    key = generate_key_material("key")
+    # phone has no leading-zero rule: a zero-led token in an int column would lose its digit
+    phone = _numeric_plans(AMOUNTS)[0].model_copy(
+        update={"method": MethodSpec(method="phone"), "entity_type": "PHONE_NUMBER"}
+    )
+    with pytest.raises(IncompatibleMethod) as err:
+        _numeric_transformer(ENGINE, key, [phone]).transform([{"id": 7_123_456_789, "amt": None}])
+    assert err.value.code == "incompatible_method" and "7123456789" not in str(err.value)
+    # a value with fewer decimals than the target scale would be re-scaled, changing its digits
+    amt = _numeric_plans(AMOUNTS)[1]
+    with pytest.raises(IncompatibleMethod) as err2:
+        _numeric_transformer(ENGINE, key, [amt]).transform([{"id": 1, "amt": Decimal("12345.6")}])
+    assert err2.value.code == "incompatible_method" and err2.value.path == "$.amt"
+
+
+@pytest.mark.fpe
+def test_real_ff1_int_and_decimal_columns_keep_their_digits_and_reveal() -> None:
+    pytest.importorskip("fastfpe")
+    import random
+
+    rng = random.Random(20261012)
+    ids = rng.sample(range(10_000_000, 100_000_000), 400)
+    rows: list[Row] = [
+        {"id": i, "amt": Decimal(rng.randrange(1_000_000, 100_000_000)) / 100} for i in ids
+    ]
+    for row in rows:
+        row["amt"] = row["amt"].quantize(Decimal("0.01"))
+    key = generate_key_material("key")
+    cols = _numeric_plans(AMOUNTS)
+    transformer = _numeric_transformer(REAL_FF1, key, cols)
+    out = transformer.transform([dict(r) for r in rows[:150]]).rows
+    out += transformer.transform([dict(r) for r in rows[150:]]).rows  # batch split is irrelevant
+    assert all(len(str(o["id"])) == 8 for o in out)
+    assert len({o["id"] for o in out}) == len(rows)
+    assert all(
+        len(format(o["amt"], "f")) == len(format(r["amt"], "f"))
+        for o, r in zip(out, rows, strict=True)
+    )
+    assert _reveal_column(REAL_FF1, key, cols[0], out) == [str(i) for i in ids]
+    assert _reveal_column(REAL_FF1, key, cols[1], out) == [format(r["amt"], "f") for r in rows]

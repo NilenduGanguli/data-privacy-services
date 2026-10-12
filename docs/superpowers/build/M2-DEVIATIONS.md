@@ -713,3 +713,59 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   `test_several_objects_make_one_snapshot_each`, `test_failures_are_coded_and_value_free`,
   `test_an_unreachable_source_is_retried`: 9 + 3 + 4 = 16 (plan: 5). The discover test also
   checks that no sampled name, e-mail or mobile number reaches the stored snapshot.
+
+## Review G4 r1 fixes (Tasks 15–17)
+
+Review: `M2-G4-review-r1.md`, one blocking finding (B1). Contract change: §0 amendment 2026-10-12
+"`fpe_digits` keeps the leading-zero class", §6.4 (`ColumnPlan` comment), §6.5 (same commit).
+
+- **B1 — `fpe_digits` on `int`/`decimal` columns lost the token's leading zero (~1 value in 10), so
+  the stored token revealed to a different number or not at all.** Decided at contract level, for
+  every layer, so that the same digits keep one token in a document, a text column and a numeric
+  column (P3, §6.5): `fpe_digits` gains the param `leading_zero: any | preserve`; `preserve`
+  cycle-walks FF1 (when `keep_prefix` is 0) until the token's first digit is `0` exactly when the
+  value's is. That is a bijection on each class, keeps the length, and leaves every plain-FF1 token
+  that already started with a non-zero digit unchanged (about 90 % of ids). Forcing
+  `keep_prefix >= 1` on numeric columns (the review's second option) was rejected: it changes every
+  numeric token relative to the same digits in a text column or a document (breaking §6.5), leaks the
+  first digit, and pushes 6-digit values under the FF1 domain minimum (`det_token` fallback, which an
+  integer column cannot hold).
+- **Where the default lives.** The method's own default stays `any` (plain FF1), so a reveal hint or
+  reveal map without the param keeps revealing tokens issued by v0.1.0-m0. Every *new plan* gets
+  `preserve` explicitly: `dps/engine/findings.py` `PLAN_PARAM_DEFAULTS` / `with_plan_defaults`,
+  applied by a `PlanEntry` validator (L1 plans and hints) and by a `ColumnPlan` validator
+  (`dps/engine/batch.py`; a new `MethodSpec`, never the snapshot's or policy's object), so the evidence
+  pack's `reveal_map` will carry it. The policy model and its `config_hash` are untouched (the pinned
+  `dpdp-pseudonymise` hash test still passes).
+- **Fail closed instead of silent loss** (`dps/engine/batch.py`): `BatchTransformer` refuses
+  `fpe_digits` without `leading_zero: preserve` on an `int`/`decimal`/`float` output column
+  (`IncompatibleMethod`, `incompatible_method`) and a column plan whose params lack their plan
+  defaults (`ValueError`; a `model_copy` around the validator would run with params the reveal map
+  does not show). Per row, any **reversible** output that the target column's codec would store
+  differently (`to_engine_text(from_engine_text(text)) != text`) raises `incompatible_method` and the
+  batch is not written: this also catches `phone` on an integer column (no `+`, so no kept country
+  code) and a decimal value whose scale differs from the target column's (re-scaling changes the
+  digits FF1 reverses). Non-reversible outputs (surrogates, noise) are converted as before.
+- **M0 touch points** (contract §0.7, module and tests together): `dps/engine/transform/fpe.py`
+  (`preserve_leading_zero` keyword, `cycle_walk_leading_zero`, `CycleWalkError`, `MAX_WALK = 1000`),
+  `dps/engine/transform/methods.py` (`LEADING_ZERO_MODES`, the `leading_zero` choice param on encrypt
+  and reverse; the cipher is now built outside the `try`, so a missing key on reverse reports itself
+  instead of "domain too small"), `dps/engine/findings.py` (plan defaults). M0 test expectations
+  changed with them: `tests/test_planner.py` (SSN params now include `leading_zero: preserve`) and
+  `tests/test_apply.py::test_int_tokens_that_would_lose_a_leading_zero_stay_strings` (pins the
+  v0.1.0 safety net with an explicit `leading_zero: any` plan; the default now walks on to an int
+  token, pinned by the new `test_plans_preserve_the_leading_zero_so_int_tokens_stay_ints`).
+- L1 behaviour change, documented: an L1 `fpe_digits` token now differs from the v0.1.0 token for the
+  same value and key in about 1 case in 10 (values without a leading zero whose plain token started
+  with `0`) and about 9 in 10 for values that start with `0`; old tokens still reveal with their old
+  hints. Cost: ~1.1 FF1 calls per value without a leading zero, ~10 per value with one (FF1 ≈ 7 µs).
+- Tests (each failed before the fix; run against a `git archive HEAD` copy with the new tests):
+  `tests/test_fpe.py` +5 (incl. an exhaustive bijection check of the walk over a 3-digit domain, the
+  non-permutation bound, and real FF1 on 400 eight-digit ids), `tests/test_methods.py` +2,
+  `tests/test_planner.py` +1, `tests/test_apply.py` +1, `tests/test_batch.py` +5 (incl. real FF1:
+  400 `bigint` ids and 400 `numeric(14,2)` amounts, digit lengths kept, revealed with per-path hints
+  built from the column plans as Task 22's `reveal_row` will), and integration
+  `tests/connectors/test_fpe_numeric_pg.py` (300 rows through source-pg: read as `dps_reader`,
+  transformed with real FF1, written to a `bigint`/`varchar`/`numeric(14,2)` table, read back and
+  revealed; the `bigint` and text tokens of the same digits are equal; the legacy setting on the text
+  column shows ≥ 10 zero-led tokens, so the data set exercises the defect).

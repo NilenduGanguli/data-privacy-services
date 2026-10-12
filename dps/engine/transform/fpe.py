@@ -9,11 +9,21 @@ separators, case pattern and kept prefixes/suffixes. When the guard fails, calle
 
 Non-ASCII letters (``Ñ``, accented characters) pass through unchanged — a documented v1 limit;
 names dominated by them should be routed to ``det_token`` by policy.
+
+**Leading zeros** (contract §6.5, amendment 2026-10-12). Plain FF1 turns about one value in ten
+into a token that starts with ``0``; an integer or decimal column drops that digit and the stored
+token can no longer be reversed. With ``preserve_leading_zero`` the digits are *cycle-walked*:
+FF1 is applied again to its own output until the first digit is ``0`` exactly when the input's
+is. FF1 is a permutation, so the walk is a permutation of each of the two classes (a bijection,
+reversed by walking back with the decryption), the length is kept, and a token that plain FF1
+already produced with a non-zero first digit is unchanged. A kept prefix already keeps the first
+digit, so the walk applies only when ``keep_prefix`` is 0.
 """
 
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Callable
 from string import ascii_lowercase, ascii_uppercase
 from typing import Protocol
 
@@ -21,6 +31,10 @@ MIN_DOMAIN = 1_000_000
 DIGITS = "0123456789"
 LOWER = ascii_lowercase
 UPPER = ascii_uppercase
+#: Upper bound on cycle-walk steps. FF1 needs ~1.1 steps on average from a value without a
+#: leading zero and ~10 from one with it; 1000 steps fail with probability 0.9**1000 < 1e-45,
+#: so only a cipher that is not a permutation (a broken test double) can reach the bound.
+MAX_WALK = 1000
 
 
 class Cipher(Protocol):
@@ -78,8 +92,35 @@ def _rebuild_digits(text: str, positions: list[int], digits: str) -> str:
     return "".join(chars)
 
 
+class CycleWalkError(ValueError):
+    """The cycle walk did not converge: the cipher is not a permutation (no detail)."""
+
+
+def cycle_walk_leading_zero(step: Callable[[str], str], digits: str) -> str:
+    """Apply ``step`` (FF1 encryption, or decryption to reverse) until the result's first digit is
+    ``0`` exactly when ``digits``' first digit is (module docstring).
+
+    Raises:
+        CycleWalkError: no such result within :data:`MAX_WALK` steps (``step`` is not a
+            permutation). The message carries no digits.
+    """
+    zero = digits[:1] == "0"
+    out = step(digits)
+    for _ in range(MAX_WALK):
+        if (out[:1] == "0") == zero:
+            return out
+        out = step(out)
+    raise CycleWalkError("fpe_digits cycle walk did not converge: the cipher is not a permutation")
+
+
 def _fpe_digits(
-    cipher: Cipher, text: str, keep_prefix: int, keep_suffix: int, *, decrypt: bool
+    cipher: Cipher,
+    text: str,
+    keep_prefix: int,
+    keep_suffix: int,
+    *,
+    decrypt: bool,
+    preserve_leading_zero: bool,
 ) -> str | None:
     if keep_prefix < 0 or keep_suffix < 0:
         raise ValueError("keep_prefix and keep_suffix must not be negative")
@@ -91,25 +132,60 @@ def _fpe_digits(
     middle = digits[keep_prefix:end]
     if not domain_ok(10, len(middle)):
         return None
-    coded = cipher.decrypt(DIGITS, middle) if decrypt else cipher.encrypt(DIGITS, middle)
+
+    def step(part: str) -> str:
+        return cipher.decrypt(DIGITS, part) if decrypt else cipher.encrypt(DIGITS, part)
+
+    if preserve_leading_zero and keep_prefix == 0:
+        coded = cycle_walk_leading_zero(step, middle)
+    else:
+        coded = step(middle)
     return _rebuild_digits(text, positions, digits[:keep_prefix] + coded + digits[end:])
 
 
 def fpe_digits_encrypt(
-    cipher: Cipher, text: str, *, keep_prefix: int = 0, keep_suffix: int = 0
+    cipher: Cipher,
+    text: str,
+    *,
+    keep_prefix: int = 0,
+    keep_suffix: int = 0,
+    preserve_leading_zero: bool = False,
 ) -> str | None:
     """Encrypt the digit positions between a kept prefix and suffix.
 
+    With ``preserve_leading_zero`` the token's first digit is ``0`` exactly when the value's is
+    (cycle walking, module docstring); without it this is plain FF1 (v0.1.0 tokens).
+
     Returns ``None`` when fewer than six digits remain to encrypt (domain too small).
     """
-    return _fpe_digits(cipher, text, keep_prefix, keep_suffix, decrypt=False)
+    return _fpe_digits(
+        cipher,
+        text,
+        keep_prefix,
+        keep_suffix,
+        decrypt=False,
+        preserve_leading_zero=preserve_leading_zero,
+    )
 
 
 def fpe_digits_decrypt(
-    cipher: Cipher, text: str, *, keep_prefix: int = 0, keep_suffix: int = 0
+    cipher: Cipher,
+    text: str,
+    *,
+    keep_prefix: int = 0,
+    keep_suffix: int = 0,
+    preserve_leading_zero: bool = False,
 ) -> str:
-    """Inverse of :func:`fpe_digits_encrypt`; ``ValueError`` if the domain is too small."""
-    out = _fpe_digits(cipher, text, keep_prefix, keep_suffix, decrypt=True)
+    """Inverse of :func:`fpe_digits_encrypt` (same keeps and ``preserve_leading_zero``);
+    ``ValueError`` if the domain is too small."""
+    out = _fpe_digits(
+        cipher,
+        text,
+        keep_prefix,
+        keep_suffix,
+        decrypt=True,
+        preserve_leading_zero=preserve_leading_zero,
+    )
     if out is None:
         raise ValueError("ciphertext digit domain too small — not produced by fpe_digits")
     return out
