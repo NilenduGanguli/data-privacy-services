@@ -674,3 +674,68 @@ The compose `mock-key` is a local literal the mock ignores.
 12. When OCR is configured, a redacted PDF costs one OCR call per produced page (the re-read) plus
     one per page that needs reading; and when a redacted PDF is asked for, every page carrying an
     image is OCR'd (an ID photo or stamp is otherwise burned in unread).
+
+## 11. M1 + M2 integrated on `main` (2026-10-12)
+
+`merge: M1 documents and Layer 1 complete` (`80c26ca`) and `merge: M2 jobs and PostgreSQL`
+(`d8f7678`), both `--no-ff`, then the `fix(integrate)` commits below. No tag was made (v0.2.0 stays
+the M1 version; `v0.1.0-m2` is M2's lane tag).
+
+**What the integration changed** (each test-first; the contract records §8.2 and §9):
+
+- **One wire error shape.** One handler (`dps.auth.coded_http_exception_handler`, registered by
+  `create_app` for every `HTTPException`) renders M1's `CodedHTTPException` and `dps.auth`'s
+  `CodedAuthHTTPException` as `{"detail", "code"}`; M2's `DpsHttpError` adds `**extra`; M2's
+  `to_http` now keeps an M1 `CodedError`'s (or a coded `HTTPException`'s) status and code instead of
+  a 500; a strict audit refusal is 503 `audit_unavailable` on the Layer 1 routes too.
+- **One `Idempotency-Key` contract.** The job routes take the header regex, codes and details from
+  Layer 1 (`dps.errors`, `dps.layers.api.idempotency`); `Idempotent-Replay` is exposed through CORS.
+  Migration `010_job_idempotency_fp.sql` binds a durable key to a keyed fingerprint of its request,
+  so the same key with another body (or on the other job route) is 422 `idempotency_key_reused`, as
+  on Layer 1, instead of a silent replay of a different job. The wizard mints a new key whenever the
+  run request changes.
+- **NDJSON under strict audit.** A stream is audited before its `report` line; a strict sink that
+  refuses ends the stream with an `audit_unavailable` error line (no report, not recorded for replay).
+- **Console.** Every page of both milestones is routed and in the nav (Overview, Playground with the
+  Document tab, Policies, Data sources & jobs, the wizard, job detail, Reports, the evidence pack);
+  `api.ts` keeps M1's `call`/`callForm` and M2's `request`/`json`/`post`/`qs`; `ApiError.code` is
+  `code?: string` (contract §14); `npm test` runs both suites (`node --test` for `frontend/tests`,
+  Vitest for `src/**/*.test.ts`). M1's page CSS is scoped to `.documents-page` / `.policies-page`
+  (its global `.tbl-scroll > table.tbl { min-width: 760px }`, `.m`, `.prm`, `.plan`, `.two`, `.grp`
+  and phone `table.stack` rules restyled the job pages), and there is one disabled-button look
+  (mockup 06's greyed `.btn[disabled]`).
+- **Compose.** One file: `app`, `dps-db`, `migrate`, `worker` (default), `azure-ocr-mock` (`docs`,
+  `full`), `source-pg`, `minio`, `minio-init`, `demo-secrets`, `seed-sources` (`sources`, `full`);
+  every host port and built image through the lane-safe variables; the app `depends_on` the
+  metadata DB, `migrate` and (optionally) the OCR mock. The image installs
+  `.[fpe,docs,db,connectors,tabular]` plus Tesseract; 925 MB on arm64.
+
+**Gates on the integrated tree** (stack: `docker compose --env-file docker/compose.sources.env
+--profile docs --profile sources up -d --build` from this checkout, default ports, project
+`data-privacy-services`, image `data-privacy-services:local`; fresh `.venv` with
+`uv pip install -e ".[dev,fpe,docs,db,connectors,uitest,e2e]"`):
+
+| Gate | Result |
+|---|---|
+| `ruff format --check dps tests tools` · `ruff check dps tests tools` · `mypy dps` | 247 files formatted · all checks passed · no issues in 103 files |
+| `pytest -q` (stack up) | 1593 passed, 4 skipped (`tesseract` ×2 without a host binary, `ner` ×2) |
+| `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` (M1 gate) | 138 passed, 2 skipped (the `tesseract` cases; in the image: 2 passed) |
+| `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"` (M2 gate) | 164 passed (after the smoke test created the demo connections the console tests need) |
+| `pytest -m slow tests/connectors/test_resume_after_kill.py` | 6 passed |
+| `cd frontend && npm ci && npm run typecheck && npm test && npm run build` | 42 node tests + 60 Vitest passed, build ok |
+| `DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py` | 34/34 (15 Layer 1 + 10 documents/OCR/schema + 9 job platform) |
+| `python tools/demo_m2.py` | 12 jobs succeeded, verification passed, 0 orphans |
+| `python tools/console_check.py` (M1 pages) · `tests/console/test_console_m2.py` (M2 pages) | 84/84 · 3 passed |
+| compose logs scan (values, key material) · `/metrics` `dps_llm_raw_pii_sent_total` | 0 hits · 0 |
+
+**Traps (integration).**
+
+1. Run `tools/smoke_test.py` before the M2 gate on a fresh stack: `tests/console/test_console_m2.py`
+   (marker `db`) needs the demo connections the smoke test creates, and fails under
+   `DPS_TEST_REQUIRE_SERVICES=1` without them.
+2. An older stack picks up migration 010 only when the `migrate` one-shot runs again (`docker compose
+   up -d` recreates it); until then the app reports `migrations pending or drifted`.
+3. Rotating the job KEK changes request fingerprints: a retry that straddles a rotation with the
+   same `Idempotency-Key` is refused as `idempotency_key_reused`; mint a new key.
+4. New console CSS goes under its page root (`.<name>-page`); the M1 and M2 pages share short class
+   names (`.m`, `.plan`, `.two`, `.grp`, `.stack`), so a global rule leaks into the other pages.

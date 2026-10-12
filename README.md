@@ -33,7 +33,7 @@ job detail, evidence pack, reports). All offline in compose.
 docker compose --env-file docker/compose.sources.env --profile docs --profile sources up -d --build
                                      # console + API on http://127.0.0.1:8400 (key: dps_local_dev_key_change_me),
                                      # worker, metadata DB, OCR mock (5016), demo source (5442), MinIO (9010)
-python tools/smoke_test.py           # Layer 1 + documents/OCR + job-platform checks (needs the dev install below for httpx)
+python tools/smoke_test.py           # 34 checks: Layer 1, documents/OCR/schema, job platform (needs the dev install below for httpx)
 python tools/demo_m2.py              # 10-table UAT copy, in place, append
 docker compose --profile docs --profile sources down
 ```
