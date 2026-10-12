@@ -7,7 +7,7 @@ import react from '@vitejs/plugin-react';
 // the app resolves by trying each path suffix inside dist (dps/app.py::_dist_file, M2 Task 24).
 // The dev proxy follows the lane's app port (contract §0, lane-safe amendment 2026-10-12).
 const appPort = process.env.DPS_APP_PORT ?? '8400';
-const appUrl = `http://localhost:${appPort}`;
+const appUrl = `http://127.0.0.1:${appPort}`;
 
 export default defineConfig({
   base: './',

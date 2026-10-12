@@ -1,5 +1,6 @@
 import { Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import { Jobs } from './pages/Jobs';
 import { Overview } from './pages/Overview';
 import { Playground } from './pages/Playground';
 
@@ -21,7 +22,8 @@ export function App(): JSX.Element {
         <Route path="/" element={<Overview />} />
         <Route path="/playground" element={<Playground />} />
         <Route path="/policies" element={<Soon title="Policies" />} />
-        <Route path="/data-sources" element={<Soon title="Data sources & jobs (M2)" />} />
+        <Route path="/data-sources" element={<Jobs />} />
+        <Route path="/data-sources/jobs" element={<Jobs />} />
         <Route path="/scanner" element={<Soon title="UI scanner (M4)" />} />
         <Route path="/reports" element={<Soon title="Reports & audit (M5)" />} />
         <Route path="/admin" element={<Soon title="Admin (M5)" />} />

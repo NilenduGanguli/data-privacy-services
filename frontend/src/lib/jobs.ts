@@ -610,3 +610,50 @@ export function jobTargetText(job: Job): string {
     default: return '';
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Jobs page (mockup 07): client-side filters over the loaded page, health-strip ring buffers.
+
+export type StatusBucket = 'running' | 'review' | 'completed' | 'failed' | 'canceled';
+
+/** The Status filter's bucket of a job. */
+export function statusBucket(job: Job, proposed: Set<string>): StatusBucket {
+  if (job.kind === 'discover' && job.state === 'succeeded' && job.progress.snapshot_ids.some((id) => proposed.has(id))) return 'review';
+  if (job.state === 'succeeded') return 'completed';
+  if (job.state === 'failed' || job.state === 'dead') return 'failed';
+  if (job.state === 'canceled') return 'canceled';
+  return 'running';
+}
+
+export interface JobFilters { q: string; status: StatusBucket | ''; engine: string; mode: string; writeMode: string; owner: string }
+export const NO_FILTERS: JobFilters = { q: '', status: '', engine: '', mode: '', writeMode: '', owner: '' };
+
+/** The schema / owner part of `object_ref` ('' for an unqualified name). */
+export function ownerOf(job: Pick<Job, 'object_ref'>): string {
+  const ref = job.object_ref ?? '';
+  const dot = ref.indexOf('.');
+  return dot > 0 ? ref.slice(0, dot) : '';
+}
+
+/** Jobs that pass every set filter (`engines`: connection id → engine). */
+export function filterJobs(jobs: Job[], f: JobFilters, ctx: { proposed: Set<string>; engines: Record<string, string> }): Job[] {
+  const q = f.q.trim().toLowerCase();
+  return jobs.filter((j) => {
+    if (f.status && statusBucket(j, ctx.proposed) !== f.status) return false;
+    if (f.engine && ctx.engines[j.connection_id ?? ''] !== f.engine) return false;
+    if (f.mode && j.mode !== f.mode) return false;
+    if (f.writeMode && jobWriteMode(j) !== f.writeMode) return false;
+    if (f.owner && ownerOf(j) !== f.owner) return false;
+    if (q) {
+      const hay = [j.id, j.object_ref, j.purpose?.ticket, jobTargetText(j), j.group_id].filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+/** Append a sample to a ring buffer of at most `max` samples (the API keeps no history). */
+export function pushSample(buf: [string, number][], sample: [string, number], max = 60): [string, number][] {
+  const next = [...buf, sample];
+  return next.length > max ? next.slice(next.length - max) : next;
+}

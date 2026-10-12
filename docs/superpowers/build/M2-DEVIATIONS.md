@@ -1438,3 +1438,28 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   `HeatLegend` is exported beside `HeatMap`.
 - Tooling: `vitest@2.1.9` brings `npm audit` advisories that concern the dev server only (vite,
   esbuild, @vitest/mocker); nothing of it ships in `dist/`.
+
+## Task 30 — Jobs page (mockup 07) and Overview recent jobs
+
+- `frontend/src/lib/jobs.ts`, `jobs.test.ts` (added to the commit): the page's filter logic is pure
+  and tested first — `statusBucket`, `JobFilters`/`NO_FILTERS`, `ownerOf`, `filterJobs`,
+  `pushSample` (3 Vitest cases, 10 in all).
+- `frontend/src/hooks/useAuth.ts` (new): a stable `Auth` from `useSettings()`, shared by the pages.
+- `frontend/src/styles/jobs.css` (added to the commit): `.cols-5` for the overview KPI row with the
+  extra "Jobs running" tile; the Owner cell wraps long schema names.
+- `frontend/vite.config.ts` (added to the commit): the dev proxy targets `127.0.0.1` (compose
+  publishes on 127.0.0.1 only; Node 22 may resolve `localhost` to `::1`).
+- Status filter: five buckets (running, awaiting review, completed, failed, canceled) — a canceled
+  job is not a failure, the mockup has four. Engine filter and badges come from `GET /connections`
+  (a job row carries no engine). "Review N columns" and "N rows sampled" come from
+  `GET /snapshots?status=proposed&limit=200`, polled with the list (N = `needsDecision` columns; a
+  proposed snapshot without such columns says "Review snapshot").
+- Rows keep **Open** (or **Review N columns**) and add **Evidence pack** when the pack exists, so a
+  finished job can be opened too (the mockup shows one action). The error box shows `errorText(code)`
+  plus the job's value-free `error`; **Retry** (failed/dead run jobs) answers a 409
+  `key_material_required` with a pointer to the job page, where the key file can be loaded.
+- Overview: the subtitle names M2; **New job** beside **Open playground** when `jobs` is ready; the
+  readiness table scrolls inside its card on phones.
+- Browser check (private Playwright 1.55.0, Vite dev server proxied to this lane's stack, 57 jobs of
+  the smoke/demo/bench runs): `/data-sources` and `/` render with live stats, no console errors, no
+  horizontal scroll at 1440 and 390 px.

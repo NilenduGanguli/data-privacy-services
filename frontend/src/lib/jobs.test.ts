@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRunSpec, canConfirmWrite, draftForStorage, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, needsDecision, progressPct, sparkPath, splitCounters, writeModeLabel } from './jobs';
+import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
 import { draft, job, column } from './fixtures';
 
 describe('jobs helpers', () => {
@@ -43,3 +43,35 @@ describe('jobs helpers', () => {
     expect(csv.split('\n')[0]).toBe('id,created_at,kind,state,source,target,mode,write_mode,rows_written');
   });
 });
+
+describe('jobs page filters', () => {
+  const review = job({ id: 'j_review', kind: 'discover', state: 'succeeded', phase: 'discover', object_ref: 'loans.applicants', spec: {}, progress: { snapshot_ids: ['snap_p'] }, purpose: {} });
+  const running = job({ id: 'j_run', state: 'waiting', phase: 'partitions', connection_id: 'c_pg', object_ref: 'bank.customers', purpose: { ticket: 'CHG-48213' } });
+  const failed = job({ id: 'j_fail', state: 'failed', connection_id: 'c_ora', object_ref: 'CRM.CUSTOMERS', mode: 'synthesize', spec: { target: { write_mode: 'files', files: { format: 'parquet', prefix: 'crm/' } } } });
+  const ctx = { proposed: new Set(['snap_p']), engines: { c_pg: 'postgres', c_ora: 'oracle' } as Record<string, string> };
+  const all = [review, running, failed];
+  it('puts every job in one status bucket', () => {
+    expect([review, running, failed].map((j) => statusBucket(j, ctx.proposed))).toEqual(['review', 'running', 'failed']);
+    expect(statusBucket(job({ state: 'canceled' }), ctx.proposed)).toBe('canceled');
+    expect(statusBucket(job({ state: 'succeeded' }), ctx.proposed)).toBe('completed');
+  });
+  it('filters by status, search, engine, mode, write mode and owner', () => {
+    expect(filterJobs(all, NO_FILTERS, ctx)).toHaveLength(3);
+    expect(filterJobs(all, { ...NO_FILTERS, status: 'review' }, ctx).map((j) => j.id)).toEqual(['j_review']);
+    expect(filterJobs(all, { ...NO_FILTERS, q: 'chg-48213' }, ctx).map((j) => j.id)).toEqual(['j_run']);
+    expect(filterJobs(all, { ...NO_FILTERS, q: 'applicants' }, ctx).map((j) => j.id)).toEqual(['j_review']);
+    expect(filterJobs(all, { ...NO_FILTERS, engine: 'oracle' }, ctx).map((j) => j.id)).toEqual(['j_fail']);
+    expect(filterJobs(all, { ...NO_FILTERS, mode: 'synthesize' }, ctx).map((j) => j.id)).toEqual(['j_fail']);
+    expect(filterJobs(all, { ...NO_FILTERS, writeMode: 'files' }, ctx).map((j) => j.id)).toEqual(['j_fail']);
+    expect(filterJobs(all, { ...NO_FILTERS, owner: 'bank' }, ctx).map((j) => j.id)).toEqual(['j_run']);
+    expect(ownerOf(failed)).toBe('CRM');
+  });
+  it('keeps the last samples of a client-side ring buffer', () => {
+    let buf: [string, number][] = [];
+    for (let i = 0; i < 65; i++) buf = pushSample(buf, [`t${i}`, i], 60);
+    expect(buf).toHaveLength(60);
+    expect(buf[0]).toEqual(['t5', 5]);
+    expect(buf[59]).toEqual(['t64', 64]);
+  });
+});
+
