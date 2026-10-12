@@ -69,3 +69,39 @@ the lane rules).
   and `test_the_navigation_log_is_append_only_for_the_api` (no UPDATE grant; `(job_id, seq)`
   unique): 7 tests (plan: 5). `python -m dps.migrate` then `--verify` on a fresh database of the
   lane's Postgres: both exit 0 (12 files applied).
+
+## Task 4 — Scan specification, records and API models
+
+- `dps/jobs_models.py`: `ScanScope`, `ScanAuth`, `FillSpec`, `CaptureSpec`, `ScanSpec`, `PATH_GLOB`,
+  `SECRET_REF` and `JobSecret.scan_start_url` as planned (M2 shipped no placeholder `ScanSpec`).
+  Every scan model is `extra="forbid"` **and** `hide_input_in_errors=True` (the M2 convention: a
+  start URL can carry personal data in its query, and pydantic's default error text would quote
+  it). `FillSpec` checks the locale against `SUPPORTED_LOCALES` exactly (no `normalise_locale`
+  mapping, so `fr_FR` is refused rather than silently becoming `en_US`). `ScanAuth` refuses both
+  sources together and a `..` segment.
+- `dps/layers/scanner/models.py`: the planned models, plus:
+  - **Page data never reaches a `repr`.** Every facts field that can hold page data (labels,
+    placeholders, titles, aria labels, name/id attributes, selectors, options, pre-filled values,
+    rendered text, label hints, hrefs, form actions, frame paths, the page URL and title) is
+    `Field(repr=False)`, and `ValidatedScan.__repr__` shows the origin and limits only (its
+    `start_url` keeps the raw query). A traceback or a stray `repr()` therefore cannot carry page
+    data. Test `test_page_facts_never_show_page_data_in_repr`.
+  - `validate_scan` treats any `@` in the netloc as userinfo (the plan's `username is not None`
+    misses `http://:pw@host/`), resolves and range-checks `max_depth` (0..5) and `max_pages`
+    (1..`scan_max_pages`) for programmatically built specs too, and adds one code, `auth_invalid`
+    (both storage-state sources, or a `..` ref, in a spec built around the model's validator).
+    `hosts` is normalised (trimmed, lower-cased) into `ValidatedScan.hosts`.
+  - `redact_scan_spec` also records the resolved `scope.max_pages` / `scope.max_depth` and two
+    more value-free flags, `consistency.caller_key` / `caller_seed` (the run spec's `redact_spec`
+    records the same facts), beside the planned `key_wrapped`.
+  - `PersonaPreviewRequest` is `extra="forbid"` and checks its locale like `FillSpec`.
+  - `ValidationMessage.text` is capped at 200 characters by the model (the plan's comment).
+- Contract §3.3 (`JobSecret.scan_start_url`) and §9 (the M4 additions to `ScanSpec`, the accept-time
+  codes incl. `auth_invalid`, and what the stored spec keeps) updated in this commit.
+- **Not done here (Task 16):** `auth.storage_state_ref` is only validated for form. It must be
+  resolved with the tenant-scoped resolver that SEC-2 introduces at integration
+  (`DPS_SECRET_DIR/<tenant_id>/<ref>/`); nothing in M4 may resolve a ref in the global namespace.
+- `tests/scanner/test_models.py`: the plan's 10 cases (parametrised codes extended with
+  password-only userinfo, a non-http scheme and a start path outside `allow`) plus programmatic
+  re-checks, inline auth where allowed, resolved limits, no-echo validation errors, the
+  `JobSecret` field, the facts `repr` test and the preview request bounds: 20 tests (plan: 10).
