@@ -886,3 +886,28 @@ relationship managers' names passed every test: the review's probe sent `Ananya`
   rows, which go back to the caller who sent them; with NER off that includes an undetected
   low-cardinality name column (a product decision: e.g. refuse multi-word labels, or require NER for
   samples).
+
+**B3: `GET /entities` showed every tenant's custom entity types to every other tenant**
+(`dps/layers/api/routers/entities.py`). The route walked M0's process-wide `TAXONOMY`, into which any
+tenant's inline policy registers its recognizers' types, so tenant `wealth` received
+`PROJECT_FALCON_ID`, `custom:falcon-project`, `HIGH` after tenant `retail` called `/detect` with it.
+
+- The route now lists **built-in types only** (`is_builtin_entity`), still read through `entity_info`
+  and sorted by family then name. The response shape is unchanged (`builtin` stays in `EntityOut` and is
+  now always `true`), so the console's typed client and the contract's route row are unaffected. This
+  deviates from the plan's "the live taxonomy incl. registered custom types" and closes Task 14's open
+  item. The console's recognizer builder knows the custom types of the policy it is editing, and the
+  plan's Policies page already renders a type missing from `/entities` as `custom`.
+- Test: `test_entities_never_list_custom_types_any_tenant_registered` (two tenants; one registers a
+  HIGH custom type through `/detect`, another is registered directly; neither tenant sees either). It
+  replaces `test_entities_include_registered_custom_types`, which asserted the leaking behaviour.
+- **Contract question (for §9, M2/M5):** should `GET /entities` list a tenant's *own* custom types? If
+  yes, it needs the per-tenant policy store (M5 `043_policies.sql` / `dps/policy_store.py`, or M2 if
+  earlier) and the custom types read from the caller's stored policies, never from the process-wide
+  registry. A related M0 question: `register_entity` lets one tenant raise the tier another tenant gets
+  for the same custom type name (it only ever raises protection, by design); a per-tenant registry
+  would remove that coupling too.
+
+Count: 4 new tests, one of which replaces an old one (net +3). Suite 901 → 904 passed, 4 skipped
+(unit). Tasks 11–14 add no
+integration tests and no compose profile, so no lane containers were needed; the frontend is untouched.

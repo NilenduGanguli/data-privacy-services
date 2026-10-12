@@ -111,7 +111,37 @@ def test_too_many_patterns_and_value_free_errors(client: TestClient) -> None:
     assert "Blue Falcon" not in r.text and "EMP-000000" not in r.text
 
 
-def test_entities_include_registered_custom_types(client: TestClient) -> None:
+def test_entities_never_list_custom_types_any_tenant_registered() -> None:
+    """B3: the taxonomy registry is process-wide (M0), so custom types are not listed until M2
+    stores policies per tenant; before the fix tenant ``wealth`` saw ``retail``'s type."""
+    keys = [
+        {"name": "a", "key": "dps_a", "tenant_ids": ["retail"], "scopes": ["detect"]},
+        {"name": "b", "key": "dps_b", "tenant_ids": ["wealth"], "scopes": ["detect"]},
+    ]
+    settings = Settings(
+        _env_file=None,
+        env="local",
+        auth_enabled=True,
+        api_keys=json.dumps(keys),
+        llm_provider="stub",
+        ner_enabled=False,
+        rate_limit_enabled=False,
+    )
+    client = TestClient(create_app(settings, audit_sink=MemoryAuditSink()))
+    recognizer = {
+        "name": "falcon-project",
+        "supported_entity": "M1_FALCON_PROJECT_ID",
+        "sensitivity": "HIGH",
+        "patterns": [{"name": "p", "regex": r"FAL-\d{4}", "score": 0.9}],
+    }
+    policy = {"preset": "gdpr-pseudonymise", "detect": {"custom_recognizers": [recognizer]}}
+    r = client.post(
+        "/api/v1/detect",
+        headers={"X-API-KEY": "dps_a"},
+        json={"data": {"t": "FAL-1234"}, "policy": policy},
+    )
+    assert r.status_code == 200
+    assert entity_info("M1_FALCON_PROJECT_ID").sensitivity == Sensitivity.HIGH  # registered
     PolicyCustomDetector(
         [
             RecognizerSpec(
@@ -123,6 +153,9 @@ def test_entities_include_registered_custom_types(client: TestClient) -> None:
         ],
         [],
     )
-    by = {i["name"]: i for i in client.get("/api/v1/entities", headers=RO).json()["items"]}
-    custom = by["M1_ENTITIES_TEST_TYPE"]
-    assert (custom["builtin"], custom["sensitivity"], custom["family"]) == (False, "HIGH", "other")
+    for key in ("dps_b", "dps_a"):
+        body = client.get("/api/v1/entities", headers={"X-API-KEY": key}).json()
+        names = {i["name"] for i in body["items"]}
+        assert "M1_FALCON_PROJECT_ID" not in names and "M1_ENTITIES_TEST_TYPE" not in names
+        assert "falcon" not in json.dumps(body) and all(i["builtin"] for i in body["items"])
+        assert "SSN" in names and len(names) >= 46

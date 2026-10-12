@@ -1,5 +1,11 @@
 """GET /api/v1/entities and POST /api/v1/policies/test-recognizer (console Policies page).
 
+``GET /entities`` lists the built-in taxonomy only. M0's registry of custom types is process-wide:
+any tenant's inline policy registers its recognizers' types, names, ``custom:<recognizer>``
+descriptions and tiers there, so listing it would show one tenant's policy metadata to every other
+tenant. Custom types come back once M2 stores policies per tenant (the console already knows the
+custom types of the policy it is editing).
+
 The recognizer test answers with offsets only: the sample text is neither stored nor echoed, and
 nothing is registered (a recognizer's ``sensitivity`` is dropped before the detector is built, so a
 test cannot change the process-wide taxonomy). Python's ``re`` has no timeout, so the route bounds
@@ -67,9 +73,12 @@ class RecognizerTestOut(BaseModel):
     dependencies=[Depends(require_scope("detect")), Depends(enforce_rate_limit)],
 )
 def entities() -> EntitiesOut:
-    """The live taxonomy (built-in types and registered custom ones), by family then name."""
+    """The built-in taxonomy, by family then name (never another tenant's custom types)."""
     # entity_info: a built-in entry always wins, even if the open registry was mutated
-    items = sorted((entity_info(name) for name in list(TAXONOMY)), key=lambda e: (e.family, e.name))
+    items = sorted(
+        (entity_info(name) for name in list(TAXONOMY) if is_builtin_entity(name)),
+        key=lambda e: (e.family, e.name),
+    )
     return EntitiesOut(
         items=[
             EntityOut(
