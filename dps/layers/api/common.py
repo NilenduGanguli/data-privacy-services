@@ -3,8 +3,10 @@
 Error mapping (the engine's messages name rules, never values):
 
 - payload too large (characters, values) → 413; malformed payload or nesting too deep → 422
-- :class:`~dps.engine.service.VerificationFailed` → 422 (nothing is returned)
-- :class:`~dps.engine.service.EngineError` → 400
+- :class:`~dps.engine.service.VerificationFailed` → 422 ``{"detail", "code": "leakage"}``
+  (nothing is returned)
+- :class:`~dps.engine.service.EngineError` → 400 ``{"detail", "code": "bad_request"}``
+- :class:`~dps.errors.CodedError` → its own status and ``{"detail", "code"}`` (M1)
 - anything else → 500 ``internal error``; only the exception's class name is logged
 
 Every outcome, rejections included, is counted and audited (value-free).
@@ -12,20 +14,24 @@ Every outcome, rejections included, is counted and audited (value-free).
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import re
 import time
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from typing import Any, overload
 
 import structlog
 from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from dps.audit import AuditEvent
 from dps.engine.policy import preset_names
 from dps.engine.service import EngineError, Payload, VerificationFailed
+from dps.errors import CodedError
 from dps.observability import LATENCY, REQUESTS, get_logger
 
 logger = get_logger(__name__)
@@ -37,8 +43,8 @@ MAX_DEPTH = 100
 #: A caller's request id is echoed (and logged) only when it is an identifier; anything else —
 #: free text, a value, a control character — is replaced by a generated id.
 _TRACE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-#: Policy names that may be audited verbatim (preset names, ``<preset>+overrides``, ids).
-_POLICY_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+#: The shape of a preset name; a string policy of this shape that names no preset is ``unknown``.
+_PRESET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
 def trace_id(request: Request) -> str:
@@ -47,20 +53,52 @@ def trace_id(request: Request) -> str:
     return given if _TRACE_ID.fullmatch(given) else uuid.uuid4().hex[:16]
 
 
-def policy_label(ref: str | dict[str, Any] | None, default: str) -> str:
-    """A value-free name for the requested policy (for audit and metrics).
+class CodedHTTPException(HTTPException):
+    """An HTTPException rendered as ``{"detail", "code"}``.
 
-    Preset names pass through; an unknown name becomes ``unknown`` (it could be anything the
-    caller typed); an inline policy is ``<preset>+overrides`` or ``inline``.
+    M2's ``DpsHttpError`` (contract §8.2) has the same wire shape and should subclass this class.
     """
-    if ref is None:
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        detail: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.code = code
+
+
+async def coded_http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Registered in ``create_app`` for :class:`CodedHTTPException`."""
+    assert isinstance(exc, CodedHTTPException)
+    return JSONResponse(
+        {"detail": exc.detail, "code": exc.code},
+        status_code=exc.status_code,
+        headers=exc.headers,
+    )
+
+
+def policy_label(policy: str | dict[str, Any] | None, default: str) -> str:
+    """What audit and logs record for a policy: a preset name or ``<preset>+inline:<hash12>``.
+
+    Never the inline body (an inline policy may hold deny-list values or declared paths) and
+    never a name the caller typed: a string that names no preset is ``unknown`` when it has a
+    preset name's shape and ``invalid`` otherwise; an inline policy is labelled by its preset
+    when that is a shipped preset, else ``custom``, plus a 12-hex hash of its canonical JSON so
+    two calls with the same inline policy correlate.
+    """
+    if policy is None:
         return default
-    if isinstance(ref, str):
-        return ref if ref in preset_names() else "unknown"
-    preset = ref.get("preset")
-    if "name" not in ref and isinstance(preset, str) and preset in preset_names():
-        return f"{preset}+overrides"
-    return "inline"
+    if isinstance(policy, str):
+        if policy in preset_names():
+            return policy
+        return "unknown" if _PRESET_NAME.fullmatch(policy) else "invalid"
+    canon = json.dumps(policy, sort_keys=True, separators=(",", ":"), default=str)
+    preset = policy.get("preset")
+    base = preset if isinstance(preset, str) and preset in preset_names() else "custom"
+    return f"{base}+inline:{hashlib.sha256(canon.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _measure(data: Any, max_items: int, max_depth: int) -> tuple[int, bool]:
@@ -109,34 +147,40 @@ def payload_from(request: Request, data: Any | None, text: str | None) -> Payloa
     return payload
 
 
-def _audit_event(
-    request: Request,
-    *,
-    mode: str,
-    policy: str,
-    result: Any,
-    duration_ms: float,
-    outcome: str,
-    tid: str,
-) -> AuditEvent:
+def result_counts(result: Any) -> dict[str, Any]:
+    """The audit counts of an engine result (value-free: counts, type and method names)."""
     report = getattr(result, "report", None)
     findings = getattr(result, "findings", None) or []
-    if report is not None:
-        if policy == "inline" and _POLICY_LABEL.fullmatch(report.policy):
-            policy = report.policy
+    if report is not None and hasattr(report, "findings_total"):
         verification = report.verification
-        counts: dict[str, Any] = {
+        return {
             "findings_total": report.findings_total,
             "findings_by_type": dict(report.findings_by_type),
             "methods_used": dict(report.methods_used),
             "verification_passed": verification.passed if verification is not None else None,
             "reversible_values": report.reversible_values,
         }
-    else:
-        counts = {
-            "findings_total": len(findings),
-            "findings_by_type": dict(Counter(f.entity_type for f in findings)),
-        }
+    # detect results, and reports that are not engine reports (schema synthesis)
+    counts: dict[str, Any] = {
+        "findings_total": len(findings),
+        "findings_by_type": dict(Counter(f.entity_type for f in findings)),
+    }
+    verification = getattr(report, "verification", None)
+    if verification is not None:
+        counts["verification_passed"] = verification.passed
+    return counts
+
+
+def _audit_event(
+    request: Request,
+    *,
+    mode: str,
+    policy: str,
+    counts: dict[str, Any],
+    duration_ms: float,
+    outcome: str,
+    tid: str,
+) -> AuditEvent:
     principal = getattr(request.state, "principal", None)
     return AuditEvent(
         trace_id=tid,
@@ -157,6 +201,68 @@ def _audit(request: Request, **fields: Any) -> None:
         request.app.state.audit.write(_audit_event(request, **fields))
     except Exception as exc:  # noqa: BLE001 - audit must not take the request down in M0 (strict mode arrives with M2)
         logger.warning("audit_write_failed", error=type(exc).__name__)
+
+
+def begin_call(request: Request) -> str:
+    """Start an audited call: the trace id (set on ``request.state``, bound to the log context).
+
+    A replay (:func:`with_idempotency`) keeps the original call's trace id.
+    """
+    tid = getattr(request.state, "replay_trace_id", None) or trace_id(request)
+    request.state.trace_id = tid
+    structlog.contextvars.bind_contextvars(trace_id=tid, route=request.url.path)
+    return tid
+
+
+def end_call(
+    request: Request,
+    *,
+    mode: str,
+    policy: str,
+    tid: str,
+    started: float,
+    outcome: str,
+    counts: dict[str, Any] | None = None,
+) -> None:
+    """Finish an audited call: request metrics and exactly one value-free audit event.
+
+    ``started`` is the call's ``time.perf_counter()`` at :func:`begin_call`; ``counts`` are
+    :func:`result_counts` (or a stream's sums), ``None`` for a call that produced nothing. A
+    successful replay is audited with outcome ``replayed``.
+    """
+    if outcome == "ok" and getattr(request.state, "replay_trace_id", None):
+        outcome = "replayed"
+    route = request.url.path
+    duration = (time.perf_counter() - started) * 1000
+    REQUESTS.labels(route, outcome).inc()
+    LATENCY.labels(route).observe(duration / 1000)
+    _audit(
+        request,
+        mode=mode,
+        policy=policy,
+        counts=counts or {},
+        duration_ms=duration,
+        outcome=outcome,
+        tid=tid,
+    )
+
+
+def map_engine_error(exc: Exception) -> tuple[str, HTTPException]:
+    """The audit outcome and the HTTP error for an exception raised by an engine call.
+
+    The engine's messages name rules, never values; an unexpected exception is logged by its
+    class name only and becomes a value-free 500.
+    """
+    if isinstance(exc, VerificationFailed):  # before EngineError, which it subclasses
+        return "verification_failed", CodedHTTPException(422, "leakage", str(exc))
+    if isinstance(exc, EngineError):
+        return "bad_request", CodedHTTPException(400, "bad_request", str(exc))
+    if isinstance(exc, CodedError):
+        return exc.code, CodedHTTPException(exc.status, exc.code, exc.detail)
+    if isinstance(exc, HTTPException):
+        return "rejected", exc
+    logger.error("engine_error", error=type(exc).__name__)
+    return "error", HTTPException(status_code=500, detail="internal error")
 
 
 @overload
@@ -192,10 +298,7 @@ async def run_engine[T](
     Returns:
         The engine's result and the trace id.
     """
-    tid = trace_id(request)
-    request.state.trace_id = tid
-    route = request.url.path
-    structlog.contextvars.bind_contextvars(trace_id=tid, route=route)
+    tid = begin_call(request)
     start = time.perf_counter()
     outcome = "ok"
     result: T | None = None
@@ -203,30 +306,107 @@ async def run_engine[T](
         raw = call()
         result = await raw if inspect.isawaitable(raw) else raw
         return result, tid
-    except VerificationFailed as exc:
-        outcome = "verification_failed"
-        raise HTTPException(status_code=422, detail=str(exc)) from None
-    except EngineError as exc:
-        outcome = "bad_request"
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    except HTTPException:
-        outcome = "rejected"
-        raise
-    except Exception as exc:  # noqa: BLE001 - mapped to a value-free 500
-        outcome = "error"
-        logger.error("engine_error", error=type(exc).__name__)
-        raise HTTPException(status_code=500, detail="internal error") from None
+    except Exception as exc:  # noqa: BLE001 - mapped to a coded, value-free HTTP error
+        outcome, error = map_engine_error(exc)
+        if error is exc:
+            raise
+        raise error from None
     finally:
-        duration = (time.perf_counter() - start) * 1000
-        REQUESTS.labels(route, outcome).inc()
-        LATENCY.labels(route).observe(duration / 1000)
-        _audit(
+        end_call(
             request,
             mode=mode,
             policy=policy_name,
-            result=result,
-            duration_ms=duration,
-            outcome=outcome,
             tid=tid,
+            started=start,
+            outcome=outcome,
+            counts=result_counts(result),
         )
         structlog.contextvars.unbind_contextvars("trace_id", "route")
+
+
+async def with_idempotency[T](
+    request: Request,
+    body: bytes,
+    run: Callable[[], Awaitable[T]],
+    *,
+    mode: str = "-",
+    policy: str = "-",
+) -> T:
+    """Honour ``Idempotency-Key`` around a Layer 1 call (contract §9, decision D2).
+
+    ``body`` is what the call's fingerprint covers: the raw request body (multipart: the file's
+    digest and the ``request`` field). A retry with the same key and body within the TTL re-runs
+    ``run`` as a replay — the original trace id, audit outcome ``replayed``, header
+    ``Idempotent-Replay: true``; nothing from the response is cached. A first call is recorded
+    after it succeeds (a stream, when it ends with its report line). ``mode`` and ``policy`` name
+    the audit event of a refused header.
+
+    Raises:
+        CodedHTTPException: 422 ``idempotency_key_invalid`` (malformed header) or
+            ``idempotency_key_reused`` (same key, another body) — audited, nothing run.
+    """
+    # Imported here: dps.layers.api.idempotency builds on this module's CodedHTTPException.
+    from dps.layers.api.idempotency import (
+        IdemEntry,
+        IdempotencyCache,
+        IdempotencyConflict,
+        parse_idempotency_key,
+        scope_of,
+    )
+
+    cache: IdempotencyCache = request.app.state.idempotency
+    key: str | None = None
+    entry: IdemEntry | None = None
+    scope = digest = ""
+    try:
+        key = parse_idempotency_key(request)
+        if key is not None and cache.enabled:
+            scope = scope_of(request, key)
+            digest = hashlib.sha256(body).hexdigest()
+            try:
+                entry = cache.get(scope, digest)
+            except IdempotencyConflict:
+                raise CodedHTTPException(
+                    422,
+                    "idempotency_key_reused",
+                    "this Idempotency-Key was already used with a different request body",
+                ) from None
+    except CodedHTTPException as exc:
+        tid = begin_call(request)
+        end_call(
+            request,
+            mode=mode,
+            policy=policy,
+            tid=tid,
+            started=time.perf_counter(),
+            outcome=exc.code,
+        )
+        structlog.contextvars.unbind_contextvars("trace_id", "route")
+        raise
+    if key is None or not cache.enabled:
+        return await run()
+    if entry is not None:
+        request.state.replay_trace_id = entry.trace_id
+    result = await run()
+    if entry is not None:
+        request.state.idempotent_replay = True  # the app's middleware sets the response header
+        return result
+
+    def record() -> None:
+        cache.put(scope, IdemEntry(digest, request.state.trace_id, cache.clock()))
+
+    if isinstance(result, StreamingResponse):
+        result.body_iterator = _record_when_complete(request, result.body_iterator, record)
+    else:
+        record()
+    return result
+
+
+async def _record_when_complete(
+    request: Request, lines: AsyncIterable[Any], record: Callable[[], None]
+) -> AsyncIterator[Any]:
+    """Pass a stream through; record its idempotency entry only when it ended ``ok``."""
+    async for line in lines:
+        yield line
+    if getattr(request.state, "stream_outcome", None) == "ok":
+        record()

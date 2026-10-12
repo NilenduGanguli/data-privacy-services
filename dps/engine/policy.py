@@ -213,6 +213,39 @@ def list_presets() -> list[dict[str, str]]:
     return out
 
 
+#: Presets meant for the synthesize mode (all others are obfuscation presets).
+PRESET_MODES: dict[str, str] = {
+    "synthetic-realistic": "synthesize",
+    "synthetic-strict": "synthesize",
+}
+#: The methods a caller's key can undo — ``Method.reversible`` in ``transform/methods.py``, which
+#: imports this module, so the set is spelled out here and a test keeps the two equal.
+REVERSIBLE_METHODS = frozenset(
+    {"det_token", "fpe_digits", "fpe_text", "email", "phone", "date_shift", "external_tokenize"}
+)
+
+
+def preset_summaries() -> list[dict[str, Any]]:
+    """``list_presets()`` plus version, config hash, intended mode and reversibility (console)."""
+    out: list[dict[str, Any]] = []
+    for item in list_presets():
+        policy = load_preset(item["name"])
+        mode = PRESET_MODES.get(policy.name, "obfuscate")
+        reversible = mode == "obfuscate" and any(
+            spec.method in REVERSIBLE_METHODS for spec in policy.treat.values()
+        )
+        out.append(
+            {
+                **item,
+                "version": policy.version,
+                "hash": policy.config_hash(),
+                "mode": mode,
+                "reversible": reversible,
+            }
+        )
+    return out
+
+
 def resolve_policy(ref: str | dict[str, Any] | None, *, default_name: str) -> Policy:
     """Preset name, inline dict (optionally ``{"preset": name, ...overrides}``) or the default."""
     if ref is None:

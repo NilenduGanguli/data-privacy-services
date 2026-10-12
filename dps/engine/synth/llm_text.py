@@ -13,6 +13,9 @@ model ran.
 
 Every detected value is replaced by a placeholder, including values the plan keeps: the model
 sees none of them, and the fill step puts a kept value back afterwards.
+
+When the template is filled as it stands (no rewrite), ``info["segments"]`` records where each
+replacement landed in the output (:func:`placeholder_segments`); a rewritten text has none.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dps.engine.findings import Finding, Plan, PlanEntry
+from dps.engine.transform.apply import OutputSegment
 from dps.engine.transform.methods import (
     SurrogateProvider,
     TransformContext,
@@ -55,11 +59,13 @@ class LlmRewriteRejected(RuntimeError):
 
 @dataclass
 class PlaceholderText:
-    """The templated text, each label's first finding and original, and findings per label."""
+    """The templated text, each label's first finding and original, findings per label, and
+    each replaced span of the original text with its label (``slots``, in text order)."""
 
     text: str
     mapping: dict[str, tuple[Finding, str]] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
+    slots: list[tuple[int, int, str]] = field(default_factory=list)
 
 
 def _span(text: str, finding: Finding) -> tuple[int, int]:
@@ -99,6 +105,7 @@ def to_placeholders(text: str, findings: list[Finding]) -> PlaceholderText:
             by_value[key] = label
             out.mapping[label] = (f, original)
         out.counts[label] = out.counts.get(label, 0) + 1
+        out.slots.append((start, end, label))
         pieces.extend([text[cursor:start], label])
         cursor = end
     pieces.append(text[cursor:])
@@ -131,6 +138,7 @@ class _Fill:
     replacements: dict[str, str]
     methods: Counter[str]
     notes: Counter[str]
+    label_methods: dict[str, str] = field(default_factory=dict)
 
 
 def _resolve(
@@ -164,6 +172,7 @@ def _resolve(
             outcome = run_method(entry.method, original, ctx)
             value, method, note = outcome.value, outcome.method, outcome.note
         fill.replacements[label] = value if value is not None else ""
+        fill.label_methods[label] = method
         fill.methods[method] += ph.counts.get(label, 1)
         if note:
             fill.notes[note] += ph.counts.get(label, 1)
@@ -173,6 +182,48 @@ def _resolve(
 def _substitute(templated: str, replacements: dict[str, str]) -> str:
     """Fill known placeholders; leave anything else that merely looks like one untouched."""
     return PLACEHOLDER_RE.sub(lambda m: replacements.get(m.group(0), m.group(0)), templated)
+
+
+def placeholder_segments(
+    text: str,
+    ph: PlaceholderText,
+    output: str,
+    replacements: dict[str, str],
+    methods: dict[str, str],
+) -> list[OutputSegment]:
+    """Output positions of every filled placeholder when the template was not rewritten.
+
+    The output is rebuilt from the original text's gaps and each slot's replacement (the very
+    strings the fill wrote, so a plan's ``keep``/``redact``/surrogate choice is respected); if
+    the rebuild differs from ``output`` — the model rewrote the template, or a fill changed text
+    outside the placeholders — no segments are returned rather than wrong ones.
+    """
+    segments: list[OutputSegment] = []
+    pieces: list[str] = []
+    cursor = pos = 0
+    for start, end, label in ph.slots:
+        gap = text[cursor:start]
+        pieces.append(gap)
+        pos += len(gap)
+        finding, _ = ph.mapping[label]
+        replacement = replacements.get(label, "")
+        segments.append(
+            OutputSegment(
+                path="$",
+                start=start,
+                end=end,
+                out_start=pos,
+                out_end=pos + len(replacement),
+                entity_type=finding.entity_type,
+                method=methods.get(label, "surrogate"),
+                replacement=replacement,
+            )
+        )
+        pieces.append(replacement)
+        pos += len(replacement)
+        cursor = end
+    pieces.append(text[cursor:])
+    return segments if "".join(pieces) == output else []
 
 
 def fill_placeholders(
@@ -238,7 +289,9 @@ async def synthesize_text(
     plan: Plan | None = None,
     screen: Callable[[str], int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """The full pipeline; returns ``(output_text, info)`` with ``info`` safe to log.
+    """The full pipeline; returns ``(output_text, info)``.
+
+    ``info`` is safe to log except ``segments`` (replacement text), which the service pops.
 
     ``plan`` (optional) decides each placeholder's fill (``keep`` puts the original back,
     ``redact`` writes the label, ...); without it every value gets a surrogate. ``screen``
@@ -247,7 +300,9 @@ async def synthesize_text(
 
     ``info``: ``llm_calls``, ``llm_used``, ``fallback`` (why the model's text was not used:
     ``leak_guard``, ``placeholders_missing``, ``llm_introduced_entities``, ``verification`` or the
-    gateway error type), ``placeholders``, ``methods_used``, ``notes``.
+    gateway error type), ``placeholders``, ``methods_used``, ``notes``, and ``segments`` (the
+    :class:`OutputSegment` of every replaced span of the deterministic output; ``[]`` when the
+    model's rewrite is used).
 
     Raises:
         MethodError: the plan names a method that cannot run in synthesize mode.
@@ -262,6 +317,9 @@ async def synthesize_text(
         "placeholders": len(ph.mapping),
         "methods_used": dict(fill.methods),
         "notes": dict(fill.notes),
+        "segments": placeholder_segments(
+            text, ph, deterministic, fill.replacements, fill.label_methods
+        ),
     }
     if not (llm_rewrite and gateway is not None and ph.mapping and gateway.available()):
         return deterministic, info
@@ -288,4 +346,5 @@ async def synthesize_text(
         info["fallback"] = "verification"
         return deterministic, info
     info["llm_used"] = True
+    info["segments"] = []  # the rewrite moved the text around: no positions rather than wrong ones
     return output, info

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { EntityChip, Tone } from '../components/Chip';
 import { useSettings } from '../hooks/useSettings';
 import { api, ApiError, type Policy } from '../lib/api';
@@ -69,10 +70,14 @@ function Findings({ items }: { items: Finding[] }): JSX.Element {
 export function Playground(): JSX.Element {
   const { apiKey, tenant } = useSettings();
   const auth = useMemo(() => ({ apiKey, tenant }), [apiKey, tenant]);
-  const [kind, setKind] = useState<Kind>('json');
+  const navigate = useNavigate();
+  // Hand-over from the Document tab (kind) or the Policies page (an inline draft policy).
+  const handoff = (useLocation().state as { kind?: Kind; policy?: Policy } | null) ?? null;
+  const draft = handoff?.policy !== null && typeof handoff?.policy === 'object' ? handoff.policy : null;
+  const [kind, setKind] = useState<Kind>(handoff?.kind ?? 'json');
   const [input, setInput] = useState(SAMPLE_JSON);
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [policy, setPolicy] = useState<string>('gdpr-pseudonymise');
+  const [policy, setPolicy] = useState<Policy>(handoff?.policy ?? 'gdpr-pseudonymise');
   const [busy, setBusy] = useState<Mode | 'reveal' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [detect, setDetect] = useState<DetectOut | null>(null);
@@ -119,15 +124,18 @@ export function Playground(): JSX.Element {
       <div className="page-head">
         <div><h1>Try the engine</h1><p>Paste JSON or text. Detection and transformation run locally; the LLM only ever sees placeholders.</p></div>
         <div className="row"><span className="muted" style={{ fontSize: 12.5 }}>Policy</span>
-          <select className="input" style={{ width: 240 }} value={policy} onChange={(e) => setPolicy(e.target.value)}>
-            {(presets.length ? presets : [{ name: policy, description: '' }]).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+          <select className="input" style={{ width: 240 }} aria-label="Policy" value={typeof policy === 'string' ? policy : '__draft__'}
+            onChange={(e) => setPolicy(e.target.value === '__draft__' ? draft : e.target.value)}>
+            {(presets.length ? presets.map((p) => p.name) : ['gdpr-pseudonymise']).map((n) => <option key={n} value={n}>{n}</option>)}
+            {draft !== null && <option value="__draft__">draft from Policies</option>}
           </select></div>
       </div>
       {error && <div className="err">{error}</div>}
       <div className="play">
         <div className="card">
           <div className="card-head"><div className="card-title">Input</div>
-            <div className="seg"><button className={kind === 'json' ? 'on' : ''} onClick={() => setKind('json')}>JSON</button><button className={kind === 'text' ? 'on' : ''} onClick={() => setKind('text')}>Text</button></div></div>
+            <div className="seg" role="group" aria-label="Input kind"><button className={kind === 'json' ? 'on' : ''} aria-pressed={kind === 'json'} onClick={() => setKind('json')}>JSON</button><button className={kind === 'text' ? 'on' : ''} aria-pressed={kind === 'text'} onClick={() => setKind('text')}>Text</button>
+              <button onClick={() => navigate('/playground/documents', { state: { policy } })}>Document</button></div></div>
           <textarea className="input" value={input} onChange={(e) => setInput(e.target.value)} spellCheck={false} />
           <div className="row" style={{ marginTop: 12 }}>
             <span className="faint" style={{ fontSize: 12 }}>{input.length.toLocaleString()} chars</span><span className="spacer" />

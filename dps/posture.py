@@ -52,6 +52,23 @@ def posture_problems(settings: Settings) -> list[str]:
             problems.append(f"{env_name} must be https in staging/prod")
     if not settings.audit_enabled:
         problems.append("DPS_AUDIT_ENABLED must be true")
+    # M1 (contract §10): the OCR key travels in a header and the pages are customer documents,
+    # so azure OCR needs a key and TLS. The message names the setting, never the URL.
+    # ``auto`` resolving to azure sends the key and the pages just the same.
+    engine = settings.ocr_engine
+    if settings.ocr_provider == "azure" or engine == "azure":
+        if not settings.azure_vision_key:
+            problems.append(
+                "DPS_AZURE_VISION_KEY (or DPS_AZURE_VISION_KEY_FILE) is required for azure OCR"
+            )
+        if urlparse(settings.azure_vision_endpoint).scheme != "https":
+            problems.append("DPS_AZURE_VISION_ENDPOINT must be an https URL")
+    # Local Tesseract (provider tesseract, or auto without Azure) has no egress and is allowed;
+    # auto that resolves to nothing would silently leave scanned pages unread.
+    if settings.ocr_provider == "auto" and engine == "none":
+        problems.append(
+            "OCR is enabled (auto) but neither an Azure endpoint nor tesseract is available"
+        )
     return problems
 
 

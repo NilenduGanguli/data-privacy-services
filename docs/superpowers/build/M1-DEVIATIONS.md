@@ -1,0 +1,1658 @@
+# M1 build — deviations from the plan
+
+Plan: `docs/superpowers/plans/2026-10-11-m1-documents-and-l1-complete.md`.
+Contract: `docs/superpowers/plans/2026-10-11-m1-m5-contract.md`.
+One section per task: file, what changed, why. Public names and signatures that later tasks rely on
+are preserved unless a section says otherwise.
+
+## Task 1 — Dependencies, M1 settings, OCR posture, test service discovery
+
+- `.env.example`: **not changed in this commit.** The build session's permission rules deny every
+  tool access to `.env*` paths (the file could be read only through `git show HEAD:.env.example`, and
+  neither an edit nor an append was allowed), so the M1 block could not be written. Follow-up for
+  whoever holds that permission — append, in the lane-safe form of contract §0 (python-dotenv 1.x and
+  compose both expand `${VAR:-default}` in a `.env`; checked with python-dotenv 1.0.1):
+
+  ```bash
+  # Documents (M1). OCR goes through the Azure Read v3.2 contract: the compose mock locally,
+  # the org gateway (azure-gateway-api, health path /_gw/health) in prod. The mock's host port is
+  # DPS_OCR_PORT (contract port 5016), so a lane that moves it moves this endpoint too.
+  DPS_OCR_PROVIDER=azure
+  DPS_AZURE_VISION_ENDPOINT=http://127.0.0.1:${DPS_OCR_PORT:-5016}
+  DPS_AZURE_VISION_KEY=mock-key
+  DPS_OCR_HEALTH_PATH=/health
+  DPS_MAX_DOCUMENT_MB=20
+  DPS_MAX_DOCUMENT_PAGES=200
+  DPS_PDF_RENDER_DPI=200
+  DPS_REDACT_IMAGE_FORMAT=jpeg
+  DPS_SCHEMA_MAX_ROWS=10000
+  ```
+
+  The plan's block shows the literal `5016` with a comment; the contract's lane-safe amendment says a
+  literal host port in a `.env` example stands for its variable form, so the block above uses it.
+- `dps/posture.py`: the https rule for `DPS_AZURE_VISION_ENDPOINT` is
+  `urlparse(endpoint).scheme != "https"` instead of `not endpoint.startswith("https://")`. Why: the
+  M0 Stellar/COIN rule in the same function compares the parsed scheme, which is case-insensitive
+  (`HTTPS://…` passes there); one rule for every egress URL. An empty endpoint still fails it.
+- `dps/config.py`: the plan's trailing comments are reflowed onto the line above each field so the
+  file stays within 100 columns; `ocr_configured` is wrapped by `ruff format`. Fields, defaults,
+  bounds, validators and properties are exactly the plan's.
+- `tests/conftest.py`: `from tests.services import require_service` sits with the module's other
+  imports instead of being appended above the fixture (ruff `E402`, module import not at top).
+- `HANDOFF.md` (§4 configuration table, §6 posture guard, §7 secrets) and `README.md` (develop install
+  `.[dev,fpe,docs]`, the `docs` and `uitest` extras) are updated in the same commit. Why: contract §0.6
+  (the Wega rule) — a change to env or extras updates HANDOFF.md in the same commit; the plan's Task 1
+  file list omits both.
+- Count: the plan expects 12 new test cases; its own tests are 13 (config 8 — of which 6
+  parametrised — posture 1, services 4). Suite 588 → 601 passed, 2 skipped (the `ner` extra).
+
+## Task 2 — Coded errors and value-free policy labels in the API layer
+
+- `dps/layers/api/common.py` `policy_label` (name collision with M0 as built): M0 already had a
+  `policy_label(ref, default)` that every M0 router calls (`detect.py`, `transform.py`,
+  `policies.py`), so the routers are **unchanged** and the function is replaced in place with the
+  plan's signature and label format. Two rules stay stricter than the plan's snippet, because the
+  plan's regex passthrough would audit a caller-typed lowercase string (a policy named `ananya`, or
+  `{"preset": "ananya"}`) verbatim, weakening M0's "a name that is no preset is `unknown`" rule:
+  - a string policy is audited verbatim only when it is a shipped preset (`preset_names()`); any
+    other string with a preset name's shape (`^[a-z0-9][a-z0-9-]{0,63}$`) is `unknown` (M0's label),
+    and anything else is `invalid` (the plan's label);
+  - an inline policy's label base is its `preset` only when that is a shipped preset, else
+    `custom`; the suffix is the plan's `+inline:<sha256(canonical JSON)[:12]>`.
+- `dps/layers/api/common.py` `_audit_event`: removed M0's substitution of `report.policy` for the
+  `inline` label (and the `_POLICY_LABEL` regex it used). Why: it audited an inline policy's
+  caller-chosen `name` whenever that looked like an identifier — part of the inline body, which the
+  plan's rule says audit never records. Labels are now computed once, by `policy_label`.
+- `dps/layers/api/common.py` `run_engine`: the coded exceptions are raised `from None`, as M0 as
+  built does, instead of the plan's `from exc` (no chained engine exception in tracebacks; the
+  response and audit are the plan's).
+- `tests/test_api.py` (M0 tests changed with their module, contract §0.7):
+  `test_rejections_and_engine_errors_are_audited_value_free` now expects `invalid` for the policy
+  string `"Ananya Krishnan"`, adds `"ananya"` → `unknown`, uses the inline name `"ananya"` (a name
+  M0's label would have audited verbatim) → `custom+inline:…`, and `{"preset": "pci-dss"}` →
+  `pci-dss+inline:…`; the test's closing "no `ananya` in any audit event" check covers both.
+  `test_run_engine_takes_policy_name_and_sync_or_async_calls` expects the additive
+  `"code": "bad_request"`.
+- `docs/technical/api-m0.md` (errors carry an additive `code`) and `HANDOFF.md` §5 (the audit
+  policy label format) are updated in the same commit; not in the plan's file list.
+- Count: `tests/test_api_errors.py` 4 passed; suite 601 → 605 passed, 2 skipped.
+
+## Task 3 — Engine output segments (where each replacement landed)
+
+- `dps/engine/synth/llm_text.py` `placeholder_segments` takes the fill's own replacements and
+  per-label methods — `placeholder_segments(text, ph, output, replacements, methods)` — instead of
+  the plan's `(text, ph, output, surrogates, locale, anchor)`, which recomputed every slot with
+  `surrogates.surrogate(...)`. Why: M0 as built fills placeholders through `_resolve`, which applies
+  the **plan's** method per finding (`keep` puts the original back, `redact` writes the mask, a
+  surrogate otherwise), and the service always passes the plan. Recomputed surrogates would differ
+  from the output at every kept or redacted slot, the rebuild check would fail, and every
+  plan-driven synthesis (all document synthesis) would get no segments. `_Fill` gains
+  `label_methods` (each label's method) so a segment names the method that actually ran. The
+  rebuild safety check ("no segments rather than wrong ones") is kept as the plan wrote it.
+- `dps/engine/synth/llm_text.py` `synthesize_text`: M0 as built has several early returns of the
+  deterministic text (no rewrite, leak guard, rejected or failed rewrite, invented entities,
+  verification), so `info["segments"]` is computed once for the deterministic output and set to
+  `[]` only when the model's rewrite is used, instead of the plan's single `if not
+  info["llm_used"]` before one final return.
+- `tests/test_segments.py`: the plan's `test_ambiguous_templates_yield_no_segments` asserted `[]`
+  for `"Template {EMAIL_9} then a.b@example-mail.in"`. Impossible as M0 is built: `_substitute`
+  fills only this text's own labels and leaves any other placeholder-shaped string untouched (M0's
+  `test_text_that_already_looks_like_a_placeholder_is_kept_and_never_reused`), and labels never
+  reuse a placeholder-shaped string already in the text, so the deterministic output always
+  rebuilds and its segments are exact (observed: one correct `EMAIL` segment). Replaced by
+  `test_placeholder_shaped_text_keeps_exact_segments` (the segment is exact and `{EMAIL_9}`
+  survives) and `test_placeholder_segments_refuse_an_output_they_cannot_rebuild` (the safety check,
+  called directly with an output that differs → `[]`). Added `test_placeholder_segments_follow_the_plan`
+  (a `synthetic-realistic` plan: two `keep` and one `surrogate` segment, each slicing the output)
+  and `test_a_used_rewrite_has_no_segments`.
+- `tests/test_llm_text.py` (M0 test changed with its module, contract §0.7):
+  `test_gateway_failures_and_unavailability_fall_back` compared `info` with an exact dict; it now
+  pops and checks `segments` first, then compares the rest unchanged.
+- `docs/technical/api-m0.md`: documents `options.return_segments` and the additive `segments`
+  response field (M0 routes return `"segments": null` unless asked); not in the plan's file list.
+- Count: `tests/test_segments.py` 9 passed (the plan's 6, one replaced, three added); suite
+  605 → 614 passed, 2 skipped.
+
+## Task 4 — Document models, layout geometry, document metrics and log fields
+
+- `dps/layers/documents/models.py`: `PageBox`, `PageSummary`, `RedactionReport` and `DocumentInfo`
+  gained one-line class docstrings (project rule: Google-style docstrings on public names); the
+  `PageFinding.out_span` comment sits on one line. Fields, types and defaults are the plan's.
+- `dps/layers/documents/errors.py`: the module docstring carries the plan's list of M1 codes and
+  statuses, so later tasks find them next to `DocumentError`.
+- `dps/observability.py`: the third-party logger caps are a module constant
+  (`_THIRD_PARTY_LEVELS`, same loggers and levels as the plan) applied at the end of
+  `configure_logging`. Before widening `_SAFE_FIELDS`, an AST scan of every `logger.*(...)` call in
+  `dps/` confirmed that no M0 call site passes any of the 18 new field names, so the extension lets
+  no M0 value through.
+- No `docs`/`ocr`-marked tests exist yet (Tasks 1–4 add none, and compose has no `azure-ocr-mock`
+  until Task 19), so the M1 integration gate `pytest -q -m "docs or ocr"` selects nothing at this
+  point (630 deselected).
+- Count: `tests/documents` 12 passed, `tests/test_observability.py` +2; suite 614 → 628 passed,
+  2 skipped.
+
+## Task 5 — PDF normalisation, text layer and serialised rasterisation
+
+- No code deviation: `dps/layers/documents/render.py`, the PDF part of
+  `dps/layers/documents/extract.py`, `tests/documents/fixtures.py` and `tests/documents/test_pdf.py`
+  are the plan's code (ruff format leaves them unchanged).
+- Step 2's expected failure: the run fails with `ModuleNotFoundError: dps.layers.documents.extract`,
+  not `…render` as the plan says, because `test_pdf.py` imports `extract` before `render`. Same cause
+  (the modules do not exist yet).
+- Count: `tests/documents/test_pdf.py` 12 passed (also with `-W error::DeprecationWarning`);
+  suite 628 → 640 passed, 2 skipped; `-m "docs or ocr"` selects 12.
+
+## Task 6 — DOCX, TXT, CSV and image extraction; format sniffing
+
+The plan's code is used, with five robustness/security fixes found by probing it with crafted
+inputs before committing. Each has a test in `tests/documents/test_extract.py` (12 added to the
+plan's 15) that failed against the plan's code for the reason named.
+
+- `dps/layers/documents/extract.py` `extract_csv` — **`csv.Sniffer` replaced by `_sniff_delimiter`.**
+  The Sniffer's quote regexes backtrack quadratically on crafted text (cubically on some): a 64 KB
+  upload of `", ' "` repeated pinned a worker thread for more than five minutes (killed), 16 KB took
+  4.7 s. `_sniff_delimiter` parses the first ≤ 51 non-blank rows of the 64 KB head with the C `csv`
+  parser once per candidate (`, ; tab |`), keeps the candidate whose most common row width (≥ 2) is
+  the most consistent (ties: wider, then that order), and falls back to `,` — the plan's fallback
+  (`csv.excel`) when nothing is detected. Linear: the 64 KB sample now takes 4 ms. Reading uses the
+  excel dialect with the detected delimiter, so two Sniffer side effects are gone: a sniffed
+  `skipinitialspace` no longer strips the space after a delimiter (cells keep it; header names are
+  stripped as before), and `'` is not detected as a quote character. `csv_delimiter` and
+  `ExtractedDocument` are unchanged. Test: `test_csv_delimiter_detection_is_linear_on_crafted_input`
+  (< 1 s), plus `test_csv_delimiters_are_detected` (all four delimiters, single column → `,`).
+- `extract_csv` — **duplicate header names**: the plan's `while name in header: name += "_2"` is
+  cubic in the number of duplicates (list scans × growing names; 12 289 duplicate columns from the
+  crafted sample took 38 s). Now a set plus a per-name counter: `a, a_2, a_3, …` instead of
+  `a, a_2, a_2_2, …` (the plan's first duplicate, `name_2`, and blank → `column_N` are unchanged, so
+  the plan's test holds). Test: `test_csv_duplicate_header_names_are_numbered_in_linear_time`.
+- `extract_csv` — a `csv.Error` while reading (a field over `csv.field_size_limit()`, 131 072
+  characters) escaped as an uncoded exception (a 500). It is now `corrupt_document` (422) naming
+  the line and the limit, raised `from None`. Test: `test_csv_parse_errors_are_coded`.
+- `_looks_like_text` decoded the 64 KB head strictly, so a UTF-8 text whose multi-byte character
+  straddles byte 65 536 (two in three Devanagari texts over 64 KB, when the upload has no `.txt`
+  name or `text/*` type) was refused as `unsupported_format`. It now decodes the head with an
+  incremental decoder (`final=False`). The head size is the constant `SNIFF_BYTES`. Test:
+  `test_sniff_text_with_a_multibyte_character_across_the_sample_end`.
+- `extract_docx` — a part python-docx does not model (footnotes, endnotes) that is not well-formed
+  XML raised `lxml.etree.XMLSyntaxError` (a 500); now `corrupt_document`. The XXE-safe parser is the
+  plan's; `test_docx_parts_never_resolve_external_entities` pins that a `SYSTEM` entity in such a
+  part is not resolved. Test: `test_docx_unmodelled_parts_are_read_and_malformed_ones_refused`.
+- `extract_image` — `Image.open(..., formats=("PNG", "JPEG"))`: only the two formats
+  `sniff_format` admits are decoded, so a caller passing `fmt="image"` cannot reach Pillow's other
+  decoders (a GIF is `corrupt_document`). A fuzz run (3 000 mutated PNG/JPEG files) found Pillow
+  raising `SyntaxError` for broken PNG chunks (an uncoded 500 whose message held file bytes); the
+  caught tuple adds `SyntaxError` and `EOFError`. Tests: `test_only_png_and_jpeg_are_decoded`,
+  `test_broken_png_chunks_are_coded`.
+- Count: `tests/documents/test_extract.py` 27 passed (the plan says `15`; its tests are 15 cases
+  with the parametrisation); `tests/documents` 51 passed (also with `-W error::DeprecationWarning`);
+  suite 640 → 667 passed, 2 skipped; `-m "docs or ocr"` selects 39.
+
+## Task 7 — OCR client (Azure Read v3.2 contract), readiness, mock integration test
+
+The plan's `dps/layers/documents/ocr.py` and its two test files are used, with three fixes that keep
+every name and signature; 10 tests added to `tests/documents/test_ocr_client.py` (the plan's 14 → 24)
+failed against the plan's code for the reason named.
+
+- `parse_read_result` **fails closed**. The plan skipped a word whose `boundingBox` was missing,
+  short or non-numeric. Such a word never reaches the engine, so a value in it is neither detected
+  nor boxed, and the rasterised page keeps showing it while the redaction report passes (the OCR
+  re-read only looks for detected originals). Now a word with text but no usable box (8 finite
+  numbers, `_polygon`) raises `OcrError("ocr_protocol")` for the page, and so does a result of an
+  unexpected shape (`readResults` not a list, `lines`/`words` not lists of objects, a non-numeric
+  `width`…) — the plan let those escape as `AttributeError`/`KeyError`/`ValueError` (a 500).
+  Words with blank text are still skipped (nothing to box). A non-finite `confidence` becomes
+  `None`. Messages are fixed text (no OCR body). Tests:
+  `test_results_of_an_unexpected_shape_are_protocol_errors` (5 shapes),
+  `test_words_without_usable_geometry_fail_closed` (4 boxes, incl. NaN — Python's `json` accepts
+  `NaN`).
+- `AzureReadClient._read`: a poll body that is JSON but not an object (a list) raised
+  `AttributeError`; now `ocr_protocol` ("poll response was not a JSON object").
+- `_retry_after`: `Retry-After: nan` parsed to NaN and reached `asyncio.sleep(nan)`, whose timer
+  handle breaks the event loop's heap ordering for every other task; a non-finite value now falls
+  back to the default (`inf` too, previously capped to 30). Test:
+  `test_non_finite_retry_after_falls_back_to_the_default`.
+- Mock container: compose has no `azure-ocr-mock` until Task 19, so the plan's pre-Task-19 command
+  ran it, in the lane-safe form: `docker run -d --rm --name "dps-ocr-${COMPOSE_PROJECT_NAME:-dps}"`
+  (here `dps-ocr-dps-wt-m1`) `-p "127.0.0.1:${DPS_OCR_PORT:-5016}:5000"
+  document_intelligence-azure-ocr-mock:latest` (the cached image; `${DPS_IMAGE_TAG}` names images
+  compose builds), then stopped. The test reads the endpoint from `DPS_TEST_OCR_URL` (`ocr_url`).
+- Count: `tests/documents/test_ocr_client.py` 24 passed; `test_ocr_mock.py` 1 passed with
+  `DPS_TEST_REQUIRE_SERVICES=1`; `-m "docs or ocr"` 40 passed; suite 667 → 692 passed with the mock
+  up (691 passed, 3 skipped without it).
+
+## Fix round 1 for Tasks 5–7 (review `M1-G2-review-r1`)
+
+Each fix has tests that failed before it. Public names and signatures are unchanged; the private
+helpers named below are new or changed.
+
+- **B1, `dps/layers/documents/ocr.py` `parse_read_result` fails closed on every unknown shape.** The
+  Task 7 version still read a `succeeded` body with no `analyzeResult`, `readResults: {}` or `[{}]`
+  (no `lines`), or a v4-style `readResult.blocks` body, as a page with **no words and no error**. It
+  also dropped a line whose text had no words. Such a page would reach the engine empty, its values
+  would stay visible in a redacted raster, and the report would pass. Now each of these raises
+  `ocr_protocol`:
+  - the result is not exactly one page: `analyzeResult.readResults` must be a one-element list
+    holding an object, because DPS sends one page image per call;
+  - that page has no `lines` list (a blank page is `"lines": []`, which the mock sends and which
+    was checked live), or its `unit` is not `pixel` or `inch`;
+  - a line or a word is not an object, or a line's `text` is not a string, or its `words` is not a
+    list;
+  - a word's `text` is not a string (a dict used to become its `repr`), or it is missing;
+  - a line's text is not carried by its words, compared with all whitespace removed. This covers
+    `words` that are missing, empty, only blank, or **partial** (`"SSN 123-45-6789"` with only the
+    word `SSN`). The partial case goes beyond the review: it is the same failure, a value that
+    could never be detected or boxed. Comparing without whitespace accepts scripts without spaces
+    (`株式会社` from `株式` + `会社`). Read v3.2 builds a line's text from its words, and so does
+    the mock. If a real deployment ever differs, every OCR'd page fails with `ocr_protocol`, which
+    is visible; values are never silently kept;
+  - `width`, `height` or `angle` is present but is not a finite JSON number. Strings such as
+    `"1700"` and `"nan"`, booleans, infinities and integers too large for a float are all refused.
+    A missing field still defaults to 0, and Task 9 (N8) cross-checks the size.
+
+  An integer too large for a float (`10**400`, which `json` accepts) no longer escapes as an uncoded
+  `OverflowError`. In a box it means "no usable box", which is `ocr_protocol`. In a page field it is
+  `ocr_protocol`. As a `confidence` it becomes `None`, like a non-finite confidence. `OverflowError`
+  is also in the parser's catch-all tuple. Tests:
+  `test_succeeded_results_without_exactly_one_page_fail_closed` (10 bodies),
+  `test_line_text_the_words_do_not_carry_fails_closed` (5),
+  `test_lines_and_words_that_agree_are_read`, `test_word_text_must_be_a_string` (4),
+  `test_page_fields_of_the_wrong_type_fail_closed` (12) and
+  `test_numbers_beyond_a_float_never_escape_uncoded`.
+- **B1 (optional part), `AzureReadClient._same_origin`.** An `Operation-Location` that the stdlib
+  cannot parse used to escape as an uncoded `ValueError`. Examples: port 99999, `:abc`, `[::1`, or a
+  tab that `urlsplit` strips so the port becomes `5000.evil.example`. These are now
+  `ocr_protocol: Operation-Location is not a valid URL`. The resolved URL is also parsed by httpx,
+  and the key is sent only when **both** parsers place it on the endpoint's origin. The method now
+  returns that `httpx.URL`, and the poll sends exactly the URL that was checked, so there is no
+  re-parse. The review's 19 location payloads give the same pinning: every request goes to the
+  configured origin, and the uncoded cases are now coded. The review's IDN full-width-dot case was
+  an artefact of its probe: `httpx.Response(headers=str)` cannot encode the header. Sent as raw
+  header bytes, as a server sends it, it is refused by the origin check, and the test sends it that
+  way. Test: `test_malformed_operation_locations_are_protocol_errors` (5).
+- **N5, `AzureReadClient._read`:** the submit loop no longer sleeps after its last attempt, which
+  only delayed the `ocr_throttled` error by up to 30 s. Test:
+  `test_throttled_submits_do_not_sleep_after_the_last_attempt`.
+- Live check against the lane's mock: a blank 800×600 PNG gives 0 words and `unit=pixel`, and three
+  200-dpi KYC renders give 16 words each. The integration test `test_ocr_mock` passes.
+- **B2, `dps/layers/documents/extract.py` `normalise_pdf`: every pypdf failure is now
+  `corrupt_document` (422).** The plan's `_PDF_ERRORS` tuple let 116 of 3,000 fuzzed PDFs (3.9 %)
+  escape as uncoded 500s. They raised `AttributeError`, `NotImplementedError` ("Unsupported
+  filter") or `IndexError` at the clone, at `page.rotation`, at `transfer_rotation_to_content` and
+  at `add_transformation`. Both pypdf stages now catch `Exception` (after `DocumentError`), as the
+  pdfplumber stage already did, and name only the exception type:
+  `the PDF could not be parsed (AttributeError)`. The tuple is gone, and so is the `PyPdfError`
+  import. Re-running the review's fuzz probe on seeds 7, 1234 and 99 (3,000 PDFs each) gives
+  0 uncoded failures. Test: `test_malformed_pdfs_are_corrupt_documents_not_uncoded_errors` (3
+  deterministic inputs: an unsupported `/Filter` on a rotated page and on a cropped page, and a
+  `/Contents` that is a number). It also asserts that no cause is chained.
+- **N4 (same commit): `DocumentError` is raised `from None`** wherever `extract.py` and `render.py`
+  used `from exc`: the pypdf, pdfplumber, UTF-8, zip, python-docx, Pillow and PDFium paths. pypdf's
+  `PdfReadError`, Pillow's `SyntaxError` and `UnicodeDecodeError` quote file bytes in their
+  messages, and a chained cause would carry those bytes into any traceback that a future log
+  processor kept. Messages are unchanged apart from the type names added above. `render.py` thus
+  differs from the plan in that one `raise`.
+- **B3, `extract_pdf` bounds the page size (new private `_check_page_sizes`).** A 433-byte PDF with
+  one blank 14,400 pt page used to be accepted with `needs_ocr=True`, because blank pages are
+  scan-suspect. At 200 dpi it would be rendered at 40,000 × 40,000 px, about 17 GB. Read v3.2 also
+  refuses more than 10,000 px a side, so such a page could never be OCR'd. After normalising,
+  `extract_pdf` now refuses any page whose pypdfium2 bitmap, `ceil(points × dpi / 72)`, would
+  exceed `MAX_IMAGE_SIDE` (10,000). It refuses with `image_too_large` (413), naming the page
+  number, the limit and the dpi:
+  `page 1 would render over 10000 px a side at 200 dpi; pages are limited to 3600 pt a side`.
+  The dpi used is `max(pdf_render_dpi, preview_dpi)`. This goes beyond the review's formula
+  (`pdf_render_dpi`), because previews (Task 10) render the same pages at `preview_dpi`, which the
+  settings allow up to 150 while `pdf_render_dpi` may be as low as 72. With the defaults (200/72)
+  the bound is the review's: 3,600 pt is accepted and 3,601 pt is refused. The refusal takes under
+  1 ms and renders nothing. A 3,600 pt page still renders at the full 10,000 px (the review
+  measured about 1.1 GB peak RSS). That is the Read limit, and renders stay serialised by
+  `PDFIUM_LOCK`. `MAX_IMAGE_SIDE` moves up to the PDF section of the module, with the same name
+  and value. HANDOFF.md §4 (the `DPS_PDF_RENDER_DPI` row) states the bound. Tests:
+  `test_pages_too_large_to_render_are_refused` (14,400 pt; 3,600 accepted; page 2 of 2 named; a
+  rotated page) and `test_the_page_bound_follows_the_highest_render_resolution`. The fuzz re-run
+  (3 × 3,000) still gives 0 uncoded failures with the new size walk.
+- **N1, `test_csv_delimiter_detection_is_linear_on_crafted_input` now tests its claim.** Its 16 KB
+  input (`", ' "` × 4096) takes 0.07 s with the plan's `csv.Sniffer().sniff(text[:65536],
+  delimiters=",;\t|")`, so the test passed against the code it was written to reject. The input is
+  now `",'"` × 32,768 (64 KB). The plan's call takes 6.7 s on it, and `_sniff_delimiter` takes about
+  6 ms, so the 1 s bound fails against the plan and passes now. A correction to the Task 6 entry
+  above: the review measured `", ' "` at 1.0 s for 64 KB and 0.07 s for 16 KB, and could not
+  reproduce "more than five minutes". The worst measured cases are about 6.5–7 s at 64 KB
+  (quadratic). The reason for replacing the Sniffer still holds.
+
+## Fix round 2 for Tasks 5–7 (review `M1-G2-review-r2`)
+
+- **B1-r2: a forged `/Pages /Count` was an uncoded `PdfiumError` (HTTP 500).** pypdf keeps the
+  input's root `/Count` when it writes the normalised PDF. PDFium takes its page count from that
+  `/Count` (when it lies in 1..2^20−2), while pdfplumber walks `/Kids`. So a one-page PDF claiming
+  `/Count 2` made `_check_page_sizes` load PDFium page 2, which raised
+  `PdfiumError: Failed to load page.` uncoded. Three changes:
+  1. **`PdfRenderer` codes every PDFium failure** (`render.py`). A private `_page(index)` loads
+     each page and turns `PdfiumError` into `corrupt_document` ("a PDF page could not be loaded").
+     `page_size`, `render` and `image_coverage` all go through it. `render` also codes a failing
+     render ("a PDF page could not be rendered"). `image_coverage` also codes a failing
+     `get_bounds` ("the images on a PDF page could not be measured"). All are raised
+     `from None`.
+  2. **`extract_pdf` refuses a page-count disagreement.** When PDFium's count differs from
+     pdfplumber's, it raises `corrupt_document` with the message "the renderer and the text layer
+     disagree on the page count (R and T): /Count contradicts the page tree". The message holds
+     only the two counts. Before, a `/Count` below the tree was refused only by an incidental
+     `IndexError` on `coverage[i]`. The check runs after `_check_page_sizes`, so a `/Count` above
+     the tree is still refused there, by the guard in (1).
+  3. **Beyond the review: `normalise_pdf` settles the page tree** to pypdf's reading of it. On
+     clone, pypdf already lists every page it found directly under the root `/Kids`. Normalisation
+     now also does three things:
+     - it sets `/Type /Pages` on the root;
+     - it sets `/Type /Page` on every page;
+     - it deletes any `/Kids` or `/Count` that a page carries.
+
+     **Why.** The three parsers decide what a page is by different rules:
+     - pypdf reads `/Type` first, then the absence of `/Kids`;
+     - pdfminer reads `/Type` only;
+     - PDFium reads the absence of `/Kids` only.
+
+     **The attack this closes.** Build a tree of an untyped page X (holding an SSN) and a page Y
+     typed `/Page` but carrying `/Kids []`, with `/Count 1`. Before this fix it was *accepted*:
+     PDFium rendered X while the text layer read only Y, so the SSN was in the raster and was
+     never scanned. The count check in (2) did not catch it, because both sides counted 1. Now
+     every parser sees both pages:
+     - with `/Count 1` the PDF is refused by (2);
+     - with `/Count 2` it is accepted, and page by page PDFium's own text equals the text layer.
+
+     The root's `/Count` is deliberately *not* rewritten. A count that contradicts the tree is
+     refused, as the review asked. Repairing it would be the lenient alternative; it is safe once
+     the leaves are settled, if real traffic needs it. `/Count 0`, `-1` or out-of-range values
+     make PDFium walk the tree, so they are accepted as before when the tree is consistent.
+- **N7 (folded in): a closed renderer refuses every call.** `__len__`, `page_size`,
+  `image_coverage` and `render` all raise `corrupt_document` ("the renderer was already
+  closed"). Before, the first three reached pypdfium2 with a null handle and raised
+  `ctypes.ArgumentError`. `close()` now checks and sets `_closed` under `PDFIUM_LOCK`, so two
+  closing threads cannot double-close.
+- **Interfaces unchanged:** the `PdfRenderer` methods, `normalise_pdf` and `extract_pdf` keep
+  their names and signatures. `_page` and `_require_open` are private.
+- **Tests (`tests/documents/test_pdf.py`, +6):**
+  - `test_a_page_count_that_contradicts_the_page_tree_is_a_corrupt_document`:
+    - `count-above-the-tree` (1 page, `/Count 2`) failed uncoded before;
+    - `count-below-the-tree` (3 pages, `/Count 1`, the 3rd 14,400 pt) passed before only through
+      the `IndexError`.
+  - `test_renderer_page_loads_that_fail_are_corrupt_documents`
+  - `test_a_closed_renderer_refuses_every_call`
+  - `test_the_renderer_and_the_text_layer_read_the_same_pages` (uncoded `PdfiumError` before)
+  - `test_a_page_rendered_but_never_read_is_refused` (accepted before)
+
+  The helper `_one_page` now builds on a general `_raw_pdf(*objects)`.
+
+## Task 8 — True redaction: burned-in boxes, image-only rebuild, output inspection
+
+The plan's `dps/layers/documents/redact.py` and `tests/documents/test_redact.py` are used, with one
+strengthening of the inspection; names and signatures are the plan's.
+
+- `inspect_output_pdf` also counts text-showing operators inside **Form XObjects** that a page's
+  resources name (new private `_form_text_operators`: recursive through each form's own
+  resources, each object read once, depth ≤ 8). Why: the plan scanned only each page's content
+  stream, so text drawn by a Form XObject that the page merely calls with `Do` was invisible to
+  it, and pypdf's `extract_text` also misses such text when the form carries no font resource
+  (checked: a form drawing `(hidden) Tj` passed the plan's inspection as `clean`). DPS's own
+  output has image XObjects only, so this costs nothing for it and makes the structural check
+  prove what its docstring claims. Test:
+  `test_inspection_reads_text_operators_inside_form_xobjects` (fails against the plan's code).
+- `PageRedaction`, `RedactedOutput` and `OutputInspection` gained one-line class docstrings
+  (project rule: Google-style docstrings on public names).
+- Tests added beyond the plan's 8: `test_inspection_flags_a_text_layer_and_annotations` (the
+  inspection is not vacuous: a reportlab text PDF has text characters and operators, the annotated
+  fixture has one annotation), the Form XObject test above, and
+  `test_only_pdf_and_image_documents_are_redacted` (`redaction_unsupported_format` for a DOCX).
+- Count: `tests/documents/test_redact.py` 11 passed (the pdftoppm cross-check runs: poppler is
+  installed here); suite 741 → 752 passed, 3 skipped.
+
+## Task 9 — The DocumentPipeline
+
+The plan's `dps/layers/documents/__init__.py` and `tests/documents/test_pipeline.py` are used (all
+16 plan tests pass, including both reveal round trips, against the real M0 engine). Changes, each
+with a test that fails against the plan's module (checked by swapping the plan's module in: 6
+failed, 17 passed):
+
+- **Review N8 (owned by this task): the OCR page size is cross-checked against the image sent.**
+  New private `_check_ocr_size(result, size, dpi)`: a `pixel` page must be the PNG's size within
+  1 px; an `inch` page × the image's dpi within 1 % (≥ 1 px). Otherwise `OcrError("ocr_protocol",
+  "the OCR page size differs from the image sent")`, which the pipeline reports as it reports
+  every OCR failure: 503 `ocr_unavailable` naming the code (`… (ocr_protocol)`). Why: a gateway
+  that rescales images returns words in another pixel space and every box would land in the wrong
+  place while the report passed. Both the OCR stage and the OCR re-read check it.
+  `_page_png` returns the image size as a third element (private helper; `_png_size` reads a PNG
+  header for image uploads). Verified against the lane's mock: it reports exactly the PNG size
+  (1700 × 2200 for a 200-dpi letter page). Tests:
+  `test_an_ocr_page_size_other_than_the_image_sent_is_refused`,
+  `test_the_reread_refuses_a_page_size_other_than_the_image_sent`.
+- **Review §5 escalation (small-image PII on a text page) — provisional decision, flagged for
+  the owner.** The plan OCRs a text page only when images cover ≥ `ocr_image_coverage` (0.25), so
+  an ID photo or stamp on a KYC form page was rasterised verbatim into a "passed" redacted PDF.
+  Now, **only when a redacted PDF is requested** with `ocr=auto` and OCR configured, every page
+  with any image (`image_coverage > 0`) is OCR'd too (it becomes `hybrid`: text-layer words win,
+  OCR adds what lies in the image). When such a page is not OCR'd (OCR unconfigured, or
+  `ocr=never`) the response carries the new warning code `images_not_ocr_read` (the redaction is
+  still produced, as an unconfigured deployment already gets `redaction_not_ocr_verified`).
+  Detect, obfuscate and synthesize without `redacted_pdf` are unchanged (no extra OCR calls).
+  Cost: one OCR call per image-bearing page of a redaction request. The stricter alternative
+  (refuse `redacted_pdf` when an image-bearing page cannot be OCR'd) is a one-line change in
+  `_redact` if the owner prefers it. Tests: `test_a_redacted_pdf_reads_pages_with_small_images`,
+  `test_unread_images_in_a_redaction_are_a_warning` (2 cases), and the control
+  `test_small_images_are_not_ocr_read_without_a_redaction`. Fixture: `small_image_pdf()`.
+- `locate_findings` numbers CSV findings in row order: the plan sorted by the path string, which
+  puts `$[10]` before `$[2]` (new private `_document_order`: row index, path, offset). Test:
+  `test_csv_findings_are_numbered_in_row_order` (12 rows).
+- `_ocr_reread`: the OCR haystack skips words that normalise to nothing (`-`, `|`), so a blank
+  token cannot split a multi-word original and hide a hit (strictly more hits, never fewer).
+- `__all__` lists the module's public names.
+- `tests/documents/fixtures.py`: `FakeOcr.read` reports the size of the PNG it was sent (as
+  Read v3.2 does) instead of 0 × 0, which the N8 check refuses; `small_image_pdf()` added.
+  `FakeOcr` had no other user.
+- Count: `tests/documents/test_pipeline.py` 23 passed (the plan's 16 + 7); suite 752 → 776
+  passed, 2 skipped (lane OCR mock up). Live probe against the mock (not committed): scanned PDF,
+  PNG, small-image and hybrid PDFs all redact with `ocr_checked: true`, `ocr_hits: 0`; the hybrid
+  merge adds no duplicate words (16 = the text layer's 16).
+
+## Task 10 — Documents API, app wiring, OCR readiness loop
+
+The plan's router, tests and `create_app` changes are used, adapted to M0's `app.py` as built.
+
+- `dps/app.py` `_BodyLimit`: **M0's pure-ASGI middleware is extended** instead of the plan's
+  `BaseHTTPMiddleware` replacement. The plan's version checked only `Content-Length`, which would
+  have dropped M0's streaming check (a chunked body has no length; `test_body_limit_by_header_and_by_stream`
+  pins it). The middleware takes `max_bytes` and `document_max_bytes` (the plan's names), picks the
+  limit by path (`/api/v1/documents/*` → `max_document_bytes + DOCUMENT_MULTIPART_OVERHEAD`), and
+  both refusals now carry `"code": "payload_too_large"`: the `Content-Length` answer adds the code
+  to M0's body, and the streaming refusal raises `CodedHTTPException(413, "payload_too_large", …)`
+  instead of M0's uncoded `StarletteHTTPException` (FastAPI re-raises it from multipart parsing as
+  it does from JSON parsing; checked with a chunked 4 MB multipart upload in the test and with
+  `curl -H "Transfer-Encoding: chunked"` against a live uvicorn). The detail text is M0's.
+- `dps/app.py`: the startup probe and the loop both go through a private `_refresh_ocr`, which
+  catches any exception from a probe, marks the `ocr` component `{"ok": false, "detail": "error"}`
+  and logs `ocr_probe_error` with the exception's class name only. Why: the plan wrapped the loop
+  but called `refresh_ocr_readiness` bare at startup, so a probe that raised (a client double, an
+  unexpected `httpx` error type) would have failed the app's startup although OCR is never
+  required. Test: `test_a_probe_that_raises_at_startup_does_not_stop_the_app`.
+- `dps/app.py` lifespan: `api-core` is set to `stopping` inside the `finally` that also cancels the
+  probe loop and closes the OCR client (the plan's block, with M0's shutdown line moved into it).
+- `dps/layers/api/routers/documents.py` `_run`: the `request` JSON is parsed before
+  `run_engine` (to label the policy) but its refusal, and the upload read, are raised **inside**
+  `run_engine`'s call. Why: M0 audits every outcome, rejections included (`payload_from` runs
+  inside the call); the plan's router parsed and read outside it, so an invalid `request` field
+  or an oversized file was neither audited nor counted. The audited policy is `-` when the request
+  could not be parsed (its policy is unknown). Test: `test_rejections_are_audited_value_free`.
+  Response models and route functions gained one-line docstrings.
+- `Dockerfile` (not in the plan's Task 10 file list; Task 19 plans the same line): the runtime
+  installs `.[fpe,docs]` (`.[fpe,docs,ner]` under `WITH_NER=1`). Why: `dps.app` now imports the
+  document pipeline at startup (the plan's code does), so an image without the `docs` extra could
+  no longer start — the lane's compose stack would have been broken from this commit until Task 19.
+  Checked: `docker compose build app` (image `data-privacy-services:m1`), the container reaches
+  `healthy`, `/readyz` shows `ocr: unconfigured`, and inside the container a 2-page text PDF is
+  obfuscated with a redacted PDF (`passed`, 0 text characters, no SSN in the PDF or the result,
+  2 previews) while a scanned PDF answers 200 with `ocr_unconfigured` on detect and 503
+  `ocr_unconfigured` on redaction (compose has no OCR until Task 19).
+- `HANDOFF.md` (contract §0.6): §1/§2 the `docs` extra in the image, §4 the per-route body limits
+  and the redaction OCR rule of Task 9 (`images_not_ocr_read`), §5 the `ocr` readiness component,
+  the M1 metrics and the document audit modes and outcomes.
+- Tests added beyond the plan's 9 (+1 `ocr`): `test_body_limits_are_per_route` (JSON route still
+  1 MB, a 1.5 MB upload reaches the pipeline, a chunked 4 MB upload is a coded 413),
+  `test_rejections_are_audited_value_free`, `test_lifespan_probes_ocr_and_closes_the_client`,
+  `test_a_failed_probe_never_stops_the_loop` (a probe that raises, then `down`, then `up`),
+  `test_a_probe_that_raises_at_startup_does_not_stop_the_app`. `tests/test_api_documents_ocr.py`
+  also `importorskip`s `pdfplumber` (its fixtures need the `docs` extra).
+- Mock: compose has no `azure-ocr-mock` until Task 19, so the plan's pre-Task-19 command ran it in
+  the lane-safe form (`docker run -d --rm --name dps-ocr-dps-wt-m1 -p
+  "127.0.0.1:${DPS_OCR_PORT:-5016}:5000" document_intelligence-azure-ocr-mock:latest`); the test
+  reads `DPS_TEST_OCR_URL`.
+- Count: `tests/test_api_documents.py` 15 passed, `tests/test_api_documents_ocr.py` 1 passed;
+  `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m ocr` 2 passed; suite 776 → 791 passed, 2 skipped
+  (mock up).
+
+## Fix round 1 for Tasks 8–10 (review `M1-G3-review-r1`)
+
+**B1: a redacted PDF could pass, `ocr_checked: true`, while still showing SSNs and card numbers
+whenever the PDF's text layer disagreed with what the page draws.** Reproduced first with the
+review's probes against the lane mock (real tesseract): a searchable scan with an OCR-error
+invisible layer, one with a "Specimen" layer, and a text PDF whose `/ToUnicode` maps digits to `X`
+all passed with values visible. The plan's design caused it in two places ("text-layer words win";
+the re-read looks only for the originals of detected findings, and only on boxed pages). Both are
+changed; interfaces (names and signatures) are unchanged.
+
+- **(a) Verification: `_redact` / `_ocr_reread` (`dps/layers/documents/__init__.py`).**
+  - When OCR is configured and `ocr_verify` holds, **every** page of the produced PDF is re-read,
+    not only boxed ones. `RedactionReport.ocr_pages` is now the page count.
+  - New private `_residual`: the engine runs over each page's re-read text with the request's policy,
+    locale and mode, through the public `PrivacyEngine.plan`. Any finding whose method is not `keep`
+    fails the request with 422 `leakage`, and nothing is returned. This also catches values that only
+    the raster holds (vector or outlined text, broken maps).
+  - The needle check stays. It is now **document-wide**: each page's re-read is searched for the
+    redacted originals of every page. Before, it searched only for that page's own. Why: the
+    customer's name, boxed on page 1, shown on page 2 where the text layer does not say it, has no
+    cue there, so only a needle sees it.
+  - The `leakage` message now names the count, the entity types and the pages, never a value:
+    "an OCR re-read of the redacted PDF still shows N value(s) the policy redacts (CARD_PAN, SSN)
+    on page(s) 1; nothing was returned". `RedactionReport.ocr_hits` is 0 whenever a report is
+    returned, since any hit raises. Its model comment is updated.
+  - **Text the engine checks after the re-read (`_reread_text`).** The page is laid out as an OCR
+    page with two changes:
+    - words OCR read inside a painted box (half their area or more, the `chars_under_boxes` rule)
+      are dropped;
+    - each box reads as one `█` (private `_BOX_MARK`) on its OCR line.
+
+    **Why.** It came from a false positive found in the real-mock sweep. Tesseract read the
+    redacted SSN box on a text-layer page as `RR`, and with the name boxed, the weak lead-in
+    `Customer:` named the next line's `SSN RR` a `PERSON_NAME`. Without the mark, every text-layer
+    fixture failed with `leakage`: 70 of the 168 sweep combinations. A box read as nothing has the
+    same effect when the next line starts with capitalised words (`Customer:` followed by
+    `Premier Banking`). A box is solid black, so nothing under it is readable, and the mark keeps a
+    cue from reaching past a redacted value.
+- **(b) Hybrid merge: `merge_ocr_words` and `group_lines` (`dps/layers/documents/layout.py`).**
+  - **Grouping.** OCR and text-layer words that hold the same place are grouped transitively:
+    boxes overlapping `OCR_OVERLAP` of the *smaller* box. Before, the test was coverage of the OCR
+    word alone. Transitive grouping makes a word split differently on each side (`Kri`+`shnan,`
+    against `KRISHNAN`) one group.
+  - **Duplicates.** A group's OCR words are dropped only when both sides read the same text,
+    normalised with the engine's `normalise`.
+  - **Conflicts.** Otherwise the OCR line holding the conflicting word is kept **whole**, with its
+    line hint, as a line of its own. Why whole lines: a card number's four groups next to the text
+    layer's misread groups would interleave word by word, and the engine does not see a card number
+    without its "Card" cue (`4111 1111 1111 1111 09/28` alone has no finding).
+  - **Other OCR words.** OCR words over no text-layer word join the text-layer lines, as before.
+  - **`group_lines`.** It now groups hinted words by hint and clusters unhinted words by centre in
+    the same call. Before, a mixed list was clustered entirely. Pure OCR and pure text-layer pages
+    are unchanged.
+  - A text-layer index of 24 pt row bands keeps the merge near-linear on dense pages.
+- **Measured against the lane mock (real tesseract), `options.redacted_pdf: true`:**
+  - The review's probes: `garbled` and `specimen` now redact SSN, card, e-mail and name. An
+    independent OCR of the output reads none of them, and the report passes. The control `none`
+    passes unchanged. `probe-m1-G3-tounicode.py` fails closed: 422 `leakage` (CARD_PAN, SSN).
+  - A sweep of 12 fixtures × 7 policies (default and six presets) × {obfuscate, synthesize}:
+    - 154 of 168 pass, with no false-positive `leakage`. The fixtures are text 1 and 3 pages,
+      scanned 1 and 2 pages, hybrid, small image, PNG, rotated, cropped, annotated, garbled and
+      specimen.
+    - The other 14 are `cropped_pdf`, which crashes **before** the re-read on HEAD too (see the
+      next section).
+    - The hybrid and small-image fixtures keep exactly the text layer's 16 words, because tesseract
+      agrees with them, so no extra lines are added.
+  - In the rebuilt image (`data-privacy-services:m1`, lane `dps-wt-m1`), the pipeline was run against
+    the mock at `host.docker.internal`. It passed with nothing visible afterwards for text, scan,
+    garbled and specimen.
+- **Costs and side effects (for the owner):**
+  - A redaction request now makes one OCR call per output page, where it used to make one per boxed
+    page. It also runs one engine pass per page, on top of the OCR'd input pages.
+  - On a hybrid page whose OCR disagrees with the text layer, the canonical text, and so the
+    obfuscated output, holds both readings of the disagreeing lines.
+  - The re-read's detections increment `dps_findings_total` as any `PrivacyEngine.plan` call does.
+- **Open (not measurable here): NER.** With the `ner` extra (`DPS_NER_ENABLED`), spaCy may label
+  re-read text differently from the original. A context-dependent label on words the engine already
+  judged would then fail closed. That is safe, but it is a false `leakage`. A possible refinement,
+  if real traffic shows it: count a residual finding only when its value never appeared in the
+  canonical text outside redacted spans.
+- **Tests** (each B1 test fails against the pre-fix modules; checked by running them against a HEAD
+  export of `dps/`, 8 failed):
+  - `tests/documents/test_layout.py`:
+    - `test_merge_ocr_words_keeps_what_the_text_layer_reads_otherwise`;
+    - `test_merge_ocr_words_keeps_a_line_an_overlay_hides`;
+    - `test_merge_ocr_words_drops_duplicates_however_the_words_split` (a guard: different
+      segmentation, case or punctuation adds no duplicates).
+  - `tests/documents/test_pipeline.py`:
+    - `test_a_searchable_scan_is_redacted_by_what_it_shows[garbled|specimen]`;
+    - `test_values_the_text_layer_cannot_read_fail_the_reread[obfuscate|synthesize]` (broken
+      `/ToUnicode`);
+    - `test_every_page_of_a_redacted_pdf_is_reread`;
+    - `test_a_redacted_value_another_page_shows_is_a_leak`;
+    - the control `test_the_reread_passes_a_redaction_that_hides_every_value`;
+    - `test_what_ocr_reads_inside_a_box_is_not_a_leak[2 cases]` (it failed against the
+      intermediate state without box marks, in 3 of its 4 sub-cases).
+  - Fixtures (`tests/documents/fixtures.py`): `searchable_scan(hidden)`, `GARBLED_LAYER`,
+    `SPECIMEN_LAYER`, `broken_tounicode_pdf()`, and `ScreenOcr`. `ScreenOcr` is an OCR double that
+    returns the drawn words less those a black box hides in the image it is sent, and optionally
+    reads a box as text (`box_reads_as`).
+- **Count:** suite 791 → 803 passed, 2 skipped (`ner` extra; lane OCR mock up).
+  `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` gives 109 passed, and `-m ocr` gives 2
+  passed.
+- Review nits N1, N3–N8 are not addressed in this round. N2 is partly covered by (a): a value that
+  a misplaced box leaves whole on the page is found. A value it leaves only in part is still not
+  found.
+
+### Beyond the review: text outside a crop box crashed redaction (found by the B1 sweep)
+
+- **Symptom.** `cropped_pdf` keeps its first line in the text layer, above the crop box: it is
+  detected but never drawn. Its finding box came out *inverted* (`y1 < y0`), for two reasons:
+  - `BBox.padded` clamped each side on its own;
+  - the box lay wholly above the page.
+
+  Two failures followed:
+  - `/documents/detect` returned that inverted box;
+  - with `redacted_pdf`, `paint_boxes` raised an uncoded `ValueError` (HTTP 500).
+
+  This was present on HEAD before this round, with or without OCR (Tasks 4 and 8).
+- **Fix.**
+  - `BBox.padded` (`models.py`) clamps every coordinate to the page and never lets a far side pass
+    its near side. A box off the page becomes an empty box on the page's edge.
+  - `paint_boxes` (`redact.py`) skips boxes without area. They cover nothing that is drawn, while
+    PIL would have painted a 1-px line.
+  - `RedactedOutput.boxes`, and so `RedactionReport.boxes` and `dps_redacted_boxes_total`, counts
+    only the boxes actually burned in.
+  - The finding keeps its (empty) box, so it is "located" and `redaction_unlocated` does not fire.
+    The redacted raster cannot show text outside the crop box.
+- **Tests (each fails before the fix):**
+  - `test_models.py::test_a_box_off_the_page_pads_to_an_empty_box_on_its_edge`;
+  - `test_redact.py::test_empty_boxes_paint_nothing`;
+  - `test_pipeline.py::test_text_outside_a_cropped_page_does_not_break_redaction`.
+- **Count:** suite 803 → 806 passed, 2 skipped. `-m "docs or ocr"` gives 111 passed. The real-mock
+  sweep (12 fixtures × 7 policies × 2 modes) now passes 168 of 168.
+
+## Task 11 — Generator specs and the deterministic executor
+
+- `dps/engine/synth/schema_gen.py`, `ENTITY_TEMPLATES`: **every entity in `ENTITY_GENERATORS` now has
+  a template.** The plan's dict left ten without one (`DATE_OF_BIRTH`, `GENDER`, `NATIONALITY`,
+  `AGE`, `CARD_EXPIRY`, `IBAN`, `IP_ADDRESS`, `MAC_ADDRESS`, `URL`, `ORG_NAME`) and fell back to `""`.
+  The M0 surrogate engine as built returns a blank original unchanged
+  (`SurrogateEngine.surrogate`: `if not original.strip(): return original`), so those fields
+  came out empty: the plan's own `validate("IBAN", …)` assertion failed on every row. Added:
+  `YYYY-MM-DD` (unparseable, so the row persona's birth date in ISO form), `Gender`, `Nationality`,
+  `age` (no digits, so the age that agrees with the persona's birth date), `MM/YY`,
+  `GB00 AAAA 0000 0000 0000 00` (a fresh mod-97-valid GB IBAN), `0.0.0.0`, `00:00:00:00:00:00`,
+  `https://host/path` (not `https://example.com/`: the URL surrogate always lives under
+  example.com, so that template would "reveal" itself on every draw and fall through to the
+  engine's hex last resort) and `Org`. `_generate` reads `ENTITY_TEMPLATES[entity]` (no `""`
+  fallback); a test asserts the dict covers the set.
+- `ENTITY_TEMPLATES["PHONE"]` is `+ phone` instead of `+1 201 555 0100`. The plan's template is a
+  parseable US number, so every row had a US phone whatever the spec's locale; an unparseable
+  template makes the engine use the row persona's country (en_IN → `+91 …`, en_GB → the Ofcom drama
+  range) in international format. A caller who wants the US layout passes `format`.
+- `tests/test_schema_gen.py::test_entity_values_are_rule_valid_and_coherent`: the Aadhaar check is
+  "12 digits, starts with `1`, Verhoeff-valid" instead of `validate("AADHAAR", …) is True`. The M0
+  surrogate deliberately draws Aadhaar numbers outside issued space (UIDAI never issues 0/1), and
+  stdnum's validator refuses exactly those; M0's `test_surrogates.py` asserts
+  `validate("AADHAAR", aad) is False`. The plan's assertion was impossible.
+- Validation tightened so a spec that validates cannot fail or emit NaN during execution (the plan
+  says "all validated before execution"); each case is in `test_invalid_specs_are_refused`:
+  - numbers (`decimal`/`normal`/`lognormal` bounds, `weights`, `p_true`) are finite and
+    `|x| ≤ MAX_ABS` (1e100): `NaN`/`Infinity` arrive through JSON (`json.loads` accepts them) and
+    `uniform(-1e300, 1e300)` overflows to `inf`, which then fails response serialisation (500);
+  - `scale` is an integer 0..10 (the plan's `int(p.get("scale", 2))` raised on `"x"` at execution);
+  - `lognormal` needs `|mu| ≤ 100`, `sigma ≤ 20` (`exp` overflow); `normal`/`lognormal` need
+    `min ≤ max` when both are given;
+  - `choice` values and `constant` values are JSON scalars without NaN/infinity; `RuleCase` and
+    `RuleConstraint` use `allow_inf_nan=False`;
+  - an `entity` `format` must hold a letter or digit (an all-blank format came back blank).
+- Order constraints: the plan grouped `sequence`/`integer`/`decimal`/`normal`/`lognormal` as one
+  "number" kind and both sortable date formats as one "date" kind. Sorting moves values between
+  fields, so mixing produced wrong output: an integer column received a decimal, a `%Y%m%d` column an
+  ISO date (and the string sort ordered `2015-…` before `20150101`), and a `sequence` with a prefix
+  (a string) next to an integer raised `TypeError` mid-execution (a 500). Now `_sort_class` replaces
+  `_ORDER_KIND`: fields must share one class — integers (incl. a bare `sequence` and scale-0
+  `normal`/`lognormal`), numbers of one scale, dates of one sortable format, or datetimes; a
+  prefixed or padded `sequence` is not sortable; a field may not be named twice. Datetimes are sorted
+  as instants (`_sort_key`), not as strings, so different offsets order correctly
+  (`test_ordered_datetimes_compare_as_instants`).
+- A constraint may not target a `unique` field (order fields, rule target): uniqueness is enforced
+  before constraints run, and a constraint would silently rewrite the value (duplicates in a key).
+- Module docstring: `AGE` and `CARD_EXPIRY` are relative to today (M0 surrogate behaviour), so
+  replays are byte-identical within a day; every other value is a pure function of
+  (spec, seed, row). The contract §0 amendment (call `declare_record` before `surrogate`) has
+  nothing to declare here — a generated row has no original values, only templates; a comment says
+  so at the call site.
+- Count: the plan expects 17 tests; the file has 37 (17 plan cases + 5 locales of
+  `test_every_entity_generator_produces_a_value`, `test_ordered_datetimes_compare_as_instants`, 14
+  new invalid-spec cases). Against the plan's code, 21 of them fail. Throughput on this Mac:
+  ≈ 1 875 rows/s for the 16-field test spec. Suite 804 → 841 passed, 4 skipped.
+
+## Task 12 — Structure profiles and spec proposers (heuristic and LLM, P1-safe)
+
+`dps/engine/shapes.py` is the plan's. `dps/engine/synth/schema_profile.py` is the plan's module plus the
+fixes below; public names and signatures are unchanged. The plan's 11 tests pass on the plan's code, but a
+probe found 14 inputs on which it raised a raw `ValidationError`/`OverflowError`/`TypeError` (an uncoded 500
+at the Task 13 routes) and one quadratic path; each fix has a test that fails on the plan's code (25 of the
+27 new cases fail there; the two that pass guard behaviour the plan already had).
+
+- **Field names always validate** (`_Namer`, used by all three profilers). The plan built names with
+  `_ident` per segment, so `a b` and `a_b` (or JSON Schema `a-b` / `a_b`) became duplicate fields, a sample
+  key that is a scalar in one row and an object in another (`a` and `a.b`) made a field nest under a
+  scalar, and a dotted key with more than four segments broke `FieldSpec`'s name rule — each a
+  `GeneratorSpec` `ValidationError`. A name that cannot be used as is (too deep, colliding, or aliased as
+  sensitive) becomes `field_N` (`field_N_2`, … if that is taken). The JSON Schema walk passes raw path
+  segments to the namer instead of pre-joined prefixes, and stops descending past `MAX_SCHEMA_DEPTH` (32)
+  levels (as does `_flatten` for samples) instead of recursing until `RecursionError`.
+- **At most `MAX_FIELDS` (200) fields** — `GeneratorSpec.fields` holds 200 — else `SchemaError`
+  `schema_unsupported` (a coded 422) from every profiler, checked before the per-column work.
+- **Numbers that no generator accepts are not numbers.** `_finite` (a `TypeGuard`): finite and
+  `|x| ≤ MAX_ABS` (Task 11). A sampled `10**400` raised `OverflowError` in `float()`; a JSON `NaN` raised
+  `ValueError` in `math.log10`; a JSON Schema `maximum: 1e308` produced a `decimal` the executor refuses.
+  `_infer_type` and the sample statistics use it, and so do JSON Schema `minimum`/`maximum`.
+- **The heuristic proposer clamps to the executor's limits:** `scale ≤ MAX_SCALE` (DDL `NUMERIC(20,12)`
+  gave scale 12); `lognormal` only when `|mu| ≤ 100` and `sigma ≤ 20` (else `decimal`); DDL precision is
+  capped at `MAX_DIGITS` = 38 integer digits (`NUMERIC(1000,0)` raised `OverflowError` in `10.0 ** 1000`);
+  years are clamped to 1..9999 and zero-padded (`0005-…` became `5-01-01`, not an ISO date). As a last
+  resort, `heuristic_spec` turns a field whose proposal still fails validation into short `text` and says
+  how many did in `notes` (a count, never a value).
+- **JSON Schema keywords of the wrong type are ignored**, not fatal: `minLength: "x"` raised `ValueError`
+  in `int()`; `required: [{}]` raised `TypeError` building a set. Only string entries of `required` count;
+  `minLength`/`maxLength` must be integers.
+- **DDL comments are stripped in one linear pass, quote-aware** (`_strip_comments`, `_body_end`). The
+  plan's `re.sub(r"/\*.*?\*/", …, flags=re.DOTALL)` is quadratic on unterminated comments: 60 000
+  characters took 2 s, the 100 000-character limit about 6 s, on the event loop (Task 13 also moves DDL
+  profiling to a thread). The plan's strip and parenthesis scan also ignored quotes, so
+  `DEFAULT '--'` or `DEFAULT '('` made a valid table `ddl_unparsed`.
+- **`merge_llm_spec` refuses unusable replies with `ValueError`** (→ `fallback: llm_invalid_spec`, as
+  the plan intends): `fields` not a list (`{"fields": 5}` raised `TypeError`, a 500), a reply proposing
+  none of the profile's fields (`{}` was labelled `source: llm` while being the heuristic spec), and a reply
+  nested deeply enough for `json.loads` to raise `RecursionError`. `notes` that are not a list are ignored
+  (`{"notes": 7}` raised `TypeError`).
+- **`verify_against_sample` does not look for `GENDER` and `NATIONALITY` values (`SWEEP_EXEMPT`).** The
+  `entity` generator draws them from a handful of words, and the M0 surrogate engine already lets them
+  equal an original (`surrogates._IDENTITY_OK`: forcing a different value would itself reveal it), so a
+  sample with a gender column failed every run with `leakage`. Every other detected type is swept exactly
+  as the plan says. **Open:** at volume the sweep still fails healthy runs on other low-entropy types
+  (measured on Faker en_IN samples: a 50-row sample with a city column → 100 rows fail 5/5 on `CITY`;
+  200 → 1 000 rows fail 5/5 on `CITY`, `DATE`, `DATE_OF_BIRTH`, a few `PERSON_NAME`). That is a policy
+  decision (which sample values count as "originals" for a generated dataset) and is left fail-closed;
+  see the build report.
+- Count: plan 11 tests; the file has 38 (11 + 14 always-valid cases, DDL comments/quotes, linear-time
+  comment strip, 3 too-many-fields cases, 6 unusable replies, notes of the wrong type, gender/nationality
+  sweep). Suite 841 → 879 passed, 4 skipped.
+
+## Task 13 — Schema API: generator spec and synthesis routes
+
+- `dps/layers/api/common.py` `_audit_event` (not in the task's file list): **the plan's
+  `/schema/synthesize` lost its audit event.** `SchemaSynthesizeOut` has a `report` (a `SchemaReport`),
+  so `_audit_event` took the engine-report branch and raised `AttributeError` on
+  `report.findings_total`; `_audit` swallowed it (`audit_write_failed`), so every successful synthesis
+  went unaudited. The engine-report branch now requires `findings_total`; any other report contributes
+  only its `verification.passed`, so the audit carries the sample sweep's verdict
+  (`test_schema_routes_are_audited`, which fails on the plan's code).
+- `dps/layers/api/routers/schema.py`:
+  - `ddl` and `sample` carry no pydantic `max_length`. With it, an oversized DDL or sample was a generic
+    422 validation error and the plan's own 413 codes `ddl_too_large` / `sample_too_large` were
+    unreachable. `parse_ddl` already checks `MAX_DDL_CHARS`; `_profile` checks `MAX_SAMPLE_ROWS` before the
+    leaf count (`test_oversized_inputs_are_coded_413`). The body-size guard still bounds both.
+  - `seed` is used when it is not `None`, not when it is truthy: `{"seed": {}}` silently drew a fresh
+    seed; it is now 422 `invalid_seed` (`test_an_empty_seed_is_invalid_not_ignored`).
+  - JSON Schema and DDL profiling run in a worker thread like sample profiling (a 100 000-character
+    DDL is parsed on the event loop otherwise), and so does the sample sweep: at the limits (1 000
+    sample rows × 5 sensitive fields against 10 000 generated rows) `verify_against_sample` took 7.5 s
+    on this Mac.
+  - `info` is annotated `dict[str, Any]` (mypy inferred `dict[str, object]` from the caller-spec branch).
+- `HANDOFF.md` §5: the schema routes' audit modes, policy label and the `genspec` LLM purpose.
+- Extra tests beyond the plan's five: audit events, coded 413s, empty seed, replaying the returned spec
+  with the returned seed (same rows, no sweep without a sample), and a fail-closed `leakage` 422 that
+  does not echo the leaked values. Three of them fail on the plan's router.
+- **Open (see Task 12):** with a sample, the sweep fails healthy runs at volume on low-entropy types —
+  on this Mac a 1 000-row sample of account numbers, segments, balances and an opening date gave
+  422 `leakage` for 10 000 rows (generated dates coincide with sampled ones), and Faker-like names
+  coincide too. Fail-closed, as the plan specifies; a policy decision is needed.
+- Count: 10 tests (plan 5). Suite 879 → 889 passed, 4 skipped. Route timings on this Mac: a 10 000-row
+  synthesis from a spec answers in 0.36 s (823 KiB of JSON).
+
+## Task 14 — Entities route, recognizer test route, allow-lists, preset summaries
+
+- `dps/engine/detect/custom.py`: each compiled pattern and deny-list matcher carries its recognizer's
+  allow-list (`frozenset`), instead of the plan's `self._allow` keyed by recognizer **name**. Nothing
+  makes recognizer names unique, so with two recognizers named alike the plan's dict let one's
+  allow-list silence (or fail to silence) the other's hits
+  (`test_allow_lists_are_per_recognizer_even_with_one_name`). The allow-list is matched exactly
+  (case-sensitive) against `m.group(0)`, for pattern and deny-list hits alike, as the plan says; blank
+  entries are refused like blank deny-list entries (one validator for both). The module docstring
+  documents the field. Additive: an inline policy with recognizers now dumps `allow_list: []`, so its
+  `config_hash()` differs from M0's for the same input (no hash is persisted before M2).
+- `dps/engine/policy.py` `REVERSIBLE_METHODS` also holds `external_tokenize`, which the method registry
+  marks reversible (`Method("external_tokenize", True, …)`); the plan's set omitted it.
+  `transform/methods.py` imports `policy.py`, so the set cannot be derived there; a test keeps the two
+  equal (`test_reversible_methods_match_the_method_registry`). No shipped preset uses the method, so
+  every preset's `reversible` value is the plan's.
+- `dps/layers/api/routers/entities.py`:
+  - `GET /entities` also has the rate-limit dependency (M0's `GET /policies/presets` has it) and reads
+    each entry through `entity_info`, so a built-in entry wins even if the open registry was mutated
+    (the taxonomy's own rule); the plan sorted `TAXONOMY.values()` directly.
+  - `POST /policies/test-recognizer` also refuses more than 50 patterns (`invalid_recognizer`): the
+    plan bounds the text and each pattern because Python's `re` has no timeout, but not how many
+    patterns run over the text.
+- `dps/layers/api/routers/policies.py`: the presets route's return type is `list[dict[str, Any]]`.
+- Extra tests: the allow-list on deny-list hits and blank entries, per-recognizer allow-lists,
+  registry parity, the pattern cap with value-free errors, and registered custom types listed by
+  `/entities` with `builtin: false`.
+- **Open:** the taxonomy registry is process-wide (M0), so `GET /entities` lists custom types (and
+  their `custom:<recognizer name>` descriptions) registered by any tenant's policy — names only, never
+  values; the plan asks for "the live taxonomy incl. registered custom types". A pathological regex
+  (catastrophic backtracking) can still hold a worker thread on this route, as on M0's `/detect` with
+  an inline recognizer.
+- Count: plan 7 new tests (custom 1, policy 1, entities 5); added 5 more. Suite 889 → 901 passed,
+  4 skipped; `tests/test_api.py` (M0) unchanged and green.
+
+## Fix round 1 for Tasks 11–14 (review `M1-G4-review-r1`)
+
+Each blocking finding has a test that fails on the reviewed code (be188d7) and passes after the fix.
+Public names and signatures are unchanged.
+
+**B1: the model could overwrite a detected field through a constraint** (`merge_llm_spec`,
+`dps/engine/synth/schema_profile.py`). The merge kept DPS's generator for every field with an
+entity type, but passed the model's `constraints` through, and the executor applies them after
+generation: a `rule` on `ssn` made every row `078-05-1120` (an issued SSN) and one on `card` made every
+row `4111111111111111`, with `source: llm`.
+
+- New private `_llm_constraints`: the reply's constraints are parsed one by one
+  (`TypeAdapter(list[Constraint])`), and a `rule` whose `field` is detected, or an `order` that names a
+  detected field (sorting moves values between its fields), is dropped. The spec's `notes` say how many
+  (`"N llm constraint(s) dropped: …"`), never which values. Constraints that do not parse, or that fail
+  the spec's own checks, are still all dropped with `llm constraints dropped (invalid)`, as before.
+  Rules may still *read* a detected field in `when` (they write a model constant into another field).
+- Consequence: "detected" means any entity type, as the merge's existing rule does, and sample date
+  columns are usually detected as `DATE` by value, so an LLM `order` over two sampled date columns
+  (`opened ≤ closed`) is now dropped. The heuristic proposer makes no constraints, so this is no worse
+  than the no-LLM path. Allowing `order` over fields whose generator is not `entity` would bring it back;
+  that is a product decision, left as is (fail-safe).
+- Side effect, intended: an invalid `order` on a detected field (an `entity` generator is not sortable)
+  no longer takes the model's valid constraints on other fields down with it.
+- Test: `test_llm_constraints_cannot_write_or_reorder_sensitive_fields` (the review's reply plus an
+  `order` over detected dates, a kept `rule` and a kept `order`).
+
+**B2 (P1): sampled values reached the gateway as categorical labels and as field names**
+(`profile_from_sample`, `render_prompt`, `merge_llm_spec`, `profile_originals`). A column with ≤ 12
+distinct letters-only values, each seen twice and none detected, became `FieldProfile.enum`, and
+`render_prompt` sent it. The default image has no NER, so a column of first names or of
+relationship managers' names passed every test: the review's probe sent `Ananya` … `Krishnan` with
+`llm.raw_pii_sent: 0`. A sample key that is a name went through as a field name too.
+
+- **Labels never reach the model.** `render_prompt` drops each field's `enum` and sends
+  `enum_size` (the label count) instead, for every source (JSON Schema `enum` values are treated the
+  same way, though they are caller metadata rather than data). `FieldProfile.enum` itself is unchanged:
+  the heuristic proposer uses it, and `POST /schema/generator-spec` returns it to the caller who sent
+  the sample. `SPEC_SYSTEM` says the model gets only the count, and that DPS generates fields with an
+  `entity_type` or an `enum_size` itself.
+- **An enum field keeps DPS's `choice`** in `merge_llm_spec`, exactly like a detected field (the
+  model never saw the labels, so its proposal could only invent them), and B1's constraint filter
+  covers enum fields as well (`kept_by_dps` = detected ∪ categorical).
+- **Data-like sample keys are aliased in the prompt only.** New `FieldProfile.prompt_alias`
+  (`Field(exclude=True)`: never serialised, so neither the prompt nor any response carries it) is set
+  by `profile_from_sample` when a key segment is not identifier-like (`_PLAIN_KEY`: a letter or `_`,
+  then letters, digits, `_` or `-`, at most 63 characters, and no run of four digits — so
+  `Ananya Krishnan`, `José` and account numbers used as keys are aliased; `customer_id`, `first-name`,
+  `address_line1` are not). New private `_prompt_names` maps each such field to `field_N` (never equal
+  to, or a prefix of, a name sent as is); `merge_llm_spec` maps the reply's field and constraint names
+  back, so the generated rows keep the caller's column names. Profile-level aliasing
+  (`field_N` in the output, as for keys the detector flags) was not used because it would also rename
+  ordinary spaced CSV headers in the output. DDL column names and JSON Schema property names are
+  schema metadata and are sent as before.
+- `profile_originals` no longer exempts enum labels from the leak guard (the exemption existed only
+  because labels were sent). Enum labels themselves are not added to the guard: `normalise` joins the
+  whole prompt into one string of letters and digits, so short labels would match inside JSON keys and
+  silently push every categorical sample to the heuristic path; the prompt holds no labels by
+  construction instead.
+- Tests: `test_sample_labels_and_data_keys_never_reach_the_model` (NER off; first names, full names,
+  segment labels and a name used as a key; the model's alias maps back and its `choice` for the name
+  column is ignored) and `test_json_schema_labels_are_counted_not_sent`. Both fail on be188d7.
+- **Open:** a key that is a name *and* identifier-like (`ananya_krishnan`) is still sent; only NER (or a
+  key dictionary) could tell. The heuristic `choice` still writes the sampled labels into the generated
+  rows, which go back to the caller who sent them; with NER off that includes an undetected
+  low-cardinality name column (a product decision: e.g. refuse multi-word labels, or require NER for
+  samples).
+
+**B3: `GET /entities` showed every tenant's custom entity types to every other tenant**
+(`dps/layers/api/routers/entities.py`). The route walked M0's process-wide `TAXONOMY`, into which any
+tenant's inline policy registers its recognizers' types, so tenant `wealth` received
+`PROJECT_FALCON_ID`, `custom:falcon-project`, `HIGH` after tenant `retail` called `/detect` with it.
+
+- The route now lists **built-in types only** (`is_builtin_entity`), still read through `entity_info`
+  and sorted by family then name. The response shape is unchanged (`builtin` stays in `EntityOut` and is
+  now always `true`), so the console's typed client and the contract's route row are unaffected. This
+  deviates from the plan's "the live taxonomy incl. registered custom types" and closes Task 14's open
+  item. The console's recognizer builder knows the custom types of the policy it is editing, and the
+  plan's Policies page already renders a type missing from `/entities` as `custom`.
+- Test: `test_entities_never_list_custom_types_any_tenant_registered` (two tenants; one registers a
+  HIGH custom type through `/detect`, another is registered directly; neither tenant sees either). It
+  replaces `test_entities_include_registered_custom_types`, which asserted the leaking behaviour.
+- **Contract question (for §9, M2/M5):** should `GET /entities` list a tenant's *own* custom types? If
+  yes, it needs the per-tenant policy store (M5 `043_policies.sql` / `dps/policy_store.py`, or M2 if
+  earlier) and the custom types read from the caller's stored policies, never from the process-wide
+  registry. A related M0 question: `register_entity` lets one tenant raise the tier another tenant gets
+  for the same custom type name (it only ever raises protection, by design); a per-tenant registry
+  would remove that coupling too.
+
+Count: 4 new tests, one of which replaces an old one (net +3). Suite 901 → 904 passed, 4 skipped
+(unit). Tasks 11–14 add no
+integration tests and no compose profile, so no lane containers were needed; the frontend is untouched.
+
+## Task 15 — Detector evaluation harness, labelled corpus, committed report
+
+The plan's corpus generator was written against the M0 *plan*; the M0 surrogate engine as built
+deliberately draws several identifiers from never-issued ranges, which the checksum validators (and
+the detectors) rightly reject. With the plan's code `generate_corpus` raised
+`RuntimeError: no rule-valid SIN after 25 attempts`, then the same for `AADHAAR`. The plan's own
+rule ("for identifiers whose surrogates are deliberately invalid … check-digit arithmetic, so every
+checksum-validated value is rule-valid — otherwise the evaluation would measure the validators, not
+the detectors") is applied to the cases it did not list:
+
+- `dps/evaluation/corpus.py` `_sin`: a Luhn-valid SIN whose first digit is 1–7 (M0's surrogates
+  start with 0; stdnum refuses 0 and 8). Generator `rule`.
+- `dps/evaluation/corpus.py` `_aadhaar`: a Verhoeff-valid, 12-digit Aadhaar starting 2–9 (M0's
+  surrogates start with 1, which UIDAI never issues and stdnum refuses). Generator `rule`.
+- `dps/evaluation/corpus.py` `ValueFactory._phone` and `_valid`: **phone numbers must be valid in
+  the jurisdiction's region** (`phonenumbers.is_valid_number`), and the surrogate template is the
+  region's own example mobile number. The plan's templates (`+1 201 555 0100` / `201 555 0100` for
+  every locale) put NANP numbers into UK, Indian and Mexican texts, and under `en_GB` the national
+  template made the surrogate engine return Ofcom's drama *mobile* range (07700 900xxx), which
+  libphonenumber does not accept: 20 of 38 `en_GB` phones were "missed" (PHONE recall 0.942), a
+  measurement of the validity check, not of the detector. UK numbers now come from Ofcom's drama
+  *landline* range (`020 7946 0xxx`, valid and fictional; generator `rule`); every other region
+  keeps the surrogate engine (NANP 555-01xx, numbers near the example elsewhere). PHONE recall is
+  now 1.000 over 345 labels.
+- `dps/evaluation/corpus.py` `CARD_EXPIRY`: a seeded `MM/YY` with year 27–34 (generator `rule`)
+  instead of the surrogate, whose year is `datetime.now().year + 1..4`: regenerating the corpus in a
+  later year would otherwise change it. Generation is now byte-identical across processes
+  (checked with `PYTHONHASHSEED` 0, 1, 12345: one sha256) and across years.
+- The module docstring names the added rule generators; two docstring/markdown lines were
+  reflowed to stay within 100 columns (the rendered markdown text is unchanged).
+
+**Measured (committed `docs/technical/detector-eval-m1.{json,md}`, corpus sha256 `988a239f…`):**
+900 records, 3 983 labels, min score 0.6, NER off — micro precision 1.000, micro recall 0.953,
+micro F1 0.976, macro F1 0.968. Every `FLOOR_TYPES` entry is 1.000/1.000 (no template change was
+needed, the floor is untouched). Shortfalls:
+
+- `IP_ADDRESS` recall 0.245 (12/49): the detector defect the plan predicted — an IPv4 address at the
+  end of a sentence (`… from 10.84.170.64.`) is missed (the M0 pattern's lookahead rejects the full
+  stop). All 37 misses are sentence-final (CA and EU templates). **Follow-up (detector, not M1):**
+  accept a trailing full stop that is not followed by a digit.
+- `PERSON_NAME` recall 0.756: all 151 misses are free-text names without a cue (JSON names are found
+  structurally, 450/450). Free text needs the NER tier (`run --ner`, `[ner]` extra).
+- The plan's second predicted defect (a card whose last 12 digits form a Verhoeff-valid Aadhaar
+  reported as `AADHAAR`) does not occur: no confusions at all. M0's card surrogates use the test IIN
+  `411111`, so the trailing 12 digits start with `1`, which the Aadhaar validator refuses. The defect
+  class still exists for real cards and stays a follow-up.
+- Threshold sweep: recall 0.953 from 0.3 to 0.6, 0.918 at 0.7, 0.909 at 0.8, 0.731 at 0.9; precision
+  1.000 throughout.
+
+## Task 19A — NDJSON streaming of large arrays on the Layer 1 routes
+
+- **Routing (`dps/layers/api/ndjson.py`, `routers/{detect,transform}.py`).** The plan declares the
+  JSON routes' body as `Body(default=None)` plus an `openapi_extra` so an NDJSON body skips FastAPI's
+  JSON parsing. That would have replaced M0's typed `EngineRequest` / `RevealRequest` parameters with
+  hand-written validation (and an OpenAPI schema that `$ref`s a model no route declares any more).
+  Instead each streaming route gets an **NDJSON-body twin**: `add_ndjson_route(router, path, mode=,
+  scope=)` registers, *before* the JSON route, a route whose class `NdjsonBodyRoute` matches only
+  `Content-Type: application/x-ndjson` (same scope and rate-limit dependencies, hidden from
+  OpenAPI). The JSON routes keep M0's typed bodies, validation and 422 shapes unchanged; they branch
+  to `stream_lines` only for a `data` array (and no `text`) with `Accept: application/x-ndjson`,
+  and document the NDJSON alternative (request and 200 response content) through
+  `openapi_extra=OPENAPI_NDJSON`. Checked with FastAPI 0.143's `_IncludedRouter`: the twin keeps
+  its `matches` after `include_router`.
+- **`stream_lines` is `async`** (the plan shows a sync signature): request errors are mapped and
+  audited inside the same coroutine before the `StreamingResponse` is returned. New
+  `stream_request(request, mode=)` reads an NDJSON body inside that audited region, so a malformed
+  body is audited like every other rejection (M0 rule "every outcome … is audited").
+- **`read_ndjson` returns `Sequence[Any]`, not `list[Any]`:** `NdjsonItems` keeps the body once,
+  as bytes, with each item line's span, and parses an item when its chunk runs (every line is
+  still checked up front: UTF-8, JSON, not `null`). With a list, a body at the 256 MB default
+  would expand several-fold into Python objects while it streams — beyond the compose
+  `mem_limit` (1536m). Measured: 20,000 items (1.5 MB) obfuscated in 7.1 s through TestClient
+  (~0.35 ms/item).
+- **`/reveal` with a JSON array and `Accept: application/x-ndjson`** (`stream_reveal_array`): the
+  hints of a JSON obfuscation address the whole array (`$[i]…`, and a field-scoped subkey binds that
+  full path), so re-basing them per item would break field-scoped reveals. The array is revealed
+  as one document under M0's limits (exactly the JSON route's result) and streamed one line per
+  element (`revealed` counted from each hint's `$[i]` prefix). An NDJSON reveal body (the item
+  lines of an obfuscate stream) is processed per item, as the plan says.
+- **Request errors are coded HTTP errors before anything streams**, not error lines: an envelope
+  that is not an object of `policy`/`options` (`/reveal`: `key_material`; extra keys refused) →
+  400 `ndjson_invalid` "line 1 …"; a line that is not UTF-8 JSON or a `null` item → 400
+  `ndjson_invalid` "line N …"; too many items → 413 `ndjson_too_large`; an item over `max_items`
+  values → 413 `payload_too_large` "item N …"; nesting deeper than 100 → 422 `ndjson_invalid`; an
+  unknown policy, invalid key material, seed or `wrap_key` → 400 `bad_request`. Details carry line
+  or item numbers and rules only.
+- **Item failure codes:** `leakage` and `bad_request` as planned; a `CodedError` keeps its code and
+  an unexpected exception becomes `internal_error` / `"internal error"` (class name logged), audit
+  outcome `error`. A stream the client abandons is audited with outcome `aborted`.
+- **Line shapes:** header `{"type", "trace_id", "mode", "policy": {"name", "hash"}}` (+ `key_material`
+  for obfuscate, wrapped once when `options.wrap_key` is set; + `synthesis_seed` for synthesize
+  unless the scope is `request`; `/reveal` has no `policy`); item lines carry `result`, `findings`,
+  `reveal_hints` (obfuscate), `segments` (when `options.return_segments`), `record_sensitivity`
+  (detect, no `result`), `revealed` (reveal); the report line's `report` adds
+  `reversible_values` (obfuscate) and `revealed` (reveal) to the planned fields; `verification` is
+  `null` for detect and reveal.
+- **`dps/layers/api/common.py`:** `run_engine`'s error mapping, metrics and audit are factored into
+  `begin_call`, `end_call`, `map_engine_error` and `result_counts` (behaviour unchanged; M0's API
+  tests pass as they were) so a stream writes one audit event with summed counts.
+- **`.env.example` not changed** (the session's permission rules deny every tool access to `.env*`
+  paths, as in Task 1). Follow-up for whoever holds that permission — append:
+
+  ```bash
+  # NDJSON streaming on /detect, /obfuscate, /synthesize, /reveal (M1)
+  DPS_NDJSON_MAX_ITEMS=1000000
+  DPS_NDJSON_CHUNK_ITEMS=500
+  DPS_MAX_NDJSON_MB=256
+  ```
+- **Posture:** contract §10 says the NDJSON limits are "posture-checked like `max_items`"; M0's
+  `posture_problems` has no `max_items` rule, so there is nothing to mirror and none was added.
+- `HANDOFF.md` §4 gains the three settings (contract §0.6), with a memory note.
+- Tests (`tests/test_ndjson.py`, 12): the eight planned, plus scopes on the NDJSON twins and the
+  OpenAPI content types, `Accept`/`Content-Type` parsing (`q=0` is not acceptance), detect item
+  shape, and the separate NDJSON body limit (a 1.5 MB NDJSON body passes under `max_payload_mb=1`,
+  the same items as JSON get 413). The plan's "fail with `ModuleNotFoundError`" step failed instead
+  on behaviour (the tests drive HTTP only until the last two were added).
+
+## Task 19B — `Idempotency-Key` on the Layer 1 routes
+
+As amended on 2026-10-12 (decision D2, contract §9 "L1 replay custody"): the cache keeps the scope
+hash and `IdemEntry(body_sha256, trace_id, created)` only; a replay re-runs the engine.
+
+- **`with_idempotency(request, body, run, *, mode="-", policy="-")`** (`common.py`): the plan's
+  three positional parameters plus two keywords that name the audit event of a refused header —
+  `idempotency_key_invalid` and `idempotency_key_reused` are audited (outcome = the code) like every
+  other rejection, before anything runs. It imports `dps.layers.api.idempotency` inside the
+  function: that module builds on `common.CodedHTTPException`, so a module-level import would be
+  circular.
+- **Replay plumbing:** `with_idempotency` sets `request.state.replay_trace_id` before `run`;
+  `begin_call` uses it as the trace id and `end_call` turns outcome `ok` into `replayed`, so JSON
+  routes, NDJSON streams, documents and schema synthesis all replay the same way. The response
+  header comes from a small ASGI middleware (`_ReplayHeader`, innermost) that reads
+  `request.state.idempotent_replay` at `http.response.start` (set only after `run` succeeded, so a
+  replay that fails carries no header) — a route returning a model cannot set headers otherwise.
+  Checked against a live `uvicorn` as well as TestClient.
+- **Streams are recorded at the end:** an NDJSON stream's 200 is sent before its items run, so
+  `with_idempotency` wraps the `StreamingResponse` body and records the entry only when the stream
+  ended with its report line (`request.state.stream_outcome == "ok"`, set by the stream). A stream
+  that ended with an error line leaves no entry, like any failed call.
+- **Documents fingerprint:** `sha256(file bytes) ‖ request field` (fixed 32-byte prefix, so the two
+  parts cannot be confused). The upload is now read *before* `run_engine` (the fingerprint needs
+  it); a refusal while reading (`document_too_large`, `invalid_request`) is still raised inside
+  `run_engine`'s call, so it is audited exactly as before.
+- **`IdempotencyCache.put` keeps a live entry** for the same scope (of two concurrent first calls,
+  the first to finish wins, as the plan says); `get` refreshes LRU order but never `created` (the TTL
+  runs from the first call's completion). `IdempotencyConflict` is the exception `get` raises on a
+  body mismatch. Extra names: `IDEMPOTENCY_HEADER`, `REPLAY_HEADER`, `route_template`, property
+  `enabled`.
+- **TTL 0:** the header is still validated (contract §9: it must match the pattern) and then
+  ignored — "accepted and ignored" applies to well-formed keys.
+- `/schema/generator-spec` and `/policies/*` do not honour the header (contract §9 lists the L1
+  engine routes, `/documents/*` and `/schema/synthesize` only).
+- **`.env.example` not changed** (same permission rule as Tasks 1 and 19A). Follow-up — append:
+
+  ```bash
+  # Idempotency-Key on the L1 routes (M1): replica-local fingerprints only, never key material
+  DPS_IDEMPOTENCY_TTL_SECONDS=600
+  DPS_IDEMPOTENCY_MAX_ENTRIES=10000
+  ```
+- `HANDOFF.md` §4 gains the two settings and the custody rule.
+- Tests (`tests/test_idempotency_l1.py`, 13): the eleven planned plus `test_disabled_cache_…` and
+  `test_streams_replay_and_cors_names_the_headers` (NDJSON replay keeps the header's trace id;
+  CORS allows `Idempotency-Key` and exposes `Idempotent-Replay`). Confirmed failing first on the
+  previous commit (`ModuleNotFoundError: dps.layers.api.idempotency`, run from a `git archive` copy).
+
+## Task 19C — Local Tesseract OCR when no Azure endpoint is configured
+
+- **`tests/test_config.py`:** the invalid-values case `("ocr_provider", "paddle")` was already in
+  place (Task 1 accepted `tesseract` from the start), so only `test_ocr_engine_resolution` (plus a
+  bad-values case for the three new settings) was added. Both config tests that read the
+  `ocr_provider` default now `monkeypatch.delenv("DPS_OCR_PROVIDER")`, because the app image sets
+  `auto` and the tests also run there.
+- **`dps/config.py`:** `tesseract_langs` is validated (`^[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*$`) — it is
+  passed to the CLI as an argument, and a value starting with `-` would be read as an option;
+  `tesseract_cmd` must be non-empty. `ocr_engine` follows the plan's table exactly; `auto` with an
+  endpoint but no key falls to Tesseract.
+- **`dps/layers/documents/ocr.py`:** `TesseractOcrClient` runs in its own process group
+  (`start_new_session=True`) and a timeout — or a cancelled/failed read — kills the **whole
+  group** (`os.killpg`): with only `proc.kill()`, a child process holding the pipes made
+  `proc.wait()` block until the child exited (found by `test_a_slow_tesseract_is_killed…`, 5 s
+  instead of 0.3 s). Stderr goes to `DEVNULL` (never read at all); the version probe reads stdout
+  only. `engine` is `"tesseract"` until `probe()` reads `tesseract --version`
+  (`tesseract-<major.minor>`; startup always probes). `parse_tsv` fails closed (`ocr_protocol`) on
+  a missing header, a non-numeric field, a non-finite confidence or a missing page row, like
+  `parse_read_result`. Metrics use engine label `tesseract`. `refresh_ocr_readiness` reports a
+  client's `unconfigured_detail` (`tesseract_missing`) instead of `unconfigured`.
+- **`dps/posture.py`:** the azure key/https rules also apply when `auto` *resolves* to azure (the
+  key and the pages leave the same way); `auto` resolving to none is a problem, as planned.
+  Tests added in `tests/test_posture.py` (not in the plan's file list).
+- **Demo scan:** `demo/documents/kyc-scanned.pdf` does not exist yet (Task 16 makes the demo
+  documents, and Task 16 is not built on this branch). The two `tesseract` tests use
+  `tests.documents.fixtures.scanned_pdf` with six synthetic KYC lines (26 words, so "≥ 20 words"
+  holds) and render page 1 with Task 5's renderer + `encode_png`.
+- **`frontend/src/components/OcrStatus.tsx` not changed:** the component does not exist yet (Task
+  16 creates it). Hand-off for Task 16: show "Local Tesseract" when `components.ocr.engine` starts
+  with `tesseract` (`/readyz` reports e.g. `{"ok": true, "detail": "up", "provider": "auto",
+  "engine": "tesseract-5.5"}`, or `detail: "tesseract_missing"`).
+- **Image (`Dockerfile`):** `tesseract-ocr tesseract-ocr-eng` and `ENV DPS_OCR_PROVIDER=auto` in the
+  runtime stage. `python:3.12-slim` is Debian 13 here (not bookworm): Tesseract **5.5.0**,
+  leptonica 1.84.1; the apt layer is **107 MB** (arm64), not ~30 MB. The default compose stack
+  therefore OCRs scanned pages locally (checked live on the lane stack: `/readyz`
+  `ocr: up, engine tesseract-5.5`; a scanned KYC PDF → `ocr_pages [1]`, SSN/EMAIL/CARD found,
+  redacted PDF re-read by Tesseract with 0 hits; `tools/smoke_test.py` 15/15).
+- **In-image test run (bind-mounted, no test stage):** compose's `app` service is read-only and
+  non-root, so `docker compose run … app python -m pytest` cannot install pytest. The tests ran
+  with `docker run --rm --user root -v "$PWD/tests:/app/tests:ro" --entrypoint sh
+  data-privacy-services:${DPS_IMAGE_TAG}` installing `pytest`/`pytest-asyncio` into that throwaway
+  container: `-m tesseract tests/documents/test_ocr_tesseract.py` with
+  `DPS_TEST_REQUIRE_SERVICES=1 DPS_TEST_REQUIRE_TESSERACT=1` → **2 passed**; `tests/documents`,
+  `tests/test_config.py`, `tests/test_posture.py` (`-m "not ocr"`, `DPS_OCR_PROVIDER` unset) → 225
+  passed, 1 skipped. M0/M1 unit tests that read the `ocr_provider` default (e.g.
+  `test_ocr_client.py::test_builder_picks_the_client`) assume `DPS_OCR_PROVIDER` is unset, so in
+  the image they run with `env -u DPS_OCR_PROVIDER`.
+- `pyproject.toml` registers the `tesseract` marker; `HANDOFF.md` §2 (image contents, size) and §4
+  (provider table, three settings).
+- **`.env.example` not changed** (permission rule, as before). Follow-up — append:
+
+  ```bash
+  # Local OCR (M1): used for DPS_OCR_PROVIDER=tesseract, or auto without an Azure endpoint
+  DPS_TESSERACT_CMD=tesseract
+  DPS_TESSERACT_LANGS=eng
+  DPS_TESSERACT_TIMEOUT_SECONDS=60
+  ```
+
+## Task 19D — T3 LLM metadata labelling, opt-in, value-free
+
+- **`dps/engine/policy.py` unchanged:** M0's `DetectConfig.tiers` is a free `list[str]` (no tier
+  validation), so `llm_label` was already accepted (checked with an inline policy).
+- **Entity types offered and accepted are the built-in taxonomy only**, not "the taxonomy
+  registry": the process-wide registry holds every tenant's custom types (M1-G4 review B3), so
+  listing it in the prompt would send one tenant's type names to the model for another.
+- **What is aliased (`prompt_fields`):** besides the plan's rule (a name or label with a whole-value
+  finding → `field_<n>`), a name that is not identifier-like (M1 Task 12's sample-key rule: letter
+  or `_`, then letters/digits/`_`/`-`, ≤ 63 characters, no run of four digits) and a `ref` with a
+  quoted path segment (`['…']`) or any finding are aliased too. The plan's refs are JSON path
+  templates, which carry every key on the way to the leaf — a customer's name used as a key
+  (`$['Ananya Krishnan'].code`) is found by neither T1 nor the leak guard (keys are not leaf values)
+  and would otherwise reach the model in the ref. A field whose name is aliased is sent under the
+  alias as its ref, and the reply's refs are mapped back.
+- **The leak guard checks the user message** (the field list), as `propose_spec` (Task 12) does —
+  the system text is a fixed constant (task, answer format, built-in type names) and holds no call
+  data; guarding it too would refuse every call whose leftover values happen to occur inside a
+  type name (`CARD`, `CODE`, `NAME` …).
+- **Engine surface:** `label_leftovers(payload, policy_ref, options)` returns `Leftovers`, a
+  `list[Finding]` subclass that also carries `llm_calls` (0/1): the engine operations read it for
+  `report.llm.calls` (the plan says the labelling call is counted there; a call that returned no
+  verdicts — or failed — still counts as made). Added for streams: `label_templates(documents,
+  …) -> LeftoverLabels` (one call for the leftover templates of several documents) and
+  `apply_labels(payload, …, labels) -> Leftovers` (per document, no LLM), plus
+  `labelling_enabled(policy_ref)`. T3 findings below the policy's `detect.min_score` are dropped
+  (the cap 0.85 is applied first), so "treated like any other finding" includes the threshold.
+  `label_leftovers` returns early, before resolving the policy, when no real provider is
+  configured (the common case costs nothing).
+- **`dps/engine/detect/llm_label.py`:** `label(...) -> LabelOutcome(verdicts, llm_calls,
+  fallback)` is the engine's entry; `label_fields` (the plan's interface) returns its verdicts.
+  Helpers `template_of`, `field_name`, `leftover_fields` (the value → shape step lives here, so the
+  leak-guard test can force values into the prompt), `prompt_fields`, `render_prompt`,
+  `parse_verdicts` (keeps the highest confidence per ref; a confidence outside 0..1, a bool or a
+  string is dropped). Gateway call: `temperature=0.0`, `max_tokens=2048`, `purpose="label"`.
+- **NDJSON (`ndjson.py`):** one labelling call per **stream**, from the leftover templates of its
+  first chunk (≤ `ndjson_chunk_items` items), applied to every item with `apply_labels` — not one
+  LLM call per item (a million-item stream would make a million calls). The report line gains
+  `llm_calls` (all modes but reveal; summed from item reports plus the stream's labelling call).
+  Items whose leftover templates were not in the first chunk get no T3 findings.
+- Routes: `/detect`, `/obfuscate`, `/synthesize` and `/policies/plan` await `label_leftovers`
+  inside their `call()` (after the M0 limits) and pass `extra_findings`. `/documents/*` (CSV
+  records reach the engine as JSON data) is not wired: the plan's file list does not include it.
+- `dps/observability.py`: `LLM_LABEL_FIELDS` = `dps_llm_label_fields_total{outcome}` (`labelled`,
+  `unlabelled`, `skipped`, `blocked`, `failed`); `verdicts` joins the log allow-list (`fields` was
+  already there). The `llm.label` log line carries `fields`, `verdicts`, `fallback` only.
+- **`.env.example` not changed** (permission rule). Follow-up — append:
+
+  ```bash
+  # T3 LLM metadata labelling (M1): opt-in per policy (detect.tiers: [..., llm_label])
+  DPS_LLM_LABEL_MAX_FIELDS=40
+  DPS_LLM_LABEL_MIN_CONFIDENCE=0.7
+  ```
+- `HANDOFF.md` §4 (the two settings and the rules) and §5 (the metric, readiness details).
+- Tests (`tests/test_llm_label.py`, 15 with parametrisation): the seven planned (the "bad replies"
+  case is parametrised over seven replies, including an `LlmCallError`), plus the per-call field
+  cap (`skipped` counted) and one labelling call per NDJSON stream. The fake gateways subclass
+  `LlmGateway` with a configured `stellar` provider (a `stub` provider never labels, by rule).
+
+## Fix round 1 for Tasks 15, 19A–19D (review `M1-G5-review-r1`)
+
+The one blocking finding has tests that fail on the reviewed code (bd74d91) and pass after the fix.
+Existing public names and signatures are unchanged; `CorpusError` is new.
+
+**B1: a malformed line in a corpus file echoed raw corpus content** (`dps/evaluation/corpus.py`,
+`tools/eval_detectors.py`). `run --corpus` is the slot for the bank's own labelled samples, but
+`load_corpus` let pydantic's `ValidationError` (with `input_value`) and `UnicodeDecodeError`
+propagate, so a truncated line printed part of an SSN, and a wrongly typed field or a bad `kind`
+printed its value in full.
+
+- `Label` and `CorpusRecord` now set `model_config = ConfigDict(hide_input_in_errors=True)`.
+- New `CorpusError(ValueError)`. `load_corpus` parses each file with the new private
+  `_parse_lines`, which decodes and validates **one line at a time**. A line that is not UTF-8,
+  or that fails validation, raises `CorpusError("<file name> line <n>: <problem> (content not
+  shown)")`. The problem is either `not valid UTF-8` or `not a valid corpus record: <pydantic error
+  types>`, for example `json_invalid`, `int_parsing` or `literal_error`. Those type codes come from
+  pydantic's fixed vocabulary, and `include_input=False` drops the input. The error is raised
+  *outside* the `except` block. As a result, neither the pydantic error nor the
+  `UnicodeDecodeError` is attached as `__context__`; the latter's `.object` would hold the line,
+  and under the old code the whole file. The line number is the physical line, so blank lines are
+  counted. The file name is the operator's own path argument (only its base name is used).
+- **Line splitting changed (a fix found while writing the tests):** lines are now split with
+  `bytes.splitlines()`, which splits on `\n`, `\r` and `\r\n` only. Before, the whole file was
+  decoded and split with `str.splitlines()`, which also splits on U+2028, U+2029 and U+0085.
+  `write_corpus` (`ensure_ascii=False`) and JSON allow those characters unescaped inside a
+  string, so a record holding one was cut into two invalid halves. This would have hit a bank's
+  free text. It does not affect the committed corpus: its sha256, the 900 records and the
+  regenerated `docs/technical/detector-eval-m1.{json,md}` are byte-identical.
+- `tools/eval_detectors.py run` catches `CorpusError`, prints `eval_detectors: <message>` to stderr
+  and exits with code 2, without a traceback.
+- Tests (in `tests/test_eval_corpus.py`):
+  - `test_malformed_line_error_names_file_and_line_only`, parametrised over six cases: a truncated
+    line, a wrongly typed `start`, a bad `kind`, a bare JSON string, `labels` not a list, and
+    invalid UTF-8. Each case is a sentinel line after a good line and a blank line. The test
+    asserts that the sentinel and the SSN appear nowhere in the formatted traceback, the repr or
+    the args. It also asserts that there is no `__cause__` or `__context__`, and that the message
+    names `bank-private.jsonl line 3`.
+  - `test_record_models_hide_input_in_errors`.
+  - `test_unicode_line_separators_inside_values_do_not_split_a_record`.
+  - `test_cli_reports_a_malformed_corpus_without_values`: exit code 2, no value and no traceback on
+    stdout or stderr.
+
+  All nine fail on bd74d91.
+- The reviewer's probe files (`scratchpad/build/g5r1/priv/bad*.jsonl`) now give exit code 2 with
+  `literal_error`, `int_parsing` and `json_invalid` respectively, and no content.
+
+The review's non-blocking items N1–N9 are not addressed in this round. They stay open as the review
+describes them: N1 opaque prompt refs for T3, N2 validating T3 verdicts before format-preserving
+methods, N4 `.env.example`, N5 `OcrStatus.tsx` in Task 16, N6 an HMAC for the replay fingerprint,
+and N7 `asyncio.to_thread` for NDJSON validation.
+
+Count: 9 new tests. The unit suite went from 966 to 975 passed, with 6 skipped (the same optional
+extras and later-task services as before). The app does not import `dps.evaluation`, and these
+tasks add no integration tests or compose profile, so no lane containers were needed. The frontend
+is untouched.
+
+## Task 16 — Demo documents and the console foundation
+
+- `tools/make_demo_docs.py` — **the Aadhaar-shaped number is Verhoeff arithmetic on an issued first
+  digit (2-9)**, seeded from the same `SEED` (`_aadhaar(seed)`), instead of
+  `engine.surrogate("AADHAAR", …)`. Why: the surrogate engine's Aadhaar numbers start with 1 on
+  purpose (UIDAI never issues them), and the detector's AADHAAR pattern (`[2-9]…`) and stdnum's
+  validator rightly ignore them, so with the plan's value the demo letter's "Your Aadhaar No." was
+  never detected and stayed unboxed in the redacted PDF (checked: detect on the plan's
+  `kyc-text.pdf` found no `AADHAAR`). The evaluation corpus (Task 15) solved the same problem the
+  same way. Every other value is the plan's (surrogate engine, seed 7). The module docstring says so.
+- `tools/make_demo_docs.py` gains `build() -> dict[str, bytes]` (every document by file name,
+  nothing written); `main()` writes `build()`'s output. Why: the test compares the committed files
+  with a fresh build without touching the working tree. Public functions gained docstrings.
+- Tests (the plan's Task 16 has none; written first, each failing on a missing module or file):
+  - `tests/test_demo_docs.py` (17, marker `docs`; one also `ocr`): the tool is reproducible; the
+    committed text-built files (`kyc-text.pdf`, `kyc.docx`, `kyc.txt`, `customers.csv`) are
+    byte-identical to a fresh build; the committed rasters (`kyc-scanned.pdf`, `id-card.png`) are
+    checked by structure (2 A4 pages; 1654 × 2339 px) because another platform's PDFium/JPEG build
+    may differ by a few bytes, and `frontend/public/demo/kyc-scanned.pdf` equals the committed scan;
+    the scan has no text layer (0 characters, 0 text operators); the values are rule-valid and
+    synthetic (Verhoeff Aadhaar, PAN, Luhn card on the test IIN, RFC 2606 domains); 20 CSV rows; the
+    DOCX zip carries the fixed timestamp; the engine finds AADHAAR, PAN_IN, CARD_PAN, EMAIL and PHONE
+    in the text PDF and the DOCX (the TXT has no phone, the CSV no Aadhaar/PAN, as the plan writes
+    them); without OCR the scan's pages are `unreadable`; and, against the lane's OCR mock, the scan
+    and the PNG read page for page like the text PDF and the scan's redaction passes its OCR re-read.
+  - `tests/test_console_yaml.py` (1): runs `frontend/src/lib/yaml.ts` under Node (type stripping)
+    over every preset and its inline-draft form and loads the output with PyYAML: equal to the input.
+    Skips without Node ≥ 22.6.
+  - `frontend/tests/{yaml,api,ocr}.test.ts` (18, `node:test`) and the script
+    `"test": "node --experimental-transform-types --no-warnings --test \"tests/*.test.ts\""` in
+    `frontend/package.json`. No new dependency (Node 22's own runner; `--experimental-transform-types`
+    because `ApiError` uses parameter properties). Files under `frontend/tests/` are outside
+    `tsconfig.json`'s `include`, so `tsc` does not see `node:test`.
+- `frontend/src/lib/ocr.ts` (new): `ocrState`, `ocrConfigured`, `ocrEngineLabel`, `ocrNote`.
+  `OcrStatus.tsx` imports them and re-exports the plan's `ocrState` and `OcrState`. Why: Node cannot
+  load `.tsx`, so logic the tests need lives in `.ts`; and the review hand-off N5 / Task 19C: the
+  plan predates local Tesseract, so its component showed a rose `tesseract_missing` chip and the
+  "Read v3.2 contract" note on a Tesseract deployment. Now `unconfigured` and `tesseract_missing`
+  both read "OCR not configured", `tesseract-5.5` reads "Local Tesseract 5.5 · up" with the note
+  "runs inside this service, no network call". `OcrState` gains `provider`.
+- `frontend/vite.config.ts`: besides the plan's `base: '/'`, the dev-server proxy target reads
+  `DPS_APP_PORT` (default 8400) — the contract's lane-safe rule for a literal host port.
+- `HANDOFF.md` §8 (the `base: '/'` trap the plan says is recorded there: a path prefix needs a
+  gateway rewrite) and `README.md` Develop (`npm test`, `tools/make_demo_docs.py`, `demo/documents`):
+  contract §0.6; not in the plan's file list.
+- Observation, not changed (engine scope, review G3-r2 N12): under the compose configuration (NER
+  off) the demo statement's account number (`ACCOUNT_NUMBER` is detected from field names only),
+  street address and payee name are not detected, so they stay visible in the redacted demo PDF; the
+  sweep cannot see them either.
+- Count: Python 977 → 995 passed, 4 skipped (tesseract binary ×2, `ner` ×2; lane OCR mock up);
+  frontend 18 `node:test` cases; `npm run build`: 41 modules, `dist/index.html` references
+  `/assets/…` and `/theme-init.js`, `dist/demo/kyc-scanned.pdf` present.
+
+## Task 17 — Console: Playground Document tab (mockup 08)
+
+The plan's `PageViewer`, `PlaygroundDocuments`, routes and styles are used; names, routes, test ids
+(`file-input`, `mode-*`, `run`, `verify-ok`, `page-box`, `page-frame`, `findings`, `result-text`,
+`ocr-status`) and every section title Task 20's console check looks for are the plan's. Changes:
+
+- **Pure logic in `frontend/src/lib/documents.ts`** (new): `uniqueFindings`, `sameValueAs`,
+  `boxStyle`, `tokenFontSize`, `findingTone`, `tokenSegments`, `ocrWordCount`, `verifyState`,
+  `isPaged`, `documentOptions`, `curlCommand`, `timingLine`, `redactedName`, `sizeText`,
+  `extensionLabel`, `hasGeometry`. Why: Node's test runner cannot load `.tsx`; the plan kept these
+  inside the components. Tests first: `frontend/tests/documents.test.ts` (14 cases).
+- **"Verified" keys on the OCR re-read (review G3-r2 N3) and on M0's partial coverage.**
+  `verifyState`: `failed` when the sweep failed or the redaction did not pass; `unverified` when no
+  sweep ran or a redacted PDF was produced but **not OCR re-read** (`ocr_checked: false`, e.g. OCR
+  unconfigured or `ocr_verify: false`); `partial` when the sweep passed with coverage gaps; else
+  `ok`. `verify-ok` is set for `ok` and `partial` only. The plan's `verified` was
+  `verification.passed && redaction.passed`, so a redaction nobody re-read showed "Verified". The
+  line shows "Verified, with partial coverage" and lists the gaps for `partial` (M0's rule: a sweep
+  with gaps is never an unqualified pass; the compose stack runs without NER, so this is what it
+  shows), amber "Not verified" for `unverified`, rose for `failed`. "Verify · N leaks" counts sweep
+  hits plus OCR re-read hits (the plan counted the re-read only).
+- **Copy as curl** (`curlCommand`): every word is single-quoted with `'` escaped, and the options
+  are the ones the page sends (`redacted_pdf` only for a PDF or image). The plan interpolated the
+  JSON inside `'…'` unescaped (an inline draft with a `'` in a regex broke the command) and always
+  sent `redacted_pdf: true` in Redact mode, which a DOCX refuses. The key stays `$DPS_API_KEY`.
+- **Redact mode on DOCX, TXT or CSV** (no redacted PDF): the output card is titled and described as
+  obfuscated text (the plan said "Output · redacted PDF" and "boxes are burned in"), the run button
+  reads "Obfuscate as text" and a note explains. Pages without geometry (the API returns 0 × 0 and
+  no preview for DOCX, TXT and CSV) render a placeholder (`hasGeometry`) instead of a zero-height
+  frame; their thumbnails are blank tiles.
+- **Hand-over:** "draft from Policies" appears only for an object (inline draft) policy; a preset
+  name handed over from the Playground selects that preset (the plan treated any handed-over policy
+  as a draft). The JSON/Text buttons hand the current policy back to `/playground`.
+- **Reveal** also works for CSV results (a list: revealed with `data`); the plan revealed string
+  results only. The download name comes from the file the run used, not the file chosen since.
+  The file input is reset after a choice, so choosing the same file again re-runs `choose`.
+- Labels: the OCR step reads "text layer" only for PDFs, "N pages unread" when OCR could not read
+  them, "not needed" for DOCX/TXT/CSV; hybrid pages say "+ text layer"; a `review` flag shows the
+  OCR confidence; the page head no longer says OCR runs "through the Read v3.2 contract" (Task 19C
+  added local Tesseract).
+- `styles.css`: `.verify.partial`, `.verify.unverified`, `.verify.failed` replace the plan's
+  `.verify.fail`; `.thumb-paper.blank` and `.page-none` added. Everything else is the plan's block.
+- `Playground.tsx`: as planned, plus `aria-label`/`aria-pressed` on the select and the Input
+  segment.
+- Manual check (plan Step 3), run with a private Playwright 1.55.0 (scratch venv, cached
+  chrome-headless-shell 1243) against `uvicorn` on the lane port with the lane's OCR mock
+  (`docker run … dps-wt-m1-azure-ocr-mock`, `127.0.0.1:${DPS_OCR_PORT:-5016}`), at 1440×900 and
+  390×844 in dark and light: demo scan → Redact → boxes on page 1, "Verified, with partial
+  coverage", `kyc-scanned.redacted.pdf` downloads (a PDF), page 2 via the strip, hover links box
+  and finding, Reveal restores; Obfuscate → tokens over the page, Reveal; Synthesize → violet tokens
+  and the validity line; no horizontal scroll, no console error (72 checks, 18 per size and theme; 11 more below). Also: DOCX in Redact
+  mode, CSV obfuscate + reveal, and the JSON/Text/Document hand-over.
+- Count: frontend 31 `node:test` cases (+14 incl. `hasGeometry`); Python suite unchanged (995
+  passed, 4 skipped); `npm run build` 46 modules.
+
+## Task 18 — Console: Policies page (mockup 05)
+
+The plan's page, routes (`/policies`, `/policies/:name`), section titles, labels ("Obfuscate method
+for CVV", "Run on the engine", "Re-run plan", …) and test ids (`policy-header`, `matrix`,
+`recognizer`, `plan`, `draft-yaml`) are kept. Changes:
+
+- **Pure logic in `frontend/src/lib/policyDraft.ts`** (new): `METHODS`, `REVERSIBLE`,
+  `PLAN_SAMPLE`, `TEST_TEXT`, `DEFAULT_RECOGNIZER`, `Draft`/`EMPTY_DRAFT`, `listOf`,
+  `inlinePolicy`, `draftChanges`, `withTreatment`, `treatmentRows`, `filterRows`, `declareField`,
+  `recognizerSpec`, `livePreview`, `matchCount`, `planSummary` — the plan's in-component code, so
+  that it is testable. Tests first: `frontend/tests/policies.test.ts` (10 cases) and
+  `tests/test_console_policies.py` (4), which runs the module under Node and sends what it builds
+  through the engine: the method lists equal `METHOD_NAMES` − `surrogate` and `REVERSIBLE_METHODS`;
+  every preset's inline draft validates and takes effect (`resolve_policy`); the default recognizer
+  finds the same offsets live and on `/policies/test-recognizer` (`EMP-204417` only); the plan
+  sample plans with a draft (≥ 4 rows, CVV on the drafted method). Shared Node runner:
+  `tests/node_ts.py`; `tests/test_console_yaml.py` (Task 16) now uses it.
+- `REVERSIBLE` includes `external_tokenize` (the engine's `REVERSIBLE_METHODS` does; the plan's
+  list did not, so the matrix said "No" for a reversible method).
+- `withTreatment`: choosing the method the preset already uses drops the draft entry, so the
+  preset's parameters come back and the draft count does not grow (the plan stored
+  `{method, params: {}}` for any choice, which silently dropped e.g. `keep_prefix`/`keep_suffix`).
+  Task 20's check (CVV `redact` → `det_token` → "draft · 1 change") is unaffected.
+- Live preview: the count names the reported (not allow-listed) hits with matching grammar (the
+  plan printed "1 matches"); a pattern the browser cannot compile says Python-only syntax may still
+  work on the engine (the plan said it "matches nothing"). Engine result "0 matches" says so.
+- Plan preview sends the preset **name** while there is no draft (the plan always sent the inline
+  form, so the plan's report named `<preset>+overrides` for an unchanged preset); with a draft it
+  sends the inline policy as planned. "Nothing detected" row for an empty plan.
+- **Layout bug fixed:** the plan's port dropped the mockup's `.pol-cell` wrapper, so the sticky
+  side column's containing block was the whole grid and it slid over the full-width sections below
+  (Declared fields, recognizer, plan), covering "Add recognizer to draft" (found by the browser
+  check: the click was intercepted). The mockup's `.pol-cell` / `.pol-main { grid-column: 2;
+  grid-row: 1 }` rules and its 1200/1240 px breakpoints are ported. The "On this page" card stays
+  visible on narrow screens (the mockup hides it), because Task 20's check reads the first match
+  of each section title and the index would be a hidden first match.
+- **Phone tables:** the plan's tables carry `class="stack"` and `data-l` labels but its CSS never
+  defined them (they lived in `docs/design/mockups/vault.css`), so on a phone the tables were
+  squeezed columns. The mockups' `table.stack` rules (≤ 720 px: labelled cards) are ported.
+- Version history items are plain `div`s with `aria-current` (the plan's `<button>`s did nothing
+  when pressed); Publish sits in a span carrying the M5 tooltip (a disabled button shows none);
+  "Copy hash" and "Copy as Presidio YAML" confirm the copy; `Declare a field` is disabled without a
+  path; the facts row breaks `DPS_DEFAULT_LOCALE` at the underscore; family names replace every `_`.
+- Manual check (plan Step 3), private Playwright as in Task 17, at 1440×900 and 390×844 in dark and
+  light (96 checks): six presets; `/policies/pci-dss` loads; CVV `det_token` marks the row and
+  "draft · 1 change", choosing `redact` again clears it; live preview and engine both `EMP-204417`
+  only; adding the recognizer and declaring `$.loan.internal_score` count; Re-run plan fills the
+  table with the draft's methods (CVV `det_token`, `BUSINESS_SENSITIVE` `bucket`); Download YAML
+  saves `pci-dss-draft.yaml`; Use in Playground opens `/playground` with "draft from Policies"
+  selected and the Document tab keeps it; no horizontal scroll, no console error. The Task 17 checks
+  were re-run on the final styles (72 + 11 pass).
+- Count: Python 995 → 999 passed, 4 skipped; frontend 41 `node:test` cases; `npm run build` 49
+  modules.
+
+## Task 19 — Local stack (OCR mock), image, smoke test extension
+
+- `docker-compose.yml`: **M0's `app` service as built is kept and extended**, not replaced by the
+  plan's snippet. The snippet drops M0's hardening (`read_only`, `cap_drop: [ALL]`,
+  `no-new-privileges`), the healthcheck's `start_period` and `127.0.0.1` URL, `DPS_COIN_CA_FILE`,
+  `DPS_COIN_TLS_INSECURE` and the overridable `DPS_FPE_ENABLED`; all stay. Added exactly as planned:
+  the M1 environment block (`DPS_OCR_PROVIDER` `azure`, the mock endpoint and demo key,
+  `DPS_OCR_HEALTH_PATH`, `DPS_MAX_DOCUMENT_MB`, `DPS_SCHEMA_MAX_ROWS`), `depends_on` the mock with
+  `required: false`, and the `azure-ocr-mock` service (profiles `docs` and `full`, lane-safe port
+  and image tag, healthcheck, `mem_limit: 768m`, labels). The header comment documents the profile,
+  the no-profile behaviour and the lane example with `DPS_OCR_PORT`.
+- `Dockerfile`: **unchanged.** The `node:22-slim` console stage is M0's as built, `.[fpe,docs]`
+  (and `.[fpe,docs,ner]` under `WITH_NER=1`) arrived with Task 10, and Task 19C added Tesseract.
+- `.dockerignore`: adds `demo`. `tests/eval` is not added because `tests` (all of it) is already
+  ignored.
+- `tools/smoke_test.py` — the plan's ten M1 checks, with three changes:
+  - **The text-PDF redaction check reads OCR readiness first.** The plan sent
+    `{"redacted_pdf": true}` regardless, and with the plan's own compose (`DPS_OCR_PROVIDER=azure`
+    by default) a stack started without `--profile docs` answers that request with 503
+    `ocr_unavailable`: OCR is configured, so the redacted PDF's OCR re-read must run, and DPS fails
+    closed when it cannot (Task 9's rule; observed on the lane stack). The plan's "OCR checks need
+    `--profile docs`" (two skips) was therefore unreachable. When `/readyz` says OCR is not ready
+    the check now asks for `ocr_verify: false` (the structural checks only: no text layer, no
+    text-showing operator) and its detail shows `ocr_checked=False`; with OCR ready it is the plan's
+    request. No assertion was relaxed: `passed` and 0 extractable characters are required either
+    way, and under `DPS_SMOKE_REQUIRE_OCR=1` a stack without OCR still fails (at the scan check).
+  - Every check prints a value-free detail (HTTP status, counts, entity types, the OCR engine) and
+    reads a body only from a 200 response (`_json`); the CSV check also requires the same number
+    of rows as the source; the demo-scan check also requires a `%PDF-` body (the console's SPA
+    fallback answers 200 with `index.html` for any missing file).
+  - The closing line counts skipped checks: `all 23 checks passed …, 2 skipped (OCR not ready)`.
+- **Tests first (the plan has none for this task): `tests/test_compose.py`** (7, offline, PyYAML):
+  every host port is `127.0.0.1:${DPS_*_PORT:-<port>}:<port>`; every service has a healthcheck, a
+  `mem_limit` and the `app` label; the mock's image, build context, profiles, port and healthcheck;
+  the app's OCR environment and `depends_on … required: false`; M0's hardening kept; the Dockerfile's
+  `node:22-slim` stage and `.[fpe,docs]` installs; `.dockerignore` leaves out `demo`, `tests` and
+  `docs` but not `frontend/public` (the console's demo scan). Before the change three failed for the
+  expected reasons (`KeyError: 'azure-ocr-mock'`, `KeyError: 'DPS_OCR_PROVIDER'`, `demo` missing);
+  the other four guard properties M0 already had.
+- **The mock image was built, not taken from the cache.** With the lane's `DPS_IMAGE_TAG=m1` the
+  compose image name is `document_intelligence-azure-ocr-mock:m1`, which did not exist, so the plan's
+  `docker compose --profile docs up --build -d` built it from `../mock_azure_ocr` (network was
+  available: `ghcr.io/astral-sh/uv:latest`, Debian's `tesseract-ocr` 5.5.0). HANDOFF §3 records
+  the offline fallback (tag the cached `:latest` image for the lane and start without `--build`).
+- `HANDOFF.md` §1 (smoke check count), §3 (the services table, the profile, the no-profile
+  behaviour, `DPS_OCR_PORT`, `DPS_SMOKE_REQUIRE_OCR`) and §4 (compose-only variables) are updated in
+  this commit (contract §0.6); not in the plan's file list. The M1 section proper is Task 20's.
+- **Results on the lane stack** (`COMPOSE_PROJECT_NAME` `dps-wt-m1`, `DPS_APP_PORT=8401`,
+  `DPS_OCR_PORT=5016`, `DPS_IMAGE_TAG=m1`):
+  - `docker compose --profile docs up --build -d`: `app` and `azure-ocr-mock` healthy; `/readyz`
+    `ready: true`, `ocr = {ok: true, detail: up, provider: azure, engine: azure-read-v3.2}`.
+  - `DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py` → `all 25 checks passed` (M0's smoke has
+    15 checks as built, so the total is the plan's "M0's count + 10"). The scan is read
+    on pages `[1, 2]` and finds AADHAAR, CARD_PAN, DATE_OF_BIRTH, EMAIL, PAN_IN, PERSON_NAME, PHONE
+    and POSTAL_CODE; its redaction is OCR re-read with 0 hits; the PNG gives 5 findings.
+  - Before the compose change (the image's own `DPS_OCR_PROVIDER=auto`, local Tesseract) the same
+    extended smoke also passed 25/25 (`engine tesseract-5.5`).
+  - Without the profile (`docker compose up -d`): the app starts, `/readyz` `ready: true` with
+    `ocr: down`; the smoke passes 23 with the two OCR checks skipped, and fails at the first OCR
+    check under `DPS_SMOKE_REQUIRE_OCR=1`. With the mock stopped, a scanned PDF is 503
+    `ocr_unavailable` and a DOCX is 200.
+  - `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` → 128 passed, 2 skipped: the two
+    `tesseract`-marked cases of `tests/documents/test_ocr_tesseract.py` (no `tesseract` binary on
+    this Mac; contract §12.1). In the image (bind-mounted tests, pytest installed in a throwaway
+    root container, as in Task 19C) `-m tesseract` → 2 passed.
+  - `docker compose logs app | grep -cE '[0-9]{4} [0-9]{4} [0-9]{4}|@example\.(com|net|org)'` → 0
+    after the smoke runs (DoD 9).
+- Count: suite 999 → 1006 passed, 4 skipped (tesseract ×2, `ner` ×2; lane OCR mock up).
+
+## Task 20 — No-values log scan, console browser check, API reference, handoff, release
+
+- **`tests/test_no_values_in_logs_m1.py`** holds the plan's test unchanged
+  (`test_m1_paths_log_no_values`) plus two more. Why: the plan's scan drives the pipeline, the Read
+  client and the schema proposer directly, so the M1 routes and the modules of Tasks 13, 14 and
+  19A–19D were not covered (contract §0.1 asks for a scan of the milestone's new modules).
+  - `test_m1_routes_log_and_audit_no_values` runs the app with JSON logs at DEBUG, a configured LLM
+    provider double and a `FakeOcr`. It drives: documents (an OCR'd scan redacted and re-read; a
+    fail-closed leak; an image; CSV synthesis; an invalid `request` field carrying a name); an
+    `Idempotency-Key` replay and a reuse; T3 labelling of a leftover field; an NDJSON stream and a
+    malformed NDJSON body; schema spec and synthesis from a sample; `/entities`; the recognizer
+    test over text holding values; and the presets. It then scans stdout, stderr, the log records,
+    the 13 audit events and every refusal body. The needles are the values, the T3 leftover, the API
+    key, and every DEK and synthesis seed the responses returned.
+  - `test_local_tesseract_failures_log_no_values` makes a stand-in `tesseract` print the values on
+    stdout and stderr (`ocr_failed`, `ocr_protocol`) and scans the logs and the errors.
+  - The tests pass on the code as built, which is expected for a scan. Their power was checked with
+    five mutations in a scratch copy, one at a time, and each was caught:
+    1. the OCR body put into the Read client's error (plan test);
+    2. Tesseract's stdout put into its error (Tesseract test);
+    3. the validation message echoing the input (routes test, refusal body);
+    4. a `print` of a T3 leftover value (routes test, stdout);
+    5. the raw `request` field used as the audited policy label (routes test, audit).
+- **`tools/console_check.py`**: the plan's flows, sections, sizes and themes are kept. Changes:
+  - The key goes into `sessionStorage`, the console's default since O5. The plan wrote
+    `localStorage`, which the console only accepts as an M0 leftover and moves.
+  - `shoot()` scrolls to the top before each full-page screenshot. Without it, the fixed header,
+    the sidebar and the Policies side column were drawn where the page was scrolled to, in the
+    middle of the image (the first run's screenshots).
+  - `shoot()` also masks the key line (kid and the shortened DEK). Screenshots are committed, and
+    key material never is.
+  - A failed step prints a `FAIL` line naming the exception class and the run continues. The plan's
+    version ended with a traceback.
+  - Two checks were added per size and theme (84 in all, not 76): "revealed text is labelled as the
+    original" and "Publish is disabled and looks it". Both failed against the image before the two
+    fixes below (8 FAILs) and pass after them.
+- The check ran with a private Playwright 1.55.0 (a scratch venv, as the build session requires)
+  instead of `uv pip install -e ".[uitest]"` into the lane venv. Chromium build 1187 is not cached,
+  so the script fell back to the newest cached headless shell (1243), as designed.
+- **Two fixes from the screenshot review** (frontend; tests first):
+  - **The text pane kept the heading "Text extraction · obfuscated" (and "reversible with key")
+    after Reveal, while it showed the original values.** A copy taken from it was plain personal
+    data under a heading that said otherwise. New `extractionHead(synthetic, revealed)` in
+    `frontend/src/lib/documents.ts` gives "Text extraction · revealed original" with an amber
+    "original values · not stored". `frontend/tests/documents.test.ts` failed first
+    (`does not provide an export named 'extractionHead'`).
+  - **A disabled button looked enabled.** The console CSS had no `:disabled` rule (M0 included), so
+    the Policies page's Publish button, disabled until the policy store arrives (M5), showed as an
+    active primary button. Run and Reveal while busy had the same problem. `styles.css` gains
+    `.btn:disabled` (opacity .45, `not-allowed`, no hover or press effect).
+- **Screenshots** in `docs/superpowers/build/m1-console/` (16: app and mockup, two pages, two sizes,
+  two themes) are quantised to 256 colours with Pillow before committing: 11.5 MB down to 4.4 MB,
+  still legible. The tool itself writes full-colour PNGs.
+- **Visible differences from the mockups, after side-by-side review.** Each is intended unless it
+  says "fixed".
+  - **Mockup 08, Document tab.**
+    - The page header is M0's console header (tenant, key, theme) rather than the mockup's
+      breadcrumb and route chip. "Copy as curl" sits in the page head. Intended (M0 layout).
+    - The policy control lists the shipped presets and the compose default `gdpr-pseudonymise`
+      instead of dpdp, gdpr, pci and "custom…". On a phone it scrolls inside itself. Intended.
+    - OCR shows the configured engine as a readiness chip ("Azure Read v3.2 · up") and the
+      `auto | always | never` mode, not a per-request Azure/Tesseract switch. Intended (plan open
+      question 7).
+    - Real page images of the synthetic two-page demo scan replace the mockup's three drawn pages,
+      and they show 10 findings where the mockup shows 24.
+      - The compose image has no NER, so the address, account number and payee are not detected.
+        They stay visible in the redacted raster, which the Verify line calls "partial coverage"
+        (see HANDOFF §10 trap 7). Intended (engine scope, Task 16 observation).
+      - Findings list the detector evidence (`cue:lead-in`, `checksum:AADHAAR`) rather than the
+        mockup's prose.
+    - Verify reads "Verified, with partial coverage" (amber) instead of "Verified." (green), because
+      NER is off. Intended (M0 coverage rule, Task 17).
+    - The key card shows `kid` and a shortened `dek`; the mockup also shows a wrap. There is no "not
+      flagged" row and no declared-key note. Intended.
+    - After Reveal, the text pane said "obfuscated" over the original text. **Fixed** (above).
+  - **Mockup 05, Policies.**
+    - Presets are the six shipped presets at v1 with mode and reversibility. There are no job or
+      key counts and no "active v3 / draft v4"; the draft is a browser-session draft ("draft · N
+      changes"). Publish is disabled (M5). Intended (plan open question 6).
+    - The disabled Publish looked active. **Fixed** (above).
+    - At 1440 px, Publish wraps under Discard draft and Preview plan, where the mockup has one row.
+      Cosmetic, left as is.
+    - The treatment matrix lists every entity type the preset treats (49), with a method select per
+      row, entity chips coloured by sensitivity and no per-row synthesis notes. The mockup shows 18
+      read-only rows and "Show all 46". On a phone each row is a labelled card, so the page is long.
+      Intended (Task 18).
+    - Locale reads "service default · DPS_DEFAULT_LOCALE" because only `dpdp-pseudonymise` pins a
+      locale. Declared fields start empty with an add row. Version history is the session draft
+      plus the shipped v1. Intended.
+    - "On this page" stays visible on phones, where the mockup hides it. Intended (Task 18: the
+      check reads the first match of each section title).
+- **Version 0.2.0** in `dps/__init__.py`, `pyproject.toml` and `frontend/package.json`. The root
+  `version` in `frontend/package-lock.json` (two places) is bumped as well, so the lockfile agrees
+  with the manifest. Because the report's `engine_version` comes from `dps.__version__`,
+  `docs/technical/detector-eval-m1.{json,md}` were regenerated. The diff is that one field and its
+  markdown line (`engine 0.2.0`); every number is unchanged. Both files are committed here, and the
+  plan's `git diff --exit-code` holds after the commit.
+- `docs/technical/api-m1.md` was written from the routers. Every curl example was run against the
+  lane stack: the scan redaction gives `passed`, 0 text characters and `ocr_hits` 0; 1 000 rows
+  replay identically with the returned seed; the NDJSON 3-item array gives 5 lines; a repeated
+  `Idempotency-Key` gives `Idempotent-Replay: true`, the same `trace_id` and the same result with
+  caller-held key material, and another body gives 422.
+- `HANDOFF.md`: a new **§10 M1** (build, run, configuration table, probes, secrets, the plan's ten
+  traps plus two found here: the no-profile compose behaviour and the OCR cost of a redaction), a
+  header line with the M1 gate results, the §1 package row, and §9 pointing at §10. `README.md`:
+  "Status: M1 shipped", the run commands with the `docs` profile, the demo flow and links to
+  `api-m1.md` and `detector-eval-m1.md`.
+- **Results.**
+  - Gates:
+    - `ruff format --check` and `ruff check` on `dps tests tools`: clean; `mypy dps`: clean.
+    - `pytest -q`: 1009 passed, 4 skipped (tesseract ×2, `ner` ×2).
+    - `npm run typecheck`: clean; `npm test`: 42 pass; `npm run build`: `dist/index.html`
+      references `/assets/…` and `/theme-init.js`.
+  - The stack was rebuilt with v0.2.0: `/readyz` reports `api-core` version 0.2.0 and
+    `ocr: up, azure-read-v3.2`.
+  - Smoke 25/25 under `DPS_SMOKE_REQUIRE_OCR=1`.
+  - `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"`: 131 passed, 2 skipped (the two
+    `tesseract` cases, 2 passed in the image).
+  - Console check 84/84.
+  - App log grep for card or Aadhaar digit groups and `@example.(com|net|org)`: 0 lines.
+- **Open (not changed, outside M1 scope).**
+  - `/api/v1/obfuscate` fails closed (422 `leakage`) about one call in four for an e-mail whose local
+    part is a single letter (`a@…`; 2 of 8 runs). The `email` method can map a one-letter local part
+    onto itself, and the sweep then refuses it, which is correct. This is an availability gap in
+    M0's `email` method, not a leak. Two- and three-letter and realistic local parts passed in the runs made here (one call each, plus 5 streams of 3).
+  - `.env.example` still lacks the M1 lines (the permission rule of Tasks 1 and 19A–19D).
+- **The `v0.2.0` tag is not created in this commit; it is left to the release step.** M0's plan also
+  tagged at the end of its last task, yet `v0.1.0-m0` sits on the post-verification commit
+  (`48d9425`, after three fix commits). Tagging before the M1 review would need a forced move if a
+  fix round follows. Command for the release step, on the final verified commit:
+  `git tag -a v0.2.0 -m "M1: documents and Layer 1 complete"`. The lane stack was stopped with
+  `docker compose --profile docs down`, as the plan's Step 5 says.
+
+## Verification fix round 1 (review `M1-verify-r1`)
+
+- **B1-r3: a page listed twice in the page tree was rendered in place of a later page.** pypdf and
+  PDFium list a page each time the tree reaches it, while pdfminer skips an object it has already
+  visited. With root `/Kids [A A B]` and `/Count 2`, PDFium rendered A, A and pdfplumber read A, B.
+  Both counts were 2, so the count check of round 2 passed and `needs_ocr` was false. The same
+  happened with `[A A B C] /Count 3`, with `[B A A C] /Count 3`, and with a page reached once
+  through an intermediate node and once directly. On the lane API, `/documents/detect` found
+  nothing on page 2, and `/documents/obfuscate` with `redacted_pdf: true, ocr_verify: false`
+  answered 200 with `passed: true` while page 2 of the output showed the SSN. The default OCR
+  re-read caught it (422 `leakage`).
+- **Fix (`dps/layers/documents/extract.py`).** Before it settles the tree, `normalise_pdf` checks
+  that every page pypdf lists is a separate indirect object. It compares object numbers alone, as
+  pdfminer's visited set does, and refuses a missing reference too. pypdf keeps one writer object
+  per source object, so a page reached twice keeps one number. A repeat is `corrupt_document`
+  (422, "a page is listed more than once in the page tree"). The message holds no value. It is
+  raised inside the existing `try`, so pypdf errors stay coded and unchained.
+  - The check runs after the `too_many_pages` bound, so an oversized tree is not walked twice.
+  - Once the root's `/Kids` holds distinct `/Page` leaves, PDFium's page i and pdfminer's page i
+    are the same object whenever the two counts agree. A count that disagrees is still refused by
+    round 2's check.
+  - **The root's `/Count` is still not rewritten.** Rewriting it would also turn round 2's refused
+    forged counts into accepted repairs. That weakens a tested refusal, and the repeat check makes
+    it unnecessary for this attack.
+  - **No per-page text comparison** (PDFium characters against pdfplumber characters) was added.
+    The two engines legitimately differ in generated spaces, ligatures and `(cid:N)` output, so
+    such a check would refuse real documents. The structural check above settles which object
+    each page index names.
+- **Tests (`tests/documents/test_pdf.py`, +7, written first, 6 failed before the fix):**
+  - `test_a_page_listed_more_than_once_is_a_corrupt_document`, with 6 cases: `[4 4 5] /Count 2`
+    (the review's regression), `[4 4 5 6] /Count 3`, `[5 4 4 6] /Count 3`, a page through a node
+    and directly, a node listed twice, and `[4 4 5] /Count 3`. Each case is checked on
+    `normalise_pdf` and on `extract_pdf` in `auto` and `never` modes: `corrupt_document`, 422, no
+    SSN in the message, no chained cause.
+  - `test_pages_that_share_a_content_stream_are_still_distinct_pages`: two page objects drawing
+    one content stream are still accepted, and PDFium's text matches the text layer page for page.
+- **Live, lane stack rebuilt (`docker compose --profile docs up --build -d`):** `/documents/detect`,
+  `/documents/obfuscate` with `ocr_verify: false`, and the default `/documents/obfuscate` all
+  answered 422 `corrupt_document` for the review's `[4 4 5] /Count 2` file. No response body
+  holds the SSN.

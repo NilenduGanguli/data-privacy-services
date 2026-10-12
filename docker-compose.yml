@@ -1,9 +1,16 @@
-# Local stack for M0: the app alone (Layer 1 is stateless). M1 adds the Azure OCR mock, M2 Postgres
-# (job metadata), a worker and source databases, M3 Oracle Free and MongoDB, M4 the browser worker.
+# Local stack. Default: the app (Layer 1 is stateless). Profile `docs` (or `full`) adds the Azure
+# Computer Vision Read v3.2 mock (Tesseract inside) that the documents routes use for scanned pages
+# and images. M2 adds Postgres (job metadata), a worker and source databases, M3 Oracle Free and
+# MongoDB, M4 the browser worker.
 #
-#   docker compose up --build -d       # console + API on http://127.0.0.1:8400 (DPS_APP_PORT to move it)
-#   python tools/smoke_test.py         # end-to-end checks against it (waits for /health)
-#   docker compose down
+#   docker compose --profile docs up --build -d   # console + API on http://127.0.0.1:${DPS_APP_PORT:-8400}
+#   python tools/smoke_test.py                    # end-to-end checks (OCR checks need --profile docs)
+#   docker compose --profile docs down
+#
+# Without `--profile docs` the app still starts and /readyz reports the `ocr` component down (OCR is
+# never required); DPS_OCR_PROVIDER=tesseract selects the image's local Tesseract instead.
+# The mock is the cached image document_intelligence-azure-ocr-mock (built from ../mock_azure_ocr,
+# the directory DPS is nested in); a lane tags it ${DPS_IMAGE_TAG} like every image compose builds.
 #
 # Host ports bind 127.0.0.1 only. The key below is a local demo literal; staging/prod refuse
 # DPS_BOOTSTRAP_API_KEY and read DPS_API_KEYS_FILE instead.
@@ -11,7 +18,8 @@
 # Lane-safe (contract §0 amendment 2026-10-12): every host port comes from a DPS_*_PORT variable
 # whose default is the contract port, and every image built here is tagged ${DPS_IMAGE_TAG:-local},
 # so a second stack can run beside this one:
-#   COMPOSE_PROJECT_NAME=dps-lane2 DPS_IMAGE_TAG=lane2 DPS_APP_PORT=8401 docker compose up --build -d
+#   COMPOSE_PROJECT_NAME=dps-lane2 DPS_IMAGE_TAG=lane2 DPS_APP_PORT=8401 DPS_OCR_PORT=5017 \
+#     docker compose --profile docs up --build -d
 #   DPS_APP_PORT=8401 python tools/smoke_test.py
 #
 # Detection runs offline: structural keys, the pattern catalogue and name cues (a name next to a
@@ -44,11 +52,22 @@ services:
       DPS_SSL_CERT_FILE: ${DPS_SSL_CERT_FILE:-}
       DPS_COIN_CA_FILE: ${DPS_COIN_CA_FILE:-}
       DPS_COIN_TLS_INSECURE: ${DPS_COIN_TLS_INSECURE:-false}   # true only behind the VDI proxy
+      # Documents (M1). The key is a local demo literal; staging/prod read DPS_AZURE_VISION_KEY_FILE.
+      DPS_OCR_PROVIDER: ${DPS_OCR_PROVIDER:-azure}
+      DPS_AZURE_VISION_ENDPOINT: ${DPS_AZURE_VISION_ENDPOINT:-http://azure-ocr-mock:5000}
+      DPS_AZURE_VISION_KEY: ${DPS_AZURE_VISION_KEY:-mock-key}
+      DPS_OCR_HEALTH_PATH: ${DPS_OCR_HEALTH_PATH:-/health}
+      DPS_MAX_DOCUMENT_MB: ${DPS_MAX_DOCUMENT_MB:-20}
+      DPS_SCHEMA_MAX_ROWS: ${DPS_SCHEMA_MAX_ROWS:-10000}
+    depends_on:
+      azure-ocr-mock:
+        condition: service_healthy
+        required: false            # without --profile docs the app starts and reports ocr "down"
     # Hardening: read-only root filesystem (scratch space is a memory-backed /tmp), no Linux
     # capabilities, no privilege escalation, bounded memory.
     read_only: true
     tmpfs:
-      - /tmp:size=256m,mode=1777
+      - /tmp:size=256m,mode=1777   # multipart uploads above 1 MiB spool here: memory, never a layer
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -62,4 +81,23 @@ services:
     labels:
       app: data-privacy-services
       component: api
+      env: local
+
+  azure-ocr-mock:
+    build:
+      context: ../mock_azure_ocr
+    image: document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG:-latest}
+    profiles: ["docs", "full"]
+    ports:
+      - "127.0.0.1:${DPS_OCR_PORT:-5016}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    mem_limit: 768m
+    labels:
+      app: data-privacy-services
+      component: ocr-mock
       env: local

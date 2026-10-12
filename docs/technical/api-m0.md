@@ -7,7 +7,9 @@ Base path `/api/v1`. The live schema is at `/api/v1/openapi.json` (Swagger UI at
 `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`); `X-Request-ID` (optional; echoed as `trace_id` when it matches
 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, otherwise a fresh 16-hex id is used).
 
-**Errors** are `{"detail": "..."}` and never quote the request:
+**Errors** are `{"detail": "..."}` and never quote the request. From M1 the engine's errors also
+carry a stable machine `code` (additive): `{"detail", "code": "bad_request"}` for a 400 from the
+engine and `{"detail", "code": "leakage"}` for the 422 leakage-sweep failure (contract §8.2):
 
 | Status | When |
 |---|---|
@@ -68,7 +70,8 @@ Presets: `gdpr-pseudonymise` (the default), `dpdp-pseudonymise`, `pci-dss`, `ana
   instead of `dek`); `consistency.scope` (`request` | `key` | `entity`) with caller-held
   `key_material` (obfuscate: the same key gives the same tokens) or `synthesis_seed` (synthesize:
   the same seed gives the same surrogates); `llm_rewrite` (text synthesis only, and only when the
-  server's `DPS_LLM_TEXT_REWRITE` is on).
+  server's `DPS_LLM_TEXT_REWRITE` is on); `return_segments` (M1, default `false`: also return
+  `segments`, below).
 - `mode` is read by `/policies/plan` only.
 
 Methods a policy can name: reversible `det_token`, `fpe_digits`, `fpe_text`, `email`, `phone`,
@@ -107,6 +110,10 @@ only), `report`, `trace_id`.
 - `reveal_hints[]`: `{path, start, end, entity_type, method, params, reverse_params,
   original_type, anchor, kid, kcv, field_scoped}` — locations and methods, never values.
 - `synthesis_seed`: `{alg: "dps.synth.v1", seed, created_at}` — confidential (it links outputs).
+- `segments` (M1; `null` unless `options.return_segments` is `true`): where each replacement landed,
+  `{path, start, end, out_start, out_end, entity_type, method, replacement}` — the input span, the
+  output span within the same leaf (`null`s for a whole value) and the text written there (already
+  in `result`). A text synthesis whose LLM rewrite was used returns `[]`.
 
 **`report`** (every engine response): `mode`, `policy`, `policy_hash`, `engine_version`,
 `findings_total`, `findings_by_type`, `findings_by_detector`, `record_sensitivity`,

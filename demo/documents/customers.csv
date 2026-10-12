@@ -1,0 +1,21 @@
+customer_id,full_name,email,phone,card_number,status,risk_score
+CUST-884120,Finn Kota,finn.kota8929@example.org,+91 81231 16311,4111 1166 2443 4744,CLOSED,600
+CUST-884121,Kashish Hegde,kashish.hegde6679@example.org,+91 81233 00790,4111 1137 2125 0826,ACTIVE,637
+CUST-884122,Aarush Krish,aarush.krish3081@example.com,+91 81235 29039,4111 1100 4513 1955,ACTIVE,674
+CUST-884123,Pallavi Madan,pallavi.madan9790@example.com,+91 81237 27128,4111 1176 0922 7632,ACTIVE,711
+CUST-884124,Vincent Sridhar,vincent.sridhar2098@example.com,+91 81232 25180,4111 1181 6746 3411,CLOSED,748
+CUST-884125,Riya Chahal,riya.chahal7278@example.com,+91 81231 00532,4111 1189 0613 0636,ACTIVE,785
+CUST-884126,Farhan Das,farhan.das370@example.org,+91 81239 66261,4111 1188 5697 6111,ACTIVE,822
+CUST-884127,Janani Mani,janani.mani4559@example.org,+91 81236 36784,4111 1144 3346 5090,ACTIVE,859
+CUST-884128,Edhitha Oommen,edhitha.oommen7678@example.com,+91 81232 49368,4111 1157 4802 0728,CLOSED,896
+CUST-884129,Nikita Bakshi,nikita.bakshi4561@example.com,+91 81232 30818,4111 1185 3013 0317,ACTIVE,633
+CUST-884130,Zashil Bahl,zashil.bahl9634@example.org,+91 81235 78314,4111 1127 7575 4923,ACTIVE,670
+CUST-884131,Vaishnavi Sarna,vaishnavi.sarna8309@example.net,+91 81230 18963,4111 1102 4111 5570,ACTIVE,707
+CUST-884132,Aradhana Saraf,aradhana.saraf7663@example.net,+91 81239 42602,4111 1196 2000 0865,CLOSED,744
+CUST-884133,Faqid Mutti,faqid.mutti252@example.com,+91 81233 54772,4111 1120 6678 3607,ACTIVE,781
+CUST-884134,Yashoda Nigam,yashoda.nigam2089@example.com,+91 81232 98880,4111 1166 5606 9673,ACTIVE,818
+CUST-884135,Qabil Bhattacharyya,qabil.bhattacharyya7182@example.org,+91 81238 42717,4111 1129 9162 0510,ACTIVE,855
+CUST-884136,Anirudh Bajaj,anirudh.bajaj7878@example.com,+91 81231 25363,4111 1181 1625 7690,CLOSED,892
+CUST-884137,Manya Rai,manya.rai4533@example.net,+91 81236 05813,4111 1136 4433 1984,ACTIVE,629
+CUST-884138,Sanya Tella,sanya.tella8544@example.com,+91 81233 25687,4111 1159 7227 4975,ACTIVE,666
+CUST-884139,Nimrat Rajagopalan,nimrat.rajagopalan4436@example.net,+91 81230 27706,4111 1113 5740 7470,ACTIVE,703

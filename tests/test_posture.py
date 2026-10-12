@@ -128,3 +128,30 @@ def test_insecure_coin_mint_is_allowed_outside_production() -> None:
     for env in ("local", "dev"):
         settings = Settings(_env_file=None, env=env, coin_tls_insecure=True, **_GOOD_STELLAR)
         assert posture_problems(settings) == []
+
+
+def test_azure_ocr_needs_key_and_https_in_production() -> None:
+    problems = posture_problems(_prod(ocr_provider="azure", azure_vision_endpoint="http://gw:8080"))
+    assert any("DPS_AZURE_VISION_KEY" in p for p in problems)
+    assert any("https" in p for p in problems)
+    ok = posture_problems(
+        _prod(
+            ocr_provider="azure",
+            azure_vision_endpoint="https://gw.bank.internal",
+            azure_vision_key="k",
+        )
+    )
+    assert not any("AZURE" in p for p in ok)
+
+
+def test_local_tesseract_is_allowed_and_auto_must_resolve(monkeypatch) -> None:  # noqa: ANN001
+    import dps.config as config
+
+    monkeypatch.setattr(config.shutil, "which", lambda cmd: None)
+    nothing = posture_problems(_prod(ocr_provider="auto"))
+    assert any("OCR is enabled (auto)" in p for p in nothing)
+    assert not any("OCR" in p for p in posture_problems(_prod(ocr_provider="tesseract")))
+    plain = _prod(ocr_provider="auto", azure_vision_endpoint="http://gw:8080", azure_vision_key="k")
+    assert any("DPS_AZURE_VISION_ENDPOINT" in p for p in posture_problems(plain))
+    monkeypatch.setattr(config.shutil, "which", lambda cmd: "/usr/bin/tesseract")
+    assert not any("OCR" in p for p in posture_problems(_prod(ocr_provider="auto")))

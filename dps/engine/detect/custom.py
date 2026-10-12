@@ -4,6 +4,8 @@ Recognizers use Presidio's YAML recognizer shape (``name``, ``supported_entity``
 ``deny_list``, ``context``) so the files DES already maintains load unchanged; an optional
 ``sensitivity`` registers the custom entity's tier in the taxonomy (custom names only — the
 taxonomy owns the tiers of built-in types, so ``sensitivity`` on one is refused at validation).
+``allow_list`` is a DPS extension (M1): exact matched texts that are never reported, such as seeded
+test fixtures. Presidio's ``deny_list`` keeps its meaning — terms that are always reported.
 
 Deny-list entries and patterns are often the sensitive terms themselves, so validation errors
 never echo the input (``hide_input_in_errors``) and a bad regex is reported without its text.
@@ -69,17 +71,19 @@ class RecognizerSpec(BaseModel):
     deny_list: tuple[str, ...] = ()
     context: tuple[str, ...] = ()
     sensitivity: Sensitivity | None = None
+    #: Exact matched texts this recognizer never reports (pattern and deny-list hits alike).
+    allow_list: tuple[str, ...] = ()
 
     @field_validator("supported_entity")
     @classmethod
     def _entity_name(cls, value: str) -> str:
         return _check_entity_name(value)
 
-    @field_validator("deny_list")
+    @field_validator("deny_list", "allow_list")
     @classmethod
     def _no_blank_terms(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if any(not term.strip() for term in value):
-            raise ValueError("deny_list entries must be non-blank")
+            raise ValueError("list entries must be non-blank")
         return value
 
     @model_validator(mode="after")
@@ -146,9 +150,14 @@ class PolicyCustomDetector:
 
     def __init__(self, recognizers: list[RecognizerSpec], declared: list[DeclaredField]) -> None:
         self._declared = [(d, path_glob(d.path)) for d in declared]
-        self._patterns: list[tuple[RecognizerSpec, PatternSpecModel, re.Pattern[str]]] = []
-        self._deny: list[tuple[RecognizerSpec, re.Pattern[str]]] = []
+        # each matcher carries its recognizer's allow-list (per recognizer, not per name: two
+        # recognizers may share a name)
+        self._patterns: list[
+            tuple[RecognizerSpec, PatternSpecModel, re.Pattern[str], frozenset[str]]
+        ] = []
+        self._deny: list[tuple[RecognizerSpec, re.Pattern[str], frozenset[str]]] = []
         for rec in recognizers:
+            allowed = frozenset(rec.allow_list)
             if rec.sensitivity is not None:
                 register_entity(
                     EntityInfo(
@@ -156,13 +165,13 @@ class PolicyCustomDetector:
                     )
                 )
             for pat in rec.patterns:
-                self._patterns.append((rec, pat, re.compile(pat.regex)))
+                self._patterns.append((rec, pat, re.compile(pat.regex), allowed))
             if rec.deny_list:
                 alternation = "|".join(
                     re.escape(w) for w in sorted(rec.deny_list, key=len, reverse=True)
                 )
                 self._deny.append(
-                    (rec, re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE))
+                    (rec, re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE), allowed)
                 )
         for d in declared:
             if d.sensitivity is not None:
@@ -178,9 +187,9 @@ class PolicyCustomDetector:
     def scan(self, text: str, key_hint: str | None) -> list[Hit]:
         """Custom-pattern and deny-list hits in ``text``; empty matches are ignored."""
         hits: list[Hit] = []
-        for rec, pat, regex in self._patterns:
+        for rec, pat, regex, allowed in self._patterns:
             for m in regex.finditer(text):
-                if m.end() == m.start():
+                if m.end() == m.start() or m.group(0) in allowed:
                     continue
                 score = pat.score
                 before = text[max(0, m.start() - CONTEXT_WINDOW) : m.start()]
@@ -197,8 +206,10 @@ class PolicyCustomDetector:
                         f"custom-pattern:{pat.name}",
                     )
                 )
-        for rec, regex in self._deny:
+        for rec, regex, allowed in self._deny:
             for m in regex.finditer(text):
+                if m.group(0) in allowed:
+                    continue
                 hits.append(
                     Hit(
                         rec.supported_entity,

@@ -4,6 +4,7 @@ import pytest
 
 from dps.engine.detect.custom import (
     DeclaredField,
+    PatternSpecModel,
     PolicyCustomDetector,
     RecognizerSpec,
     load_recognizers_yaml,
@@ -128,3 +129,42 @@ def test_empty_matches_and_blank_deny_entries_never_become_hits() -> None:
     assert [(h.start, h.end) for h in hits] == [(3, 5)]
     with pytest.raises(ValueError):
         RecognizerSpec(name="blank", supported_entity="ZED", deny_list=["Nightjar", "  "])
+
+
+def test_allow_list_suppresses_exact_matches() -> None:
+    rec = RecognizerSpec(
+        name="emp",
+        supported_entity="EMPLOYEE_ID",
+        patterns=(PatternSpecModel(name="emp", regex=r"\bEMP-\d{6}\b", score=0.9),),
+        allow_list=("EMP-000000",),
+    )
+    text = "EMP-204417 escalated; fixture EMP-000000 is seeded"
+    assert [text[h.start : h.end] for h in PolicyCustomDetector([rec], []).scan(text, None)] == [
+        "EMP-204417"
+    ]
+
+
+def test_allow_list_applies_to_deny_list_hits_and_refuses_blank_entries() -> None:
+    rec = RecognizerSpec(
+        name="codes",
+        supported_entity="PROJECT_CODE",
+        deny_list=("Nightjar", "Blue Falcon"),
+        allow_list=("Nightjar",),
+    )
+    text = "Nightjar ships before Blue Falcon"
+    hits = PolicyCustomDetector([rec], []).scan(text, None)
+    assert [text[h.start : h.end] for h in hits] == ["Blue Falcon"]
+    with pytest.raises(ValueError, match="non-blank"):
+        RecognizerSpec(
+            name="codes", supported_entity="PROJECT_CODE", deny_list=("x",), allow_list=(" ",)
+        )
+
+
+def test_allow_lists_are_per_recognizer_even_with_one_name() -> None:
+    pattern = PatternSpecModel(name="emp", regex=r"\bEMP-\d{6}\b", score=0.9)
+    seeded = RecognizerSpec(
+        name="emp", supported_entity="EMPLOYEE_ID", patterns=(pattern,), allow_list=("EMP-000000",)
+    )
+    plain = RecognizerSpec(name="emp", supported_entity="STAFF_ID", patterns=(pattern,))
+    hits = PolicyCustomDetector([seeded, plain], []).scan("EMP-000000", None)
+    assert [h.entity_type for h in hits] == ["STAFF_ID"]

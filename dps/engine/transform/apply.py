@@ -87,6 +87,20 @@ class RevealHint(BaseModel):
     field_scoped: bool = False
 
 
+class OutputSegment(BaseModel):
+    """Where one replacement landed. Value-free except ``replacement``, which is already in the
+    output (the token, surrogate or mask written there; ``""`` for ``redact``/``null``)."""
+
+    path: str
+    start: int | None = None  # input span within the leaf; None = whole value
+    end: int | None = None
+    out_start: int | None = None  # output span within the same leaf; None = whole value
+    out_end: int | None = None
+    entity_type: str
+    method: str
+    replacement: str
+
+
 class ApplyResult(BaseModel):
     """The transformed document plus what reveal and the report need."""
 
@@ -95,6 +109,7 @@ class ApplyResult(BaseModel):
     methods_used: dict[str, int]
     notes: dict[str, int]
     anchor: str
+    segments: list[OutputSegment] = Field(default_factory=list)
 
 
 @dataclass
@@ -234,6 +249,7 @@ def apply_plan(
     )
     field_scoped = options.policy.consistency.field_scoped
     hints: list[RevealHint] = []
+    segments: list[OutputSegment] = []
     used: Counter[str] = Counter()
     notes: Counter[str] = Counter()
     by_path: dict[str, list[PlanEntry]] = {}
@@ -282,6 +298,14 @@ def apply_plan(
             if outcome.note:
                 notes[outcome.note] += 1
             new_value = _typed(outcome.value, original_type, exact=outcome.reversible)
+            segments.append(
+                OutputSegment(
+                    path=path,
+                    entity_type=entry.finding.entity_type,
+                    method=outcome.method,
+                    replacement="" if outcome.value is None else str(outcome.value),
+                )
+            )
             if outcome.reversible:
                 hints.append(hint(entry, outcome.method, outcome.reverse_params, original_type))
         elif spans and (isinstance(current, str) or _is_number(current)):
@@ -312,6 +336,18 @@ def apply_plan(
                 pieces.append(source[cursor:start])
                 out_start = start + delta
                 pieces.append(replacement)
+                segments.append(
+                    OutputSegment(
+                        path=path,
+                        start=start,
+                        end=end,
+                        out_start=out_start,
+                        out_end=out_start + len(replacement),
+                        entity_type=entry.finding.entity_type,
+                        method=outcome.method,
+                        replacement=replacement,
+                    )
+                )
                 if outcome.reversible:
                     hints.append(
                         hint(
@@ -336,6 +372,7 @@ def apply_plan(
         methods_used=dict(used),
         notes=dict(notes),
         anchor=anchor,
+        segments=segments,
     )
 
 

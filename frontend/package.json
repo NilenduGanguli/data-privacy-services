@@ -1,14 +1,15 @@
 {
   "name": "dps-privacy-console",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Data Privacy Services — Privacy Console (Vite + React SPA served by FastAPI from frontend/dist).",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-transform-types --no-warnings --test \"tests/*.test.ts\""
   },
   "dependencies": {
     "react": "^18.3.1",
