@@ -25,3 +25,20 @@ the lane rules).
   (`browser_concurrency` 17, `scan_max_pages` 0, `scan_max_depth` -1, `scan_page_timeout_seconds`
   0, `scan_settle_ms` -1), a clean-prod case (no M4 posture message without the two settings) and
   the four metrics' label names: 14 tests (plan: 7).
+
+## Task 2 — URL toolkit
+
+- `dps/layers/scanner/urls.py`: the plan's code, plus:
+  - `redact_url` also turns a query **key** the classifier recognises into `<k>` (the plan only
+    checked the key's characters, so `?ananya.k%40x.in=1` would have stored a customer's e-mail
+    as a key). Test `test_redaction_never_keeps_a_query_key_that_is_itself_a_value`.
+  - A malformed port (`http://h:99999/x`) never raises from `template`, `redact_url` or
+    `redact_origin` (urllib's `.port` raises `ValueError` there; a guard that redacts arbitrary
+    request URLs must not crash on one); `canonical` returns `None` and `Origin.of` raises
+    `UrlError("url_invalid")` as before. Test `test_a_malformed_port_is_never_echoed_and_never_raises`.
+  - `Origin.text()` (`scheme://host[:port]`, default port left out) for the redacted spec's
+    `url_origin` (Task 4). Additive.
+  - Docstrings on the public functions; the plan's `_segments` helper is inlined.
+- `tests/scanner/test_urls.py`: the plan's 5 tests (lines wrapped to 100 characters, one extra
+  `scheme` verdict assertion) plus the two above and `test_url_errors_carry_the_code_only`: 8
+  tests (plan: 5).
