@@ -65,6 +65,40 @@ async def _seed(conn: asyncpg.Connection, tenant: str) -> None:
     )
 
 
+async def _seed_scan(conn: asyncpg.Connection, tenant: str) -> None:
+    """One row in each M4 scan table (030), hanging off a scan job of the same tenant."""
+    await conn.execute(
+        "INSERT INTO dps.dps_job (id, tenant_id, kind, phase, spec) "
+        "VALUES ($1, $2, 'scan', 'scan', '{}')",
+        f"s_{tenant}",
+        tenant,
+    )
+    await conn.execute(
+        "INSERT INTO dps.dps_scan_page (tenant_id, job_id, page_no, url_redacted, depth, status, "
+        "template) VALUES ($1, $2, 1, 'http://h/', 0, 'done', 'h/')",
+        tenant,
+        f"s_{tenant}",
+    )
+    await conn.execute(
+        "INSERT INTO dps.dps_scan_field (tenant_id, job_id, page_no, form_index, field_no, "
+        "selector, tag) VALUES ($1, $2, 1, 0, 1, 'input', 'input')",
+        tenant,
+        f"s_{tenant}",
+    )
+    await conn.execute(
+        "INSERT INTO dps.dps_scan_request (tenant_id, job_id, method, decision, reason, host) "
+        "VALUES ($1, $2, 'POST', 'blocked', 'method', 'h')",
+        tenant,
+        f"s_{tenant}",
+    )
+    await conn.execute(
+        "INSERT INTO dps.dps_scan_event (tenant_id, job_id, seq, kind, result, target_redacted, "
+        "note_code) VALUES ($1, $2, 1, 'navigate', '200', '', 'start')",
+        tenant,
+        f"s_{tenant}",
+    )
+
+
 async def test_posture_is_clean_for_the_api_role(migrated_db) -> None:  # noqa: ANN001
     assert await db.assert_rls_posture(migrated_db) == []
 
@@ -74,6 +108,7 @@ async def test_each_tenant_table_is_isolated(migrated_db, table: str) -> None:  
     for tenant in ("t1", "t2"):
         async with db.acquire(tenant) as conn:
             await _seed(conn, tenant)
+            await _seed_scan(conn, tenant)
     async with db.acquire("t2") as conn:
         assert await conn.fetchval(f"SELECT count(*) FROM dps.{table} WHERE tenant_id = 't1'") == 0
         assert await conn.fetchval(f"SELECT count(*) FROM dps.{table}") >= 1
