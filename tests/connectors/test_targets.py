@@ -328,8 +328,26 @@ def test_files_synthesize_group_and_tabular_rules(settings: Settings) -> None:
         "group_not_found",
         404,
     )
-    tabular = spec(**UAT_TABLE, mode="synthesize", options={"tabular": "copula"})
-    assert _code(tabular, settings) == ("tabular_invalid", 422)
+    # M5 Task 6: copula synthesis into a table or files target is accepted ...
+    copula = {"tabular": "copula"}
+    _check(spec(**UAT_TABLE, mode="synthesize", options=copula), settings=settings)
+    _check(spec(**files, mode="synthesize", options=copula), settings=settings, target_conn=PVC)
+    # ... but not in obfuscate mode, not into a database write, not with the engine switched off
+    assert _code(spec(**UAT_TABLE, options=copula), settings) == ("tabular_invalid", 422)
+    append = dict(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    assert _code(spec(**append, mode="synthesize", options=copula), settings) == (
+        "tabular_invalid",
+        422,
+    )
+    off = settings.model_copy(update={"synth_tabular_engine": ""})
+    assert _code(spec(**UAT_TABLE, mode="synthesize", options=copula), off) == (
+        "tabular_invalid",
+        422,
+    )
+    mostly = spec(**UAT_TABLE, mode="synthesize", options={"tabular": "mostly"})
+    assert _code(mostly, settings) == ("tabular_invalid", 422)  # not enabled
+    with_mostly = settings.model_copy(update={"synth_tabular_engine": "copula,mostly"})
+    assert _code(mostly, with_mostly) == ("tabular_invalid", 422)  # the extra is not installed
 
 
 def test_column_plans_per_write_mode() -> None:

@@ -692,6 +692,21 @@ async def advance_job(
     return applied
 
 
+async def reseal_secret(worker_id: str, job_id: str, sealed_secret: bytes) -> bool:
+    """Replace ``key_enc`` while this worker holds the job in ``prepare`` (M5: the sealed tabular
+    model joins the job secret). Fenced like :func:`advance_job`; ``False`` = lease lost (or the
+    job left ``prepare``): stop now."""
+    async with db.acquire_queue(None) as conn:
+        tag = await conn.execute(
+            f"UPDATE {db.schema_ident()}.dps_job SET key_enc = $3, updated_at = now() "
+            "WHERE id = $1 AND locked_by = $2 AND state = 'running' AND phase = 'prepare'",
+            job_id,
+            worker_id,
+            sealed_secret,
+        )
+    return db.rowcount(tag) > 0
+
+
 async def retry_job(
     worker_id: str,
     job_id: str,

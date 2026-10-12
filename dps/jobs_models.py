@@ -306,6 +306,8 @@ class JobProgress(BaseModel):
     pages: int | None = None
     fields: int | None = None
     blocked_requests: int | None = None
+    #: M5 synthesize jobs: value-free fidelity/privacy/utility/tabular figures measured at prepare
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class ColumnClassification(BaseModel):

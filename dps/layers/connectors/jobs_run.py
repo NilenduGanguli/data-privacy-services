@@ -12,6 +12,13 @@ resumed ``in_place``/``append`` partition takes the target ledger as authoritati
 batch ahead of the checkpoint after a crash), so no batch is ever applied twice; ``table`` resumes
 after its checkpoint (idempotent upserts) and ``files`` restarts from its lower bound.
 
+**Tabular synthesis** (M5, contract §6.6): a synthesize run with ``options.tabular`` fits the
+engine in ``prepare`` on a bounded sample, previews it through the real transformer, measures and
+gates it before anything is written (:mod:`dps.layers.connectors.tabular`), re-seals the job
+secret with the fitted model (``jobs.reseal_secret``) and stores the value-free figures in
+``progress.metrics``; partitions load the sealed model (and the policy's constraints) once per
+runtime.
+
 ``finalize`` (one fenced job row) decides the outcome, writes the files manifest last, clears the
 write ledger of a finished job, samples written rows for the evidence, stores the evidence pack,
 audits ``job.finalize`` and moves the job to its terminal state, purging the sealed key.
@@ -40,10 +47,17 @@ from dps.connections import (
     get_connection,
     load_credentials,
 )
-from dps.engine.batch import BatchResult, BatchTransformer, IncompatibleMethod, LeakageError
+from dps.engine.batch import (
+    BatchResult,
+    BatchTransformer,
+    IncompatibleMethod,
+    LeakageError,
+    TabularSampler,
+    row_anchor,
+)
 from dps.engine.policy import Policy
 from dps.engine.service import EngineError
-from dps.engine.synth.surrogates import seed_from_caller
+from dps.engine.synth.surrogates import seed_bytes, seed_from_caller
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobPhase, JobState, PartitionState
 from dps.jobs_models import (
@@ -90,11 +104,12 @@ from dps.layers.connectors.targets import (
     resolve_target,
 )
 from dps.observability import LEASES_LOST, ROWS_WRITTEN, get_logger
-from dps.secrets import SealError, SecretUnavailable, open_json
+from dps.secrets import SealError, SecretUnavailable, open_json, seal_json
 from dps.snapshots import get_snapshot
 from dps.storage import ObjectStore, StorageError
 
 if TYPE_CHECKING:
+    from dps.engine.synth.constraints import ConstraintSet
     from dps.worker import HandlerContext
 
 logger = get_logger(__name__)
@@ -115,6 +130,19 @@ _TERMINAL = {
 
 class _Lost(Exception):
     """A fenced write found the lease gone: stop without touching the row again."""
+
+
+def _constraint_errors() -> tuple[type[Exception], ...]:
+    """``ConstraintError`` when the ``tabular`` extra is installed (M2 runs work without it)."""
+    try:
+        from dps.engine.synth.constraints import ConstraintError
+    except ImportError:  # pragma: no cover - the image and the dev venv install the extra
+        return ()
+    return (ConstraintError,)
+
+
+#: A tabular constraint the table cannot take, raised while transforming (value-free).
+CONSTRAINT_ERRORS = _constraint_errors()
 
 
 @dataclass
@@ -210,6 +238,9 @@ def _transformer(
     plan: RunPlan,
     policy: Policy,
     shape: TableShape,
+    *,
+    tabular: TabularSampler | None = None,
+    constraints: ConstraintSet | None = None,
 ) -> BatchTransformer:
     if spec.mode == "obfuscate" and not secret.key_material:
         raise SecretUnavailable()
@@ -230,6 +261,9 @@ def _transformer(
         unclassified=spec.options.unclassified,
         anchor=anchor,
         verify=spec.options.verify,
+        tabular=tabular,
+        constraints=constraints,
+        max_resample=ctx.settings.copula_max_resample,
     )
 
 
@@ -323,6 +357,8 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
     except IncompatibleMethod as exc:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
+    except CONSTRAINT_ERRORS as exc:
+        await _fail_to_finalize(ctx, job, "incompatible_method", str(exc))
     except LeakageError as exc:
         await _fail_to_finalize(ctx, job, "leakage", str(exc))
     except (SealError, SecretUnavailable):
@@ -450,7 +486,17 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             batch_rows=spec.source.batch_rows or settings.batch_rows,
             same_table_append=mode == "append" and resolved.same_as_source,
         )
-        transformer = _transformer(ctx, spec, secret, plan, policy, shape)
+        tabular: TabularSampler | None = None
+        constraints: ConstraintSet | None = None
+        metrics: dict[str, Any] = {}
+        if spec.mode == "synthesize" and spec.options.tabular != "none":
+            await _stage(ctx, job, "fitting the tabular model")
+            secret, tabular, constraints, metrics = await _prepare_tabular(
+                ctx, job, spec, secret, plan, policy, shape, snapshot, source
+            )
+        transformer = _transformer(
+            ctx, spec, secret, plan, policy, shape, tabular=tabular, constraints=constraints
+        )
         await _stage(ctx, job, "preflight")
         sample = await source.sample(
             shape, selection, selection.params, max(1, min(settings.preflight_rows, rows))
@@ -486,6 +532,8 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             "existing_rows": report.existing_rows,
         }
         base: dict[str, Any] = {"rows_estimated": rows, "stage": ""}
+        if metrics:
+            base["metrics"] = metrics
         if spec.options.dry_run:
             if not await jobs.advance_job(
                 ctx.worker_id,
@@ -545,6 +593,114 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         if target is not None and target is not source:
             await target.close()
         await source.close()
+
+
+async def _prepare_tabular(
+    ctx: HandlerContext,
+    job: ClaimedJob,
+    spec: RunSpec,
+    secret: JobSecret,
+    plan: RunPlan,
+    policy: Policy,
+    shape: TableShape,
+    snapshot: ClassificationSnapshot,
+    source: Connector,
+) -> tuple[JobSecret, TabularSampler, ConstraintSet | None, dict[str, Any]]:
+    """Fit, preview, measure and gate the tabular engine; re-seal the secret with the model.
+
+    Returns the re-sealed secret, the sampler and constraints the preflight and partitions use,
+    and the value-free metrics for ``progress.metrics``.
+
+    Raises:
+        PrepareFailure: a tabular gate (``tabular_invalid``, ``incompatible_method``,
+            ``leakage``, ``privacy_gate``); ``_Lost`` when the job row's lease is gone.
+    """
+    from dps.layers.connectors.tabular import TabularGateError, prepare_tabular, runtime_sampler
+
+    if not secret.synthesis_seed:
+        raise SecretUnavailable()
+    seed = seed_bytes(seed_from_caller(secret.synthesis_seed))
+    selection = spec.source.selection
+
+    def make(sampler: TabularSampler, constraints: ConstraintSet | None) -> BatchTransformer:
+        return _transformer(
+            ctx, spec, secret, plan, policy, shape, tabular=sampler, constraints=constraints
+        )
+
+    try:
+        prepared = await prepare_tabular(
+            settings=ctx.settings,
+            engine_name=spec.options.tabular,
+            connector=source,
+            shape=shape,
+            selection=selection,
+            params=selection.params,
+            snapshot=snapshot,
+            policy=policy,
+            seed=seed,
+            object_fqn=plan.source_object,
+            make_transformer=make,
+            anchor_of=lambda row: row_anchor(row, shape, None),
+            projection=plan.projection,
+        )
+    except TabularGateError as exc:
+        raise PrepareFailure(exc.code, exc.detail) from None
+    resealed = secret.model_copy(update={"tabular_model": prepared.model_b64})
+    sealed = seal_json(ctx.kek, resealed, aad=f"dps_job.key:{job.id}")
+    if not await jobs.reseal_secret(ctx.worker_id, job.id, sealed):
+        raise _Lost()  # the reaper re-queues prepare, which refits deterministically
+    sampler, constraints = runtime_sampler(
+        prepared.engine,
+        prepared.model_b64,
+        seed,
+        policy=policy,
+        shape=shape,
+        snapshot=snapshot,
+        object_fqn=plan.source_object,
+    )
+    logger.info(
+        "tabular_prepared",
+        job_id=job.id,
+        engine=prepared.engine,
+        columns=len(prepared.metrics["tabular"]["columns"]),
+    )
+    return resealed, sampler, constraints, prepared.metrics
+
+
+async def _runtime_tabular(
+    job: JobInternal,
+    spec: RunSpec,
+    secret: JobSecret,
+    plan: RunPlan,
+    policy: Policy,
+    shape: TableShape,
+) -> tuple[TabularSampler, ConstraintSet | None]:
+    """The sealed model and its constraints for this job's partitions (once per runtime)."""
+    from dps.engine.synth.copula import CopulaError
+    from dps.layers.connectors.tabular import runtime_sampler
+
+    if not secret.synthesis_seed or not secret.tabular_model:
+        raise SecretUnavailable()
+    async with db.acquire_queue(job.tenant_id) as conn:
+        snapshot = await get_snapshot(job.tenant_id, spec.snapshot_id, conn=conn)
+    if snapshot is None:
+        raise PrepareFailure("snapshot_stale", "the accepted snapshot no longer exists")
+    try:
+        return runtime_sampler(
+            spec.options.tabular,
+            secret.tabular_model,
+            seed_bytes(seed_from_caller(secret.synthesis_seed)),
+            policy=policy,
+            shape=shape,
+            snapshot=snapshot,
+            object_fqn=plan.source_object,
+        )
+    except CopulaError:
+        raise PrepareFailure(
+            "tabular_invalid", "the sealed tabular model could not be read"
+        ) from None
+    except CONSTRAINT_ERRORS as exc:
+        raise PrepareFailure("incompatible_method", str(exc)) from None
 
 
 async def _check_same_table_offset(
@@ -646,7 +802,15 @@ class RuntimeCache:
                     assert target_conn is not None
                     target = await _open(ctx, job, target_conn, "run")
                 writer = await target.writer(plan.target, shape)
-            transformer = _transformer(ctx, spec, secret, plan, policy, shape)
+            tabular: TabularSampler | None = None
+            constraints: ConstraintSet | None = None
+            if secret.tabular_model:
+                tabular, constraints = await _runtime_tabular(
+                    job, spec, secret, plan, policy, shape
+                )
+            transformer = _transformer(
+                ctx, spec, secret, plan, policy, shape, tabular=tabular, constraints=constraints
+            )
         except BaseException:
             if target is not None and target is not source:
                 with contextlib.suppress(Exception):
@@ -728,6 +892,8 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
         await _fail_partition(ctx, part, exc.code, str(exc))
     except PkCollision as exc:
         await _fail_partition(ctx, part, exc.code, str(exc))
+    except CONSTRAINT_ERRORS as exc:
+        await _fail_partition(ctx, part, "incompatible_method", str(exc))
     except PrepareFailure as exc:
         await _fail_partition(ctx, part, exc.code, exc.detail)
     except (SealError, SecretUnavailable):
@@ -1224,6 +1390,10 @@ async def _store_evidence(
         )
         for p in parts
     ]
+    policy_version: str | None = None
+    if plan is not None:
+        with contextlib.suppress(PrepareFailure):
+            policy_version = str(_policy(ctx, spec, plan.policy_name).version)
     inputs = EvidenceInputs(
         job=job,
         spec=job.spec,
@@ -1246,6 +1416,7 @@ async def _store_evidence(
         errors=errors,
         engine_version=__version__,
         image_digest=ctx.settings.image_digest or None,
+        policy_version=policy_version,
     )
     record = await save_evidence(
         build_pack(inputs), artefacts=ctx.artefacts, acquire=db.acquire_queue, expires_at=None

@@ -8,6 +8,13 @@ what reveal needs (``{path, entity_type, method, params, anchor_path, reveal, te
 ``reveal`` is false for ``date_shift`` when the row anchor cannot be recomputed from the output
 (the anchor column transformed one-way, or an append whose keys were replaced) — contract §6.2.
 
+**Synthesize packs** (M5, contract §7.1/§7.2) carry the value-free figures ``prepare`` measured on
+the deterministic preview (``progress.metrics``): ``fidelity``, ``privacy`` (plus the redraws the
+partitions made, ``exact_row_resamples_run``), ``utility`` and ``tabular`` (engine, modelled and
+excluded columns, constraints, fit/holdout/preview sizes). A synthesize run without tabular
+synthesis says so in ``privacy`` (``measured: false``): its non-sensitive columns were copied from
+the source, which is exactly what a reader of the pack must know.
+
 ``pack_sha256 = sha256(canonical JSON, sort_keys, compact separators)``; ``config_hash =
 sha256(policy hash + snapshot hash + sha256(canonical redacted spec))``. The HTML rendering is a
 self-contained page (every interpolation escaped, inline CSS with a print stylesheet, no
@@ -73,6 +80,7 @@ class EvidencePack(BaseModel):
     fidelity: dict[str, Any] | None = None
     privacy: dict[str, Any] | None = None
     utility: dict[str, Any] | None = None
+    tabular: dict[str, Any] | None = None
     scan: dict[str, Any] | None = None
     timings: dict[str, Any]
     partitions: list[dict[str, Any]]
@@ -104,6 +112,7 @@ class EvidenceInputs:
     errors: list[dict[str, str]]
     engine_version: str
     image_digest: str | None
+    policy_version: str | None = None  # M5: the resolved policy's version, when known
 
 
 class EvidenceRecord(BaseModel):
@@ -161,10 +170,15 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: Counter keys of tabular redraws (``<engine>_resample``, M5): counted, never a method.
+RESAMPLE_KEYS = frozenset({"copula_resample", "mostly_resample"})
+
+
 def _split_counters(
     counters: dict[str, int],
 ) -> tuple[dict[str, int], dict[str, int], dict[str, int], int]:
-    """``(methods, fallbacks, per column, verification hits)`` from a counter map."""
+    """``(methods, fallbacks, per column, verification hits)`` from a counter map (tabular
+    redraw counters are left out; :func:`_resamples` sums them)."""
     methods: dict[str, int] = {}
     fallbacks: dict[str, int] = {}
     columns: dict[str, int] = {}
@@ -176,9 +190,48 @@ def _split_counters(
             columns[key.removeprefix("col:")] = int(value)
         elif key == "verify:hits":
             hits = int(value)
-        elif ":" not in key:
+        elif ":" not in key and key not in RESAMPLE_KEYS:
             methods[key] = int(value)
     return methods, fallbacks, columns, hits
+
+
+def _resamples(counters: dict[str, int]) -> int:
+    return sum(int(v) for k, v in counters.items() if k in RESAMPLE_KEYS)
+
+
+def _synthetic_blocks(
+    inputs: EvidenceInputs,
+) -> tuple[
+    dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None
+]:
+    """``(fidelity, privacy, utility, tabular)`` of a synthesize pack (``None`` otherwise)."""
+    if inputs.job.mode != "synthesize":
+        return None, None, None, None
+    options = inputs.spec.get("options") or {}
+    engine = options.get("tabular") or "none"
+    if engine == "none":
+        unmeasured: dict[str, Any] = {
+            "engine": "none",
+            "measured": False,
+            "reason": "options.tabular=none: non-sensitive columns were copied from the source",
+        }
+        return None, unmeasured, None, None
+    metrics = inputs.job.progress.metrics or {}
+    fidelity = metrics.get("fidelity")
+    measured = metrics.get("privacy")
+    privacy: dict[str, Any]
+    if measured is not None:
+        privacy = {
+            **measured,
+            "exact_row_resamples_run": _resamples(inputs.job.progress.values_by_method),
+        }
+    else:
+        privacy = {
+            "engine": engine,
+            "measured": False,
+            "reason": "prepare stopped before the synthetic preview was measured",
+        }
+    return fidelity, privacy, metrics.get("utility"), metrics.get("tabular")
 
 
 def _strategy_kind(plan: RunPlan) -> str | None:
@@ -294,6 +347,10 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
         "name": plan.policy_name if plan else (snapshot.policy_name if snapshot else ""),
         "hash": plan.policy_hash if plan else (snapshot.policy_hash if snapshot else ""),
     }
+    if inputs.policy_version is not None:
+        policy["version"] = inputs.policy_version
+    reviewed = {c.path: c for c in snapshot.columns} if snapshot is not None else {}
+    fidelity, privacy, utility, tabular = _synthetic_blocks(inputs)
     snapshot_hash = plan.snapshot_hash if plan else (snapshot.content_hash if snapshot else "")
     columns: list[dict[str, Any]] = []
     reveal_map: list[dict[str, Any]] = []
@@ -301,10 +358,14 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
         recoverable = anchor_recoverable(plan)
         anchor_path = _anchor_path(plan, snapshot)
         for p in plan.columns:
+            review = reviewed.get(p.path)
             columns.append(
                 {
                     "path": p.path,
                     "entity_type": p.entity_type,
+                    "data_type": review.data_type if review else None,
+                    "confidence": review.confidence if review else None,
+                    "override": review.override if review else False,
                     "method": p.method.method,
                     "params": p.method.params if p.reversible else {},
                     "reversible": p.reversible,
@@ -390,6 +451,10 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
             "values_transformed": sum(v for k, v in methods.items() if k != "keep"),
         },
         verification=verification,
+        fidelity=fidelity,
+        privacy=privacy,
+        utility=utility,
+        tabular=tabular,
         timings={
             "started_at": started.isoformat(),
             "finished_at": now.isoformat(),
@@ -499,7 +564,9 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
     fidelity = (
         f"<h2>6 Synthetic fidelity and privacy</h2><table><tr><th>Fidelity</th>"
         f"<td class=mono>{e(pack.fidelity)}</td></tr><tr><th>Privacy</th>"
-        f"<td class=mono>{e(pack.privacy)}</td></tr></table>"
+        f"<td class=mono>{e(pack.privacy)}</td></tr><tr><th>Utility</th>"
+        f"<td class=mono>{e(pack.utility)}</td></tr><tr><th>Tabular model</th>"
+        f"<td class=mono>{e(pack.tabular)}</td></tr></table>"
         if pack.fidelity is not None or pack.privacy is not None
         else ""
     )

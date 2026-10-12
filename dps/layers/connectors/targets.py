@@ -11,7 +11,9 @@ detail): ``kek_unconfigured`` · ``engine_unavailable`` · ``snapshot_not_accept
 ``pk_strategy_invalid`` (token key not reversible, synthesize token, same-table token/prefix or a
 key that is not one integer column, an offset on a non-integer key or a prefix on a non-text key)
 · ``target_invalid`` (table, files) · ``key_method_not_injective`` · ``method_needs_key`` ·
-``text_method_invalid`` · ``group_not_found`` / ``group_key_mismatch`` · ``tabular_invalid``.
+``text_method_invalid`` · ``group_not_found`` / ``group_key_mismatch`` · ``tabular_invalid``
+(M5: tabular synthesis outside synthesize mode, into an ``in_place``/``append`` write, or with an
+engine this deployment has not enabled).
 
 A same-table append re-reads its own new rows unless every new key sorts above every selected
 key; only one integer key with ``generate`` (an owned, ascending, non-cycling sequence ahead of the
@@ -249,6 +251,25 @@ def _check_target(spec: RunSpec, source_conn: Connection, target_conn: Connectio
             raise _fail(invalid, 422, "an append target must be a database connection")
 
 
+def _check_tabular(spec: RunSpec, settings: Settings) -> None:
+    """M5 tabular synthesis: synthesize mode, a table or files target, an enabled engine."""
+    engine = spec.options.tabular
+    if spec.mode != "synthesize" or spec.target.write_mode in _DATABASE_WRITES:
+        raise _fail(
+            "tabular_invalid",
+            422,
+            "tabular synthesis runs in synthesize mode into a table or files target",
+        )
+    if engine not in settings.tabular_engines:
+        raise _fail(
+            "tabular_invalid", 422, f"tabular engine {engine} is not enabled on this deployment"
+        )
+    if engine == "mostly":
+        raise _fail(
+            "tabular_invalid", 422, "the synth-ml extra is not installed on this deployment"
+        )
+
+
 def validate_run(
     spec: RunSpec,
     *,
@@ -342,7 +363,7 @@ def validate_run(
             )
     _check_group(spec, group)
     if spec.options.tabular != "none":
-        raise _fail("tabular_invalid", 422, "tabular synthesis arrives with milestone M5")
+        _check_tabular(spec, settings)
 
 
 def build_column_plans(

@@ -135,19 +135,81 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
 - Contract §6.4 lists M2's existing `anchor`/`verify` keywords beside the two new ones; §6.6 carries
   the extended protocol, the `fit` keywords of Task 3 and the behaviour sentence.
 
+## Task 6 — L2 synthesize jobs: fit, preview, measure, gate, seal; evidence
+
+- **`validate_run` lives in `dps/layers/connectors/targets.py`** (M2 as built), not
+  `dps/jobs_models.py`; the tabular rule went there (`_check_tabular`): synthesize mode, a `table` or
+  `files` target, an engine in `DPS_SYNTH_TABULAR_ENGINE`; `mostly` is refused ("the synth-ml extra
+  is not installed") until Task 7 wires `mostly_available()`. `tests/connectors/test_targets.py`'s
+  M2 assertion ("tabular arrives with M5") became the M5 accept/refuse matrix.
+- `dps/layers/connectors/tabular.py`:
+  - **Reproducibility.** PostgreSQL's `sample` is `ORDER BY random()` (whole table when it is small),
+    so the plan's split and fit depended on the order the database returned: the same seed fitted a
+    different model and `test_same_seed_reproduces_the_same_target` could not hold. The sampled rows
+    are put in a keyed, order-independent order first (`keyed_order`: HMAC of the seed and each row
+    anchor), then split and fitted (`test_prepare_is_deterministic_whatever_order_the_sample_comes_in`).
+    For a table larger than `fit + holdout` rows the sample itself is random, so the model (and the
+    output) is reproducible only when the whole selection is sampled — HANDOFF material for Task 27.
+  - `tabular_columns` takes an optional `projection` (the run's projected columns; others are neither
+    modelled nor written) and gives integer columns without a catalogue precision the digits their
+    type holds (`INT_DIGITS`: smallint 4, integer 9, bigint 18 — the Task 4 note), so a `unique` rule
+    never draws a number its column cannot store. The reject columns are the projected non-key columns.
+  - Columns the engine itself declines (copula: `all_null`, `no_frequent_category`) keep their source
+    values and are added to `tabular.excluded` with that reason; `tabular.columns`, the metrics and the
+    constraints cover the columns the sampler writes only (the plan built constraints over every
+    eligible column, so a `when` rule could have rewritten a source-kept value).
+  - New helpers: `keyed_order`, `check_constraints` (a `unique` rule needs one integer key —
+    `incompatible_method` at prepare instead of an `internal_error` retry mid-partition, the Task 5
+    note), `runtime_sampler` (the sealed model plus its constraints, shared by the preflight and
+    partitions), `GATE_CODES`. `fit_sampler`/`load_sampler` gain the MOSTLY branch in Task 7.
+  - A preview that cannot avoid real rows (`LeakageError(rule="exact_row_match")`) fails with
+    `leakage` and the detail "every redraw … equalled a real row (too few distinct value
+    combinations to synthesize)" (Task 5 open note 1; `test_a_table_whose_every_combination_is_real_
+    fails_closed`). The privacy block also records `engine`, `measured: true` and `nndr_enforced`.
+- `dps/layers/connectors/jobs_run.py`: the plan's `_make_transformer` is M2's `_transformer` with
+  keyword `tabular`/`constraints` (and `max_resample=DPS_COPULA_MAX_RESAMPLE`); `_prepare_tabular`
+  runs between the run plan and the preflight (so the preflight also runs the sampler), re-seals with
+  `seal_json` and `jobs.reseal_secret` (lease lost → stop), and stores `progress.metrics` on the
+  partitions/dry-run transition. Partitions rebuild the sampler in `RuntimeCache._build`
+  (`_runtime_tabular`, which loads the accepted snapshot for the constraint column specs); an
+  unreadable model is `tabular_invalid`, a constraint error `incompatible_method` (prepare and
+  partitions, `CONSTRAINT_ERRORS`, imported lazily so M2 runs need no `tabular` extra).
+  `TabularGateError`s become `PrepareFailure`s (M2's `_fail_to_finalize`, failed evidence pack).
+- `dps/layers/connectors/evidence.py`: `columns[*]` gain `data_type`, `confidence`, `override` but
+  **not** the snapshot's `params` (M2 prints params for reversible methods only — a one-way
+  `dictionary`/`redact` may hold literals; that rule is kept). `policy.version` comes from
+  `EvidenceInputs.policy_version` (finalize resolves the run policy; best effort). `<engine>_resample`
+  counters are not methods (`RESAMPLE_KEYS`; they no longer inflate `values_transformed`) and are
+  summed into `privacy.exact_row_resamples_run`. A synthesize pack whose prepare failed before the
+  preview carries `privacy = {engine, measured: false, reason}`. The HTML section 6 prints utility and
+  the tabular block too (Task 14/21 render them properly).
+- `JobProgress.metrics` uses `Field(default_factory=dict)` (M2 style).
+- Tests: `tests/test_tabular_prepare.py` — the plan's `ColumnPlan` needs M2's `name`; the holdout is
+  ~20 % by a keyed hash, so the size assertions are bounds (the plan's `fit_rows == 400` held for one
+  seed in three); added the integer digits, order-independence, runtime constraints,
+  every-combination-real and unique-without-integer-key tests (11; plan 6). `tests/test_evidence.py`
+  +2, `tests/db/test_jobs_queue.py` +1 (`reseal_secret` fencing), `tests/connectors/test_targets.py`
+  matrix. **Integration test path**: `tests/connectors/test_synthesize_copula.py` (the repo has no
+  `tests/integration/`; M2's run suites live in `tests/connectors/` and drive jobs in process with
+  `tests.connectors.helpers.drive` rather than through the API and a `Consumer`); the targets are
+  tables in the per-test schema (dropped by the fixture) instead of `synth_<hex>` schemas. Three tests
+  (plan 2): the measured run, same-seed reproduction, and a privacy gate that fails prepare before the
+  target exists. Stage A lesson 1: the measured run compares every ground-truth sensitive column with
+  the source — no row keeps its own value (all of them, `date_of_birth` included), no source national
+  id, tax id, e-mail or mobile number appears anywhere in the target (any column, free text
+  included), and no target row equals a source row on all non-key columns. `full_name` allows
+  chance coincidences across rows (≤ 3 %; measured 16 of 1 494): the demo rows were generated by the
+  same persona name pools as the surrogates. The key `customer_id` keeps its values by the
+  synthesize-mode key rule (contract §5.3) — see the report's open issues.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
 - Task 1: `Dockerfile`'s comment still says the `[tabular]` extra "arrives with M5" and is skipped;
   the install line already names the extra, so the image now gets numpy + scipy. The comment and the
   image size measurement belong to Task 24 (images), which this lane does not run.
-- Task 5 → Task 6 (open): a table whose non-key columns have few distinct values (every combination
-  occurs in the real data) cannot pass exact-row rejection: almost every draw equals some real row
-  and the batch fails closed (`test_a_table_whose_every_combination_is_real_fails_closed`). Task 6's
-  prepare preview meets this first and should fail the job with a clear code (or the design may
-  choose to reject only matches of rare/unique real rows — a privacy decision, not taken here).
-- Task 5 → Task 6 (open): `ConstraintError` (a `unique` rule on a table without a single integer
-  key, a key outside the rule's domain) raised inside `transform` reaches `jobs_run`'s generic
-  handler (`internal_error`, retried). Task 6 should check `ConstraintSet.needs_key_int` against the
-  table key at prepare and map `ConstraintError` to a value-free 4xx code; it must also pass
-  `ColumnSpec.precision` 4/9/18 for `smallint`/`integer`/`bigint` (Task 4 note).
+- Task 5 → Task 6 (closed in Task 6): a table whose every non-key value combination is real now
+  fails prepare with `leakage` and a detail that says why; whether to reject only matches of
+  rare/unique real rows instead stays a privacy decision for the final stage (not taken here).
+- Task 5 → Task 6 (closed in Task 6): `ConstraintError` maps to `incompatible_method` at prepare
+  (with the one-integer-key pre-check) and in partitions; integer precision 4/9/18 is passed.
