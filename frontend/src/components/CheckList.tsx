@@ -6,7 +6,8 @@ function CheckRow({ check }: { check: Check }): JSX.Element {
   const state = check.ok ? 'ok' : check.severity === 'advisory' ? 'warn' : 'bad';
   const icon = check.ok ? '✓' : state === 'warn' ? '!' : '✕';
   const meta = check.count !== undefined && check.count !== null ? fmtCount(check.count) : check.ok ? 'ok' : (check.code ?? (state === 'warn' ? 'check' : 'failed'));
-  const detail = [check.detail, !check.ok && check.code && check.count !== undefined ? check.code : null].filter(Boolean).join(' · ');
+  const shown = check.name === 'connect' && check.detail === 'tls' ? 'over TLS' : check.name === 'connect' && check.detail === 'plain' ? 'without TLS' : check.detail;
+  const detail = [shown, !check.ok && check.code && check.count !== undefined ? check.code : null].filter(Boolean).join(' · ');
   return (
     <div className={`ck ${state}`}>
       <span className="ic" aria-hidden="true">{icon}</span>

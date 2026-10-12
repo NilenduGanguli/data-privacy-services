@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
 import { evidenceSoFar, methodText, partitionPct, shortType, stepperState } from './jobs';
+import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
+import type { Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
 
 describe('jobs helpers', () => {
@@ -104,5 +106,43 @@ describe('job detail helpers', () => {
       values_by_method: { det_token: 30, keep: 50, fpe_digits: 10, 'fallback:fpe_domain_too_small': 4, 'fallback:fpe_disabled': 1, 'col:email': 30, 'verify:hits': 0 },
       verification: { checked: 40, hits: 0 } } }));
     expect(e).toMatchObject({ rows: 40, values: 40, hits: 0, fallbacks: 5, dominantFallback: 'fpe_domain_too_small', done: 3, total: 4, failed: 1 });
+  });
+});
+
+describe('wizard state (steps 1-2)', () => {
+  const conn = (over: Partial<Connection> = {}): Connection => ({
+    id: 'c_new', tenant_id: 'default', name: 'bank-dev', engine: 'postgres', params: { host: 'db', port: 5432, database: 'bank' },
+    secret_ref: null, has_secret: true, secret_expires_at: null, roles: ['source'], tags: [], capabilities: {}, last_test: null,
+    created_by: null, created_at: '2026-10-12T09:00:00Z', updated_at: '2026-10-12T09:00:00Z', ...over,
+  });
+  const count: CountOut = { rows: 42, checks: [], runs_as: 'SELECT …', binds: 1 };
+  it('clears the selection, the check result and the discovery state when a new table is chosen', () => {
+    let d = draft({ where: "country_code = 'IN'", count, rows: 42, columns: ['email'], discoverJobId: 'j_d', snapshotId: 'snap_1', snapshotAccepted: true, typed: 'bank_restore.contacts' });
+    d = wizardReducer(d, { type: 'table', table: 'accounts' });
+    expect(d).toMatchObject({ table: 'accounts', where: '', count: null, rows: null, columns: null, discoverJobId: null, snapshotId: null, snapshotAccepted: false, typed: '', shape: null });
+    d = wizardReducer({ ...d, count }, { type: 'filter', text: 'x > 1' });
+    expect(d.count).toBeNull();
+  });
+  it('refuses inline credentials on a production-tagged connection', () => {
+    let d = wizardReducer(draft({ connMode: 'new', credMode: 'secret_ref' }), { type: 'production', on: true });
+    d = wizardReducer(d, { type: 'credMode', mode: 'inline' });
+    expect(d.credMode).toBe('secret_ref');
+    d = wizardReducer(wizardReducer(draft({ connMode: 'new', credMode: 'inline', password: 'pw-1' }), { type: 'production', on: true }), { type: 'set', patch: {} });
+    expect(d).toMatchObject({ credMode: 'secret_ref', password: '' });
+  });
+  it('keeps the connection id but no password once the connection is created and tested', () => {
+    let d = wizardReducer(draft({ connMode: 'new', credMode: 'inline', connectionId: null }), { type: 'set', patch: { username: 'dps_reader', password: 'pw-secret-9' } });
+    d = wizardReducer(d, { type: 'created', connection: conn() });
+    d = wizardReducer(d, { type: 'tested', result: { ok: true, engine: 'postgres', server_version: '16', checks: [], capabilities: {}, error_code: null }, at: '2026-10-12T09:00:00Z' });
+    const saved = JSON.stringify(draftForStorage(d));
+    expect(saved).toContain('"connectionId":"c_new"');
+    expect(saved).not.toContain('pw-secret-9');
+    expect(d.password).toBe('');
+    expect(canLeave(1, d)).toBe(true);
+  });
+  it('opens the next steps only when the earlier ones are complete', () => {
+    const d = draft({ shape: null, test: null });
+    expect(reachable(d)).toBe(1);
+    expect(canLeave(2, draft({ shape: { object: { owner: 'bank', name: 'customers' }, columns: [], key: ['id'], key_source: 'primary_key', row_estimate: 10 }, where: 'a = 1', count: null }))).toBe(false);
   });
 });

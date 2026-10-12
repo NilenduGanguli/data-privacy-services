@@ -2,6 +2,7 @@ import { Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { JobDetail } from './pages/JobDetail';
 import { Jobs } from './pages/Jobs';
+import { JobWizard } from './pages/JobWizard';
 import { Overview } from './pages/Overview';
 import { Playground } from './pages/Playground';
 
@@ -25,6 +26,7 @@ export function App(): JSX.Element {
         <Route path="/policies" element={<Soon title="Policies" />} />
         <Route path="/data-sources" element={<Jobs />} />
         <Route path="/data-sources/jobs" element={<Jobs />} />
+        <Route path="/data-sources/jobs/new" element={<JobWizard />} />
         <Route path="/data-sources/jobs/:jobId" element={<JobDetail />} />
         <Route path="/scanner" element={<Soon title="UI scanner (M4)" />} />
         <Route path="/reports" element={<Soon title="Reports & audit (M5)" />} />

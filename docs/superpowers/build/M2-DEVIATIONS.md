@@ -1493,3 +1493,37 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   the snapshot as plain text, not a link (one "Evidence pack" link per page). Discover jobs show the
   snapshot list (**Review and accept** for proposed ones) and the first snapshot's table.
 - `synthesize_*` type notes are hidden on obfuscate jobs (they describe the synthesize method).
+
+## Task 32 — New-job wizard, steps 1–2 (connect, select data)
+
+- `WizardDraft` was completed in Task 29; this task adds the reducer (`pages/wizard/state.ts`:
+  `wizardReducer`, `WizardAction`, `canLeave`, `reachable`, `targetReady`, `useWizard`,
+  `loadSavedDraft`, `clearSavedDraft`, `DRAFT_KEY`) and its 4 Vitest cases in `jobs.test.ts` (18 in
+  all; the plan's three plus one for step gating). `lib/jobs.ts` is therefore not in this commit.
+- Saved connections: the option text is the connection's name alone (production / role shown as
+  chips after the choice). Observed for Task 36: Playwright for Python 1.55 `select_option(label=…)`
+  takes strings only (a compiled regex raises `TypeError: 're.Pattern' object is not iterable`), so
+  the plan's `select_option(label=re.compile("bank-pg-ro"))` needs the plain name; with exact option
+  texts `label="bank-pg-ro"` works.
+- New connection: PostgreSQL needs `host` and `database` in `params` whichever credential mode is
+  used (`ConnectionSpec` rule), so both modes show host, port and database; a **Writable (In place
+  and Append)** switch adds the `target` role (otherwise In place cannot be chosen later). After the
+  create the fields are replaced by a note (the password is dropped from React state by the
+  `created` action); an edit means a new connection.
+- The step 1 target select is labelled "Target connection for Copy to a table (optional)" and the
+  WHERE box "WHERE expression on <object>" (no "table" before a table is chosen): Playwright's
+  `get_by_label` matches substrings, and "Table" / "Target connection" must resolve to one element
+  in step 2 and step 4.
+- Step 2 requires a **Check** only when a filter was typed (no filter = every row, nothing to check);
+  the count's `runs_as` statement is shown as returned (it lists the projected columns, Task 24).
+  The console has no UI for named bind parameters: literals are bound by the server
+  (`parameterize_literals`), and `params` stays empty.
+- `CheckList` shows the `connect` check's detail `tls`/`plain` as "over TLS"/"without TLS".
+- Shell: the crumb and "Draft saved hh:mm" are in the page (the M0 topbar holds the key fields); a
+  restored draft opens on the farthest step it can still show and offers "Start a new draft"; steps
+  3–5 render a placeholder until Tasks 33–34.
+- Browser check (private Playwright, lane stack): steps 1–2 driven by the accessible names of the
+  plan (PostgreSQL, Saved connection, Test connection, Next: Select data, Owner, Table, WHERE
+  expression, Check): "3 of 3 checks passed", a `FOR UPDATE` filter refused with the failing check
+  and the server's message (no SQL echoed), `country_code = 'IN'` → "12,069 rows match"; no
+  horizontal scroll at 1440/390 px.
