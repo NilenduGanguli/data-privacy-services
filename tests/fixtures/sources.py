@@ -10,7 +10,7 @@ dropped afterwards. Rows put there by tests are synthetic.
 from __future__ import annotations
 
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from dps.connections import Connection, Credentials
     from dps.layers.connectors.base import ObjectRef
     from dps.storage import LocalObjectStore, S3ObjectStore
+    from dps.worker import HandlerContext
 
 
 @pytest.fixture
@@ -53,6 +54,51 @@ def s3_store() -> S3ObjectStore:
         secret_access_key="minioadmin",
         force_path_style=True,
     )
+
+
+CUSTOMERS_DDL = (
+    "customer_id bigint PRIMARY KEY, full_name varchar(120) NOT NULL, date_of_birth date, "
+    "national_id varchar(18), id_type varchar(12) NOT NULL, tax_id char(10), email varchar(254), "
+    "mobile varchar(20), country_code char(2) NOT NULL, segment varchar(16) NOT NULL, "
+    "risk_score smallint NOT NULL, kyc_status varchar(12) NOT NULL, "
+    "relationship_manager_id bigint, notes text, created_at timestamptz NOT NULL, "
+    "updated_at timestamptz NOT NULL"
+)
+#: Test-only synthesis seed (32 zero bytes): the demo rows are the same on every run.
+_ROWS_SEED = "A" * 43
+
+
+def customers_records(n: int) -> list[tuple[Any, ...]]:
+    """``n`` synthetic customers rows (personas from the surrogate engine, reserved domains)."""
+    from dps.engine.synth.surrogates import SurrogateEngine, SynthesisSeed, seed_bytes
+
+    engine = SurrogateEngine(seed_bytes(SynthesisSeed(seed=_ROWS_SEED)), default_locale="en_IN")
+    created = datetime(2024, 1, 1, tzinfo=UTC)
+    out: list[tuple[Any, ...]] = []
+    for i in range(n):
+        country = ["IN", "US"][i % 2]
+        persona = engine.persona(f"customer:{i}", "en_IN" if country == "IN" else "en_US")
+        out.append(
+            (
+                10_000_001 + i,
+                persona.full_name,
+                persona.dob,
+                f"{(7_000_000_000 + i * 7919) % 10**12:012d}" if country == "IN" else None,
+                "AADHAAR" if country == "IN" else "SSN",
+                f"ABCPE{1000 + i % 9000:04d}F" if country == "IN" else None,
+                f"{persona.email_local}@example-mail.in",
+                f"+91 9{(800_000_000 + i * 137) % 10**9:09d}" if country == "IN" else None,
+                country,
+                ["retail", "premium", "private"][i % 3],
+                i % 900,
+                ["verified", "pending"][i % 2],
+                None,
+                f"Prefers e-mail: {persona.email_local}@example-mail.in" if i % 4 == 0 else None,
+                created,
+                created,
+            )
+        )
+    return out
 
 
 @dataclass
@@ -86,6 +132,11 @@ class SourcePg:
         if rows:
             await self.admin.copy_records_to_table(name, records=rows, schema_name=self.schema)
         return ObjectRef(owner=self.schema, name=name)
+
+    async def customers_table(self, rows: int = 300) -> ObjectRef:
+        """``customers`` with the demo DDL (``01_bank_schema.sql``, without its foreign key) and
+        ``rows`` deterministic synthetic rows from the surrogate engine (fixed seed, no real PII)."""
+        return await self.table("customers", CUSTOMERS_DDL, customers_records(rows))
 
     def connection(
         self, *, user: str = "dps_reader", roles: tuple[str, ...] = ("source",)
@@ -146,3 +197,61 @@ async def source_pg() -> AsyncIterator[SourcePg]:
     finally:
         await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await conn.close()
+
+
+@pytest.fixture
+def source_secrets(handler_ctx: HandlerContext) -> Path:
+    """Local ``secret_ref`` directories under the handler's ``secret_dir`` (contract §5.1):
+    ``dps/src/test-pg`` = dps_reader, ``dps/src/test-pg-rw`` = dps_writer,
+    ``dps/src/test-pg-admin`` = postgres (local demo logins; password = login)."""
+    root = Path(handler_ctx.settings.secret_dir)
+    for ref, login in (
+        ("dps/src/test-pg", "dps_reader"),
+        ("dps/src/test-pg-rw", "dps_writer"),
+        ("dps/src/test-pg-admin", "postgres"),
+    ):
+        folder = root / ref
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "username").write_text(login + "\n", encoding="utf-8")
+        (folder / "password").write_text(login + "\n", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def register_source(
+    handler_ctx: HandlerContext, source_secrets: Path
+) -> Callable[..., Awaitable[Connection]]:
+    """``await register_source("t1", ref=..., roles=..., name=..., tags=..., port=...)`` stores a
+    PostgreSQL connection to the lane's source-pg (database ``bank``) under that tenant."""
+    from dps.connections import create_connection
+    from dps.jobs_models import ConnectionParams, ConnectionSpec
+
+    dsn = require_service("source-pg")
+    parsed = urlparse(dsn)
+
+    async def register(
+        tenant: str,
+        *,
+        ref: str = "dps/src/test-pg",
+        roles: set[str] | None = None,
+        name: str | None = None,
+        tags: tuple[str, ...] = (),
+        port: int | None = None,
+    ) -> Connection:
+        spec = ConnectionSpec(
+            name=name or f"test-pg-{secrets.token_hex(4)}",
+            engine="postgres",
+            params=ConnectionParams(
+                host=parsed.hostname or "127.0.0.1",
+                port=port or parsed.port or 5432,
+                database=parsed.path.lstrip("/") or "bank",
+            ),
+            secret_ref=ref,
+            roles=roles or {"source"},  # type: ignore[arg-type]
+            tags=list(tags),
+        )
+        return await create_connection(
+            tenant, spec, settings=handler_ctx.settings, kek=handler_ctx.kek, created_by="test"
+        )
+
+    return register

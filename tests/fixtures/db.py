@@ -12,7 +12,9 @@ import asyncio
 import base64
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from pathlib import Path
 from types import ModuleType
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import asyncpg
@@ -22,6 +24,10 @@ import pytest_asyncio
 from dps import db
 from dps.config import Settings
 from tests.fixtures.services import require_service
+
+if TYPE_CHECKING:
+    from dps.engine.service import PrivacyEngine
+    from dps.worker import HandlerContext
 
 TEST_KEK = bytes(range(32))  # test-only constant; never a production value
 ROLES_SQL = """
@@ -198,3 +204,49 @@ async def fresh_db(pg_admin_dsn: str) -> AsyncIterator[Callable[..., Awaitable[S
     await db.close_pools()
     for name in made:
         await drop_database(pg_admin_dsn, name)
+
+
+@pytest.fixture
+def engine() -> PrivacyEngine:
+    """A ``PrivacyEngine`` with FPE on (FF1 when ``fastfpe`` imports, else a rotation cipher), no
+    NER and the stub LLM. A module-level ``engine`` fixture in a test module overrides this one."""
+    from dps.engine.service import PrivacyEngine
+    from dps.engine.transform import fpe
+
+    settings = Settings(_env_file=None, llm_provider="stub", fpe_enabled=True, ner_enabled=False)
+    if fpe.fpe_available():
+        return PrivacyEngine(settings)
+    return PrivacyEngine(settings, cipher_factory=lambda key, tweak: _RotationCipher())
+
+
+class _RotationCipher:
+    """Test-only stand-in for FF1 when ``fastfpe`` is missing (format-preserving, not secure)."""
+
+    def encrypt(self, alphabet: str, plaintext: str) -> str:
+        return "".join(alphabet[(alphabet.index(ch) + 3) % len(alphabet)] for ch in plaintext)
+
+    def decrypt(self, alphabet: str, ciphertext: str) -> str:
+        return "".join(alphabet[(alphabet.index(ch) - 3) % len(alphabet)] for ch in ciphertext)
+
+
+@pytest.fixture
+def handler_ctx(migrated_db: Settings, engine: PrivacyEngine, tmp_path: Path) -> HandlerContext:
+    """A worker ``HandlerContext`` over the test DB (contract §12.2): secrets under a tmp
+    ``secret_dir``, local artefacts, the test KEK and a ``MemoryAuditSink``."""
+    from dps.audit import MemoryAuditSink
+    from dps.storage import ArtefactService, LocalObjectStore
+    from dps.worker import HandlerContext
+
+    secret_dir = tmp_path / "secrets"
+    secret_dir.mkdir(parents=True, exist_ok=True)
+    settings = migrated_db.model_copy(update={"secret_dir": str(secret_dir)})
+    return HandlerContext(
+        settings=settings,
+        engine=engine,
+        worker_id="test-worker:1:abcdef",
+        kek=TEST_KEK,
+        artefacts=ArtefactService(
+            LocalObjectStore(tmp_path / "artefacts"), acquire=db.acquire_queue
+        ),
+        audit=MemoryAuditSink(),
+    )

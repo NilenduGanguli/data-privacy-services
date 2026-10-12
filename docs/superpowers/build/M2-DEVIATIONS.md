@@ -663,3 +663,53 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   `test_verify_row_rules`, `test_plans_digest_is_stable`,
   `test_synthesize_free_text_keeps_low_sensitivity_spans_without_a_hit` and extra assertions
   (`values_by_column`, hit shape, child paths that need quoting): 5 + 17 = 22 (plan: 13).
+
+## Task 17 — Discovery, snapshots and the `discover_job` handler
+
+- `dps/snapshots.py` — **the plan's override semantics lost information, changed to "overrides
+  accumulate per path".** The plan replaced the stored override list on every `set_overrides`
+  and re-applied it to the *stored* (already overridden) columns from their method suggestions.
+  An entity, free-text or anchor override is not undone by resetting methods, so a later call that
+  omitted it left the column reclassified but flagged `override=False` — the evidence pack would
+  then under-report what the owner changed. `set_overrides` now merges the new overrides into the
+  stored list (per path; fields set later win; a re-specified path moves to the end) and applies
+  the merged list; an override stays visible until replaced (`merge_overrides`, public;
+  `test_overrides_accumulate_per_path`). An explicit `entity_type: null` marks a column not
+  sensitive (`keep`); overrides are stored and hashed with `exclude_unset` so that explicit null
+  survives the round trip. Contract §5.3 notes the semantics (same commit).
+- `apply_overrides` takes an additional optional `shape` (the snapshot's `TableShape`), so a
+  re-suggestion sees the column's real `nullable`; `text_column` overrides follow fixed rules
+  (true without an entity → `FREE_TEXT`; false on `FREE_TEXT` → not sensitive); an anchor on a
+  column without an entity is refused with **new code `override_anchor_invalid`** (422), and a
+  column reclassified to "not sensitive" loses the anchor. The preset is used for re-suggestion
+  only when both its name and `config_hash` match the snapshot (an inline policy named like a
+  preset is treated as inline). A missing snapshot is **new code `snapshot_not_found`** (404).
+  `accept_snapshot` catches the unique-index race outside the transaction (`snapshot_conflict`).
+  All queries also filter `tenant_id` beside RLS. Contract §5.3 lists the new codes.
+- `dps/layers/connectors/discovery.py` `discover_job`, failures the plan let escape uncoded:
+  `open_connector` runs inside the `try` (plan: before it, so a refused or unreachable source
+  raised out of the handler and was never retried — `test_an_unreachable_source_is_retried`);
+  `SecretUnavailable` → `secret_unavailable`, `ConnectionStoreError` → its code, an invalid inline
+  policy → `policy_invalid`, an unparsable stored spec → `spec_invalid`; a target-only connection
+  → `connection_role`. A stored spec that carries a selection but no `spec_enc` fails with
+  `secret_unavailable` (the plan's code would have replaced the selection with an empty one and
+  sampled the whole table). Failed jobs record `progress.outcome = "failed"`.
+- `classify_columns`: binary / LOB-binary / ObjectId columns are classified by name only, as the
+  plan's text says (its code ran the detector over the hex text of every blob); their
+  `null_rate` counts non-null values. The anchor flag is set with `model_copy`.
+- `dps/worker.py`: `HandlerContext.__repr__` shows the worker id only (the dataclass default repr
+  would print the KEK bytes into any log line or traceback that formats the context).
+- Fixtures: `engine` and `handler_ctx` in `tests/fixtures/db.py` (the context's `secret_dir` is a
+  per-test tmp directory); `source_secrets` and `register_source` (extra `port` keyword, for the
+  unreachable-source test) in `tests/fixtures/sources.py`; `SourcePg.customers_table` uses the
+  demo DDL without its foreign key (the test schema has no `employees`) and rows from
+  `SurrogateEngine` personas under a fixed test-only seed. `tests/connectors/factories.py` also
+  provides `customers_rows()` and `classified_columns()`, which `tests/test_discovery_classify.py`
+  uses instead of a local copy.
+- Tests: the plan's 3 + 1 + 1 plus offline `test_empty_samples_and_nulls`,
+  `test_type_compatibility_rules`, `test_overrides_apply_to_suggestions`, `test_override_errors`,
+  `test_free_text_overrides`, `test_content_hash_is_canonical`; db
+  `test_overrides_accumulate_per_path`, `test_missing_snapshots_and_paging`; integration
+  `test_several_objects_make_one_snapshot_each`, `test_failures_are_coded_and_value_free`,
+  `test_an_unreachable_source_is_retried`: 9 + 3 + 4 = 16 (plan: 5). The discover test also
+  checks that no sampled name, e-mail or mobile number reaches the stored snapshot.
