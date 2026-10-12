@@ -911,23 +911,35 @@ export function shortSha(sha: string): string {
   return sha.length > 12 ? `${sha.slice(0, 8)}…${sha.slice(-4)}` : sha;
 }
 
+/** A run whose verification can pass: a failed or canceled run's output is incomplete (N3). */
+export function finishedOutcome(outcome: string | null | undefined): boolean {
+  return !outcome || outcome === 'succeeded' || outcome === 'dry_run';
+}
+
 /**
  * The verification chip of a pack (mockups 09, 10): "passed · 0 leaks", "failed · 2 leaks caught",
- * "failed closed" for a run that stopped before its counters held a hit (a preflight leak), and
+ * "failed closed" for a run that stopped before its counters held a hit (a preflight leak),
  * "review required" when the post-write sample found personal data in a column kept as not
- * personal (never "passed": the output holds untransformed personal data).
+ * personal (never "passed": the output holds untransformed personal data), and "not verified · job
+ * failed (length_overflow)" for a run that ended failed or canceled for another reason: its sweep
+ * saw only what was written, often nothing, so it never reads as passed (packs stored before that
+ * rule could say `passed: true` for such a run; the outcome decides).
  */
-export function verificationText(passed: boolean, hits: number, review = false): string {
-  if (passed) return `passed · ${fmtCount(hits)} leaks`;
+export function verificationText(passed: boolean, hits: number, review = false, outcome?: string | null, errorCode?: string | null): string {
+  const finished = finishedOutcome(outcome);
+  if (passed && finished) return `passed · ${fmtCount(hits)} leaks`;
   if (hits > 0) return `failed · ${fmtCount(hits)} ${hits === 1 ? 'leak' : 'leaks'} caught`;
+  if (!finished && errorCode !== 'leakage') return `not verified · job ${outcome}${errorCode ? ` (${errorCode})` : ''}`;
   if (review) return 'review required';
   return 'failed closed';
 }
 
-/** The chip tone of a verification: emerald passed, amber review required, rose failed. */
-export function verificationTone(passed: boolean, hits: number, review = false): 'emerald' | 'amber' | 'rose' {
-  if (passed) return 'emerald';
-  return review && hits === 0 ? 'amber' : 'rose';
+/** The chip tone of a verification: emerald passed, amber review required, slate canceled, rose failed. */
+export function verificationTone(passed: boolean, hits: number, review = false, outcome?: string | null): 'emerald' | 'amber' | 'rose' | 'slate' {
+  const finished = finishedOutcome(outcome);
+  if (passed && finished) return 'emerald';
+  if (!finished && hits === 0 && outcome === 'canceled') return 'slate';
+  return review && hits === 0 && finished ? 'amber' : 'rose';
 }
 
 /** Where a pack's run wrote, as its title shows it. */

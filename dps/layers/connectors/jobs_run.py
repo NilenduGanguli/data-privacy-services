@@ -1031,17 +1031,25 @@ def scan_written(
 
 
 def verification_outcome(
-    hits: int, leakage: bool, post_sample: dict[str, Any] | None
+    hits: int,
+    leakage: bool,
+    post_sample: dict[str, Any] | None,
+    *,
+    outcome: str = "succeeded",
 ) -> tuple[bool, str, bool]:
     """``(passed, status, review_required)`` of a run's verification.
 
     ``failed`` when the sweep caught an original (or refused a batch as leakage);
-    ``review_required`` when the post-write sample found personal data in a column the snapshot
-    called not personal; else ``passed``. Only ``passed`` passes.
+    ``incomplete`` when the job ended ``failed`` or ``canceled`` without a hit (its sweep saw only
+    what was written before it stopped, often nothing: a run refused at prepare is never "passed
+    · 0 leaks"); ``review_required`` when the post-write sample found personal data in a column the
+    snapshot called not personal; else ``passed``. Only ``passed`` passes.
     """
     review = int((post_sample or {}).get("kept_column_hits") or 0) > 0
     if hits or leakage:
         return False, "failed", review
+    if outcome not in ("succeeded", "dry_run"):
+        return False, "incomplete", review
     if review:
         return False, "review_required", True
     return True, "passed", False
@@ -1298,7 +1306,7 @@ async def _store_evidence(
     counters = progress.values_by_method
     hits = int(counters.get("verify:hits", 0)) + int(progress.verification.get("hits", 0))
     leakage = job.error_code == "leakage" or any(p.error_code == "leakage" for p in parts)
-    passed, status, review = verification_outcome(hits, leakage, post_sample)
+    passed, status, review = verification_outcome(hits, leakage, post_sample, outcome=outcome)
     verification = {
         "mode": spec.options.verify,
         "batches": sum(p.batch_no for p in parts),

@@ -205,7 +205,7 @@ overrides}, consistency {scope, field_scoped, kid, seed_fingerprint, key_custody
 purged_at}}, columns [{path, entity_type, method, reversible, values, fallbacks}], reveal_map [{path,
 entity_type, method, params, anchor_path, reveal}], counts {rows_estimated, rows_read, rows_written,
 rows_skipped, partitions, batches, resumed_partitions}, verification {mode, batches, values_checked,
-hits, passed, status (passed|review_required|failed), review_required, post_sample {rows,
+hits, passed, status (passed|review_required|failed|incomplete), review_required, post_sample {rows,
 detector_hits, kept_column_hits, kept_columns, declared_kept_hits}}, fidelity/privacy/utility (M5),
 scan (M4), timings {started_at, finished_at, duration_s, rows_per_s}, partitions [{no, rows, attempts,
 resumed, state}], errors [{code, where}], config_hash` (sha256 of policy hash + snapshot hash +
@@ -221,6 +221,14 @@ in place, `CITY: keep`). Any `kept_column_hits` make the verification `review_re
 job's `progress.verification.kept_hits` carries the count to the job page; `failed` (sweep hits or a
 leakage refusal) wins over it. `GET /evidence` rows carry `review_required`; the console shows
 "review required" (amber), never "verified · 0 leaks".
+
+**A run that did not finish is never verified** (verify r2, N3). A job that ends `failed` or
+`canceled` without a sweep hit (e.g. refused at prepare with `length_overflow`, 0 rows) gets
+`verification.status: incomplete`, `passed: false`: its sweep saw only what was written before it
+stopped. `GET /evidence` rows answer `passed: false` for any pack whose `outcome` is not
+`succeeded`/`dry_run` (packs stored before this rule said `passed: true`) and carry `error_code`,
+the pack's first error code; the console shows "not verified · job failed (length_overflow)" (a
+preflight leak stays "failed closed"), and the printable page "not verified · job failed".
 
 `pack_sha256` = sha256 of the canonical JSON (sorted keys, compact separators). Each pack is stored
 with a JSON and a printable HTML artefact (the console's Print / save as PDF uses the browser; the PDF

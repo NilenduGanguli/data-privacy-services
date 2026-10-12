@@ -184,3 +184,20 @@ def test_the_pack_never_says_verified_when_review_is_required() -> None:
     assert "Review required" in page and "value" in page
     clean = build_pack(evidence_inputs(mode="obfuscate"))
     assert "verified · 0 leaks" in render_html(clean, sha=pack_sha256(clean))
+
+
+@pytest.mark.parametrize("outcome", ["failed", "canceled"])
+def test_a_job_that_did_not_finish_is_never_verified(outcome: str) -> None:
+    """N3: a failed or canceled run (0 rows, length_overflow at prepare) is not "passed · 0 leaks"."""
+    assert verification_outcome(0, False, None, outcome=outcome) == (False, "incomplete", False)
+    assert verification_outcome(0, False, {"kept_column_hits": 2}, outcome=outcome) == (
+        False,
+        "incomplete",
+        True,
+    )
+    assert verification_outcome(3, False, None, outcome=outcome) == (False, "failed", False)
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "dry_run"])
+def test_finished_runs_keep_their_verdict(outcome: str) -> None:
+    assert verification_outcome(0, False, None, outcome=outcome) == (True, "passed", False)

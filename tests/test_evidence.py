@@ -125,3 +125,27 @@ def test_html_escapes_everything_and_has_no_scripts() -> None:
     synth_page = render_html(synth, sha=pack_sha256(synth))
     assert "synthetic — measured, not claimed anonymous" in synth_page
     assert "<script" not in synth_page
+
+
+def test_a_failed_run_never_reads_as_verified() -> None:
+    """N3: a failed job with 0 rows is "not verified · job failed", even when the counters it
+    reached held no hit, and an older pack that recorded passed: true renders the same."""
+    inputs = evidence_inputs(mode="obfuscate", outcome="failed")
+    inputs.plan = None
+    inputs.errors = [{"code": "length_overflow", "where": "prepare"}]
+    inputs.verification = {"mode": "strict", "hits": 0, "passed": True, "status": "passed"}
+    pack = build_pack(inputs)
+    assert pack.verification["passed"] is False and pack.verification["status"] == "incomplete"
+    page = render_html(pack, sha=pack_sha256(pack))
+    assert "not verified · job failed" in page and "verified · 0 leaks" not in page
+    legacy = pack.model_copy(
+        update={"verification": {**pack.verification, "passed": True, "status": "passed"}}
+    )
+    legacy_page = render_html(legacy, sha=pack_sha256(legacy))
+    assert "not verified · job failed" in legacy_page and "verified · 0 leaks" not in legacy_page
+    canceled = build_pack(evidence_inputs(mode="obfuscate", outcome="canceled"))
+    assert canceled.verification["passed"] is False
+    assert "not verified · job canceled" in render_html(canceled, sha=pack_sha256(canceled))
+    done = build_pack(evidence_inputs(mode="obfuscate"))
+    assert done.verification["passed"] is True
+    assert "verified · 0 leaks" in render_html(done, sha=pack_sha256(done))

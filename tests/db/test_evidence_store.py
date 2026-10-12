@@ -81,3 +81,31 @@ async def test_list_pages_newest_first(migrated_db: Any, tmp_path: Path) -> None
     rest, end = await list_evidence("t1", limit=2, cursor=cursor)
     assert [i.id for i in rest] == [ids[0]] and end is None
     assert first[0].mode == "synthesize" and first[0].label.startswith("synthetic")
+
+
+async def test_the_list_shows_the_real_outcome_of_a_failed_run(
+    migrated_db: Any, tmp_path: Path
+) -> None:
+    """N3: Reports lists a failed 0-row run as not passed with its error code, including a pack
+    stored before the fix with ``verification.passed: true``."""
+    artefacts = ArtefactService(LocalObjectStore(tmp_path), acquire=db.acquire)
+    inputs = evidence_inputs(mode="obfuscate", outcome="failed")
+    inputs.plan = None
+    inputs.errors = [{"code": "length_overflow", "where": "prepare"}]
+    inputs.verification = {"mode": "strict", "hits": 0, "passed": True}
+    await jobs.create_job(
+        tenant_id="t1", kind=JobKind.run, phase=JobPhase.prepare, spec={}, job_id=inputs.job.id
+    )
+    pack = build_pack(inputs)
+    legacy = pack.model_copy(update={"verification": {**pack.verification, "passed": True}})
+    await save_evidence(legacy, artefacts=artefacts, acquire=db.acquire, expires_at=None)
+    (item,), _ = await list_evidence("t1", job_id=inputs.job.id)
+    assert item.outcome == "failed" and item.passed is False and item.hits == 0
+    assert item.error_code == "length_overflow"
+    ok = evidence_inputs(mode="obfuscate")
+    await jobs.create_job(
+        tenant_id="t1", kind=JobKind.run, phase=JobPhase.prepare, spec={}, job_id=ok.job.id
+    )
+    await save_evidence(build_pack(ok), artefacts=artefacts, acquire=db.acquire, expires_at=None)
+    (done,), _ = await list_evidence("t1", job_id=ok.job.id)
+    assert done.passed is True and done.error_code is None

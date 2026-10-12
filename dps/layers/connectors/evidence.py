@@ -41,6 +41,8 @@ Outcome = Literal["succeeded", "failed", "canceled", "dry_run"]
 _HIDDEN = ConfigDict(hide_input_in_errors=True)
 _MIN_LIMIT, _MAX_LIMIT = 1, 200
 _REPLACED_KEYS = frozenset({"generate", "offset"})
+#: Outcomes whose verification can pass: a failed or canceled run's output is incomplete.
+FINISHED_OUTCOMES = frozenset({"succeeded", "dry_run"})
 
 
 class EvidencePack(BaseModel):
@@ -141,6 +143,8 @@ class EvidenceSummary(BaseModel):
     hits: int
     rows_written: int
     html_artefact_id: str | None = None
+    #: The first error of a failed or canceled run (a code, e.g. ``length_overflow``).
+    error_code: str | None = None
 
 
 def _canon(doc: Any) -> bytes:
@@ -336,6 +340,10 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
         **inputs.verification,
     }
     verification.setdefault("hits", hits)
+    if inputs.outcome not in FINISHED_OUTCOMES and verification.get("passed"):
+        # N3: a run that did not finish is never "passed" (its output is incomplete, often empty)
+        verification["passed"] = False
+        verification["status"] = "incomplete"
     verification["fallbacks"] = fallbacks
     purpose = spec.get("purpose") or job.purpose or None
     return EvidencePack(
@@ -450,10 +458,17 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
     e = _cell
     v = pack.verification
     hits = v.get("hits", 0)
-    passed = bool(v.get("passed"))
+    # packs stored before N3 could say passed for a failed run: the outcome decides
+    passed = bool(v.get("passed")) and pack.outcome in FINISHED_OUTCOMES
     post = v.get("post_sample") or {}
     if passed:
         status = f"<span class='chip ok'>verified · {e(hits)} leaks</span>"
+    elif not hits and pack.outcome not in FINISHED_OUTCOMES:
+        first = pack.errors[0].get("code") if pack.errors else None
+        status = (
+            f"<span class='chip bad'>not verified · job {e(pack.outcome)}"
+            f"{f' ({e(first)})' if first else ''}</span>"
+        )
     elif v.get("review_required") and not hits:
         status = (
             f"<span class='chip warn'>review required · {e(post.get('kept_column_hits', 0))} "
@@ -664,7 +679,10 @@ async def list_evidence(
             "COALESCE(pack->'target'->>'object', pack->'target'->'files'->>'prefix') AS target, "
             "pack->'target'->>'write_mode' AS write_mode, pack->'policy'->>'name' AS policy, "
             "pack->'purpose'->>'ticket' AS ticket, "
-            "COALESCE((pack->'verification'->>'passed')::boolean, false) AS passed, "
+            # a failed or canceled run never passed (packs stored before N3 could say it did)
+            "(COALESCE((pack->'verification'->>'passed')::boolean, false) "
+            "AND pack->>'outcome' IN ('succeeded', 'dry_run')) AS passed, "
+            "pack->'errors'->0->>'code' AS error_code, "
             "COALESCE((pack->'verification'->>'review_required')::boolean, false) "
             "AS review_required, "
             "COALESCE((pack->'verification'->>'hits')::int, 0) AS hits, "

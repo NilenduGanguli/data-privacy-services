@@ -298,3 +298,20 @@ describe('connection change codes (SEC-3)', () => {
     expect(errorText('admin_scope_required')).toMatch(/changing a production-tagged connection/);
   });
 });
+
+describe('the real outcome of a run that did not finish (N3)', () => {
+  it('never words a failed or canceled run as passed', () => {
+    expect(verificationText(false, 0, false, 'failed', 'length_overflow')).toBe('not verified · job failed (length_overflow)');
+    // a pack stored before the fix said passed: the outcome decides
+    expect(verificationText(true, 0, false, 'failed', 'length_overflow')).toBe('not verified · job failed (length_overflow)');
+    expect(verificationTone(true, 0, false, 'failed')).toBe('rose');
+    expect(verificationText(false, 0, false, 'canceled')).toBe('not verified · job canceled');
+    expect(verificationTone(false, 0, false, 'canceled')).toBe('slate');
+    // a leak caught by the preflight is still "failed closed", and hits still count first
+    expect(verificationText(false, 0, false, 'failed', 'leakage')).toBe('failed closed');
+    expect(verificationText(false, 2, false, 'failed', 'leakage')).toBe('failed · 2 leaks caught');
+    expect(verificationText(true, 0, false, 'succeeded')).toBe('passed · 0 leaks');
+    expect(verificationText(true, 0, false, 'dry_run')).toBe('passed · 0 leaks');
+    expect(verificationTone(true, 0, false, 'succeeded')).toBe('emerald');
+  });
+});

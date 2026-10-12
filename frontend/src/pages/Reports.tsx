@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
-import { fmtCount, fmtUtc, shortId, verificationText, verificationTone, writeModeLabel } from '../lib/jobs';
+import { finishedOutcome, fmtCount, fmtUtc, shortId, verificationText, verificationTone, writeModeLabel } from '../lib/jobs';
 import type { EvidenceSummary } from '../lib/types';
 
 function apiMessage(e: unknown): string {
@@ -40,8 +40,10 @@ export function Reports(): JSX.Element {
   }
 
   const list = items ?? [];
-  const review = list.filter((s) => !s.passed && s.review_required && !s.hits).length;
-  const failed = list.filter((s) => !s.passed).length - review;
+  // the outcome decides: a failed or canceled run is never passed (N3), whatever its pack says
+  const passedRun = (s: EvidenceSummary): boolean => s.passed && finishedOutcome(s.outcome);
+  const review = list.filter((s) => !passedRun(s) && s.review_required && !s.hits && finishedOutcome(s.outcome)).length;
+  const failed = list.filter((s) => !passedRun(s)).length - review;
   return (
     <main className="page reports-page">
       <div className="page-head">
@@ -49,7 +51,7 @@ export function Reports(): JSX.Element {
       </div>
       <div className="grid cols-3">
         <div className="card kpi"><div className="label">Evidence packs</div><div className="value">{items ? fmtCount(list.length) : '—'}{cursor ? '+' : ''}</div><div className="delta">{cursor ? 'loaded so far · older packs below' : 'kept under the tenant retention policy'}</div></div>
-        <div className="card kpi"><div className="label">Verification</div><div className="value">{items ? `${fmtCount(list.length - failed - review)} / ${fmtCount(review)} / ${fmtCount(failed)}` : '—'}</div><div className="delta">passed / review required / failed{failed ? ' · failures failed closed' : ''}</div></div>
+        <div className="card kpi"><div className="label">Verification</div><div className="value">{items ? `${fmtCount(list.length - failed - review)} / ${fmtCount(review)} / ${fmtCount(failed)}` : '—'}</div><div className="delta">passed / review required / failed or not finished{failed ? ' · failures failed closed' : ''}</div></div>
         <div className="card kpi zero"><div className="label">Customer values stored</div><div className="value">0</div><div className="delta">counts, hashes and key ids only</div></div>
       </div>
 
@@ -64,7 +66,7 @@ export function Reports(): JSX.Element {
               <td data-l="Layer">Connectors</td>
               <td data-l="Mode">{s.mode ? <span className={`chip ${s.mode === 'synthesize' ? 'violet' : 'teal'}`}>{s.mode}</span> : '—'}</td>
               <td className="mono" data-l="Policy">{s.policy ?? '—'}</td>
-              <td data-l="Verification"><span className={`chip ${verificationTone(s.passed, s.hits, s.review_required)}`} title={s.review_required && !s.passed && !s.hits ? 'The post-write sample found personal data in a column kept as not personal' : undefined}>{verificationText(s.passed, s.hits, s.review_required)}</span></td>
+              <td data-l="Verification"><span className={`chip ${verificationTone(s.passed, s.hits, s.review_required, s.outcome)}`} title={!finishedOutcome(s.outcome) ? `The job ended ${s.outcome}${s.error_code ? ` with ${s.error_code}` : ''}; its output is incomplete and was not verified` : s.review_required && !s.passed && !s.hits ? 'The post-write sample found personal data in a column kept as not personal' : undefined}>{verificationText(s.passed, s.hits, s.review_required, s.outcome, s.error_code)}</span></td>
               <td className="t" data-l="Created (UTC)">{fmtUtc(s.created_at, false).replace(' UTC', '')}</td>
               <td data-l="Download"><div className="dl">
                 <button className="btn btn-sm" type="button" disabled={busy === s.id} aria-label={`Download evidence pack ${shortId(s.job_id)} as JSON`} onClick={() => void downloadJson(s)}>JSON</button>
