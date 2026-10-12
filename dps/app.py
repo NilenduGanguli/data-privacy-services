@@ -11,9 +11,12 @@ class name logged — it never reaches the server's traceback log, which could q
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -25,16 +28,20 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from dps import __version__
-from dps.audit import AuditSink, LogAuditSink, NullAuditSink
-from dps.auth import API_KEY_HEADER, TENANT_HEADER, StaticKeyStore
+from dps.audit import AuditSink, DbAuditSink, LogAuditSink, NullAuditSink
+from dps.auth import API_KEY_HEADER, TENANT_HEADER, StaticKeyStore, coded_http_exception_handler
 from dps.config import Settings, get_settings
 from dps.engine.service import PrivacyEngine
 from dps.layers.api.common import TRACE_HEADER
 from dps.layers.api.routers import detect, ops, policies, transform
 from dps.llm.gateway import get_gateway
 from dps.observability import READINESS, configure_logging, get_logger
-from dps.posture import assert_production_posture
+from dps.posture import PostureError, assert_production_posture
 from dps.ratelimit import RateLimiter
+from dps.secrets import load_kek
+
+if TYPE_CHECKING:
+    from dps.worker import Consumer
 
 logger = get_logger(__name__)
 FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
@@ -43,6 +50,10 @@ CSP = (
     "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 )
 HSTS = "max-age=31536000; includeSubDomains"
+#: Seconds between reconnect attempts while the metadata database is down at boot.
+DB_RETRY_SECONDS = 10.0
+IDEMPOTENCY_HEADER = "Idempotency-Key"
+ASSET_CACHE = "public, max-age=31536000, immutable"
 
 
 class _SecurityHeaders:
@@ -179,10 +190,174 @@ def _mount_frontend(app: FastAPI) -> None:
     async def _spa(full_path: str) -> FileResponse | JSONResponse:
         if full_path == "api" or full_path.startswith("api/"):
             return JSONResponse({"detail": "API route not found"}, status_code=404)
-        candidate = (dist / full_path).resolve()
-        if not candidate.is_relative_to(dist):
+        found = _dist_file(dist, full_path)
+        if found is None or found == index:
             return _index()
-        return FileResponse(candidate) if candidate.is_file() else _index()
+        cached = assets.is_dir() and found.is_relative_to(assets.resolve())
+        return FileResponse(found, headers={"cache-control": ASSET_CACHE} if cached else None)
+
+
+def _dist_file(dist: Path, full_path: str) -> Path | None:
+    """The file a console route asks for, if any.
+
+    The console is built with ``base: './'``, so a page at ``/data-sources/jobs/<id>`` requests
+    ``/data-sources/jobs/assets/<file>`` and ``/data-sources/jobs/favicon.svg``. Each path suffix
+    is tried inside the dist root (``assets/<file>``, then ``<file>``); ``.``/``..`` segments and
+    anything resolving outside the root are never served.
+    """
+    parts = [p for p in full_path.split("/") if p]
+    if any(p in (".", "..") or "\\" in p for p in parts):
+        return None
+    for i in range(len(parts)):
+        candidate = (dist / "/".join(parts[i:])).resolve()
+        if candidate.is_relative_to(dist) and candidate.is_file():
+            return candidate
+    return None
+
+
+class _JobPlatform:
+    """The app's side of the job platform (M2): metadata DB, migrations mode, RLS posture, KEK,
+    the DB audit sink, readiness ``db``/``jobs`` and — locally only — an embedded worker.
+
+    A database that is down at boot leaves ``api-core`` ready, reports ``db: down`` and retries
+    every :data:`DB_RETRY_SECONDS`; the M2 routes answer 503 ``db_unavailable`` meanwhile.
+    """
+
+    def __init__(self, app: FastAPI, settings: Settings, *, own_audit: bool) -> None:
+        self.app, self.settings, self.own_audit = app, settings, own_audit
+        self.sink: DbAuditSink | None = None
+        self.retry: asyncio.Task[None] | None = None
+        self.consumer: Consumer | None = None
+        self.worker: asyncio.Task[None] | None = None
+
+    @property
+    def configured(self) -> bool:
+        from dps.db import db_configured  # the db extra is needed only with a database
+
+        return bool(self.app.state.m2_routes) and db_configured(self.settings)
+
+    async def start(self) -> None:
+        """Connect (or schedule reconnects); refuses boot only for a staging/prod RLS problem."""
+        if not self.configured:
+            READINESS.set("db", False, "unconfigured")
+            READINESS.set("jobs", False, "unconfigured")
+            return
+        from dps import db
+
+        self.app.state.kek = load_kek(self.settings)
+        if self.own_audit and self.settings.audit_enabled:
+            self.sink = DbAuditSink(db.acquire, self.settings)
+            self.sink.start()
+            self.app.state.audit = self.sink
+        try:
+            await self._connect()
+        except PostureError:
+            await self.stop()
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported by class name; retried in background
+            self._down(exc)
+            self.retry = asyncio.create_task(self._reconnect(), name="dps-db-reconnect")
+
+    def _down(self, exc: BaseException) -> None:
+        self.app.state.db_state = "down"
+        READINESS.set("db", False, "down", error=type(exc).__name__)
+        READINESS.set("jobs", False, "db down")
+        logger.warning("db_unavailable", error=type(exc).__name__)
+
+    async def _reconnect(self) -> None:
+        while True:
+            await asyncio.sleep(DB_RETRY_SECONDS)
+            try:
+                await self._connect()
+                return
+            except PostureError:
+                logger.error("rls_posture_refused")
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._down(exc)
+
+    async def _connect(self) -> None:
+        from dps import db
+
+        settings = self.settings
+        await db.init_pool(settings)
+        async with db.acquire(None) as conn:
+            await conn.fetchval("SELECT 1")
+        if settings.migrations_mode == "auto":
+            mconn = await db.open_migration_connection(settings)
+            try:
+                await db.run_migrations(settings, connection=mconn)
+            finally:
+                await mconn.close()
+        try:
+            await db.verify_migrations(settings)
+            migrations = "verified"
+        except db.MigrationDrift:
+            migrations = "pending or drifted"
+            logger.warning("migrations_not_verified", mode=settings.migrations_mode)
+        problems = await db.assert_rls_posture(settings)
+        for problem in problems:
+            logger.warning("rls_posture_problem", reason=problem)
+        if problems and settings.is_production:
+            raise PostureError("rls posture refused: " + "; ".join(problems))
+        kek = self.app.state.kek is not None
+        ready = migrations == "verified"
+        self.app.state.db_state = "up" if ready else "down"
+        READINESS.set("db", True, "up", migrations=migrations)
+        READINESS.set(
+            "jobs",
+            ready and kek,
+            "ready" if ready and kek else ("kek missing" if ready else "migrations " + migrations),
+        )
+        if ready and settings.embedded_worker:
+            await self._start_worker()
+
+    async def _start_worker(self) -> None:
+        """Local only (posture refuses it in staging/prod): a ``Consumer`` in the app's loop."""
+        from dps import db
+        from dps.jobs import JobKind, JobPhase
+        from dps.layers.connectors.discovery import discover_job
+        from dps.layers.connectors.jobs_run import finalize, prepare, run_partition
+        from dps.retention import retention_job
+        from dps.worker import Consumer, build_context
+
+        try:
+            ctx = build_context(self.settings, audit=self.app.state.audit)
+        except RuntimeError:
+            logger.warning("embedded_worker_disabled", reason="DPS_JOB_KEK is not set")
+            return
+        await db.init_worker_pool(self.settings)
+        self.consumer = Consumer(
+            self.settings,
+            kinds=(JobKind.discover, JobKind.run, JobKind.retention),
+            handlers={
+                JobPhase.discover: discover_job,
+                JobPhase.prepare: prepare,
+                JobPhase.finalize: finalize,
+                JobPhase.retention: retention_job,
+            },
+            partition_handler=run_partition,
+            concurrency=self.settings.worker_concurrency,
+            ctx=ctx,
+        )
+        self.worker = asyncio.create_task(self.consumer.run(), name="dps-embedded-worker")
+        logger.info("embedded_worker_started", worker_id=ctx.worker_id)
+
+    async def stop(self) -> None:
+        """Drain the embedded worker, flush the audit sink, close the pools."""
+        if self.retry is not None:
+            self.retry.cancel()
+            await asyncio.gather(self.retry, return_exceptions=True)
+        if self.consumer is not None and self.worker is not None:
+            self.consumer.stop()
+            await asyncio.gather(self.worker, return_exceptions=True)
+        if self.sink is not None:
+            await self.sink.stop()
+        if self.configured:
+            from dps import db
+
+            with contextlib.suppress(Exception):
+                await db.close_pools()
 
 
 def create_app(
@@ -239,9 +414,14 @@ def create_app(
         READINESS.set(
             "fpe", engine.fpe_enabled, "ff1" if engine.fpe_enabled else "det_token fallback"
         )
+        m2 = _JobPlatform(app, settings, own_audit=audit_sink is None)
+        await m2.start()
         logger.info("startup", env=settings.env, auth=settings.auth_enabled, provider=provider)
-        yield
-        READINESS.set("api-core", False, "stopping", version=__version__)
+        try:
+            yield
+        finally:
+            READINESS.set("api-core", False, "stopping", version=__version__)
+            await m2.stop()
 
     app = FastAPI(
         title="Data Privacy Services",
@@ -259,6 +439,9 @@ def create_app(
     )
     app.state.audit = audit_sink or (LogAuditSink() if settings.audit_enabled else NullAuditSink())
     app.add_exception_handler(RequestValidationError, _validation_error)
+    app.add_exception_handler(StarletteHTTPException, coded_http_exception_handler)
+    app.state.db_state = "unconfigured"
+    app.state.kek = None
 
     # add_middleware prepends: the last one added is the outermost.
     app.add_middleware(_ValueFreeErrors)
@@ -266,8 +449,14 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type", API_KEY_HEADER, TENANT_HEADER, TRACE_HEADER],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Content-Type",
+            API_KEY_HEADER,
+            TENANT_HEADER,
+            TRACE_HEADER,
+            IDEMPOTENCY_HEADER,
+        ],
     )
     app.add_middleware(_SecurityHeaders, hsts=settings.env != "local")
 
@@ -275,5 +464,20 @@ def create_app(
     app.include_router(detect.router)
     app.include_router(transform.router)
     app.include_router(policies.router)
+    app.state.m2_routes = _include_m2_routers(app)
     _mount_frontend(app)
     return app
+
+
+def _include_m2_routers(app: FastAPI) -> bool:
+    """The job platform's routes (contract §9). They need the ``db`` and ``connectors`` extras; a
+    Layer 1 install without them serves the engine routes only."""
+    try:
+        from dps.layers.api.errors import install_error_handlers
+        from dps.layers.api.routers import connections
+    except ModuleNotFoundError as exc:
+        logger.warning("m2_routes_disabled", reason=f"missing module {exc.name}")
+        return False
+    install_error_handlers(app)
+    app.include_router(connections.router)
+    return True

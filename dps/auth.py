@@ -21,7 +21,10 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from fastapi import HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from dps.config import Settings
 from dps.observability import get_logger
@@ -42,12 +45,32 @@ TENANT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
-class AuthError(Exception):
-    """An authentication or authorisation failure with its HTTP status (value-free detail)."""
+#: Tenant ids starting with this are DPS pseudo-tenants (``_system``, contract §8.1): never
+#: selectable through the API, not even with a wildcard key.
+RESERVED_TENANT_PREFIX = "_"
 
-    def __init__(self, status: int, detail: str) -> None:
+
+class AuthError(Exception):
+    """An authentication or authorisation failure with its HTTP status (value-free detail).
+
+    ``code`` (M2) is a stable machine-readable code; when set, the HTTP glue answers
+    ``{"detail", "code"}`` instead of M0's ``{"detail"}``.
+    """
+
+    def __init__(self, status: int, detail: str, code: str | None = None) -> None:
         super().__init__(detail)
-        self.status, self.detail = status, detail
+        self.status, self.detail, self.code = status, detail, code
+
+
+class CodedAuthHTTPException(HTTPException):
+    """An ``HTTPException`` that also carries a ``code``: rendered as ``{"detail", "code"}`` by
+    the M2 error handlers (``dps.layers.api.errors.install_error_handlers``)."""
+
+    def __init__(
+        self, status_code: int, detail: str, code: str, headers: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.code = code
 
 
 class Principal(BaseModel):
@@ -219,9 +242,12 @@ def resolve_tenant(principal: Principal, requested: str | None) -> str:
 
     Raises:
         AuthError: 400 when the header is not a tenant identifier, 403 when the tenant is not
-            granted or the key holds several tenants and none was chosen.
+            granted or the key holds several tenants and none was chosen, 403
+            ``tenant_reserved`` for a DPS pseudo-tenant (``_system``), wildcard keys included.
     """
     if requested:
+        if requested.startswith(RESERVED_TENANT_PREFIX):  # before the grant test: wildcards too
+            raise AuthError(403, "tenant id is reserved", code="tenant_reserved")
         if not TENANT_ID.fullmatch(requested):
             raise AuthError(400, f"{TENANT_HEADER} is not a tenant identifier")
         if not principal.can_access(requested):
@@ -238,7 +264,22 @@ def resolve_tenant(principal: Principal, requested: str | None) -> str:
 def _reject(request: Request, exc: AuthError, reason: str) -> HTTPException:
     logger.warning("auth_rejected", status_code=exc.status, reason=reason, route=request.url.path)
     headers = {"WWW-Authenticate": WWW_AUTHENTICATE} if exc.status == 401 else None
+    if exc.code is not None:
+        return CodedAuthHTTPException(exc.status, exc.detail, exc.code, headers=headers)
     return HTTPException(status_code=exc.status, detail=exc.detail, headers=headers)
+
+
+def _authorize(request: Request, scopes: tuple[str, ...]) -> Principal:
+    principal = current_principal(request)
+    if not any(principal.has_scope(s) for s in scopes):
+        wanted = " or ".join(repr(s) for s in scopes)
+        raise _reject(request, AuthError(403, f"scope {wanted} required"), "scope")
+    try:
+        request.state.tenant_id = resolve_tenant(principal, request.headers.get(TENANT_HEADER))
+    except AuthError as exc:
+        raise _reject(request, exc, "tenant") from None
+    request.state.principal = principal
+    return principal
 
 
 def current_principal(request: Request) -> Principal:
@@ -262,14 +303,32 @@ def require_scope(scope: str) -> Callable[[Request], Principal]:
         raise ValueError(f"unknown scope {scope!r}")
 
     def dependency(request: Request) -> Principal:
-        principal = current_principal(request)
-        if not principal.has_scope(scope):
-            raise _reject(request, AuthError(403, f"scope {scope!r} required"), "scope")
-        try:
-            request.state.tenant_id = resolve_tenant(principal, request.headers.get(TENANT_HEADER))
-        except AuthError as exc:
-            raise _reject(request, exc, "tenant") from None
-        request.state.principal = principal
-        return principal
+        return _authorize(request, (scope,))
 
     return dependency
+
+
+def require_any_scope(*scopes: str) -> Callable[[Request], Principal]:
+    """FastAPI dependency like :func:`require_scope`, satisfied by any one of ``scopes``
+    (evidence and artefacts: ``jobs`` or ``scan``; the route then checks the owning job's kind)."""
+    unknown = [s for s in scopes if s not in SCOPES]
+    if not scopes or unknown:
+        raise ValueError(f"unknown scopes {unknown!r}")
+
+    def dependency(request: Request) -> Principal:
+        return _authorize(request, tuple(scopes))
+
+    return dependency
+
+
+async def coded_http_exception_handler(request: Request, exc: Exception) -> Response:
+    """Exception handler: an ``HTTPException`` with a ``code`` answers ``{"detail", "code"}``;
+    any other keeps FastAPI's ``{"detail"}`` (M0's wire shape)."""
+    if not isinstance(exc, StarletteHTTPException):  # pragma: no cover - registered for it only
+        raise exc
+    code = getattr(exc, "code", None)
+    if isinstance(code, str):
+        return JSONResponse(
+            {"detail": exc.detail, "code": code}, status_code=exc.status_code, headers=exc.headers
+        )
+    return await http_exception_handler(request, exc)

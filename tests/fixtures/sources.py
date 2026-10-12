@@ -9,8 +9,9 @@ dropped afterwards. Rows put there by tests are synthetic.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -180,32 +181,70 @@ async def source_pg() -> AsyncIterator[SourcePg]:
     schema = f"t_{secrets.token_hex(4)}"
     conn = await asyncpg.connect(dsn)
     try:
-        await conn.execute(f'CREATE SCHEMA "{schema}"')
-        await conn.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO dps_reader, dps_writer')
-        await conn.execute(
-            f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" GRANT SELECT ON TABLES TO dps_reader'
-        )
-        await conn.execute(
-            f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" '
-            "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO dps_writer"
-        )
-        await conn.execute(
-            f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" '
-            "GRANT USAGE, SELECT ON SEQUENCES TO dps_writer"
-        )
-        await conn.execute(f'GRANT CREATE ON SCHEMA "{schema}" TO dps_writer')
+        await _create_schema(conn, schema)
         yield SourcePg(dsn=dsn, schema=schema, admin=conn)
     finally:
         await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await conn.close()
 
 
+@dataclass
+class SourcePgSync:
+    """A test schema in the ``bank`` database for synchronous tests (TestClient flows)."""
+
+    dsn: str
+    schema: str
+
+
+async def _create_schema(conn: asyncpg.Connection, schema: str) -> None:
+    await conn.execute(f'CREATE SCHEMA "{schema}"')
+    await conn.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO dps_reader, dps_writer')
+    await conn.execute(
+        f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" GRANT SELECT ON TABLES TO dps_reader'
+    )
+    await conn.execute(
+        f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" '
+        "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO dps_writer"
+    )
+    await conn.execute(
+        f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" GRANT USAGE, SELECT ON SEQUENCES TO dps_writer'
+    )
+    await conn.execute(f'GRANT CREATE ON SCHEMA "{schema}" TO dps_writer')
+
+
 @pytest.fixture
-def source_secrets(handler_ctx: HandlerContext) -> Path:
-    """Local ``secret_ref`` directories under the handler's ``secret_dir`` (contract §5.1):
+def source_pg_sync() -> Iterator[SourcePgSync]:
+    """A fresh schema with ``customers`` (200 synthetic rows), set up and dropped with
+    ``asyncio.run`` so synchronous tests (a ``TestClient`` owns its own loop) can use it."""
+    dsn = require_service("source-pg")
+    schema = f"t_{secrets.token_hex(4)}"
+
+    async def setup() -> None:
+        conn = await asyncpg.connect(dsn)
+        try:
+            await _create_schema(conn, schema)
+            await SourcePg(dsn=dsn, schema=schema, admin=conn).customers_table(rows=200)
+        finally:
+            await conn.close()
+
+    async def teardown() -> None:
+        conn = await asyncpg.connect(dsn)
+        try:
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        finally:
+            await conn.close()
+
+    asyncio.run(setup())
+    try:
+        yield SourcePgSync(dsn=dsn, schema=schema)
+    finally:
+        asyncio.run(teardown())
+
+
+def write_source_secrets(root: Path) -> Path:
+    """Write the local ``secret_ref`` directories under ``root`` (contract §5.1):
     ``dps/src/test-pg`` = dps_reader, ``dps/src/test-pg-rw`` = dps_writer,
     ``dps/src/test-pg-admin`` = postgres (local demo logins; password = login)."""
-    root = Path(handler_ctx.settings.secret_dir)
     for ref, login in (
         ("dps/src/test-pg", "dps_reader"),
         ("dps/src/test-pg-rw", "dps_writer"),
@@ -216,6 +255,12 @@ def source_secrets(handler_ctx: HandlerContext) -> Path:
         (folder / "username").write_text(login + "\n", encoding="utf-8")
         (folder / "password").write_text(login + "\n", encoding="utf-8")
     return root
+
+
+@pytest.fixture
+def source_secrets(handler_ctx: HandlerContext) -> Path:
+    """:func:`write_source_secrets` under the handler's ``secret_dir``."""
+    return write_source_secrets(Path(handler_ctx.settings.secret_dir))
 
 
 @pytest.fixture

@@ -597,6 +597,31 @@ _CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def check_for(code: str) -> str | None:
+    """The checklist entry (``one_statement``, ``literals_bound`` …) a selection code fails."""
+    for name, codes in _CHECKS:
+        if code in codes:
+            return name
+    return None
+
+
+def failed_checks(
+    sel: Selection, engine: Engine, shape: TableShape | None, code: str
+) -> list[dict[str, Any]]:
+    """:func:`selection_checks` for a selection refused with ``code`` (by binding, validation or
+    compilation): the entry ``code`` belongs to is failed even when re-validating the unbound
+    selection would not fail it."""
+    try:
+        checks = selection_checks(sel, engine, shape)
+    except SelectionError:  # the counting pass re-parses: report the refusal alone
+        checks = [{"name": name, "ok": True} for name, _ in _CHECKS]
+    name = check_for(code)
+    for entry in checks:
+        if entry["name"] == name and entry["ok"]:
+            entry["ok"], entry["code"] = False, code
+    return checks
+
+
 def selection_checks(
     sel: Selection, engine: Engine, shape: TableShape | None
 ) -> list[dict[str, Any]]:

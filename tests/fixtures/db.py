@@ -305,3 +305,52 @@ def handler_ctx(migrated_db: Settings, engine: PrivacyEngine, tmp_path: Path) ->
         ),
         audit=MemoryAuditSink(),
     )
+
+
+#: The API keys of :func:`api_client`: a wildcard key, a ``jobs`` key for tenants t1/t2 and a
+#: ``detect``-only key (test-only values).
+API_KEYS = (
+    '[{"name": "full", "key": "dps_full", "tenant_ids": ["*"], "scopes": ["*"]}, '
+    '{"name": "jobs", "key": "dps_jobs", "tenant_ids": ["t1", "t2"], "scopes": ["jobs", "detect"]}, '
+    '{"name": "detect", "key": "dps_detect", "tenant_ids": ["t1"], "scopes": ["detect"]}]'
+)
+
+
+def api_settings(db_settings: Settings, tmp_path: Path, **overrides: object) -> Settings:
+    """``db_settings`` for an app under test: auth on with :data:`API_KEYS`, no rate limit, the
+    secret/artefact/export folders under ``tmp_path`` (the source ``secret_ref`` files written)."""
+    from tests.fixtures.sources import write_source_secrets
+
+    secret_dir = write_source_secrets(tmp_path / "secrets")
+    update: dict[str, object] = {
+        "auth_enabled": True,
+        "api_keys": API_KEYS,
+        "rate_limit_enabled": False,
+        "secret_dir": str(secret_dir),
+        "artefact_dir": str(tmp_path / "artefacts"),
+        "export_root": str(tmp_path / "exports"),
+        "worker_metrics_port": 0,
+    }
+    update.update(overrides)
+    return db_settings.model_copy(update=update)
+
+
+@pytest.fixture
+def api_client(db_settings: Settings, tmp_path: Path) -> Iterator[tuple[object, object]]:
+    """``(TestClient, MemoryAuditSink)`` for an app on the test database (contract §12.2).
+
+    The app's lifespan owns the pools (do not combine with ``migrated_db``); every table is
+    truncated afterwards.
+    """
+    from fastapi.testclient import TestClient
+
+    from dps.app import create_app
+    from dps.audit import MemoryAuditSink
+
+    settings = api_settings(db_settings, tmp_path)
+    sink = MemoryAuditSink()
+    try:
+        with TestClient(create_app(settings, audit_sink=sink)) as client:
+            yield client, sink
+    finally:
+        asyncio.run(_truncate(db_settings))

@@ -185,8 +185,18 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 - `GET /health` — liveness, `{"status": "ok"}`.
 - `GET /readyz` — `{"ready", "components"}` with `api-core`, `llm-gateway` (`provider`, `coin_tls`
   `verified` / `insecure`), `ner`
-  (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`); **503** only when a required
-  component is down, and only `api-core` is required in M0 (it turns false on shutdown).
+  (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`); M2 adds `db` (`up` /
+  `down` / `unconfigured`, with `migrations: verified`) and `jobs` (ok when the DB is up, the
+  migrations verify and the KEK is loaded); **503** only when a required component is down, and
+  only `api-core` is required (it turns false on shutdown) — the engine routes never depend on the
+  database. A database that is down at boot is retried every 10 s; meanwhile the `/api/v1`
+  job-platform routes answer 503 `{"detail", "code": "db_unavailable"}`. RLS posture problems are
+  logged as `rls_posture_problem` locally and refuse boot in staging/prod.
+- M2 errors are `{"detail", "code", …}` (contract §8.2); M0 routes keep `{"detail"}`. A tenant id
+  starting with `_` (`_system`) is refused with 403 `tenant_reserved`, wildcard keys included; the
+  job platform takes lower-case tenant ids only (400 `tenant_invalid`). CORS allows
+  `GET POST PATCH DELETE OPTIONS` and the `Idempotency-Key` header. `DPS_EMBEDDED_WORKER=true`
+  (local only) runs a worker `Consumer` inside the app process.
 - `GET /metrics` — Prometheus: `dps_requests_total{route,outcome}`,
   `dps_request_seconds{route}`, `dps_findings_total{entity_type,detector}`,
   `dps_transforms_total{mode,method}`, `dps_llm_calls_total{provider,purpose,outcome}`,

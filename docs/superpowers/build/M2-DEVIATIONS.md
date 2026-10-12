@@ -1118,3 +1118,82 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
   9 (plan 4).
 - `HANDOFF.md` §4/§5: the worker command, its ops server, drain and retention; `DPS_HOST` is now read
   by the worker's ops server.
+
+## Task 24 — API foundation, connections routes, app wiring
+
+- `tests/test_app_m2.py` — **plan assertion that cannot pass at this task, adapted.**
+  `test_m2_routes_answer_503_without_a_database` called `GET /api/v1/jobs`, a Task 25 route; at
+  Task 24 it falls through to the SPA's 404. The test checks the connections routes here (same body:
+  `{"detail": "the metadata database is not configured", "code": "db_unavailable"}`) and Task 25
+  adds `/api/v1/jobs` to it. It also asserts the new readiness components (`db: unconfigured`).
+- `dps/auth.py`: `resolve_tenant` checks the reserved prefix **before** the identifier shape (the
+  plan: before the grant test) — `_system` does not match M0's `TENANT_ID` pattern (it must start
+  with a letter or digit), so a shape check first would have answered 400 instead of 403
+  `tenant_reserved`. `AuthError(status, detail, code=None)`; the glue raises
+  `CodedAuthHTTPException` (an `HTTPException` with `.code`) when a code is set, and
+  `coded_http_exception_handler` (registered by the app for every `HTTPException`) renders it as
+  `{"detail", "code"}` and leaves every other `HTTPException` to FastAPI's handler (M0's
+  `{"detail"}`, `WWW-Authenticate` kept). The handler lives in `dps.auth` (not `errors.py`) so a
+  Layer 1 install without the `db`/`connectors` extras still renders the reserved-tenant refusal.
+  `require_scope` and the new `require_any_scope(*scopes)` share one `_authorize` helper.
+- `dps/layers/api/deps.py`: `tenant_of` also refuses (400 `tenant_invalid`) a tenant id the job
+  platform cannot store: `dps_tenant.tenant_id` has `CHECK (~ '^[a-z0-9_][a-z0-9_-]{0,62}$')`
+  (migration 002) while M0's header pattern admits upper case and dots, so `X-DPS-Tenant: Retail`
+  would have failed inside the first insert as a 500. Additions: `principal_of`, `audited` (runs a
+  body, maps its error with `to_http`, audits `ok` / `rejected` (4xx) / `error` (5xx) with the
+  status, raises without the exception chain), `guarded` (the same for read-only routes, not
+  audited), `page_args` (limit clamped to 1..200). `audit_action` also counts
+  `dps_requests_total{route,outcome}` with the route template, and the event's tenant is `-` when
+  none was resolved.
+- `dps/layers/api/errors.py` `to_http`: as planned, plus `SealError` → 409 `secret_unavailable`,
+  `AuditUnavailable` → 503 `audit_unavailable`, `decode_cursor`'s `ValueError("malformed cursor")`
+  → 400 **`cursor_invalid`** (new code; every M2 list pages with that decoder), `ConnectorError`
+  codes `no_key`, `connection_invalid` and `selection_*` → 422 (plan: 502), the `ConnectorError`'s
+  `detail` (its value-free phrase) instead of `str(exc)` (`"<code>: <detail>"`), and fixed phrases for
+  `StorageError` (its detail is an S3 error code). The unexpected case logs `api_error` with the class
+  name. `DpsHttpError.body()` builds the wire shape; `.headers` for responses that need them.
+- `dps/layers/api/routers/connections.py`:
+  - the `production` tag check needs `admin` when **adding or removing** the tag (plan: adding only);
+    code `admin_scope_required` (the code Task 18 uses for production writes);
+  - `test`: the body's `object` takes `OWNER.NAME` or `{owner, name}`; a role the connection does not
+    have is 422 `connection_role`; an unresolvable `secret_ref` or purged inline secret is a failed
+    test (`error_code: secret_unavailable`) and a refused login a failed test
+    (`connection_failed`), both stored as `last_test`, never a 5xx; `s3`/`pvc` targets run
+    `test_store` (put + delete of a probe object);
+  - `objects`/`describe`/`count` on a file store are 422 `engine_not_tabular`; an unparsable object
+    name is 422 **`object_invalid`** (new code);
+  - `count` binds and validates the selection **before opening the connector** (statically), then
+    again against the described shape; a refusal answers `{"detail", "code", "checks"}` where the
+    failing entry is the one the code belongs to (new public helpers
+    `selection.check_for(code)` / `failed_checks(sel, engine, shape, code)`: re-validating the
+    *unbound* selection does not always fail the same entry, e.g. a binding refusal); a non-source
+    connection is 422 `connection_role`. `runs_as` is rendered by the PostgreSQL `select_sql` over the
+    bound template (`None` for engines without SQL; M3 adds Oracle's); it lists the projected
+    columns rather than `…`. Audit actions: `connection.create|update|delete|test|count`.
+- `dps/app.py` (`_JobPlatform`): as planned, plus: readiness `db` is `unconfigured` without a
+  database (and `jobs` likewise) so the components always exist; migrations are **verified in every
+  mode** after `auto` applied them (a database with pending files is `db_state = down` for the
+  routes and `jobs` not ready, `api-core` unaffected); the DB audit sink is created whenever the
+  database is configured and auditing is on, even when the DB is down at boot (its log line is
+  synchronous; flushes retry); an RLS posture problem in staging/prod raises `PostureError` (boot
+  refused), locally each is logged as `rls_posture_problem`; the embedded worker shares the app's
+  audit sink (`build_context(settings, audit=…)`, Task 23) and is skipped with a warning when the
+  KEK is missing. The M2 routers are included only when their modules import
+  (`_include_m2_routers`): a Layer 1 install without the `db`/`connectors` extras keeps serving
+  the engine routes. SPA: `_dist_file` tries each path suffix inside `frontend/dist`, refuses `.`/
+  `..` segments, serves `index.html` only through `_index()` (with its CSP, also for
+  `/a/b/index.html`), and gives nested `assets/` files the same immutable cache header as `/assets`.
+- `tests/fixtures`: `api_client` builds its settings with `api_settings(db_settings, tmp_path,
+  **overrides)` (public: Task 25's e2e app reuses it) and writes the source `secret_ref` files with
+  `write_source_secrets(root)` (factored out of `source_secrets`, which needs `handler_ctx` and
+  therefore `migrated_db`). A third key `dps_detect` (scope `detect`) tests the scope refusal.
+  `source_pg_sync` returns `SourcePgSync(dsn, schema)` and shares the schema/grant setup with
+  `source_pg` (`_create_schema`).
+- `tests/api/test_api_connections.py`: the PG params come from `service_url("source-pg")` (plan:
+  literal port 5442; contract §0 amendment). The connection used for the target test has both roles.
+  Added `test_reserved_and_upper_case_tenants_never_reach_the_database` and
+  `test_a_refused_login_is_a_failed_test_not_an_error` (wrong password, unresolvable `secret_ref`,
+  `count` with an unresolvable secret → 409); `tests/test_app_m2.py` adds
+  `test_a_database_that_is_down_at_boot_leaves_api_core_ready`. 5 offline + 4 db = 9 (plan 4 + 2).
+- `HANDOFF.md` §5: readiness `db`/`jobs`, the DB-down behaviour, coded errors, reserved and
+  lower-case tenants, CORS, the embedded worker.
