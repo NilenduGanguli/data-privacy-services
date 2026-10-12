@@ -1304,3 +1304,58 @@ is untouched.
 - Count: Python 977 → 995 passed, 4 skipped (tesseract binary ×2, `ner` ×2; lane OCR mock up);
   frontend 18 `node:test` cases; `npm run build`: 41 modules, `dist/index.html` references
   `/assets/…` and `/theme-init.js`, `dist/demo/kyc-scanned.pdf` present.
+
+## Task 17 — Console: Playground Document tab (mockup 08)
+
+The plan's `PageViewer`, `PlaygroundDocuments`, routes and styles are used; names, routes, test ids
+(`file-input`, `mode-*`, `run`, `verify-ok`, `page-box`, `page-frame`, `findings`, `result-text`,
+`ocr-status`) and every section title Task 20's console check looks for are the plan's. Changes:
+
+- **Pure logic in `frontend/src/lib/documents.ts`** (new): `uniqueFindings`, `sameValueAs`,
+  `boxStyle`, `tokenFontSize`, `findingTone`, `tokenSegments`, `ocrWordCount`, `verifyState`,
+  `isPaged`, `documentOptions`, `curlCommand`, `timingLine`, `redactedName`, `sizeText`,
+  `extensionLabel`, `hasGeometry`. Why: Node's test runner cannot load `.tsx`; the plan kept these
+  inside the components. Tests first: `frontend/tests/documents.test.ts` (14 cases).
+- **"Verified" keys on the OCR re-read (review G3-r2 N3) and on M0's partial coverage.**
+  `verifyState`: `failed` when the sweep failed or the redaction did not pass; `unverified` when no
+  sweep ran or a redacted PDF was produced but **not OCR re-read** (`ocr_checked: false`, e.g. OCR
+  unconfigured or `ocr_verify: false`); `partial` when the sweep passed with coverage gaps; else
+  `ok`. `verify-ok` is set for `ok` and `partial` only. The plan's `verified` was
+  `verification.passed && redaction.passed`, so a redaction nobody re-read showed "Verified". The
+  line shows "Verified, with partial coverage" and lists the gaps for `partial` (M0's rule: a sweep
+  with gaps is never an unqualified pass; the compose stack runs without NER, so this is what it
+  shows), amber "Not verified" for `unverified`, rose for `failed`. "Verify · N leaks" counts sweep
+  hits plus OCR re-read hits (the plan counted the re-read only).
+- **Copy as curl** (`curlCommand`): every word is single-quoted with `'` escaped, and the options
+  are the ones the page sends (`redacted_pdf` only for a PDF or image). The plan interpolated the
+  JSON inside `'…'` unescaped (an inline draft with a `'` in a regex broke the command) and always
+  sent `redacted_pdf: true` in Redact mode, which a DOCX refuses. The key stays `$DPS_API_KEY`.
+- **Redact mode on DOCX, TXT or CSV** (no redacted PDF): the output card is titled and described as
+  obfuscated text (the plan said "Output · redacted PDF" and "boxes are burned in"), the run button
+  reads "Obfuscate as text" and a note explains. Pages without geometry (the API returns 0 × 0 and
+  no preview for DOCX, TXT and CSV) render a placeholder (`hasGeometry`) instead of a zero-height
+  frame; their thumbnails are blank tiles.
+- **Hand-over:** "draft from Policies" appears only for an object (inline draft) policy; a preset
+  name handed over from the Playground selects that preset (the plan treated any handed-over policy
+  as a draft). The JSON/Text buttons hand the current policy back to `/playground`.
+- **Reveal** also works for CSV results (a list: revealed with `data`); the plan revealed string
+  results only. The download name comes from the file the run used, not the file chosen since.
+  The file input is reset after a choice, so choosing the same file again re-runs `choose`.
+- Labels: the OCR step reads "text layer" only for PDFs, "N pages unread" when OCR could not read
+  them, "not needed" for DOCX/TXT/CSV; hybrid pages say "+ text layer"; a `review` flag shows the
+  OCR confidence; the page head no longer says OCR runs "through the Read v3.2 contract" (Task 19C
+  added local Tesseract).
+- `styles.css`: `.verify.partial`, `.verify.unverified`, `.verify.failed` replace the plan's
+  `.verify.fail`; `.thumb-paper.blank` and `.page-none` added. Everything else is the plan's block.
+- `Playground.tsx`: as planned, plus `aria-label`/`aria-pressed` on the select and the Input
+  segment.
+- Manual check (plan Step 3), run with a private Playwright 1.55.0 (scratch venv, cached
+  chrome-headless-shell 1243) against `uvicorn` on the lane port with the lane's OCR mock
+  (`docker run … dps-wt-m1-azure-ocr-mock`, `127.0.0.1:${DPS_OCR_PORT:-5016}`), at 1440×900 and
+  390×844 in dark and light: demo scan → Redact → boxes on page 1, "Verified, with partial
+  coverage", `kyc-scanned.redacted.pdf` downloads (a PDF), page 2 via the strip, hover links box
+  and finding, Reveal restores; Obfuscate → tokens over the page, Reveal; Synthesize → violet tokens
+  and the validity line; no horizontal scroll, no console error (92 checks). Also: DOCX in Redact
+  mode, CSV obfuscate + reveal, and the JSON/Text/Document hand-over.
+- Count: frontend 31 `node:test` cases (+14 incl. `hasGeometry`); Python suite unchanged (995
+  passed, 4 skipped); `npm run build` 46 modules.
