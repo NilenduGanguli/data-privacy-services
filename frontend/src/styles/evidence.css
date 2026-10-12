@@ -1,0 +1,144 @@
+/* Evidence pack (mockup 10-evidence-pack.html) and the Reports evidence list (mockup 09), each
+   nested under its page root. The synthetic companion's fidelity/privacy rules (.two .dist .cmx
+   .ramp .pm) arrive with M5. Print rules that reach outside the page (console chrome, tokens,
+   @page) live in styles.css. */
+.evidence-page {
+  .sheet { max-width: 1040px; width: 100%; margin: 0 auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-md); padding: 36px 44px 40px; }
+  .eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .doc-head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; padding-bottom: 20px; border-bottom: 2px solid var(--ink); flex-wrap: wrap; }
+  .doc-head h1 { margin: 6px 0 4px; font-size: 24px; letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .doc-head .jid { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .seal { text-align: right; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; font-size: 12px; color: var(--ink-2); }
+  .seal .mono { font-size: 11.5px; }
+  .meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 20px; padding: 16px 0 4px; }
+  .meta .l, & dl.kv dt { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .meta .v { font-size: 13px; margin-top: 3px; overflow-wrap: anywhere; }
+  & section.sec { padding-top: 26px; }
+  & section.sec > h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 12px; font-size: 16px; letter-spacing: -.005em; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  & section.sec > h2 .n { font-family: var(--mono); font-size: 12px; color: var(--ink-3); font-weight: 700; min-width: 16px; }
+  & section.sec > h2 .r { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--ink-3); }
+  & h3 { font-size: 13.5px; margin: 20px 0 8px; }
+  .lead { font-size: 14px; line-height: 1.6; margin: 0 0 14px; max-width: 74ch; }
+  .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+  .stats > div { background: var(--surface); padding: 10px 12px; min-width: 0; }
+  .stats .l { font-size: 11px; color: var(--ink-3); font-weight: 600; }
+  .stats .v { font-size: 19px; font-weight: 800; margin-top: 2px; letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .stats .v.ok { color: var(--emerald); } .stats .v.bad { color: var(--rose); }
+  .stats .s { font-size: 11px; color: var(--ink-3); margin-top: 1px; }
+  & dl.kv { display: grid; grid-template-columns: 210px minmax(0, 1fr); margin: 0; border-top: 1px solid var(--border); }
+  & dl.kv dt, & dl.kv dd { padding: 8px 0; border-bottom: 1px solid var(--border); margin: 0; }
+  & dl.kv dt { padding-top: 10px; }
+  & dl.kv dd { font-size: 13px; min-width: 0; }
+  & dl.kv dd .mono { word-break: break-all; }
+  & dl.kv dd .s2 { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
+  .tbl.doc td, .tbl.doc th { padding: 7px 8px; }
+  .tbl.doc td { font-size: 12.5px; vertical-align: top; }
+  .tbl.doc tr:hover td { background: transparent; }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .m { font-family: var(--mono); font-size: 12px; }
+  .prm { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+  .note { font-size: 12px; color: var(--ink-3); margin-top: 8px; }
+  .timeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; margin: 14px 0 4px; position: relative; }
+  .timeline::before { content: ""; position: absolute; left: 6px; right: 6px; top: 6px; height: 1px; background: var(--border-strong); }
+  .timeline > div { position: relative; padding-top: 20px; font-size: 12px; padding-right: 8px; }
+  .timeline > div::before { content: ""; position: absolute; top: 1px; left: 1px; width: 9px; height: 9px; border-radius: 50%; background: var(--surface); border: 2px solid var(--ink-3); }
+  .timeline > div.warn::before { border-color: var(--amber); }
+  .timeline > div.ok::before { border-color: var(--emerald); background: var(--emerald); }
+  .timeline > div.bad::before { border-color: var(--rose); background: var(--rose); }
+  .timeline .t { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .reg { display: grid; gap: 10px; }
+  .reg .callout { font-size: 13px; line-height: 1.55; }
+  .sig { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  .sig > div { border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; display: flex; flex-direction: column; min-height: 168px; min-width: 0; }
+  .sig .role { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
+  .sig .who { font-weight: 700; margin-top: 4px; font-size: 13px; }
+  .sig .what { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+  .sig .line { margin-top: auto; border-top: 1px solid var(--ink-3); padding-top: 4px; font-size: 11px; color: var(--ink-3); display: flex; justify-content: space-between; gap: 8px; }
+  .sig .line .mono { font-size: 10.5px; word-break: break-all; }
+  .doc-foot { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .doc-foot .mono { font-size: 11px; word-break: break-all; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .print-only { display: none; }
+
+  @media screen and (max-width: 1100px) {
+    .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .sig { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media screen and (max-width: 720px) {
+    .sheet { padding: 20px 16px 24px; border-radius: var(--r-md); }
+    .doc-head h1 { font-size: 19px; }
+    .seal { text-align: left; align-items: flex-start; }
+    .meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    & dl.kv { grid-template-columns: minmax(0, 1fr); }
+    & dl.kv dt { border-bottom: 0; padding-bottom: 0; }
+    .timeline { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .timeline::before { left: 5px; right: auto; top: 6px; bottom: 6px; width: 1px; height: auto; }
+    .timeline > div { padding: 0 0 0 22px; }
+    .sig { grid-template-columns: minmax(0, 1fr); }
+    & table.stack, & table.stack tbody, & table.stack tr, & table.stack td { display: block; }
+    & table.stack thead { display: none; }
+    & table.stack tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; padding: 10px 0; border-bottom: 1px solid var(--border); grid-auto-flow: row dense; }
+    & table.stack td { border: 0; padding: 0 !important; min-width: 0; text-align: left !important; }
+    & table.stack td::before { content: attr(data-l); display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 2px; }
+    & table.stack td.wide { grid-column: 1 / -1; }
+    & table.stack.c3 tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    & section.sec > h2 { flex-wrap: wrap; }
+    & section.sec > h2 .r { flex-basis: 100%; margin-left: 26px; }
+  }
+
+  @media print {
+    .sheet { border: 0; box-shadow: none; padding: 0; max-width: none; border-radius: 0; }
+    .print-only { display: block; }
+    & a { color: #000; text-decoration: none; }
+    .doc-head { border-bottom-width: 1.5pt; flex-wrap: nowrap; }
+    .doc-head > div:first-child { flex: 1 1 auto !important; }
+    .seal { flex: none; }
+    .snap { table-layout: fixed; }
+    .snap .m { word-break: break-word; font-size: 8pt; }
+    & section.keep { break-inside: avoid; page-break-inside: avoid; }
+    .doc-head h1 { font-size: 17pt; }
+    & section.sec { padding-top: 16pt; }
+    & section.sec > h2 { font-size: 12pt; break-after: avoid; page-break-after: avoid; }
+    & h3 { break-after: avoid; page-break-after: avoid; margin: 12pt 0 6pt; }
+    & tr, .stats, .sig, .reg .callout, .timeline, & dl.kv > * { break-inside: avoid; page-break-inside: avoid; }
+    .chip { border-width: .75pt; }
+    .callout { border-left-width: 2pt; }
+    .stats .v { font-size: 14pt; }
+    .tbl.doc td, .tbl.doc th { padding: 3pt 5pt; }
+    .lead { font-size: 9.5pt; margin-bottom: 8pt; }
+    .timeline { margin: 6pt 0 2pt; }
+    .note { margin-top: 5pt; }
+    .tbl th { color: #333; }
+    .sig { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .sig > div { min-height: 92pt; }
+    .doc-foot { margin-top: 12pt; break-before: avoid; page-break-before: avoid; }
+    .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .snap td, .snap th { font-size: 8.5pt; padding: 4pt 4pt !important; }
+  }
+}
+
+/* Reports (mockup 09, the M2 evidence list) */
+.reports-page {
+  .tbl-scroll > table.tbl { min-width: 980px; }
+  .tbl td.sub { line-height: 1.35; }
+  .tbl .t { font-family: var(--mono); font-size: 12px; white-space: nowrap; color: var(--ink-2); }
+  .tbl th { white-space: nowrap; }
+  #packs td.mono { white-space: nowrap; }
+  .dl { display: flex; gap: 6px; }
+  .card-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; font-size: 12px; color: var(--ink-3); flex-wrap: wrap; }
+  .empty-row td { text-align: center; color: var(--ink-2); padding: 24px !important; }
+  @media (max-width: 720px) {
+    .tbl-scroll > table.tbl { min-width: 0; }
+    & table.stack, & table.stack tbody, & table.stack tr, & table.stack td { display: block; }
+    & table.stack thead { display: none; }
+    & table.stack tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 12px; padding: 12px 2px; border-bottom: 1px solid var(--border); }
+    & table.stack tr:last-child { border-bottom: 0; }
+    & table.stack td { border: 0; padding: 0 !important; min-width: 0; }
+    & table.stack td::before { content: attr(data-l); display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; margin-bottom: 3px; }
+    & table.stack td:first-child, & table.stack td[colspan] { grid-column: 1 / -1; }
+    & table.stack td:first-child::before, & table.stack td[colspan]::before { display: none; }
+    & table.stack tr:hover td { background: transparent; }
+    #packs td.mono { white-space: normal; overflow-wrap: anywhere; }
+  }
+}

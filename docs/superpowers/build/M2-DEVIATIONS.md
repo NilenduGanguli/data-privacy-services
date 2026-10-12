@@ -1386,3 +1386,55 @@ signature, write-atomicity rule) and §5.3 (same-table append row), same commit.
 - Process: the tool modules were scaffolded before `tests/test_tools_m2.py` (TDD order reversed for
   the scripts); the test then failed for a real reason (the reveal defect above) before the fix.
 - Tests: `tests/test_tools_m2.py` 4 (as planned) + `tests/test_reveal_row.py` +1.
+
+## Task 29 — Console foundation (types, API groups, helpers, Vitest, shared components)
+
+- `frontend/vite.config.ts`: besides the Vitest reference and `test` block, `build.cssTarget` lists
+  browsers (`chrome105 edge105 firefox104 safari15`) so esbuild flattens the page stylesheets' CSS
+  nesting (with `es2020` alone it ships native nesting, which needs Chrome 112 / Safari 16.5); the dev
+  proxy follows `DPS_APP_PORT` (contract §0 lane-safe amendment; default 8400); the comment that
+  routes must be one segment deep is replaced by the Task 24 suffix resolution it no longer matches.
+- `frontend/src/styles/components.css` (new, flat): the shared components (EngineBadge, Sparkline,
+  CheckList, HeatMap, ConfirmWriteModal, KeyMaterialCard) appear on several pages, so their rules
+  cannot live inside one page's nesting block; it also carries the vault.css utilities the M2 pages
+  use and `styles.css` lacks (`[hidden]`, `.sr`, `.linkbtn`, `.btn-danger`, `.btn[disabled]`,
+  `.head-actions`, `.tbl-scroll`, `.tbl .s2`, `.callout.emerald|rose`, `:focus-visible`). M0's
+  `select.input { appearance: auto }` is left alone. Imported in `main.tsx` with the four page files.
+- Page stylesheets: nested type selectors are written `& h3`, `& dl.kv …` (valid in every nesting
+  version). `&.mode-syn .only-obf` and `&:not(.mode-syn) .only-syn` are two rules: as one selector
+  list esbuild folded them into `.wizard-page:is(.mode-syn .only-obf, …)`, which matches nothing
+  intended. The `.eb` badge moved to components.css; the synthetic-companion rules of mockup 10 that
+  were dropped also include `.two` and `.dist` (used only by the M5 article); the print rules that
+  reach outside the page (chrome, tokens, `@page`) go to `styles.css` in Task 35.
+- `frontend/src/lib/types.ts`: fields added so the interfaces mirror the pydantic models field for
+  field: `JobProgress.throughput_mark|pages|fields|blocked_requests`, `TargetSpec.ledger_owner`,
+  `RunSpec.source.partition_rows`, `consistency.field_scoped`, `options.unclassified`,
+  `EvidencePack.utility`, `EvidenceOut.id|job_id|created_at` (the route answers them);
+  `CountOut.runs_as` is `string | null` (`None` for engines without SQL). No exported name beyond the
+  contract §14 list.
+- `frontend/src/lib/api.ts`: M0's `call` is kept for the L1 call sites and now runs through `json`
+  (same JSON content type and errors); errors carry `code` and `extra`; a FastAPI validation list
+  becomes "field: message" (M0 showed the raw JSON); path ids are URL-encoded; `saveBlob` is
+  exported (artefact download and KeyMaterialCard share it); `jobs.discover` accepts the
+  `DiscoverSpec.mode` hint.
+- `frontend/src/lib/jobs.ts`: `WizardDraft` is complete here (the plan fills it in Task 32) because
+  `buildRunSpec`, `draftForStorage` and `specPreview`, tested in this task, read its fields. `typed`
+  holds the object name the operator confirmed in the modal ('' = not confirmed), so `confirm_write`
+  is `canConfirmWrite(typed, written object)`. `splitCounters` strips a doubled `fallback:` prefix
+  (the Task 28 observation `fallback:fallback:fpe_domain_too_small`) and adds up duplicates. Extra
+  pure helpers the pages share: `isTerminal`, `fmtCompact|Clock|When|Utc`, `shortId`, `total`,
+  `writeModeTone`, `engineName`, `decisionReason`, `typeNoteText`, `checkLabel`, `errorText`,
+  `methodFor|Text`, `METHOD_NAMES`, `emptyDraft`, `newDraftId`, `fqn`, `sourceObject`,
+  `writtenObject`, `needsConfirmation`, `selectionOf`, `parseCount`, `legalBasisText`,
+  `parseKeyFile`, `jobWriteMode`, `jobTargetText`, `LEGAL_BASES`. Test factories in `lib/fixtures.ts`.
+- `frontend/src/hooks/usePoll.ts`: the contract signature; a generation counter replaces the plan's
+  `alive` flag (with it, a slow answer from before a `deps` change could overwrite the new data), and
+  the latest `load`/`active`/interval are read through a ref.
+- `ConfirmWriteModal`: `adminScope` is `boolean | null`. No route tells the console which scopes its
+  key holds (contract §9), so the page passes `null` and the modal says DPS checks the scope at Run
+  job (the server answers 403 `admin_scope_required`); `false` blocks as planned. The copy says the
+  key is "returned once" — "shown once" is reserved for the key card, which the Task 36 check waits
+  for by that text. `KeyMaterialCard` also renders the synthesize seed (`dps-<job>.seed.json`);
+  `HeatLegend` is exported beside `HeatMap`.
+- Tooling: `vitest@2.1.9` brings `npm audit` advisories that concern the dev server only (vite,
+  esbuild, @vitest/mocker); nothing of it ships in `dist/`.
