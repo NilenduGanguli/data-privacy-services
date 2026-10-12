@@ -1482,3 +1482,130 @@ for CVV", "Run on the engine", "Re-run plan", …) and test ids (`policy-header`
   - `docker compose logs app | grep -cE '[0-9]{4} [0-9]{4} [0-9]{4}|@example\.(com|net|org)'` → 0
     after the smoke runs (DoD 9).
 - Count: suite 999 → 1006 passed, 4 skipped (tesseract ×2, `ner` ×2; lane OCR mock up).
+
+## Task 20 — No-values log scan, console browser check, API reference, handoff, release
+
+- **`tests/test_no_values_in_logs_m1.py`** holds the plan's test unchanged
+  (`test_m1_paths_log_no_values`) plus two more. Why: the plan's scan drives the pipeline, the Read
+  client and the schema proposer directly, so the M1 routes and the modules of Tasks 13, 14 and
+  19A–19D were not covered (contract §0.1 asks for a scan of the milestone's new modules).
+  - `test_m1_routes_log_and_audit_no_values` runs the app with JSON logs at DEBUG, a configured LLM
+    provider double and a `FakeOcr`. It drives: documents (an OCR'd scan redacted and re-read; a
+    fail-closed leak; an image; CSV synthesis; an invalid `request` field carrying a name); an
+    `Idempotency-Key` replay and a reuse; T3 labelling of a leftover field; an NDJSON stream and a
+    malformed NDJSON body; schema spec and synthesis from a sample; `/entities`; the recognizer
+    test over text holding values; and the presets. It then scans stdout, stderr, the log records,
+    the 13 audit events and every refusal body. The needles are the values, the T3 leftover, the API
+    key, and every DEK and synthesis seed the responses returned.
+  - `test_local_tesseract_failures_log_no_values` makes a stand-in `tesseract` print the values on
+    stdout and stderr (`ocr_failed`, `ocr_protocol`) and scans the logs and the errors.
+  - The tests pass on the code as built, which is expected for a scan. Their power was checked with
+    five mutations in a scratch copy, one at a time, and each was caught:
+    1. the OCR body put into the Read client's error (plan test);
+    2. Tesseract's stdout put into its error (Tesseract test);
+    3. the validation message echoing the input (routes test, refusal body);
+    4. a `print` of a T3 leftover value (routes test, stdout);
+    5. the raw `request` field used as the audited policy label (routes test, audit).
+- **`tools/console_check.py`**: the plan's flows, sections, sizes and themes are kept. Changes:
+  - The key goes into `sessionStorage`, the console's default since O5. The plan wrote
+    `localStorage`, which the console only accepts as an M0 leftover and moves.
+  - `shoot()` scrolls to the top before each full-page screenshot. Without it, the fixed header,
+    the sidebar and the Policies side column were drawn where the page was scrolled to, in the
+    middle of the image (the first run's screenshots).
+  - `shoot()` also masks the key line (kid and the shortened DEK). Screenshots are committed, and
+    key material never is.
+  - A failed step prints a `FAIL` line naming the exception class and the run continues. The plan's
+    version ended with a traceback.
+  - Two checks were added per size and theme (84 in all, not 76): "revealed text is labelled as the
+    original" and "Publish is disabled and looks it". Both failed against the image before the two
+    fixes below (8 FAILs) and pass after them.
+- The check ran with a private Playwright 1.55.0 (a scratch venv, as the build session requires)
+  instead of `uv pip install -e ".[uitest]"` into the lane venv. Chromium build 1187 is not cached,
+  so the script fell back to the newest cached headless shell (1243), as designed.
+- **Two fixes from the screenshot review** (frontend; tests first):
+  - **The text pane kept the heading "Text extraction · obfuscated" (and "reversible with key")
+    after Reveal, while it showed the original values.** A copy taken from it was plain personal
+    data under a heading that said otherwise. New `extractionHead(synthetic, revealed)` in
+    `frontend/src/lib/documents.ts` gives "Text extraction · revealed original" with an amber
+    "original values · not stored". `frontend/tests/documents.test.ts` failed first
+    (`does not provide an export named 'extractionHead'`).
+  - **A disabled button looked enabled.** The console CSS had no `:disabled` rule (M0 included), so
+    the Policies page's Publish button, disabled until the policy store arrives (M5), showed as an
+    active primary button. Run and Reveal while busy had the same problem. `styles.css` gains
+    `.btn:disabled` (opacity .45, `not-allowed`, no hover or press effect).
+- **Screenshots** in `docs/superpowers/build/m1-console/` (16: app and mockup, two pages, two sizes,
+  two themes) are quantised to 256 colours with Pillow before committing: 11.5 MB down to 4.4 MB,
+  still legible. The tool itself writes full-colour PNGs.
+- **Visible differences from the mockups, after side-by-side review.** Each is intended unless it
+  says "fixed".
+  - **Mockup 08, Document tab.**
+    - The page header is M0's console header (tenant, key, theme) rather than the mockup's
+      breadcrumb and route chip. "Copy as curl" sits in the page head. Intended (M0 layout).
+    - The policy control lists the shipped presets and the compose default `gdpr-pseudonymise`
+      instead of dpdp, gdpr, pci and "custom…". On a phone it scrolls inside itself. Intended.
+    - OCR shows the configured engine as a readiness chip ("Azure Read v3.2 · up") and the
+      `auto | always | never` mode, not a per-request Azure/Tesseract switch. Intended (plan open
+      question 7).
+    - Real page images of the synthetic two-page demo scan replace the mockup's three drawn pages,
+      and they show 10 findings where the mockup shows 24.
+      - The compose image has no NER, so the address, account number and payee are not detected.
+        They stay visible in the redacted raster, which the Verify line calls "partial coverage"
+        (see HANDOFF §10 trap 7). Intended (engine scope, Task 16 observation).
+      - Findings list the detector evidence (`cue:lead-in`, `checksum:AADHAAR`) rather than the
+        mockup's prose.
+    - Verify reads "Verified, with partial coverage" (amber) instead of "Verified." (green), because
+      NER is off. Intended (M0 coverage rule, Task 17).
+    - The key card shows `kid` and a shortened `dek`; the mockup also shows a wrap. There is no "not
+      flagged" row and no declared-key note. Intended.
+    - After Reveal, the text pane said "obfuscated" over the original text. **Fixed** (above).
+  - **Mockup 05, Policies.**
+    - Presets are the six shipped presets at v1 with mode and reversibility. There are no job or
+      key counts and no "active v3 / draft v4"; the draft is a browser-session draft ("draft · N
+      changes"). Publish is disabled (M5). Intended (plan open question 6).
+    - The disabled Publish looked active. **Fixed** (above).
+    - At 1440 px, Publish wraps under Discard draft and Preview plan, where the mockup has one row.
+      Cosmetic, left as is.
+    - The treatment matrix lists every entity type the preset treats (49), with a method select per
+      row, entity chips coloured by sensitivity and no per-row synthesis notes. The mockup shows 18
+      read-only rows and "Show all 46". On a phone each row is a labelled card, so the page is long.
+      Intended (Task 18).
+    - Locale reads "service default · DPS_DEFAULT_LOCALE" because only `dpdp-pseudonymise` pins a
+      locale. Declared fields start empty with an add row. Version history is the session draft
+      plus the shipped v1. Intended.
+    - "On this page" stays visible on phones, where the mockup hides it. Intended (Task 18: the
+      check reads the first match of each section title).
+- **Version 0.2.0** in `dps/__init__.py`, `pyproject.toml` and `frontend/package.json`. The root
+  `version` in `frontend/package-lock.json` (two places) is bumped as well, so the lockfile agrees
+  with the manifest. Because the report's `engine_version` comes from `dps.__version__`,
+  `docs/technical/detector-eval-m1.{json,md}` were regenerated. The diff is that one field and its
+  markdown line (`engine 0.2.0`); every number is unchanged. Both files are committed here, and the
+  plan's `git diff --exit-code` holds after the commit.
+- `docs/technical/api-m1.md` was written from the routers. Every curl example was run against the
+  lane stack: the scan redaction gives `passed`, 0 text characters and `ocr_hits` 0; 1 000 rows
+  replay identically with the returned seed; the NDJSON 3-item array gives 5 lines; a repeated
+  `Idempotency-Key` gives `Idempotent-Replay: true`, the same `trace_id` and the same result with
+  caller-held key material, and another body gives 422.
+- `HANDOFF.md`: a new **§10 M1** (build, run, configuration table, probes, secrets, the plan's ten
+  traps plus two found here: the no-profile compose behaviour and the OCR cost of a redaction), a
+  header line with the M1 gate results, the §1 package row, and §9 pointing at §10. `README.md`:
+  "Status: M1 shipped", the run commands with the `docs` profile, the demo flow and links to
+  `api-m1.md` and `detector-eval-m1.md`.
+- **Results.**
+  - Gates:
+    - `ruff format --check` and `ruff check` on `dps tests tools`: clean; `mypy dps`: clean.
+    - `pytest -q`: 1009 passed, 4 skipped (tesseract ×2, `ner` ×2).
+    - `npm run typecheck`: clean; `npm test`: 42 pass; `npm run build`: `dist/index.html`
+      references `/assets/…` and `/theme-init.js`.
+  - The stack was rebuilt with v0.2.0: `/readyz` reports `api-core` version 0.2.0 and
+    `ocr: up, azure-read-v3.2`.
+  - Smoke 25/25 under `DPS_SMOKE_REQUIRE_OCR=1`.
+  - `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"`: 131 passed, 2 skipped (the two
+    `tesseract` cases, 2 passed in the image).
+  - Console check 84/84.
+  - App log grep for card or Aadhaar digit groups and `@example.(com|net|org)`: 0 lines.
+- **Open (not changed, outside M1 scope).**
+  - `/api/v1/obfuscate` fails closed (422 `leakage`) about one call in four for an e-mail whose local
+    part is a single letter (`a@…`; 2 of 8 runs). The `email` method can map a one-letter local part
+    onto itself, and the sweep then refuses it, which is correct. This is an availability gap in
+    M0's `email` method, not a leak. Two- and three-letter and realistic local parts passed in the runs made here (one call each, plus 5 streams of 3).
+  - `.env.example` still lacks the M1 lines (the permission rule of Tasks 1 and 19A–19D).

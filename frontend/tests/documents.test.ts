@@ -3,8 +3,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  boxStyle, curlCommand, documentOptions, extensionLabel, findingTone, hasGeometry, isPaged, ocrWordCount, redactedName, sameValueAs,
-  sizeText, timingLine, tokenFontSize, tokenSegments, uniqueFindings, verifyState,
+  boxStyle, curlCommand, documentOptions, extensionLabel, extractionHead, findingTone, hasGeometry, isPaged, ocrWordCount, redactedName,
+  sameValueAs, sizeText, timingLine, tokenFontSize, tokenSegments, uniqueFindings, verifyState,
 } from '../src/lib/documents.ts';
 import type { DocumentTransformOut, PageFinding, PageSummary, Report } from '../src/lib/types.ts';
 
@@ -161,4 +161,11 @@ test('labels: timing line, redacted file name, size and extension', () => {
 test('DOCX, TXT and CSV pages have no geometry: no page image to draw boxes on', () => {
   assert.equal(hasGeometry(page(1, [])), true);
   assert.equal(hasGeometry(page(1, [], { width: 0, height: 0, source: 'docx' })), false);
+});
+
+test('the text pane says what it shows: obfuscated, synthetic, or the revealed original', () => {
+  assert.deepEqual(extractionHead(false, false), { title: 'Text extraction · obfuscated', tone: 'teal', note: 'reversible with key' });
+  assert.deepEqual(extractionHead(true, false), { title: 'Text extraction · synthetic', tone: 'violet', note: 'no path back' });
+  // After Reveal the pane holds the original values: never labelled as obfuscated.
+  assert.deepEqual(extractionHead(false, true), { title: 'Text extraction · revealed original', tone: 'amber', note: 'original values · not stored' });
 });

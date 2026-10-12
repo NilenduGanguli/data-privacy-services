@@ -6,8 +6,8 @@ import { PageViewer } from '../components/PageViewer';
 import { useSettings } from '../hooks/useSettings';
 import { api, base64Blob, errorText, type Policy } from '../lib/api';
 import {
-  curlCommand, documentOptions, extensionLabel, isPaged, ocrWordCount, redactedName, sameValueAs, secondsText, sizeText,
-  timingLine, tokenSegments, uniqueFindings, verifyState, type OutMode,
+  curlCommand, documentOptions, extensionLabel, extractionHead, isPaged, ocrWordCount, redactedName, sameValueAs, secondsText,
+  sizeText, timingLine, tokenSegments, uniqueFindings, verifyState, type OutMode,
 } from '../lib/documents';
 import type { DocumentTransformOut, OcrMode, PageFinding, PresetSummary, Sensitivity } from '../lib/types';
 
@@ -59,6 +59,7 @@ export function PlaygroundDocuments(): JSX.Element {
   const verdict = res ? verifyState(res) : null;
   const pdfOut = out?.mode === 'red' && !!res?.redacted_pdf_b64;
   const syn = out?.mode === 'syn';
+  const head = extractionHead(syn, revealed !== null);
 
   function choose(f: File | null): void { setFile(f); setOut(null); setError(null); setRevealed(null); setPage(1); setHot(null); }
   function onDrop(e: DragEvent<HTMLElement>): void { e.preventDefault(); choose(e.dataTransfer.files?.[0] ?? null); }
@@ -233,7 +234,7 @@ export function PlaygroundDocuments(): JSX.Element {
       {res && out && verdict && (
         <div className="two">
           <section className="card">
-            <div className="card-head"><div className="card-title">{syn ? 'Text extraction · synthetic' : 'Text extraction · obfuscated'} {syn ? <Tone tone="violet">no path back</Tone> : <Tone tone="teal">reversible with key</Tone>}</div>
+            <div className="card-head"><div className="card-title" data-testid="result-head">{head.title} <Tone tone={head.tone}>{head.note}</Tone></div>
               <div className="btnrow"><span className="faint">{pageCount(res.document.pages)}</span>
                 <button className="btn btn-sm" onClick={() => copy('text', revealed ?? (typeof res.result === 'string' ? res.result : res.result_csv ?? JSON.stringify(res.result)))}>{copied === 'text' ? 'Copied' : 'Copy text'}</button></div></div>
             <div className="pane textpane" data-testid="result-text">{revealed !== null ? revealed

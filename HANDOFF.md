@@ -1,6 +1,16 @@
 # HANDOFF — data-privacy-services (DPS)
 
-Last verified: 2026-10-12 at `629f4db` = tag `v0.1.0-m0` (`48d9425`) + the post-M0 fixes (SEC-1 COIN
+**M1 (v0.2.0) verified 2026-10-12 on branch `m1`** (lane `dps-wt-m1`: `DPS_APP_PORT=8401`,
+`DPS_OCR_PORT=5016`, `DPS_IMAGE_TAG=m1`) — see §10: `ruff format --check` / `ruff check` on
+`dps tests tools`, `mypy dps`, `pytest -q` (1009 passed, 4 skipped: `tesseract` ×2 without a host
+binary, `ner` ×2), `cd frontend && npm test && npm run build`, `docker compose --profile docs up
+--build -d` (both services healthy, `/readyz` `ocr: up, engine azure-read-v3.2`),
+`DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` (131 passed, 2 skipped: the same
+`tesseract` cases, which pass inside the image), `DPS_SMOKE_REQUIRE_OCR=1 python
+tools/smoke_test.py` (25/25), `python tools/console_check.py` (84/84) and the detector report
+regenerated without a change in its numbers. The M0 record follows.
+
+Last verified (M0): 2026-10-12 at `629f4db` = tag `v0.1.0-m0` (`48d9425`) + the post-M0 fixes (SEC-1 COIN
 mint TLS, O1/O2 locale and phone evidence, O5 session-only console key, lane-safe compose, the D2
 idempotency amendment) + the A-prepare review r1 fixes (B1: surrogates never reuse a part of the
 record and the sweep checks name parts; B2: lane-safe test endpoints in the plans; this file's refresh
@@ -21,7 +31,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | Artefact | Kind | Notes |
 |---|---|---|
 | `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001** |
-| `dps` package | Python 3.12 | Layer 1 engine + API; extras `fpe` and `docs` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex` |
+| `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents; extras `fpe` and `docs` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` (Playwright for `tools/console_check.py`, never in the image) |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | 25 end-to-end checks against a running stack (M0's 15 + 10 for documents, OCR and schema from M1); prints verdicts, never bodies |
 
@@ -268,5 +278,102 @@ set outside a laptop. DPS never stores customer data, reveal keys or synthesis s
 
 ## 9. Next milestones
 
-M1 documents → M2 jobs + PostgreSQL (adds Postgres, worker, migrations) → M3 Oracle + MongoDB → M4 UI
-scanner (browser worker image) → M5 hardening + showcase. Each adds a section here.
+M1 documents (shipped, §10) → M2 jobs + PostgreSQL (adds Postgres, worker, migrations) → M3 Oracle +
+MongoDB → M4 UI scanner (browser worker image) → M5 hardening + showcase. Each adds a section here.
+
+## 10. M1 — documents and Layer 1 complete (v0.2.0)
+
+What M1 adds: `POST /api/v1/documents/{detect,obfuscate,synthesize}` (PDF text layer, scanned pages
+and images through OCR, DOCX, TXT, CSV; per-page findings with boxes; a true redacted PDF verified by
+structure and an OCR re-read), `POST /api/v1/schema/{generator-spec,synthesize}`, `GET /api/v1/entities`,
+`POST /api/v1/policies/test-recognizer`, preset summaries, NDJSON streaming, `Idempotency-Key`, local
+Tesseract, the opt-in T3 `llm_label` tier, the detector evaluation harness and report, and the
+console's Playground **Document** tab and **Policies** page. API reference:
+`docs/technical/api-m1.md`; evaluation: `docs/technical/detector-eval-m1.md`.
+
+**Build.** Unchanged commands (§2). The image's console stage is `node:22-slim`; the runtime installs
+`.[fpe,docs]` (`.[fpe,docs,ner]` with `WITH_NER=1`) plus `tesseract-ocr` + `tesseract-ocr-eng` and
+sets `DPS_OCR_PROVIDER=auto`. pypdfium2's wheel bundles PDFium; no other system package is needed.
+
+**Run.**
+
+```bash
+docker compose --profile docs up --build -d       # app on 127.0.0.1:${DPS_APP_PORT:-8400}, OCR mock on 127.0.0.1:${DPS_OCR_PORT:-5016}
+DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py  # 25 checks: M0's 15 + documents, OCR, schema
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"   # the M1 integration gate (contract §12.4)
+python tools/console_check.py                     # browser check of /playground/documents and /policies
+docker compose --profile docs down
+```
+
+`tools/console_check.py` needs `playwright==1.55.0` (`uv pip install -e ".[uitest]"`, or any venv
+holding it) and writes screenshots to `docs/superpowers/build/m1-console/`. The demo flow: open the
+console, paste the key, Playground → **Document** → *Load demo KYC scan* → **Redact**.
+
+**Configuration (M1).** All of these are in §4 with their full notes; defaults are the app's.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DPS_OCR_PROVIDER` | `""` (image `auto`, compose `azure`) | `off`/`""`, `azure` (Read v3.2), `tesseract` (local CLI), `auto` (azure when configured, else tesseract, else none) |
+| `DPS_AZURE_VISION_ENDPOINT` | — | Read v3.2 base URL: compose `http://azure-ocr-mock:5000`; prod the org gateway (`azure-gateway-api`), `https` |
+| `DPS_AZURE_VISION_KEY` | — | `Ocp-Apim-Subscription-Key`; **prod: `DPS_AZURE_VISION_KEY_FILE`** (a mounted secret) |
+| `DPS_OCR_HEALTH_PATH` / `DPS_OCR_PROBE_INTERVAL_SECONDS` | `/health` / 30 | readiness probe of the OCR endpoint; behind the org gateway use **`/_gw/health`**; `""` = no probe |
+| `DPS_OCR_TIMEOUT_SECONDS` / `DPS_OCR_POLL_INTERVAL_SECONDS` | 60 / 0.5 | one OCR call (analyze + polls) / poll spacing |
+| `DPS_OCR_MAX_CONCURRENCY` | 4 | parallel OCR calls per request |
+| `DPS_OCR_MIN_TEXT_CHARS` / `DPS_OCR_IMAGE_COVERAGE` | 20 / 0.25 | when a PDF page is OCR'd under `ocr: auto` |
+| `DPS_MAX_DOCUMENT_MB` / `DPS_MAX_DOCUMENT_PAGES` | 20 / 200 | upload limits (413) |
+| `DPS_PDF_RENDER_DPI` | 200 | raster resolution for OCR and redaction (pages over 10,000 px a side are refused) |
+| `DPS_REDACT_IMAGE_FORMAT` / `DPS_REDACT_JPEG_QUALITY` / `DPS_REDACT_OCR_VERIFY` | `jpeg` / 85 / `true` | redacted page rasters; OCR re-read of every produced page |
+| `DPS_PREVIEW_DPI` / `DPS_MAX_PREVIEW_PAGES` | 72 / 50 | console page previews |
+| `DPS_SCHEMA_MAX_ROWS` | 10,000 | rows per `/schema/synthesize` |
+| `DPS_TESSERACT_CMD` / `DPS_TESSERACT_LANGS` / `DPS_TESSERACT_TIMEOUT_SECONDS` | `tesseract` / `eng` / 60 | local OCR |
+| `DPS_NDJSON_MAX_ITEMS` / `DPS_NDJSON_CHUNK_ITEMS` / `DPS_MAX_NDJSON_MB` | 1,000,000 / 500 / 256 | NDJSON streams |
+| `DPS_IDEMPOTENCY_TTL_SECONDS` / `DPS_IDEMPOTENCY_MAX_ENTRIES` | 600 / 10,000 | replica-local replay cache (fingerprints only, decision D2) |
+| `DPS_LLM_LABEL_MAX_FIELDS` / `DPS_LLM_LABEL_MIN_CONFIDENCE` | 40 / 0.7 | T3 labelling (opt-in per policy) |
+
+`.env.example` still lacks the M1 block (the build sessions could not write `.env*` files); the lines
+to append are in `docs/superpowers/build/M1-DEVIATIONS.md` (Tasks 1, 19A–19D).
+
+**Probes.** `/readyz` `components.ocr` = `{ok, detail, provider, engine}`, `detail` one of `up`,
+`down`, `down:<status>`, `error`, `unconfigured`, `tesseract_missing`; `engine` `azure-read-v3.2` or
+`tesseract-<major.minor>`. OCR is **never required**: `/readyz` stays 200 when it is down, and
+JSON/text keep working. Metrics added: `dps_document_pages_total{format,source}`,
+`dps_redacted_boxes_total`, `dps_ocr_calls_total{engine,outcome}`, `dps_ocr_seconds`,
+`dps_llm_label_fields_total{outcome}` (§5).
+
+**Secrets (names only).** `DPS_AZURE_VISION_KEY` (mount it, read it as `DPS_AZURE_VISION_KEY_FILE`).
+The compose `mock-key` is a local literal the mock ignores.
+
+**Traps.**
+
+1. PDFium is not thread-safe: every pypdfium2 call goes through `PDFIUM_LOCK`, so renders
+   (OCR rasters, redaction, previews) are serialised per process. Scale with replicas, not threads.
+2. The OCR client refuses an `Operation-Location` on another origin than
+   `DPS_AZURE_VISION_ENDPOINT` (the key is never sent elsewhere). A gateway behind a host-rewriting
+   proxy must return its external host in that header.
+3. The console builds with `base: '/'` (asset URLs `/assets/…`, `/theme-init.js`): hosting it under
+   a path prefix needs a gateway rewrite to the root (§8).
+4. Multipart uploads above 1 MiB spool to `/tmp`: compose mounts it as a 256 MB tmpfs; mount `/tmp`
+   as an in-memory `emptyDir` in OpenShift too (never a disk-backed layer).
+5. `redact.py` sets `reportlab.rl_config.useA85 = 0` process-wide (binary image streams). Anything
+   else in the process that uses reportlab gets the same setting.
+6. The OCR engine is sent page **images** only: DPS rasterises PDFs itself. Never point a client at
+   the mock with a PDF; it reads images.
+7. A redacted PDF is image-only by design: no text layer (not searchable), no metadata, annotations
+   and forms not drawn, and no key brings anything back. It hides what was **detected**: with NER
+   off (the compose image), values the patterns and cues miss — the demo statement's account number,
+   street address and payee name — stay visible in the raster, and the OCR re-read cannot flag them
+   either (it looks for detected originals and for what the engine finds again).
+8. Faker's `es_MX` `curp()` and `rfc()` ignore `seed_instance` (checked with Faker 40.43): never use
+   them where determinism matters (the schema executor and the evaluation corpus do not).
+9. `playwright==1.55.0` wants Chromium build 1187, which this Mac does not cache:
+   `tools/console_check.py` falls back to the newest cached `chrome-headless-shell` (or
+   `DPS_PLAYWRIGHT_CHROMIUM`).
+10. `tests/test_eval_report.py` fails when the detectors change until the report is regenerated
+    (`python tools/eval_detectors.py run …`, `docs/technical/api-m1.md`): by design.
+11. With compose's default `DPS_OCR_PROVIDER=azure` and no `--profile docs`, OCR is configured but
+    down: scanned pages, images and every redacted PDF are refused with 503 `ocr_unavailable`
+    (fail closed), while text-layer PDFs, DOCX, TXT and CSV work. Start the profile, or
+    `DPS_OCR_PROVIDER=tesseract` to use the image's own Tesseract.
+12. When OCR is configured, a redacted PDF costs one OCR call per produced page (the re-read) plus
+    one per page that needs reading; and when a redacted PDF is asked for, every page carrying an
+    image is OCR'd (an ID photo or stamp is otherwise burned in unread).

@@ -91,6 +91,15 @@ export function verifyState(res: DocumentTransformOut): VerifyVerdict {
   return { ...base, state: 'ok', verified: true };
 }
 
+/** The text pane's heading. After Reveal the pane holds the caller's original values, so it is
+ *  never labelled "obfuscated" then (a copy of it is plain personal data). */
+export function extractionHead(synthetic: boolean, revealed: boolean): { title: string; tone: 'teal' | 'violet' | 'amber'; note: string } {
+  if (revealed) return { title: 'Text extraction · revealed original', tone: 'amber', note: 'original values · not stored' };
+  return synthetic
+    ? { title: 'Text extraction · synthetic', tone: 'violet', note: 'no path back' }
+    : { title: 'Text extraction · obfuscated', tone: 'teal', note: 'reversible with key' };
+}
+
 /** PDFs and images are paged (previews, boxes, a redacted PDF); DOCX, TXT and CSV are text. */
 export function isPaged(name: string | null): boolean { return !!name && /\.(pdf|png|jpe?g)$/i.test(name); }
 

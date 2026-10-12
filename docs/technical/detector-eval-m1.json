@@ -280,7 +280,7 @@
     "records": 900,
     "sha256": "988a239f91ea5b59764a550d3aac23d69f550a1870d335a65100b6ad1fb00db2"
   },
-  "engine_version": "0.1.0",
+  "engine_version": "0.2.0",
   "overall": {
     "macro_f1": 0.9676,
     "micro_f1": 0.9758,
