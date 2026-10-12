@@ -58,6 +58,7 @@ from dps.engine.transform.crypto import (
     key_material_from_caller,
     wrap_key_material,
 )
+from dps.engine.transform.external import ExternalServiceError, ExternalTokenizer, build_tokenizer
 from dps.engine.transform.methods import CipherFactory, MethodError
 from dps.engine.verify import (
     NerState,
@@ -81,6 +82,10 @@ class EngineError(ValueError):
 
 class VerificationFailed(EngineError):
     """The leakage sweep found an original value in the output under a strict policy."""
+
+
+class TokenizationUnavailable(EngineError):
+    """The bank tokenization service failed (M5 ``external_tokenize``); mapped to HTTP 502."""
 
 
 class Payload(BaseModel):
@@ -210,10 +215,20 @@ class PrivacyEngine:
         *,
         gateway: LlmGateway | None = None,
         cipher_factory: CipherFactory | None = None,
+        tokenizer: ExternalTokenizer | None | Literal["auto"] = "auto",
     ) -> None:
+        """``tokenizer`` (M5): the bank tokenization adapter; ``"auto"`` builds it from the
+        settings (``None`` when ``DPS_TOKENIZER_PROVIDER`` is empty).
+
+        Raises:
+            ValueError: the tokenizer URL is not https while egress TLS is required.
+        """
         self.settings = settings
         self.gateway = gateway
         self.cipher_factory = cipher_factory
+        self.tokenizer: ExternalTokenizer | None = (
+            build_tokenizer(settings) if tokenizer == "auto" else tokenizer
+        )
         self.ner = build_ner(tuple(settings.ner_languages_list), settings.ner_enabled)
         self.fpe_enabled = settings.fpe_enabled and (
             cipher_factory is not None or fpe.fpe_available()
@@ -395,7 +410,13 @@ class PrivacyEngine:
 
     def _plan(self, findings: list[Finding], policy: Policy, mode: str) -> Plan:
         try:
-            return build_plan(findings, policy, mode, fpe_enabled=self.fpe_enabled)
+            return build_plan(
+                findings,
+                policy,
+                mode,
+                fpe_enabled=self.fpe_enabled,
+                external_enabled=self.tokenizer is not None,
+            )
         except ValueError as exc:
             raise EngineError(str(exc)) from None
 
@@ -415,6 +436,7 @@ class PrivacyEngine:
             cipher_factory=self.cipher_factory,
             token_style=options.token_style or policy.output.token_style,
             locale=locale,
+            tokenizer=self.tokenizer,
         )
 
     @staticmethod
@@ -552,6 +574,8 @@ class PrivacyEngine:
                 data=payload.data,
                 text=payload.text,
             )
+        except ExternalServiceError:
+            raise TokenizationUnavailable("tokenization service unavailable") from None
         except MethodError as exc:
             raise EngineError(str(exc)) from None
         for method, count in applied.methods_used.items():
@@ -730,10 +754,13 @@ class PrivacyEngine:
             fpe_enabled=self.fpe_enabled,
             cipher_factory=self.cipher_factory,
             locale=self.settings.default_locale,
+            tokenizer=self.tokenizer,
         )
         output: Any = payload.data if payload.data is not None else payload.text
         try:
             result = reveal(output=output, key=key, hints=parsed, options=options)
+        except ExternalServiceError:
+            raise TokenizationUnavailable("tokenization service unavailable") from None
         except MethodError as exc:  # value-free by contract: names the rule
             raise EngineError(f"reveal failed: {exc}") from None
         except (KeyError, IndexError, ValueError) as exc:

@@ -187,6 +187,7 @@ Services (host ports bind `127.0.0.1` only):
 | `migrate` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot `python -m dps.migrate` as `dps_owner` after `dps-db` is healthy, exits 0; app and worker wait for it (`service_completed_successfully`) and run with `DPS_MIGRATIONS_MODE=verify` |
 | `worker` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — (9400 inside the network) | `python -m dps.worker`, `DPS_WORKER_CONCURRENCY=4`; healthcheck urllib `:9400/health`; scalable (`--scale worker=N`); read-only root, 512 MB `/tmp` tmpfs (files spools), `mem_limit: 1g` |
 | `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) into the `dps-secrets` volume, which app and worker mount read-only at `/var/run/secrets/dps` |
+| `tokenizer-mock` (M5, profiles `tokenizer`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | `${DPS_TOKENIZER_MOCK_PORT:-8420}` → 8420 | vaultless mock of a bank tokenization service for `external_tokenize` (`docker/tokenizer-mock/server.py`, mounted read-only): tokens `tk_` + base32(AES-SIV(value, entity\|profile)); bearer token `dps-local-tokenizer-token` and key are local demo literals; logs request lines only; healthcheck urllib `/health`, `mem_limit: 128m`. App and worker point `DPS_TOKENIZER_URL` at it (`DPS_TOKENIZER_PROVIDER=http`); without the profile the app reports `tokenizer` down and `external_tokenize` answers 502 |
 | `seed-sources` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot after `source-pg` is healthy: `python tools/seed_sources.py --target postgres --rows 20000 --seed 7 --restore-copy`; idempotent |
 
 The app talks to the mock as `http://azure-ocr-mock:5000` (`DPS_OCR_PROVIDER=azure`, key `mock-key`,
@@ -598,6 +599,19 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   - Run the integration gates one at a time against a lane's stack: the service tests share one
     metadata database, one source database and one MinIO bucket with fixed keys (two concurrent runs
     collide, e.g. on `tests/big.bin` in `tests/connectors/test_storage_s3.py`).
+  - **M5 `external_tokenize` — the wire contract for the bank's integration team.** DPS calls an
+    adapter in front of the bank's tokenization product (Voltage, Protegrity, Thales, in-house):
+    `POST {DPS_TOKENIZER_URL}/v1/tokenize` `{"profile", "entity_type", "values": [...]}` → 200
+    `{"tokens": [...]}`, `POST …/v1/detokenize` `{"profile", "entity_type", "tokens": [...]}` → 200
+    `{"values": [...]}`, `GET …/health` → 200; `Authorization: Bearer <DPS_TOKENIZER_TOKEN(_FILE)>`,
+    TLS verified with `DPS_TOKENIZER_CA_FILE` (else `DPS_SSL_CERT_FILE`, else system CAs; https is
+    required when `DPS_EGRESS_TLS_REQUIRED=true`). Answers keep order and length, at most
+    `DPS_TOKENIZER_BATCH` items per call, deterministic per (profile, entity type, value); a token
+    equal to its input, a wrong length or a non-string is refused as malformed. 429/5xx and
+    transport errors are retried (`DPS_TOKENIZER_RETRIES`); L1 then answers 502 and L2 retries the
+    batch with code `tokenization_unavailable`. Policy: `treat: {SSN: {method: external_tokenize,
+    profile: ssn-fpe}}` — `profile` is passed through. Reveal through DPS detokenizes in one call
+    per entity type and profile (after the caller's key matched the hints).
   - **M5 tabular synthesis** (`options.tabular`): the copula model is fitted on a sample of the
     selection; the same seed reproduces the same target only when the whole selection fits in the
     sample (`DPS_COPULA_FIT_ROWS + DPS_COPULA_HOLDOUT_ROWS`), because a larger table is sampled at

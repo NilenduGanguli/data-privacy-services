@@ -26,8 +26,9 @@ import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -46,6 +47,9 @@ from dps.engine.transform.methods import (
     run_method,
 )
 from dps.engine.transform.tokens import ENVELOPE_RE, make_envelope, parse_envelopes
+
+if TYPE_CHECKING:  # the adapter module imports settings and httpx; apply needs only the protocol
+    from dps.engine.transform.external import ExternalTokenizer
 
 ANCHOR_ENTITIES = (
     "CUSTOMER_ID",
@@ -126,6 +130,10 @@ class ApplyOptions:
     #: The record's raw anchor when the caller computes it (L2: one per row, contract §6.2);
     #: ``None`` → :func:`anchor_for`. Either way it is keyed before use.
     anchor: str | None = None
+    #: M5 ``external_tokenize``: the bank tokenization adapter (``None`` = not configured) and
+    #: tokens the caller already fetched for this batch (``(entity_type, value) → token``).
+    tokenizer: ExternalTokenizer | None = None
+    external_cache: dict[tuple[str, str], str] | None = None
 
 
 def anchor_for(document: Any, plan: Plan) -> str:
@@ -152,7 +160,13 @@ def _keyed_anchor(raw: str, key: KeyMaterial | None) -> str:
     return "a_" + crypto.b32(crypto.hmac_bytes(crypto.subkey(key, "anchor"), raw))[:26]
 
 
-def _ctx(entry: PlanEntry, options: ApplyOptions, anchor: str, mode: str) -> TransformContext:
+def _ctx(
+    entry: PlanEntry,
+    options: ApplyOptions,
+    anchor: str,
+    mode: str,
+    external: Mapping[tuple[str, str], str] | None = None,
+) -> TransformContext:
     return TransformContext(
         entity_type=entry.finding.entity_type,
         path=entry.finding.locator.path,
@@ -165,6 +179,7 @@ def _ctx(entry: PlanEntry, options: ApplyOptions, anchor: str, mode: str) -> Tra
         fpe_enabled=options.fpe_enabled,
         synth=options.surrogates,
         cipher_factory=options.cipher_factory,
+        external=external,
     )
 
 
@@ -221,6 +236,61 @@ def _record_originals(document: Any, plan: Plan) -> list[tuple[str, str]]:
     return originals
 
 
+def _tokenize_prepass(
+    plan: Plan, document: Any, options: ApplyOptions
+) -> dict[tuple[str, str], str] | None:
+    """One tokenization call per (entity type, profile) for the values the batch cache lacks;
+    ``None`` when no adapter is configured (``external_tokenize`` then fails closed)."""
+    if options.tokenizer is None:
+        return None
+    cache = dict(options.external_cache or {})
+    groups: dict[tuple[str, str | None], set[str]] = {}
+    for entry in plan.entries:
+        if entry.method != "external_tokenize":
+            continue
+        loc = entry.finding.locator
+        try:
+            current = str(_read(document, loc.path))
+        except MethodError:
+            continue  # the transform loop reports a plan that does not fit
+        value = current if loc.whole else current[loc.start or 0 : loc.end]
+        if (entry.finding.entity_type, value) not in cache:
+            profile = entry.params.get("profile")
+            key = (entry.finding.entity_type, str(profile) if profile is not None else None)
+            groups.setdefault(key, set()).add(value)
+    for (entity, profile), values in groups.items():
+        ordered = sorted(values)
+        tokens = options.tokenizer.tokenize(entity, ordered, profile=profile)
+        cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
+    return cache
+
+
+def _detokenize_prepass(
+    output: Any, hints: list[RevealHint], options: ApplyOptions
+) -> dict[tuple[str, str], str] | None:
+    """One detokenization call per (entity type, profile) for the hints' external tokens."""
+    if options.tokenizer is None:
+        return None
+    groups: dict[tuple[str, str | None], set[str]] = {}
+    for h in hints:
+        if h.method != "external_tokenize":
+            continue
+        try:
+            current = str(_read(output, h.path))
+        except MethodError:
+            continue  # the reveal loop reports a hint that does not fit
+        token = current if h.start is None else current[h.start : h.end]
+        profile = h.params.get("profile")
+        key = (h.entity_type, str(profile) if profile is not None else None)
+        groups.setdefault(key, set()).add(token)
+    cache: dict[tuple[str, str], str] = {}
+    for (entity, profile), tokens in groups.items():
+        ordered = sorted(tokens)
+        values = options.tokenizer.detokenize(entity, ordered, profile=profile)
+        cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
+    return cache
+
+
 def _write(document: Any, path: str, value: Any) -> Any:
     if path == "$":
         return value
@@ -242,6 +312,7 @@ def apply_plan(
         raise ValueError("pass exactly one of data or text")
     document: Any = copy.deepcopy(data) if text is None else text
     anchor = _keyed_anchor(options.anchor or anchor_for(document, plan), options.key)
+    external = _tokenize_prepass(plan, document, options)
     if options.surrogates is not None:
         declare_record(options.surrogates, anchor, _record_originals(document, plan))
     kid = options.key.kid if options.key is not None else None
@@ -295,7 +366,7 @@ def apply_plan(
                 raise MethodError("plan entry does not point at a scalar value")
             entry = whole[0]
             outcome = run_method(
-                entry.method, str(current), _ctx(entry, options, anchor, plan.mode)
+                entry.method, str(current), _ctx(entry, options, anchor, plan.mode, external)
             )
             used[outcome.method] += 1
             if outcome.note:
@@ -321,7 +392,7 @@ def apply_plan(
                     raise MethodError("plan span does not fit the document")
                 if start < cursor:
                     continue  # overlapping span already consumed
-                ctx = _ctx(entry, options, anchor, plan.mode)
+                ctx = _ctx(entry, options, anchor, plan.mode, external)
                 outcome = run_method(entry.method, source[start:end], ctx)
                 used[outcome.method] += 1
                 if outcome.note:
@@ -379,7 +450,11 @@ def apply_plan(
     )
 
 
-def _reveal_ctx(hint: RevealHint, options: ApplyOptions) -> TransformContext:
+def _reveal_ctx(
+    hint: RevealHint,
+    options: ApplyOptions,
+    external: Mapping[tuple[str, str], str] | None = None,
+) -> TransformContext:
     return TransformContext(
         entity_type=hint.entity_type,
         path=hint.path,
@@ -391,6 +466,7 @@ def _reveal_ctx(hint: RevealHint, options: ApplyOptions) -> TransformContext:
         locale=options.locale,
         fpe_enabled=options.fpe_enabled,
         cipher_factory=options.cipher_factory,
+        external=external,
     )
 
 
@@ -458,6 +534,7 @@ def reveal(*, output: Any, key: KeyMaterial, hints: list[RevealHint], options: A
             raise MethodError(
                 "the key does not match the key check value in the reveal hints; nothing was revealed"
             )
+    external = _detokenize_prepass(document, hints, options)  # before any hint rewrites it
     whole = [h for h in hints if h.start is None]
     spans = sorted(
         (h for h in hints if h.start is not None), key=lambda h: (h.path, -(h.start or 0))
@@ -466,7 +543,9 @@ def reveal(*, output: Any, key: KeyMaterial, hints: list[RevealHint], options: A
         token = _read(document, h.path)
         if not (isinstance(token, str) or _is_number(token)):
             raise MethodError("reveal hint does not point at a token")
-        plain = reverse_method(h.method, str(token), _reveal_ctx(h, options), h.reverse_params)
+        plain = reverse_method(
+            h.method, str(token), _reveal_ctx(h, options, external), h.reverse_params
+        )
         document = _write(document, h.path, _typed(plain, h.original_type, exact=True))
     for h in spans:
         value = _read(document, h.path)
@@ -479,7 +558,7 @@ def reveal(*, output: Any, key: KeyMaterial, hints: list[RevealHint], options: A
         segment = text[start : h.end]
         match = ENVELOPE_RE.fullmatch(segment)
         token = match.group(2) if match else segment
-        plain = reverse_method(h.method, token, _reveal_ctx(h, options), h.reverse_params)
+        plain = reverse_method(h.method, token, _reveal_ctx(h, options, external), h.reverse_params)
         new_text = text[:start] + plain + text[h.end :]
         document = _write(document, h.path, _typed(new_text, h.original_type, exact=True))
     return _walk_envelopes(document, options, strict=not hints)

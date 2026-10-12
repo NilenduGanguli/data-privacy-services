@@ -443,6 +443,8 @@ class BatchTransformer:
             cipher_factory=self.engine.cipher_factory,
             token_style="envelope",
             locale=self.locale,
+            tokenizer=self.engine.tokenizer,
+            external_cache=self._pretokenize(rows),
         )
         out_rows: list[Row] = []
         methods: Counter[str] = Counter()
@@ -558,6 +560,33 @@ class BatchTransformer:
             verification=verification,
             values_by_column=dict(per_column),
         )
+
+    def _pretokenize(self, rows: list[Row]) -> dict[tuple[str, str], str] | None:
+        """M5 ``external_tokenize``: one call per entity type and profile for the batch's whole
+        values (spans in free text still go through ``apply``'s per-row pre-pass).
+
+        Raises:
+            ExternalServiceError: the tokenization service failed (value-free).
+        """
+        tokenizer = self.engine.tokenizer
+        columns = [c for c in self.whole if c.method.method == "external_tokenize"]
+        if tokenizer is None or not columns:
+            return None
+        groups: dict[tuple[str, str | None], set[str]] = {}
+        for col in columns:
+            info = self.shape.column(col.name)
+            profile = col.method.params.get("profile")
+            key = (col.entity_type, str(profile) if profile is not None else None)
+            for row in rows:
+                text = to_engine_text(row.get(col.name), info)
+                if text:
+                    groups.setdefault(key, set()).add(text)
+        cache: dict[tuple[str, str], str] = {}
+        for (entity, profile), values in groups.items():
+            ordered = sorted(values)
+            tokens = tokenizer.tokenize(entity, ordered, profile=profile)
+            cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
+        return cache
 
     def _key_int(self, row: Row) -> int | None:
         """The row's single integer key (for ``unique`` constraints), else ``None``."""

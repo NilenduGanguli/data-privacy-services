@@ -19,7 +19,7 @@ import hashlib
 import math
 import re
 import secrets
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
@@ -78,6 +78,9 @@ class TransformContext:
     fpe_enabled: bool = False
     synth: SurrogateProvider | None = None
     cipher_factory: CipherFactory | None = None
+    #: M5 ``external_tokenize``: ``(entity_type, value) → token`` (or token → value when
+    #: revealing), filled by ``apply``'s (de)tokenize pre-pass; ``None`` = no adapter configured
+    external: Mapping[tuple[str, str], str] | None = None
 
     def subkey(self, method: str, length: int = crypto.SUBKEY_BYTES) -> bytes:
         """The HKDF subkey for ``method`` and this entity type (and path when field-scoped)."""
@@ -581,7 +584,20 @@ def _surrogate(value: str, ctx: TransformContext) -> str:
 
 
 def _external(value: str, ctx: TransformContext) -> str:
-    raise MethodError("external_tokenize: no tokenization adapter is configured (M5)")
+    """The bank service's token for ``value`` (looked up in the pre-pass batch, never called
+    per value)."""
+    if ctx.external is None:
+        raise MethodError("external_tokenize: no tokenization adapter is configured")
+    token = ctx.external.get((ctx.entity_type, value))
+    if token is None:
+        raise MethodError("external_tokenize: value was not part of the tokenization batch")
+    return token
+
+
+def _external_reverse(token: str, ctx: TransformContext, _rp: dict[str, Any]) -> str:
+    if ctx.external is None or (ctx.entity_type, token) not in ctx.external:
+        raise MethodError("external_tokenize: token could not be detokenized")
+    return ctx.external[(ctx.entity_type, token)]
 
 
 # --- registry ----------------------------------------------------------------------------------
@@ -614,7 +630,7 @@ METHODS: dict[str, Method] = {
     "noise": Method("noise", False, _noise),
     "keep": Method("keep", False, lambda v, c: v),
     "surrogate": Method("surrogate", False, _surrogate),
-    "external_tokenize": Method("external_tokenize", True, _external),
+    "external_tokenize": Method("external_tokenize", True, _external, _external_reverse),
 }
 if set(METHODS) != set(METHOD_NAMES):  # not an assert: must hold under ``python -O`` too
     raise RuntimeError("methods.py and policy.METHOD_NAMES disagree")

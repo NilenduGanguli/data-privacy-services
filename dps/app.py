@@ -502,6 +502,14 @@ def create_app(
         READINESS.set(
             "fpe", engine.fpe_enabled, "ff1" if engine.fpe_enabled else "det_token fallback"
         )
+        tokenizer = engine.tokenizer
+        tokenizer_ok = await asyncio.to_thread(tokenizer.health) if tokenizer is not None else False
+        READINESS.set(  # M5 external_tokenize: informational, never a required component
+            "tokenizer",
+            tokenizer_ok,
+            ("up" if tokenizer_ok else "down") if tokenizer is not None else "unconfigured",
+            adapter=tokenizer.name if tokenizer is not None else "none",
+        )
         await _refresh_ocr(ocr, settings)
         m2 = _JobPlatform(app, settings, own_audit=audit_sink is None)
         try:

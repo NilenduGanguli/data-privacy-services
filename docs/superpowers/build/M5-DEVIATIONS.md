@@ -324,6 +324,45 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   order hold, and the pack records DP and the linked block. Generated names may coincide with
   source names by chance (≤ 10 % allowed; same persona pools, placeholder input — see Task 6).
 
+## Task 8 — `external_tokenize`: the bank tokenization adapter, a mock, batch pre-passes
+
+- Routers: **no change** — M0/M1 as built already run `detect`, `obfuscate`, `plan` and `reveal`
+  off the event loop (`run_in_threadpool`), which is what the plan's `asyncio.to_thread` edit was for.
+- `dps/engine/transform/external.py`: a CA bundle path becomes an `ssl.SSLContext` (httpx 0.28
+  deprecates `verify=<path>`); `HttpTokenizer.__repr__` shows the base URL only (the bearer token
+  lives in the client's headers); a non-JSON 200 is counted as `malformed` too.
+- `dps/engine/transform/apply.py`: the pre-passes skip entries/hints whose path does not fit the
+  document (the transform/reveal loops report those, as before) and pass `profile` as a string; the
+  detokenize pre-pass runs after the kid/kcv checks, so a wrong key never calls the service.
+- `dps/engine/service.py`: `reveal` wraps `ExternalServiceError` as `TokenizationUnavailable` too;
+  `PrivacyEngine(tokenizer="auto")` raises `ValueError` at construction for an http URL while
+  egress TLS is required (`build_tokenizer`). `dps/layers/api/common.py` maps it to a plain 502
+  `{"detail": "tokenization service unavailable"}` (no `code`, as the plan says), audit outcome
+  `upstream_error`. `dps/app.py`: the readiness probe runs `health()` in a thread (blocking HTTP),
+  detail `up`/`down`/`unconfigured`, `adapter`; never a required component.
+- `dps/engine/batch.py` `_pretokenize`: one call per entity type and profile per batch for the
+  whole values (nulls skipped); free-text spans still use the per-row pre-pass.
+- `dps/layers/connectors/jobs_run.py` (not in the plan): an `ExternalServiceError` during prepare or
+  a partition is retried with the new code `tokenization_unavailable` (a prepare that exhausts its
+  attempts fails with it) instead of `internal_error`; contract §5.3 lists the code and the L1 502.
+- `docker-compose.yml`: the tokenizer variables are in the shared `x-dps-env` anchor (app **and**
+  worker transform), each overridable (`${DPS_TOKENIZER_URL:-http://tokenizer-mock:8420}`); the mock
+  uses the app image with `pull_policy: never` (plan: `build: .`, a second build of the same image),
+  the lane-safe port `${DPS_TOKENIZER_MOCK_PORT:-8420}` (contract §0 amendment), a read-only root,
+  `cap_drop: [ALL]` and the labels `tests/test_compose.py` requires. The service was **not run in a
+  container** here (this lane has no `m5` image; building images is Task 24): `docker compose config`
+  validates it and the script's CLI entry point was smoke-run on the host (health 200, 401 without
+  the bearer token, a `tk_` token with it, request lines only in its log).
+- `docker/tokenizer-mock/server.py`: the plan's mock, with `do_GET`/`do_POST` returning after each
+  response explicitly.
+- `HANDOFF.md`: §3 service row, §8 "Traps" carries the wire contract for the bank's integration team
+  (the plan said §8; the configuration rows were already in §4 from Task 1).
+- Tests: `tests/test_external_tokenize.py` 11 (plan 7): the plan's, plus the bearer token is sent
+  and never shown, `build_tokenizer` follows the settings (TLS rule, CA bundle), free-text spans are
+  tokenized and revealed, the 502 carries no value and `/readyz` reports the adapter, nulls in a
+  batch, and the compose service. `ColumnPlan` needs M2's `name`. The M0 suites (`test_methods`,
+  `test_apply`, `test_service`, `test_api`, `test_planner`, `test_batch`) pass unchanged.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -343,3 +382,8 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   without the extra — run `pytest -m ml tests/test_mostly_linked.py` where it is installed. The
   console (Task 21) and PDF (Task 14) must render `tabular.linked`, `tabular.dp` and the
   `{parent, child}` shapes of `tabular.columns` and `fidelity.tables`.
+- Task 8 (open): `reveal_row` (L2 reveal, `tools/reveal_rows.py`) does not detokenize
+  `external_tokenize` columns (it has no tokenizer in its candidate loop); an L2 policy that maps a
+  column to `external_tokenize` on a deployment without an adapter fails at the preflight with an
+  `internal_error` retry (`MethodError`) instead of a coded refusal at submit. The `tokenizer-mock`
+  container itself runs once an `m5` image exists (Task 24 smoke).

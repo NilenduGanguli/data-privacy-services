@@ -69,6 +69,7 @@ from dps.engine.policy import Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_bytes, seed_from_caller
 from dps.engine.transform.crypto import key_material_from_caller
+from dps.engine.transform.external import ExternalServiceError
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobPhase, JobState, PartitionState
 from dps.jobs_models import (
     ClassificationSnapshot,
@@ -384,6 +385,13 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             await _retry(ctx, job, exc.code, str(exc))
         else:
             await _fail_to_finalize(ctx, job, exc.code, str(exc))
+    except ExternalServiceError:  # M5: the bank tokenization service failed — transient
+        if job.attempts < job.max_attempts:
+            await _retry(ctx, job, "tokenization_unavailable", "tokenization service unavailable")
+        else:
+            await _fail_to_finalize(
+                ctx, job, "tokenization_unavailable", "tokenization service unavailable"
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # unexpected: retry; never put the message in the row
@@ -1107,6 +1115,8 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
         raise
     except Exception as exc:  # ConnectorError, StorageError and the unexpected: retry
         code = exc.code if isinstance(exc, ConnectorError | StorageError) else "internal_error"
+        if isinstance(exc, ExternalServiceError):  # M5: the tokenization service — transient
+            code = "tokenization_unavailable"
         if code == "internal_error":
             logger.error("partition_failed", job_id=job.id, error=type(exc).__name__)
         await jobs.retry_partition(

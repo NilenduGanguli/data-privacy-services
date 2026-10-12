@@ -5,6 +5,8 @@ Error mapping (the engine's messages name rules, never values):
 - payload too large (characters, values) → 413; malformed payload or nesting too deep → 422
 - :class:`~dps.engine.service.VerificationFailed` → 422 ``{"detail", "code": "leakage"}``
   (nothing is returned)
+- :class:`~dps.engine.service.TokenizationUnavailable` → 502 ``{"detail": "tokenization service
+  unavailable"}`` (M5, the bank tokenization service failed; audit outcome ``upstream_error``)
 - :class:`~dps.engine.service.EngineError` → 400 ``{"detail", "code": "bad_request"}``
 - :class:`~dps.errors.CodedError` → its own status and ``{"detail", "code"}`` (M1)
 - anything else → 500 ``internal error``; only the exception's class name is logged
@@ -35,7 +37,7 @@ from fastapi.responses import StreamingResponse
 from dps.audit import AuditEvent, AuditUnavailable
 from dps.auth import coded_http_exception_handler as coded_http_exception_handler  # one handler
 from dps.engine.policy import preset_names
-from dps.engine.service import EngineError, Payload, VerificationFailed
+from dps.engine.service import EngineError, Payload, TokenizationUnavailable, VerificationFailed
 from dps.errors import IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL, CodedError
 from dps.observability import LATENCY, REQUESTS, get_logger
 
@@ -278,6 +280,10 @@ def map_engine_error(exc: Exception) -> tuple[str, HTTPException]:
     """
     if isinstance(exc, VerificationFailed):  # before EngineError, which it subclasses
         return "verification_failed", CodedHTTPException(422, "leakage", str(exc))
+    if isinstance(exc, TokenizationUnavailable):  # M5: the bank tokenization service failed
+        return "upstream_error", HTTPException(
+            status_code=502, detail="tokenization service unavailable"
+        )
     if isinstance(exc, EngineError):
         return "bad_request", CodedHTTPException(400, "bad_request", str(exc))
     if isinstance(exc, CodedError):
