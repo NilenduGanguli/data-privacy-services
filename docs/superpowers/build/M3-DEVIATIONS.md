@@ -1,0 +1,118 @@
+# M3 build — deviations from the plan
+
+Plan: `docs/superpowers/plans/2026-10-11-m3-oracle-and-mongodb.md`. One section per task: file, what
+changed, why. Public names and signatures that later tasks rely on are preserved unless a section says
+otherwise. Built in the lane worktree `dps-wt-m3` (branch `m3`), compose project and host ports from the
+lane's `.env` (contract §0, amendment 2026-10-12).
+
+## Task 1 — seam audit
+
+Read in the tree as built (M0 + M1 + M2 integrated on `main`, `88eae2e`). One line per row of the
+plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as built.
+
+- **connector types** (`dps/layers/connectors/base.py`): `ObjectRef(owner, name)` (+ `fqn`, `parse`;
+  part pattern `^[A-Za-z_][A-Za-z0-9_$#]{0,127}$`), `ColumnInfo` (no `pseudo` yet — Task 3 adds it),
+  `ColumnKind`, `TableShape` (+ `key_columns()`, `column(name)`), `KeyRange(lower, upper)` encoded,
+  `EncodedKey`, `encode_key`, `decode_key` (tag `ts` with `ts_precision > 6` stays text), `to_engine_text`,
+  `from_engine_text`, `LedgerMark(job_id, partition_no, batch_no, last_key, rows)`,
+  `ConnectionTestResult`, `PrepareReport(created, truncated, ledger, existing_rows, checks,
+  append_upper)`, `ConnectorError(code, detail="", *, retryable=False)`, `IncompatibleValue`,
+  `UnsupportedKey`: **same**. `ConnectorError` already keeps `.code`, `.detail`, `.retryable`, so the
+  plan's one-line M2 touch (Task 4) is not needed. The key codec already has the `oid` tag
+  (`object_id` kind, decoded as text) and the TIMESTAMP(7-9) text rule, so the file-structure row
+  "`base.py`: `oid` and TIMESTAMP(7-9) key codec rules" is already satisfied by M2. Extra M2 name M3
+  uses: `LedgerConflict(ConnectorError)` (`ledger_conflict`, contract §0 amendment "the write guard
+  is the caller's mark"), which the Oracle/Mongo writers raise instead of inventing their own.
+- **protocols**: `Connector` with `key_at_offset(shape, selection, params, offset)` and
+  `sample_keys(shape, selection, params, n, *, upper=None)`: **same**. `BatchWriter`: `prepare(*,
+  dry_run)`, `precheck_collisions(keys)`, `read_ledger(job_id, partition_no)`, `write_batch(rows, *,
+  mark)`, `finish_partition(job_id, partition_no, *, batch_no=None) -> dict`, `clear_ledger(job_id)`,
+  `close()`: **differs** only by `finish_partition`'s keyword `batch_no` (contract amendment; database
+  writers ignore it) — M3 writers (Tasks 6, 12) accept and ignore it. `ResolvedTarget(job_id,
+  write_mode, connection_id, engine, object, same_as_source, create_if_missing, table_load,
+  pk_strategy, files, ledger_owner, key, write_columns, generated_key, target_shape, column_types)`:
+  **same**.
+- **connections** (`dps/connections.py`): `Connection`, `Credentials(username="", password: SecretStr,
+  extra: dict[str, SecretStr])`, `load_credentials(c, *, settings, kek, conn=None)`, `get_connection`:
+  **same**; the `dsn`/`uri` files of a `secret_ref` arrive in `Credentials.extra` (`dps.secrets.
+  SECRET_FILES` lists both). Note: `resolve_secret_ref(ref, settings)` is not tenant-scoped yet; the
+  queued SEC-2 fix resolves under `DPS_SECRET_DIR/<tenant>/<ref>/` at integration, so no M3 code or
+  demo relies on one tenant reading another's ref (see Task 2).
+- **registry** (`registry.py`): `open_connector(conn, settings, *, action, kek, job_id=None,
+  credentials=None)` returns an opened connector and raises `engine_unavailable` for `oracle`/`mongo`:
+  **same**. The PG connector's constructor is `PostgresConnector(conn, credentials, settings, *, action,
+  job_id=None)`; the M3 connectors take the same arguments (Tasks 5, 11 call sites).
+- **selection**: `Selection(where, params, query, columns, max_rows, sample: SampleSpec(percent, seed),
+  mongo_filter)` (in `dps/jobs_models.py`), `SelectionError(code, message)`, `quote_ident(name,
+  engine)` (Oracle: `^[A-Za-z][A-Za-z0-9_$#]{0,127}$`, upper-cased), `validate_selection(sel, engine,
+  shape)`, `compile_where`/`compile_query(sel, engine) -> (sql, ordered bind names)` (Oracle renders
+  `:name`), `validate_mongo_filter`, `mongo_filter_template`, `MONGO_OPERATORS`, the codes
+  `selection_operator_denied`, `selection_identifier_invalid`: **same**; M2 also has
+  `parameterize_literals(sel, engine)` (literals → `:lN` binds) which the Oracle reads reuse.
+- **engine bridge** (`dps/engine/batch.py`): `ColumnPlan(path, name, entity_type, method, text_column,
+  reversible, kind, length, precision, scale)`: **same**; `BatchTransformer(engine, *, policy, mode,
+  columns, shape, key, seed, locale, unclassified="detect", tabular=None, anchor=None,
+  verify="strict")`: **same** names (more keywords than the plan lists, all defaulted).
+- **discovery** (`discovery.py`): `discover_job(ctx, job)` exists (the plan said "not yet written");
+  per-column classification is the shared `classify_columns(shape, rows, *, policy, detector,
+  fpe_enabled)`. Lesson (Stage A): `main` is being fixed so that a text column whose sampled values hit
+  detectors at a meaningful rate is never auto-kept (`discovery.py`, `jobs_run.py`). Task 8 must route
+  Oracle and Mongo discovery through `classify_columns` (no engine-specific classifier) so the fix is
+  inherited at merge; only the value read per column (`docpaths.column_values`) and the forced `keep`
+  of pseudo/never-transformed columns are M3's.
+- **targets / handlers / groups**: `targets.resolve_target(spec, *, job_id, source_conn,
+  target_conn, source_shape, target_shape, plans, projection) -> (ResolvedTarget, plans)`;
+  `created_column_type` returns **PostgreSQL** DDL types (open question 14: Oracle targets need
+  `oracle_sql.oracle_ddl_type`, Task 6 call site). `jobs_run.py` has `prepare`, `run_partition`,
+  `finalize` (finalize calls `writer.clear_ledger(job.id)` through `_clear_ledger`; same-table append
+  is bounded by `append_upper` in `_prepare`/`_check_same_table_offset`). `POST /job-groups {name}` →
+  `{group, key_material, synthesis_seed}`: **same**. **Differs:** the group model is
+  `dps.groups.JobGroup(id, tenant_id, name, kid, seed_fingerprint, created_by, created_at, closed_at)`
+  in `dps/groups.py` (not `jobs_models.py`); Task 17 adds `last_check`/`last_check_at` there.
+- **fixtures**: `db_settings`, `migrated_db`, `api_client`, `kek` (`tests/fixtures/db.py`) and
+  `source_pg` (`tests/fixtures/sources.py`): **same**. Endpoint helpers exist twice:
+  `tests/services.py` (`service_url("oracle"|"mongo")`, `host_port`, already lane-safe) and
+  `tests/fixtures/services.py` (no Oracle/Mongo entries); `tests/fixtures/m3_services.py` uses the
+  former, so no host port is hard-coded (deviation below).
+- **demo PG data**: `bank.customers(customer_id bigint` from `10000001`, `full_name`, `email`,
+  `mobile`, `national_id`, `tax_id char(10)`, …`)`, targets in `bank_uat`, seed marker
+  `bank._dps_seed_info`, `tools/seed_sources.py` `CUSTOMER_BASE = 10_000_001`: **same**.
+- **conformance** (`tests/connectors/conformance.py`): exists. Interface = `ConformanceEnv` protocol
+  (`engine`, `source`, `rw`, `make_table(name, *, key, rows)`, `insert`, `read_all`, `target(obj,
+  shape, write_mode, **kw)`, `rejected_selections()`) + the `ConnectorConformance` test class +
+  `sql_rejected_selections()`; Task 14's harnesses implement `ConformanceEnv`.
+- **console**: `pages/{Jobs,JobDetail,JobWizard}.tsx` and `pages/wizard/{StepConnect,StepSelect,
+  StepDiscover,StepTarget,StepRun,RunResult,state}.ts(x)`, `api.connections`, `api.jobs`,
+  `api.snapshots`, `api.groups.{list, create}` (no `get` yet), Vitest (`lib/jobs.test.ts`,
+  `wizard/state.test.ts`): **same** names; `types.ts` `Selection` has no `mongo_filter` yet (Task 18b).
+
+## Task 1 — dependencies, settings, markers, service fixtures
+
+- `tests/fixtures/m3_services.py`: `oracle_dsn()` / `mongo_uri()` return `tests.services.
+  service_url("oracle"|"mongo")` (plan: literal defaults `127.0.0.1:1522/FREEPDB1`,
+  `mongodb://127.0.0.1:27018/...`) and the TCP probe uses `host_port()` (plan: string splitting). Why:
+  contract §0 amendment 2026-10-12 — tests read endpoints only from `DPS_TEST_*`, else from the
+  `DPS_ORACLE_PORT` / `DPS_MONGO_PORT` compose variables; this lane runs Oracle on 1523 and Mongo on
+  27019.
+- `tests/fixtures/m3_services.py`: the drivers are imported inside the fixtures
+  (`pytest.importorskip` per fixture) instead of at module level. Why: the module is a `pytest_plugins`
+  entry of `tests/conftest.py`; a module-level `importorskip` in a plugin aborts collection of the
+  whole suite on a host without the drivers instead of skipping only the tests that need them.
+- `tests/fixtures/m3_services.py`: `mongo_client` tolerates `PyMongoError` while it waits for a
+  primary (plan: `hello` once per loop, an exception would escape), closes the client before skipping,
+  and `OracleTestSchema.__repr__` names the users only (the passwords are random per session but a
+  failing assertion would otherwise print them).
+- `pyproject.toml`: the `oracle` / `mongo` marker descriptions name `DPS_TEST_*` and the port variables
+  (`${DPS_ORACLE_PORT:-1522}`, `${DPS_MONGO_PORT:-27018}`) like M2's markers; the `connectors` extra is
+  written one entry per line. Installed: `oracledb 26.0.0`, `pymongo 4.18.3` (`dnspython 2.9.0`).
+- `.env.example`: **not modified.** As in M2 Task 1, the session's permission rules deny every read and
+  write of `.env*` files in this worktree. The four `DPS_` settings (and the rule that Oracle/Mongo
+  credentials never go in env vars) are documented in `HANDOFF.md` §4 "M3 settings" instead. Open issue:
+  append them to `.env.example` from a session that may edit it.
+- `HANDOFF.md`: §4 gains the "M3 settings" table (contract §0.6: HANDOFF rides with config changes).
+- `dps/config.py`: the module regex `_ORACLE_MODULE` holds the plan's pattern; validator names are
+  prefixed (`_oracle_pool_max`, …) so they cannot shadow M0/M2 validators. Messages are the plan's.
+- `dps/observability.py`: of the plan's allow-list additions, `engine`, `job_id`, `group_id`,
+  `partition_no`, `batch_no`, `rows`, `object_ref` were already present (M1/M2); added `op`,
+  `driver_code`, `members`, `pairs`, `coverage`, `passed`, `sampled`. M2 defines no connector-call
+  counter, so `CONNECTOR_CALLS` and `CONSISTENCY_CHECKS` are new as planned.

@@ -338,6 +338,17 @@ an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture che
 | `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
 | `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
 
+**M3 settings (Oracle and MongoDB connectors; contract §10).** Oracle and MongoDB credentials never
+go in env vars: a connection's `secret_ref` directory supplies `username`, `password` and `dsn`
+(Oracle) or `uri` (Mongo).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DPS_ORACLE_POOL_MAX` | 4 | sessions per Oracle connection pool (1–64) |
+| `DPS_ORACLE_CALL_TIMEOUT_MS` | 30000 | per round trip (1000–3600000; the Wega rule: a hung call becomes an error) |
+| `DPS_ORACLE_MODULE` | `dps` | `v$session.module` of every DPS session (1–48 of `[A-Za-z0-9_.-]`), for the DBA's audit |
+| `DPS_MONGO_SERVER_SELECTION_TIMEOUT_MS` | 5000 | 500–120000 |
+
 Declared but not read by the app: `DPS_HOST` (only the worker's ops server binds to it), `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`. The M1 document, OCR and
 schema settings above are validated (and posture-checked) and read by the document pipeline and routes.

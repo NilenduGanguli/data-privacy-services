@@ -116,6 +116,16 @@ _SAFE_FIELDS = frozenset(
         "code",
         "checks",
         "lease_lost",
+        # Oracle and MongoDB connectors and cross-system checks (M3): an operation name, a driver
+        # error *code* (ORA-00942, mongo:11000 — never the driver message, which can quote a
+        # value), member/pair counts, a coverage ratio and a pass flag
+        "op",
+        "driver_code",
+        "members",
+        "pairs",
+        "coverage",
+        "passed",
+        "sampled",
     }
 )
 
@@ -231,6 +241,14 @@ LEASES_LOST = Counter("dps_leases_lost_total", "Fenced writes that found the lea
 ROWS_WRITTEN = Counter("dps_rows_written_total", "Rows written by L2 jobs", ["mode", "write_mode"])
 QUEUE_DEPTH = Gauge("dps_queue_depth", "Queue rows by table and state", ["table", "state"])
 AUDIT_DROPPED = Counter("dps_audit_dropped_total", "Audit events dropped on a saturated queue")
+CONNECTOR_CALLS = Counter(
+    "dps_connector_calls_total",
+    "Connector driver calls by engine, operation and outcome (M3)",
+    ["engine", "op", "outcome"],
+)
+CONSISTENCY_CHECKS = Counter(
+    "dps_consistency_checks_total", "Cross-system consistency checks by outcome (M3)", ["outcome"]
+)
 
 
 def metrics_payload() -> tuple[bytes, str]:
