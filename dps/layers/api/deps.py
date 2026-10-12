@@ -6,7 +6,11 @@
   job platform stores tenants in ``dps_tenant`` (lower-case ids), so any other id is 400
   ``tenant_invalid`` before a query runs.
 - :func:`kek_of` — the job KEK loaded at startup (``None`` when unset).
-- :func:`idempotency_key` — the ``Idempotency-Key`` header, shape-checked.
+- :func:`idempotency_key` — the ``Idempotency-Key`` header, shape-checked exactly as on Layer 1
+  (one regex, one code, one detail: ``dps.layers.api.idempotency``).
+- :func:`request_fingerprint` — the keyed fingerprint a durable key is bound to (route template
+  and raw body under a KEK subkey), so the same key with another request is 422
+  ``idempotency_key_reused`` on the job routes as on Layer 1 (contract §9).
 - :func:`audit_action` — one value-free audit event per M2 action (route template, action,
   outcome, status, job id, counts); a strict sink that cannot take it answers 503.
 - :func:`audited` — runs a route body, maps its error with :func:`~dps.layers.api.errors.to_http`
@@ -23,14 +27,17 @@ from fastapi import Request
 
 from dps.audit import AuditEvent, AuditUnavailable
 from dps.auth import Principal
+from dps.errors import IDEMPOTENCY_KEY_INVALID, IDEMPOTENCY_KEY_INVALID_DETAIL
 from dps.layers.api.common import route_template, trace_id
 from dps.layers.api.errors import DpsHttpError, to_http
+from dps.layers.api.idempotency import IDEMPOTENCY_HEADER, KEY_RE
 from dps.observability import REQUESTS, get_logger
+from dps.secrets import keyed_fingerprint
 
 logger = get_logger(__name__)
 
-IDEMPOTENCY_HEADER = "Idempotency-Key"
-_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+#: HKDF ``info`` of the subkey that fingerprints an idempotent job request (migration 010).
+IDEMPOTENCY_FP_INFO = "dps.idempotency_fp"
 #: ``dps_tenant.tenant_id``'s CHECK (migration 002), without the reserved ``_`` start.
 _DB_TENANT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
@@ -75,16 +82,30 @@ def idempotency_key(request: Request) -> str | None:
 
     Raises:
         DpsHttpError: 422 ``idempotency_key_invalid`` when it does not match
-            ``^[A-Za-z0-9_.:-]{1,128}$`` (the key is never echoed).
+            ``^[A-Za-z0-9_.:-]{1,128}$`` — Layer 1's code and detail (the key is never echoed).
     """
     value = request.headers.get(IDEMPOTENCY_HEADER)
     if value is None:
         return None
-    if not _IDEMPOTENCY_KEY.fullmatch(value):
-        raise DpsHttpError(
-            422, "idempotency_key_invalid", "Idempotency-Key must match ^[A-Za-z0-9_.:-]{1,128}$"
-        )
+    if not KEY_RE.fullmatch(value):
+        raise DpsHttpError(422, IDEMPOTENCY_KEY_INVALID, IDEMPOTENCY_KEY_INVALID_DETAIL)
     return value
+
+
+async def request_fingerprint(request: Request) -> str | None:
+    """The keyed fingerprint of this request that a durable ``Idempotency-Key`` is bound to.
+
+    ``HMAC-SHA256`` under an HKDF subkey of the job KEK (salt: the route template) over the raw
+    request body — a body can carry selection bind values or caller key material, so it is never
+    a plain hash. ``None`` without a KEK: the job then keeps M2's key-only replay.
+    """
+    kek = kek_of(request)
+    if kek is None:
+        return None
+    body = await request.body()
+    return keyed_fingerprint(
+        kek, info=IDEMPOTENCY_FP_INFO, salt=route_template(request), data=body, hex_chars=64
+    )
 
 
 def audit_action(

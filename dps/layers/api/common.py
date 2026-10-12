@@ -36,7 +36,7 @@ from dps.audit import AuditEvent, AuditUnavailable
 from dps.auth import coded_http_exception_handler as coded_http_exception_handler  # one handler
 from dps.engine.policy import preset_names
 from dps.engine.service import EngineError, Payload, VerificationFailed
-from dps.errors import CodedError
+from dps.errors import IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL, CodedError
 from dps.observability import LATENCY, REQUESTS, get_logger
 
 logger = get_logger(__name__)
@@ -396,9 +396,7 @@ async def with_idempotency[T](
                 entry = cache.get(scope, digest)
             except IdempotencyConflict:
                 raise CodedHTTPException(
-                    422,
-                    "idempotency_key_reused",
-                    "this Idempotency-Key was already used with a different request body",
+                    422, IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL
                 ) from None
     except CodedHTTPException as exc:
         tid = begin_call(request)

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 from fastapi import Request
 
+from dps.errors import IDEMPOTENCY_KEY_INVALID, IDEMPOTENCY_KEY_INVALID_DETAIL
 from dps.layers.api.common import CodedHTTPException
 
 #: The header the caller sends, and the one a replay carries (M2's job routes send the same one).
@@ -54,11 +55,7 @@ def parse_idempotency_key(request: Request) -> str | None:
     if raw is None:
         return None
     if not KEY_RE.fullmatch(raw):
-        raise CodedHTTPException(
-            422,
-            "idempotency_key_invalid",
-            "Idempotency-Key must be 1-128 characters of letters, digits and _ . : -",
-        )
+        raise CodedHTTPException(422, IDEMPOTENCY_KEY_INVALID, IDEMPOTENCY_KEY_INVALID_DETAIL)
     return raw
 
 

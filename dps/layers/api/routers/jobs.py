@@ -1,7 +1,8 @@
 """``/api/v1/jobs`` (contract §9, scope ``jobs``; production writes need ``admin``, §5.3).
 
 ``POST /jobs/run`` returns the generated key material or synthesis seed **once** (``Cache-Control:
-no-store``); an idempotent replay answers 200 with ``Idempotent-Replay: true`` and no key. The
+no-store``); an idempotent replay answers 200 with ``Idempotent-Replay: true`` and no key, and the
+same ``Idempotency-Key`` with another request is 422 ``idempotency_key_reused`` (Layer 1's code). The
 job's stored spec is the redacted one (templates, ids, fingerprints). Controls follow the queue's
 rules (contract §3.1): 409 ``job_terminal`` / ``job_finalizing`` / ``job_not_pausable`` /
 ``job_not_paused`` / ``job_not_retryable`` / ``key_material_required`` / ``key_material_mismatch``.
@@ -28,16 +29,17 @@ from dps.layers.api.deps import (
     page_args,
     principal_of,
     rejected,
+    request_fingerprint,
     require_db,
     tenant_of,
 )
 from dps.layers.api.errors import DpsHttpError
+from dps.layers.api.idempotency import REPLAY_HEADER
 from dps.layers.connectors.submit import seal_retry_secret, submit_discover, submit_run
 from dps.ratelimit import enforce_rate_limit
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"])
 _JOBS = [Depends(require_scope("jobs")), Depends(enforce_rate_limit), Depends(require_db)]
-REPLAY_HEADER = "Idempotent-Replay"
 
 
 class RetryRequest(BaseModel):
@@ -75,7 +77,8 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
     counts = {"objects": len(body.objects)}
     try:
         tenant, key = tenant_of(request), idempotency_key(request)
-        earlier = await jobs.find_by_idempotency(tenant, key) if key else None
+        fp = await request_fingerprint(request) if key else None
+        earlier = await jobs.find_by_idempotency(tenant, key, fingerprint=fp) if key else None
         if earlier is None:
             job = await submit_discover(
                 body,
@@ -84,6 +87,7 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
                 settings=_settings(request),
                 kek=kek_of(request),
                 idempotency_key=key,
+                idempotency_fp=fp,
             )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "job.create", exc) from None
@@ -98,13 +102,18 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
 async def run(body: RunSpec, request: Request, response: Response) -> dict[str, Any]:
     """Validate, seal and queue a run; the generated key or seed is in this answer only."""
     try:
+        key = idempotency_key(request)
+        fp = await request_fingerprint(request) if key else None
+        if key:  # a key reused with another request is refused before any validation (as on L1)
+            await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
         sub = await submit_run(
             body,
             tenant_id=tenant_of(request),
             principal=principal_of(request),
             settings=_settings(request),
             kek=kek_of(request),
-            idempotency_key=idempotency_key(request),
+            idempotency_key=key,
+            idempotency_fp=fp,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "job.create", exc) from None

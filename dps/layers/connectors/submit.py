@@ -100,6 +100,7 @@ async def submit_discover(
     settings: Settings,
     kek: bytes | None,
     idempotency_key: str | None = None,
+    idempotency_fp: str | None = None,
 ) -> Job:
     """Queue a discover job: bind and validate the selection, seal it, store the template.
 
@@ -131,6 +132,7 @@ async def submit_discover(
         object_ref=spec.objects[0].fqn(),
         created_by=principal.key_id,
         idempotency_key=idempotency_key,
+        idempotency_fp=idempotency_fp,
         job_id=job_id,
     )
 
@@ -179,6 +181,7 @@ async def submit_run(
     settings: Settings,
     kek: bytes | None,
     idempotency_key: str | None = None,
+    idempotency_fp: str | None = None,
 ) -> RunSubmission:
     """Validate, seal and queue a run job (module docstring).
 
@@ -248,6 +251,7 @@ async def submit_run(
         purpose=spec.purpose.model_dump(),
         created_by=principal.key_id,
         idempotency_key=idempotency_key,
+        idempotency_fp=idempotency_fp,
         job_id=job_id,
     )
     replay = job.id != job_id

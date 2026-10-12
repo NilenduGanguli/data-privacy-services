@@ -30,6 +30,7 @@ async def test_files_are_the_contract_set() -> None:
         "007_audit_log.sql",
         "008_rls_policies.sql",
         "009_grants.sql",
+        "010_job_idempotency_fp.sql",
     ]
 
 

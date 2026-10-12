@@ -19,3 +19,15 @@ class CodedError(Exception):
         self.detail = detail
         if status is not None:
             self.status = status
+
+
+#: ``Idempotency-Key`` refusals shared by Layer 1 (M1, replay cache) and the job routes (M2,
+#: durable): one code and one value-free detail each (contract §9). The key is never echoed.
+IDEMPOTENCY_KEY_INVALID = "idempotency_key_invalid"
+IDEMPOTENCY_KEY_INVALID_DETAIL = (
+    "Idempotency-Key must be 1-128 characters of letters, digits and _ . : -"
+)
+IDEMPOTENCY_KEY_REUSED = "idempotency_key_reused"
+IDEMPOTENCY_KEY_REUSED_DETAIL = (
+    "this Idempotency-Key was already used with a different request body"
+)

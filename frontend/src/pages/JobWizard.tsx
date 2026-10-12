@@ -13,7 +13,7 @@ import { StepDiscover } from './wizard/StepDiscover';
 import { StepRun, type RunSubmission } from './wizard/StepRun';
 import { StepSelect } from './wizard/StepSelect';
 import { StepTarget } from './wizard/StepTarget';
-import { clearSavedDraft, DRAFT_KEY, isSubmitted, loadSavedDraft, reachable, useWizard, wizardReducer } from './wizard/state';
+import { clearSavedDraft, DRAFT_KEY, isSubmitted, loadSavedDraft, reachable, submissionKey, type SubmissionKey, useWizard, wizardReducer } from './wizard/state';
 
 const STEP_TITLES: Record<Step, string> = { 1: 'Connect', 2: 'Select data', 3: 'Discover', 4: 'Target and write mode', 5: 'Review and run' };
 
@@ -78,7 +78,7 @@ export function JobWizard(): JSX.Element {
   const [runError, setRunError] = useState<{ message: string; code?: string } | null>(null);
   /** The answer of Run job and the specification it was given (without key material). Memory only. */
   const [submission, setSubmission] = useState<{ out: RunOut; spec: Record<string, unknown> } | null>(null);
-  const idem = useRef<{ key: string; dry: boolean } | null>(null);
+  const idem = useRef<SubmissionKey | null>(null);
   const inFlight = useRef(false);   // set synchronously: a second click before the re-render sends nothing
   const reach = reachable(d);
   const submitted = isSubmitted(d);
@@ -135,9 +135,9 @@ export function JobWizard(): JSX.Element {
     inFlight.current = true;
     setBusy(dry ? 'dry' : 'run'); setRunError(null);
     try {
-      if (!idem.current || idem.current.dry !== dry) idem.current = { key: globalThis.crypto.randomUUID(), dry };
       const spec = buildRunSpec(d);
       spec.options = { ...spec.options, dry_run: dry };
+      idem.current = submissionKey(idem.current, dry, JSON.stringify(spec));
       const shown = { ...specPreview(d), options: spec.options };   // the rail keeps what was sent
       const out = await api.jobs.run(auth, spec, idem.current.key);
       idem.current = null;

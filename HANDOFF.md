@@ -218,7 +218,10 @@ for this month and the next three. `--verify` only checks (runtime login, no DDL
 pending or changed file; `--maintain` also drops audit partitions older than
 `DPS_AUDIT_RETENTION_MONTHS`. Exit codes: 0 ok, 1 drift/pending or a failed run (class name and
 SQLSTATE only), 2 `DPS_PG_HOST` unset. Applied files are never edited: fix forward with a new number
-(M2 owns 001–019). Against the compose database:
+(M2 owns 001–019). `010_job_idempotency_fp.sql` (M1+M2 integration) adds `dps_job.idempotency_fp`: a
+durable `Idempotency-Key` is bound to a keyed fingerprint of its request, so the same key with another
+body is 422 `idempotency_key_reused` on the job routes, as on Layer 1 (contract §9); a running stack
+picks it up when the `migrate` one-shot runs again (`docker compose up -d` recreates it). Against the compose database:
 `DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
 **M2 compose environment** (`x-dps-env`, shared by app, migrate and worker): `DPS_PG_HOST=dps-db`, logins
 `dps_app` / `dps_worker_login` / `dps_owner` (local passwords = role name), `DPS_MIGRATIONS_MODE=verify`

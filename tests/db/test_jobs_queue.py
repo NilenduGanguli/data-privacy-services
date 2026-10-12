@@ -39,6 +39,34 @@ async def test_idempotency_key_returns_the_first_job(migrated_db) -> None:  # no
     assert again.id == first.id
 
 
+async def test_an_idempotency_key_bound_to_another_request_is_refused(migrated_db) -> None:  # noqa: ANN001
+    """Contract §9: the same key with another request is 422 ``idempotency_key_reused`` (as on
+    Layer 1), never a replay of a different job."""
+    fp_a, fp_b = "a" * 64, "b" * 64
+    first = await _job(idempotency_key="req-fp", idempotency_fp=fp_a)
+    assert (await _job(idempotency_key="req-fp", idempotency_fp=fp_a)).id == first.id
+    with pytest.raises(jobs.IdempotencyKeyReused) as caught:
+        await _job(idempotency_key="req-fp", idempotency_fp=fp_b)
+    assert caught.value.status == 422 and caught.value.code == "idempotency_key_reused"
+    assert (await jobs.find_by_idempotency("t1", "req-fp", fingerprint=fp_a)).id == first.id
+    with pytest.raises(jobs.IdempotencyKeyReused):
+        await jobs.find_by_idempotency("t1", "req-fp", fingerprint=fp_b)
+    # a job admitted without a fingerprint (no KEK) keeps M2's key-only replay
+    legacy = await _job(idempotency_key="req-nofp")
+    assert (await _job(idempotency_key="req-nofp", idempotency_fp=fp_b)).id == legacy.id
+
+
+async def test_concurrent_reuse_with_another_request_is_refused(migrated_db) -> None:  # noqa: ANN001
+    results = await asyncio.gather(
+        _job(idempotency_key="race-fp", idempotency_fp="c" * 64),
+        _job(idempotency_key="race-fp", idempotency_fp="d" * 64),
+        return_exceptions=True,
+    )
+    made = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, jobs.IdempotencyKeyReused)]
+    assert len(made) == 1 and len(refused) == 1
+
+
 async def test_queue_full_per_tenant(migrated_db) -> None:  # noqa: ANN001
     async with db.acquire_queue(None) as conn:
         await conn.execute("INSERT INTO dps.dps_tenant (tenant_id, max_queued) VALUES ('t1', 2)")

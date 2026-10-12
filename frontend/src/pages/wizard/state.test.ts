@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildRunSpec, confirmationKey, countKey, draftForStorage, fqn, inPlaceKeyRewrites, isWriteConfirmed, writtenObject, type WizardDraft } from '../../lib/jobs';
 import { column, draft } from '../../lib/fixtures';
 import type { ClassificationSnapshot, ColumnClassification, ColumnInfo, TableShape } from '../../lib/types';
-import { canLeave, isSubmitted, reachable, targetReady, wizardReducer, type WizardAction } from './state';
+import { canLeave, isSubmitted, reachable, submissionKey, targetReady, wizardReducer, type WizardAction } from './state';
 
 // The D3 write confirmation (spec §7, contract §14): In place and Append are confirmed with the row count
 // the selection matches, and a confirmation covers exactly what the operator read in the dialog.
@@ -258,5 +258,18 @@ describe('in place keeps the key columns (verify r1)', () => {
     const restored = wizardReducer(draft({ owner: '', table: '' }), { type: 'restore', draft: forged });
     expect(restored.keyMethods).toBeNull();
     expect(targetReady({ ...restored, writeMode: 'in_place' })).toBe(false);
+  });
+});
+
+describe('the run Idempotency-Key follows the request (contract §9: same key, other body = 422 idempotency_key_reused)', () => {
+  const ids = (() => { let n = 0; return () => `k${++n}`; })();
+  it('keeps the key for a retry of the same request', () => {
+    const first = submissionKey(null, false, '{"a":1}', ids);
+    expect(submissionKey(first, false, '{"a":1}', ids)).toBe(first);
+  });
+  it('takes a new key when the request changed, or dry run became a run', () => {
+    const first = submissionKey(null, false, '{"a":1}', ids);
+    expect(submissionKey(first, false, '{"a":2}', ids).key).not.toBe(first.key);
+    expect(submissionKey(first, true, '{"a":1}', ids).key).not.toBe(first.key);
   });
 });

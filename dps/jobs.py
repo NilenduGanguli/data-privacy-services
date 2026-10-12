@@ -16,6 +16,7 @@ carry codes, and the ``error`` column only ever receives the caller's value-free
 from __future__ import annotations
 
 import base64
+import hmac
 import os
 import random
 import socket
@@ -28,6 +29,7 @@ import asyncpg
 from pydantic import BaseModel, Field
 
 from dps import db
+from dps.errors import IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL
 from dps.ids import new_id
 from dps.jobs_models import JobProgress
 from dps.layers.connectors.base import EncodedKey, KeyRange, key_fingerprint
@@ -130,6 +132,22 @@ class JobStateError(Exception):
         super().__init__(detail)
         self.code = code
         self.detail = detail
+
+
+class IdempotencyKeyReused(JobStateError):
+    """The ``Idempotency-Key`` names a job created from another request: 422
+    ``idempotency_key_reused`` — the Layer 1 code (contract §9) — never a replay of that job."""
+
+    status = 422
+
+    def __init__(self) -> None:
+        super().__init__(IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL)
+
+
+def _same_request(stored: str | None, given: str | None) -> bool:
+    """Whether a durable key's stored request fingerprint admits ``given``. A job admitted without
+    a fingerprint (no KEK, or before migration 010) keeps the key-only replay."""
+    return stored is None or given is None or hmac.compare_digest(stored, given)
 
 
 class Job(BaseModel):
@@ -263,7 +281,7 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
         raise ValueError("malformed cursor") from None
 
 
-def _row_job(row: asyncpg.Record, model: type[Job] = Job) -> Any:
+def _row_job(row: asyncpg.Record | dict[str, Any], model: type[Job] = Job) -> Any:
     """A row of :func:`_select` → ``model``, with the live partition aggregate in ``progress``."""
     data = dict(row)
     progress = JobProgress.model_validate(data.pop("progress") or {})
@@ -340,20 +358,23 @@ async def create_job(
     purpose: dict[str, str] | None = None,
     created_by: str | None = None,
     idempotency_key: str | None = None,
+    idempotency_fp: str | None = None,
     priority: int = 100,
     job_id: str | None = None,
 ) -> Job:
     """Insert a queued job (cap-checked) and notify workers.
 
-    An idempotent replay (same ``idempotency_key``) returns the original job — before the queue
-    cap is checked, so a replay is never refused as ``queue_full``. Admission is serialised per
+    An idempotent replay (same ``idempotency_key`` and, when both are known, the same request
+    fingerprint ``idempotency_fp``) returns the original job — before the queue cap is checked,
+    so a replay is never refused as ``queue_full``; the same key with another fingerprint raises
+    :class:`IdempotencyKeyReused` (contract §9). Admission is serialised per
     tenant (a transaction-scoped advisory lock taken before the count), so concurrent submissions
     cannot all pass the cap on the same count; a replay that waited behind the lock finds the
     original there. ``job_id`` lets a caller that seals with the id in the AAD mint it first.
-    Raises :class:`QueueFull`.
+    Raises :class:`QueueFull`, :class:`IdempotencyKeyReused`.
     """
     if idempotency_key is not None:
-        existing = await find_by_idempotency(tenant_id, idempotency_key)
+        existing = await find_by_idempotency(tenant_id, idempotency_key, fingerprint=idempotency_fp)
         if existing is not None:
             return existing
     settings = db.active_settings()
@@ -366,13 +387,16 @@ async def create_job(
                 f"{_ADMIT_LOCK}:{settings.pg_schema}:{tenant_id}",
             )
             if idempotency_key is not None:
-                winner_id = await conn.fetchval(
-                    f"SELECT id FROM {s}.dps_job WHERE tenant_id = $1 AND idempotency_key = $2",
+                winner = await conn.fetchrow(
+                    f"SELECT id, idempotency_fp FROM {s}.dps_job "
+                    "WHERE tenant_id = $1 AND idempotency_key = $2",
                     tenant_id,
                     idempotency_key,
                 )
-                if winner_id is not None:
-                    job_id = winner_id
+                if winner is not None:
+                    if not _same_request(winner["idempotency_fp"], idempotency_fp):
+                        raise IdempotencyKeyReused()
+                    job_id = winner["id"]
                     raise _Replayed()
             await _touch_tenant(conn, tenant_id)
             cap = await conn.fetchval(
@@ -391,9 +415,10 @@ async def create_job(
             await conn.execute(
                 f"INSERT INTO {s}.dps_job (id, tenant_id, kind, phase, mode, group_id, "
                 "connection_id, target_connection_id, object_ref, snapshot_id, spec, purpose, "
-                "key_enc, spec_enc, kid, priority, max_attempts, idempotency_key, created_by) "
+                "key_enc, spec_enc, kid, priority, max_attempts, idempotency_key, created_by, "
+                "idempotency_fp) "
                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, "
-                "$14, $15, $16, $17, $18, $19)",
+                "$14, $15, $16, $17, $18, $19, $20)",
                 job_id,
                 tenant_id,
                 kind.value,
@@ -413,6 +438,7 @@ async def create_job(
                 settings.job_max_attempts,
                 idempotency_key,
                 created_by,
+                idempotency_fp,
             )
             await conn.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, kind.value)
     except _Replayed:
@@ -421,7 +447,7 @@ async def create_job(
         # A concurrent request with the same idempotency key won the insert.
         if idempotency_key is None:
             raise
-        winner = await find_by_idempotency(tenant_id, idempotency_key)
+        winner = await find_by_idempotency(tenant_id, idempotency_key, fingerprint=idempotency_fp)
         if winner is None:
             raise
         return winner
@@ -440,13 +466,27 @@ async def get_job(tenant_id: str, job_id: str) -> Job | None:
     return _row_job(row) if row else None
 
 
-async def find_by_idempotency(tenant_id: str, key: str) -> Job | None:
-    """The tenant's job created with idempotency key ``key``, or None."""
+async def find_by_idempotency(
+    tenant_id: str, key: str, *, fingerprint: str | None = None
+) -> Job | None:
+    """The tenant's job created with idempotency key ``key``, or None.
+
+    Raises:
+        IdempotencyKeyReused: ``fingerprint`` is given and the job was admitted with another
+            request fingerprint (the same key, another request; contract §9).
+    """
     async with db.acquire(tenant_id) as conn:
         row = await conn.fetchrow(
-            _select(_PUBLIC, "j.tenant_id = $1 AND j.idempotency_key = $2"), tenant_id, key
+            _select(_PUBLIC + ", idempotency_fp", "j.tenant_id = $1 AND j.idempotency_key = $2"),
+            tenant_id,
+            key,
         )
-    return _row_job(row) if row else None
+    if row is None:
+        return None
+    data = dict(row)
+    if not _same_request(data.pop("idempotency_fp"), fingerprint):
+        raise IdempotencyKeyReused()
+    return _row_job(data)
 
 
 async def list_jobs(

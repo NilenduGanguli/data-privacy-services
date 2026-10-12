@@ -158,6 +158,18 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
 }
 
 /** Run job created a job from this draft: nothing in it can change or run again until `reset`. */
+/** The Idempotency-Key of a run submission and the request it was minted for. */
+export interface SubmissionKey { key: string; dry: boolean; body: string }
+
+/**
+ * The key for submitting `body` (the serialised RunSpec): the held one while the request is the
+ * same (a retry after an error must replay, never run twice), a new one when the request changed
+ * — the server refuses a key reused with another body (422 `idempotency_key_reused`, contract §9).
+ */
+export function submissionKey(held: SubmissionKey | null, dry: boolean, body: string, mint: () => string = () => globalThis.crypto.randomUUID()): SubmissionKey {
+  return held && held.dry === dry && held.body === body ? held : { key: mint(), dry, body };
+}
+
 export function isSubmitted(d: WizardDraft): boolean {
   return d.submittedJobId !== null;
 }

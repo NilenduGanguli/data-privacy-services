@@ -370,3 +370,56 @@ def test_audit_actions(seeded, api_client) -> None:  # noqa: ANN001
     assert created.route == "/api/v1/jobs/run"
     dumped = json.dumps([e.model_dump(mode="json") for e in sink.events])
     assert "bank_uat" not in dumped and "dek" not in dumped
+
+
+def test_job_routes_share_layer_1_idempotency_names_and_codes(seeded) -> None:  # noqa: ANN001
+    """One ``Idempotency-Key`` contract for Layer 1 (M1) and the job routes (M2, contract §9):
+    the same header names, the same refusal for a malformed key, and 422
+    ``idempotency_key_reused`` when a key comes back with another request — never a silent
+    replay of a different job."""
+    c, src, uat = seeded["c"], seeded["src"], seeded["uat"]
+    table = {
+        "write_mode": "table",
+        "connection_id": uat,
+        "object": {"owner": "bank_uat", "name": "customers"},
+    }
+    other = {**table, "object": {"owner": "bank_uat", "name": "customers_other"}}
+    key = {"Idempotency-Key": "integ-reuse-1"}
+    first = c.post(
+        "/api/v1/jobs/run", json=_run(src, seeded["snap_src"], table), headers={**JOBS, **key}
+    )
+    assert first.status_code == 202, first.text
+    reused = c.post(
+        "/api/v1/jobs/run", json=_run(src, seeded["snap_src"], other), headers={**JOBS, **key}
+    )
+    assert reused.status_code == 422 and reused.json()["code"] == "idempotency_key_reused"
+    assert "key_material" not in reused.json() and "idempotent-replay" not in reused.headers
+    replay = c.post(
+        "/api/v1/jobs/run", json=_run(src, seeded["snap_src"], table), headers={**JOBS, **key}
+    )
+    assert replay.status_code == 200 and replay.headers["idempotent-replay"] == "true"
+    assert replay.json()["job"]["id"] == first.json()["job"]["id"]
+    # the same key on another job route is another request
+    discover = {"connection_id": src, "objects": [{"owner": "bank", "name": "customers"}]}
+    across = c.post("/api/v1/jobs/discover", json=discover, headers={**JOBS, **key})
+    assert across.status_code == 422 and across.json()["code"] == "idempotency_key_reused"
+    d_key = {"Idempotency-Key": "integ-reuse-2"}
+    d1 = c.post("/api/v1/jobs/discover", json=discover, headers={**JOBS, **d_key})
+    d2 = c.post("/api/v1/jobs/discover", json=discover, headers={**JOBS, **d_key})
+    assert d1.status_code == 202 and d2.status_code == 200
+    assert d2.headers["idempotent-replay"] == "true"
+    other_obj = {**discover, "objects": [{"owner": "bank", "name": "accounts"}]}
+    d3 = c.post("/api/v1/jobs/discover", json=other_obj, headers={**JOBS, **d_key})
+    assert d3.status_code == 422 and d3.json()["code"] == "idempotency_key_reused"
+    # Layer 1 and the job routes refuse a malformed key with the same code and detail
+    bad = {"Idempotency-Key": "no spaces"}
+    l1 = c.post("/api/v1/detect", json={"data": {"a": "b"}}, headers={**FULL, **bad})
+    l2 = c.post("/api/v1/jobs/discover", json=discover, headers={**JOBS, **bad})
+    assert l1.status_code == l2.status_code == 422
+    assert l1.json() == l2.json() and l1.json()["code"] == "idempotency_key_invalid"
+    # the replay header is exposed to the console on every route (CORS)
+    pre = c.options(
+        "/api/v1/jobs/run",
+        headers={"Origin": "http://console.test", "Access-Control-Request-Method": "POST"},
+    )
+    assert "Idempotency-Key" in pre.headers.get("access-control-allow-headers", "")

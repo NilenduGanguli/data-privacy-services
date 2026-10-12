@@ -18,7 +18,10 @@ job id, counts — never a value, key or selection literal).
   `cursor_invalid`.
 - `POST /jobs/discover`, `POST /jobs/run` and `POST /jobs/{id}/retry` honour `Idempotency-Key`
   (`^[A-Za-z0-9_.:-]{1,128}$`, else 422 `idempotency_key_invalid`; durable per tenant). A replay
-  answers **200** with `Idempotent-Replay: true` and the job only — never the key again.
+  answers **200** with `Idempotent-Replay: true` and the job only — never the key again. The key
+  is bound to its request (route and body, fingerprinted under a subkey of the job KEK; migration
+  010): the same key with another body, or on the other route, is 422 `idempotency_key_reused` —
+  the Layer 1 code and detail (contract §9).
 - Ids: jobs `j_…` (scans `s_…`, M4), connections `c_…`, snapshots `snap_…`, groups `grp_…`, evidence
   `ev_…`, artefacts `art_…` (prefix + 26-character Crockford ULID).
 
@@ -140,7 +143,8 @@ batch is written), `source_error`, `target_error`, `statement_timeout`, `selecti
 `snapshot_not_found`, `snapshot_not_proposed`, `snapshot_conflict`, `override_*`, `evidence_not_found`,
 `artefact_not_found`, `scope_required`, `db_unavailable`, `audit_unavailable` (503 when
 `DPS_AUDIT_STRICT` and the audit write failed), `tenant_invalid`, `tenant_reserved`, `cursor_invalid`,
-`idempotency_key_invalid`, `internal_error` (500; only the exception class is logged).
+`idempotency_key_invalid`, `idempotency_key_reused`, `internal_error` (500; only the exception
+class is logged).
 
 ## Job and partition state machine
 
