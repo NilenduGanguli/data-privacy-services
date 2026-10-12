@@ -697,3 +697,57 @@ changed; interfaces (names and signatures) are unchanged.
   `test_every_entity_generator_produces_a_value`, `test_ordered_datetimes_compare_as_instants`, 14
   new invalid-spec cases). Against the plan's code, 21 of them fail. Throughput on this Mac:
   ≈ 1 875 rows/s for the 16-field test spec. Suite 804 → 841 passed, 4 skipped.
+
+## Task 12 — Structure profiles and spec proposers (heuristic and LLM, P1-safe)
+
+`dps/engine/shapes.py` is the plan's. `dps/engine/synth/schema_profile.py` is the plan's module plus the
+fixes below; public names and signatures are unchanged. The plan's 11 tests pass on the plan's code, but a
+probe found 14 inputs on which it raised a raw `ValidationError`/`OverflowError`/`TypeError` (an uncoded 500
+at the Task 13 routes) and one quadratic path; each fix has a test that fails on the plan's code (25 of the
+27 new cases fail there; the two that pass guard behaviour the plan already had).
+
+- **Field names always validate** (`_Namer`, used by all three profilers). The plan built names with
+  `_ident` per segment, so `a b` and `a_b` (or JSON Schema `a-b` / `a_b`) became duplicate fields, a sample
+  key that is a scalar in one row and an object in another (`a` and `a.b`) made a field nest under a
+  scalar, and a dotted key with more than four segments broke `FieldSpec`'s name rule — each a
+  `GeneratorSpec` `ValidationError`. A name that cannot be used as is (too deep, colliding, or aliased as
+  sensitive) becomes `field_N` (`field_N_2`, … if that is taken). The JSON Schema walk passes raw path
+  segments to the namer instead of pre-joined prefixes, and stops descending past `MAX_SCHEMA_DEPTH` (32)
+  levels (as does `_flatten` for samples) instead of recursing until `RecursionError`.
+- **At most `MAX_FIELDS` (200) fields** — `GeneratorSpec.fields` holds 200 — else `SchemaError`
+  `schema_unsupported` (a coded 422) from every profiler, checked before the per-column work.
+- **Numbers that no generator accepts are not numbers.** `_finite` (a `TypeGuard`): finite and
+  `|x| ≤ MAX_ABS` (Task 11). A sampled `10**400` raised `OverflowError` in `float()`; a JSON `NaN` raised
+  `ValueError` in `math.log10`; a JSON Schema `maximum: 1e308` produced a `decimal` the executor refuses.
+  `_infer_type` and the sample statistics use it, and so do JSON Schema `minimum`/`maximum`.
+- **The heuristic proposer clamps to the executor's limits:** `scale ≤ MAX_SCALE` (DDL `NUMERIC(20,12)`
+  gave scale 12); `lognormal` only when `|mu| ≤ 100` and `sigma ≤ 20` (else `decimal`); DDL precision is
+  capped at `MAX_DIGITS` = 38 integer digits (`NUMERIC(1000,0)` raised `OverflowError` in `10.0 ** 1000`);
+  years are clamped to 1..9999 and zero-padded (`0005-…` became `5-01-01`, not an ISO date). As a last
+  resort, `heuristic_spec` turns a field whose proposal still fails validation into short `text` and says
+  how many did in `notes` (a count, never a value).
+- **JSON Schema keywords of the wrong type are ignored**, not fatal: `minLength: "x"` raised `ValueError`
+  in `int()`; `required: [{}]` raised `TypeError` building a set. Only string entries of `required` count;
+  `minLength`/`maxLength` must be integers.
+- **DDL comments are stripped in one linear pass, quote-aware** (`_strip_comments`, `_body_end`). The
+  plan's `re.sub(r"/\*.*?\*/", …, flags=re.DOTALL)` is quadratic on unterminated comments: 60 000
+  characters took 2 s, the 100 000-character limit about 6 s, on the event loop (Task 13 also moves DDL
+  profiling to a thread). The plan's strip and parenthesis scan also ignored quotes, so
+  `DEFAULT '--'` or `DEFAULT '('` made a valid table `ddl_unparsed`.
+- **`merge_llm_spec` refuses unusable replies with `ValueError`** (→ `fallback: llm_invalid_spec`, as
+  the plan intends): `fields` not a list (`{"fields": 5}` raised `TypeError`, a 500), a reply proposing
+  none of the profile's fields (`{}` was labelled `source: llm` while being the heuristic spec), and a reply
+  nested deeply enough for `json.loads` to raise `RecursionError`. `notes` that are not a list are ignored
+  (`{"notes": 7}` raised `TypeError`).
+- **`verify_against_sample` does not look for `GENDER` and `NATIONALITY` values (`SWEEP_EXEMPT`).** The
+  `entity` generator draws them from a handful of words, and the M0 surrogate engine already lets them
+  equal an original (`surrogates._IDENTITY_OK`: forcing a different value would itself reveal it), so a
+  sample with a gender column failed every run with `leakage`. Every other detected type is swept exactly
+  as the plan says. **Open:** at volume the sweep still fails healthy runs on other low-entropy types
+  (measured on Faker en_IN samples: a 50-row sample with a city column → 100 rows fail 5/5 on `CITY`;
+  200 → 1 000 rows fail 5/5 on `CITY`, `DATE`, `DATE_OF_BIRTH`, a few `PERSON_NAME`). That is a policy
+  decision (which sample values count as "originals" for a generated dataset) and is left fail-closed;
+  see the build report.
+- Count: plan 11 tests; the file has 38 (11 + 14 always-valid cases, DDL comments/quotes, linear-time
+  comment strip, 3 too-many-fields cases, 6 unusable replies, notes of the wrong type, gender/nationality
+  sweep). Suite 841 → 879 passed, 4 skipped.
