@@ -1413,3 +1413,72 @@ for CVV", "Run on the engine", "Re-run plan", …) and test ids (`policy-header`
   were re-run on the final styles (72 + 11 pass).
 - Count: Python 995 → 999 passed, 4 skipped; frontend 41 `node:test` cases; `npm run build` 49
   modules.
+
+## Task 19 — Local stack (OCR mock), image, smoke test extension
+
+- `docker-compose.yml`: **M0's `app` service as built is kept and extended**, not replaced by the
+  plan's snippet. The snippet drops M0's hardening (`read_only`, `cap_drop: [ALL]`,
+  `no-new-privileges`), the healthcheck's `start_period` and `127.0.0.1` URL, `DPS_COIN_CA_FILE`,
+  `DPS_COIN_TLS_INSECURE` and the overridable `DPS_FPE_ENABLED`; all stay. Added exactly as planned:
+  the M1 environment block (`DPS_OCR_PROVIDER` `azure`, the mock endpoint and demo key,
+  `DPS_OCR_HEALTH_PATH`, `DPS_MAX_DOCUMENT_MB`, `DPS_SCHEMA_MAX_ROWS`), `depends_on` the mock with
+  `required: false`, and the `azure-ocr-mock` service (profiles `docs` and `full`, lane-safe port
+  and image tag, healthcheck, `mem_limit: 768m`, labels). The header comment documents the profile,
+  the no-profile behaviour and the lane example with `DPS_OCR_PORT`.
+- `Dockerfile`: **unchanged.** The `node:22-slim` console stage is M0's as built, `.[fpe,docs]`
+  (and `.[fpe,docs,ner]` under `WITH_NER=1`) arrived with Task 10, and Task 19C added Tesseract.
+- `.dockerignore`: adds `demo`. `tests/eval` is not added because `tests` (all of it) is already
+  ignored.
+- `tools/smoke_test.py` — the plan's ten M1 checks, with three changes:
+  - **The text-PDF redaction check reads OCR readiness first.** The plan sent
+    `{"redacted_pdf": true}` regardless, and with the plan's own compose (`DPS_OCR_PROVIDER=azure`
+    by default) a stack started without `--profile docs` answers that request with 503
+    `ocr_unavailable`: OCR is configured, so the redacted PDF's OCR re-read must run, and DPS fails
+    closed when it cannot (Task 9's rule; observed on the lane stack). The plan's "OCR checks need
+    `--profile docs`" (two skips) was therefore unreachable. When `/readyz` says OCR is not ready
+    the check now asks for `ocr_verify: false` (the structural checks only: no text layer, no
+    text-showing operator) and its detail shows `ocr_checked=False`; with OCR ready it is the plan's
+    request. No assertion was relaxed: `passed` and 0 extractable characters are required either
+    way, and under `DPS_SMOKE_REQUIRE_OCR=1` a stack without OCR still fails (at the scan check).
+  - Every check prints a value-free detail (HTTP status, counts, entity types, the OCR engine) and
+    reads a body only from a 200 response (`_json`); the CSV check also requires the same number
+    of rows as the source; the demo-scan check also requires a `%PDF-` body (the console's SPA
+    fallback answers 200 with `index.html` for any missing file).
+  - The closing line counts skipped checks: `all 23 checks passed …, 2 skipped (OCR not ready)`.
+- **Tests first (the plan has none for this task): `tests/test_compose.py`** (7, offline, PyYAML):
+  every host port is `127.0.0.1:${DPS_*_PORT:-<port>}:<port>`; every service has a healthcheck, a
+  `mem_limit` and the `app` label; the mock's image, build context, profiles, port and healthcheck;
+  the app's OCR environment and `depends_on … required: false`; M0's hardening kept; the Dockerfile's
+  `node:22-slim` stage and `.[fpe,docs]` installs; `.dockerignore` leaves out `demo`, `tests` and
+  `docs` but not `frontend/public` (the console's demo scan). Before the change three failed for the
+  expected reasons (`KeyError: 'azure-ocr-mock'`, `KeyError: 'DPS_OCR_PROVIDER'`, `demo` missing);
+  the other four guard properties M0 already had.
+- **The mock image was built, not taken from the cache.** With the lane's `DPS_IMAGE_TAG=m1` the
+  compose image name is `document_intelligence-azure-ocr-mock:m1`, which did not exist, so the plan's
+  `docker compose --profile docs up --build -d` built it from `../mock_azure_ocr` (network was
+  available: `ghcr.io/astral-sh/uv:latest`, Debian's `tesseract-ocr` 5.5.0). HANDOFF §3 records
+  the offline fallback (tag the cached `:latest` image for the lane and start without `--build`).
+- `HANDOFF.md` §1 (smoke check count), §3 (the services table, the profile, the no-profile
+  behaviour, `DPS_OCR_PORT`, `DPS_SMOKE_REQUIRE_OCR`) and §4 (compose-only variables) are updated in
+  this commit (contract §0.6); not in the plan's file list. The M1 section proper is Task 20's.
+- **Results on the lane stack** (`COMPOSE_PROJECT_NAME` `dps-wt-m1`, `DPS_APP_PORT=8401`,
+  `DPS_OCR_PORT=5016`, `DPS_IMAGE_TAG=m1`):
+  - `docker compose --profile docs up --build -d`: `app` and `azure-ocr-mock` healthy; `/readyz`
+    `ready: true`, `ocr = {ok: true, detail: up, provider: azure, engine: azure-read-v3.2}`.
+  - `DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py` → `all 25 checks passed` (M0's smoke has
+    15 checks as built, so the total is the plan's "M0's count + 10"). The scan is read
+    on pages `[1, 2]` and finds AADHAAR, CARD_PAN, DATE_OF_BIRTH, EMAIL, PAN_IN, PERSON_NAME, PHONE
+    and POSTAL_CODE; its redaction is OCR re-read with 0 hits; the PNG gives 5 findings.
+  - Before the compose change (the image's own `DPS_OCR_PROVIDER=auto`, local Tesseract) the same
+    extended smoke also passed 25/25 (`engine tesseract-5.5`).
+  - Without the profile (`docker compose up -d`): the app starts, `/readyz` `ready: true` with
+    `ocr: down`; the smoke passes 23 with the two OCR checks skipped, and fails at the first OCR
+    check under `DPS_SMOKE_REQUIRE_OCR=1`. With the mock stopped, a scanned PDF is 503
+    `ocr_unavailable` and a DOCX is 200.
+  - `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"` → 128 passed, 2 skipped: the two
+    `tesseract`-marked cases of `tests/documents/test_ocr_tesseract.py` (no `tesseract` binary on
+    this Mac; contract §12.1). In the image (bind-mounted tests, pytest installed in a throwaway
+    root container, as in Task 19C) `-m tesseract` → 2 passed.
+  - `docker compose logs app | grep -cE '[0-9]{4} [0-9]{4} [0-9]{4}|@example\.(com|net|org)'` → 0
+    after the smoke runs (DoD 9).
+- Count: suite 999 → 1006 passed, 4 skipped (tesseract ×2, `ner` ×2; lane OCR mock up).

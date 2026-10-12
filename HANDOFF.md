@@ -23,7 +23,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001** |
 | `dps` package | Python 3.12 | Layer 1 engine + API; extras `fpe` and `docs` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex` |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `tools/smoke_test.py` | script | 13 end-to-end checks against a running stack; prints verdicts, never bodies |
+| `tools/smoke_test.py` | script | 25 end-to-end checks against a running stack (M0's 15 + 10 for documents, OCR and schema from M1); prints verdicts, never bodies |
 
 ## 2. Build
 
@@ -52,25 +52,46 @@ Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (ar
 ## 3. Run locally (compose)
 
 ```bash
-docker compose up --build -d          # http://127.0.0.1:8400, key dps_local_dev_key_change_me
-python tools/smoke_test.py            # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90), then 13 checks
-docker compose down
+docker compose --profile docs up --build -d       # http://127.0.0.1:8400, key dps_local_dev_key_change_me
+DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py  # waits for /health (DPS_SMOKE_WAIT_SECONDS, default 90), then 25 checks
+docker compose --profile docs down
 ```
 
-One service, `app` (image `data-privacy-services:${DPS_IMAGE_TAG:-local}`), port
-`127.0.0.1:${DPS_APP_PORT:-8400}:8400`.
+Two services:
+
+| Service | Image | Host port | Profile | Notes |
+|---|---|---|---|---|
+| `app` | `data-privacy-services:${DPS_IMAGE_TAG:-local}` (build `.`) | `127.0.0.1:${DPS_APP_PORT:-8400}:8400` | default | API + console |
+| `azure-ocr-mock` | `document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG:-latest}` (build `../mock_azure_ocr`) | `127.0.0.1:${DPS_OCR_PORT:-5016}:5000` | `docs`, `full` | Azure Computer Vision Read v3.2 contract with Tesseract inside (M1); healthcheck `/health`, `mem_limit: 768m` |
+
+The app talks to the mock as `http://azure-ocr-mock:5000` (`DPS_OCR_PROVIDER=azure`, key `mock-key`,
+a local demo literal) and `depends_on` it with `required: false`: **without `--profile docs` the app
+still starts** and `/readyz` reports `ocr: down` (never required); JSON, text, text-layer PDFs and
+DOCX/TXT/CSV documents work, while a document with pages to OCR (a scan, an image) and any redacted
+PDF are refused with 503 `ocr_unavailable` — OCR is configured, so DPS fails closed rather than
+skip it (a redacted PDF's OCR re-read included; `options.ocr_verify: false` asks for the
+structural checks only).
+`DPS_OCR_PROVIDER=tesseract docker compose up -d` uses the image's own Tesseract instead of the mock.
+`tools/smoke_test.py` skips its two OCR checks when `/readyz` says OCR is not ready, and fails on them
+under `DPS_SMOKE_REQUIRE_OCR=1` (the M1 milestone gate). `../mock_azure_ocr` is the directory this
+repo is nested in; its build pulls `ghcr.io/astral-sh/uv:latest`, so offline, tag the cached image
+for the lane (`docker tag document_intelligence-azure-ocr-mock:latest
+document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG}`) and start without `--build`.
 Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,
-`DPS_FPE_ENABLED=true`, `DPS_LLM_PROVIDER=stub` and passes the Stellar/COIN variables through (each
-overridable from the shell; `DPS_COIN_TLS_INSECURE` defaults to `false`). The smoke test reads `DPS_BASE_URL` or `DPS_TEST_APP_URL` (default
+`DPS_FPE_ENABLED=true`, `DPS_LLM_PROVIDER=stub`, the M1 document settings (`DPS_OCR_PROVIDER=azure`,
+`DPS_AZURE_VISION_ENDPOINT`, `DPS_AZURE_VISION_KEY`, `DPS_OCR_HEALTH_PATH=/health`,
+`DPS_MAX_DOCUMENT_MB=20`, `DPS_SCHEMA_MAX_ROWS=10000`) and passes the Stellar/COIN variables through
+(each overridable from the shell; `DPS_COIN_TLS_INSECURE` defaults to `false`). The `/tmp` tmpfs is
+also where multipart uploads above 1 MiB spool. The smoke test reads `DPS_BASE_URL` or `DPS_TEST_APP_URL` (default
 `http://127.0.0.1:${DPS_APP_PORT:-8400}`) and `DPS_API_KEY` (default the local demo key).
 
 **Lane-safe stacks** (contract §0, amendment 2026-10-12). Parallel milestone lanes each run their own
 stack on this host, so `docker-compose.yml` fixes neither a host port nor an image tag:
 
 - every host port is `127.0.0.1:${DPS_<NAME>_PORT:-<contract port>}:<container port>`: `DPS_APP_PORT`
-  8400 today; as services arrive, `DPS_DB_PORT` 5441, `DPS_SOURCE_PG_PORT` 5442, `DPS_MINIO_PORT` 9010,
+  8400 and `DPS_OCR_PORT` 5016 today; as services arrive, `DPS_DB_PORT` 5441, `DPS_SOURCE_PG_PORT` 5442, `DPS_MINIO_PORT` 9010,
   `DPS_MINIO_CONSOLE_PORT` 9011, `DPS_ORACLE_PORT` 1522, `DPS_MONGO_PORT` 27018, `DPS_OCR_PORT` 5016,
   `DPS_DEMO_SITE_PORT` 8410, `DPS_TOKENIZER_MOCK_PORT` 8420 (worker metrics ports likewise if published);
 - every image compose builds is tagged `${DPS_IMAGE_TAG:-local}` (`data-privacy-services`, later
@@ -80,9 +101,9 @@ stack on this host, so `docker-compose.yml` fixes neither a host port nor an ima
 - give each lane its own `COMPOSE_PROJECT_NAME` so containers, networks and volumes stay apart:
 
 ```bash
-COMPOSE_PROJECT_NAME=dps-m2 DPS_IMAGE_TAG=m2 DPS_APP_PORT=8401 docker compose up --build -d
+COMPOSE_PROJECT_NAME=dps-m2 DPS_IMAGE_TAG=m2 DPS_APP_PORT=8401 DPS_OCR_PORT=5017 docker compose --profile docs up --build -d
 DPS_APP_PORT=8401 python tools/smoke_test.py
-COMPOSE_PROJECT_NAME=dps-m2 docker compose down
+COMPOSE_PROJECT_NAME=dps-m2 docker compose --profile docs down
 ```
 
 ## 4. Configuration (all `DPS_*`; `DPS_<NAME>_FILE` reads the value from a mounted file)
@@ -136,8 +157,9 @@ schema settings above are validated (and posture-checked) from M1 Task 1 on and 
 pipeline and routes land during M1.
 
 Compose-only variables (read by `docker-compose.yml` and the tools, not by the app): `DPS_IMAGE_TAG`
-(default `local`) and the host-port variables `DPS_APP_PORT` (8400; the others arrive with their
-services, §3 "Lane-safe stacks").
+(default `local`; the OCR mock `latest`) and the host-port variables `DPS_APP_PORT` (8400) and
+`DPS_OCR_PORT` (5016; the others arrive with their services, §3 "Lane-safe stacks").
+`DPS_SMOKE_REQUIRE_OCR=1` makes `tools/smoke_test.py` fail instead of skipping its OCR checks.
 
 ## 5. Probes and ops surfaces
 
