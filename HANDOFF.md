@@ -398,10 +398,17 @@ the references the deployment's tenants may use (open issue, see the M2 build re
   and add renamed classes to `_node_types(...)` — never loosen a test. Oracle renders `DATE '…'` as
   `TO_DATE(:l1, 'YYYY-MM-DD')` and intervals as `NUMTODSINTERVAL(:l1, 'DAY')`; those format/unit
   strings are the only literals left in a compiled selection (plus `ORDER BY` positions and type
-  parameters).
+  parameters). Denied functions (`DENIED_FUNCTION_PREFIXES`) are refused as calls and in PostgreSQL
+  attribute notation, where `t.f` and `(expr).f` call `f(t)`/`f(expr)`: a **qualified** name whose
+  last part starts with a denied prefix is `selection_function_denied`, so a qualified column such
+  as `a.utl_rate` or `c.ts_status` is refused too — reference it unqualified (an unqualified name
+  is never a call). `lo_*` calls are refused; in attribute position only the real large-object
+  function names are (`a.lo_limit` stays usable).
 - PostgreSQL sources (M2, `dps/layers/connectors/postgres.py`): every read runs in `BEGIN READ ONLY` on a
   session with `statement_timeout` = `DPS_CONNECTOR_STATEMENT_TIMEOUT_SECONDS`, `lock_timeout=5s` and
-  `application_name = dps:<action>:<job id>` (what a DBA sees in `pg_stat_activity`). Bind values are
+  `application_name = dps:<action>:<job id>` (what a DBA sees in `pg_stat_activity`). The pool
+  resets a session when a read releases it (`pg_advisory_unlock_all()`, `RESET ALL`), so no
+  session lock or setting outlives a read. Bind values are
   coerced by the prepared statement's parameter types (a JSON string for a `date` column works; one
   that is not a date fails with `selection_param_invalid`, no value in the message). A refused login
   is `connection_failed` and not retried; network failures are. The connection test's advisory

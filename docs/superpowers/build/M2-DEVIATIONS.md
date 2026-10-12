@@ -609,6 +609,19 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   and `test()` reports it without raising): 18 offline + 9 integration = 27 (plan: 19).
 - `HANDOFF.md`: §3 `source-pg` row, start command and `DPS_TEST_SOURCE_PG_DSN`; §4
   `DPS_SOURCE_PG_PORT`; §8 the read-session rules and the advisory check.
+- **Defence in depth beside the selection deny-list** (recorded at verify r1, see "Verify r1
+  fixes"). The deny-list is the control; the read side limits what a function that slips past it
+  can do. Every read runs in `BEGIN READ ONLY` on a session with `statement_timeout`
+  (`DPS_CONNECTOR_STATEMENT_TIMEOUT_SECONDS`), `lock_timeout=5s` and
+  `idle_in_transaction_session_timeout`, so a sleep ends at the timeout and nothing is written.
+  Sessions come from an asyncpg pool, which resets a session on release with
+  `SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;`: a session-level advisory
+  lock or a `set_config(…, false)` taken inside one read never reaches the next acquirer (`RESET
+  ALL` restores the startup `statement_timeout` and `default_transaction_read_only`). Pinned by the
+  integration test `test_a_released_session_keeps_no_advisory_lock_or_session_setting` (one pooled
+  session: lock and `statement_timeout=0` taken, released, the lock gone and `7s` back). It does
+  not stop a transaction-level effect inside the read itself (signalling another backend, reading
+  a large object), which is why the deny-list must cover every invocation path.
 
 ## Task 16 — Engine bridge (`dps/engine/batch.py`) and M0 touch points
 
@@ -1939,3 +1952,60 @@ reducer with the new helpers stubbed, among them the reviewer's cases A–D on t
     run's random bytes). It is a harness collision, not a product defect: both runs share one bucket
     and one key by design of the test. The gate was re-run alone: 159 passed. HANDOFF's *M2 traps*
     gains "run the integration gates one at a time against a lane's stack".
+
+## Verify r1 fixes
+
+- **B1 — denied functions ran through PostgreSQL attribute notation** (review G3 r3 B1, carried
+  until now and reproduced again at verify r1). In PostgreSQL `x.f` is the call `f(x)` when `x` is
+  a range variable with no column `f`, and `(expr).f` is `f(expr)`; with `unnest(ARRAY[:q]) AS t`
+  in `FROM`, `t` is a scalar of the bound type, so `t.pg_sleep`, `t.ts_stat` (a bound SQL string),
+  `t.pg_advisory_lock` or `t.pg_terminate_backend` call the function with no call syntax. sqlglot
+  parses these as `exp.Column` (`t.f`, `"t"."f"`, `s.t.f`) or `exp.Dot` (`(t).f`, `(t.*).f`,
+  `((t)).f`, `(t).x.f`, `(CAST(… ) ).f`, `(ARRAY[…])[1].f`), never as `exp.Func`, and
+  `_validate_tree` applied `DENIED_FUNCTION_PREFIXES` to `exp.Func` only. The verifier's
+  `SELECT (SELECT t.pg_sleep::text FROM unnest(ARRAY[1.0::float8]) AS t) IS NULL` slept 1012 ms on
+  the lane's source-pg while `validate_selection` accepted the same where clause.
+  - Fix (`dps/layers/connectors/selection.py`): `_validate_tree` also refuses, with
+    `selection_function_denied` and the value-free message "a denied function is called through
+    attribute notation (name.function)", the `this` identifier of a **qualified** `exp.Column`
+    (any of `table`/`db`/`catalog` set) and the `expression` identifier of an `exp.Dot` whose
+    lower-cased name starts with a `DENIED_ATTRIBUTE_PREFIXES` entry. It runs on every node of the
+    tree, so `validate_selection`, `parameterize_literals`, `compile_where`, `compile_query` and
+    the console checklist (`selection_checks` → `no_into_lock_procs`) all refuse it. An
+    unqualified name stays allowed: PostgreSQL never reads it as a call (`column "pg_sleep" does
+    not exist`), and `pg_sleep > :a` on a real column `pg_sleep` is a column.
+  - `DENIED_ATTRIBUTE_PREFIXES` is `DENIED_FUNCTION_PREFIXES` with the contract's `lo_*` narrowed
+    to the real large-object functions (`LARGE_OBJECT_FUNCTIONS`: `lo_close`, `lo_creat`,
+    `lo_create`, `lo_export`, `lo_from_bytea`, `lo_get`, `lo_import`, `lo_lseek*`, `lo_manage`,
+    `lo_open`, `lo_put`, `lo_tell*`, `lo_truncate*`, `lo_unlink`, `loread`, `lowrite`; read from
+    `pg_proc` on the lane's PG16 plus the `lo` extension), so a qualified column such as
+    `a.lo_limit` is not refused. Calls keep the contract's `lo_*` prefix unchanged. Every other
+    prefix applies in full, so a qualified column whose name starts with a denied prefix
+    (`a.utl_rate`, `c.ts_status`, `x.dbms_flag`) is now refused (stricter); reference such a
+    column unqualified. HANDOFF §8 says so.
+  - Live check on the lane's source-pg (PG16.15), each with `unnest(ARRAY[0.3::float8]) AS t`:
+    `t.pg_sleep`, `(t).pg_sleep`, `(t.*).pg_sleep`, `"t"."pg_sleep"`, `T.PG_SLEEP` and
+    `((t)).pg_sleep` each slept ~305 ms; `s.t.pg_sleep` and `(t).x.pg_sleep` are errors in
+    PostgreSQL. The validator now refuses all eight.
+  - Tests (`tests/connectors/test_selection.py`, written first; 50 failed with `DID NOT RAISE`
+    before the fix): `test_denied_functions_called_through_attribute_notation_are_refused_at_every_stage`
+    ×48 (`pg_sleep`, `ts_stat`, `crosstab`, `pg_advisory_lock`, `dblink_exec`,
+    `pg_terminate_backend` × `t.f`, `(t).f`, `(t.*).f`, `"t"."f"`, `s.t.f`, `T.F`, `((t)).f`,
+    `(t).x.f`; each in three where forms — scalar subquery, `EXISTS … WHERE`, `IN (SELECT …)` — and
+    three query forms — projection, scalar subquery in the where, `JOIN … ON`; each through
+    `validate_selection` without and with a shape, `parameterize_literals` and
+    `compile_where`/`compile_query`, asserting the code and that the message holds neither the
+    function name, the bound SQL nor the selection's table),
+    `test_attribute_notation_on_expressions_and_long_paths_is_refused` (field selection on a cast,
+    `ROW`, an array element, a five-part name, a subscript, a `::` cast, `ORDER BY`, a window, a
+    CTE, `coalesce`, and the other SQL-string functions), and
+    `test_large_object_functions_are_denied_by_name_in_attribute_notation` (17 names in three
+    forms; `lo_*` calls still refused; `a.lo_limit`, `a.loan_ref`, `a.lower_band` allowed); guard
+    `test_unqualified_columns_named_like_denied_functions_are_not_calls` (passes before and after).
+    No existing test changed. 137 tests in the file (was 86).
+  - Defence in depth: see the Task 15 entry above (read-only transaction, statement timeout, pool
+    reset with `pg_advisory_unlock_all()` and `RESET ALL`, pinned by a new integration test). It
+    is not a substitute for the fix.
+  - Residual (unchanged, for the contract owner): a name deny-list cannot cover user-defined
+    functions, operators backed by functions, casts or domain checks in a source database; the
+    §5.2 allow-list recommendation of the G3 reviews stands.

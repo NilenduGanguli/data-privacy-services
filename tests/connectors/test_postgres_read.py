@@ -334,3 +334,29 @@ async def test_sql_string_functions_are_reported_as_advisory(
         assert checks["no_sql_string_functions"]["severity"] == "advisory" and result.ok
     finally:
         await reader.close()
+
+
+async def test_a_released_session_keeps_no_advisory_lock_or_session_setting(
+    source_pg: SourcePg, settings: Settings
+) -> None:
+    # Defence in depth beside the selection deny-list (review G3 r3, verify r1): the pool resets a
+    # session when it is released (asyncpg runs pg_advisory_unlock_all() and RESET ALL), so a
+    # session-level advisory lock or setting taken inside one read never outlives that read.
+    c = await _connector(
+        source_pg, settings, worker_concurrency=0, connector_statement_timeout_seconds=7
+    )
+    held = "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = $1"
+    try:
+        async with c.read_transaction() as conn:
+            pid = await conn.fetchval("SELECT pg_backend_pid()")
+            await conn.execute("SELECT pg_advisory_lock(424242)")
+            await conn.execute("SELECT set_config('statement_timeout', '0', false)")
+            assert await conn.fetchval("SHOW statement_timeout") == "0"
+            assert await source_pg.admin.fetchval(held, pid) == 1
+        assert await source_pg.admin.fetchval(held, pid) == 0
+        async with c.read_transaction() as conn:
+            assert await conn.fetchval("SELECT pg_backend_pid()") == pid  # the one pooled session
+            assert await conn.fetchval("SHOW statement_timeout") == "7s"
+            assert await conn.fetchval("SHOW transaction_read_only") == "on"
+    finally:
+        await c.close()

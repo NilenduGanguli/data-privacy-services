@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from dps.jobs_models import ObjectRef, Selection
@@ -454,3 +456,145 @@ def test_mongo_selections_refuse_sql_and_sql_refuses_mongo_filters() -> None:
         validate_selection(Selection(mongo_filter={"a": 1}), "postgres", None)
     assert err2.value.code == "selection_engine_mismatch"
     assert parameterize_literals(Selection(mongo_filter={"a": 1}), "mongo").mongo_filter == {"a": 1}
+
+
+#: PostgreSQL attribute notation: ``x.f`` is the call ``f(x)`` when ``x`` is a range variable with
+#: no column ``f`` (``unnest(ARRAY[:q]) AS t`` makes ``t`` a scalar of the bound type), and
+#: ``(expr).f`` is ``f(expr)``. Review G3 r3 / verify r1 ran ``t.pg_sleep`` (1 s) and
+#: ``t.ts_stat`` (a bound SQL string) as ``dps_app`` inside ``BEGIN READ ONLY`` on PG16.
+_ATTRIBUTE_FUNCTIONS = (
+    "pg_sleep",
+    "ts_stat",
+    "crosstab",
+    "pg_advisory_lock",
+    "dblink_exec",
+    "pg_terminate_backend",
+)
+_ATTRIBUTE_FORMS = (
+    "t.{f}",
+    "(t).{f}",
+    "(t.*).{f}",
+    '"t"."{f}"',
+    "s.t.{f}",
+    "T.{F}",
+    "((t)).{f}",
+    "(t).x.{f}",
+)
+_SQL_STRING = {"q": "select set_config('statement_timeout', '0', true)::tsvector"}
+
+
+def _attribute_selections(ref: str) -> list[tuple[Selection, Any]]:
+    """``ref`` in where (scalar subquery, EXISTS, IN) and query (projection, subquery, ON) form."""
+    src = "unnest(ARRAY[:q]) AS t"
+    wheres = (
+        f"(SELECT {ref} FROM {src}) IS NULL",
+        f"EXISTS (SELECT t FROM {src} WHERE {ref} IS NOT NULL)",
+        f"customer_id IN (SELECT {ref} FROM {src})",
+    )
+    queries = (
+        f"SELECT c.customer_id, {ref} AS v FROM bank.customers c, {src}",
+        f"SELECT * FROM bank.customers WHERE (SELECT {ref} FROM {src}) IS NULL",
+        f"SELECT c.* FROM bank.customers c JOIN {src} ON {ref} IS NULL",
+    )
+    return [(Selection(where=w, params=_SQL_STRING), compile_where) for w in wheres] + [
+        (Selection(query=q, params=_SQL_STRING), compile_query) for q in queries
+    ]
+
+
+@pytest.mark.parametrize("form", _ATTRIBUTE_FORMS)
+@pytest.mark.parametrize("func", _ATTRIBUTE_FUNCTIONS)
+def test_denied_functions_called_through_attribute_notation_are_refused_at_every_stage(
+    func: str, form: str
+) -> None:
+    ref = form.format(f=func, F=func.upper())
+    for sel, compile_sel in _attribute_selections(ref):
+        for check in (
+            lambda s=sel: validate_selection(s, "postgres", None),
+            lambda s=sel: validate_selection(s, "postgres", SHAPE),
+            lambda s=sel: parameterize_literals(s, "postgres"),
+            lambda s=sel, c=compile_sel: c(s, "postgres"),
+        ):
+            with pytest.raises(SelectionError) as err:
+                check()
+            message = str(err.value)
+            assert err.value.code == "selection_function_denied", (ref, err.value.code)
+            for text in (func, "statement_timeout", "unnest", "customers"):
+                assert text not in message.lower()
+
+
+def test_attribute_notation_on_expressions_and_long_paths_is_refused() -> None:
+    for where in (
+        "(SELECT (CAST(:q AS float8)).pg_sleep) IS NULL",
+        "(SELECT (ROW(:q)).pg_advisory_lock) IS NULL",
+        "(SELECT (ARRAY[:q])[1].ts_stat) IS NULL",
+        "(SELECT a.b.c.d.pg_terminate_backend FROM unnest(ARRAY[:q]) AS t) IS NULL",
+        "(SELECT t.pg_sleep[1] FROM unnest(ARRAY[:q]) AS t) IS NULL",
+        "(SELECT t.pg_sleep::text FROM unnest(ARRAY[:q]) AS t) IS NULL",
+        "EXISTS (SELECT 1 FROM unnest(ARRAY[:q]) AS t ORDER BY t.pg_sleep)",
+        "EXISTS (SELECT count(*) OVER (ORDER BY t.pg_sleep) FROM unnest(ARRAY[:q]) AS t)",
+        "EXISTS (WITH w AS (SELECT t.ts_stat FROM unnest(ARRAY[:q]) AS t) SELECT 1 FROM w)",
+        "(SELECT coalesce(t.crosstab, :q) FROM unnest(ARRAY[:q]) AS t) IS NULL",
+        "(SELECT t.xpath_table FROM unnest(ARRAY[:q]) AS t) IS NULL",
+        "(SELECT t.dblink FROM unnest(ARRAY[:q]) AS t) IS NULL",
+        "(SELECT t.set_config FROM unnest(ARRAY[:q]) AS t) IS NULL",
+        "(SELECT t.query_to_xml FROM unnest(ARRAY[:q]) AS t) IS NULL",
+    ):
+        with pytest.raises(SelectionError) as err:
+            validate_selection(Selection(where=where, params=_SQL_STRING), "postgres", None)
+        assert err.value.code == "selection_function_denied", where
+
+
+def test_large_object_functions_are_denied_by_name_in_attribute_notation() -> None:
+    # Calls keep the contract's lo_* prefix; a qualified name is refused for the real large-object
+    # functions, so a qualified column such as a.lo_limit stays usable.
+    for name in (
+        "lo_get",
+        "lo_unlink",
+        "lo_creat",
+        "lo_create",
+        "lo_close",
+        "lo_tell",
+        "lo_tell64",
+        "lo_import",
+        "lo_export",
+        "lo_from_bytea",
+        "lo_open",
+        "lo_put",
+        "lo_lseek64",
+        "lo_truncate64",
+        "loread",
+        "lowrite",
+        "lo_manage",
+    ):
+        for ref in (f"t.{name}", f"(t).{name}", f'"t"."{name}"'):
+            with pytest.raises(SelectionError) as err:
+                validate_selection(
+                    Selection(
+                        where=f"(SELECT {ref} FROM unnest(ARRAY[:q]) AS t) IS NULL", params={"q": 1}
+                    ),
+                    "postgres",
+                    None,
+                )
+            assert err.value.code == "selection_function_denied", ref
+    for call in ("lo_get(:q)", "lo_whatever(:q)", "pg_catalog.lo_unlink(:q)"):
+        with pytest.raises(SelectionError) as err:
+            validate_selection(
+                Selection(where=f"{call} IS NULL", params={"q": 1}), "postgres", None
+            )
+        assert err.value.code == "selection_function_denied", call
+    validate_selection(
+        Selection(
+            query="SELECT a.account_id, a.customer_id, a.lo_limit, a.loan_ref, a.lower_band "
+            "FROM bank.accounts a WHERE a.lo_limit > :q",
+            params={"q": 1},
+        ),
+        "postgres",
+        None,
+    )
+
+
+def test_unqualified_columns_named_like_denied_functions_are_not_calls() -> None:
+    # PostgreSQL never reads an unqualified name as a call (column "pg_sleep" does not exist).
+    for where in ("pg_sleep > :a", "ts_status = :a", "lo_limit > :a", "crosstab_ref = :a"):
+        sel = parameterize_literals(Selection(where=where, params={"a": 1}), "postgres")
+        assert compile_where(sel, "postgres")[0].endswith("$1")

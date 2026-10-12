@@ -3,7 +3,9 @@
 How text becomes SQL. A ``where`` is parsed as ``SELECT * FROM __dps_t WHERE <where>`` (``*``
 rather than the contract's ``1``, so the wrapper adds no literal of its own) and must be one
 boolean expression (no trailing ``ORDER BY``/``LIMIT``); a ``query`` must be exactly one
-``SELECT``. The first violation is refused with a stable :class:`SelectionError` code. Comments
+``SELECT``. The first violation is refused with a stable :class:`SelectionError` code. Denied
+functions are refused as calls and in PostgreSQL attribute notation (``t.f`` and ``(expr).f``
+call ``f``), wherever they appear in the tree. Comments
 are stripped. Unquoted identifiers are folded (lower for PostgreSQL, upper for Oracle) and every
 identifier is then quoted. Every literal value becomes a named bind (``:l1``, ``:l2``, …): a typed
 literal (``DATE '…'``) becomes ``CAST(CAST(:l1 AS TEXT) AS DATE)`` so the driver binds text, a
@@ -67,7 +69,8 @@ MONGO_OPERATORS = frozenset(
 #: Function-name prefixes refused anywhere in a selection: the contract's deny-list, M2's
 #: additions, and functions that run SQL from a string or signal other sessions (they would
 #: escape this validation or the read-only transaction's intent). Matched on the lower-cased
-#: bare name, so schema-qualified, quoted and upper-case spellings are refused alike.
+#: bare name, so schema-qualified, quoted and upper-case spellings are refused alike. Calls are
+#: matched against this list; attribute notation against :data:`DENIED_ATTRIBUTE_PREFIXES`.
 DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
     "pg_sleep",
     "pg_read_file",
@@ -107,6 +110,33 @@ DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
 )
 _DENY_SCHEMAS = frozenset(
     {"sys", "dbms_lock", "dbms_pipe", "dbms_scheduler", "utl_http", "utl_file"}
+)
+#: The large-object functions of PostgreSQL 16 (``pg_proc``) and of the ``lo`` extension; prefix
+#: matched, so ``lo_lseek64``, ``lo_tell64`` and ``lo_truncate64`` are included.
+LARGE_OBJECT_FUNCTIONS: tuple[str, ...] = (
+    "lo_close",
+    "lo_creat",
+    "lo_create",
+    "lo_export",
+    "lo_from_bytea",
+    "lo_get",
+    "lo_import",
+    "lo_lseek",
+    "lo_manage",
+    "lo_open",
+    "lo_put",
+    "lo_tell",
+    "lo_truncate",
+    "lo_unlink",
+    "loread",
+    "lowrite",
+)
+#: Names refused where PostgreSQL reads a name as a call without call syntax (attribute notation:
+#: ``t.f`` and ``(expr).f`` mean ``f(t)`` and ``f(expr)`` when ``f`` is not a column of ``t``).
+#: The call deny-list, with the contract's ``lo_*`` narrowed to the real large-object functions
+#: so that a qualified column such as ``a.lo_limit`` is not refused; calls keep ``lo_*``.
+DENIED_ATTRIBUTE_PREFIXES: tuple[str, ...] = (
+    tuple(p for p in DENIED_FUNCTION_PREFIXES if p != "lo_") + LARGE_OBJECT_FUNCTIONS
 )
 _PACKAGE_PREFIXES = ("dbms_", "utl_")
 _BIND_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,30}$")
@@ -264,6 +294,22 @@ def _identifier_text(node: exp.Identifier) -> str:
     return node.this if isinstance(node.this, str) else str(node.this)
 
 
+def _attribute_call_name(node: exp.Expression) -> str | None:
+    """The name PostgreSQL may call in attribute notation at ``node``, else ``None``.
+
+    A qualified column ``t.f`` (also ``s.t.f``, ``"t"."f"``) and a field selection ``(expr).f``
+    (also ``(t).f``, ``(t.*).f``) mean the call ``f(t)`` / ``f(expr)`` when ``f`` is not a column
+    of ``t``. An unqualified name is never a call (PostgreSQL reports a missing column).
+    """
+    if isinstance(node, exp.Column):
+        qualified = any(node.args.get(part) is not None for part in ("table", "db", "catalog"))
+        name = node.this
+        return _identifier_text(name) if qualified and isinstance(name, exp.Identifier) else None
+    if isinstance(node, exp.Dot) and isinstance(node.expression, exp.Identifier):
+        return _identifier_text(node.expression)
+    return None
+
+
 def _validate_tree(
     stmt: exp.Expression, engine: Engine, params: dict[str, JsonScalar]
 ) -> dict[str, int]:
@@ -291,6 +337,12 @@ def _validate_tree(
             name = (node.name if isinstance(node, exp.Anonymous) else node.sql_name()).lower()
             if name.startswith(DENIED_FUNCTION_PREFIXES):
                 raise SelectionError("selection_function_denied", "a denied function is used")
+        called = _attribute_call_name(node)
+        if called is not None and called.lower().startswith(DENIED_ATTRIBUTE_PREFIXES):
+            raise SelectionError(
+                "selection_function_denied",
+                "a denied function is called through attribute notation (name.function)",
+            )
         if isinstance(node, exp.Placeholder):
             bind = str(node.name or "")
             if not _BIND_NAME.fullmatch(bind):
