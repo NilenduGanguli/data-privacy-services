@@ -38,7 +38,7 @@ from dps.layers.api.common import (
     CodedHTTPException,
     coded_http_exception_handler,
 )
-from dps.layers.api.routers import detect, documents, ops, policies, transform
+from dps.layers.api.routers import detect, documents, ops, policies, schema, transform
 from dps.layers.documents import DocumentPipeline
 from dps.layers.documents.ocr import OcrClient, build_ocr_client, refresh_ocr_readiness
 from dps.llm.gateway import get_gateway
@@ -350,5 +350,6 @@ def create_app(
     app.include_router(transform.router)
     app.include_router(policies.router)
     app.include_router(documents.router)
+    app.include_router(schema.router)
     _mount_frontend(app)
     return app

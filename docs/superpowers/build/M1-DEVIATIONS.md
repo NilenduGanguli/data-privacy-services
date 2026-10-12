@@ -751,3 +751,35 @@ at the Task 13 routes) and one quadratic path; each fix has a test that fails on
 - Count: plan 11 tests; the file has 38 (11 + 14 always-valid cases, DDL comments/quotes, linear-time
   comment strip, 3 too-many-fields cases, 6 unusable replies, notes of the wrong type, gender/nationality
   sweep). Suite 841 → 879 passed, 4 skipped.
+
+## Task 13 — Schema API: generator spec and synthesis routes
+
+- `dps/layers/api/common.py` `_audit_event` (not in the task's file list): **the plan's
+  `/schema/synthesize` lost its audit event.** `SchemaSynthesizeOut` has a `report` (a `SchemaReport`),
+  so `_audit_event` took the engine-report branch and raised `AttributeError` on
+  `report.findings_total`; `_audit` swallowed it (`audit_write_failed`), so every successful synthesis
+  went unaudited. The engine-report branch now requires `findings_total`; any other report contributes
+  only its `verification.passed`, so the audit carries the sample sweep's verdict
+  (`test_schema_routes_are_audited`, which fails on the plan's code).
+- `dps/layers/api/routers/schema.py`:
+  - `ddl` and `sample` carry no pydantic `max_length`. With it, an oversized DDL or sample was a generic
+    422 validation error and the plan's own 413 codes `ddl_too_large` / `sample_too_large` were
+    unreachable. `parse_ddl` already checks `MAX_DDL_CHARS`; `_profile` checks `MAX_SAMPLE_ROWS` before the
+    leaf count (`test_oversized_inputs_are_coded_413`). The body-size guard still bounds both.
+  - `seed` is used when it is not `None`, not when it is truthy: `{"seed": {}}` silently drew a fresh
+    seed; it is now 422 `invalid_seed` (`test_an_empty_seed_is_invalid_not_ignored`).
+  - JSON Schema and DDL profiling run in a worker thread like sample profiling (a 100 000-character
+    DDL is parsed on the event loop otherwise), and so does the sample sweep: at the limits (1 000
+    sample rows × 5 sensitive fields against 10 000 generated rows) `verify_against_sample` took 7.5 s
+    on this Mac.
+  - `info` is annotated `dict[str, Any]` (mypy inferred `dict[str, object]` from the caller-spec branch).
+- `HANDOFF.md` §5: the schema routes' audit modes, policy label and the `genspec` LLM purpose.
+- Extra tests beyond the plan's five: audit events, coded 413s, empty seed, replaying the returned spec
+  with the returned seed (same rows, no sweep without a sample), and a fail-closed `leakage` 422 that
+  does not echo the leaked values. Three of them fail on the plan's router.
+- **Open (see Task 12):** with a sample, the sweep fails healthy runs at volume on low-entropy types —
+  on this Mac a 1 000-row sample of account numbers, segments, balances and an opening date gave
+  422 `leakage` for 10 000 rows (generated dates coincide with sampled ones), and Faker-like names
+  coincide too. Fail-closed, as the plan specifies; a policy decision is needed.
+- Count: 10 tests (plan 5). Suite 879 → 889 passed, 4 skipped. Route timings on this Mac: a 10 000-row
+  synthesis from a spec answers in 0.36 s (823 KiB of JSON).

@@ -159,7 +159,7 @@ def _audit_event(
 ) -> AuditEvent:
     report = getattr(result, "report", None)
     findings = getattr(result, "findings", None) or []
-    if report is not None:
+    if report is not None and hasattr(report, "findings_total"):
         verification = report.verification
         counts: dict[str, Any] = {
             "findings_total": report.findings_total,
@@ -168,11 +168,14 @@ def _audit_event(
             "verification_passed": verification.passed if verification is not None else None,
             "reversible_values": report.reversible_values,
         }
-    else:
+    else:  # detect results, and reports that are not engine reports (schema synthesis)
         counts = {
             "findings_total": len(findings),
             "findings_by_type": dict(Counter(f.entity_type for f in findings)),
         }
+        verification = getattr(report, "verification", None)
+        if verification is not None:
+            counts["verification_passed"] = verification.passed
     principal = getattr(request.state, "principal", None)
     return AuditEvent(
         trace_id=tid,

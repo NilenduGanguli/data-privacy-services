@@ -154,6 +154,9 @@ services, §3 "Lane-safe stacks").
   when a document is refused (`encrypted_pdf`, `ocr_unavailable`, `leakage`, …), and the policy
   is `-` when the `request` form field could not be parsed. The `document_processed` log line
   carries counts only (format, pages, OCR pages, boxes, duration).
+  Schema routes (M1) audit mode `schema.generator-spec|schema.synthesize` with policy `-`;
+  `verification_passed` is the sample leakage sweep's verdict (absent for a schema, DDL or spec),
+  and a spec proposal through the gateway counts as `dps_llm_calls_total{purpose="genspec"}`.
   The policy label is a shipped preset name, `unknown`/`invalid` for any other string, or
   `<preset|custom>+inline:<hash12>` for an inline policy (M1; never the inline body).
   Logs go to stdout through an allow-list of field names; outside `local` they are JSON.
