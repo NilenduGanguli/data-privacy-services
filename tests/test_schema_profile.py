@@ -465,3 +465,84 @@ async def test_llm_constraints_cannot_write_or_reorder_sensitive_fields() -> Non
     assert "4111111111111111" not in {str(r["card"]).replace(" ", "") for r in rows}
     assert all(r["fee"] == 0 and r["lo"] <= r["hi"] for r in rows)
     assert verify_against_sample(rows, result).passed
+
+
+async def test_sample_labels_and_data_keys_never_reach_the_model() -> None:
+    """B2: without NER a low-cardinality name column is categorical, and a key can be a name.
+
+    Before the fix the prompt carried the labels (``Ananya`` … ``Krishnan``) and the key
+    ``Ananya_Krishnan.x``, while the leak guard had nothing to check them against.
+    """
+    first = ["Ananya", "Rohan", "Priya", "Rajesh"]
+    rows = [
+        {
+            "owner": first[i % 4],
+            "rm": f"{first[i % 4]} Krishnan",
+            "segment": "WEALTH" if i % 2 else "RETAIL",
+            "Ananya Krishnan": {"x": i},
+            "score": 10 * i + 7,
+        }
+        for i in range(8)
+    ]
+    result = profile_from_sample(rows, DETECTOR)  # the default detector: NER off
+    by = {f.name: f for f in result.profile.fields}
+    assert by["owner"].entity_type is None and by["owner"].enum == sorted(first)
+    assert by["rm"].enum is not None and by["segment"].enum == ["RETAIL", "WEALTH"]
+    assert by["score"].entity_type is None and by["Ananya_Krishnan.x"].entity_type is None
+    reply = json.dumps(
+        {
+            "fields": [
+                {"name": "owner", "generator": "choice", "params": {"values": ["Zed"]}},
+                {"name": "field_4", "generator": "integer", "params": {"min": 1, "max": 9}},
+            ],
+            "constraints": [
+                {
+                    "kind": "rule",
+                    "field": "segment",
+                    "when": [{"field": "score", "op": "ge", "value": 50, "then": "VIP"}],
+                    "else": "STD",
+                },
+                {
+                    "kind": "rule",
+                    "field": "score",
+                    "when": [{"field": "field_4", "op": "ge", "value": 5, "then": 0}],
+                    "else": 1,
+                },
+            ],
+        }
+    )
+    gateway = RecordingGateway(reply)
+    spec, info = await propose_spec(result, gateway, locale="en_IN")
+    assert info["source"] == "llm" and len(gateway.messages) == 1
+    sent = normalise(json.dumps(gateway.messages))
+    assert [w for w in (*first, "Krishnan", "RETAIL", "WEALTH") if normalise(w) in sent] == []
+    prompt = {f["name"]: f for f in json.loads(gateway.messages[0][1]["content"])["fields"]}
+    assert list(prompt) == ["owner", "rm", "segment", "field_4", "score"]
+    assert prompt["owner"]["enum_size"] == 4 and "enum" not in prompt["owner"]
+    fields = {f.name: f for f in spec.fields}
+    assert list(fields) == ["owner", "rm", "segment", "Ananya_Krishnan.x", "score"]
+    # categorical fields keep DPS's choice over the sampled labels; the model's alias maps back
+    assert fields["owner"].generator == "choice" and fields["owner"].params["values"] == sorted(
+        first
+    )
+    assert fields["Ananya_Krishnan.x"].params == {"min": 1, "max": 9}
+    assert [c.model_dump(by_alias=True) for c in spec.constraints] == [
+        {
+            "kind": "rule",
+            "field": "score",
+            "when": [{"field": "Ananya_Krishnan.x", "op": "ge", "value": 5, "then": 0}],
+            "else": 1,
+        }
+    ]
+    assert any(note.startswith("1 llm constraint(s) dropped") for note in spec.notes)
+    generated = execute_spec(spec, rows=20, seed=bytes(32)).rows
+    assert {r["segment"] for r in generated} <= {"RETAIL", "WEALTH"}
+
+
+def test_json_schema_labels_are_counted_not_sent() -> None:
+    result = profile_from_json_schema(
+        {"type": "object", "properties": {"tier": {"type": "string", "enum": ["Gold", "Platinum"]}}}
+    )
+    sent = render_prompt(result.profile)[1]["content"]
+    assert json.loads(sent)["fields"][0]["enum_size"] == 2
+    assert "Gold" not in sent and "Platinum" not in sent

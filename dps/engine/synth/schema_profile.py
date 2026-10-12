@@ -1,11 +1,15 @@
 """Structure profiles and generator-spec proposers for synthesize-from-schema (spec §5.6).
 
-P1 holds: the LLM never sees a value. A :class:`StructureProfile` is all that may leave DPS —
-field names (aliased when a name itself looks sensitive), inferred types, value *shapes*
-(``XX-9999``), orders of magnitude, null and distinct rates, DPS's own entity verdicts, and
-categorical labels only when they are safe (≤ 12 distinct, letters only, each seen at least twice,
-nothing detected in them). Exact statistics stay in :class:`FieldStats`, which is never put in a
-prompt; the rule-based proposer (no LLM) uses them, rounded to two significant figures.
+P1 holds: the LLM never sees a value. :func:`render_prompt` sends only structure — field names
+(aliased when a name itself looks sensitive, and, for a sample, sent as ``field_N`` when the key is
+not identifier-like, since a key can be data such as a person's name), inferred types, value
+*shapes* (``XX-9999``), orders of magnitude, null and distinct rates, DPS's own entity verdicts, and
+for a categorical field only how many labels it has (``enum_size``). The labels themselves
+(``FieldProfile.enum``: ≤ 12 distinct, letters only, each seen at least twice, nothing detected in
+them) stay in DPS: without NER a column of first names passes every one of those tests, so they are
+returned to the caller but never put in a prompt, and an enum field keeps DPS's ``choice`` whatever
+the model proposes. Exact statistics stay in :class:`FieldStats`, which is never put in a prompt;
+the rule-based proposer (no LLM) uses them, rounded to two significant figures.
 
 Every profile turns into a spec that validates: field names become unique identifiers nesting at
 most four levels (a name that cannot be one, or that collides, is aliased ``field_N``), at most
@@ -102,27 +106,33 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _NOT_IDENT = re.compile(r"[^A-Za-z0-9_]")
+#: A sample key segment the model may see as is: identifier-like and no run of four digits.
+_PLAIN_KEY = re.compile(r"(?!.*\d{4})[A-Za-z_][A-Za-z0-9_-]{0,62}")
 _PATTERN_LITERALS = set("Aa9X\\")
 _CONSTRAINTS: TypeAdapter[list[Constraint]] = TypeAdapter(list[Constraint])
 
 SPEC_SYSTEM = (
     "You design synthetic-data generators. You receive a JSON description of a table's structure: "
     "field names, types, value shapes (letters become x or X, digits 9), orders of magnitude, null rates "
-    "and the entity type a privacy engine detected. Reply with ONE JSON object and nothing else: "
+    "and the entity type a privacy engine detected; for a categorical field only how many labels it "
+    "has (enum_size), never the labels. Reply with ONE JSON object and nothing else: "
     '{"fields": [{"name": str, "generator": str, "params": {}, "null_rate": float, "unique": bool}], '
     '"constraints": [], "notes": [str]}. Generators and params: sequence{start,step,prefix,width}, uuid{}, '
     "integer{min,max}, decimal{min,max,scale}, normal{mean,std,min,max,scale}, "
     "lognormal{mu,sigma,min,max,scale}, choice{values,weights}, boolean{p_true}, "
     "date{start,end,format}, datetime{start,end}, pattern{template: A upper, a lower, 9 digit, "
     "X upper-or-digit}, text{words_min,words_max}, entity{entity_type,format}, constant{value}. Use "
-    "entity for every field that has an entity_type. Constraints: {kind: order, fields: [...]} or "
-    "{kind: rule, field, when: [{field, op: lt|le|gt|ge|eq|ne, value, then}], else}. Use exactly the "
-    "field names given. Never write personal data."
+    "entity for every field that has an entity_type. DPS generates fields with an entity_type or an "
+    "enum_size itself: no constraint may write or reorder them. Constraints: {kind: order, fields: "
+    "[...]} or {kind: rule, field, when: [{field, op: lt|le|gt|ge|eq|ne, value, then}], else}. Use "
+    "exactly the field names given. Never write personal data."
 )
 
 
 class FieldProfile(BaseModel):
-    """What may be said about one field to a model: structure, never values."""
+    """Structure of one field. ``enum`` holds categorical labels for the caller and the heuristic
+    proposer only — :func:`render_prompt` sends their count (``enum_size``) instead — and
+    ``prompt_alias`` (never serialised) marks a sample key the model sees as ``field_N``."""
 
     name: str
     type: FieldType
@@ -137,6 +147,7 @@ class FieldProfile(BaseModel):
     enum: list[str] | None = None
     year_range: list[int] | None = None
     primary_key: bool = False
+    prompt_alias: bool = Field(default=False, exclude=True)
 
 
 class StructureProfile(BaseModel):
@@ -675,6 +686,7 @@ def profile_from_sample(
             nullable=len(present) < len(values),
             entity_type=entity,
             entity_source=source,
+            prompt_alias=not all(_PLAIN_KEY.fullmatch(part) for part in key.split(".")),
         )
         st = FieldStats()
         if present:
@@ -859,26 +871,59 @@ def heuristic_spec(result: ProfileResult, *, locale: str) -> GeneratorSpec:
     return GeneratorSpec(name=name, locale=locale, fields=fields, source="heuristic", notes=notes)
 
 
+def _prompt_names(profile: StructureProfile) -> dict[str, str]:
+    """Each field's name → the name the model sees: itself, or ``field_N`` for a sample key that is
+    not identifier-like (unique, and never equal to or a prefix of a name sent as is)."""
+    taken: set[str] = set()
+    for f in profile.fields:
+        if not f.prompt_alias:
+            parts = f.name.split(".")
+            taken.update(".".join(parts[:i]) for i in range(1, len(parts) + 1))
+    names: dict[str, str] = {}
+    for index, f in enumerate(profile.fields, start=1):
+        if not f.prompt_alias:
+            names[f.name] = f.name
+            continue
+        alias, extra = f"field_{index}", 1
+        while alias in taken:
+            extra += 1
+            alias = f"field_{index}_{extra}"
+        taken.add(alias)
+        names[f.name] = alias
+    return names
+
+
 def render_prompt(profile: StructureProfile) -> list[dict[str, str]]:
-    """The only messages the gateway ever receives for a spec proposal."""
-    body = json.dumps(profile.model_dump(mode="json", exclude_none=True), sort_keys=True)
+    """The only messages the gateway ever receives for a spec proposal: the profile with each
+    categorical field's labels replaced by their count and data-like sample keys aliased."""
+    names = _prompt_names(profile)
+    payload = profile.model_dump(mode="json", exclude_none=True)
+    for field in payload["fields"]:
+        field["name"] = names[field["name"]]
+        labels = field.pop("enum", None)
+        if labels is not None:
+            field["enum_size"] = len(labels)
+    body = json.dumps(payload, sort_keys=True)
     return [{"role": "system", "content": SPEC_SYSTEM}, {"role": "user", "content": body}]
 
 
 def profile_originals(result: ProfileResult) -> list[str]:
-    """Every sample value of a field DPS judged sensitive (safe enum labels excluded): the leak
-    guard checks the prompt against them before any call. The profile carries no raw values by
-    construction; this is defence in depth."""
-    allowed = {label for p in result.profile.fields for label in (p.enum or [])}
+    """Every sample value of a field DPS judged sensitive: the leak guard checks the prompt
+    against them before any call. The prompt carries no raw values by construction (no labels,
+    no data-like keys); this is defence in depth."""
     out: list[str] = []
     for st in result.stats.values():
-        out += [v for v in st.originals if v not in allowed]
+        out += st.originals
     return out
 
 
-def _llm_constraints(raw: Any, kept_by_dps: set[str]) -> tuple[list[dict[str, Any]], int] | None:
-    """The model's constraints that neither write nor reorder a field in ``kept_by_dps`` (dumped
-    for ``GeneratorSpec``), and how many were dropped; ``None`` when they do not parse.
+def _llm_constraints(
+    raw: Any, kept_by_dps: set[str], real: dict[str, str]
+) -> tuple[list[dict[str, Any]], int] | None:
+    """The model's constraints, with the prompt's names mapped back through ``real``, that neither
+    write nor reorder a field in ``kept_by_dps`` (dumped for ``GeneratorSpec``), and how many were
+    dropped; ``None`` when they do not parse. A name the prompt did not hold is left for the spec's
+    own check to refuse.
 
     A ``rule`` replaces its field's generated value with a constant the model chose, and an
     ``order`` moves values between its fields, so either would undo the merge's rule that a field
@@ -890,21 +935,32 @@ def _llm_constraints(raw: Any, kept_by_dps: set[str]) -> tuple[list[dict[str, An
         return None
     kept: list[dict[str, Any]] = []
     for constraint in parsed:
-        touched = (
-            set(constraint.fields)
-            if isinstance(constraint, OrderConstraint)
-            else {constraint.field}
-        )
+        if isinstance(constraint, OrderConstraint):
+            touched = {real.get(n, n) for n in constraint.fields}
+            constraint = constraint.model_copy(
+                update={"fields": [real.get(n, n) for n in constraint.fields]}
+            )
+        else:
+            touched = {real.get(constraint.field, constraint.field)}
+            cases = [
+                case.model_copy(update={"field": real.get(case.field, case.field)})
+                for case in constraint.when
+            ]
+            constraint = constraint.model_copy(
+                update={"field": real.get(constraint.field, constraint.field), "when": cases}
+            )
         if not touched & kept_by_dps:
             kept.append(constraint.model_dump(mode="json", by_alias=True))
     return kept, len(parsed) - len(kept)
 
 
 def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -> GeneratorSpec:
-    """Parse the model's reply; keep its choices only for non-sensitive fields (a model cannot
-    downgrade a detected SSN to an integer). Its constraints may not write (``rule``) or reorder
-    (``order``) a sensitive field either: those are dropped with a note naming how many, and
-    constraints that do not validate are all dropped with a note.
+    """Parse the model's reply (written in the prompt's names, see :func:`render_prompt`); keep its
+    choices only for fields DPS does not generate itself — a detected field keeps its generator (a
+    model cannot downgrade a detected SSN to an integer) and a categorical one its ``choice`` over
+    the labels the model never saw. Its constraints may not write (``rule``) or reorder (``order``)
+    such a field either: those are dropped with a note naming how many, and constraints that do
+    not validate are all dropped with a note.
 
     Raises:
         ValueError: the reply holds no JSON object, its ``fields`` is not a list, or it proposes
@@ -919,18 +975,19 @@ def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -
         raise ValueError("the reply nests too deeply") from None
     if not isinstance(data, dict) or not isinstance(data.get("fields", []), list):
         raise ValueError("the reply has no list of fields")
+    real = {sent: name for name, sent in _prompt_names(result.profile).items()}
     proposed = {
-        f["name"]: f
+        real[f["name"]]: f
         for f in data.get("fields", [])
-        if isinstance(f, dict) and isinstance(f.get("name"), str)
+        if isinstance(f, dict) and isinstance(f.get("name"), str) and f["name"] in real
     }
     if not proposed.keys() & {f.name for f in heuristic.fields}:
         raise ValueError("the reply proposes none of the fields")
-    sensitive = {p.name for p in result.profile.fields if p.entity_type}
+    kept_by_dps = {p.name for p in result.profile.fields if p.entity_type or p.enum}
     fields: list[FieldSpec] = []
     for fallback in heuristic.fields:
         candidate = proposed.get(fallback.name)
-        if candidate is None or fallback.name in sensitive:
+        if candidate is None or fallback.name in kept_by_dps:
             fields.append(fallback)
             continue
         try:
@@ -948,14 +1005,14 @@ def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -
         "source": "llm",
     }
     invalid = "llm constraints dropped (invalid)"
-    constraints = _llm_constraints(data.get("constraints"), sensitive)
+    constraints = _llm_constraints(data.get("constraints"), kept_by_dps, real)
     if constraints is None:
         return GeneratorSpec.model_validate({**base, "notes": [*notes, invalid]})
     kept, dropped = constraints
     if dropped:
         notes.append(
             f"{dropped} llm constraint(s) dropped: a constraint may not write or reorder a field "
-            "DPS detected as sensitive"
+            "DPS generates itself (detected or categorical)"
         )
     try:
         return GeneratorSpec.model_validate({**base, "notes": notes, "constraints": kept})

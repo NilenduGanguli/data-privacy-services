@@ -845,3 +845,44 @@ row `4111111111111111`, with `source: llm`.
   no longer takes the model's valid constraints on other fields down with it.
 - Test: `test_llm_constraints_cannot_write_or_reorder_sensitive_fields` (the review's reply plus an
   `order` over detected dates, a kept `rule` and a kept `order`).
+
+**B2 (P1): sampled values reached the gateway as categorical labels and as field names**
+(`profile_from_sample`, `render_prompt`, `merge_llm_spec`, `profile_originals`). A column with ≤ 12
+distinct letters-only values, each seen twice and none detected, became `FieldProfile.enum`, and
+`render_prompt` sent it. The default image has no NER, so a column of first names or of
+relationship managers' names passed every test: the review's probe sent `Ananya` … `Krishnan` with
+`llm.raw_pii_sent: 0`. A sample key that is a name went through as a field name too.
+
+- **Labels never reach the model.** `render_prompt` drops each field's `enum` and sends
+  `enum_size` (the label count) instead, for every source (JSON Schema `enum` values are treated the
+  same way, though they are caller metadata rather than data). `FieldProfile.enum` itself is unchanged:
+  the heuristic proposer uses it, and `POST /schema/generator-spec` returns it to the caller who sent
+  the sample. `SPEC_SYSTEM` says the model gets only the count, and that DPS generates fields with an
+  `entity_type` or an `enum_size` itself.
+- **An enum field keeps DPS's `choice`** in `merge_llm_spec`, exactly like a detected field (the
+  model never saw the labels, so its proposal could only invent them), and B1's constraint filter
+  covers enum fields as well (`kept_by_dps` = detected ∪ categorical).
+- **Data-like sample keys are aliased in the prompt only.** New `FieldProfile.prompt_alias`
+  (`Field(exclude=True)`: never serialised, so neither the prompt nor any response carries it) is set
+  by `profile_from_sample` when a key segment is not identifier-like (`_PLAIN_KEY`: a letter or `_`,
+  then letters, digits, `_` or `-`, at most 63 characters, and no run of four digits — so
+  `Ananya Krishnan`, `José` and account numbers used as keys are aliased; `customer_id`, `first-name`,
+  `address_line1` are not). New private `_prompt_names` maps each such field to `field_N` (never equal
+  to, or a prefix of, a name sent as is); `merge_llm_spec` maps the reply's field and constraint names
+  back, so the generated rows keep the caller's column names. Profile-level aliasing
+  (`field_N` in the output, as for keys the detector flags) was not used because it would also rename
+  ordinary spaced CSV headers in the output. DDL column names and JSON Schema property names are
+  schema metadata and are sent as before.
+- `profile_originals` no longer exempts enum labels from the leak guard (the exemption existed only
+  because labels were sent). Enum labels themselves are not added to the guard: `normalise` joins the
+  whole prompt into one string of letters and digits, so short labels would match inside JSON keys and
+  silently push every categorical sample to the heuristic path; the prompt holds no labels by
+  construction instead.
+- Tests: `test_sample_labels_and_data_keys_never_reach_the_model` (NER off; first names, full names,
+  segment labels and a name used as a key; the model's alias maps back and its `choice` for the name
+  column is ignored) and `test_json_schema_labels_are_counted_not_sent`. Both fail on be188d7.
+- **Open:** a key that is a name *and* identifier-like (`ananya_krishnan`) is still sent; only NER (or a
+  key dictionary) could tell. The heuristic `choice` still writes the sampled labels into the generated
+  rows, which go back to the caller who sent them; with NER off that includes an undetected
+  low-cardinality name column (a product decision: e.g. refuse multi-word labels, or require NER for
+  samples).
