@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     tesseract_cmd: str = Field(default="tesseract", min_length=1)
     tesseract_langs: str = Field(default="eng", pattern=r"^[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*$")
     tesseract_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    # --- T3 LLM metadata labelling (M1 Task 19D, contract §10): opt-in per policy with
+    # detect.tiers: [..., llm_label]; field names, types and value shapes only, never values ---
+    llm_label_max_fields: int = Field(default=40, ge=1, le=500)  # fields per labelling call
+    llm_label_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)  # verdicts below: dropped
     # --- NDJSON streaming on /detect, /obfuscate, /synthesize, /reveal (M1, contract §10) ---
     ndjson_max_items: int = Field(default=1_000_000, ge=1, le=100_000_000)  # items per stream
     ndjson_chunk_items: int = Field(default=500, ge=1, le=100_000)  # items per worker-thread hop

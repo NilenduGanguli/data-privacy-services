@@ -49,7 +49,10 @@ async def obfuscate(body: EngineRequest, request: Request) -> TransformOut | Str
 
         async def call() -> TransformResponse:
             payload = payload_from(request, body.data, body.text)
-            return await run_in_threadpool(engine.obfuscate, payload, body.policy, body.options)
+            extra = await engine.label_leftovers(payload, body.policy, body.options)  # T3 (opt-in)
+            return await run_in_threadpool(
+                engine.obfuscate, payload, body.policy, body.options, extra_findings=extra
+            )
 
         result, tid = await run_engine(request, mode="obfuscate", policy_name=policy, call=call)
         return TransformOut(**result.model_dump(), trace_id=tid)
@@ -84,7 +87,8 @@ async def synthesize(body: EngineRequest, request: Request) -> TransformOut | St
 
         async def call() -> TransformResponse:
             payload = payload_from(request, body.data, body.text)
-            return await engine.synthesize(payload, body.policy, body.options)
+            extra = await engine.label_leftovers(payload, body.policy, body.options)  # T3 (opt-in)
+            return await engine.synthesize(payload, body.policy, body.options, extra_findings=extra)
 
         result, tid = await run_engine(request, mode="synthesize", policy_name=policy, call=call)
         return TransformOut(**result.model_dump(), trace_id=tid)

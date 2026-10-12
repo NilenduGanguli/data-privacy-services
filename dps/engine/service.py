@@ -10,7 +10,9 @@ reason (they carry customer data and key material).
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,8 +20,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from dps.config import Settings
 from dps.engine.detect.custom import custom_detector_from
 from dps.engine.detect.ensemble import Detector, DetectorConfig
+from dps.engine.detect.llm_label import (
+    LLM_LABEL_TIER,
+    LabelVerdict,
+    gateway_usable,
+    label,
+    leftover_fields,
+    template_of,
+)
 from dps.engine.detect.ner_presidio import build_ner
-from dps.engine.findings import Finding, Plan
+from dps.engine.findings import Finding, Locator, Plan, hash_value
+from dps.engine.jsonpath import Scalar, flatten
 from dps.engine.planner import build_plan, explain_plan
 from dps.engine.policy import Policy, resolve_policy
 from dps.engine.report import Report, build_report
@@ -31,7 +42,7 @@ from dps.engine.synth.surrogates import (
     seed_bytes,
     seed_from_caller,
 )
-from dps.engine.taxonomy import Sensitivity
+from dps.engine.taxonomy import Sensitivity, entity_info, record_sensitivity
 from dps.engine.transform import fpe
 from dps.engine.transform.apply import (
     ApplyOptions,
@@ -149,12 +160,45 @@ class RevealResponse(BaseModel):
     report: Report
 
 
+#: T3 never outranks a checksum: a label's score is capped here (spec §5.3).
+T3_SCORE_CAP = 0.85
+
+
+class Leftovers(list[Finding]):
+    """T3 findings for one document, plus the labelling calls made for them (0 or 1).
+
+    A plain list of findings to every caller; the engine operations read ``llm_calls`` from it
+    for ``report.llm.calls``.
+    """
+
+    def __init__(self, findings: Sequence[Finding] = (), *, llm_calls: int = 0) -> None:
+        super().__init__(findings)
+        self.llm_calls = llm_calls
+
+
+class LeftoverLabels(BaseModel):
+    """T3 verdicts by path template, relative to a document (value-free), for a stream: one
+    labelling call, then :meth:`PrivacyEngine.apply_labels` per item without the LLM."""
+
+    verdicts: dict[str, LabelVerdict] = Field(default_factory=dict)
+    llm_calls: int = 0
+
+
+#: A document's leaves T0–T2 left without a finding, grouped by path template.
+LeafGroups = dict[str, list[tuple[str, Scalar]]]
+
+
 def _kept(plan: Plan) -> set[tuple[str, int | None, int | None]]:
     return {
         (e.finding.locator.path, e.finding.locator.start, e.finding.locator.end)
         for e in plan.entries
         if e.method == "keep"
     }
+
+
+def _label_calls(extra_findings: Sequence[Finding]) -> int:
+    """The T3 labelling calls behind ``extra_findings`` (a :class:`Leftovers` knows; else 0)."""
+    return int(getattr(extra_findings, "llm_calls", 0))
 
 
 class PrivacyEngine:
@@ -201,12 +245,145 @@ class PrivacyEngine:
             raise EngineError(f"invalid custom recognizers: {exc}") from None
         return Detector(config, ner=self.ner, custom=custom)
 
-    def _detect(self, payload: Payload, detector: Detector) -> tuple[list[Finding], Sensitivity]:
+    def _detect(
+        self, payload: Payload, detector: Detector, extra: Sequence[Finding] = ()
+    ) -> tuple[list[Finding], Sensitivity]:
+        """T0–T2 (and T4) findings, merged with ``extra`` (T3) on leaves they left untouched."""
         result = detector.detect(data=payload.data, text=payload.text)
-        for f in result.findings:
+        findings, sensitivity = list(result.findings), result.record_sensitivity
+        if extra and payload.data is not None:
+            covered = {f.locator.path for f in findings}
+            findings += [f for f in extra if f.locator.path not in covered]
+            sensitivity = record_sensitivity(f.entity_type for f in findings)
+        for f in findings:
             for d in f.detectors:
                 FINDINGS.labels(f.entity_type, d.split(":")[0]).inc()
-        return result.findings, result.record_sensitivity
+        return findings, sensitivity
+
+    # -- T3: LLM metadata labelling (opt-in, value-free; spec §5.3) ---------------------------
+    def _t3_enabled(self, policy: Policy) -> bool:
+        return LLM_LABEL_TIER in policy.detect.tiers and gateway_usable(self.gateway)
+
+    def labelling_enabled(self, policy_ref: str | dict[str, Any] | None) -> bool:
+        """True when T3 would run for this policy: it lists ``llm_label`` and a real (non-stub)
+        LLM provider is configured."""
+        return gateway_usable(self.gateway) and self._t3_enabled(self.policy(policy_ref))
+
+    @staticmethod
+    def _leftover_groups(data: Any, detector: Detector) -> LeafGroups:
+        """String and number leaves with no T0–T2 finding, grouped by template (``[n]`` → ``[*]``)."""
+        covered = {f.locator.path for f in detector.detect(data=data).findings}
+        groups: LeafGroups = {}
+        for path, value in flatten(data):
+            if path in covered or value is None or isinstance(value, bool):
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            groups.setdefault(template_of(path), []).append((path, value))
+        return groups
+
+    @staticmethod
+    def _t3_findings(
+        groups: LeafGroups, verdicts: dict[str, LabelVerdict], policy: Policy
+    ) -> list[Finding]:
+        out: list[Finding] = []
+        for template, verdict in verdicts.items():
+            score = round(min(verdict.confidence, T3_SCORE_CAP), 3)
+            if score < policy.detect.min_score:
+                continue
+            info = entity_info(verdict.entity_type)
+            out += [
+                Finding(
+                    locator=Locator(path=path),
+                    entity_type=verdict.entity_type,
+                    score=score,
+                    detectors=[LLM_LABEL_TIER],
+                    sensitivity=info.sensitivity,
+                    evidence=[LLM_LABEL_TIER],
+                    value_hash=hash_value(value),
+                )
+                for path, value in groups.get(template, [])
+            ]
+        return out
+
+    async def _label_groups(self, groups: LeafGroups) -> tuple[dict[str, LabelVerdict], int]:
+        values = {template: [value for _, value in leaves] for template, leaves in groups.items()}
+        outcome = await label(
+            leftover_fields(values),
+            gateway=self.gateway,
+            settings=self.settings,
+            protected=[str(v) for vs in values.values() for v in vs],
+        )
+        return {v.ref: v for v in outcome.verdicts}, outcome.llm_calls
+
+    async def label_leftovers(
+        self,
+        payload: Payload,
+        policy_ref: str | dict[str, Any] | None,
+        options: RequestOptions,
+    ) -> Leftovers:
+        """T3 findings for the JSON leaves T0–T2 left without one (empty unless the policy's
+        ``detect.tiers`` holds ``llm_label`` and a real LLM provider is configured).
+
+        One labelling call per document: each leaf template becomes a value-free
+        :class:`~dps.engine.detect.llm_label.FieldMeta`; every leaf of a labelled template gets a
+        ``Finding`` (detector ``llm_label``, score ≤ 0.85). Pass the result to the operation as
+        ``extra_findings``.
+        """
+        if payload.data is None or not gateway_usable(self.gateway):
+            return Leftovers()  # before resolving the policy: the common, LLM-free case
+        policy = self.policy(policy_ref)
+        if not self._t3_enabled(policy):
+            return Leftovers()
+        detector = self._detector(policy, self._locale(policy, options))
+        groups = await asyncio.to_thread(self._leftover_groups, payload.data, detector)
+        if not groups:
+            return Leftovers()
+        verdicts, calls = await self._label_groups(groups)
+        return Leftovers(self._t3_findings(groups, verdicts, policy), llm_calls=calls)
+
+    async def label_templates(
+        self,
+        documents: Sequence[Any],
+        policy_ref: str | dict[str, Any] | None,
+        options: RequestOptions,
+    ) -> LeftoverLabels:
+        """One labelling call for the leftover templates of several JSON documents (an NDJSON
+        stream's first chunk); :meth:`apply_labels` then applies the verdicts per document."""
+        if not documents or not gateway_usable(self.gateway):
+            return LeftoverLabels()
+        policy = self.policy(policy_ref)
+        if not self._t3_enabled(policy):
+            return LeftoverLabels()
+        detector = self._detector(policy, self._locale(policy, options))
+
+        def collect() -> LeafGroups:
+            merged: LeafGroups = {}
+            for document in documents:
+                for template, leaves in self._leftover_groups(document, detector).items():
+                    merged.setdefault(template, []).extend(leaves)
+            return merged
+
+        groups = await asyncio.to_thread(collect)
+        if not groups:
+            return LeftoverLabels()
+        verdicts, calls = await self._label_groups(groups)
+        return LeftoverLabels(verdicts=verdicts, llm_calls=calls)
+
+    def apply_labels(
+        self,
+        payload: Payload,
+        policy_ref: str | dict[str, Any] | None,
+        options: RequestOptions,
+        labels: LeftoverLabels,
+    ) -> Leftovers:
+        """T3 findings for a document from verdicts obtained earlier (no LLM call)."""
+        if not labels.verdicts or payload.data is None:
+            return Leftovers()
+        policy = self.policy(policy_ref)
+        detector = self._detector(policy, self._locale(policy, options))
+        groups = self._leftover_groups(payload.data, detector)
+        return Leftovers(self._t3_findings(groups, labels.verdicts, policy))
 
     def _plan(self, findings: list[Finding], policy: Policy, mode: str) -> Plan:
         try:
@@ -282,12 +459,18 @@ class PrivacyEngine:
         payload: Payload,
         policy_ref: str | dict[str, Any] | None,
         options: RequestOptions,
+        *,
+        extra_findings: Sequence[Finding] = (),
     ) -> DetectResponse:
-        """Findings (locators, types, scores; never values) and the record's sensitivity."""
+        """Findings (locators, types, scores; never values) and the record's sensitivity.
+
+        ``extra_findings`` (T3, :meth:`label_leftovers`) join the detectors' on JSON leaves the
+        detectors left untouched; so for every operation below.
+        """
         t0 = time.perf_counter()
         policy = self.policy(policy_ref)
         findings, sensitivity = self._detect(
-            payload, self._detector(policy, self._locale(policy, options))
+            payload, self._detector(policy, self._locale(policy, options)), extra_findings
         )
         report = build_report(
             mode="detect",
@@ -299,7 +482,7 @@ class PrivacyEngine:
             notes={},
             reversible_values=0,
             verification=None,
-            llm_calls=0,
+            llm_calls=_label_calls(extra_findings),
             duration_ms=(time.perf_counter() - t0) * 1000,
         )
         report.record_sensitivity = str(sensitivity)
@@ -312,11 +495,12 @@ class PrivacyEngine:
         options: RequestOptions,
         *,
         mode: str,
+        extra_findings: Sequence[Finding] = (),
     ) -> PlanResponse:
         """What ``obfuscate`` / ``synthesize`` would do, with reasons, without doing it."""
         policy = self.policy(policy_ref)
         findings, sensitivity = self._detect(
-            payload, self._detector(policy, self._locale(policy, options))
+            payload, self._detector(policy, self._locale(policy, options)), extra_findings
         )
         plan = self._plan(findings, policy, mode)
         return PlanResponse(
@@ -328,6 +512,8 @@ class PrivacyEngine:
         payload: Payload,
         policy_ref: str | dict[str, Any] | None,
         options: RequestOptions,
+        *,
+        extra_findings: Sequence[Finding] = (),
     ) -> TransformResponse:
         """Reversible (and irreversible) obfuscation under a per-request or caller-held key.
 
@@ -339,7 +525,7 @@ class PrivacyEngine:
         policy = self.policy(policy_ref)
         locale = self._locale(policy, options)
         detector = self._detector(policy, locale)
-        findings, _ = self._detect(payload, detector)
+        findings, _ = self._detect(payload, detector, extra_findings)
         plan = self._plan(findings, policy, "obfuscate")
         scope = options.consistency.scope or policy.consistency.scope
         try:
@@ -381,7 +567,7 @@ class PrivacyEngine:
             notes=applied.notes,
             reversible_values=len(applied.reveal_hints),
             verification=verification,
-            llm_calls=0,
+            llm_calls=_label_calls(extra_findings),
             duration_ms=(time.perf_counter() - t0) * 1000,
         )
         return TransformResponse(
@@ -412,6 +598,8 @@ class PrivacyEngine:
         payload: Payload,
         policy_ref: str | dict[str, Any] | None,
         options: RequestOptions,
+        *,
+        extra_findings: Sequence[Finding] = (),
     ) -> TransformResponse:
         """Synthetic surrogates (and, for text, an optional placeholder-only LLM rewrite).
 
@@ -425,7 +613,7 @@ class PrivacyEngine:
         policy = self.policy(policy_ref)
         locale = self._locale(policy, options)
         detector = self._detector(policy, locale)
-        findings, _ = self._detect(payload, detector)
+        findings, _ = self._detect(payload, detector, extra_findings)
         plan = self._plan(findings, policy, "synthesize")
         scope = options.consistency.scope or policy.consistency.scope
         try:
@@ -444,7 +632,7 @@ class PrivacyEngine:
         )
         llm_rewrite = llm_rewrite and self.settings.llm_text_rewrite
         llm: dict[str, Any] = {"used": False, "fallback": None}
-        llm_calls = 0
+        llm_calls = _label_calls(extra_findings)
         output: Any
         methods_used: dict[str, int]
         notes: dict[str, int]
@@ -465,7 +653,7 @@ class PrivacyEngine:
             except MethodError as exc:
                 raise EngineError(str(exc)) from None
             segments = info.pop("segments", [])  # replacement text: never logged with ``info``
-            llm_calls = int(info["llm_calls"])
+            llm_calls += int(info["llm_calls"])
             llm = {"used": bool(info["llm_used"]), "fallback": info["fallback"]}
             methods_used = dict(info["methods_used"])
             notes = dict(info["notes"])

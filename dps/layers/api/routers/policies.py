@@ -51,8 +51,11 @@ async def plan(body: PlanRequest, request: Request) -> PlanOut:
 
     async def call() -> PlanResponse:
         payload = payload_from(request, body.data, body.text)
+        extra = await engine.label_leftovers(payload, body.policy, body.options)  # T3 (opt-in)
         return await run_in_threadpool(
-            lambda: engine.plan(payload, body.policy, body.options, mode=body.mode)
+            lambda: engine.plan(
+                payload, body.policy, body.options, mode=body.mode, extra_findings=extra
+            )
         )
 
     result, tid = await run_engine(

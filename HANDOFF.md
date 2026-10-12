@@ -126,6 +126,7 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_REDACT_IMAGE_FORMAT` / `DPS_REDACT_JPEG_QUALITY` / `DPS_REDACT_OCR_VERIFY` | `jpeg` / 85 / `true` | page rasters inside a redacted PDF (`jpeg` or `png`); when OCR is configured, re-read **every** page of the produced PDF with OCR and refuse it (422 `leakage`, nothing returned) if a redacted original is still readable on any page or the engine, with the request's policy, finds a value it would transform in what OCR read (one extra OCR call per page). On a page with a text layer and OCR (`hybrid`), OCR words the text layer reads otherwise are kept (their whole OCR line), so the engine sees what the page shows |
 | `DPS_PREVIEW_DPI` / `DPS_MAX_PREVIEW_PAGES` | 72 / 50 | console page previews |
 | `DPS_SCHEMA_MAX_ROWS` | 10,000 | rows per `/schema/synthesize` call |
+| `DPS_LLM_LABEL_MAX_FIELDS` / `DPS_LLM_LABEL_MIN_CONFIDENCE` | 40 / 0.7 | T3 metadata labelling, **opt-in per policy** (`detect.tiers` lists `llm_label`) and only with a real provider (`stellar`/`vertex`; never `stub`): JSON leaves T0–T2 left without a finding are grouped by path template (`[n]` → `[*]`) and sent as field name, JSON type and ≤ 3 value **shapes** (`AB-1234` → `XX-9999`) — never a value; value-like names (and paths with a quoted key) go as `field_<n>`; the prompt passes the leak guard against the leaf values or no call is made. Fields per call / the lowest confidence kept; a labelled leaf becomes a finding with detector `llm_label` and score ≤ 0.85, treated like any other (plan, transform, verification, report `llm.calls`). One call per request, one per NDJSON stream (from its first chunk) |
 | `DPS_IDEMPOTENCY_TTL_SECONDS` / `DPS_IDEMPOTENCY_MAX_ENTRIES` | 600 / 10,000 | `Idempotency-Key` on `/detect`, `/obfuscate`, `/synthesize`, `/reveal`, `/documents/*`, `/schema/synthesize`: a **replica-local** replay cache holding, per `sha256(tenant, key id, route, key)`, only the body's SHA-256, the original trace id and a timestamp — never key material, a seed or an output (decision D2). Same key + body within the TTL re-runs the engine and answers `Idempotent-Replay: true` with the original `trace_id` (audit outcome `replayed`); identical output only when the caller sent its own `consistency.key_material` / `synthesis_seed`. Same key + another body → 422 `idempotency_key_reused`; a malformed key → 422 `idempotency_key_invalid`. A retry on another replica, or after the TTL, runs as a first call. `0` disables the cache (a well-formed header is accepted and ignored) |
 | `DPS_NDJSON_MAX_ITEMS` / `DPS_NDJSON_CHUNK_ITEMS` / `DPS_MAX_NDJSON_MB` | 1,000,000 / 500 / 256 | NDJSON streaming on `/detect`, `/obfuscate`, `/synthesize`, `/reveal` (an `application/x-ndjson` body, or a JSON `data` array with `Accept: application/x-ndjson`): items per stream (413 `ndjson_too_large`), items per worker-thread hop, and the body limit for an NDJSON body on those four routes (JSON bodies keep `DPS_MAX_PAYLOAD_MB`); every item obeys `DPS_MAX_ITEMS`. The whole body is held in memory while it streams out, so keep `DPS_MAX_NDJSON_MB` well under the container's memory limit |
 
@@ -144,7 +145,8 @@ services, §3 "Lane-safe stacks").
 - `GET /readyz` — `{"ready", "components"}` with `api-core`, `llm-gateway` (`provider`, `coin_tls`
   `verified` / `insecure`), `ner`
   (`presidio` / `patterns-only`), `fpe` (`ff1` / `det_token fallback`) and, from M1, `ocr`
-  (`up` / `down` / `down:<status>` / `error` / `unconfigured`, with `provider` and `engine`; probed at
+  (`up` / `down` / `down:<status>` / `error` / `unconfigured` / `tesseract_missing`, with `provider`
+  and `engine` — `azure-read-v3.2` or `tesseract-<major.minor>`; probed at
   startup and every `DPS_OCR_PROBE_INTERVAL_SECONDS` while OCR is configured; never required, since
   JSON and text need no OCR); **503** only when a required component is down, and only `api-core`
   is required (it turns false on shutdown).
@@ -153,7 +155,10 @@ services, §3 "Lane-safe stacks").
   `dps_transforms_total{mode,method}`, `dps_llm_calls_total{provider,purpose,outcome}`,
   `dps_verification_failures_total{mode}` and **`dps_llm_raw_pii_sent_total`, which must stay 0**;
   M1 adds `dps_document_pages_total{format,source}`, `dps_redacted_boxes_total`,
-  `dps_ocr_calls_total{engine,outcome}` and `dps_ocr_seconds`.
+  `dps_ocr_calls_total{engine,outcome}` (engine `azure-read-v3.2` or `tesseract`),
+  `dps_ocr_seconds` and `dps_llm_label_fields_total{outcome}` (T3 labelling: `labelled`,
+  `unlabelled`, `skipped` over the per-call cap, `blocked` by the leak guard, `failed`; the call
+  itself is `dps_llm_calls_total{purpose="label"}`).
 - Audit: one `audit` log line per engine request, rejections included (trace id, route, tenant, key
   id, mode, policy label, outcome, counts, methods, verification, duration — never a value or a key).
   Document routes audit mode `document.detect|obfuscate|synthesize`; the outcome is the error code

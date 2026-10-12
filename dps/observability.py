@@ -89,6 +89,8 @@ _SAFE_FIELDS = frozenset(
         "spec_hash",
         "bytes",
         "warnings",
+        # T3 metadata labelling (M1): how many fields were sent and labelled — counts only
+        "verdicts",
     }
 )
 
@@ -169,6 +171,12 @@ TRANSFORMS = Counter(
 LLM_CALLS = Counter("dps_llm_calls_total", "LLM gateway calls", ["provider", "purpose", "outcome"])
 LLM_RAW_PII = Counter(
     "dps_llm_raw_pii_sent", "Raw sensitive values sent to the LLM gateway. Must stay 0 forever."
+)
+LLM_LABEL_FIELDS = Counter(
+    "dps_llm_label_fields_total",
+    "Fields offered to T3 metadata labelling, by outcome "
+    "(labelled, unlabelled, skipped, blocked by the leak guard, failed)",
+    ["outcome"],
 )
 VERIFY_FAIL = Counter("dps_verification_failures_total", "Leakage sweeps that failed", ["mode"])
 LATENCY = Histogram(

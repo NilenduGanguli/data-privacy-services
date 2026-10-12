@@ -46,8 +46,11 @@ async def detect(body: EngineRequest, request: Request) -> DetectOut | Streaming
 
         async def call() -> DetectResponse:
             payload = payload_from(request, body.data, body.text)
+            extra = await engine.label_leftovers(payload, body.policy, body.options)  # T3 (opt-in)
             # CPU-bound and synchronous: off the event loop so probes stay responsive.
-            return await run_in_threadpool(engine.detect, payload, body.policy, body.options)
+            return await run_in_threadpool(
+                engine.detect, payload, body.policy, body.options, extra_findings=extra
+            )
 
         result, tid = await run_engine(request, mode="detect", policy_name=policy, call=call)
         return DetectOut(**result.model_dump(), trace_id=tid)

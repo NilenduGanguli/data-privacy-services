@@ -1135,3 +1135,62 @@ hash and `IdemEntry(body_sha256, trace_id, created)` only; a replay re-runs the 
   DPS_TESSERACT_LANGS=eng
   DPS_TESSERACT_TIMEOUT_SECONDS=60
   ```
+
+## Task 19D — T3 LLM metadata labelling, opt-in, value-free
+
+- **`dps/engine/policy.py` unchanged:** M0's `DetectConfig.tiers` is a free `list[str]` (no tier
+  validation), so `llm_label` was already accepted (checked with an inline policy).
+- **Entity types offered and accepted are the built-in taxonomy only**, not "the taxonomy
+  registry": the process-wide registry holds every tenant's custom types (M1-G4 review B3), so
+  listing it in the prompt would send one tenant's type names to the model for another.
+- **What is aliased (`prompt_fields`):** besides the plan's rule (a name or label with a whole-value
+  finding → `field_<n>`), a name that is not identifier-like (M1 Task 12's sample-key rule: letter
+  or `_`, then letters/digits/`_`/`-`, ≤ 63 characters, no run of four digits) and a `ref` with a
+  quoted path segment (`['…']`) or any finding are aliased too. The plan's refs are JSON path
+  templates, which carry every key on the way to the leaf — a customer's name used as a key
+  (`$['Ananya Krishnan'].code`) is found by neither T1 nor the leak guard (keys are not leaf values)
+  and would otherwise reach the model in the ref. A field whose name is aliased is sent under the
+  alias as its ref, and the reply's refs are mapped back.
+- **The leak guard checks the user message** (the field list), as `propose_spec` (Task 12) does —
+  the system text is a fixed constant (task, answer format, built-in type names) and holds no call
+  data; guarding it too would refuse every call whose leftover values happen to occur inside a
+  type name (`CARD`, `CODE`, `NAME` …).
+- **Engine surface:** `label_leftovers(payload, policy_ref, options)` returns `Leftovers`, a
+  `list[Finding]` subclass that also carries `llm_calls` (0/1): the engine operations read it for
+  `report.llm.calls` (the plan says the labelling call is counted there; a call that returned no
+  verdicts — or failed — still counts as made). Added for streams: `label_templates(documents,
+  …) -> LeftoverLabels` (one call for the leftover templates of several documents) and
+  `apply_labels(payload, …, labels) -> Leftovers` (per document, no LLM), plus
+  `labelling_enabled(policy_ref)`. T3 findings below the policy's `detect.min_score` are dropped
+  (the cap 0.85 is applied first), so "treated like any other finding" includes the threshold.
+  `label_leftovers` returns early, before resolving the policy, when no real provider is
+  configured (the common case costs nothing).
+- **`dps/engine/detect/llm_label.py`:** `label(...) -> LabelOutcome(verdicts, llm_calls,
+  fallback)` is the engine's entry; `label_fields` (the plan's interface) returns its verdicts.
+  Helpers `template_of`, `field_name`, `leftover_fields` (the value → shape step lives here, so the
+  leak-guard test can force values into the prompt), `prompt_fields`, `render_prompt`,
+  `parse_verdicts` (keeps the highest confidence per ref; a confidence outside 0..1, a bool or a
+  string is dropped). Gateway call: `temperature=0.0`, `max_tokens=2048`, `purpose="label"`.
+- **NDJSON (`ndjson.py`):** one labelling call per **stream**, from the leftover templates of its
+  first chunk (≤ `ndjson_chunk_items` items), applied to every item with `apply_labels` — not one
+  LLM call per item (a million-item stream would make a million calls). The report line gains
+  `llm_calls` (all modes but reveal; summed from item reports plus the stream's labelling call).
+  Items whose leftover templates were not in the first chunk get no T3 findings.
+- Routes: `/detect`, `/obfuscate`, `/synthesize` and `/policies/plan` await `label_leftovers`
+  inside their `call()` (after the M0 limits) and pass `extra_findings`. `/documents/*` (CSV
+  records reach the engine as JSON data) is not wired: the plan's file list does not include it.
+- `dps/observability.py`: `LLM_LABEL_FIELDS` = `dps_llm_label_fields_total{outcome}` (`labelled`,
+  `unlabelled`, `skipped`, `blocked`, `failed`); `verdicts` joins the log allow-list (`fields` was
+  already there). The `llm.label` log line carries `fields`, `verdicts`, `fallback` only.
+- **`.env.example` not changed** (permission rule). Follow-up — append:
+
+  ```bash
+  # T3 LLM metadata labelling (M1): opt-in per policy (detect.tiers: [..., llm_label])
+  DPS_LLM_LABEL_MAX_FIELDS=40
+  DPS_LLM_LABEL_MIN_CONFIDENCE=0.7
+  ```
+- `HANDOFF.md` §4 (the two settings and the rules) and §5 (the metric, readiness details).
+- Tests (`tests/test_llm_label.py`, 15 with parametrisation): the seven planned (the "bad replies"
+  case is parametrised over seven replies, including an `LlmCallError`), plus the per-call field
+  cap (`skipped` counted) and one labelling call per NDJSON stream. The fake gateways subclass
+  `LlmGateway` with a configured `stellar` provider (a `stub` provider never labels, by rule).

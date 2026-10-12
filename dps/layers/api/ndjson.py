@@ -53,10 +53,12 @@ from starlette.types import Scope
 
 from dps.auth import require_scope
 from dps.config import Settings
+from dps.engine.findings import Finding
 from dps.engine.policy import Policy
 from dps.engine.service import (
     DetectResponse,
     EngineError,
+    LeftoverLabels,
     Payload,
     PrivacyEngine,
     RequestOptions,
@@ -332,6 +334,7 @@ class _Totals:
     revealed: int = 0
     verified: bool | None = None
     checked: int = 0
+    llm_calls: int = 0
 
     def add(self, result: DetectResponse | TransformResponse | RevealResponse) -> None:
         self.items += 1
@@ -339,6 +342,7 @@ class _Totals:
             self.revealed += result.revealed
             return
         report = result.report
+        self.llm_calls += int(report.llm.get("calls", 0))
         self.findings_total += report.findings_total
         self.findings_by_type.update(report.findings_by_type)
         self.methods_used.update(report.methods_used)
@@ -355,6 +359,7 @@ class _Totals:
         self.reversible_values += other.reversible_values
         self.revealed += other.revealed
         self.checked += other.checked
+        self.llm_calls += other.llm_calls
         if other.verified is not None:
             self.verified = other.verified and self.verified is not False
 
@@ -373,6 +378,8 @@ class _Totals:
             out["reversible_values"] = self.reversible_values
         if mode == "reveal":
             out["revealed"] = self.revealed
+        else:
+            out["llm_calls"] = self.llm_calls
         return out
 
     def audit_counts(self) -> dict[str, Any]:
@@ -419,6 +426,7 @@ class _Stream:
     items: Sequence[Any]
     chunk_items: int
     run_chunk: ChunkRunner
+    llm_calls: int = 0  # made while preparing (T3: one labelling call per stream)
 
 
 def _item_line(index: int, result: Any, mode: str, options: RequestOptions) -> bytes:
@@ -445,8 +453,12 @@ def _engine_runner(
     policy_ref: str | dict[str, Any] | None,
     options: RequestOptions,
     key_material: dict[str, Any] | None,
+    labels: LeftoverLabels | None = None,
 ) -> ChunkRunner:
-    """Each item through the engine operation of ``mode``, in order, stopping at a failure."""
+    """Each item through the engine operation of ``mode``, in order, stopping at a failure.
+
+    ``labels`` (T3, one labelling call per stream) give each item its ``extra_findings``.
+    """
 
     def run_chunk(
         offset: int, everything: Sequence[Any], size: int
@@ -460,14 +472,23 @@ def _engine_runner(
                 index = offset + n
                 try:
                     result: DetectResponse | TransformResponse | RevealResponse
+                    extra: Sequence[Finding] = ()
+                    if labels is not None and mode != "reveal":
+                        extra = engine.apply_labels(Payload(data=item), policy_ref, options, labels)
                     if mode == "detect":
-                        result = engine.detect(Payload(data=item), policy_ref, options)
+                        result = engine.detect(
+                            Payload(data=item), policy_ref, options, extra_findings=extra
+                        )
                     elif mode == "obfuscate":
-                        result = engine.obfuscate(Payload(data=item), policy_ref, options)
+                        result = engine.obfuscate(
+                            Payload(data=item), policy_ref, options, extra_findings=extra
+                        )
                     elif mode == "synthesize":
                         assert loop is not None
                         result = loop.run_until_complete(
-                            engine.synthesize(Payload(data=item), policy_ref, options)
+                            engine.synthesize(
+                                Payload(data=item), policy_ref, options, extra_findings=extra
+                            )
                         )
                     else:
                         assert key_material is not None
@@ -544,7 +565,7 @@ def _header(
     return header
 
 
-def _prepare(
+async def _prepare(
     request: Request, mode: StreamMode, tid: str, envelope: NdjsonEnvelope, items: Sequence[Any]
 ) -> _Stream:
     engine: PrivacyEngine = request.app.state.engine
@@ -563,12 +584,19 @@ def _prepare(
     else:
         options = resolve_stream_material(engine, mode, envelope.policy, envelope.options)
         engine.policy(envelope.policy)  # an unknown or invalid policy fails before streaming
+    header = _header(engine, mode, tid, envelope, options)
+    labels: LeftoverLabels | None = None
+    if mode != "reveal" and engine.labelling_enabled(envelope.policy):
+        # T3 (opt-in): one labelling call per stream, from the first chunk's leftover fields.
+        sample = await asyncio.to_thread(lambda: list(items[: settings.ndjson_chunk_items]))
+        labels = await engine.label_templates(sample, envelope.policy, options)
     return _Stream(
         mode=mode,
-        header=_header(engine, mode, tid, envelope, options),
+        header=header,
         items=items,
         chunk_items=settings.ndjson_chunk_items,
-        run_chunk=_engine_runner(engine, mode, envelope.policy, options, key_material),
+        run_chunk=_engine_runner(engine, mode, envelope.policy, options, key_material, labels),
+        llm_calls=labels.llm_calls if labels is not None else 0,
     )
 
 
@@ -577,7 +605,7 @@ async def _lines(request: Request, stream: _Stream, policy: str, tid: str) -> As
     the error line that ends the stream. Writes the stream's one audit event when it ends."""
     started = time.perf_counter()
     structlog.contextvars.bind_contextvars(trace_id=tid, route=request.url.path)
-    totals = _Totals()
+    totals = _Totals(llm_calls=stream.llm_calls)
     outcome = "aborted"  # the client went away before the stream finished
     try:
         yield _dumps(stream.header)
@@ -665,7 +693,7 @@ async def stream_lines(
 
     async def prepare(tid: str, audit: _Audit) -> _Stream:
         audit.policy = _label(request, mode, envelope)
-        return _prepare(request, mode, tid, envelope, items)
+        return await _prepare(request, mode, tid, envelope, items)
 
     return await _start(request, mode=mode, prepare=prepare)
 
@@ -676,7 +704,7 @@ async def stream_request(request: Request, *, mode: StreamMode) -> StreamingResp
     async def prepare(tid: str, audit: _Audit) -> _Stream:
         envelope, items = await read_ndjson(request, request.app.state.settings)
         audit.policy = _label(request, mode, envelope)
-        return _prepare(request, mode, tid, envelope, items)
+        return await _prepare(request, mode, tid, envelope, items)
 
     return await _start(request, mode=mode, prepare=prepare)
 
