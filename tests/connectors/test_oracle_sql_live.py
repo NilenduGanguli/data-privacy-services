@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -22,6 +23,8 @@ from dps.layers.connectors.base import ObjectRef, TableShape
 from tests.fixtures.m3_services import OracleTestSchema
 
 oracledb = pytest.importorskip("oracledb")
+
+from dps.layers.connectors.oracle import INPUT_TYPES  # noqa: E402
 
 pytestmark = [pytest.mark.integration, pytest.mark.oracle]
 
@@ -55,16 +58,25 @@ NAME = osql.column_info(
     _cat("FULL_NAME", "VARCHAR2", data_length=480, char_length=120, char_used="C"), is_key=False
 )
 NOTES = osql.column_info(_cat("NOTES", "CLOB", data_length=4000), is_key=False)
+OCCURRED_AT = osql.column_info(_cat("OCCURRED_AT", "TIMESTAMP(6)", data_scale=6), is_key=True)
+CREATED_AT = osql.column_info(_cat("CREATED_AT", "TIMESTAMP(6)", data_scale=6), is_key=False)
 
 
 def _code(exc: BaseException) -> str:
     return str(getattr(exc.args[0], "full_code", "")) if exc.args else ""
 
 
-def _page_all(
-    conn: Any, shape: TableShape, batch: int, bind_types: dict[str, Any] | None = None
-) -> list[tuple[Any, ...]]:
-    """Every row through keyset pages of ``batch`` rows (``after`` = the last row's key)."""
+def _sizes(plan: osql.ReadPlan) -> dict[str, Any]:
+    """The plan's typed binds as driver types (what the connector passes to ``setinputsizes``)."""
+    return {name: INPUT_TYPES[t] for name, t in plan.bind_types.items()}
+
+
+def _page_all(conn: Any, shape: TableShape, batch: int) -> list[tuple[Any, ...]]:
+    """Every row through keyset pages of ``batch`` rows (``after`` = the last row's key).
+
+    The ``after`` binds are typed from the plan, as the connector types them. A page that re-reads
+    a row fails the test at once (a bound compared at a coarser precision never moves on).
+    """
     first = osql.read_sql(
         shape,
         columns=shape.columns,
@@ -87,6 +99,7 @@ def _page_all(
     )
     key_pos = [shape.columns.index(k) for k in shape.key_columns()]
     out: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
     after: tuple[Any, ...] | None = None
     while True:
         with conn.cursor() as cur:
@@ -96,13 +109,17 @@ def _page_all(
                 binds: dict[str, Any] = {"batch": batch}
                 for i, value in enumerate(after):
                     binds[f"af{i}"] = value
-                if bind_types:
-                    cur.setinputsizes(**bind_types)
+                if sizes := _sizes(nxt):
+                    cur.setinputsizes(**sizes)
                 cur.execute(nxt.sql, binds)
             page = cur.fetchall()
         if not page:
             return out
-        out.extend(page)
+        for row in page:
+            key = tuple(row[p] for p in key_pos)
+            assert key not in seen, f"a keyset page re-read a row after {len(out)} rows"
+            seen.add(key)
+            out.append(row)
         after = tuple(page[-1][p] for p in key_pos)
 
 
@@ -163,8 +180,152 @@ def test_char_keys_page_with_char_binds(oracle_conn: Any, oracle_schema: OracleT
         cur.execute(plan.sql, {"batch": 10, "af0": "K17"})  # an untyped, unpadded VARCHAR2 bind
         untyped = [r[0].rstrip() for r in cur.fetchall()]
     assert untyped == ["K17", "K17A", "K2"]  # the pitfall the CHAR bind avoids: K17 again
-    got = _page_all(oracle_conn, shape, batch=1, bind_types={"af0": oracledb.DB_TYPE_CHAR})
+    assert _sizes(plan) == {"af0": oracledb.DB_TYPE_CHAR}
+    got = _page_all(oracle_conn, shape, batch=1)
     assert [r[0].rstrip() for r in got] == ["K100", "K17", "K17A", "K2"]
+
+
+def _ts6_rows() -> list[tuple[int, datetime, str]]:
+    """Ten composite keys inside two seconds, distinct only in their microseconds (none .000000)."""
+    base = datetime(2025, 1, 1, 10, 0, 0)
+    micros = [1, 2, 3, 10, 123456, 123457, 500000, 999998, 999999]
+    rows = [(1, base + timedelta(microseconds=m), f"a{m}") for m in micros]
+    rows.append((2, base + timedelta(microseconds=7), "b7"))
+    return rows
+
+
+def test_keyset_pages_timestamp6_keys_with_their_microseconds(
+    oracle_conn: Any, oracle_schema: OracleTestSchema
+) -> None:
+    rows = _ts6_rows()
+    with oracle_conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE EVT6 (CUSTOMER_ID NUMBER(12) NOT NULL, OCCURRED_AT TIMESTAMP(6) NOT NULL, "
+            "NOTE VARCHAR2(20), CONSTRAINT EVT6_PK PRIMARY KEY (CUSTOMER_ID, OCCURRED_AT))"
+        )
+        # loaded as FF6 text so the fixture does not depend on the bind rule under test
+        cur.executemany(
+            "INSERT INTO EVT6 VALUES (:1, TO_TIMESTAMP(:2, 'YYYY-MM-DD HH24:MI:SS.FF6'), :3)",
+            [(c, ts.strftime("%Y-%m-%d %H:%M:%S.%f"), n) for c, ts, n in rows],
+        )
+    oracle_conn.commit()
+    shape = TableShape(
+        object=ObjectRef(owner=oracle_schema.owner, name="EVT6"),
+        columns=[CID, OCCURRED_AT, NOTE],
+        key=["CUSTOMER_ID", "OCCURRED_AT"],
+        key_source="primary_key",
+    )
+    for batch in (2, 3):
+        got = _page_all(oracle_conn, shape, batch=batch)
+        assert got == sorted(rows)  # every row exactly once, microseconds intact
+
+
+def _table_rows(conn: Any, owner: str) -> list[tuple[Any, ...]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            f'SELECT CUSTOMER_ID, OCCURRED_AT, CREATED_AT, NOTE FROM "{owner}"."TSW" ORDER BY 1, 2'
+        )
+        return [tuple(r) for r in cur.fetchall()]
+
+
+def test_timestamp6_writes_keep_their_microseconds(
+    oracle_conn: Any, oracle_schema: OracleTestSchema
+) -> None:
+    """MERGE (named binds), UPDATE by a TIMESTAMP(6) key and INSERT (positional binds), typed the
+    way the writer types them, keep every microsecond of values and keys."""
+    owner = oracle_schema.owner
+    target = ObjectRef(owner=owner, name="TSW")
+    cols = [CID, OCCURRED_AT, CREATED_AT, NOTE]
+    with oracle_conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE TSW (CUSTOMER_ID NUMBER(12) NOT NULL, OCCURRED_AT TIMESTAMP(6) NOT NULL, "
+            "CREATED_AT TIMESTAMP(6), NOTE VARCHAR2(20), "
+            "CONSTRAINT TSW_PK PRIMARY KEY (CUSTOMER_ID, OCCURRED_AT))"
+        )
+    base = datetime(2025, 3, 4, 5, 6, 7)
+    # the first row at .000000 is the measured worst case: the driver then binds the column as DATE
+    micros = [0, 1, 123456, 500000, 999999]
+    expected = [
+        (1, base + timedelta(microseconds=m), base + timedelta(seconds=1, microseconds=m), f"m{m}")
+        for m in micros
+    ]
+    named = [{f"v{i}": v for i, v in enumerate(r)} for r in expected]
+    merge = osql.merge_sql(target, cols, ["CUSTOMER_ID", "OCCURRED_AT"])
+    by_name = {f"v{i}": INPUT_TYPES[t] for i, c in enumerate(cols) if (t := osql.input_type(c))}
+    assert set(by_name) == {"v1", "v2"}
+    with oracle_conn.cursor() as cur:
+        for _ in range(2):  # a reload matches every row on its microsecond key
+            cur.setinputsizes(**by_name)
+            cur.executemany(merge, named)
+    assert _table_rows(oracle_conn, owner) == expected
+
+    upd = osql.update_sql(target, [CREATED_AT, NOTE], [CID, OCCURRED_AT])
+    upd_cols = [CREATED_AT, NOTE, CID, OCCURRED_AT]
+    positional = [INPUT_TYPES.get(osql.input_type(c) or "") for c in upd_cols]
+    changed = [
+        (created + timedelta(microseconds=1), f"u{i}", cid, occurred)
+        for i, (cid, occurred, created, _) in enumerate(expected)
+    ]
+    with oracle_conn.cursor() as cur:
+        cur.setinputsizes(*positional)
+        cur.executemany(upd, changed)
+        assert cur.rowcount == len(changed)  # every key matched at full precision
+    expected = [(cid, occ, created, note) for created, note, cid, occ in changed]
+    assert _table_rows(oracle_conn, owner) == expected
+
+    ins = osql.insert_sql(target, cols)
+    added = [
+        (2, base + timedelta(microseconds=7), base + timedelta(microseconds=999_999), "i7"),
+        (2, base + timedelta(microseconds=8), None, "i8"),
+    ]
+    with oracle_conn.cursor() as cur:
+        cur.setinputsizes(*[INPUT_TYPES.get(osql.input_type(c) or "") for c in cols])
+        cur.executemany(ins, added)
+    assert _table_rows(oracle_conn, owner) == sorted(expected + added, key=lambda r: r[:2])
+    oracle_conn.rollback()
+
+
+def test_key_sample_spreads_over_the_whole_key_space(
+    oracle_conn: Any, oracle_schema: OracleTestSchema
+) -> None:
+    with oracle_conn.cursor() as cur:
+        cur.execute("CREATE TABLE SPREAD (CUSTOMER_ID NUMBER(12) PRIMARY KEY, NOTE VARCHAR2(20))")
+        cur.execute("INSERT INTO SPREAD SELECT LEVEL - 1, 'r' FROM dual CONNECT BY LEVEL <= 10000")
+    oracle_conn.commit()
+    shape = TableShape(
+        object=ObjectRef(owner=oracle_schema.owner, name="SPREAD"),
+        columns=[CID, NOTE],
+        key=["CUSTOMER_ID"],
+        key_source="primary_key",
+    )
+
+    def keys(percent: float | None, n: int, upper: int | None = None) -> list[int]:
+        plan = osql.sample_sql(
+            shape,
+            columns=shape.columns,
+            where=None,
+            query=None,
+            percent=percent,
+            keys_only=True,
+            upper=upper is not None,
+        )
+        binds: dict[str, Any] = {"n": n}
+        if upper is not None:
+            binds["hi0"] = upper
+        with oracle_conn.cursor() as cur:
+            cur.execute(plan.sql, binds)
+            return [int(r[0]) for r in cur.fetchall()]
+
+    # unsampled: the first of every 200 keys of 10,000 (quantiles, DB-ordered), not keys 0..49
+    assert keys(None, 50) == list(range(0, 10_000, 200))
+    # SAMPLE (10): about 1,000 rows, every ~20th kept; the sample still spans the table
+    sampled = keys(10.0, 50)
+    assert sampled == sorted(set(sampled)) and 10 <= len(sampled) <= 50
+    assert sampled[-1] >= 9_000 and sampled[0] < 1_000  # top decile reached, bottom too
+    # below an upper bound: the quantiles of [0, 5000), not a filtered table-wide sample
+    assert keys(None, 50, upper=5_000) == list(range(0, 5_000, 100))
+    assert keys(None, 20_000) == list(range(10_000))  # n above the set: every key
+    assert keys(None, 3) == [0, 3_334, 6_668] and keys(None, 0) == [0]  # never more than n
 
 
 def test_rowid_tables_page_in_rowid_key_order(

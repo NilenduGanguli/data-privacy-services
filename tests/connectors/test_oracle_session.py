@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import decimal
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -10,6 +10,7 @@ oracledb = pytest.importorskip("oracledb")
 from dps.jobs_models import ConnectionParams  # noqa: E402
 from dps.layers.connectors import oracle as ora  # noqa: E402
 from dps.layers.connectors.base import ConnectorError  # noqa: E402
+from dps.layers.connectors.oracle_sql import InputType  # noqa: E402
 
 
 class FakeConn:
@@ -256,3 +257,9 @@ def test_easy_connect_validates_host_and_service() -> None:
         with pytest.raises(ConnectorError) as info:
             ora.easy_connect(bad)
         assert info.value.code == "connection_invalid"
+
+
+def test_every_input_type_has_a_driver_type() -> None:
+    assert set(ora.INPUT_TYPES) == set(get_args(InputType))
+    # never DATE: the thin driver's DATE bind drops the fractional seconds
+    assert ora.INPUT_TYPES["timestamp"] is oracledb.DB_TYPE_TIMESTAMP

@@ -275,3 +275,58 @@ plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as b
   Decimal exact above 2**53, BINARY_DOUBLE → float, CLOB/NCLOB of > 4000 bytes with astral characters
   → whole str, BLOB → bytes, `IS JSON` VARCHAR2 and CLOB → str, not dict).
 - `ConnectorError.detail` already existed (Task 1 audit): no M2 touch in `base.py`.
+
+## Review round 1 fixes (Tasks 1-4) — `M3-G1-review-r1.md` B1, B2
+
+- **B1 — TIMESTAMP(0-6) binds are typed TIMESTAMP** (`dps/layers/connectors/oracle_sql.py`,
+  `dps/layers/connectors/oracle.py`). Measured: python-oracledb 26.0.0 thin binds a bare `datetime`
+  as `DB_TYPE_DATE` and drops the fractional seconds. A `merge_sql`/`update_sql` `executemany` into
+  `TIMESTAMP(6)` lost the microseconds (the demo's `CREATED_AT`, `OCCURRED_AT`, `APPLIED_AT`), and a
+  keyset over `(NUMBER, TIMESTAMP(6))` re-read the same rows on every page. Now:
+  - `InputType` gains `"timestamp"`; `input_type()` returns it for `TIMESTAMP` / `TIMESTAMP(0-6)`
+    without a zone (the same `is_ts9` test as `value_expr`, so a column is either a typed TIMESTAMP
+    bind or FF9 text, never both). `DATE` keeps the driver's DATE bind (exact for DATE); TIMESTAMP(7-9)
+    and WITH TIME ZONE stay text (`None`).
+  - `oracle.INPUT_TYPES["timestamp"] = oracledb.DB_TYPE_TIMESTAMP`; a unit test pins that
+    `INPUT_TYPES` covers every `InputType` literal.
+  - `read_sql` therefore types the `lo/hi/af` key binds of a TIMESTAMP(0-6) key column. The writers
+    (Task 6) pick it up through the plan's `INPUT_TYPES.get(osql.input_type(c) or "")` for SET,
+    VALUES and key binds; `lookup_sql` (plan) through `input_type(join)`.
+  - Contract §4.2 engine notes record the rule; HANDOFF §8 has the trap.
+  - Tests: unit `test_timestamps_up_to_microseconds_bind_as_timestamp`,
+    `test_timestamp6_key_bounds_are_typed`, `test_every_input_type_has_a_driver_type`; live
+    `test_keyset_pages_timestamp6_keys_with_their_microseconds` (10 microsecond-distinct composite
+    keys, none `.000000`, paged with batch 2 and 3, typed from the plan's `bind_types`) and
+    `test_timestamp6_writes_keep_their_microseconds` (MERGE twice with named binds, UPDATE by a
+    `(NUMBER, TIMESTAMP(6))` key and INSERT with positional binds; the first row at `.000000`).
+    The live `_page_all` helper now types its binds from the plan (as the connector will) and fails
+    at the first re-read row instead of looping. Mutation check: with `INPUT_TYPES["timestamp"]`
+    forced back to `DB_TYPE_DATE`, both live tests fail (re-read after 2 rows; values differ).
+- **B2 — `sample_sql(keys_only=True)` returns key quantiles** (`oracle_sql.py`). Plan:
+  `… ORDER BY key FETCH FIRST :n`, which returns the lowest `n` keys of the sampled set (measured:
+  keys 4..603 of 0..9999), so every partition boundary fell at the bottom of the key space. Now an
+  inline view ranks the set (`ROW_NUMBER() OVER (ORDER BY <table-qualified keys>) DPS_RN`,
+  `COUNT(*) OVER () DPS_N`) and the outer query keeps `MOD(DPS_RN - 1, CEIL(DPS_N / GREATEST(:n, 1)))
+  = 0` ordered by `DPS_RN`: the first key of every run of `ceil(total / n)` keys, at most `n`, in the
+  database's order (M2's PostgreSQL `sample_keys` keeps the last key of each run; the first is used
+  here so the count is `ceil(total / step)`, closer to `n`; `plan_partitions` never cuts at
+  `sample[0]` either way). No lock, no `FETCH FIRST` in this statement; the `DPS_*` aliases name the
+  view's columns only (an analytic ORDER BY never sees select-list aliases). The row sample
+  (`keys_only=False`) is unchanged.
+  - **Additive keyword** `sample_sql(..., upper: bool = False)`: binds `:hi<i>` (typed like
+    `read_sql`'s) bound the set *before* ranking, so the quantiles are those of `[min, upper)`. Why:
+    with spread keys, the plan's Task 5 Python filter `k < tuple(upper)` would throw away every key
+    above the bound and leave a `max_rows` job with one or two boundaries. **Task 5 must pass
+    `upper=upper is not None` with `hi<i>` binds (through `_bind_key`) instead of filtering in
+    Python** (this also keeps Python from ever ordering keys, review N3).
+  - Contract §4.2 `sample_keys` comment: "spread over that bounded set (quantiles), never just its
+    lowest n keys" (spec §7 already says partitions come from key quantiles).
+  - Tests: unit `test_sample_sql_spreads_keys_over_the_set_or_draws_a_fresh_sample` (exact text),
+    `test_key_sample_below_an_upper_bound_is_spread_below_it` (CHAR + TIMESTAMP(6) composite bound,
+    typed `hi` binds, ROWID keys); live `test_key_sample_spreads_over_the_whole_key_space` (10,000
+    keys: unsampled `n=50` → exactly `0, 200, …, 9800`; `SAMPLE (10)` → max in the top decile and
+    min in the bottom one; `upper=5000` → `0, 100, …, 4900`; `n` above the set → every key; `n=3`
+    → 3 keys; `n=0` → 1 key).
+- Not changed (non-blocking review items, left for the tasks they name): N1 sample percent below
+  `0.0000005`, N2 BYTE-semantics VARCHAR2 created targets, N4 dead TSTZ key path, N5 `.env.example`,
+  N6 per-cursor output type handler.

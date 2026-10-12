@@ -10,6 +10,12 @@ not chosen (Wega orchestrator on Oracle 23ai Free with python-oracledb 26.0.0 th
   (Wega T2-ORA-ID-EXACT).
 * TIMESTAMP(7-9) crosses the driver as FF9 text both ways: the driver's datetime holds microseconds,
   and a key truncated to microseconds never pages past a burst of rows inside one microsecond.
+* TIMESTAMP(0-6) binds are typed TIMESTAMP: the thin driver binds a bare datetime as DATE, which drops
+  the fractional seconds, so a write loses its microseconds and a key bound compared at second
+  precision re-reads the same rows on every page (measured: 10 rows, 120 reads).
+* A key sample for partition boundaries keeps the first key of every run of ceil(total / n) keys in
+  key order (quantiles of the selected set, as M2's PostgreSQL ``sample_keys``); ``ORDER BY key FETCH
+  FIRST n`` would return the n lowest keys and cut every boundary from the bottom of the key space.
 * CHAR binds are typed CHAR and blank-padded to the declared length; a VARCHAR2 bind compares without
   padding, so 'K17' never matches the stored 'K17         '.
 * CLOB/NCLOB are fetched whole as str and never addressed by offset: CLOB offsets count UTF-16 code
@@ -55,7 +61,7 @@ Family = Literal[
     "json",
     "unsupported",
 ]
-InputType = Literal["char", "nchar", "nvarchar", "clob", "nclob", "blob"]
+InputType = Literal["char", "nchar", "nvarchar", "clob", "nclob", "blob", "timestamp"]
 KeyOp = Literal[">", ">=", "<"]
 
 _TS = re.compile(r"^TIMESTAMP(?:\((\d)\))?$")
@@ -287,6 +293,8 @@ def input_type(col: ColumnInfo) -> InputType | None:
         return "nclob"
     if dt == "BLOB":
         return "blob"
+    if _TS.match(dt) and not is_ts9(col):
+        return "timestamp"  # TIMESTAMP(0-6): a bare datetime binds as DATE and loses its fraction
     return None
 
 
@@ -389,24 +397,48 @@ def sample_sql(
     query: str | None,
     percent: float | None,
     keys_only: bool = False,
+    upper: bool = False,
 ) -> ReadPlan:
     """A random sample for discovery (``keys_only`` for partition boundaries); no locks.
 
-    Bind ``:n`` caps the rows. ``keys_only`` orders the sampled keys (boundaries); a row sample is
-    unordered.
+    Bind ``:n`` caps the rows. A row sample is unordered (``FETCH FIRST :n``). ``keys_only`` returns
+    the key quantiles of the selected set in key order: ``ROW_NUMBER() OVER (ORDER BY key)`` ranks
+    in the database's order and the first key of every run of ``ceil(total / n)`` keys is kept, at
+    most ``n`` keys spread over the whole set. ``upper`` bounds that set below ``:hi<i>`` (the global
+    read bound, typed like ``read_sql``'s), so the quantiles are those of the bounded set.
     """
     cols = key_columns(shape) if keys_only else columns
     if query is None and percent is not None and 0 < percent < 100:
         src = f"{qualified(shape.object)} SAMPLE ({percent:.6f}) t"  # unseeded: a fresh sample
     else:
         src = _source(shape, query, None)  # small table or a query
-    where_sql = f" WHERE ({where})" if where else ""
-    order = f" ORDER BY {', '.join(sort_expr(k) for k in cols)}" if keys_only else ""
+    conds = [f"({where})"] if where else []
+    if not keys_only:
+        where_sql = f" WHERE {conds[0]}" if conds else ""
+        sql = (
+            f"SELECT /* dps:sample */ {', '.join(select_expr(c) for c in cols)} FROM {src}"
+            f"{where_sql} FETCH FIRST :n ROWS ONLY"
+        )
+        return ReadPlan(sql=sql, columns=list(cols), bind_types={})
+    sorts = [sort_expr(k) for k in cols]
+    bind_types: dict[str, InputType] = {}
+    if upper:
+        values = [key_value_expr(k, f"hi{i}") for i, k in enumerate(cols)]
+        conds.append(tuple_predicate(sorts, values, "<"))
+        for i, k in enumerate(cols):
+            if (t := input_type(k)) is not None:
+                bind_types[f"hi{i}"] = t
+    where_sql = f" WHERE {' AND '.join(conds)}" if conds else ""
+    # DPS_* aliases name the inline view's columns only; the window's ORDER BY names the
+    # table-qualified columns (an analytic ORDER BY never sees select-list aliases).
+    ranked = ", ".join(f"{select_expr(k)} DPS_K{i}" for i, k in enumerate(cols))
     sql = (
-        f"SELECT /* dps:sample */ {', '.join(select_expr(c) for c in cols)} FROM {src}"
-        f"{where_sql}{order} FETCH FIRST :n ROWS ONLY"
+        f"SELECT /* dps:sample */ {', '.join(f's.DPS_K{i}' for i in range(len(cols)))} FROM "
+        f"(SELECT {ranked}, ROW_NUMBER() OVER (ORDER BY {', '.join(sorts)}) DPS_RN, "
+        f"COUNT(*) OVER () DPS_N FROM {src}{where_sql}) s "
+        "WHERE MOD(s.DPS_RN - 1, CEIL(s.DPS_N / GREATEST(:n, 1))) = 0 ORDER BY s.DPS_RN"
     )
-    return ReadPlan(sql=sql, columns=list(cols), bind_types={})
+    return ReadPlan(sql=sql, columns=list(cols), bind_types=bind_types)
 
 
 def merge_sql(target: ObjectRef, cols: list[ColumnInfo], keys: list[str]) -> str:

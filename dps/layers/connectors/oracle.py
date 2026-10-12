@@ -75,6 +75,8 @@ INPUT_TYPES: Final[dict[str, Any]] = {
     "clob": oracledb.DB_TYPE_CLOB,
     "nclob": oracledb.DB_TYPE_NCLOB,
     "blob": oracledb.DB_TYPE_BLOB,
+    # TIMESTAMP(0-6): the thin driver binds a bare datetime as DATE and drops the fraction
+    "timestamp": oracledb.DB_TYPE_TIMESTAMP,
 }
 
 

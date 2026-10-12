@@ -204,16 +204,95 @@ def test_read_sql_over_a_query_and_a_seeded_sample() -> None:
     )
 
 
-def test_sample_sql_reads_keys_in_order_or_a_fresh_sample() -> None:
+def test_sample_sql_spreads_keys_over_the_set_or_draws_a_fresh_sample() -> None:
     shape = _shape(CID, NAME, key=["CUSTOMER_ID"])
     keys = osql.sample_sql(
-        shape, columns=shape.columns, where=None, query=None, percent=5.0, keys_only=True
+        shape, columns=shape.columns, where="SEGMENT = :s", query=None, percent=5.0, keys_only=True
     )
     assert [c.name for c in keys.columns] == ["CUSTOMER_ID"]
-    assert 'SAMPLE (5.000000) t ORDER BY t."CUSTOMER_ID" FETCH FIRST :n ROWS ONLY' in keys.sql
+    # the first key of every run of ceil(total / n) keys of the ordered set (quantiles, as M2's
+    # PostgreSQL sample_keys), never the lowest n keys: a FETCH FIRST over ORDER BY key would cut
+    # every partition boundary from the bottom of the key space
+    assert keys.sql == (
+        'SELECT /* dps:sample */ s.DPS_K0 FROM (SELECT t."CUSTOMER_ID" DPS_K0, '
+        'ROW_NUMBER() OVER (ORDER BY t."CUSTOMER_ID") DPS_RN, COUNT(*) OVER () DPS_N '
+        'FROM "CRM"."INTERACTIONS" SAMPLE (5.000000) t WHERE (SEGMENT = :s)) s '
+        "WHERE MOD(s.DPS_RN - 1, CEIL(s.DPS_N / GREATEST(:n, 1))) = 0 ORDER BY s.DPS_RN"
+    )
+    assert "FETCH FIRST" not in keys.sql and keys.bind_types == {}
     rows = osql.sample_sql(shape, columns=shape.columns, where=None, query=None, percent=None)
     assert "SAMPLE" not in rows.sql and "ORDER BY" not in rows.sql
     assert rows.sql.endswith("FETCH FIRST :n ROWS ONLY")
+
+
+def test_key_sample_below_an_upper_bound_is_spread_below_it() -> None:
+    ts6 = osql.column_info(_cat("OCCURRED_AT", "TIMESTAMP(6)", data_scale=6), is_key=True)
+    shape = _shape(REF, ts6, NAME, key=["DOC_REF", "OCCURRED_AT"])
+    plan = osql.sample_sql(
+        shape,
+        columns=shape.columns,
+        where=None,
+        query=None,
+        percent=None,
+        keys_only=True,
+        upper=True,
+    )
+    inner = plan.sql.split(") s WHERE")[0]
+    assert (
+        'WHERE (t."DOC_REF" <= :hi0 AND (t."DOC_REF" < :hi0 OR (t."DOC_REF" = :hi0 AND '
+        't."OCCURRED_AT" < :hi1)))' in inner
+    )  # the bound filters the set the quantiles are taken from, not the sampled keys
+    assert plan.bind_types == {"hi0": "char", "hi1": "timestamp"}
+    rid = osql.rowid_column()
+    by_rowid = osql.sample_sql(
+        _shape(NAME, rid, key=["ROWID"], src="rowid"),
+        columns=[NAME, rid],
+        where=None,
+        query=None,
+        percent=None,
+        keys_only=True,
+        upper=True,
+    ).sql
+    assert "ROWIDTOCHAR(t.ROWID) DPS_K0" in by_rowid
+    assert "ORDER BY t.ROWID) DPS_RN" in by_rowid and "t.ROWID < CHARTOROWID(:hi0)" in by_rowid
+
+
+@pytest.mark.parametrize(
+    "data_type,expected",
+    [
+        ("TIMESTAMP(0)", "timestamp"),
+        ("TIMESTAMP(3)", "timestamp"),
+        ("TIMESTAMP(6)", "timestamp"),
+        ("TIMESTAMP(9)", None),  # FF9 text both ways
+        ("TIMESTAMP(6) WITH TIME ZONE", None),  # FF9+offset text
+        ("DATE", None),  # the driver's DATE bind is exact for DATE
+    ],
+)
+def test_timestamps_up_to_microseconds_bind_as_timestamp(
+    data_type: str, expected: str | None
+) -> None:
+    # python-oracledb thin binds a datetime as DATE, which drops the fractional seconds: a
+    # TIMESTAMP(1-6) write loses its microseconds and a key bound compared at second precision
+    # re-reads the same rows forever (measured on the lane's Oracle 23.26).
+    col = osql.column_info(_cat("A", data_type), is_key=True)
+    assert osql.input_type(col) == expected
+
+
+def test_timestamp6_key_bounds_are_typed() -> None:
+    ts6 = osql.column_info(_cat("OCCURRED_AT", "TIMESTAMP(6)", data_scale=6), is_key=True)
+    shape = _shape(CID, ts6, NAME, key=["CUSTOMER_ID", "OCCURRED_AT"])
+    plan = osql.read_sql(
+        shape,
+        columns=shape.columns,
+        where=None,
+        query=None,
+        sample=None,
+        lower=True,
+        upper=True,
+        after=True,
+    )
+    assert plan.bind_types == {"lo1": "timestamp", "hi1": "timestamp", "af1": "timestamp"}
+    assert 't."OCCURRED_AT" > :af1' in plan.sql  # a typed bind, not text
 
 
 def test_char_keys_bind_as_char_and_are_padded() -> None:

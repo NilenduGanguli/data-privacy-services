@@ -603,6 +603,10 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     reuse a connection after a driver error inside a checkout. Oracle 23ai's `ORA-00001` message
     quotes the duplicate row's values, which is why only driver codes leave `dps/layers/connectors/
     oracle.py` (`connector_error`).
+  - python-oracledb 26.0.0 thin binds a bare `datetime` as DATE, dropping the fractional seconds:
+    TIMESTAMP(1-6) writes silently lose microseconds and a keyset over a TIMESTAMP(6) key re-reads
+    the same rows forever. Every TIMESTAMP(0-6) bind (values and key bounds) goes through
+    `oracle_sql.input_type` → `"timestamp"` → `setinputsizes(oracledb.DB_TYPE_TIMESTAMP)`.
 
 ## 9. Next milestones
 
