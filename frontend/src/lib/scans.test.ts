@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { demoScan, event, FIXTURE_SEED, page, scanJob } from './scanFixtures';
 import {
   blockedByPage, buildSpec, checkSession, configError, configFromSpec, crawlTree, createErrorText, DEFAULT_CONFIG, denyPathError,
-  eventsJsonl, fetchAllPages, fetchNewEvents, mergeEvents, previewBody, probeSpec, requestJson, sessionVerdict,
+  eventsJsonl, fetchAllPages, fetchNewEvents, mergeEvents, previewBody, probeSpec, requestJson, sessionVerdict, START_URL_CODES,
 } from './scans';
 import { ApiError } from './api';
 
@@ -97,6 +97,21 @@ describe('form checks', () => {
       'This host is not registered for the tenant. Register it in Admin › UI-scanner hosts (M5); locally the registered hosts are localhost, 127.0.0.1 and demo-site.');
     expect(createErrorText(new ApiError(422, 'x', 'har_not_supported'))).toMatch(/HAR/);
     expect(createErrorText(new ApiError(422, 'max_pages: too big'))).toBe('422: max_pages: too big');
+  });
+  it('words every refusal code the scans API as built returns (never the raw code)', () => {
+    // dps/layers/scanner/models.py::validate_scan and dps/layers/api/routers/scans.py::create_scan
+    for (const code of ['url_invalid', 'host_not_registered', 'scope_invalid', 'start_url_denied', 'inline_auth_forbidden', 'auth_invalid',
+      'har_not_supported', 'fill_invalid', 'policy_invalid', 'key_material_invalid', 'wrap_key_invalid', 'kek_unconfigured']) {
+      const text = createErrorText(new ApiError(422, `the scan was refused: ${code}`, code));
+      expect(text, code).not.toContain(code);
+      expect(text, code).not.toMatch(/^422/);
+    }
+    expect(createErrorText(new ApiError(422, 'x', 'start_url_denied'))).toMatch(/never-visit list/);
+    // the per-scan page cap is a server setting (DPS_SCAN_MAX_PAGES, 50 by default), not the console's 500
+    expect(createErrorText(new ApiError(422, 'x', 'scope_invalid'))).toMatch(/50 by default/);
+  });
+  it('places the refusals about the start URL under the start URL field', () => {
+    expect(START_URL_CODES).toEqual(['url_invalid', 'host_not_registered', 'start_url_denied']);
   });
 });
 

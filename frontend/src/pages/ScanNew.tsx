@@ -15,7 +15,7 @@ import { saveText } from '../lib/download';
 import { fmtWhen, isTerminal, shortId } from '../lib/jobs';
 import {
   buildSpec, checkSession, configError, configFromSpec, createErrorText, DEFAULT_CONFIG, DEMO_SESSION, denyPathError, fetchAllPages,
-  fetchNewEvents, LOCALES, MAX_DEPTH, MAX_PAGES, MAX_PERSONAS, mergeEvents, requestJson, type ScanConfig, type SessionVerdict,
+  fetchNewEvents, LOCALES, MAX_DEPTH, MAX_PAGES, MAX_PERSONAS, mergeEvents, requestJson, START_URL_CODES, type ScanConfig, type SessionVerdict,
 } from '../lib/scans';
 import type { ScanCreated, ScanDetail, ScanEvent, ScanPage, SynthesisSeed } from '../lib/types';
 
@@ -217,7 +217,7 @@ export function ScanNew(): JSX.Element {
     try { await navigator.clipboard.writeText(requestJson(cfg)); setCopied(true); window.setTimeout(() => setCopied(false), 1400); } catch { setCopied(false); }
   }
 
-  const hostErr = createErr?.code === 'host_not_registered' ? createErr.text : null;
+  const hostErr = createErr?.code && START_URL_CODES.includes(createErr.code) ? createErr.text : null;
   const otherErr = createErr && !hostErr ? createErr.text : null;
   const notFound = detail.error instanceof ApiError && detail.error.status === 404;
 
@@ -244,7 +244,7 @@ export function ScanNew(): JSX.Element {
             <div className="card-head"><div className="card-title" id="tgtT">Target</div><span className="chip slate">{tenantName}</span></div>
             <div className="field"><label htmlFor="scan-url">Start URL</label>
               <input className="input mono" id="scan-url" value={cfg.url} spellCheck={false} autoComplete="off" aria-describedby="scan-url-err"
-                onChange={(e) => { update({ url: e.target.value }); if (createErr?.code === 'host_not_registered') setCreateErr(null); }} />
+                onChange={(e) => { update({ url: e.target.value }); if (createErr?.code && START_URL_CODES.includes(createErr.code)) setCreateErr(null); }} />
               <div className="urlrow">
                 {registeredHost && registeredHost === hostOf(cfg.url)
                   ? <><span className="chip emerald">registered host</span><span className="hint">{registeredHost} is registered for {tenantName}.</span></>

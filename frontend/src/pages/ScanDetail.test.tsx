@@ -225,3 +225,24 @@ describe('ScanDetail container', () => {
     expect(t).toContain('Loading the scan');
   });
 });
+
+describe('paths as the API returns them (NumberedRiskFlag.path and InventoryRow.path are redacted page URLs)', () => {
+  const flag = { code: 'A8', path: 'http://demo-site:8410/apply/review?email=<EMAIL>&ref=<v>', flag: 'pii_in_query_string' as const, severity: 'medium' as const,
+    page_no: 7, field_nos: [], entity_types: ['EMAIL'], query_keys: ['email'], where: 'url' as const };
+  it('risk flags show the page path, never the origin or a placeholder', () => {
+    const t = text(render(<RiskFlags flags={[flag]} />));
+    expect(t).toContain('/apply/review?email=•••&ref=•••');
+    expect(t).not.toContain('http://');
+    expect(t).not.toContain('<EMAIL>');
+  });
+  it('the whole-scan inventory shows the page path', () => {
+    const row = { ...inventoryRows(d.pages, d.fields)[0], path: 'http://demo-site:8410/apply/identity' };
+    const t = text(render(<ScanInventory rows={[row]} flags={[]} onDownload={noop} />));
+    expect(t).toContain('/apply/identity');
+    expect(t).not.toContain('http://demo-site:8410');
+  });
+  it('the typed fixtures carry the paths in the shape the API returns', () => {
+    expect(d.summary.risk_flags.every((f) => f.path.startsWith('http://'))).toBe(true);
+    expect(inventoryRows(d.pages, d.fields).every((r) => r.path.startsWith('http://'))).toBe(true);
+  });
+});

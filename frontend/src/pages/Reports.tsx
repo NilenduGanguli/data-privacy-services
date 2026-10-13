@@ -4,6 +4,8 @@ import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
 import { fmtCount, fmtUtc, shortId, verificationText, writeModeLabel } from '../lib/jobs';
 import type { EvidenceSummary } from '../lib/types';
+import { saveText } from '../lib/download';
+import { canonicalJson, isScanJobId, scanEvidenceRow } from '../components/scanner/ScanEvidence';
 
 function apiMessage(e: unknown): string {
   return e instanceof ApiError ? `${e.message}${e.code ? ` (${e.code})` : ''}` : e instanceof Error ? e.message : String(e);
@@ -34,7 +36,8 @@ export function Reports(): JSX.Element {
     try {
       const ev = await api.evidence.get(auth, s.id);
       const art = ev.artefacts.find((a) => a.kind === 'evidence_json');
-      if (!art) throw new Error('the pack has no JSON artefact');
+      // a scan's finalize stores the HTML rendering only: save the pack as returned, in canonical form
+      if (!art) { saveText(canonicalJson(ev.pack), `dps-evidence-${s.id}.json`); return; }
       await api.artefacts.download(auth, art.id, `dps-evidence-${s.id}.json`);
     } catch (e) { setError(apiMessage(e)); } finally { setBusy(null); }
   }
@@ -56,21 +59,26 @@ export function Reports(): JSX.Element {
         <div className="card-head"><div className="card-title" id="ep-t">Evidence packs</div><span className="faint sm">Kept under the tenant retention policy. Download a pack to keep it longer.</span></div>
         {error && <div className="err" style={{ marginBottom: 10 }}>{error}</div>}
         <div className="tbl-scroll"><table className="tbl stack" id="packs"><thead><tr><th style={{ width: '34%' }}>Job or request</th><th>Layer</th><th>Mode</th><th>Policy</th><th>Verification</th><th>Created (UTC)</th><th>Download</th></tr></thead><tbody>
-          {list.map((s) => (
+          {list.map((s) => {
+            const scan = isScanJobId(s.job_id) ? scanEvidenceRow(s) : null;
+            return (
             <tr key={s.id}>
-              <td className="sub"><Link className="mono" to={`/data-sources/jobs/${s.job_id}`} title={s.job_id}>{shortId(s.job_id)}</Link> · {s.source_object ?? '—'} → {s.target ?? '—'}
-                <span className="s2">{[s.ticket, writeModeLabel(s.write_mode), `${fmtCount(s.rows_written)} rows`, s.outcome !== 'succeeded' ? s.outcome.replace('_', ' ') : null].filter(Boolean).join(' · ')}</span></td>
-              <td data-l="Layer">Connectors</td>
+              {scan
+                ? <td className="sub"><Link className="mono" to={scan.href} title={s.job_id}>{shortId(s.job_id)}</Link> · {scan.what}<span className="s2">{scan.sub}</span></td>
+                : <td className="sub"><Link className="mono" to={`/data-sources/jobs/${s.job_id}`} title={s.job_id}>{shortId(s.job_id)}</Link> · {s.source_object ?? '—'} → {s.target ?? '—'}
+                  <span className="s2">{[s.ticket, writeModeLabel(s.write_mode), `${fmtCount(s.rows_written)} rows`, s.outcome !== 'succeeded' ? s.outcome.replace('_', ' ') : null].filter(Boolean).join(' · ')}</span></td>}
+              <td data-l="Layer">{scan ? scan.layer : 'Connectors'}</td>
               <td data-l="Mode">{s.mode ? <span className={`chip ${s.mode === 'synthesize' ? 'violet' : 'teal'}`}>{s.mode}</span> : '—'}</td>
               <td className="mono" data-l="Policy">{s.policy ?? '—'}</td>
-              <td data-l="Verification"><span className={`chip ${s.passed ? 'emerald' : 'rose'}`}>{verificationText(s.passed, s.hits)}</span></td>
+              <td data-l="Verification"><span className={`chip ${s.passed ? 'emerald' : 'rose'}`}>{scan ? scan.verification : verificationText(s.passed, s.hits)}</span></td>
               <td className="t" data-l="Created (UTC)">{fmtUtc(s.created_at, false).replace(' UTC', '')}</td>
               <td data-l="Download"><div className="dl">
                 <button className="btn btn-sm" type="button" disabled={busy === s.id} aria-label={`Download evidence pack ${shortId(s.job_id)} as JSON`} onClick={() => void downloadJson(s)}>JSON</button>
                 <Link className="btn btn-sm" to={`/reports/evidence/${s.id}`} aria-label={`Open evidence pack ${shortId(s.job_id)}`}>Open</Link>
               </div></td>
             </tr>
-          ))}
+            );
+          })}
           {items && !list.length && <tr className="empty-row"><td colSpan={7}>No evidence pack yet. Every finished run leaves one. <Link to="/data-sources/jobs/new" style={{ color: 'var(--teal)', fontWeight: 600 }}>Start a job</Link>.</td></tr>}
           {!items && !error && <tr><td colSpan={7}><div className="skeleton" /></td></tr>}
         </tbody></table></div>

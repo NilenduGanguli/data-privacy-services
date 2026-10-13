@@ -909,3 +909,13 @@ export function packTargetText(target: Record<string, any>, source: Record<strin
   if (target.write_mode === 'in_place') return `${target.object ?? source.object ?? '—'} (in place)`;
   return String(target.object ?? '—');
 }
+
+/** Where a job opens: a UI scan in the scanner (M4), every other kind in Jobs. */
+export function jobHref(j: Pick<Job, 'id' | 'kind'>): string {
+  return j.kind === 'scan' ? `/scanner/scans/${encodeURIComponent(j.id)}` : `/data-sources/jobs/${encodeURIComponent(j.id)}`;
+}
+
+/** The batch jobs of a `GET /jobs` page: scans are listed and opened in the UI scanner instead. */
+export function tableJobs(items: Job[]): Job[] {
+  return items.filter((j) => j.kind !== 'scan');
+}

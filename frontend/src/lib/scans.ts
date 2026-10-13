@@ -144,11 +144,20 @@ export function configError(cfg: ScanConfig): string | null {
 const CREATE_ERRORS: Record<string, string> = {
   host_not_registered: 'This host is not registered for the tenant. Register it in Admin › UI-scanner hosts (M5); locally the registered hosts are localhost, 127.0.0.1 and demo-site.',
   url_invalid: 'The start URL must be an http(s) address without a user name or password.',
-  scope_invalid: `The scope is not valid: max pages 1–${MAX_PAGES}, max depth 0–${MAX_DEPTH}, deny paths start with /.`,
+  start_url_denied: 'The start URL is on the never-visit list (or outside the allowed paths); choose another start page or change the scope.',
+  scope_invalid: `The scope is not valid: max pages from 1 up to the service's per-scan cap (DPS_SCAN_MAX_PAGES, 50 by default), max depth 0–${MAX_DEPTH}, never-visit paths start with /.`,
   har_not_supported: 'HAR files are not supported: a HAR holds response bodies with personal data.',
   auth_invalid: 'The stored session reference is not valid for this tenant.',
   inline_auth_forbidden: 'Inline sessions are refused here; use a stored session reference.',
+  fill_invalid: `The fill settings are not valid: personas 1–${MAX_PERSONAS}, a supported locale, and the displayed persona among them.`,
+  policy_invalid: 'The policy of this scan does not resolve; choose a preset or a valid policy.',
+  key_material_invalid: 'The supplied key material or synthesis seed is not valid; start without it to get fresh ones.',
+  wrap_key_invalid: 'The RSA public key cannot be read; paste a PEM "BEGIN PUBLIC KEY" block, or return the key in clear.',
+  kek_unconfigured: 'This service cannot seal a scan (DPS_JOB_KEK is not configured); ask the operator of the service.',
 };
+
+/** Refusals about the start URL itself: shown under the Start URL field, not under the Start button. */
+export const START_URL_CODES = ['url_invalid', 'host_not_registered', 'start_url_denied'];
 
 /** A refusal of POST /scans in words (codes only; the URL is never echoed). */
 export function createErrorText(e: unknown): string {

@@ -4,7 +4,7 @@ import { Tone } from '../components/Chip';
 import { StateChip } from '../components/StateChip';
 import { useAuth } from '../hooks/useAuth';
 import { api, metricTotal } from '../lib/api';
-import { fmtWhen, shortId } from '../lib/jobs';
+import { fmtWhen, jobHref, shortId } from '../lib/jobs';
 import type { Job, JobStats, Readiness } from '../lib/types';
 
 /** Recent jobs (mockup 01, the M2 part): the five newest jobs of the tenant. */
@@ -17,7 +17,7 @@ function RecentJobs({ jobs }: { jobs: Job[] }): JSX.Element {
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
-              <td><Link className="mono" to={`/data-sources/jobs/${j.id}`} title={j.id}>{shortId(j.id)}</Link></td>
+              <td><Link className="mono" to={jobHref(j)} title={j.id}>{shortId(j.id)}</Link></td>
               <td className="mono">{j.object_ref ?? '—'}</td>
               <td>{j.mode ? <Tone tone={j.mode === 'synthesize' ? 'violet' : 'teal'}>{j.mode}</Tone> : <span className="faint">{j.kind}</span>}</td>
               <td><StateChip job={j} /></td>

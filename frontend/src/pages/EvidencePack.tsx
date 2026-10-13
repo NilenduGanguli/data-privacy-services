@@ -7,6 +7,8 @@ import {
   writeModeLabel, verificationText,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, EvidenceOut, Job } from '../lib/types';
+import { saveText } from '../lib/download';
+import { canonicalJson, isScanPack, scanPackTitle, ScanPackSections, ScanPackSummary, Sec } from '../components/scanner/ScanEvidence';
 
 const LABEL_OBFUSCATE = 'pseudonymised — still personal data';
 
@@ -15,15 +17,6 @@ function apiMessage(e: unknown): string {
 }
 
 const text = (v: unknown): string => (v === null || v === undefined || v === '' ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v));
-
-function Sec({ n, title, right, keep, children }: { n: number; title: string; right?: React.ReactNode; keep?: boolean; children: React.ReactNode }): JSX.Element {
-  return (
-    <section className={`sec${keep ? ' keep' : ''}`} aria-labelledby={`s${n}`}>
-      <h2 id={`s${n}`}><span className="n">{n}</span> {title}{right && <span className="r">{right}</span>}</h2>
-      {children}
-    </section>
-  );
-}
 
 /** The evidence pack (mockup 10): the sealed, value-free record of one job, printable as the PDF look. */
 export function EvidencePack(): JSX.Element {
@@ -50,6 +43,9 @@ export function EvidencePack(): JSX.Element {
 
   async function download(kind: 'evidence_json' | 'evidence_html'): Promise<void> {
     const art = ev?.artefacts.find((a) => a.kind === kind);
+    // a scan's finalize stores the HTML rendering only: its JSON is the pack as the API returned it,
+    // in the canonical form whose sha256 is pack_sha256
+    if (ev && !art && kind === 'evidence_json') { saveText(canonicalJson(ev.pack), `dps-evidence-${ev.pack.id}.json`); return; }
     if (!ev || !art) { setError(`The pack has no ${kind === 'evidence_json' ? 'JSON' : 'HTML'} artefact.`); return; }
     setBusy(kind);
     try { await api.artefacts.download(auth, art.id, `dps-evidence-${ev.pack.id}.${kind === 'evidence_json' ? 'json' : 'html'}`); }
@@ -90,6 +86,7 @@ export function EvidencePack(): JSX.Element {
   const fallbacks = (v.fallbacks ?? {}) as Record<string, number>;
   const fbTotal = Object.values(fallbacks).reduce((a, b) => a + Number(b), 0);
   const day = new Date(p.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const scan = isScanPack(p);
   const outcomeWords = p.outcome === 'succeeded' ? '' : p.outcome === 'dry_run' ? ' This was a dry run: nothing was written.' : ` The job ended ${p.outcome}.`;
 
   return (
@@ -109,11 +106,13 @@ export function EvidencePack(): JSX.Element {
         <header className="doc-head">
           <div style={{ minWidth: 0, flex: '1 1 420px' }}>
             <div className="eyebrow">Data Privacy Services · evidence pack</div>
-            <h1 id="doc-title">{engineName(src.engine)} {text(src.object)} → {targetText}</h1>
+            <h1 id="doc-title">{scan ? scanPackTitle(p) : <>{engineName(src.engine)} {text(src.object)} → {targetText}</>}</h1>
             <div className="jid">Job {p.job_id} · {p.mode ?? p.job_kind} · purpose {p.purpose?.ticket ?? '—'}</div>
           </div>
           <div className="seal">
-            {passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : <span className="chip rose">verification {verificationText(false, hits)}</span>}
+            {scan
+              ? <span className={`chip ${passed && Number(p.scan?.non_get_allowed ?? 0) === 0 ? 'emerald' : 'rose'}`}>{fmtCount(Number(p.scan?.submissions ?? 0))} submissions · {fmtCount(Number(p.scan?.non_get_allowed ?? 0))} non-GET allowed</span>
+              : passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : <span className="chip rose">verification {verificationText(false, hits)}</span>}
             <span>Sealed {fmtUtc(p.created_at)}</span>
             <span>Pack <span className="mono">{p.id}</span> · sha256 <span className="mono">{shortSha(ev.pack_sha256)}</span></span>
             <span className={`chip ${synth ? 'violet' : 'teal'}`}>{p.label}</span>
@@ -126,11 +125,12 @@ export function EvidencePack(): JSX.Element {
           <div><div className="l">Purpose</div><div className="v">{p.purpose?.ticket ?? '—'}</div></div>
           <div><div className="l">Legal basis</div><div className="v">{p.purpose?.legal_basis ?? '—'}</div></div>
           <div><div className="l">Job group</div><div className="v">{p.group_id ? <span className="mono">{p.group_id}</span> : 'none'}</div></div>
-          <div><div className="l">Mode · write</div><div className="v">{p.mode ?? '—'} · {writeModeLabel(tgt.write_mode, tgt.table_load)}</div></div>
+          <div><div className="l">Mode · write</div><div className="v">{p.mode ?? '—'} · {scan ? 'artefacts only, nothing written to the scanned site' : writeModeLabel(tgt.write_mode, tgt.table_load)}</div></div>
           <div><div className="l">Outcome</div><div className="v">{p.outcome}</div></div>
           <div><div className="l">Pack kept until</div><div className="v">{job?.expires_at ? fmtUtc(job.expires_at, false) : 'the tenant retention period'}</div></div>
         </div>
 
+        {scan ? <><ScanPackSummary p={p} /><ScanPackSections p={p} sha={ev.pack_sha256} /></> : <>
         <Sec n={1} title="Summary">
           <p className="lead">
             On {day} DPS read {fmtCount(counts.rows_read ?? 0)} rows from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} rows to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
@@ -217,6 +217,8 @@ export function EvidencePack(): JSX.Element {
           </tbody></table></div>
         </Sec>
 
+        </>}
+
         {(p.fidelity || p.privacy) && (
           <Sec n={6} title="Synthetic fidelity and privacy">
             <dl className="kv"><dt>Fidelity</dt><dd className="mono">{text(p.fidelity)}</dd><dt>Privacy</dt><dd className="mono">{text(p.privacy)}</dd></dl>
@@ -235,7 +237,7 @@ export function EvidencePack(): JSX.Element {
         <Sec n={8} title="Signatures">
           <div className="sig">
             <div><div className="role">System attestation</div><div className="who">Data Privacy Services {p.engine_version}</div><div className="what">Generated and hashed at {fmtUtc(p.created_at)}.</div><div className="line"><span className="mono">sha256:{ev.pack_sha256}</span></div></div>
-            <div><div className="role">Data owner</div><div className="who">{text(p.snapshot?.accepted_by)}</div><div className="what">Accepted the classification snapshot{p.snapshot?.accepted_at ? ` at ${fmtUtc(p.snapshot.accepted_at, false)}` : ''}.</div><div className="line"><span>Signature</span><span>Date</span></div></div>
+            <div><div className="role">Data owner</div><div className="who">{text(p.snapshot?.accepted_by)}</div><div className="what">{scan ? 'Owns the scanned application and its registered host.' : <>Accepted the classification snapshot{p.snapshot?.accepted_at ? ` at ${fmtUtc(p.snapshot.accepted_at, false)}` : ''}.</>}</div><div className="line"><span>Signature</span><span>Date</span></div></div>
             <div><div className="role">Data protection officer</div><div className="who">&nbsp;</div><div className="what">Confirms purpose, legal basis and retention.</div><div className="line"><span>Signature</span><span>Date</span></div></div>
             <div><div className="role">Change approver</div><div className="who">&nbsp;</div><div className="what">Approves the release of the output under {p.purpose?.ticket ?? 'the change'}.</div><div className="line"><span>Signature</span><span>Date</span></div></div>
           </div>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
 import { evidenceSoFar, methodText, packTargetText, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
-import { confirmationKey, countKey, fqn, keyMethodsOf, runMethodFor, writtenObject, type WizardDraft } from './jobs';
+import { confirmationKey, countKey, fqn, jobHref, keyMethodsOf, runMethodFor, tableJobs, writtenObject, type WizardDraft } from './jobs';
 import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
@@ -257,5 +257,17 @@ describe('evidence pack helpers', () => {
     expect(verificationText(false, 1)).toBe('failed · 1 leak caught');
     // a run stopped before its counters held a hit (a preflight leak, a fail-closed check)
     expect(verificationText(false, 0)).toBe('failed closed');
+  });
+});
+
+describe('scans among the jobs (M4: GET /jobs lists every kind, scans included)', () => {
+  it('opens a scan in the UI scanner and any other job in Jobs', () => {
+    expect(jobHref({ id: 's_01SCAN', kind: 'scan' })).toBe('/scanner/scans/s_01SCAN');
+    expect(jobHref({ id: 'j_01RUN', kind: 'run' })).toBe('/data-sources/jobs/j_01RUN');
+    expect(jobHref({ id: 'j_01DISC', kind: 'discover' })).toBe('/data-sources/jobs/j_01DISC');
+  });
+  it('keeps scans out of the batch-jobs table (they have no source, target or rows)', () => {
+    const items = [job({ id: 'j_1', kind: 'run' }), job({ id: 's_1', kind: 'scan' }), job({ id: 'j_2', kind: 'discover' })];
+    expect(tableJobs(items).map((j) => j.id)).toEqual(['j_1', 'j_2']);
   });
 });

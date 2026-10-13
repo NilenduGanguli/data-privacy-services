@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, Navigate, useParams } from 'react-router-dom';
 import { EngineBadge } from '../components/EngineBadge';
 import { HeatLegend } from '../components/HeatMap';
 import { Sparkline } from '../components/Sparkline';
@@ -9,7 +9,7 @@ import { usePoll } from '../hooks/usePoll';
 import { api, ApiError } from '../lib/api';
 import {
   engineName, errorText, evidenceSoFar, fmtClock, fmtCompact, fmtCount, heatTone, isTerminal, jobTargetText, jobWriteMode,
-  methodFor, methodText, needsDecision, parseKeyFile, partitionPct, progressPct, shortId, shortType, stepperState, typeNoteShort,
+  jobHref, methodFor, methodText, needsDecision, parseKeyFile, partitionPct, progressPct, shortId, shortType, stepperState, typeNoteShort,
   writeModeLabel, type DetailStep,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, ColumnClassification, Connection, Job, PartitionView } from '../lib/types';
@@ -250,6 +250,9 @@ export function JobDetail(): JSX.Element {
       if (e instanceof ApiError && e.code === 'key_material_required') setRetryOpen(true);
     } finally { setBusy(null); }
   }
+
+  // a scan is a job too (GET /jobs/{id} returns it): its page is the UI scanner's scan detail
+  if (j && j.kind === 'scan') return <Navigate to={jobHref(j)} replace />;
 
   if (!j) {
     return (

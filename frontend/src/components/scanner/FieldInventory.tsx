@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { InventoryRow, NumberedRiskFlag, ScanField, ScanMode, Sensitivity } from '../../lib/types';
-import { autocompleteText, entityChip, evidenceLabel, fillMethod, flagTone, inputText, plural } from './format';
+import { autocompleteText, entityChip, evidenceLabel, fillMethod, flagTone, inputText, pathOf, plural } from './format';
 
 function EntityCell({ type, sensitivity }: { type: string | null; sensitivity: Sensitivity | null }): JSX.Element {
   return type ? <span className={`chip ${entityChip(sensitivity)}`}>{type}</span> : <span className="faint">—</span>;
@@ -83,7 +83,7 @@ export function ScanInventory({ rows, flags, onDownload }: { rows: InventoryRow[
       </tr></thead><tbody>
         {shown.map((r) => (
           <tr key={`${r.page_no}-${r.form_index}-${r.field_no}`} data-row={`${r.page_no}-${r.field_no}`}>
-            <td data-l="Page" className="mono">{r.path}</td>
+            <td data-l="Page" className="mono">{pathOf(r.path)}</td>
             <td data-l="#">{r.field_no}</td>
             <td data-l="Label">{r.label ?? <span className="faint">(no label)</span>}</td>
             <td data-l="Input" className="mono">{inputText(r)}</td>

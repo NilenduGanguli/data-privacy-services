@@ -178,11 +178,11 @@ function buildFields(pageNo: number): ScanField[] {
 }
 
 const RISKS: NumberedRiskFlag[] = [
-  { code: 'A1', path: '/apply/identity', flag: 'autocomplete_enabled_sensitive', severity: 'high', page_no: 2, field_nos: [3, 4], entity_types: ['AADHAAR', 'PAN_IN'], query_keys: [], where: 'form' },
-  { code: 'A2', path: '/apply/review', flag: 'pii_in_query_string', severity: 'medium', page_no: 7, field_nos: [], entity_types: ['EMAIL'], query_keys: ['email'], where: 'url' },
-  { code: 'A3', path: '/profile', flag: 'pii_rendered_unmasked', severity: 'medium', page_no: 9, field_nos: [], entity_types: ['PAN_IN', 'CARD_PAN', 'ACCOUNT_NUMBER'], query_keys: [], where: 'table' },
-  { code: 'A4', path: '/login', flag: 'password_without_autocomplete_token', severity: 'medium', page_no: 8, field_nos: [2], entity_types: ['PASSWORD'], query_keys: [], where: 'form' },
-  { code: 'A5', path: '/help/track', flag: 'sensitive_form_uses_get', severity: 'high', page_no: 13, field_nos: [1], entity_types: ['EMAIL'], query_keys: [], where: 'form' },
+  { code: 'A1', path: `${DEMO_ORIGIN}/apply/identity`, flag: 'autocomplete_enabled_sensitive', severity: 'high', page_no: 2, field_nos: [3, 4], entity_types: ['AADHAAR', 'PAN_IN'], query_keys: [], where: 'form' },
+  { code: 'A2', path: `${DEMO_ORIGIN}/apply/review`, flag: 'pii_in_query_string', severity: 'medium', page_no: 7, field_nos: [], entity_types: ['EMAIL'], query_keys: ['email'], where: 'url' },
+  { code: 'A3', path: `${DEMO_ORIGIN}/profile`, flag: 'pii_rendered_unmasked', severity: 'medium', page_no: 9, field_nos: [], entity_types: ['PAN_IN', 'CARD_PAN', 'ACCOUNT_NUMBER'], query_keys: [], where: 'table' },
+  { code: 'A4', path: `${DEMO_ORIGIN}/login`, flag: 'password_without_autocomplete_token', severity: 'medium', page_no: 8, field_nos: [2], entity_types: ['PASSWORD'], query_keys: [], where: 'form' },
+  { code: 'A5', path: `${DEMO_ORIGIN}/help/track`, flag: 'sensitive_form_uses_get', severity: 'high', page_no: 13, field_nos: [1], entity_types: ['EMAIL'], query_keys: [], where: 'form' },
 ];
 const riskOf = (pageNo: number): RiskFlag[] => RISKS.filter((r) => r.page_no === pageNo).map(({ code: _c, path: _p, ...r }) => r);
 
@@ -306,7 +306,7 @@ export function summarize(pages: ScanPage[], fields: Record<number, ScanField[]>
 
 export function inventoryRows(pages: ScanPage[], fields: Record<number, ScanField[]>): InventoryRow[] {
   return pages.flatMap((p) => (fields[p.page_no] ?? []).map((f) => ({
-    page_no: p.page_no, path: p.template, form_index: f.form_index, field_no: f.field_no, label: f.label, tag: f.tag, input_type: f.input_type,
+    page_no: p.page_no, path: p.url_redacted, form_index: f.form_index, field_no: f.field_no, label: f.label, tag: f.tag, input_type: f.input_type,
     name_attr: f.name_attr, autocomplete: f.autocomplete, pattern: f.pattern, maxlength: f.maxlength, required: f.required,
     entity_type: f.entity_type, sensitivity: f.sensitivity, confidence: f.confidence, detectors: f.detectors, risk_codes: f.risk_codes,
     fill_status: f.fill_status, persona_attr: f.persona_attr, obfuscate_method: f.obfuscate_method,
