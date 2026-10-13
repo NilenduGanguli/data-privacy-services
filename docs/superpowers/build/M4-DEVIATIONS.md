@@ -1106,3 +1106,33 @@ enforced below the page. Each item was established by a probe of the pinned Chro
 - With `same_origin=false` or a frame from another registered host, the allow list now also
   applies to that host's navigations (fail closed; the spec's allow list is path-only).
 - `tests/scanner/helpers.make_runtime` gained `allow=`.
+
+## G4 review round 2 — fix (M4-G4-review-r2 R2-B1)
+
+**R2-B1 — no scanner click on a clickable whose resolved target the scope refuses**
+(`dps/layers/scanner/crawler.py`, `dom.py`; tests in `tests/scanner/test_scope_rail.py`):
+- Supersedes the round-1 entry "skip clickables whose resolved target is denied — not done":
+  `<a href="#/logout">` does have a resolvable target, and its fragment never reaches the network,
+  so only a pre-click check can stop the page's own route handler.
+- `ScanRunner._click` (used by SPA discovery and by the replay click) now reads the stamped
+  element's resolved target first (`dom.CLICK_TARGET_JS`: `href` / `xlink:href` resolved against
+  the element's `baseURI`, `null` without one, `''` when unresolvable) and clicks only when
+  `CrawlScope.navigation_verdict(target)` is `ok` (hash routes checked against the deny list via
+  `url_path_verdict`; a `<base href>` to another origin → `other_origin`; unresolvable →
+  `scheme`, fail closed). It returns `(verdict, target)` (was `None`; private method).
+- Discovery: a refused clickable is not clicked; a value-free `spa`/`skipped` event (target =
+  redacted URL or origin, note = verdict) is written for every refusal, and once per target the
+  same `skipped` page row a refused link gets (`_skip`, reason = verdict).
+- Replay: a refused target raises `_NavFailed(verdict, skipped=True)`; the queued SPA page is
+  recorded `skipped` with the verdict as reason (event `navigate`/`skipped`, audit outcome
+  `skipped`) instead of being clicked. `_NavFailed` gained the keyword-only `skipped` flag.
+- Residuals (documented in `_click`'s docstring): an element without `href` (`role="link"`) or a
+  `javascript:` link has no target to check — its network navigations meet the request guard, but
+  one that only sets `location.hash` to a denied route is not stopped; a page script that rewrites
+  the `href` between the check and the click (same task, milliseconds) is not stopped either.
+- Tests: `test_spa_discovery_never_clicks_a_hash_route_the_deny_list_names` (the reviewer's probe
+  page plus a `#!/admin/purge?…` route: 0 hits on both route handlers' API paths, the allowed
+  route's API hit, skip rows and events value-free) and
+  `test_the_replay_click_never_clicks_a_hash_route_the_deny_list_names` (the same ordinal points
+  to the allowed route at discovery and to `#/logout` at replay). Both fail on `6eac062`.
+

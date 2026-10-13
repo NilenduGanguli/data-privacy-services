@@ -319,6 +319,14 @@ CLICKABLES_JS = r"""
 }
 """
 
+CLICK_TARGET_JS = r"""
+(el) => {   // the clickable's resolved target: null = no href (role="link"), '' = unresolvable
+  const raw = el.getAttribute('href') ?? el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+  if (raw === null) return null;
+  try { return new URL(raw, el.baseURI).href; } catch (e) { return ''; }
+}
+"""
+
 TEXT_RECTS_JS = r"""
 (spans) => spans.map(([i, start, end]) => {
   const node = (window.__dpsTextNodes || [])[i];

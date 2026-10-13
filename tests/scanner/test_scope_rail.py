@@ -49,6 +49,36 @@ ALLOW_HOME = b"""<!doctype html><html><head><title>Home</title></head><body>
 <a href="/home/go">Continue</a>
 <span role="link" onclick="location.href='/home/settings'">Settings</span></nav>
 </body></html>"""
+# Review r2 B1: a hash-routed SPA. The fragment never reaches the network, so the request guard
+# cannot see ``#/logout``; its route handler does what an SPA logout does (an API call that is not
+# itself on the deny list, and clearing the client session). SPA discovery must not click it.
+HASH_HOME = b"""<!doctype html><html><head><title>Home</title></head><body>
+<h1>Account</h1>
+<nav><a href="#/logout">Sign out</a> <a href="#!/admin/purge?all=1">Purge</a>
+<a href="#/profile">Profile</a></nav>
+<script>
+function route() {
+  if (location.hash === '#/logout') { fetch('/api/session/end'); localStorage.clear(); }
+  if (location.hash.startsWith('#!/admin/purge')) { fetch('/api/cache/purge'); }
+  if (location.hash === '#/profile') { fetch('/api/profile'); }
+}
+window.addEventListener('hashchange', route);
+</script>
+</body></html>"""
+# The replay click: the same ordinal points to the allowed route at discovery and, once that
+# route has run, to the denied one (a page that re-renders its menu). The replay must not click it.
+FLIP_HOME = b"""<!doctype html><html><head><title>Home</title></head><body>
+<h1>Account</h1>
+<nav><a id="m" href="#/profile">Menu</a></nav>
+<script>
+if (localStorage.getItem('flip') === '1') document.getElementById('m').setAttribute('href', '#/logout');
+function route() {
+  if (location.hash === '#/logout') { fetch('/api/session/end'); }
+  if (location.hash === '#/profile') { fetch('/api/profile'); localStorage.setItem('flip', '1'); }
+}
+window.addEventListener('hashchange', route);
+</script>
+</body></html>"""
 PAGE = b"<!doctype html><html><head><title>P</title></head><body><p>page</p></body></html>"
 REDIRECTS = {"/go": "/logout", "/home/go": "/outside"}
 
@@ -68,7 +98,8 @@ class _Site(BaseHTTPRequestHandler):
             return
         body = self.home if path in ("/", "/home") else PAGE
         self.send_response(200)
-        self.send_header("Content-Type", "image/png" if path.endswith(".png") else "text/html")
+        kind = "application/json" if path.startswith("/api/") else "text/html"
+        self.send_header("Content-Type", "image/png" if path.endswith(".png") else kind)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -99,6 +130,16 @@ def deny_site() -> Iterator[tuple[str, Counter[str]]]:
 @pytest.fixture
 def allow_site() -> Iterator[tuple[str, Counter[str]]]:
     yield from _serve(ALLOW_HOME)
+
+
+@pytest.fixture
+def hash_site() -> Iterator[tuple[str, Counter[str]]]:
+    yield from _serve(HASH_HOME)
+
+
+@pytest.fixture
+def flip_site() -> Iterator[tuple[str, Counter[str]]]:
+    yield from _serve(FLIP_HOME)
 
 
 def _blocked(sink: MemoryScanSink, reason: str, resource_type: str | None = None) -> int:
@@ -306,3 +347,80 @@ async def test_the_allow_list_holds_for_navigations_not_for_resources(
     assert _blocked(sink, "not_allowed", "document") >= 1  # the click, at the route
     assert _blocked(sink, "not_allowed", "unrouted") >= 1  # the redirect hop, at the proxy
     assert _allowed_with(sink, ("deny", "not_allowed")) == 0
+
+
+@pytest.mark.browser
+async def test_spa_discovery_never_clicks_a_hash_route_the_deny_list_names(
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    hash_site: tuple[str, Counter[str]],
+) -> None:
+    """Review r2 B1: ``<a href="#/logout">`` is not clicked (its route handler would run); the
+    record says it was skipped as ``deny``, and a value-free ``spa_click`` skip event says why."""
+    from dps.layers.scanner.crawler import ScanRunner
+
+    base, hits = hash_site
+    sink = MemoryScanSink()
+    rt = make_runtime(
+        base,
+        scan_settings,
+        scan_engine,
+        path="/",
+        cookies=False,
+        screenshots=False,
+        deny=("/logout", "/admin"),
+        max_depth=2,
+    )
+    await ScanRunner(
+        settings=scan_settings, engine=scan_engine, sink=sink, browser=chromium, runtime=rt
+    ).run()
+    assert {p: hits[p] for p in ("/api/session/end", "/api/cache/purge")} == {
+        "/api/session/end": 0,
+        "/api/cache/purge": 0,
+    }
+    assert hits["/api/profile"] >= 1  # control: discovery clicked the allowed route
+    skips = [e for e in sink.events if e.kind == "skip" and e.note_code == "deny"]
+    assert len(skips) >= 2
+    assert all("#" not in e.target and "?" not in e.target for e in skips)  # redacted: no fragment
+    refused = [e for e in sink.events if e.kind == "spa" and e.result == "skipped"]
+    assert len(refused) >= 2 and {e.note_code for e in refused} == {"deny"}  # one per refusal
+    assert all("#" not in e.target and "?" not in e.target for e in refused)
+    clicked = [p for p in sink.pages.values() if p.discovered_via == "spa_click"]
+    assert clicked and all(p.status != "skipped" for p in clicked)
+    denied = [p for p in sink.pages.values() if (p.status, p.status_reason) == ("skipped", "deny")]
+    assert denied
+
+
+@pytest.mark.browser
+async def test_the_replay_click_never_clicks_a_hash_route_the_deny_list_names(
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    flip_site: tuple[str, Counter[str]],
+) -> None:
+    """Review r2 B1, replay half: the queued route's replay finds its clickable now pointing to
+    ``#/logout``; it is not clicked and the route's page is recorded as skipped with ``deny``."""
+    from dps.layers.scanner.crawler import ScanRunner
+
+    base, hits = flip_site
+    sink = MemoryScanSink()
+    rt = make_runtime(
+        base,
+        scan_settings,
+        scan_engine,
+        path="/",
+        cookies=False,
+        screenshots=False,
+        deny=("/logout",),
+        max_depth=2,
+    )
+    await ScanRunner(
+        settings=scan_settings, engine=scan_engine, sink=sink, browser=chromium, runtime=rt
+    ).run()
+    assert hits["/api/profile"] >= 1  # control: discovery clicked the route while it was allowed
+    assert hits["/api/session/end"] == 0
+    replays = [p for p in sink.pages.values() if p.discovered_via == "spa_click"]
+    assert [(p.status, p.status_reason) for p in replays] == [("skipped", "deny")]
+    refused = [e for e in sink.events if e.kind == "navigate" and e.result == "skipped"]
+    assert [e.note_code for e in refused] == ["deny"]

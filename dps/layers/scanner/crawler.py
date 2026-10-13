@@ -6,7 +6,8 @@ processed in fresh tabs:
 2. parallel view: fill with the display persona (synthesize) and with tokens of it (obfuscate),
    each in a fresh tab armed before the first value is set and closed after its screenshot;
 3. an obfuscated capture when the page renders personal data or arrived pre-filled;
-4. discovery: in-scope links (depth/page/template budgets, deny list) and click-only SPA routes.
+4. discovery: in-scope links (depth/page/template budgets, deny list) and click-only SPA routes
+   (a clickable whose resolved target, a hash route included, the scope refuses is never clicked).
 
 There is no code path that sends a form: the only clicks are on in-scope link-like elements
 outside any form on unfilled tabs (SPA discovery and its replay, both on ``[data-dps-click]``
@@ -53,7 +54,13 @@ from dps.layers.scanner.classify import (
     sensitive_prefilled,
     value_classifier,
 )
-from dps.layers.scanner.dom import CLICKABLES_JS, SUBMIT_ATTEMPTS_JS, extract_page, frame_map
+from dps.layers.scanner.dom import (
+    CLICK_TARGET_JS,
+    CLICKABLES_JS,
+    SUBMIT_ATTEMPTS_JS,
+    extract_page,
+    frame_map,
+)
 from dps.layers.scanner.guard import BlockedRequest, ScanGuard, stored_host
 from dps.layers.scanner.inventory import field_records, field_risks, rendered_risks, url_risks
 from dps.layers.scanner.models import (
@@ -108,9 +115,13 @@ CLICK_TIMEOUT_MS = 3000
 
 
 class _NavFailed(Exception):
-    def __init__(self, code: str) -> None:
+    """A page could not be reached. ``skipped``: the scope refused the replay click's target
+    (``code`` is the navigation verdict), so the page is recorded as skipped, not failed."""
+
+    def __init__(self, code: str, *, skipped: bool = False) -> None:
         super().__init__(code)
         self.code = code
+        self.skipped = skipped
 
 
 @dataclass(frozen=True)
@@ -379,23 +390,62 @@ class ScanRunner:
         if frame is None:
             raise _NavFailed("replay")
         try:
-            await self._click(frame, t.replay.frame_index, t.replay.ordinal)
+            verdict, _ = await self._click(frame, t.replay.frame_index, t.replay.ordinal)
         except PlaywrightError:
             raise _NavFailed("replay") from None
+        if verdict != "ok":  # the element now points somewhere the scope refuses: not clicked
+            raise _NavFailed(verdict, skipped=True)
         await page.wait_for_timeout(self.s.scan_settle_ms)
         return response
 
-    async def _click(self, frame: Frame, frame_index: int, ordinal: int) -> None:
-        """Re-stamp the frame's clickables (same predicate as the extraction) and click one."""
+    async def _click(self, frame: Frame, frame_index: int, ordinal: int) -> tuple[str, str | None]:
+        """Re-stamp the frame's clickables (same predicate as the extraction) and click one —
+        only when the scope allows a navigation to its resolved target.
+
+        Returns ``(verdict, target)``; on any verdict but ``ok`` nothing was clicked. A hash route
+        (``<a href="#/logout">``) never reaches the network, so the request guard cannot refuse
+        it: the page's own route handler would run. Its target is therefore checked here, before
+        the click, with the same :meth:`CrawlScope.navigation_verdict` as a link (a hash route is
+        checked against the deny list). An element without ``href`` (``role="link"``) and a
+        ``javascript:`` link have no target to check; their navigations meet the guard.
+        """
         await frame.evaluate(
             CLICKABLES_JS, {"frameIndex": frame_index, "shadow": self.rt.spec.scope.shadow_dom}
         )
         ref = f"{frame_index}:{ordinal}"
+        target: str | None = await frame.locator(f'[data-dps-click="{ref}"]').evaluate(
+            CLICK_TARGET_JS, timeout=CLICK_TIMEOUT_MS
+        )
+        verdict = self._click_verdict(target)
+        if verdict != "ok":
+            return verdict, target
         # Click 1 of 2 in the scanner: an in-scope link-like element outside any form, stamped by
         # CLICKABLES_JS, on an unfilled tab (the guard still blocks every non-GET it could cause).
         await frame.locator(f'[data-dps-click="{ref}"]').click(
             timeout=CLICK_TIMEOUT_MS, no_wait_after=True
         )
+        return verdict, target
+
+    def _click_verdict(self, target: str | None) -> str:
+        """``ok`` or why a clickable's resolved target is out of scope (``''`` → ``scheme``)."""
+        if target is None or target[:11].lower() == "javascript:":
+            return "ok"
+        return self.rt.scope.navigation_verdict(target)
+
+    def _refuse_click(self, target: str | None, parent: Target, verdict: str) -> None:
+        """Record a discovery click the scope refused: a value-free ``spa``/``skipped`` event for
+        every refusal and, once per target, the same skipped page row a refused link gets."""
+        url = canonical(target) if target else None
+        if url is None:
+            shown = ""
+        elif verdict in _OTHER_HOST:
+            shown = self._origin_of(url)
+        else:
+            shown = self._redact(url)
+        self._event("spa", "skipped", page_no=parent.page_no, target=shown, note=verdict)
+        if url is not None and verdict != "scheme" and url not in self._seen:
+            self._seen.add(url)
+            self._skip(url, parent, verdict)
 
     async def _close(self, page: Page) -> None:
         await self._guard.close(page)  # unload traffic aborted; never page.close()
@@ -409,16 +459,17 @@ class ScanRunner:
         try:
             page, response = await self._open(t)
         except _NavFailed as exc:
-            record.status, record.status_reason = "failed", exc.code
+            outcome: Literal["skipped", "failed"] = "skipped" if exc.skipped else "failed"
+            record.status, record.status_reason = outcome, exc.code
             self._event(
                 "navigate",
-                "failed",
+                outcome,
                 page_no=t.page_no,
                 method="GET",
                 target=record.url_redacted,
                 note=exc.code,
             )
-            await self.sink.audit_navigation(page_no=t.page_no, outcome="failed")
+            await self.sink.audit_navigation(page_no=t.page_no, outcome=outcome)
             await self._finish(record, fields)
             return
         try:
@@ -860,8 +911,12 @@ class ScanRunner:
                 if frame is None:
                     continue
                 # Click 2 of 2 in the scanner: SPA route discovery — the same kind of element as
-                # the replay click (``_click``), on a fresh, unfilled tab.
-                await self._click(frame, c.frame_index, c.ordinal)
+                # the replay click (``_click``), on a fresh, unfilled tab; never one whose target
+                # the scope refuses (``_click`` checks it first).
+                verdict, target = await self._click(frame, c.frame_index, c.ordinal)
+                if verdict != "ok":
+                    self._refuse_click(target, t, verdict)
+                    continue
                 await page.wait_for_timeout(self.s.scan_settle_ms)
                 url = canonical(page.url)
                 if url is not None and self._template(url) != base:
