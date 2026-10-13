@@ -2,10 +2,10 @@
  *  is installed — contract: no new npm dependency). Views are pure: data in, markup out. */
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MemoryRouter } from 'react-router-dom';
+import { StaticRouter } from 'react-router-dom/server';
 
 export function html(el: ReactElement, path = '/'): string {
-  return renderToStaticMarkup(<MemoryRouter initialEntries={[path]}>{el}</MemoryRouter>);
+  return renderToStaticMarkup(<StaticRouter location={path}>{el}</StaticRouter>);
 }
 
 /** The visible text of rendered markup (tags dropped, entities decoded, whitespace collapsed). */
