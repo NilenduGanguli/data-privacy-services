@@ -337,6 +337,40 @@ async def audit(
     return {"items": [r.model_dump(mode="json") for r in rows], "next_cursor": nxt}
 
 
+# --- retention -----------------------------------------------------------------------------------
+class RetentionRun(BaseModel):
+    """Body of ``POST /admin/retention/run``."""
+
+    model_config = _HIDDEN
+    dry_run: bool = False
+
+
+@router.post("/retention/run", status_code=202, dependencies=_ADMIN)
+async def retention_run(
+    request: Request, body: Annotated[RetentionRun | None, Body()] = None
+) -> dict[str, Any]:
+    """Queue an on-demand retention job (owned by ``_system``; it sweeps every tenant, so only a
+    key granted every tenant may start it)."""
+    from dps.retention import enqueue_retention
+
+    principal = principal_of(request)
+    if WILDCARD not in principal.tenant_ids:
+        raise DpsHttpError(
+            403,
+            "tenant_forbidden",
+            "retention runs across tenants: a key for every tenant is needed",
+        )
+    dry_run = body.dry_run if body is not None else False
+    job = await _audited(
+        request,
+        "admin.retention.run",
+        enqueue_retention(dry_run=dry_run, created_by=principal.key_id),
+        status=202,
+        counts={"dry_run": int(dry_run)},
+    )
+    return {"job": job.model_dump(mode="json")}
+
+
 # --- queue ---------------------------------------------------------------------------------------
 async def _queue(principal: Principal) -> dict[str, Any]:
     s = db.schema_ident()

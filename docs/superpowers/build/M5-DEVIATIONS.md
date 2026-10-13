@@ -692,6 +692,34 @@ real survivors).
   test also checks the trend split, the layer numbers and that no fixture sentinel (a job `error`,
   an audit `trace_id`, a `reveal_map` entry) reaches any answer.
 
+## Task 13 — Retention: extend M2's retention job
+
+- **Counter keys.** The plan both adds `retention:rollup_rows`/`retention:usage_rows` to
+  `values_by_method` and requires M2's `tests/db/test_retention.py` to stay green unchanged — whose
+  dry-run test pins the counter map with `==` to M2's five keys. Both hold: the M5 keys are written
+  only when non-zero (`RetentionCounts.counters()`); M2's five are always there; the full counts are
+  in `progress.metrics.retention`. Contract §3.3 says so.
+- `run_retention(*, settings, artefacts, dry_run, on_tenant=None)`: the optional `on_tenant` callback
+  carries M2's fenced per-tenant progress update (`advance_job` → `False` = lease lost, the run
+  stops), so the refactor keeps M2's behaviour. A `PostgresError` in one tenant's pass is logged
+  (`retention_tenant_failed`, class name only) and the next tenant runs, as planned; an object-store
+  error still requeues the whole (idempotent) run like M2.
+- `dps.tenants.tenant_directory` gains `worker: bool = False` (read through the worker pool — the
+  handler runs in a worker process, which should not open an API pool).
+- Roll-ups are refreshed (today and the two days before) for tenants with a job created or finished
+  in those days, never for pseudo-tenants and never on a dry run. The `retention.run` audit event
+  (route `retention`, key id `system`, outcome `ok`/`dry_run`, the `RetentionCounts` as counts) is
+  written through `ctx.audit`; a sink failure is logged, never fails the job.
+- `POST /admin/retention/run` additionally requires a key granted **every** tenant (403
+  `tenant_forbidden` otherwise): the run deletes across all tenants, so a tenant-scoped admin must
+  not be able to start it. The body is optional (`{}` = not a dry run).
+- Scan rows: this lane has no M4 030, so the scan-cascade part of
+  `test_expired_jobs_their_objects_and_scan_rows_are_deleted` runs only when `dps_scan_page` exists
+  (it will after the merge); the "no `dps_scan` statement in `dps/retention.py`" assertion always runs.
+- `test_audit_log_is_never_touched` creates (and drops) audit partitions for older months on the
+  owner connection: the fixture database only has partitions from the current month on.
+- `HANDOFF.md` §5's worker bullet describes the M5 additions and the on-demand route.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

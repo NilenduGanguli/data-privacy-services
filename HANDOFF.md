@@ -447,6 +447,11 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   schedules at most one retention job per `DPS_RETENTION_INTERVAL_HOURS` across replicas (owner
   `_system`); retention deletes expired terminal jobs with their artefacts, stale proposed/superseded
   snapshots and expired inline secrets, purges leftover sealed keys, never the audit log or exports.
+  M5 extends the same job (no second scheduler): it also ages out report roll-ups and daily usage rows
+  older than `DPS_ROLLUP_RETENTION_DAYS` (400), refreshes the last three days' roll-ups of tenants
+  with recent jobs, records its counts in `progress.metrics.retention` and writes one `retention.run`
+  audit event owned by `_system`. `POST /api/v1/admin/retention/run {"dry_run": true}` (admin key
+  granted every tenant) queues an on-demand run.
 
 ## 6. Security posture
 

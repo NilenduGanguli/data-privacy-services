@@ -152,12 +152,14 @@ def _s() -> str:
     return db.schema_ident()
 
 
-async def tenant_directory(*, include_system: bool = False) -> list[str]:
+async def tenant_directory(*, include_system: bool = False, worker: bool = False) -> list[str]:
     """Every tenant id with a ``dps_tenant`` row, a job or a connection (ids only).
 
-    Pseudo-tenants (``_system``) are included only when asked (retention).
+    Pseudo-tenants (``_system``) are included only when asked (retention); ``worker=True`` reads
+    through the worker pool (the retention handler runs in a worker process).
     """
-    async with db.acquire(None) as conn:
+    acquire = db.acquire_queue if worker else db.acquire
+    async with acquire(None) as conn:
         rows = await conn.fetch(f"SELECT tenant_id FROM {_s()}.dps_tenant_directory()")
     ids = [str(r["tenant_id"]) for r in rows]
     if include_system:
