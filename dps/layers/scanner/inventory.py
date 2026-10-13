@@ -694,6 +694,7 @@ def build_scan_evidence(
         "display_persona": int(fill.get("display_persona", 1)),
         "submissions": 0,
         "non_get_allowed": int(counts.get("non_get_allowed", 0)),
+        "scope_paths_reached": int(counts.get("scope_paths_reached", 0)),
         "blocked_requests": dict(counts.get("blocked") or {}),
         "navigations": int(counts.get("navigations", 0)),
         "validation": validation_totals(pages),

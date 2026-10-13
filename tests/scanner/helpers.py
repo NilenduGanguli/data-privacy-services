@@ -101,6 +101,7 @@ def make_runtime(
     *,
     path: str = "/apply",
     deny: tuple[str, ...] = ("/logout", "/admin"),
+    allow: tuple[str, ...] = (),
     cookies: bool = True,
     personas: int = 3,
     max_pages: int = 30,
@@ -115,7 +116,11 @@ def make_runtime(
             "url": base_url + path,
             "mode": mode,
             "scope": ScanScope(
-                max_pages=max_pages, max_depth=max_depth, deny=list(deny), spa_clicks=spa
+                max_pages=max_pages,
+                max_depth=max_depth,
+                allow=list(allow),
+                deny=list(deny),
+                spa_clicks=spa,
             ).model_dump(),
             "fill": FillSpec(personas=personas, locale="en_IN").model_dump(),
             "capture": {"screenshots": screenshots},
@@ -136,6 +141,7 @@ def make_runtime(
             start=origin,
             same_origin=True,
             registered_hosts=frozenset(settings.scan_registered_hosts_list),
+            allow=allow,
             deny=deny,
         ),
     )

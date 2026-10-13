@@ -1047,3 +1047,62 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   codes, nothing of the start URL's query appears in any answer, the wrapped key is recorded as
   `key_wrapped`, a reused idempotency key with another body is 422, cursors are validated, the
   inventory holds no fill value, audit events for create/cancel.
+
+## G4 review round 1 — fix (M4-G4-review-r1 B1, B2; N2 folded in)
+
+**B1 — scan finalize fenced and idempotent** (`dps/layers/scanner/__init__.py`, `store.py`,
+`dps/storage.py`; contract §3.1 amendment and the `dps_job.plan` comment):
+- `finalize_scan` returns `str | None` (was `str`): `None` = the lease is gone and this attempt
+  wrote nothing that stays. A job still in phase `scan` first moves to `finalize/running` through
+  `advance_job` (with `progress.stage = "finalize"` and `plan.scan_finalize = {result, outcome}`,
+  the crawl's `RunOutcome` counters, value-free). `False` → return before any write; once in
+  `finalize`, `jobs.cancel` answers `job_finalizing` (M2's existing rule, no change to `jobs.py`).
+- Idempotent like M2's `_existing_evidence`: `ScanStore.existing_evidence` (the earliest pack of
+  the job: id, outcome, HTML artefact id, export ids) is reused, and its outcome becomes the job's
+  terminal state. Otherwise the exports and HTML are written and the pack inserted in one
+  transaction under `ScanStore.lock_leased_job` (`SELECT … FOR UPDATE` where `locked_by` = this
+  worker and `state='running'`), re-checking for a pack under the lock. Only the attempt that
+  inserted the pack then deletes the export/HTML artefacts no pack references (an interrupted
+  attempt's); a fenced-out or beaten attempt deletes only the artefacts it just wrote (by id), so a
+  stale worker can never delete what the lease owner is writing. `ArtefactService.delete_for_job` gained keyword-only
+  `kinds=`, `ids=`, `keep=` filters (default behaviour unchanged; retention still deletes all).
+- The terminal `advance_job`'s return is checked; the `scan.finalize` audit row is written only
+  after it applied (so no audit row names an outcome the job does not have). Terminal progress
+  also clears `stage`.
+- `scan_finalize_job` serves the cancel path and the retry of an interrupted finalize: `canceled`
+  when `progress.outcome` says so, else the crawl's `result` and `RunOutcome` from
+  `plan.scan_finalize`, else `failed` (as before).
+- `scan_job`: before its retry clean-up (`reset_scan` + `delete_for_job`) it checks for a pack; if
+  one exists (only possible for a row from before the fence) it finalizes with that pack instead
+  of crawling again, so no artefact a pack references is ever deleted.
+- The reviewer's `test_probe_finalize.py::test_crash_after_evidence_before_advance` still fails by
+  construction: after the crash it calls `reset_scan` + `delete_for_job` directly, a sequence the
+  code no longer runs (the retry of a finalize is a finalize; a scan-phase retry checks for a pack
+  first). `tests/scanner/test_scan_finalize.py` drives the real retry path instead (lease expiry →
+  `jobs.reap` → claim → `scan_finalize_job`; and the scan-phase case through `scan_job`).
+- N2 folded in: `test_an_allowed_non_get_fails_the_scan_with_submission_detected`.
+
+**B2 — the scope's path rail in the request guard** (`guard.py`, `urls.py`, `crawler.py`,
+`store.py`, `inventory.py`, `connectors/evidence.py`; contract §7 `scan` keys):
+- New `CrawlScope.request_path_verdict(url)` (= `url_path_verdict(url, allow, deny)`), passed to
+  `ScanGuard(path_verdict=…)` by the crawler. `decide(…, path=)`: after the scheme, method and host
+  rules, `deny` refuses **every** request (any resource type, any frame — stricter than the review's
+  "document requests": a script's `fetch('/logout')` or an image on `/admin` is refused too, so the
+  claim is "a denied path never received a request from the scan"), and `not_allowed` refuses
+  navigations (main frame and sub-frames); sub-resources outside an allow list still load. Reasons
+  `deny` / `not_allowed`. The method rule still wins (a POST to `/logout` is counted as `method`).
+- The scope proxy applies the same rule to every plain-HTTP hop (redirect hops included);
+  `is_navigation_hop(headers)` tells a navigation by `Sec-Fetch-Mode: navigate`, a document-like
+  `Sec-Fetch-Dest`, `Upgrade-Insecure-Requests` or an `Accept` asking for HTML (fails towards
+  "navigation"). Refusals are counted `unrouted`, like the proxy's other refusals.
+- HTTPS redirect hops cannot be refused (the route sees first hops only, the proxy only the
+  tunnel): residual risk documented in the guard's docstring. They are not hidden: a
+  `context.on("request")` listener counts such a hop to a denied (or, navigating, not allowed) path
+  as an **allowed** request with reason `deny`/`not_allowed`; `summary_counts` adds
+  `scope_paths_reached`, the evidence pack's `scan` block carries it and its HTML prints it.
+- The optional "skip clickables whose resolved target is denied" was not done: the elements in
+  question (`href="#"` + `onclick`, `javascript:`) have no resolvable target; the guard rule covers
+  them.
+- With `same_origin=false` or a frame from another registered host, the allow list now also
+  applies to that host's navigations (fail closed; the spec's allow list is path-only).
+- `tests/scanner/helpers.make_runtime` gained `allow=`.

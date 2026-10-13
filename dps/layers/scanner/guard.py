@@ -16,6 +16,15 @@ request of every page, popup and iframe of that context:
   for plain HTTP (and plaintext inside a tunnel: a ``ws://`` socket) it also applies the method
   rule and the fill-value rule. A hop it refuses is counted with resource type ``unrouted`` and
   page ``None``.
+* **Scope paths, on every hop.** The scan's deny list holds for every request of the scan (any
+  resource type, any frame), and its allow list for every navigation (main frame and sub-frames):
+  ``path_verdict`` (``CrawlScope.request_path_verdict``) is applied by the route handler and, for
+  plain HTTP, by the scope proxy on every redirect hop. So a navigation the scanner causes itself
+  (an SPA discovery click on ``<a href="#" onclick="location='/logout'">`` or a ``javascript:``
+  link, a frame, a redirect) never reaches a denied path; each refusal is counted with reason
+  ``deny`` / ``not_allowed``. The proxy tells a navigation hop by its ``Sec-Fetch-Mode: navigate``
+  / ``Sec-Fetch-Dest`` document-like value, an ``Upgrade-Insecure-Requests`` header or an
+  ``Accept`` that asks for HTML.
 * **Filled pages.** From ``await arm(page)`` until the page is closed, every navigation request
   (any frame — a GET form submission is a navigation) and every request a script makes (XHR,
   fetch, EventSource, beacons and any other non-passive type) is aborted: such a request could
@@ -83,6 +92,12 @@ cannot carry a form value without page JS built to do it:
   (a filled page's popups never load), the proxy holds those requests to allowed hosts, and over
   plain HTTP it refuses every non-GET.
 * Reporting-API reports (``Report-To``), sent through the proxy, so only to allowed hosts.
+* A redirect hop over HTTPS to a denied (or, for a navigation, not allowed) path of an allowed
+  host: neither the route (first hops only) nor the proxy (it sees the tunnel, not the path) can
+  refuse it. It is a GET, and the crawler never processes its response as a page (its path is
+  re-checked and skipped). It is not hidden either: the guard sees the hop as it is sent and counts
+  it as **allowed** with reason ``deny`` / ``not_allowed`` (``scope_paths_reached`` in the
+  evidence pack), so no record claims that list held.
 
 Counters carry the method (non-standard methods as ``OTHER``), resource type, decision, reason and
 a value-free host (``stored_host``) — never a URL or a value. ``BlockedRequest.url`` stays in
@@ -285,7 +300,9 @@ class Decision:
     ``reason``: ``ok`` | ``scheme`` | ``method`` | ``host`` | ``filled_navigation`` |
     ``filled_value`` | ``filled_request`` | ``closing`` | ``guard_error``; at the scope proxy also
     ``service_worker`` and ``speculative``; for a use of a locked API (no request exists)
-    ``api_removed``.
+    ``api_removed``; for the scope's path rail ``deny`` (any request) and ``not_allowed`` (a
+    navigation). An *allowed* row with reason ``deny`` / ``not_allowed`` records an HTTPS redirect
+    hop that reached such a path (it could not be refused, see the module docstring).
     """
 
     allow: bool
@@ -324,11 +341,14 @@ def decide(
     needles: Collection[str],
     resource_type: str | None = None,
     method_override: bool = False,
+    path: str = "ok",
 ) -> Decision:
     """The whole policy as a pure function (the route handler only gathers its inputs).
 
     ``resource_type`` ``None`` means unknown and is treated as a script request on a filled page;
-    ``method_override`` is true when the request carries a method-override header.
+    ``method_override`` is true when the request carries a method-override header. ``path`` is
+    the scope's verdict on the URL's path (``ok`` | ``deny`` | ``not_allowed``): ``deny`` refuses
+    any request, ``not_allowed`` a navigation.
     """
     if urlsplit(url).scheme.lower() not in ("http", "https"):
         return Decision(False, "scheme")
@@ -336,6 +356,10 @@ def decide(
         return Decision(False, "method")
     if not host_allowed:
         return Decision(False, "host")
+    if path == "deny":
+        return Decision(False, "deny")
+    if path != "ok" and is_navigation:
+        return Decision(False, "not_allowed" if path == "not_allowed" else "guard_error")
     if page_filled and is_navigation:
         return Decision(False, "filled_navigation")
     if needles and _carries_value(url, needles):
@@ -343,6 +367,24 @@ def decide(
     if page_filled and resource_type not in PASSIVE_TYPES:
         return Decision(False, "filled_request")
     return Decision(True, "ok")
+
+
+#: ``Sec-Fetch-Dest`` values of a document load (a page, a frame, an embedded document)
+NAVIGATION_DESTS: frozenset[str] = frozenset(
+    {"document", "iframe", "frame", "embed", "object", "fencedframe"}
+)
+
+
+def is_navigation_hop(headers: Mapping[str, str]) -> bool:
+    """Whether a hop the scope proxy sees (headers by lower-case name) loads a document. Fails
+    towards ``True``: any navigation marker Chromium sends, or an ``Accept`` that asks for HTML."""
+    if headers.get("sec-fetch-mode", "").strip().lower() == "navigate":
+        return True
+    if headers.get("sec-fetch-dest", "").strip().lower() in NAVIGATION_DESTS:
+        return True
+    if "upgrade-insecure-requests" in headers:
+        return True
+    return "text/html" in headers.get("accept", "").lower()
 
 
 def stored_method(method: str) -> str:
@@ -394,8 +436,17 @@ class ScanGuard:
     ``browser.close_scan_context`` the last two.
     """
 
-    def __init__(self, *, host_allowed: Callable[[str], bool]) -> None:
+    def __init__(
+        self,
+        *,
+        host_allowed: Callable[[str], bool],
+        path_verdict: Callable[[str], str] | None = None,
+    ) -> None:
+        """``host_allowed(host)``: the scope's host rule. ``path_verdict(url)``: the scope's path
+        rail (``ok`` | ``deny`` | ``not_allowed``; ``CrawlScope.request_path_verdict``), ``None``
+        for none (guard unit tests)."""
         self._host_allowed = host_allowed
+        self._path_verdict = path_verdict
         self._filled: set[Page] = set()
         self._needles: set[str] = set()
         self._page_no: dict[Page, int | None] = {}
@@ -438,6 +489,7 @@ class ScanGuard:
         if harden_js:
             await context.add_init_script(script=HARDEN_JS)
         await context.route("**/*", self._handle)
+        context.on("request", self._on_request)
 
     def bind(self, page: Page, page_no: int | None) -> None:
         """Attribute ``page``'s requests to crawl page ``page_no``."""
@@ -628,9 +680,43 @@ class ScanGuard:
                 needles=self._needles,
                 resource_type=request.resource_type,
                 method_override=any(k.lower() in OVERRIDE_HEADERS for k in request.headers),
+                path=self._path(url),
             )
         page_no = self._page_no.get(page) if page is not None else None
         return decision, page_no, stored_method(request.method), stored_host(host, allowed=allowed)
+
+    def _path(self, url: str) -> str:
+        return self._path_verdict(url) if self._path_verdict is not None else "ok"
+
+    def _on_request(self, request: Request) -> None:
+        """Count an HTTPS redirect hop to a denied (or, navigating, not allowed) path as what it
+        is: a request that left. Nothing can refuse it (the route sees first hops only, the proxy
+        only the tunnel); plain-HTTP hops are refused, and counted, by the proxy instead."""
+        try:
+            if request.redirected_from is None or self._path_verdict is None:
+                return
+            url = request.url
+            if urlsplit(url).scheme.lower() != "https":
+                return
+            verdict = self._path_verdict(url)
+            if verdict == "ok" or (verdict != "deny" and not request.is_navigation_request()):
+                return
+            host = (urlsplit(url).hostname or "").lower()
+            allowed = bool(host) and self._host_allowed(host)
+            if not allowed:  # the proxy refuses the tunnel (and counts it): nothing left
+                return
+            page = self._page_of(request)
+            page_no = self._page_no.get(page) if page is not None else None
+            self._record(
+                Decision(True, verdict if verdict in ("deny", "not_allowed") else "guard_error"),
+                page_no,
+                stored_method(request.method),
+                request.resource_type,
+                stored_host(host, allowed=allowed),
+                url,
+            )
+        except Exception:  # noqa: BLE001 - an event listener must never raise into Playwright
+            return
 
     def _record(
         self,
@@ -696,11 +782,12 @@ class ScanGuard:
                 decision = decide(
                     method="POST" if body or "upgrade" in headers else method,
                     url=url,
-                    is_navigation=False,
+                    is_navigation=is_navigation_hop(headers),
                     page_filled=False,
                     host_allowed=allowed,
                     needles=self._needles,
                     method_override=any(k in OVERRIDE_HEADERS for k in headers),
+                    path=self._path(url),
                 )
         except Exception:  # noqa: BLE001 - fail closed: an undecidable hop never leaves
             decision = Decision(False, "guard_error")

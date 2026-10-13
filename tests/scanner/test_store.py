@@ -78,13 +78,15 @@ def _field(page_no: int, field_no: int, **kw: object) -> FieldRecord:
     return FieldRecord.model_validate(data)
 
 
-def _req(method: str, decision: str, count: int, *, page_no: int | None = None) -> RequestCount:
+def _req(
+    method: str, decision: str, count: int, *, page_no: int | None = None, reason: str = ""
+) -> RequestCount:
     return RequestCount(
         page_no=page_no,
         method=method,
         resource_type="fetch",
         decision=decision,  # type: ignore[arg-type]
-        reason="method" if decision == "blocked" else "ok",
+        reason=reason or ("method" if decision == "blocked" else "ok"),
         host="demo-site",
         count=count,
     )
@@ -263,6 +265,25 @@ async def test_summary_measures_non_get_requests_that_were_allowed(
         await STORE.add_request_counts(conn, T, job_id, [_req("POST", "allowed", 1)])
         await STORE.add_request_counts(conn, T, job_id, [_req("HEAD", "allowed", 3)])
         assert (await STORE.summary_counts(conn, job_id))["non_get_allowed"] == 1
+
+
+async def test_summary_measures_requests_that_reached_a_scope_path(
+    migrated_db,  # noqa: ANN001
+    queue,  # noqa: ANN001
+    tenant_conn,  # noqa: ANN001
+) -> None:
+    """Review B2: a refused scope path is blocked; one that left (an HTTPS redirect hop) is
+    counted as reached, never hidden."""
+    job_id = await _scan()
+    async with tenant_conn(T) as conn:
+        await STORE.add_request_counts(conn, T, job_id, [_req("GET", "blocked", 5, reason="deny")])
+        assert (await STORE.summary_counts(conn, job_id))["scope_paths_reached"] == 0
+        await STORE.add_request_counts(conn, T, job_id, [_req("GET", "allowed", 1, reason="deny")])
+        await STORE.add_request_counts(
+            conn, T, job_id, [_req("GET", "allowed", 2, reason="not_allowed")]
+        )
+        summary = await STORE.summary_counts(conn, job_id)
+    assert summary["scope_paths_reached"] == 3 and summary["blocked"] == {"GET": 5}
 
 
 async def test_reset_scan_clears_all_four_tables(migrated_db, queue, tenant_conn) -> None:  # noqa: ANN001

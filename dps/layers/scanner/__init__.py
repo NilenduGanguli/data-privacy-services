@@ -12,6 +12,7 @@ module level (the crawler and the browser are imported inside :func:`scan_job`).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -35,7 +36,7 @@ from dps.layers.scanner.runtime import (
     ScanRuntime,
     ScanSink,
 )
-from dps.layers.scanner.store import ScanStore
+from dps.layers.scanner.store import ScanStore, StoredEvidence
 from dps.layers.scanner.urls import CrawlScope, Origin, UrlError, canonical
 from dps.observability import get_logger
 from dps.secrets import SealError, SecretUnavailable, open_sealed, resolve_secret_ref
@@ -266,6 +267,14 @@ async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
             purge_secret=True,
         )
         return
+    async with db.acquire_queue(job.tenant_id) as conn:
+        stored = await store.existing_evidence(conn, job.id)
+    if stored is not None:
+        # a pack exists (written before the finalize fence existed): its artefacts are kept and
+        # the job ends with it; crawling again would only add a second, contradicting pack
+        logger.info("scan_evidence_exists", job_id=job.id)
+        await finalize_scan(ctx, job, runtime, store=store, outcome=None, result="succeeded")
+        return
     async with db.acquire_queue(job.tenant_id) as conn:  # a reaped-and-retried attempt starts clean
         await store.reset_scan(conn, job.id)
     await ctx.artefacts.delete_for_job(job.tenant_id, job.id)
@@ -285,17 +294,43 @@ async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
 
 
 async def scan_finalize_job(ctx: HandlerContext, job: ClaimedJob) -> None:
-    """Phase ``finalize`` (the cancel path, contract §3.1): evidence, exports, key purge."""
+    """Phase ``finalize``: the cancel path (contract §3.1), and the retry of a finalize that a
+    crash or a lost lease interrupted. Evidence, exports, key purge."""
     store = ScanStore(ctx.settings.pg_schema)
     runtime: ScanRuntime | None
     try:
         runtime = await open_runtime(ctx, job, store)
     except ScanSetupError:
         runtime = None  # key already purged (or unusable): evidence without exports
-    result: Literal["failed", "canceled"] = (
-        "canceled" if job.progress.outcome == "canceled" else "failed"
-    )
-    await finalize_scan(ctx, job, runtime, store=store, outcome=None, result=result)
+    crawl = (job.plan or {}).get(_PLAN_KEY) if isinstance(job.plan, dict) else None
+    result: Literal["succeeded", "failed", "canceled"]
+    outcome: RunOutcome | None = None
+    if job.progress.outcome == "canceled":
+        result = "canceled"
+    elif isinstance(crawl, dict) and crawl.get("result") in ("succeeded", "failed"):
+        result = crawl["result"]  # the crawl finished; its finalize is being retried
+        outcome = _run_outcome(crawl.get("outcome"))
+    else:
+        result = "failed"
+    await finalize_scan(ctx, job, runtime, store=store, outcome=outcome, result=result)
+
+
+#: ``dps_job.plan`` key under which a scan keeps its crawl's result and counters (value-free) when
+#: it enters the finalize phase, so a retried finalize builds the same pack.
+_PLAN_KEY = "scan_finalize"
+#: the artefact kinds a finalize writes (an interrupted attempt's are replaced, never doubled)
+_FINAL_KINDS = ("export_json", "export_csv", "evidence_html")
+
+
+def _run_outcome(data: object) -> RunOutcome | None:
+    """A :class:`RunOutcome` back from the job row's plan (unknown keys dropped)."""
+    if not isinstance(data, dict):
+        return None
+    names = {f.name for f in dataclasses.fields(RunOutcome)}
+    try:
+        return RunOutcome(**{k: v for k, v in data.items() if k in names})
+    except TypeError:
+        return None
 
 
 async def finalize_scan(
@@ -306,18 +341,139 @@ async def finalize_scan(
     store: ScanStore,
     outcome: RunOutcome | None,
     result: Literal["succeeded", "failed", "canceled"],
-) -> str:
+) -> str | None:
     """Build the exports and the evidence pack, purge the key, set the terminal state; returns the
-    evidence id. A non-GET request the guard allowed (unreachable by construction, measured
-    anyway) fails the scan with ``submission_detected``."""
-    async with db.acquire_queue(job.tenant_id) as conn:
+    evidence id, or ``None`` when the lease is gone (a cancel or the reaper won: the new owner
+    finalizes, and nothing was written here).
+
+    Fenced and idempotent (contract §3.1, one finalize per job). A job still in phase ``scan``
+    first moves to ``finalize/running`` through the lease fence, so a cancel either wins before
+    anything is written or is refused (``job_finalizing``). A pack an earlier attempt stored is
+    reused (with its outcome); otherwise an interrupted attempt's exports and HTML are replaced and
+    the pack is inserted under the job-row lock while the lease holds. The ``scan.finalize`` audit
+    row is written only after the terminal transition applied. A non-GET request the guard allowed
+    (unreachable by construction, measured anyway) fails the scan with ``submission_detected``.
+    """
+    tenant = job.tenant_id
+    if job.phase != JobPhase.finalize:
+        crawl = {
+            "result": result,
+            "outcome": dataclasses.asdict(outcome) if outcome is not None else None,
+        }
+        if not await jobs.advance_job(
+            ctx.worker_id,
+            job.id,
+            phase=JobPhase.finalize,
+            state=JobState.running,
+            progress={"stage": "finalize"},
+            plan={_PLAN_KEY: crawl},
+        ):
+            logger.info("scan_finalize_fenced", job_id=job.id)
+            return None
+    async with db.acquire_queue(tenant) as conn:
         pages = await store.all_pages(conn, job.id)
         fields = await store.list_fields(conn, job.id)
         counts = await store.summary_counts(conn, job.id)
+        stored = await store.existing_evidence(conn, job.id)
     errors: list[dict[str, str]] = []
     if counts["non_get_allowed"]:
         result = "failed"
         errors.append({"code": "submission_detected", "where": "guard"})
+    if stored is not None:
+        evidence_id, policy_name = stored.id, None
+        if stored.outcome in ("succeeded", "failed", "canceled"):
+            result = stored.outcome  # type: ignore[assignment]
+        await ctx.artefacts.delete_for_job(
+            tenant, job.id, kinds=_FINAL_KINDS, keep=stored.artefact_ids
+        )
+    else:
+        written = await _write_pack(
+            ctx,
+            job,
+            runtime,
+            store=store,
+            pages=pages,
+            fields=fields,
+            counts=counts,
+            outcome=outcome,
+            result=result,
+            errors=errors,
+        )
+        if written is None:
+            return None
+        evidence_id, policy_name, stored = written
+        if stored is not None and stored.outcome in ("succeeded", "failed", "canceled"):
+            result = stored.outcome  # type: ignore[assignment]
+    progress = JobProgress(
+        outcome=result,
+        pages=int(counts["pages_visited"]),
+        fields=int(counts["fields"]),
+        blocked_requests=sum((counts["blocked"] or {}).values()),
+        evidence_id=evidence_id,
+    ).model_dump(
+        mode="json",
+        include={"outcome", "stage", "pages", "fields", "blocked_requests", "evidence_id"},
+    )
+    code = errors[0]["code"] if errors and result == "failed" else None
+    if not await jobs.advance_job(
+        ctx.worker_id,
+        job.id,
+        phase=JobPhase.finalize,
+        state=JobState(result),
+        progress=progress,
+        error_code=code,
+        error=code,
+        purge_secret=True,
+    ):
+        logger.info("scan_finalize_fenced", job_id=job.id)
+        return None
+    if policy_name is None:
+        policy_name = _policy_name(ctx, job, runtime)
+    ctx.audit.write(
+        AuditEvent(
+            trace_id=job.id,
+            route="browser:finalize",
+            tenant_id=tenant,
+            key_id=job.created_by or "-",
+            mode=job.mode or "",
+            policy=policy_name,
+            outcome=result,
+            action="scan.finalize",
+            job_id=job.id,
+        )
+    )
+    logger.info("scan_finalized", job_id=job.id, outcome=result, pages=progress["pages"])
+    return evidence_id
+
+
+def _policy_name(ctx: HandlerContext, job: ClaimedJob, runtime: ScanRuntime | None) -> str:
+    if runtime is not None:
+        return runtime.policy.name
+    try:
+        return ctx.engine.policy((job.spec or {}).get("policy")).name
+    except EngineError:
+        return ""
+
+
+async def _write_pack(
+    ctx: HandlerContext,
+    job: ClaimedJob,
+    runtime: ScanRuntime | None,
+    *,
+    store: ScanStore,
+    pages: list[Any],
+    fields: list[Any],
+    counts: dict[str, Any],
+    outcome: RunOutcome | None,
+    result: Literal["succeeded", "failed", "canceled"],
+    errors: list[dict[str, str]],
+) -> tuple[str, str, StoredEvidence | None] | None:
+    """Write the exports, the HTML and the pack (inserted under the job-row lock while the lease
+    holds), then remove an interrupted attempt's exports and HTML. Returns ``(evidence id, policy name, None)``; ``(id, name, stored)`` when an earlier
+    owner's pack turned up under the lock (this attempt's artefacts are removed and that pack is
+    used); ``None`` when the lease is gone (this attempt's artefacts are removed)."""
+    tenant = job.tenant_id
+    written: list[str] = []
     exports: dict[str, str] = {}
     if runtime is not None:
         personas = [
@@ -340,21 +496,23 @@ async def finalize_scan(
         )
         meta = {"personas": len(personas)}
         exports["json"] = await ctx.artefacts.save(
-            tenant_id=job.tenant_id,
+            tenant_id=tenant,
             job_id=job.id,
             kind="export_json",
             data=export_json,
             content_type="application/json",
             meta=meta,
         )
+        written.append(exports["json"])
         exports["csv"] = await ctx.artefacts.save(
-            tenant_id=job.tenant_id,
+            tenant_id=tenant,
             job_id=job.id,
             kind="export_csv",
             data=export_csv,
             content_type="text/csv; charset=utf-8",
             meta=meta,
         )
+        written.append(exports["csv"])
     policy: dict[str, str] | None = None
     if runtime is None:
         try:
@@ -379,56 +537,39 @@ async def finalize_scan(
     )
     sha = pack_sha256(pack)
     html_id = await ctx.artefacts.save(
-        tenant_id=job.tenant_id,
+        tenant_id=tenant,
         job_id=job.id,
         kind="evidence_html",
         data=render_html(pack, sha=sha).encode("utf-8"),
         content_type="text/html; charset=utf-8",
         meta={"evidence_id": evidence_id},
     )
+    written.append(html_id)
     expires = datetime.now(UTC) + timedelta(days=ctx.settings.retention_days)
-    async with db.acquire_queue(job.tenant_id) as conn:
-        await store.insert_evidence(
-            conn,
-            job.tenant_id,
-            job.id,
-            pack,
-            pack_sha256=sha,
-            html_artefact_id=html_id,
-            expires_at=expires,
-        )
-    progress = JobProgress(
-        outcome=result,
-        pages=int(counts["pages_visited"]),
-        fields=int(counts["fields"]),
-        blocked_requests=sum((counts["blocked"] or {}).values()),
-        evidence_id=evidence_id,
-    ).model_dump(
-        mode="json", include={"outcome", "pages", "fields", "blocked_requests", "evidence_id"}
-    )
-    code = errors[0]["code"] if errors else None
-    await jobs.advance_job(
-        ctx.worker_id,
-        job.id,
-        phase=job.phase,
-        state=JobState(result),
-        progress=progress,
-        error_code=code,
-        error=code,
-        purge_secret=True,
-    )
-    ctx.audit.write(
-        AuditEvent(
-            trace_id=job.id,
-            route="browser:finalize",
-            tenant_id=job.tenant_id,
-            key_id=job.created_by or "-",
-            mode=job.mode or "",
-            policy=pack.policy.get("name", ""),
-            outcome=result,
-            action="scan.finalize",
-            job_id=job.id,
-        )
-    )
-    logger.info("scan_finalized", job_id=job.id, outcome=result, pages=progress["pages"])
-    return evidence_id
+    earlier: StoredEvidence | None = None
+    async with db.acquire_queue(tenant) as conn, conn.transaction():
+        leased = await store.lock_leased_job(conn, job.id, ctx.worker_id)
+        if leased:
+            earlier = await store.existing_evidence(conn, job.id)
+            if earlier is None:
+                await store.insert_evidence(
+                    conn,
+                    tenant,
+                    job.id,
+                    pack,
+                    pack_sha256=sha,
+                    html_artefact_id=html_id,
+                    expires_at=expires,
+                )
+    if not leased or earlier is not None:
+        await ctx.artefacts.delete_for_job(tenant, job.id, ids=written)
+    if not leased:
+        logger.info("scan_finalize_fenced", job_id=job.id)
+        return None
+    name = pack.policy.get("name", "")
+    if earlier is not None:
+        return earlier.id, name, earlier
+    # the pack is in: an interrupted attempt's exports and HTML (no pack references them) go.
+    # Only the owner that inserted the pack deletes; a stale attempt only ever deletes its own.
+    await ctx.artefacts.delete_for_job(tenant, job.id, kinds=_FINAL_KINDS, keep=written)
+    return evidence_id, name, None

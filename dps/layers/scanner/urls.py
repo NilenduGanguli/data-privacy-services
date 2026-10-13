@@ -505,6 +505,12 @@ class CrawlScope:
         h = host.lower()
         return h == self.start.host or h in self.registered_hosts
 
+    def request_path_verdict(self, url: str) -> Literal["ok", "deny", "not_allowed"]:
+        """The path rail the request guard applies to every request of the scan, on every hop:
+        ``deny`` refuses any request (whatever caused it: a link, a script's navigation, a frame, a
+        redirect), ``not_allowed`` a navigation (sub-resources outside an allow list still load)."""
+        return url_path_verdict(url, self.allow, self.deny)
+
     def navigation_verdict(self, url: str) -> NavVerdict:
         """``ok`` or the reason a navigation to ``url`` is out of scope.
 

@@ -252,7 +252,10 @@ class ScanRunner:
     # -- lifecycle -----------------------------------------------------------------------------
     async def run(self) -> RunOutcome:
         """Crawl until the frontier is empty, the page budget is spent or the scan's time is up."""
-        self.guard = ScanGuard(host_allowed=self.rt.scope.network_host_allowed)
+        self.guard = ScanGuard(
+            host_allowed=self.rt.scope.network_host_allowed,
+            path_verdict=self.rt.scope.request_path_verdict,
+        )
         self.context = await new_scan_context(
             self.browser,
             self.s,

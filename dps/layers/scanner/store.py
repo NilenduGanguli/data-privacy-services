@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -141,6 +142,8 @@ SELECT
      WHERE job_id = $1 AND decision = 'blocked' GROUP BY method) y) AS blocked,
   (SELECT coalesce(sum(count), 0) FROM {s}.dps_scan_request WHERE job_id = $1
      AND decision = 'allowed' AND method NOT IN ('GET', 'HEAD')) AS non_get_allowed,
+  (SELECT coalesce(sum(count), 0) FROM {s}.dps_scan_request WHERE job_id = $1
+     AND decision = 'allowed' AND reason IN ('deny', 'not_allowed')) AS scope_paths_reached,
   (SELECT count(*) FROM {s}.dps_scan_event WHERE job_id = $1 AND kind = 'navigate') AS navigations
 """
 _COUNT_KEYS = (
@@ -155,6 +158,7 @@ _COUNT_KEYS = (
     "personal",
     "critical",
     "non_get_allowed",
+    "scope_paths_reached",
     "navigations",
 )
 
@@ -164,12 +168,35 @@ WHERE job_id = $1 AND kind IN ('export_json', 'export_csv')
 ORDER BY kind, created_at DESC, id DESC
 """
 
+_EXISTING_EVIDENCE = """
+SELECT id, pack->>'outcome' AS outcome, html_artefact_id, pack->'target'->'exports' AS exports
+FROM {s}.dps_evidence WHERE job_id = $1 ORDER BY created_at, id LIMIT 1
+"""
+
 _INSERT_EVIDENCE = """
 INSERT INTO {s}.dps_evidence (id, tenant_id, job_id, pack, pack_sha256, pack_version,
   html_artefact_id, expires_at)
 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
 RETURNING id
 """
+
+
+@dataclass(frozen=True, slots=True)
+class StoredEvidence:
+    """A scan's stored evidence row: its id, the pack's outcome and the artefacts it references."""
+
+    id: str
+    outcome: str
+    html_artefact_id: str | None
+    exports: dict[str, str]
+
+    @property
+    def artefact_ids(self) -> frozenset[str]:
+        """Every artefact the pack references (its HTML rendering and its exports)."""
+        ids = set(self.exports.values())
+        if self.html_artefact_id:
+            ids.add(self.html_artefact_id)
+        return frozenset(ids)
 
 
 def _limit(limit: int) -> int:
@@ -192,6 +219,7 @@ class ScanStore:
         self._summary = _SUMMARY.format(s=s)
         self._exports = _EXPORTS.format(s=s)
         self._insert_evidence = _INSERT_EVIDENCE.format(s=s)
+        self._existing_evidence = _EXISTING_EVIDENCE.format(s=s)
 
     # --- writes --------------------------------------------------------------------------
     async def reset_scan(self, conn: asyncpg.Connection, job_id: str) -> None:
@@ -335,6 +363,34 @@ class ScanStore:
             )
         )
 
+    async def lock_leased_job(self, conn: asyncpg.Connection, job_id: str, worker_id: str) -> bool:
+        """Lock the job row while ``worker_id`` still holds its lease (``FOR UPDATE``, so call it
+        inside a transaction): the fence of a write that must happen once per job. ``False`` = the
+        lease is gone (canceled or reaped)."""
+        row = await conn.fetchval(
+            f"SELECT 1 FROM {self._s}.dps_job WHERE id = $1 AND locked_by = $2 "
+            "AND state = 'running' FOR UPDATE",
+            job_id,
+            worker_id,
+        )
+        return row is not None
+
+    async def existing_evidence(
+        self, conn: asyncpg.Connection, job_id: str
+    ) -> StoredEvidence | None:
+        """The pack an earlier finalize attempt of this job stored (packs are immutable), or
+        ``None``."""
+        row = await conn.fetchrow(self._existing_evidence, job_id)
+        if row is None:
+            return None
+        exports = row["exports"] if isinstance(row["exports"], dict) else {}
+        return StoredEvidence(
+            id=str(row["id"]),
+            outcome=str(row["outcome"] or ""),
+            html_artefact_id=row["html_artefact_id"],
+            exports={str(k): str(v) for k, v in exports.items() if isinstance(v, str)},
+        )
+
     # --- reads ---------------------------------------------------------------------------
     async def list_pages(
         self, conn: asyncpg.Connection, job_id: str, *, after_page_no: int = 0, limit: int = 200
@@ -414,7 +470,9 @@ class ScanStore:
 
     async def summary_counts(self, conn: asyncpg.Connection, job_id: str) -> dict[str, Any]:
         """The scan's counters: ``by_status`` and ``blocked`` (by method) maps, page/form/field
-        totals, ``non_get_allowed`` (must stay 0) and ``navigations``."""
+        totals, ``non_get_allowed`` (must stay 0), ``scope_paths_reached`` (requests to a denied or
+        not-allowed path that left the browser: an HTTPS redirect hop, see ``guard``) and
+        ``navigations``."""
         row = await conn.fetchrow(self._summary, job_id)
         out: dict[str, Any] = {
             "by_status": dict(row["by_status"] or {}),
