@@ -52,6 +52,7 @@ plans `…-m3-oracle-and-mongodb.md`, `…-m4-ui-scanner.md`, `…-m5-hardening-
 | M3-N | minor | m3 G1 review | non-blocking N1, N2, N4–N6 not done | WP-M3 (G2 review decides) |
 | M1-N | minor | main console | Policies page can show a stale preset response after a quick preset switch | WP-F4 polish |
 | A-N1/N2 | minor | main tools | stale demo group file; `console_check` overwrites tracked screenshots | WP-F4 polish |
+| SEC-5 | defence in depth | m4 `dps/layers/scanner/__init__.py` | the scanner resolves storage-state secrets with its own copy of tenant scoping (`f"{tenant_id}/{ref}"` into the pre-SEC-2 resolver, containment checked against the whole secret dir); not exploitable today (`..`/absolute refs refused, tenant id regex-pinned) but duplicated logic | WP-I (m4 merge): replace with main's `resolve_secret_ref(tenant_id, ref, settings)` (containment inside the tenant folder), validate `storage_state_ref` at ScanSpec accept time with the same rule, and add a cross-tenant scan test |
 | M5-G2-N | open | m5 | L2 `reveal_rows` cannot detokenize `external_tokenize` columns; tokenizer-mock container never run | WP-M5 / WP-F2 |
 
 ---
