@@ -7,7 +7,8 @@ cursor outlives a batch; a document whose ``_id`` has another type inside the sa
 double among ints) fails the read closed (``key_type_mixed``). A key-less collection (mixed or
 document ``_id``s, where BSON type bracketing would drop documents from a range) is one partition
 read through one cursor in ``_id`` order. Reads use ``readConcern: majority`` on a replica set
-(contract §4.2). Documents travel whole: the engine transforms nested paths and arrays (``[*]``)
+(contract §4.2). ``selection.columns`` project top-level fields (a dotted column reads its whole
+top-level field, as ``read_projection`` plans it). Documents travel whole: the engine transforms nested paths and arrays (``[*]``)
 and restores each leaf it wrote to the original leaf's BSON type (``mongo_docs.restore_leaf``);
 every other value reaches the writer as the driver decoded it.
 ``selection.sample`` keeps a document when ``HMAC-SHA256(seed, BSON({_id}))[:4] < percent·2³²`` —
@@ -17,10 +18,11 @@ Writes (:class:`MongoWriter`). Every document goes through ``make_bson_safe`` (a
 ``decimal.Decimal`` and ``datetime.date``, which the driver cannot encode, change). A ``table`` load
 into a created or emptied collection replaces whole documents by ``_id``
 (``ReplaceOne(upsert=True)``); ``table_load: upsert`` sets the row's fields through sub-documents
-(``UpdateOne({_id}, {$set: mongo_docs.upsert_fields(doc)}, upsert=True)``), so a matched target
-document keeps every field the row does not carry (arrays are set whole). Both are unordered,
-idempotent and unledgered. ``in_place`` (``$set`` of the document's leaf paths, so a projected read
-never drops fields) and ``append`` (``InsertOne``; ``generate`` lets the driver assign a new
+(``UpdateOne({_id}, mongo_docs.upsert_update(doc), upsert=True)``: ``$set`` through sub-documents,
+empty sub-documents only ``$setOnInsert``), so a matched target document keeps every field the row
+does not carry (arrays are set whole). Both are unordered, idempotent and unledgered. ``in_place``
+(``$set`` of the document's leaf paths; a projected read holds whole top-level fields, so every
+array position is the stored one and no field is dropped) and ``append`` (``InsertOne``; ``generate`` lets the driver assign a new
 ObjectId) run in one multi-document transaction with the partition's ledger document in
 ``dps_write_ledger``: the batch is applied only when the ledger holds ``mark.batch_no - 1`` (the
 caller's own mark, contract §4.2), else :class:`LedgerConflict` and nothing is written. A standalone
@@ -84,7 +86,7 @@ from dps.layers.connectors.base import (
     encode_key,
 )
 from dps.layers.connectors.docpaths import leaf_updates
-from dps.layers.connectors.mongo_docs import id_label, infer_shape, make_bson_safe, upsert_fields
+from dps.layers.connectors.mongo_docs import id_label, infer_shape, make_bson_safe, upsert_update
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.selection import compile_mongo_filter, validate_selection
 from dps.layers.connectors.targets import PrepareFailure
@@ -173,18 +175,19 @@ def bson_id(value: Any, shape: TableShape) -> Any:
 
 
 def _projection(selection: Selection) -> dict[str, int] | None:
-    """``columns`` as a find projection (``_id`` always); a path under another listed path is
-    dropped, since MongoDB refuses a projection with both (path collision)."""
+    """``columns`` as a find projection of **top-level fields** (``_id`` always): a dotted column
+    reads its whole top-level field (``accounts.iban`` → ``accounts``), as ``read_projection``
+    plans it (contract §5.2).
+
+    A dotted inclusion projection is not position-exact: MongoDB drops the non-document elements
+    of an array it crosses (``[{iban: A}, "note", {iban: B}]`` reads ``[{iban: A}, {iban: B}]``),
+    so an in-place ``$set`` of ``accounts.1.iban`` would land on the wrong element and leave the
+    source value in clear (review G3 r2 B1); a sparse sub-document would read ``{}``.
+    """
     if not selection.columns:
         return None
-    kept: list[str] = []
-    for path in sorted(set(selection.columns), key=lambda p: (p.count("."), p)):
-        if path == "_id" or path.startswith("_id."):
-            continue
-        if any(path.startswith(k + ".") for k in kept):
-            continue
-        kept.append(path)
-    return {**{p: 1 for p in kept}, "_id": 1}
+    fields = {path.split(".", 1)[0] for path in selection.columns}
+    return {**{f: 1 for f in sorted(fields) if f != "_id"}, "_id": 1}
 
 
 def _key_family(shape: TableShape) -> str:
@@ -1086,12 +1089,12 @@ class MongoWriter:
             return [ReplaceOne({"_id": d["_id"]}, d, upsert=True) for d in docs]
         ops: list[Any] = []
         for doc in docs:
-            fields = upsert_fields(doc)
-            if fields is None:
+            update = upsert_update(doc)
+            if update is None:
                 raise PrepareFailure(
                     "path_unsupported", "a field name cannot be addressed with dot notation"
                 )
-            ops.append(UpdateOne({"_id": doc["_id"]}, {"$set": fields}, upsert=True))
+            ops.append(UpdateOne({"_id": doc["_id"]}, update, upsert=True))
         return ops
 
     def _in_place_ops(self, docs: list[dict[str, Any]]) -> list[UpdateOne]:

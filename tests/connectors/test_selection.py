@@ -650,6 +650,34 @@ def test_read_projection_is_the_query_select_list_on_both_engines() -> None:
     ]
 
 
+MONGO_SHAPE = TableShape(
+    object=ObjectRef(name="profiles"),
+    key=["_id"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=p, name=p[2:].split(".")[0].split("[")[0], data_type="string", kind="text")
+        for p in ("$._id", "$.accounts[*].iban", "$.name", "$.profile.dob", "$.profile.fullName")
+    ],
+)
+
+
+def test_read_projection_folds_mongo_paths_to_top_level_fields() -> None:
+    """M3 G3 r2 B1/N1: the connector reads whole top-level fields, so a dotted ``columns`` entry
+    plans every leaf of its top-level field (the read and the plan agree)."""
+    paths = [
+        c.path
+        for c in read_projection(
+            MONGO_SHAPE, Selection(columns=["profile.fullName", "accounts.iban"]), "mongo"
+        )
+    ]
+    assert paths == ["$._id", "$.accounts[*].iban", "$.profile.dob", "$.profile.fullName"]
+    assert _names(read_projection(MONGO_SHAPE, Selection(columns=["name"]), "mongo")) == [
+        "_id",
+        "name",
+    ]
+    assert read_projection(MONGO_SHAPE, Selection(), "mongo") == MONGO_SHAPE.columns
+
+
 PG_CONTACTS = TableShape(
     object=ObjectRef(owner="crm", name="contacts"),
     key=["contact_id"],

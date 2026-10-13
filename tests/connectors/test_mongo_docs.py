@@ -170,17 +170,39 @@ def test_upsert_fields_set_through_sub_documents_only() -> None:
         "empty": {},
         "n": None,
     }
-    assert md.upsert_fields(doc) == {
+    fields = {
         "name": "T",
         "profile.fullName": "F",
         "profile.addr.pin": "560001",
         "accounts": [{"iban": "GB00TEST"}],
-        "empty": {},
         "n": None,
     }
+    assert md.upsert_fields(doc) == fields
+    assert md.upsert_update(doc) == {"$set": fields, "$setOnInsert": {"empty": {}}}
     assert md.upsert_fields({"_id": 1}) == {}
-    for bad in ({"a.b": 1}, {"$x": 1}, {"p": {"a.b": 1}}, {"p": {"": 1}}):
+    assert md.upsert_update({"_id": 1}) == {"$set": {}}
+    for bad in (
+        {"a.b": 1},
+        {"$x": 1},
+        {"p": {"a.b": 1}},
+        {"p": {"": 1}},
+        {"p": {}, "q": {"$y": 1}},
+    ):
         assert md.upsert_fields({"_id": 1, **bad}) is None
+        assert md.upsert_update({"_id": 1, **bad}) is None
+
+
+def test_upsert_update_never_sets_an_empty_sub_document_over_a_match() -> None:
+    """G3 r2 B2: an empty sub-document (a sparse source) carries no field, so it is only
+    ``$setOnInsert``; a matched document keeps its sub-document."""
+    assert md.upsert_update({"_id": 1, "profile": {}, "name": "N"}) == {
+        "$set": {"name": "N"},
+        "$setOnInsert": {"profile": {}},
+    }
+    assert md.upsert_update({"_id": 1, "profile": {"addr": {}, "dob": "D"}}) == {
+        "$set": {"profile.dob": "D"},
+        "$setOnInsert": {"profile.addr": {}},
+    }
 
 
 def test_make_bson_safe_is_recursive() -> None:

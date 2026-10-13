@@ -245,9 +245,11 @@ async def test_mixed_id_types_single_partition(
     assert len(_ids(pages)) == 33
 
 
-async def test_projection_reads_selected_paths(
+async def test_projection_reads_the_top_level_fields_of_selected_paths(
     c: MongoConnector, mongo_client: Any, mongo_db: str
 ) -> None:
+    """A dotted column reads its whole top-level field (``read_projection`` plans it so): a
+    dotted MongoDB projection drops array elements and empties sparse sub-documents (G3 r2 B1)."""
     _insert(mongo_client, mongo_db, [profile(i) for i in range(10)])
     shape = await c.describe(PROFILES)
     for columns in (["profile.fullName", "segment"], ["profile.fullName", "profile", "segment"]):
@@ -255,8 +257,7 @@ async def test_projection_reads_selected_paths(
         docs = [d for page in pages for d in page]
         assert len(docs) == 10
         assert all(set(d) == {"_id", "profile", "segment"} for d in docs)
-        expected = {"fullName"} if "profile" not in columns else {"fullName", "dob"}
-        assert all(set(d["profile"]) == expected for d in docs)
+        assert all(set(d["profile"]) == {"fullName", "dob"} for d in docs)
     sampled = await c.sample(shape, Selection(columns=["segment"]), {}, 5)
     assert len(sampled) == 5 and all(set(d) == {"_id", "segment"} for d in sampled)
 

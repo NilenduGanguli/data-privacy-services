@@ -157,8 +157,11 @@ async def test_in_place_sets_leaves_only(
     before = {d["_id"]: d for d in _coll(mongo_client, mongo_db).find()}
     shape = await c.describe(PROFILES)
     rows = await _rows(c, shape, Selection(columns=["profile.fullName"]))
-    assert all(set(r["profile"]) == {"fullName"} for r in rows)
-    changed = [{**r, "profile": {"fullName": f"T-{i:05d}"}} for i, r in enumerate(rows)]
+    assert all(set(r) == {"_id", "profile"} for r in rows)  # the whole top-level field
+    assert all(set(r["profile"]) == {"fullName", "dob"} for r in rows)
+    changed = [
+        {**r, "profile": {**r["profile"], "fullName": f"T-{i:05d}"}} for i, r in enumerate(rows)
+    ]
     writer = await _writer(c, shape, "in_place", write_columns=["profile"])
     report = await writer.prepare(dry_run=False)
     assert report.ledger and not report.created

@@ -215,14 +215,19 @@ def restore_leaf(original: Any, value: Any) -> Any:
     return _coerce(value, label)
 
 
-def upsert_fields(doc: dict[str, Any]) -> dict[str, Any] | None:
-    """``$set`` document of a ``table`` upsert: every field but ``_id`` at its dotted path through
-    sub-documents, so a matched target document keeps the fields the row does not carry (contract
-    §5.2: an upsert leaves the target's other columns untouched). Arrays, scalars and empty
-    sub-documents are set whole (an array element cannot be merged by position). None when a field
-    name cannot be dot-addressed (empty, with a ``.``, or starting with ``$``).
+def upsert_update(doc: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
+    """Update document of a ``table`` upsert (``UpdateOne({_id}, …, upsert=True)``).
+
+    ``$set``: every field but ``_id`` at its dotted path through sub-documents, so a matched
+    target document keeps the fields the row does not carry (contract §5.2: an upsert leaves the
+    target's other columns untouched). Arrays and scalars are set whole (an array element cannot
+    be merged by position). ``$setOnInsert``: empty sub-documents — an empty sub-document carries
+    no field, so it must not replace a matched document's sub-document (review G3 r2 B2); an
+    inserted document still gets it. None when a field name cannot be dot-addressed (empty, with
+    a ``.``, or starting with ``$``).
     """
-    out: dict[str, Any] = {}
+    set_: dict[str, Any] = {}
+    on_insert: dict[str, Any] = {}
 
     def walk(node: dict[str, Any], prefix: str) -> bool:
         for key, value in node.items():
@@ -231,14 +236,27 @@ def upsert_fields(doc: dict[str, Any]) -> dict[str, Any] | None:
             if not isinstance(key, str) or not key or "." in key or key.startswith("$"):
                 return False
             path = f"{prefix}{key}"
-            if isinstance(value, dict) and value:
-                if not walk(value, path + "."):
+            if isinstance(value, dict):
+                if not value:
+                    on_insert[path] = value
+                elif not walk(value, path + "."):
                     return False
             else:
-                out[path] = value
+                set_[path] = value
         return True
 
-    return out if walk(doc, "") else None
+    if not walk(doc, ""):
+        return None
+    update: dict[str, dict[str, Any]] = {"$set": set_}
+    if on_insert:
+        update["$setOnInsert"] = on_insert
+    return update
+
+
+def upsert_fields(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``$set`` part of :func:`upsert_update` (empty sub-documents are not in it)."""
+    update = upsert_update(doc)
+    return None if update is None else update["$set"]
 
 
 def make_bson_safe(value: Any) -> Any:

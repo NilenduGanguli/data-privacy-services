@@ -285,7 +285,10 @@ async def test_a_projected_upsert_keeps_the_other_fields_of_matched_documents(
     shape = await c.describe(SRC)
     rows = await _read(c, shape, Selection(columns=["name", "profile.fullName"]))
     assert all(set(r) == {"_id", "name", "profile"} for r in rows)
-    masked = [{**r, "name": f"T{i}", "profile": {"fullName": f"F{i}"}} for i, r in enumerate(rows)]
+    masked = [
+        {**r, "name": f"T{i}", "profile": {**r["profile"], "fullName": f"F{i}"}}
+        for i, r in enumerate(rows)
+    ]
     target = make_target(
         shape,
         write_mode="table",
@@ -314,7 +317,121 @@ async def test_a_projected_upsert_keeps_the_other_fields_of_matched_documents(
     names = [d["name"] for d in docs] + [d["profile"]["fullName"] for d in docs]
     assert tgt.count_documents({"name": {"$in": names}}) == 0
     assert tgt.count_documents({"profile.fullName": {"$in": names}}) == 0
-    for d in docs[10:]:  # inserted documents hold the projection only
+    for d in docs[10:]:  # inserted documents hold the projected top-level fields only
         new = tgt.find_one({"_id": d["_id"]})
         assert new is not None and set(new) == {"_id", "name", "profile"}
-        assert set(new["profile"]) == {"fullName"}
+        assert set(new["profile"]) == {"fullName", "dob"}
+
+
+def _mixed(i: int) -> dict[str, Any]:
+    """Arrays that mix sub-documents with scalars, sparse elements and nested arrays."""
+    return {
+        "_id": ObjectId(),
+        "name": f"Mixed {i:03d}",
+        "accounts": [
+            {"iban": f"GB82WEST1234569876{i:04d}", "bal": i},
+            f"legacy-note-{i}",
+            {"bal": i + 1},
+            {"iban": f"GB94BARC1020153009{i:04d}", "bal": i + 2},
+        ],
+        "matrix": [
+            [{"iban": f"DE89370400440532{i:06d}"}, "x"],
+            "y",
+            [7, {"iban": f"FR76300060000112{i:06d}", "k": i}],
+        ],
+    }
+
+
+def _ibans(doc: dict[str, Any]) -> set[str]:
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "iban":
+                    found.add(value)
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(doc)
+    return found
+
+
+def _skeleton(node: Any) -> Any:
+    """The structure of a value: element counts, element kinds and keys, non-IBAN scalars."""
+    if isinstance(node, dict):
+        return {k: ("iban" if k == "iban" else _skeleton(v)) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_skeleton(v) for v in node]
+    return node
+
+
+async def test_a_projected_in_place_write_keeps_array_positions(
+    c: MongoConnector, mongo_client: Any, mongo_db: str
+) -> None:
+    """R2-B1: dotted ``columns`` through arrays that mix sub-documents with scalars (and arrays of
+    arrays) read every element at its stored position, so each masked IBAN lands on its own
+    element: 0 source IBANs survive and no element gains, loses or moves a key."""
+    src = mongo_client[mongo_db]["src"]
+    src.insert_many([_mixed(i) for i in range(20)])
+    before = {d["_id"]: d for d in src.find()}
+    shape = await c.describe(SRC)
+    rows = await _read(c, shape, Selection(columns=["accounts.iban", "matrix.iban"]))
+    assert len(rows) == 20
+    plans = [
+        _plan(shape, "$.accounts[*].iban", "IBAN", "det_token"),
+        _plan(shape, "$.matrix[*][*].iban", "IBAN", "det_token"),
+    ]
+    out = _transformer(shape, plans).transform(rows)
+    target = make_target(
+        shape, write_mode="in_place", engine="mongo", write_columns=["_id", "accounts", "matrix"]
+    )
+    writer = await c.writer(target, shape)
+    await writer.prepare(dry_run=False)
+    assert await writer.write_batch(out.rows, mark=_mark(shape, out.rows)) == 20
+    after = {d["_id"]: d for d in src.find()}
+    source_ibans = set().union(*(_ibans(d) for d in before.values()))
+    assert len(source_ibans) == 80
+    survivors = sum(len(_ibans(d) & source_ibans) for d in after.values())
+    moved = sum(_skeleton(after[k]) != _skeleton(old) for k, old in before.items())
+    assert survivors == 0 and moved == 0
+    assert all(len(_ibans(d)) == 4 for d in after.values())  # one token per source IBAN
+
+
+async def test_a_projected_upsert_keeps_matched_fields_a_sparse_row_lacks(
+    c: MongoConnector, mongo_client: Any, mongo_db: str
+) -> None:
+    """R2-B2: a source sub-document without the projected leaf (sparse) or empty must not wipe
+    the matched target document's sub-document; an inserted document keeps the source's shape."""
+    sparse, empty, new = ObjectId(), ObjectId(), ObjectId()
+    mongo_client[mongo_db]["src"].insert_many(
+        [
+            {"_id": sparse, "name": "S", "profile": {"dob": "src-dob"}},
+            {"_id": empty, "name": "E", "profile": {}},
+            {"_id": new, "name": "N", "profile": {}},
+        ]
+    )
+    held = {"fullName": "TF", "dob": "tgt-dob", "nested": {"pin": "560001"}}
+    mongo_client[mongo_db]["tgt"].insert_many(
+        [{"_id": sparse, "profile": dict(held)}, {"_id": empty, "profile": dict(held)}]
+    )
+    shape = await c.describe(SRC)
+    rows = await _read(c, shape, Selection(columns=["name", "profile.fullName"]))
+    target = make_target(
+        shape,
+        write_mode="table",
+        engine="mongo",
+        object=ObjectRef(name="tgt"),
+        table_load="upsert",
+        write_columns=["_id", "name", "profile"],
+    )
+    writer = await c.writer(target, shape)
+    await writer.prepare(dry_run=False)
+    assert await writer.write_batch(rows, mark=_mark(shape, rows)) == 3
+    tgt = {d["_id"]: d for d in mongo_client[mongo_db]["tgt"].find()}
+    assert tgt[sparse]["profile"]["fullName"] == "TF"
+    assert tgt[sparse]["profile"]["nested"] == {"pin": "560001"}
+    assert tgt[empty]["profile"] == held
+    assert tgt[new]["profile"] == {} and tgt[new]["name"] == "N"

@@ -401,8 +401,9 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         engine = cast(Engine, source.engine)
         validate_selection(selection, engine, shape)
         # what the connector reads (a query's own select list, ``columns``, keys always) is what
-        # is planned, created and written: no column outside it is ever NULL-filled
-        projection = [c.name for c in read_projection(shape, selection, engine)]
+        # is planned, created and written: no column outside it is ever NULL-filled (one name
+        # per top-level field: a MongoDB field has a column per leaf path)
+        projection = list(dict.fromkeys(c.name for c in read_projection(shape, selection, engine)))
         try:  # submit checked the same projection; re-checked over what is actually read
             check_projected_methods(snapshot, spec.mode, projection)
         except SpecError as exc:

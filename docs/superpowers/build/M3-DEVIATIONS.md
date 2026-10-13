@@ -951,3 +951,52 @@ Red as the plan foresaw for documents, plus one Oracle gap; each fix landed with
 - Open (not in this round's findings): a **key-less** collection counted with `selection.sample` still
   pages `_id`s with `$gt` (`_scan_ids`), which skips documents of other BSON types; M2's run handler
   refuses key-less sources, so only a discovery count is affected (review N-notes otherwise unchanged).
+
+## Review G3 round 2 fixes (Tasks 9-14) — `M3-G3-review-r2.md` R2-B1, R2-B2
+
+- **R2-B1 (a projected `in_place` write through an array landed on the wrong element and left a source
+  value in clear) — fixed by reading top-level fields (the review's first option, applied to every
+  mode).** `mongo._projection` now projects the **top-level field** of each `columns` entry
+  (`accounts.iban` → `accounts`, `_id` always). A dotted MongoDB inclusion projection drops the
+  non-document elements of an array it crosses, so positions read were not the stored positions; with
+  whole top-level fields every positional leaf path `MongoWriter._in_place_ops` `$set`s is the stored one,
+  and untouched leaves are rewritten with identical BSON (already proven, r1 B1). Applying it to every
+  mode (not only `in_place`) keeps the connector stateless (a read does not know its write mode) and
+  makes the read equal `selection.read_projection`, which already folded MongoDB `columns` by top-level
+  name (contract §5.2: every connector reads exactly it); `read_projection` now folds a dotted MongoDB
+  `columns` entry to its top-level field (`_fold_column`), so the plan covers every leaf of the field
+  read (closes review R2-N1's "dotted columns plan nothing"), and `jobs_run._prepare` de-duplicates the
+  projection names (one name per top-level field; SQL unchanged). **Behaviour change:** a dotted
+  `columns` entry no longer narrows *within* a top-level field — `profile.fullName` reads, plans and
+  writes all of `profile` (every leaf of it is planned, so nothing unreviewed passes in clear). This is
+  also what closes the sparse-sub-document read (`profile: {}` for a document without `fullName`).
+  Contract §4.2/§5.2 amended. Tests: `test_mongo_write_fidelity.py::test_a_projected_in_place_write_
+  keeps_array_positions` (failed before with `target_error: mongo:28` — the shifted `$set` path ran into a
+  scalar element; the accounts-only shape leaked silently in the reviewer's probe) — 20 documents with
+  `accounts: [{iban}, "note", {bal}, {iban}]` and `matrix: [[{iban}, "x"], "y", [7, {iban}]]`,
+  `columns=["accounts.iban", "matrix.iban"]`, `det_token` on `$.accounts[*].iban` and
+  `$.matrix[*][*].iban`: 0/80 source IBANs survive, 0/20 documents change structure (element counts,
+  element kinds, keys and every non-IBAN scalar), 4 tokens per document; offline
+  `test_selection.py::test_read_projection_folds_mongo_paths_to_top_level_fields` (HEAD returned
+  `['$._id']` only). Updated to the new rule (no assertion of masking or kept fields removed):
+  `test_mongo_connector.py::test_projection_reads_the_top_level_fields_of_selected_paths` (was
+  `…_reads_selected_paths`, expected `profile == {fullName}`), `test_mongo_writer.py::test_in_place_sets_
+  leaves_only` (the read holds `profile.dob` too; the masked row keeps it), and the r1 B3 fidelity test
+  (inserted documents hold `profile.fullName` and `profile.dob`).
+- **R2-B2 (a projected upsert `$set` an empty sub-document over a matched document) — fixed with
+  `$setOnInsert`.** New `mongo_docs.upsert_update(doc)` returns the whole update document: `$set` through
+  sub-documents as before, but an **empty** sub-document goes to `$setOnInsert` (omitted when there is
+  none), so a matched document keeps its sub-document and an inserted one still gets the source's `{}`.
+  `upsert_fields` stays (the `$set` part, empty sub-documents no longer in it); `MongoWriter._table_ops`
+  sends `upsert_update`. Paths in `$set` and `$setOnInsert` are disjoint leaves, so they never conflict.
+  Contract §4.2 amended. Tests: `test_mongo_write_fidelity.py::test_a_projected_upsert_keeps_matched_
+  fields_a_sparse_row_lacks` (failed before: `KeyError: 'fullName'`) — a sparse source
+  `{profile: {dob}}` and an empty `{profile: {}}` against targets holding `fullName`, `dob` and a nested
+  sub-document, `columns=["name", "profile.fullName"]`: the sparse match keeps `fullName` and the nested
+  field, the empty match keeps its whole `profile`, the inserted document holds `profile: {}`; offline
+  `test_mongo_docs.py::test_upsert_update_never_sets_an_empty_sub_document_over_a_match` and the updated
+  `test_upsert_fields_set_through_sub_documents_only`.
+- Not changed (non-blocking notes): R2-N2 (a matched document's array is overwritten whole by a `table`
+  upsert, documented), R2-N3 (`InvalidBSON` for out-of-range dates not mapped to `source_error`), R2-N4
+  (engine date span), R2-N5 (fail-closed `fpe_digits` fallback) stay open for T15/T19 and the engine
+  owners.

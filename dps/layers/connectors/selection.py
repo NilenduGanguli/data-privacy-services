@@ -609,17 +609,29 @@ def query_projects_keys(sel: Selection, engine: Engine, key: list[str]) -> bool:
     return folded <= names
 
 
+def _fold_column(name: str, engine: Engine) -> str:
+    """A ``columns`` entry as the column name a read yields (Oracle upper case; MongoDB the
+    top-level field of a dotted path)."""
+    if engine == "oracle":
+        return name.upper()
+    if engine == "mongo":
+        return name.split(".", 1)[0]
+    return name
+
+
 def read_projection(shape: TableShape, sel: Selection, engine: Engine) -> list[ColumnInfo]:
     """The columns a read of ``sel`` yields, in table order — and so what a run writes.
 
     Every column of ``shape``, narrowed by a query's own select list (a query that names its
     columns yields only those) and by ``columns``; the key columns always. Connectors read and
     the run handler plans, creates and writes exactly this list, so a column outside it is
-    never read, created or NULL-filled (M3 G2 B1). Oracle folds ``columns`` to upper case.
+    never read, created or NULL-filled (M3 G2 B1). Oracle folds ``columns`` to upper case;
+    MongoDB folds a dotted path to its top-level field (``profile.fullName`` → ``profile``: the
+    connector reads whole top-level fields, so array positions stay exact, M3 G3 r2 B1).
     """
     names = query_columns(sel, engine)
     if sel.columns:
-        wanted = {n.upper() if engine == "oracle" else n for n in sel.columns}
+        wanted = {_fold_column(n, engine) for n in sel.columns}
         names = wanted if names is None else names & wanted
     if names is None:
         return list(shape.columns)
