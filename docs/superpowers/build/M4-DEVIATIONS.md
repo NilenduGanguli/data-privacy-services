@@ -566,3 +566,28 @@ enforced below the page. Each item was established by a probe of the pinned Chro
 - `tests/scanner/test_classify.py`: the plan's 15 cases plus hostile patterns (8, each refused and
   answered in < 0.5 s), ordinary patterns (5), a dotted label, offsets-not-text of rendered
   findings, and more helper cases: 30 tests (plan: 15).
+
+## Task 10 — Risk flags
+
+- `dps/layers/scanner/inventory.py`: the five functions per the plan's table, plus `KIND_ORDER`,
+  `TEXT_ENTRY_TYPES` (text, email, tel, number, search, url, date, month, week, time,
+  datetime-local, textarea — the plan said "text-entry" without a list) and `QUERY_KEY_FLOOR`.
+  Beyond the table:
+  - `pii_in_query_string` also reads the query of a **hash route** (`#/review?mail=…`, SPA routes)
+    and a **bare key that is itself a value** (`?501002345678`, blank value): the plan's
+    `parse_qsl(keep_blank_values=False)` dropped both. Query keys are listed only when
+    `urls.safe_key` keeps them (plain name, not value-like, not classified) — the plan's character
+    regex alone would have listed a 12-digit key. The page URL and the external links yield one
+    flag per page (`where="url"` when the page URL is involved, else `link`), keys and entity types
+    merged in order.
+  - `sensitive_form_uses_get` never counts fields outside a form (`form_index` 0).
+  - `password_without_autocomplete_token` carries `entity_types=["PASSWORD"]`.
+- `dps/layers/scanner/urls.py`: new public `safe_key(key, classify)` (wraps `_safe_key`). Additive.
+- `dps/layers/scanner/classify.py`: the label helper is public as `key_candidates` (used here for
+  query keys).
+- `tests/scanner/helpers.py`: shared `field_facts(**kw)` and `classification(entity, sens)` (the
+  plan's `F()`/`C()`, used by Tasks 10–13 instead of copies per module).
+- `tests/scanner/test_risk_flags.py`: the plan's 5 tests plus the autocomplete rule's exclusions
+  (hidden, select, checkbox, named token; `on` and textarea included), a POST form / LOW field /
+  no-form case, value-free merged query flags, a hash-route query, LOW and empty values, a HIGH-only
+  rendered finding (`medium`, `text`): 10 tests (plan: 5).

@@ -237,7 +237,7 @@ def pattern_entities(pattern: str | None) -> list[str]:
     return hits if 1 <= len(hits) <= 2 else []
 
 
-def _key_candidates(text: str) -> list[KeyCandidate]:
+def key_candidates(text: str) -> list[KeyCandidate]:
     """The structural dictionary over page text (a label is text, not a JSON path)."""
     return classify_key(_PATH_CHARS.sub(" ", text[:_MAX_KEY_TEXT]).strip())
 
@@ -292,7 +292,7 @@ def classify_field(
     )
     for source, text, factor, family in sources:
         if text:
-            for cand in _key_candidates(text):
+            for cand in key_candidates(text):
                 phrase = cand.evidence.split(":", 1)[-1]  # the dictionary's phrase, not page text
                 add(cand.entity_type, family, round(cand.score * factor, 3), f"{source}:{phrase}")
     if facts.input_type in _TYPE_SIGNAL:
@@ -372,7 +372,7 @@ def classify_rendered(
     for k, t in enumerate(texts):
         if k in whole or not t.label_hint or sum(ch.isalnum() for ch in t.text) < 2:
             continue
-        cands = _key_candidates(t.label_hint)
+        cands = key_candidates(t.label_hint)
         if cands and cands[0].score >= structural_floor:
             out = [r for r in out if not (r.frame_index == t.frame_index and r.i == t.i)]
             lead, tail = len(t.text) - len(t.text.lstrip()), len(t.text.rstrip())

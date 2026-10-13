@@ -246,6 +246,11 @@ def _safe_key(key: str, classify: ValueClassifier) -> str:
     return key if _SAFE_KEY.match(key) and not _value_like(key) and not classify(key) else "<k>"
 
 
+def safe_key(key: str, classify: ValueClassifier) -> str:
+    """A query or matrix key as it may be stored: itself when it is a plain name, else ``<k>``."""
+    return _safe_key(key, classify)
+
+
 def _segment(raw: str, classify: ValueClassifier, ids: re.Pattern[str]) -> str:
     """One path segment (matrix parameters already split off) as ``<ENTITY>``, ``{id}`` or
     itself."""
