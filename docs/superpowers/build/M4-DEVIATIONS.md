@@ -999,3 +999,51 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   demo site's `/profile`, finishes it (`succeeded`, evidence id, `key_enc` purged), serves
   `dps_scan_pages_total` on `/metrics` and exits 0 on SIGTERM; the demo site received no non-GET
   and no GET-form submission: 5 tests (plan: 4).
+
+## Task 18 — Scans API and app wiring
+
+- `dps/layers/api/routers/scans.py`: the plan's routes, built on M2's router helpers
+  (`require_db`, `tenant_of`, `principal_of`, `kek_of`, `idempotency_key`,
+  `request_fingerprint`, `audit_action`/`audited`/`rejected`/`guarded`), so scans share the job
+  routes' error mapping and audit. Differences from the plan text:
+  - **Replay:** an idempotent replay answers **200** with `Idempotent-Replay: true` and
+    `{scan, key_material: null, synthesis_seed: null, replay: true}` (M2's `POST /jobs/run`
+    convention; the plan left the status open); the same key with another body is 422
+    `idempotency_key_reused` (the request fingerprint, as on the job routes); a key that names a
+    non-scan job is refused the same way.
+  - **Error codes for key material** reuse `POST /jobs/run`'s: `key_material_invalid` (a caller
+    key or seed that does not validate) and `wrap_key_invalid` (the plan's `consistency_invalid`
+    is not used anywhere else). A missing KEK is 503 `kek_unconfigured`; a missing database is
+    M2's 503 `db_unavailable` (`require_db`), not the plan's `db_unconfigured`.
+  - The created response carries `Cache-Control: no-store` (the key and seed are in it).
+  - The preview route is rate-limited too and does not need the database; its locale notes cover
+    all five locales (en_GB/en_CA/es_MX worded from what the generators guarantee).
+  - Cursors: `after` must be digits (else 400 `cursor_invalid`); `next_cursor` is set only when a
+    full page came back. `GET /scans` lists `kind=scan` jobs (M2 keyset cursor).
+  - `GET /scans/{id}` builds the summary from **every** page (new `ScanStore.all_pages`, keyset
+    over `list_pages`, whose `limit` is capped at 1000 — the plan's `limit=100_000` in
+    `finalize_scan` was silently capped too; Task 16's finalize uses `all_pages`).
+    `pages_discovered` = all rows that are not `skipped`.
+  - `POST /scans/{id}/cancel`: M2's `JobStateError` (terminal or finalizing) → 409
+    `not_cancelable`; audited as `scan.cancel`. Create is audited as `scan.create`.
+  - Inventory CSV and export downloads: `Content-Disposition: attachment; filename="<scan
+    id>-inventory.csv"` / `"<scan id>-export.<format>"` (the id only) and `Cache-Control:
+    no-store`.
+- `dps/layers/scanner/inventory.py`: `validation_totals` is public (the summary uses it).
+- `dps/app.py`: the scans router is included with the other job-platform routers (it needs the
+  `db` extra, never Playwright); CSP `img-src 'self' data: blob:`; new
+  `refresh_browser_readiness(settings) -> int` and a `_JobPlatform` task that runs it every
+  `BROWSER_PROBE_SECONDS` (15) while the database is up (`browser: false, "db unconfigured"`
+  without one); `browser` is not a required component.
+- Contract §9: the two added routes (`GET /scans/{id}/events`, `POST /scans/personas/preview`) and
+  the create/replay answer shapes and codes.
+- `tests/scanner/test_scans_api.py`: the plan's 11 tests with these changes — the OpenAPI test
+  expects `{"get", "post"}` on `/api/v1/scans` (the plan's `{"post"}` forgot `GET /scans`); the
+  import test runs two subprocesses: every scanner module the API imports loads with **both**
+  Playwright and Pillow blocked, and `dps.app` builds its app (scans routes present) with
+  Playwright blocked — Pillow is in the app image already (M1's `[docs]` extra; the plan's
+  premise "the app image has neither" is wrong), only `capture.py` needs it. Extra assertions:
+  another tenant's scan is 404, a denied start path and an unknown policy are refused with their
+  codes, nothing of the start URL's query appears in any answer, the wrapped key is recorded as
+  `key_wrapped`, a reused idempotency key with another body is 422, cursors are validated, the
+  inventory holds no fill value, audit events for create/cancel.
