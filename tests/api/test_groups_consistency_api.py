@@ -225,3 +225,74 @@ def test_a_repeated_member_is_refused_and_not_stored(client: tuple[Any, Any]) ->
     # simply not in this group)
     self_join = [member, {"job_id": "job_1", "path": "$.referrerId"}]
     assert _check(c, gid, {"pairs": self_join}).json()["code"] == "member_not_in_group"
+
+
+def test_a_rerun_writing_the_same_target_is_refused_and_not_stored(
+    client: tuple[Any, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real check over two run jobs of the group that write the same target (a refresh: the
+    same spec submitted twice) is ``422 member_duplicate`` before any target is opened, audited
+    as a refusal, and leaves the stored ``last_check`` as it was (M3 G4 review r2, B2-r2)."""
+    from dps.jobs import Job
+    from tests.connectors.test_consistency import MDB_OBJ, ORA_OBJ, World, _rerun, make_job
+
+    c, sink = client
+    gid = _group(c)
+
+    async def stored(**kw: Any) -> ConsistencyCheckResult:
+        return canned(kw["group"].id, passed=False)
+
+    monkeypatch.setattr(groups_router, "run_consistency_check", stored)
+    assert _check(c, gid).status_code == 200
+    before = c.get(f"/api/v1/job-groups/{gid}", headers=JOBS).json()["group"]
+    assert before["last_check"]["passed"] is False
+    monkeypatch.undo()
+
+    w = World(20)
+    run_jobs = [
+        make_job("job_ora", "c_ora", ORA_OBJ, "s_ora", group_id=gid),
+        make_job("job_run1", "c_mdb", MDB_OBJ, "s_mdb", group_id=gid),
+        _rerun("job_run2", "c_mdb", MDB_OBJ, "s_mdb").model_copy(update={"group_id": gid}),
+    ]
+    snapshots = w.snapshots()
+    opened: list[str] = []
+
+    async def list_jobs(tenant: str, **kw: Any) -> tuple[list[Job], None]:
+        assert kw["group_id"] == gid
+        return run_jobs, None
+
+    async def get_snapshot(tenant: str, sid: str) -> Any:
+        return snapshots.get(sid)
+
+    async def get_connection(tenant: str, cid: str) -> Any:
+        from tests.connectors.test_consistency import _connection
+
+        return _connection(cid, "mongo", host=f"{cid}.uat", port=27017, database="crm_uat")
+
+    async def opener(*a: Any, **kw: Any) -> Any:
+        opened.append("x")
+        raise AssertionError("no target may be opened for a refused check")
+
+    monkeypatch.setattr(groups_router.jobs, "list_jobs", list_jobs)
+    monkeypatch.setattr(groups_router, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(groups_router, "get_connection", get_connection)
+    monkeypatch.setattr("dps.layers.connectors.consistency.open_connector", opener)
+    monkeypatch.setattr(
+        "dps.layers.connectors.consistency.run_consistency_check.__kwdefaults__",
+        {"opener": opener},
+    )
+    for pairs in (["job_run1", "job_run2"], ["job_ora", "job_run1", "job_run2"]):
+        body = {"pairs": [{"job_id": j, "path": "$.customerId"} for j in pairs]}
+        body["pairs"][0]["path"] = "$.CUSTOMER_ID" if pairs[0] == "job_ora" else "$.customerId"
+        r = _check(c, gid, body)
+        assert (r.status_code, r.json()["code"]) == (422, "member_duplicate"), pairs
+    assert opened == []
+    after = c.get(f"/api/v1/job-groups/{gid}", headers=JOBS).json()["group"]
+    assert after["last_check"] == before["last_check"]
+    assert after["last_check_at"] == before["last_check_at"]
+    events = [e for e in sink.events if e.action == "group.consistency_check"]
+    assert [(e.outcome, e.status) for e in events] == [
+        ("failed", 200),
+        ("rejected", 422),
+        ("rejected", 422),
+    ]

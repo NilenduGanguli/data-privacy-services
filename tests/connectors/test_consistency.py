@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import json
 import random
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from dps.connections import Connection
 from dps.engine.policy import MethodSpec
 from dps.groups import JobGroup
 from dps.jobs import Job, JobKind, JobPhase, JobState
-from dps.jobs_models import ClassificationSnapshot, ColumnClassification, JobProgress, Selection
+from dps.jobs_models import (
+    ClassificationSnapshot,
+    ColumnClassification,
+    ConnectionParams,
+    JobProgress,
+    Selection,
+)
 from dps.layers.connectors.base import ColumnInfo, ObjectRef, Row, TableShape
 from dps.layers.connectors.consistency import (
     LOOKUP_CHUNK,
@@ -464,3 +471,109 @@ async def test_a_repeated_member_is_refused() -> None:
     self_join = [ora, CheckMember(job_id="j_ora", path="$.REFERRER_ID")]
     result, _ = await w.run(ConsistencyCheckRequest(pairs=self_join))
     assert [m.path for m in result.members] == ["$.CUSTOMER_ID", "$.REFERRER_ID"]
+
+
+def _rerun(jid: str, conn: str, obj: ObjectRef, sid: str, minutes: int = 5) -> Job:
+    """A later run of the group writing the same target (a refresh: the same spec again)."""
+    job = make_job(jid, conn, obj, sid)
+    later = NOW + timedelta(minutes=minutes)
+    return job.model_copy(update={"created_at": later, "updated_at": later})
+
+
+def _connection(cid: str, engine: str, **params: Any) -> Connection:
+    return Connection(
+        id=cid, tenant_id="t_1", name=cid.replace("_", "-"), engine=engine,  # type: ignore[arg-type]
+        params=ConnectionParams(**params), secret_ref=None, has_secret=True,
+        secret_expires_at=None, roles=["source", "target"], tags=[], capabilities={},
+        last_test=None, created_by=None, created_at=NOW, updated_at=NOW,
+    )  # fmt: skip
+
+
+async def test_two_jobs_writing_one_target_are_one_member() -> None:
+    """A member is a target **column**, not a job (M3 G4 review r2, B2-r2): a re-run of the group
+    that writes the same target would join that target with itself and pass 1/1 at coverage 1.0
+    while the real cross-system member fails. Explicit pairs are refused before any connector
+    opens; the derived check keeps the newest job per target."""
+    w = World(100)
+    for k in range(100):  # the Mongo member drifted on every row: the real check fails
+        w.mongo_tokens[k] = w.tokens[k] + 1 if w.tokens[k] + 1 not in w.tokens else w.tokens[k] - 1
+    jobs = [*w.jobs(), _rerun("j_mdb_rerun", "c_mdb", MDB_OBJ, "s_mdb")]
+    mdb = CheckMember(job_id="j_mdb", path="$.customerId")
+    rerun = CheckMember(job_id="j_mdb_rerun", path="$.customerId")
+    ora = CheckMember(job_id="j_ora", path="$.CUSTOMER_ID")
+    fakes = w.connectors()
+    for pairs in ([mdb, rerun], [ora, mdb, rerun], [rerun, ora, mdb]):
+        with pytest.raises(ConsistencyError) as exc:
+            await w.run(ConsistencyCheckRequest(pairs=pairs), jobs=jobs, fakes=fakes)
+        assert (exc.value.status, exc.value.code) == (422, "member_duplicate")
+    assert not any(f.closed for f in fakes.values())  # no connector was opened (or closed)
+
+    # derived: one member per target, the newest run (in list order); Mongo still fails
+    members = derive_members(jobs, w.snapshots())
+    assert [m.job_id for m in members] == ["j_ora", "j_pg", "j_mdb_rerun"]
+    derived, _ = await w.run(jobs=jobs)
+    assert [m.job_id for m in derived.members] == ["j_ora", "j_pg", "j_mdb_rerun"]
+    assert derived.passed is False and derived.total_pairs == 3
+    # a group whose only runs are refreshes of one target has one system: nothing to join
+    only_mongo = [j for j in jobs if j.id in {"j_mdb", "j_mdb_rerun"}]
+    with pytest.raises(ConsistencyError) as exc:
+        derive_members(only_mongo, w.snapshots())
+    assert (exc.value.status, exc.value.code) == (409, "member_not_ready")
+    with pytest.raises(ConsistencyError) as exc:
+        await w.run(jobs=only_mongo)
+    assert (exc.value.status, exc.value.code) == (409, "member_not_ready")
+
+
+async def test_two_connection_records_for_one_database_are_one_target() -> None:
+    """Members are keyed on the connection's endpoint (engine, host, port, database/service),
+    so a second connection record for the same database does not make the target distinct; a
+    different database on the same server does."""
+    w = World(50)
+    snapshots = w.snapshots()
+    jobs = [
+        make_job("j_mdb", "c_mdb", MDB_OBJ, "s_mdb"),
+        make_job("j_mdb_b", "c_mdb_b", MDB_OBJ, "s_mdb"),
+        make_job("j_mdb_c", "c_mdb_c", MDB_OBJ, "s_mdb"),
+        make_job("j_ora", "c_ora", ORA_OBJ, "s_ora"),
+        make_job("j_ora_b", "c_ora_b", ObjectRef(owner="crm_masked", name="customers"), "s_ora"),
+    ]
+    connections = {
+        "c_mdb": _connection("c_mdb", "mongo", host="mongo.uat", port=27017, database="crm_uat"),
+        # the same server and database, spelt differently and with the default port implied
+        "c_mdb_b": _connection("c_mdb_b", "mongo", host="MONGO.UAT", database="crm_uat"),
+        "c_mdb_c": _connection("c_mdb_c", "mongo", host="mongo.uat", database="crm_uat2"),
+        "c_ora": _connection("c_ora", "oracle", host="ora.uat", port=1521, service_name="UAT"),
+        "c_ora_b": _connection("c_ora_b", "oracle", host="ora.uat", service_name="uat"),
+    }
+    fakes = w.connectors()
+    fakes["c_mdb_b"] = fakes["c_mdb_c"] = fakes["c_mdb"]
+    fakes["c_ora_b"] = fakes["c_ora"]
+    opened: list[str] = []
+
+    async def opener(conn: Connection, settings: Any, **kw: Any) -> FakeConnector:
+        opened.append(conn.id)
+        return fakes[conn.id]
+
+    async def check(pairs: list[tuple[str, str]]) -> Any:
+        return await run_consistency_check(
+            group=GROUP, jobs=jobs, snapshots=snapshots, connections=connections,
+            request=ConsistencyCheckRequest(
+                pairs=[CheckMember(job_id=j, path=p) for j, p in pairs]
+            ),
+            settings=None, kek=None, opener=opener,  # type: ignore[arg-type]
+        )  # fmt: skip
+
+    for pairs in (
+        [("j_mdb", "$.customerId"), ("j_mdb_b", "$.customerId")],
+        # Oracle folds unquoted identifiers: crm_masked.customers is CRM_MASKED.CUSTOMERS
+        [("j_ora", "$.CUSTOMER_ID"), ("j_ora_b", "$.CUSTOMER_ID")],
+    ):
+        with pytest.raises(ConsistencyError) as exc:
+            await check(pairs)
+        assert (exc.value.status, exc.value.code) == (422, "member_duplicate")
+    assert opened == []
+    result = await check([("j_mdb", "$.customerId"), ("j_mdb_c", "$.customerId")])
+    assert [m.job_id for m in result.members] == ["j_mdb", "j_mdb_c"]
+    # derived: the two records for crm_uat collapse to the newest; crm_uat2 and Oracle stay
+    members = derive_members(jobs, snapshots, connections)
+    assert sorted(m.job_id for m in members) == ["j_mdb_b", "j_mdb_c", "j_ora_b"]

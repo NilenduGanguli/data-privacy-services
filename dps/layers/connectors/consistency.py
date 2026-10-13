@@ -9,7 +9,8 @@ lookups regenerate each member's own representation, including FF1 outputs whose
 ``NUMBER`` column dropped (``"CUST-03104482"`` ↔ ``3104482``).
 
 Members are run jobs of the group in a ready state that wrote rows (not dry runs, not ``files``
-targets), each naming a column path of its target. With ``pairs`` omitted the join entity is the
+targets), each naming a column path of its target; no two members may name the same target column
+(:func:`target_key`: the connection's endpoint, the object and the path). With ``pairs`` omitted the join entity is the
 first of :data:`JOIN_PREFERENCE` every member's accepted snapshot maps (method ≠ ``keep``), else
 the alphabetically first shared entity. The anchor (member 0) contributes up to ``sample``
 distinct canonical join values from a random sample of its target; every member is probed with
@@ -88,8 +89,10 @@ class CheckMember(BaseModel):
 class ConsistencyCheckRequest(BaseModel):
     """Body of ``POST /job-groups/{id}/consistency-check`` (contract §9).
 
-    ``pairs``: at least two **distinct** ``(job_id, path)`` members (a repeat is refused by the
-    check as ``422 member_duplicate``); omitted, the members are derived from the group's runs.
+    ``pairs``: at least two members naming **distinct target columns** (a repeated column, by the
+    same job or by another job of the group that wrote the same target, is refused by the check
+    as ``422 member_duplicate``); omitted, one member per distinct target is derived from the
+    group's runs.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -325,15 +328,30 @@ def _eligible(job: Job) -> bool:
 
 
 def derive_members(
-    jobs: list[Job], snapshots: Mapping[str, ClassificationSnapshot]
+    jobs: list[Job],
+    snapshots: Mapping[str, ClassificationSnapshot],
+    connections: Mapping[str, Connection] | None = None,
 ) -> list[CheckMember]:
-    """Members for a request without ``pairs``: every eligible job, joined on the preferred entity.
+    """Members for a request without ``pairs``: one per distinct target, joined on the preferred
+    entity.
+
+    Eligible jobs that wrote the same target (:func:`target_key` without the path — a refresh of
+    the group re-runs the same spec) collapse to the newest one (``created_at``, then id), so a
+    target never joins itself and one system is never reported as a cross-system pass.
 
     Raises:
-        ConsistencyError: 409 ``member_not_ready`` (fewer than two eligible jobs), 422
-            ``no_shared_entity``.
+        ConsistencyError: 409 ``member_not_ready`` (fewer than two distinct eligible targets),
+            422 ``no_shared_entity`` / ``member_unsupported``.
     """
-    usable = [j for j in jobs if _eligible(j) and j.snapshot_id in snapshots]
+    newest: dict[tuple[object, ...], Job] = {}
+    for job in (j for j in jobs if _eligible(j) and j.snapshot_id in snapshots):
+        conn_id, obj = _target(job)
+        key = target_key(conn_id, (connections or {}).get(conn_id), obj)
+        kept = newest.get(key)
+        if kept is None or (job.created_at, job.id) > (kept.created_at, kept.id):
+            newest[key] = job
+    chosen = {j.id for j in newest.values()}
+    usable = [j for j in jobs if j.id in chosen]
     if len(usable) < 2:
         raise ConsistencyError(409, "member_not_ready")
     mapped = {j.id: _mapped(snapshots[str(j.snapshot_id)]) for j in usable}
@@ -385,6 +403,43 @@ def _target(job: Job) -> tuple[str, ObjectRef]:
     return str(conn_id), ObjectRef.model_validate(raw)
 
 
+#: Port an endpoint listens on when its connection record leaves ``port`` unset.
+_DEFAULT_PORT: Final = {"postgres": 5432, "oracle": 1521, "mongo": 27017}
+
+
+def target_key(
+    conn_id: str, connection: Connection | None, obj: ObjectRef, path: str | None = None
+) -> tuple[object, ...]:
+    """Identity of a member's target (column when ``path`` is given) for duplicate detection.
+
+    The endpoint is the connection's engine, host (case-folded), port (the engine default when
+    unset) and database / service name, so two connection records for one database name one
+    target. A connection without a host (or not a stored record) is identified by its id.
+    PostgreSQL and Oracle fold unquoted identifiers, so their object and path compare
+    case-insensitively; MongoDB names are case-sensitive. Limit: host aliases (a DNS name and its
+    address, two listeners of one instance) are not resolved and count as different endpoints.
+    """
+    params = getattr(connection, "params", None)
+    engine = getattr(connection, "engine", None)
+    host = getattr(params, "host", None)
+    endpoint: tuple[object, ...]
+    if params is None or not host:
+        endpoint = ("connection", conn_id)
+    else:
+        endpoint = (
+            engine,
+            str(host).casefold(),
+            params.port or _DEFAULT_PORT.get(str(engine)),
+            (params.database or "").casefold() or None,
+            (params.service_name or "").casefold() or None,
+        )
+    fold = engine in ("postgres", "oracle")
+    name = obj.fqn().casefold() if fold else obj.fqn()
+    if path is None:
+        return (*endpoint, name)
+    return (*endpoint, name, path.casefold() if fold else path)
+
+
 def _validate(
     group: JobGroup,
     wanted: list[CheckMember],
@@ -393,10 +448,12 @@ def _validate(
     connections: Mapping[str, Connection],
     problems: list[CheckProblem],
 ) -> list[tuple[CheckMember, Job, str, ObjectRef]]:
-    # the same (job, path) twice would join a target with itself and pass for any data; one job
-    # with two different paths is a self-join and stays allowed
+    # A member is a target *column*: the same column twice (one job named twice, or two jobs of
+    # the group that wrote the same target, e.g. a refresh) would join a target with itself and
+    # pass for any data. One target with two different paths is a self-join and stays allowed.
     if len({(m.job_id, m.path) for m in wanted}) != len(wanted):
         raise ConsistencyError(422, "member_duplicate")
+    seen: set[tuple[object, ...]] = set()
     out = []
     for i, m in enumerate(wanted):
         job = in_group.get(m.job_id)
@@ -414,6 +471,10 @@ def _validate(
         conn_id, obj = _target(job)
         if conn_id not in connections:
             raise ConsistencyError(409, "member_not_ready")
+        key = target_key(conn_id, connections[conn_id], obj, m.path)
+        if key in seen:
+            raise ConsistencyError(422, "member_duplicate")
+        seen.add(key)
         out.append((m, job, conn_id, obj))
     return out
 
@@ -438,7 +499,7 @@ async def run_consistency_check(
     """
     t0 = time.perf_counter()
     in_group = {j.id: j for j in jobs if j.kind == "run" and j.group_id == group.id}
-    wanted = request.pairs or derive_members(list(in_group.values()), snapshots)
+    wanted = request.pairs or derive_members(list(in_group.values()), snapshots, connections)
     problems: list[CheckProblem] = []
     plan = _validate(group, wanted, in_group, snapshots, connections, problems)
     members: list[_Member] = []

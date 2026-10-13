@@ -1242,10 +1242,46 @@ Open (not fixed here):
   `ADDRESS_REVIEW` overrides (a reviewer may still pick the method).
 - **B2 — a repeated member made the check pass and was stored as the group's verdict.**
   `consistency._validate` now refuses a repeated `(job_id, path)` with **`422 member_duplicate`**
-  before any target is opened (so with `pairs`' `min_length=2` there are always ≥ 2 distinct
-  members); one job with two different paths (a self-join, `CUSTOMER_ID` ↔ `REFERRER_ID`) stays
-  allowed. Contract §6.5 amendment updated (body rule and error list). Tests (fail before):
+  before any target is opened; one job with two different paths (a self-join, `CUSTOMER_ID` ↔
+  `REFERRER_ID`) stays allowed. *Corrected in G4 fix round 2:* this round-1 fix keyed members on
+  the job, so two different run jobs of the group writing the same target (a refresh: the same
+  spec submitted twice) were still two "distinct" members, joined the target with itself and
+  passed 1/1 at coverage 1.0 (review r2, B2-r2). The round-1 claims "there are always ≥ 2 distinct
+  members" and "a self-joined target can no longer pass and be stored" held only for job ids, not
+  for targets; the round-2 entry below closes it. Contract §6.5 amendment updated (body rule and error list). Tests (fail before):
   `tests/connectors/test_consistency.py::test_a_repeated_member_is_refused` (drifted Mongo
   member: derived check fails; `[m, m]` and `[a, m, a]` → 422 `member_duplicate`, nothing opened;
   self-join runs) and `tests/api/test_groups_consistency_api.py::test_a_repeated_member_is_refused_and_not_stored`
   (real check: 422 `member_duplicate`, audited `rejected`, `last_check` stays unset).
+
+### M3 G4 fix round 2 (review `M3-G4-review-r2.md`, B2-r2)
+
+- **B2-r2 — a member is a target column, not a job.** Two run jobs of one group that wrote the
+  same target (a routine refresh) counted as distinct members, so the check joined the target
+  with itself, passed and was stored as `last_check` while a real cross-system member failed.
+  `consistency.target_key(conn_id, connection, object, path?)` now identifies a member's target:
+  the connection's **endpoint** (engine, case-folded host, port — the engine default 5432 / 1521 /
+  27017 when unset — database, service name), the object `fqn()` and the path; PostgreSQL and
+  Oracle compare object and path case-insensitively (unquoted identifiers fold), MongoDB names
+  stay case-sensitive. A connection without a host is identified by its id. So two connection
+  records for one database name one target. Documented limit: host aliases (a DNS name and its
+  address, two listeners of one instance) are not resolved and count as different endpoints.
+  - `_validate` resolves every member's target before any connector opens and refuses a repeated
+    target column with **`422 member_duplicate`**; one target with two different paths (a
+    self-join) stays allowed.
+  - `derive_members(jobs, snapshots, connections=None)` collapses eligible jobs that wrote the
+    same target (key without the path) to the **newest** (`created_at`, then id), keeping list
+    order; fewer than 2 distinct targets → **`409 member_not_ready`** (a group whose only runs are
+    refreshes of one table has one system and nothing to join).
+  - Contract §6.5 amendment updated: "distinct" means distinct target columns; derived mode is
+    one member per distinct target. No name changed.
+  - Tests (fail before): `tests/connectors/test_consistency.py::test_two_jobs_writing_one_target_are_one_member`
+    (drifted Mongo member; `[mdb, rerun]`, `[ora, mdb, rerun]`, `[rerun, ora, mdb]` → 422, nothing
+    opened; derived keeps `j_mdb_rerun` and still fails 3 pairs; refreshes of one target only →
+    409 from `derive_members` and from the check), `::test_two_connection_records_for_one_database_are_one_target`
+    (a second Mongo record spelt `MONGO.UAT` with the default port, and an Oracle object written
+    `crm_masked.customers` with service `uat`, → 422, nothing opened; a different database on the
+    same server runs; derived collapses accordingly) and
+    `tests/api/test_groups_consistency_api.py::test_a_rerun_writing_the_same_target_is_refused_and_not_stored`
+    (the real check behind the route: 422 `member_duplicate` twice, no target opened, the stored
+    `last_check`/`last_check_at` unchanged, audit `failed 200` then `rejected 422` ×2).
