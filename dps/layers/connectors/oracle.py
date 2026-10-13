@@ -32,8 +32,6 @@ from datetime import UTC, datetime
 from typing import Any, Final, Literal, TypeVar
 
 import oracledb
-import sqlglot
-from sqlglot import exp
 
 from dps.config import Settings
 from dps.jobs_models import ConnectionParams, Selection
@@ -63,6 +61,7 @@ from dps.layers.connectors.selection import (
     compile_where,
     parameterize_literals,
     quote_ident,
+    read_projection,
     validate_selection,
 )
 from dps.layers.connectors.targets import PrepareFailure
@@ -623,21 +622,9 @@ class OracleConnector:
         return where or None, query, binds
 
     @staticmethod
-    def _projection(shape: TableShape, selection: Selection, query: str | None) -> list[ColumnInfo]:
-        """Columns a read yields: a query's own select list, narrowed by ``columns``; keys always."""
-        names: set[str] | None = None
-        if query is not None:
-            parsed = sqlglot.parse_one(query, read="oracle")
-            selects = parsed.named_selects if isinstance(parsed, exp.Select) else ["*"]
-            if "*" not in selects:
-                names = set(selects)
-        if selection.columns:
-            wanted = {name.upper() for name in selection.columns}
-            names = wanted if names is None else names & wanted
-        if names is None:
-            return list(shape.columns)
-        names |= set(shape.key)
-        return [c for c in shape.columns if c.name in names]
+    def _projection(shape: TableShape, selection: Selection) -> list[ColumnInfo]:
+        """Columns a read yields: :func:`read_projection`, the list the run handler writes."""
+        return read_projection(shape, selection, "oracle")
 
     @staticmethod
     def _row(columns: list[ColumnInfo], values: tuple[Any, ...]) -> Row:
@@ -671,7 +658,7 @@ class OracleConnector:
     ) -> list[Row]:
         """Up to ``n`` rows for discovery: ``SAMPLE`` on large tables, else the first ``n``."""
         where, query, binds = self._compile(shape, selection, params)
-        cols = self._projection(shape, selection, query)
+        cols = self._projection(shape, selection)
         n = max(1, int(n))
         percent = None if query is not None else self._percent(shape.row_estimate, n)
         while True:
@@ -781,7 +768,7 @@ class OracleConnector:
         ROWID keys through ``CHARTOROWID``.
         """
         where, query, binds = self._compile(shape, selection, params)
-        cols = self._projection(shape, selection, query)
+        cols = self._projection(shape, selection)
         keys = osql.key_columns(shape)
         lower = decode_key(key_range.lower, keys) if key_range.lower else None
         upper = decode_key(key_range.upper, keys) if key_range.upper else None
@@ -1401,6 +1388,9 @@ class OracleWriter:
 
     def _write_sync(self, rows: list[Row], mark: LedgerMark) -> int:
         sql, cols = self._statement()
+        if rows and any(c.name not in rows[0] for c in cols):
+            # a bound column the batch does not carry would be written as NULL: refuse instead
+            raise PrepareFailure("column_missing", "a written column is not in the batch")
         params = [tuple(self._value(c, r.get(c.name)) for c in cols) for r in rows]
         sizes = [INPUT_TYPES.get(osql.input_type(c) or "") for c in cols]
         written = 0

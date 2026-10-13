@@ -39,7 +39,7 @@ from sqlglot.errors import SqlglotError
 from sqlglot.tokens import TokenType
 
 from dps.jobs_models import SampleSpec, Selection  # noqa: F401 - re-exported (contract §5.2)
-from dps.layers.connectors.base import Engine, JsonScalar, TableShape
+from dps.layers.connectors.base import ColumnInfo, Engine, JsonScalar, TableShape
 
 ORACLE_IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]{0,127}$")
 PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")
@@ -574,10 +574,11 @@ def referenced_columns(sel: Selection, engine: Engine) -> set[str]:
     }
 
 
-def query_projects_keys(sel: Selection, engine: Engine, key: list[str]) -> bool:
-    """True when the query's projection includes ``*`` or every key column."""
+def query_columns(sel: Selection, engine: Engine) -> set[str] | None:
+    """The folded output names of ``sel.query``; None without a query or when it projects ``*``
+    (bare or qualified)."""
     if sel.query is None:
-        return True
+        return None
     stmt = _parse(sel.query, engine, wrap_where=False)
     _fold(stmt, engine)
     names: set[str] = set()
@@ -585,10 +586,36 @@ def query_projects_keys(sel: Selection, engine: Engine, key: list[str]) -> bool:
         if isinstance(proj, exp.Star) or (
             isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star)
         ):
-            return True
+            return None
         names.add(proj.alias_or_name)
+    return names
+
+
+def query_projects_keys(sel: Selection, engine: Engine, key: list[str]) -> bool:
+    """True when the query's projection includes ``*`` or every key column."""
+    names = query_columns(sel, engine)
+    if names is None:
+        return True
     folded = {k.upper() if engine == "oracle" else k for k in key}
     return folded <= names
+
+
+def read_projection(shape: TableShape, sel: Selection, engine: Engine) -> list[ColumnInfo]:
+    """The columns a read of ``sel`` yields, in table order — and so what a run writes.
+
+    Every column of ``shape``, narrowed by a query's own select list (a query that names its
+    columns yields only those) and by ``columns``; the key columns always. Connectors read and
+    the run handler plans, creates and writes exactly this list, so a column outside it is
+    never read, created or NULL-filled (M3 G2 B1). Oracle folds ``columns`` to upper case.
+    """
+    names = query_columns(sel, engine)
+    if sel.columns:
+        wanted = {n.upper() if engine == "oracle" else n for n in sel.columns}
+        names = wanted if names is None else names & wanted
+    if names is None:
+        return list(shape.columns)
+    names |= set(shape.key)
+    return [c for c in shape.columns if c.name in names]
 
 
 def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None) -> None:

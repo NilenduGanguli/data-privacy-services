@@ -146,6 +146,55 @@ async def test_table_mode_obfuscate_into_a_created_uat_table(
         assert entry["reveal"] and restored[name] == original[name], name
 
 
+async def test_table_mode_query_subset_writes_only_the_projected_columns(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """M3 G2 B1: a query that names a subset of the columns reads, creates and writes exactly
+    those columns (keys always); no other column exists in the target to be NULL-filled."""
+    obj = await source_pg.customers_table(rows=300, name="q_customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat-q")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "q_customers_uat"},
+    }
+    sel = {"query": f'SELECT customer_id, email, segment FROM "{source_pg.schema}".q_customers'}
+    sub = await submit_run(
+        run_spec(src.id, obj, snap.id, target, source={"selection": sel}),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    job = await drive(handler_ctx, "t1", sub.job.id)
+    assert job.state == JobState.succeeded, job.error_code
+    assert job.progress.rows_written == 300
+    cols = await source_pg.admin.fetch(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = $1 AND table_name = 'q_customers_uat' ORDER BY ordinal_position",
+        source_pg.schema,
+    )
+    assert [r["column_name"] for r in cols] == ["customer_id", "email", "segment"]
+    out = f'"{source_pg.schema}".q_customers_uat'
+    src_t = f'"{source_pg.schema}".q_customers'
+    count = source_pg.admin.fetchval
+    assert await count(f"SELECT count(*) FROM {out}") == 300
+    assert await count(f"SELECT count(*) FROM {out} WHERE email IS NULL") == 0
+    # source vs target (counts only): no source e-mail survived; segment kept as a multiset
+    assert await count(f"SELECT count(*) FROM {out} o JOIN {src_t} s ON o.email = s.email") == 0
+    assert (
+        await count(
+            f"SELECT count(*) FROM (SELECT segment, count(*) FROM {src_t} GROUP BY segment "
+            f"EXCEPT SELECT segment, count(*) FROM {out} GROUP BY segment) d"
+        )
+        == 0
+    )
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None and ev.pack.verification["passed"]
+
+
 async def test_in_place_round_trips_with_the_returned_key(
     handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
 ) -> None:

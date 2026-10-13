@@ -539,3 +539,45 @@ test-first below.
   `write_ledger_cleared` true; (3) a key-less table: discovery shows `ROWID` as the `rowid` key, kept,
   never classified; the `table` load writes 1,200 rows with 0 surviving e-mails, the created target
   has only the 3 table columns, and finalize clears the ledger.
+
+## Review G2 round 1 fixes (Tasks 5-8) — `M3-G2-review-r1.md` B1, B2
+
+- **B1 (query subset NULL-filled Oracle targets) — fixed by one shared read projection (the review's
+  preferred option 1), on both engines.** New `selection.query_columns(sel, engine)` (folded output names
+  of a query, `None` for no query or a bare/qualified `*`) and `selection.read_projection(shape, sel,
+  engine)`: every column, narrowed by the query's own select list and by `columns` (Oracle folds
+  `columns` upper), keys always, in table order. `query_projects_keys` now uses `query_columns`
+  (same result). Used by `OracleConnector._projection` (signature lost its compiled-`query` argument),
+  `PostgresConnector._projection`, `jobs_run._prepare` (→ `RunPlan.projection` → `ResolvedTarget.
+  write_columns`, created DDL, files columns, post-sample) and the `runs_as` preview of the connections
+  router. Contract §5.2 amended (2026-10-13).
+  - **M2 behaviour change (PostgreSQL):** a `table`/`append`/`files` run whose query names a column
+    subset no longer fails `source_error` (it selected `q."<col>"` for every column); it reads, creates
+    and writes exactly the projected columns, like Oracle. An upsert into a wider existing target
+    MERGEs only those columns, so matched rows keep every other value (as with `columns`).
+  - **M2 behaviour change (Oracle `columns` folding):** `jobs_run` did not fold `columns`, so a
+    lower-case `columns` list narrowed Oracle's read but not the plan; it is folded once now.
+  - **Defence in depth:** `OracleWriter._write_sync` refuses a batch whose rows lack a bound column
+    (`PrepareFailure("column_missing", …)`, value-free) instead of binding `None`.
+  - Not changed: discovery (it samples through the connector, which now yields the same projection on
+    both engines; a column outside the query is classified by name only, as Oracle already did) and
+    `targets._projection` (submit-time method checks over `columns` ∪ keys: a superset, so stricter,
+    and submit holds only the selection template).
+  - Tests (failed before the fix): `test_selection.py::test_read_projection_is_the_query_select_list_
+    on_both_engines` (ImportError); `test_run_modes.py::test_table_mode_query_subset_writes_only_the_
+    projected_columns` (PG: was `failed source_error`; now target columns exactly `customer_id, email,
+    segment`, 300 rows, 0 NULL e-mails, 0 surviving source e-mails, segment multiset equal, evidence
+    passed); `test_oracle_pipeline.py::test_a_query_subset_creates_and_writes_only_the_projected_
+    columns` (was 10 target columns; now exactly 3, 0 NULLs, 0 surviving `CUSTOMER_ID`/`EMAIL`);
+    `…::test_a_query_subset_upsert_never_nulls_the_target_columns_it_does_not_read` (key kept; second
+    run upserts a subset query: was 0/300 rows with `FULL_NAME`/`DOB` unchanged; now 300/300 and NOTES
+    unchanged on every non-NULL row, 0 surviving source e-mails).
+- **B2 (key-less Oracle `table` load stuck after a lost checkpoint) — fixed in `jobs_run`.** New
+  `_ledgered(plan)`: `in_place`/`append`, or `plan.prepare["ledger"]` (what prepare reported). Resume
+  (`_run_partition`) and finalize (ledger clearing) both use it, so the ledger-behind → `ledger_conflict`
+  and ledger-ahead → record and continue rules now hold for key-less Oracle `table` loads. Contract §4.2
+  amended ("a `table` load of a key-less Oracle source is ledgered"). Test (failed before: "job did not
+  reach a terminal state"): `test_oracle_pipeline.py::test_a_keyless_table_load_resumes_from_its_ledger_
+  after_a_lost_checkpoint` — checkpoint #2 raises after its batch committed; the job succeeds with 1,200
+  rows written and 1,200 in the target, 0 repeated rows, one resumed partition (evidence
+  `resumed_partitions` 1), 0 surviving source e-mails, ledger cleared.

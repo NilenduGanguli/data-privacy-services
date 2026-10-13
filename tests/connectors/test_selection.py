@@ -18,6 +18,7 @@ from dps.layers.connectors.selection import (
     query_projects_keys,
     query_template,
     quote_ident,
+    read_projection,
     referenced_columns,
     selection_checks,
     validate_mongo_filter,
@@ -598,3 +599,52 @@ def test_unqualified_columns_named_like_denied_functions_are_not_calls() -> None
     for where in ("pg_sleep > :a", "ts_status = :a", "lo_limit > :a", "crosstab_ref = :a"):
         sel = parameterize_literals(Selection(where=where, params={"a": 1}), "postgres")
         assert compile_where(sel, "postgres")[0].endswith("$1")
+
+
+ORA_SHAPE = TableShape(
+    object=ObjectRef(owner="CRM", name="CUSTOMERS"),
+    key=["CUSTOMER_ID"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=f"$.{n}", name=n, data_type="VARCHAR2", kind="text")
+        for n in ("CUSTOMER_ID", "FULL_NAME", "EMAIL", "SEGMENT", "NOTES")
+    ],
+)
+
+
+def _names(cols: list[ColumnInfo]) -> list[str]:
+    return [c.name for c in cols]
+
+
+def test_read_projection_is_the_query_select_list_on_both_engines() -> None:
+    """M3 G2 B1: a query that names its columns narrows the read (and so the write) to them;
+    every other column is neither read nor written, on PostgreSQL and Oracle alike."""
+    pg = Selection(query="SELECT customer_id, Full_Name AS full_name FROM bank.customers")
+    assert _names(read_projection(SHAPE, pg, "postgres")) == ["customer_id", "full_name"]
+    ora = Selection(query='SELECT customer_id, "EMAIL", segment FROM crm.customers')
+    assert _names(read_projection(ORA_SHAPE, ora, "oracle")) == [
+        "CUSTOMER_ID",
+        "EMAIL",
+        "SEGMENT",
+    ]
+    # names the table does not have (expressions, other aliases) are not columns of the read
+    odd = Selection(query="SELECT customer_id, upper(email) AS shout, 1 AS one FROM crm.customers")
+    assert _names(read_projection(ORA_SHAPE, odd, "oracle")) == ["CUSTOMER_ID"]
+    # ``columns`` narrows further; keys are always read
+    both = Selection(query=ora.query, columns=["email", "notes"])
+    assert _names(read_projection(ORA_SHAPE, both, "oracle")) == ["CUSTOMER_ID", "EMAIL"]
+    assert _names(read_projection(ORA_SHAPE, Selection(columns=["segment"]), "oracle")) == [
+        "CUSTOMER_ID",
+        "SEGMENT",
+    ]
+    # ``*`` (bare or qualified) and no query read every column
+    for sel in (
+        Selection(),
+        Selection(query="SELECT * FROM crm.customers"),
+        Selection(query="SELECT c.* FROM crm.customers c"),
+    ):
+        assert _names(read_projection(ORA_SHAPE, sel, "oracle")) == _names(ORA_SHAPE.columns)
+    assert _names(read_projection(SHAPE, Selection(columns=["risk_score"]), "postgres")) == [
+        "customer_id",
+        "risk_score",
+    ]

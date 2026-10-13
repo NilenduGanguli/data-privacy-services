@@ -52,6 +52,7 @@ from dps.layers.connectors.selection import (
     SelectionError,
     failed_checks,
     parameterize_literals,
+    read_projection,
     selection_checks,
     validate_selection,
 )
@@ -282,10 +283,7 @@ async def describe(
 
 
 def _projection(shape: TableShape, sel: Selection) -> list[ColumnInfo]:
-    if not sel.columns:
-        return shape.columns
-    wanted = set(sel.columns) | set(shape.key)
-    return [c for c in shape.columns if c.name in wanted]
+    return read_projection(shape, sel, "postgres")
 
 
 def runs_as(engine: Engine, shape: TableShape, bound: Selection) -> str | None:

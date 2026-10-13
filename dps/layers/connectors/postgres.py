@@ -72,7 +72,12 @@ from dps.layers.connectors.base import (
     WriteMode,
     decode_key,
 )
-from dps.layers.connectors.selection import compile_query, compile_where, quote_ident
+from dps.layers.connectors.selection import (
+    compile_query,
+    compile_where,
+    quote_ident,
+    read_projection,
+)
 from dps.layers.connectors.targets import TYPE_RE, PrepareFailure
 from dps.secrets import SecretUnavailable, resolve_secret_ref
 
@@ -504,10 +509,8 @@ class PostgresConnector:
         return body, [params[n] for n in names]
 
     def _projection(self, shape: TableShape, sel: Selection) -> list[ColumnInfo]:
-        if not sel.columns:
-            return shape.columns
-        wanted = set(sel.columns) | set(shape.key)
-        return [c for c in shape.columns if c.name in wanted]
+        """Columns a read yields: :func:`read_projection`, the list the run handler writes."""
+        return read_projection(shape, sel, "postgres")
 
     async def count(
         self, shape: TableShape, selection: Selection, params: dict[str, JsonScalar]

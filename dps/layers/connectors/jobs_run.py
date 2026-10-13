@@ -8,9 +8,10 @@ into partitions, storing the value-free :class:`~dps.layers.connectors.targets.R
 
 ``run_partition`` (one fenced partition) reads keyset pages, transforms them in a thread, writes
 each batch with its ledger mark in ONE target transaction and checkpoints after the commit. A
-resumed ``in_place``/``append`` partition takes the target ledger as authoritative (it can be one
-batch ahead of the checkpoint after a crash), so no batch is ever applied twice; ``table`` resumes
-after its checkpoint (idempotent upserts) and ``files`` restarts from its lower bound.
+resumed ledgered partition (``in_place``/``append``, and a ``table`` load whose prepare reported a
+ledger: Oracle key-less sources) takes the target ledger as authoritative (it can be one batch
+ahead of the checkpoint after a crash), so no batch is ever applied twice; other ``table`` loads
+resume after their checkpoint (idempotent upserts) and ``files`` restarts from its lower bound.
 
 ``finalize`` (one fenced job row) decides the outcome, writes the files manifest last, clears the
 write ledger of a finished job, samples written rows for the evidence, stores the evidence pack,
@@ -84,7 +85,11 @@ from dps.layers.connectors.files import (
 from dps.layers.connectors.partitions import partition_count, plan_partitions
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.registry import open_connector, open_target_store
-from dps.layers.connectors.selection import SelectionError, validate_selection
+from dps.layers.connectors.selection import (
+    SelectionError,
+    read_projection,
+    validate_selection,
+)
 from dps.layers.connectors.targets import (
     PrepareFailure,
     RunPlan,
@@ -378,12 +383,11 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         if not shape.key:
             raise PrepareFailure("no_key", "the table has no primary key or unique not-null index")
         selection = spec.source.selection
-        validate_selection(selection, cast(Engine, source.engine), shape)
-        projection = [
-            c.name
-            for c in shape.columns
-            if not selection.columns or c.name in set(selection.columns) | set(shape.key)
-        ]
+        engine = cast(Engine, source.engine)
+        validate_selection(selection, engine, shape)
+        # what the connector reads (a query's own select list, ``columns``, keys always) is what
+        # is planned, created and written: no column outside it is ever NULL-filled
+        projection = [c.name for c in read_projection(shape, selection, engine)]
         reviewed = {c.name for c in snapshot.columns}
         unreviewed = [n for n in projection if n not in reviewed]
         if unreviewed and mode != "in_place" and spec.options.unclassified != "keep":
@@ -767,6 +771,14 @@ async def _fail_partition(
         LEASES_LOST.labels("partition").inc()
 
 
+def _ledgered(plan: RunPlan) -> bool:
+    """Whether the run's writer keeps a write ledger (contract §4.2): ``in_place`` and
+    ``append`` always, and any load whose prepare reported one (Oracle: a key-less ``table``
+    load paged on ROWID). Resume and finalize both follow it, so a ledgered batch whose
+    checkpoint was lost is taken from the ledger, never replayed (M3 G2 B2)."""
+    return plan.target.write_mode in ("in_place", "append") or bool(plan.prepare.get("ledger"))
+
+
 async def _run_partition(
     ctx: HandlerContext, job: JobInternal, rt: RunRuntime, part: ClaimedPartition
 ) -> None:
@@ -774,7 +786,7 @@ async def _run_partition(
     cols = rt.shape.key_columns()
     after = decode_key(part.last_key, cols) if part.last_key else None
     batch_no, read_total = part.batch_no, part.rows_written
-    if mode in ("in_place", "append"):
+    if _ledgered(rt.plan):
         mark = await rt.writer.read_ledger(job.id, part.partition_no)
         if (mark.batch_no if mark is not None else 0) < part.batch_no:
             # the ledger commits before the checkpoint, so it is never behind it unless its rows
@@ -1095,8 +1107,7 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             post_sample = await _best_effort(
                 _post_sample(ctx, job, spec, plan, source_conn, target_conn)
             )
-    ledgered = mode in ("in_place", "append") or bool(plan and plan.prepare.get("ledger"))
-    if plan is not None and ledgered and outcome in ("succeeded", "canceled"):
+    if plan is not None and _ledgered(plan) and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
         cleared = await _best_effort(_clear_ledger(ctx, job, spec, plan, source_conn, target_conn))
         ledger_cleared = "error" not in cleared
