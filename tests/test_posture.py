@@ -14,6 +14,10 @@ def _prod(**kw):  # noqa: ANN003 - test helper
         api_keys='[{"name":"k","key_sha256":"ab"}]',
         llm_provider="",
         audit_enabled=True,
+        # M5 (spec §10): TLS-only egress, explicit CORS origins, strict verification
+        egress_tls_required=True,
+        cors_origins="https://console.bank.example",
+        verify_warn_allowed=False,
     )
     base.update(kw)
     return Settings(**base)

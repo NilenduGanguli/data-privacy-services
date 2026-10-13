@@ -244,11 +244,25 @@ class PrivacyEngine:
 
     # -- helpers ------------------------------------------------------------------------------
     def policy(self, ref: str | dict[str, Any] | None) -> Policy:
-        """Resolve a preset name, an inline policy or the configured default."""
+        """Resolve a preset name, an inline policy or the configured default.
+
+        Raises:
+            EngineError: the policy is unknown or invalid.
+            CodedError: 422 ``verify_warn_disallowed`` — the policy relaxes the leakage check
+                (``verify.leakage_check: warn``) while ``DPS_VERIFY_WARN_ALLOWED`` is false
+                (M5, spec §10: a caller cannot relax verification after boot).
+        """
         try:
-            return resolve_policy(ref, default_name=self.settings.default_policy)
+            policy = resolve_policy(ref, default_name=self.settings.default_policy)
         except (KeyError, ValueError) as exc:
             raise EngineError(f"invalid policy: {exc}") from None
+        if policy.verify.leakage_check == "warn" and not self.settings.verify_warn_allowed:
+            raise CodedError(
+                "verify_warn_disallowed",
+                "verify.leakage_check=warn is not allowed on this deployment",
+                status=422,
+            )
+        return policy
 
     def _locale(self, policy: Policy, options: RequestOptions) -> str:
         """Request locale, else the policy's pin (``locale.default``), else ``DPS_DEFAULT_LOCALE``."""

@@ -55,6 +55,7 @@ from dps.layers.connectors.selection import (
     selection_checks,
     validate_selection,
 )
+from dps.netguard import require_tls_connection
 from dps.ratelimit import enforce_rate_limit
 from dps.secrets import SecretUnavailable
 
@@ -128,6 +129,7 @@ async def create(body: ConnectionSpec, request: Request) -> dict[str, Any]:
         tenant = tenant_of(request)
         if PRODUCTION in body.tags:
             _require_admin_for_production(request)
+        require_tls_connection(body, _settings(request))  # M5: TLS-only egress (422)
         conn = await create_connection(
             tenant,
             body,
@@ -170,6 +172,10 @@ async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> 
         current = await _connection(request, connection_id)
         if body.tags is not None and (PRODUCTION in body.tags) != current.production:
             _require_admin_for_production(request)
+        if body.params is not None:  # M5: the changed endpoint must use TLS too (422)
+            require_tls_connection(
+                current.model_copy(update={"params": body.params}), _settings(request)
+            )
         updated = await update_connection(
             tenant, connection_id, body, settings=_settings(request), kek=kek_of(request)
         )

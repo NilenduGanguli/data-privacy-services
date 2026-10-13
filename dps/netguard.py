@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
+
+from dps.config import Settings
+
+if TYPE_CHECKING:
+    from dps.jobs_models import ConnectionParams
 
 _HOST = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
@@ -45,3 +52,46 @@ def normalize_host(value: str) -> str:
     if not _HOST.match(host):
         raise ValueError("not a valid hostname (wildcards are not allowed)")
     return host
+
+
+class _Endpoint(Protocol):
+    """What a TLS rule needs: an engine and its parameters (a ``ConnectionSpec`` or a stored
+    ``Connection``)."""
+
+    @property
+    def engine(self) -> str: ...
+
+    @property
+    def params(self) -> ConnectionParams: ...
+
+
+def require_tls_connection(
+    spec: _Endpoint, settings: Settings, *, secret: Mapping[str, str] | None = None
+) -> None:
+    """With ``DPS_EGRESS_TLS_REQUIRED``, refuse a connection that would travel in clear.
+
+    postgres ``sslmode`` ∈ {verify-full, verify-ca}; mongo ``tls=true``; oracle
+    ``protocol=tcps`` or a secret ``dsn`` that uses tcps; s3 ``endpoint_url`` https (or unset =
+    the AWS default, https); pvc exempt.
+
+    Raises:
+        SpecError: ``tls_required`` (422), naming the engine only.
+    """
+    from dps.jobs_models import SpecError  # here: netguard stays importable by dps.jobs_models
+
+    if not settings.egress_tls_required:
+        return
+    opts = spec.params.options
+    endpoint = spec.params.endpoint_url
+    ok = {
+        "postgres": opts.get("sslmode") in ("verify-full", "verify-ca"),
+        "mongo": opts.get("tls", "").lower() == "true",
+        "oracle": opts.get("protocol", "").lower() == "tcps"
+        or "tcps" in (secret or {}).get("dsn", "").lower(),
+        "s3": not endpoint or urlsplit(endpoint).scheme == "https",
+        "pvc": True,
+    }.get(spec.engine, False)
+    if not ok:
+        raise SpecError(
+            "tls_required", 422, f"{spec.engine} connections must use TLS on this deployment"
+        )

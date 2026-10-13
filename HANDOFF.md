@@ -464,6 +464,40 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   (a literal `DPS_JOB_KEK` env var is refused), `DPS_INLINE_SECRETS_ALLOWED=false`,
   `DPS_RLS_ENABLED=true`, `DPS_MIGRATIONS_MODE=verify`, `DPS_AUDIT_STRICT=true`,
   `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`.
+- **M5 posture** (`dps/posture.py`, same guard): secrets only as mounted files — a literal
+  `DPS_JOB_KEK`, `DPS_JOB_KEK_PREVIOUS`, `DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`/`_SECRET`,
+  `DPS_PG_PASSWORD`, `DPS_PG_WORKER_PASSWORD`, `DPS_PG_MIGRATION_PASSWORD`, `DPS_TOKENIZER_TOKEN`,
+  `DPS_AZURE_VISION_KEY`, `DPS_S3_ACCESS_KEY_ID` or `DPS_S3_SECRET_ACCESS_KEY` environment variable
+  is refused (use `<NAME>_FILE`); with `DPS_PG_HOST` the KEK must be set; `DPS_EGRESS_TLS_REQUIRED=true`,
+  every egress URL (`DPS_STELLAR_BASE_URL`, `DPS_COIN_URL`, `DPS_AZURE_VISION_ENDPOINT`,
+  `DPS_S3_ENDPOINT_URL`, `DPS_TOKENIZER_URL`) `https` and, when any is set, `DPS_SSL_CERT_FILE` (the
+  organisation CA bundle); `DPS_TOKENIZER_TOKEN_FILE` with `DPS_TOKENIZER_PROVIDER=http`;
+  `DPS_CORS_ORIGINS` without `*`; and **strict verification at boot**: `DPS_VERIFY_WARN_ALLOWED=false`,
+  `DPS_LLM_EGRESS_CHECK=strict`, every shipped preset and `DPS_DEFAULT_POLICY` with
+  `verify.leakage_check: strict`. At request time a policy (inline, preset override or stored) with
+  `leakage_check: warn` or a run with `options.verify=warn` is refused with 422
+  `verify_warn_disallowed` while `DPS_VERIFY_WARN_ALLOWED=false`, and publishing such a tenant policy
+  is refused the same way. In staging/prod `/docs` and `/api/v1/openapi.json` are not served.
+- **TLS-only connections** (`DPS_EGRESS_TLS_REQUIRED=true`): postgres needs
+  `options.sslmode=verify-full|verify-ca`, mongo `options.tls=true`, oracle `options.protocol=tcps`
+  (or a `dsn` secret file using tcps), s3 an `https` `endpoint_url` (or none = AWS); pvc is exempt.
+  Refused with 422 `tls_required` at `POST /connections`, at a `PATCH` that changes `params`, and at
+  use (a connection registered before the switch fails its job with `tls_required`, not retried).
+- **Runtime posture** — `GET /api/v1/admin/posture` (admin): eleven checks (`auth_enabled`,
+  `bootstrap_key_absent`, `api_keys_from_file`, `tls_egress`, `audit_strict`, `leakage_strict` incl.
+  every tenant's active policy, `llm_not_stub`, `kek_from_secret`, `keys_rotated` (names and ages of
+  active keys older than `DPS_KEY_ROTATION_MAX_AGE_DAYS` never rotated), `rls_posture`,
+  `migrations_verified`), evaluated as if production in every environment; `enforced` is true in
+  staging/prod. Database checks read "database unavailable" while it is down.
+- **KEK rotation runbook** (`python -m dps.rekey [--dry-run]`): mount the new KEK as
+  `DPS_JOB_KEK_FILE` and the old one as `DPS_JOB_KEK_PREVIOUS_FILE`; roll the app and worker
+  deployments; run `python -m dps.rekey` once (any pod with the image, the worker's database login
+  and the API login: it re-seals `dps_job.key_enc`/`spec_enc` through the worker pool and
+  `dps_connection.secret_enc` per tenant); confirm the printed JSON line has `"unreadable": 0` (exit
+  code 3 otherwise — those rows are unchanged; exit 2 = no KEK or no database); remove
+  `DPS_JOB_KEK_PREVIOUS_FILE` and roll again. Keep the previous KEK as long as callers may reveal
+  `external_tokenize` tokens bound under it (§8). Until `dps.rekey` has run, jobs sealed under the
+  old KEK cannot be opened by workers that hold only the new one — run it right after the first roll.
 - **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
   default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
@@ -475,9 +509,10 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 - Console API key: kept in `sessionStorage` (gone with the tab); the header's "Remember key on this
   device" moves it to `localStorage` and unticking removes it again. A key left in `localStorage` by
   the M0 console is moved into the tab's session on first load.
-- CORS: any origin, methods `GET POST PATCH DELETE OPTIONS` (M2), headers `Content-Type X-API-KEY
-  X-DPS-Tenant X-Request-ID Idempotency-Key` (keys travel in headers, not cookies; to be narrowed in
-  M5).
+- CORS (M5): only the origins in `DPS_CORS_ORIGINS` (comma list; `""` = same-origin, no CORS
+  headers at all; local default `*`, refused in staging/prod), methods
+  `GET POST PUT PATCH DELETE OPTIONS`, headers `Content-Type X-API-KEY X-DPS-Tenant X-Request-ID
+  Idempotency-Key` (keys travel in headers, not cookies).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a
   500 `internal error` with only the exception class logged.
 

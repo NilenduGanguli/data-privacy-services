@@ -831,6 +831,65 @@ real survivors).
   `tests/db/test_migrations.py` pins `043_policies.sql`; `tests/fixtures/db.py` truncates both.
 - Contract: §2.2 (043), new §5.5 "Policy references", §9 rows for the eight routes.
 
+## Task 16 — Posture tightening: strict verification at boot, secrets from files, TLS-only egress, KEK rotation, runtime posture report
+
+- `dps/posture.py`:
+  - The KEK rule ("must be set") applies only with `DPS_PG_HOST` (contract §10: "wherever a worker
+    runs"); the plan's `_m5_problems` required it for every deployment, which would refuse an L1-only
+    deployment that M0/M2 explicitly boot. The "decodes to 32 bytes" check stays as a backstop but
+    can never fire: `Settings` already refuses a KEK that is not base64 of 32 bytes (so the plan's
+    parametrised case `job_kek=base64("short")` raises `ValueError` at construction —
+    `tests/test_posture_m5.py` checks that instead, plus `job_kek=""` → "must be set").
+  - The plan's audit (`DPS_AUDIT_ENABLED` and `DPS_AUDIT_STRICT`) and embedded-worker rules are
+    M2's (with `DPS_PG_HOST`; `audit_strict` only affects the DB audit sink) and M0's (audit on);
+    `_m5_problems` does not repeat them. `posture_problems` de-duplicates the joined list.
+  - `non_strict_policies` iterates `preset_names()` (the plan's `list_presets()` returns dicts) and
+    skips a default policy that names no preset (that is a configuration error every request reports,
+    not a posture item). URL checks use `urlparse(...).scheme`, like M0's.
+  - `posture_report(settings, *, environ=None)`: as planned; `api_keys_from_file` passes with DB keys
+    (`DPS_PG_HOST`) or `DPS_API_KEYS_FILE`, and fails when a literal `DPS_API_KEYS` is set;
+    `leakage_strict` adds every directory tenant's active policy whose stored body is not strict
+    (`<tenant>/<name>`), reading the store; `keys_rotated` lists `"<name> is <n> days old"`. Checks
+    have `enforced_at_boot` true where a boot rule exists (all but `keys_rotated` and
+    `migrations_verified`).
+  - Request-time checks: `PrivacyEngine.policy` raises `CodedError("verify_warn_disallowed", 422)`
+    as planned; `validate_run` refuses `options.verify="warn"` **and** a policy whose resolved
+    leakage check is `warn` (contract §5.3 row). `/policies/validate` maps the `CodedError` to its
+    code (it previously caught only `EngineError`).
+- TLS-only connections: `require_tls_connection(spec, settings, *, secret=None)` accepts anything
+  with `engine` and `params` (a `ConnectionSpec` or a stored `Connection`), so `PATCH` checks the
+  connection with its new params and `open_connector` checks the stored row. At use it raises
+  `ConnectorError("tls_required")` (not retryable; `dps/layers/api/errors.py` maps it to 422) —
+  M2's connector error, so a job fails with that code instead of an `internal_error` retry.
+  `open_target_store` (s3 `files` targets) is checked too (the plan named `open_connector` only, which
+  never opens s3). `open_connector` now refuses an engine without a connector (`engine_unavailable`)
+  **before** opening credentials, then checks TLS for every engine; **integration note (WP-I):** M3's
+  oracle/mongo branches go after the TLS check (`_CONNECTORS` lists the engines).
+- `dps/app.py`: no `CORSMiddleware` at all when `DPS_CORS_ORIGINS` is empty; `PUT` allowed (Task 15).
+  `/docs` and `/api/v1/openapi.json` are off in staging/prod.
+- `GET /admin/posture` needs `admin` but **not** the database (the report says "database
+  unavailable" instead of the route answering 503).
+- `dps/rekey.py`: counts are per sealed **blob** (`rows` = blobs examined); a blob a worker rewrote
+  between the read and the optimistic update counts as `already_current`. `amain(argv, *, settings)`
+  closes the pools it opened; exit 2 for a configuration error (no `DPS_PG_HOST` or no KEK). The
+  `_system` tenant's connections are included (the directory with `include_system=True`).
+- `HANDOFF.md`: the configuration rows already existed in §4 (Task 1); the posture, TLS-only
+  connection rules, posture report and the **KEK rotation runbook** went into §6 "Security posture"
+  (§9 is "Next milestones" in this file). The CORS bullet now describes the M5 behaviour.
+- Tests: `tests/test_posture_m5.py` (24: the plan's cases plus a mixed `*` origin list, the
+  tokenizer token rule, a short-KEK construction refusal, every preset strict, request-time refusals
+  over HTTP and for runs, a good production report, `GET /admin/posture` scope, and a `db` test of the
+  key-age and tenant-policy checks); the API-keys file of the plan lacked `tenant_ids`/`scopes`, which
+  the static key store requires; `_files` clears every `SECRET_ENV` name from the environment first.
+  `tests/test_egress_tls.py` has the 12 cases (each also passing with the rule off), an
+  allow-list test and a `db` test of create/patch/use over HTTP. `tests/test_rekey.py` (2, `db`)
+  seals the connection through M2's `create_connection` and opens it with `load_credentials`.
+  M0's `tests/test_posture.py` and M2's `tests/test_posture_m2.py` `_prod()` helpers gained the M5
+  settings a good production needs (`egress_tls_required`, explicit `cors_origins`,
+  `verify_warn_allowed=False`) — the rules are not relaxed.
+- Contract: §5.1 (`protocol` option + the TLS rule), §5.3 (`tls_required` row), §9 (the posture
+  report shape), §10 (secret files, TLS egress, CORS, docs, `dps.rekey`).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

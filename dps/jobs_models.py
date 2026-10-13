@@ -37,6 +37,7 @@ OPTION_KEYS = frozenset(
         "replicaSet",
         "directConnection",
         "tls",
+        "protocol",  # M5: oracle tcps (DPS_EGRESS_TLS_REQUIRED)
     }
 )
 _TAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")

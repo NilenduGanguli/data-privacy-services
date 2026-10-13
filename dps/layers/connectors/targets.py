@@ -44,7 +44,7 @@ from dps.auth import Principal
 from dps.config import Settings
 from dps.connections import Connection
 from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
-from dps.engine.policy import MethodSpec
+from dps.engine.policy import MethodSpec, resolve_policy
 from dps.engine.synth.keys import INT_DIGITS, LINK_ENTITIES, MIN_PSEUDONYM_DIGITS
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.methods import METHODS
@@ -491,6 +491,18 @@ def _check_linked(
         )
 
 
+def _relaxes_verification(spec: RunSpec, settings: Settings) -> bool:
+    """True when the run asks for ``options.verify = "warn"`` or its policy's leakage check is
+    ``warn`` (an unresolvable policy is left to the later checks)."""
+    if spec.options.verify == "warn":
+        return True
+    try:
+        policy = resolve_policy(spec.policy, default_name=settings.default_policy)
+    except (KeyError, ValueError):
+        return False
+    return policy.verify.leakage_check == "warn"
+
+
 def validate_run(
     spec: RunSpec,
     *,
@@ -514,6 +526,13 @@ def validate_run(
     mode = target.write_mode
     if kek is None:
         raise _fail("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
+    if not settings.verify_warn_allowed and _relaxes_verification(spec, settings):
+        raise _fail(
+            "verify_warn_disallowed",
+            422,
+            "verify=warn (or a policy with verify.leakage_check=warn) is not allowed on this "
+            "deployment",
+        )
     if source_conn.engine != "postgres":
         raise _fail("engine_unavailable", 422, "M2 runs read PostgreSQL sources only")
     if (

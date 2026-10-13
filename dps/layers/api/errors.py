@@ -54,7 +54,12 @@ class DpsHttpError(Exception):
 
 
 def _connector_status(code: str) -> int:
-    if code.startswith("engine_") or code in ("object_not_found", "no_key", "connection_invalid"):
+    if code.startswith("engine_") or code in (
+        "object_not_found",
+        "no_key",
+        "connection_invalid",
+        "tls_required",  # M5: TLS-only egress refuses a clear-text connection
+    ):
         return 422
     if code.startswith("selection_"):
         return 422

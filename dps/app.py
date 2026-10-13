@@ -581,12 +581,13 @@ def create_app(
             await m2.stop()
             await ocr.aclose()
 
+    production = settings.is_production  # M5 posture: no interactive docs or schema in prod
     app = FastAPI(
         title="Data Privacy Services",
         version=__version__,
         lifespan=lifespan,
-        openapi_url="/api/v1/openapi.json",
-        docs_url="/docs",
+        openapi_url=None if production else "/api/v1/openapi.json",
+        docs_url=None if production else "/docs",
         redoc_url=None,
     )
     app.state.settings = settings
@@ -621,19 +622,21 @@ def create_app(
         document_max_bytes=settings.max_document_bytes + DOCUMENT_MULTIPART_OVERHEAD,
         ndjson_max_bytes=settings.max_ndjson_bytes,
     )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "Content-Type",
-            API_KEY_HEADER,
-            TENANT_HEADER,
-            TRACE_HEADER,
-            IDEMPOTENCY_HEADER,
-        ],
-        expose_headers=[REPLAY_HEADER],
-    )
+    origins = settings.cors_origin_list  # M5: explicit origins; [] = same-origin, no CORS at all
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=[
+                "Content-Type",
+                API_KEY_HEADER,
+                TENANT_HEADER,
+                TRACE_HEADER,
+                IDEMPOTENCY_HEADER,
+            ],
+            expose_headers=[REPLAY_HEADER],
+        )
     app.add_middleware(_SecurityHeaders, hsts=settings.env != "local")
 
     app.include_router(ops.router)

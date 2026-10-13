@@ -31,6 +31,7 @@ from dps.auth_db import (
 from dps.config import Settings
 from dps.layers.api.deps import audit_action, principal_of, require_db, tenant_of
 from dps.layers.api.errors import DpsHttpError, to_http
+from dps.posture import posture_report
 from dps.ratelimit import enforce_rate_limit
 from dps.tenants import (
     TenantError,
@@ -422,3 +423,12 @@ async def _queue(principal: Principal) -> dict[str, Any]:
 async def queue(request: Request) -> dict[str, Any]:
     """Job and partition counts by state (the caller's tenants) and the worker registry."""
     return await _guarded(_queue(principal_of(request)))
+
+
+@router.get("/posture", dependencies=[Depends(require_scope("admin")), Depends(enforce_rate_limit)])
+async def posture(request: Request) -> dict[str, Any]:
+    """The runtime posture report (M5 Task 16): eleven value-free checks, evaluated as if
+    production; ``enforced`` in staging/prod. Database checks read "database unavailable"
+    while it is down (this route itself does not need the database)."""
+    report = await posture_report(_settings(request))
+    return report.model_dump(mode="json")
