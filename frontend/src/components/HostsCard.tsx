@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import type { HostRow } from '../lib/admin';
+import { hostInputError, type HostRow } from '../lib/admin';
 import { ApiError } from '../lib/api';
 import { utcDate } from '../lib/format';
 
@@ -16,7 +16,8 @@ export function HostsCard({ rows, tenants, defaultTenant, onAdd, onRemove }: {
   async function submit(e: FormEvent): Promise<void> {
     e.preventDefault();
     setErr(null);
-    if (!host.trim()) { setErr('Enter a host such as https://host.bank.internal.'); return; }
+    const invalid = hostInputError(host);
+    if (invalid) { setErr(invalid); return; }
     setBusy(true);
     try { await onAdd(chosen, host.trim()); setHost(''); }
     catch (x) { setErr(x instanceof ApiError ? `${x.message}${x.code ? ` (${x.code})` : ''}` : 'The host could not be added.'); }

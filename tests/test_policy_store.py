@@ -326,3 +326,24 @@ def test_policies_are_tenant_isolated_and_mutations_need_admin(api_client) -> No
     assert denied.status_code == 403
     still = c.get("/api/v1/policies/presets", headers=JOBS_T1)  # M0's route keeps its meaning
     assert still.status_code == 200 and isinstance(still.json(), list)
+
+
+async def test_job_counts_include_runs_on_the_snapshot_policy(migrated_db: Settings) -> None:
+    """A run without ``spec.policy`` runs the policy its snapshot was classified under
+    (``plan.policy_name``): the Policies list and the Overview "policy pack" count it (found by
+    the M5 console walk: every lane job read "0 jobs")."""
+    from dps import jobs
+    from dps.jobs import JobKind, JobPhase
+    from dps.policy_store import list_policies
+
+    job = await jobs.create_job(
+        tenant_id="t1", kind=JobKind.run, phase=JobPhase.prepare, mode="obfuscate", spec={}
+    )
+    async with db.acquire("t1") as conn:
+        await conn.execute(
+            f"UPDATE {db.schema_ident()}.dps_job SET plan = $2::jsonb WHERE id = $1",
+            job.id,
+            {"policy_name": NAME, "policy_hash": "h"},
+        )
+    presets, _ = await list_policies("t1")
+    assert {p.name: p.jobs for p in presets}[NAME] == 1

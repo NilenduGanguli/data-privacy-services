@@ -11,7 +11,7 @@ import { useAuth } from '../hooks/useAuth';
 import { api, ApiError, errorText, type Download } from '../lib/api';
 import { utcDate } from '../lib/format';
 import { EMPTY_DRAFT, treatmentRows } from '../lib/policyDraft';
-import { addDeclaredField, changedEntities, declaredSince, setTreatment, upsertRecognizer, type Body } from '../lib/policyEdit';
+import { addDeclaredField, changedEntities, declaredSince, isTenantPolicy, planPolicy, setTreatment, upsertRecognizer, type Body } from '../lib/policyEdit';
 import type {
   EntityInfo, PlanOut, PolicyDiff, PolicyDoc, PresetView, RecognizerSpec, RecognizerTestOut, TenantPolicyDetail, TenantPolicyView,
 } from '../lib/types';
@@ -202,17 +202,19 @@ export function Policies(): JSX.Element {
     if (!routeName && listed) navigate(`/policies/${encodeURIComponent(tenantPolicies[0]?.name ?? 'gdpr-pseudonymise')}`, { replace: true });
   }, [routeName, listed, tenantPolicies, navigate]);
 
+  // a boolean, so a list reload after a save does not reload the detail and reset the selection
+  const tenantPolicy = isTenantPolicy(name, store, tenantPolicies);
   const loadDetail = useCallback(async (): Promise<void> => {
     if (!name || !listed) return;
     setError(null);
-    if (store) {
+    if (tenantPolicy) {
       try { const d = await api.policies.get(auth, name); setDetail(d); setPresetBody(null); return; } catch (e) {
         if (!(e instanceof ApiError && e.status === 404)) { setError(errorText(e)); return; }
       }
     }
     setDetail(null);
     api.policies.validate(auth, name).then(setPresetBody).catch((e: unknown) => setError(errorText(e)));
-  }, [auth, name, store, listed]);
+  }, [auth, name, listed, tenantPolicy]);
   useEffect(() => { setSelected(null); setVersionBodies({}); void loadDetail(); }, [loadDetail]);
 
   useEffect(() => {
@@ -246,7 +248,7 @@ export function Policies(): JSX.Element {
     select: setSelected,
     downloadYaml: (v) => api.policies.versionYaml(auth, name, v),
     testRecognizer: (rec, text, signal) => api.policies.testRecognizer(auth, rec, text, signal),
-    runPlan: (data, body) => api.policies.plan(auth, { data, policy: body ?? name, mode: presets.find((x) => x.name === (detail?.base_preset ?? name))?.mode ?? 'obfuscate' }),
+    runPlan: (data, body) => api.policies.plan(auth, { data, policy: planPolicy(name, body, tenantPolicy), mode: presets.find((x) => x.name === (detail?.base_preset ?? name))?.mode ?? 'obfuscate' }),
   };
   if (!name) return <main className="page m5-page policies-page"><div className="skeleton" /></main>;
   return <PoliciesView name={name} now={new Date()} store={store} presets={presets} tenantPolicies={tenantPolicies} detail={detail} presetBody={presetBody}

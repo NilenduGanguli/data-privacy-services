@@ -248,3 +248,16 @@ export const SYNTH_HINTS: Record<string, string> = {
   AADHAAR: 'Verhoeff-valid, outside the issued space', PAN_IN: 'format-valid, fictional', IBAN: 'checksum-valid test banks',
   PERSON_NAME: 'one persona per row', DATE_OF_BIRTH: 'persona-consistent', NINO: 'reserved prefixes', CVV: 'random 3 digits',
 };
+
+/** Whether `name` is one of the tenant's stored policies (GET /policies/{name} answers 404
+ *  `policy_not_found` for a shipped preset that was never adopted, so the page does not ask). */
+export function isTenantPolicy(name: string, store: boolean, tenant: { name: string }[]): boolean {
+  return store && tenant.some((t) => t.name === name);
+}
+
+/** The `policy` of a plan request: the body on screen (draft or active), else `@name` for a tenant
+ *  policy (resolved to its active version, dps/layers/api/policy_refs.py), else the preset name. */
+export function planPolicy(name: string, body: Body | null, tenantPolicy: boolean): Body | string {
+  if (body) return body;
+  return tenantPolicy ? `@${name}` : name;
+}

@@ -379,3 +379,47 @@ async def test_summary_llm_tiles_are_per_tenant(migrated_db, db_settings) -> Non
     assert t1["llm_calls"] == 5 and t1["llm_blocked"] == 1 and t1["raw_pii_sent_to_llm"] == 0
     t2 = (await summary("t2", 14, db_settings)).tiles
     assert t2["llm_calls"] == 5 and t2["llm_blocked"] == 0 and t2["raw_pii_sent_to_llm"] == 0
+
+
+async def test_run_counters_come_from_the_partitions_as_the_worker_keeps_them(  # noqa: ANN001
+    migrated_db, db_settings
+) -> None:
+    """A real run job keeps ``rows_written`` and ``values_by_method`` on its partitions (the job's
+    ``progress`` JSON has neither; ``GET /jobs/{id}`` sums them): the roll-up, the trend and the
+    Layer 2 card must count them (found by the M5 console walk against the lane stack)."""
+    from dps.reports import summary
+
+    tenant = "r1"
+    s = db.schema_ident()
+    job = await jobs.create_job(
+        tenant_id=tenant, kind=JobKind.run, phase=JobPhase.prepare, mode="obfuscate", spec={}
+    )
+    async with db.acquire(tenant) as conn:
+        await conn.execute(
+            f"INSERT INTO {s}.dps_connection (id, tenant_id, name, engine, params) "
+            "VALUES ('conn_r1', $1, 'bank-pg', 'postgres', '{}'::jsonb)",
+            tenant,
+        )
+        await conn.execute(
+            f"UPDATE {s}.dps_job SET state = 'succeeded', finished_at = now(), "
+            "connection_id = 'conn_r1', progress = '{\"outcome\": \"succeeded\"}'::jsonb "
+            "WHERE id = $1",
+            job.id,
+        )
+        for no in range(2):
+            await conn.execute(
+                f"INSERT INTO {s}.dps_job_partition (job_id, tenant_id, partition_no, state, "
+                "rows_written, values_by_method, finished_at) "
+                "VALUES ($1, $2, $3, 'done', 250, $4::jsonb, now())",
+                job.id,
+                tenant,
+                no,
+                {"fpe_digits": 200, "email": 100, "keep": 250},
+            )
+    assert await refresh_rollups(tenant, _today(), _today(), settings=db_settings)
+    [run] = [r for r in await _daily(tenant) if r["action"] == "job.run"]
+    assert run["rows_written"] == 500 and run["values_transformed"] == 600
+    out = await summary(tenant, 14, db_settings)
+    assert out.tiles["values_protected"] == 600 and out.trend[-1].obfuscated == 600
+    assert out.layers["conn"]["rows"] == 500
+    assert out.layers["conn"]["by_engine"] == {"postgres": 500}

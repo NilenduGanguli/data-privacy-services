@@ -196,8 +196,10 @@ export interface AuditFilters {
 }
 export interface PostureCheck { id: string; name: string; ok: boolean; detail: string; enforced_at_boot: boolean }
 export interface PostureReport { env: string; enforced: boolean; passed: number; total: number; checked_at: string; checks: PostureCheck[] }
-export interface WorkerRow { worker_id: string; role: string; version: string; online: boolean; busy: boolean; draining: boolean; last_seen: string | null }
-export interface QueueOut { queues: Record<string, unknown>[]; workers: WorkerRow[] }
+/** `busy`: the worker's claimed slots (an int, dps/layers/api/routers/admin.py::_queue). */
+export interface WorkerRow { worker_id: string; role: string; version: string; online: boolean; busy: number; draining: boolean; last_seen: string | null }
+export interface QueueRow { table: 'dps_job' | 'dps_job_partition' | string; state: string; n: number; oldest_s: number }
+export interface QueueOut { queues: QueueRow[]; workers: WorkerRow[] }
 export interface TrendPoint { day: string; obfuscated: number; synthesized: number }
 export interface EntityCount { entity_type: string; findings: number; sensitivity: string }
 export interface JobBrief {

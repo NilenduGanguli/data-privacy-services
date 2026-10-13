@@ -239,6 +239,36 @@ def _seed_audit(a: Admin) -> list[dict[str, Any]]:
     return rows
 
 
+def test_audit_outcome_groups_cover_job_finalize_outcomes(admin) -> None:  # noqa: ANN001
+    """``job.finalize`` rows carry the job's outcome (``succeeded``, ``dry_run``, ``failed``,
+    ``canceled``, ``dead``): the console's OK / Failed / Blocked filters must find them (found by
+    the M5 console walk: "OK" hid every finished job)."""
+    a, root, _ = admin
+    from dps.tenants import TenantSpec, create_tenant
+
+    a.call(create_tenant, TenantSpec(tenant_id="a"), ROOT, a.settings)
+    now = datetime.now(UTC)
+    outcomes = ["succeeded", "dry_run", "failed", "dead", "canceled", "replayed"]
+    a.call(
+        _insert_audit,
+        [
+            {"ts": now - timedelta(seconds=i), "tenant_id": "a", "action": "job.finalize",
+             "outcome": o, "job_id": f"j_{i:02d}", "counts": {}}
+            for i, o in enumerate(outcomes)
+        ],
+    )  # fmt: skip
+    hdr = {**root, "X-DPS-Tenant": "a"}
+
+    def found(group: str) -> set[str]:
+        r = a.client.get("/api/v1/admin/audit", params={"outcome": group}, headers=hdr)
+        assert r.status_code == 200, r.text
+        return {i["outcome"] for i in r.json()["items"]}
+
+    assert found("ok") == {"succeeded", "dry_run", "replayed"}
+    assert found("failed") == {"failed", "dead"}
+    assert found("blocked") == {"canceled"}
+
+
 def test_audit_filters_paging_and_tenants(admin) -> None:  # noqa: ANN001
     a, root, _ = admin
     c = a.client

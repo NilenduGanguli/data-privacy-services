@@ -31,7 +31,7 @@ describe('AdminView', () => {
   it('renders the KPI row', () => {
     expect(t).toContain('Active API keys 10 1 disabled · 1 due for rotation');
     expect(t).toContain('Tenants 5 6 jobs running of 15 allowed');
-    expect(t).toContain('Posture checks 10 of 11 pass 1 to fix: Keys rotated within 90 days');
+    expect(t).toContain('Posture checks 10 of 11 pass 1 to fix: API keys rotated within the maximum age');
     expect(t).toContain('Keys stored in clear 0 SHA-256 hashes only · each key shown once');
   });
   it('lists keys with prefixes, scopes, rotation chips and actions', () => {

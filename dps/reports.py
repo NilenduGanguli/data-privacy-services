@@ -77,7 +77,8 @@ SELECT j.tenant_id, (j.finished_at AT TIME ZONE 'UTC')::date,
        CASE WHEN j.kind = 'scan' THEN 'ui' ELSE 'conn' END, 'job.' || j.kind, coalesce(j.mode, '-'),
        j.state, count(*), coalesce(sum(v.n), 0),
        coalesce(sum(CASE WHEN jsonb_typeof(j.progress->'rows_written') = 'number'
-                         THEN (j.progress->>'rows_written')::numeric::bigint END), 0),
+                         THEN (j.progress->>'rows_written')::numeric::bigint
+                         ELSE pa.rows_written END), 0),
        coalesce(sum(CASE WHEN jsonb_typeof(j.progress->'pages') = 'number'
                          THEN (j.progress->>'pages')::numeric::bigint END), 0),
        coalesce(sum(CASE WHEN jsonb_typeof(j.progress->'fields') = 'number'
@@ -87,9 +88,15 @@ SELECT j.tenant_id, (j.finished_at AT TIME ZONE 'UTC')::date,
        __JOB_LLM(calls)__, __JOB_LLM(raw_values)__, __JOB_LLM(blocked)__
 FROM __S__.dps_job j
 LEFT JOIN LATERAL (
+  SELECT sum(p.rows_written)::bigint AS rows_written,
+         __S__.dps_jsonb_sum(p.values_by_method) AS values_by_method
+  FROM __S__.dps_job_partition p WHERE p.job_id = j.id AND p.tenant_id = j.tenant_id) pa ON true
+LEFT JOIN LATERAL (
   SELECT sum(e.value::bigint) AS n
   FROM jsonb_each_text(CASE WHEN jsonb_typeof(j.progress->'values_by_method') = 'object'
-                            THEN j.progress->'values_by_method' ELSE '{}'::jsonb END) e
+                            THEN j.progress->'values_by_method'
+                            WHEN jsonb_typeof(pa.values_by_method) = 'object'
+                            THEN pa.values_by_method ELSE '{}'::jsonb END) e
   WHERE e.key <> 'keep' AND e.key NOT LIKE '%\_resample' AND e.key NOT LIKE '%:%'
     AND e.value ~ '__COUNT__') v ON true
 WHERE j.tenant_id = $1 AND j.kind IN ('run', 'discover', 'scan') AND j.finished_at IS NOT NULL
@@ -435,7 +442,9 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
         )
         engines = await conn.fetch(
             f"SELECT c.engine, coalesce(sum(CASE WHEN jsonb_typeof(j.progress->'rows_written') = "
-            "'number' THEN (j.progress->>'rows_written')::numeric::bigint END), 0)::bigint AS n "
+            "'number' THEN (j.progress->>'rows_written')::numeric::bigint "
+            f"ELSE (SELECT sum(p.rows_written) FROM {s}.dps_job_partition p "
+            "WHERE p.job_id = j.id AND p.tenant_id = j.tenant_id) END), 0)::bigint AS n "
             f"FROM {s}.dps_job j JOIN {s}.dps_connection c ON c.id = j.connection_id "
             "WHERE j.tenant_id = $1 AND j.kind = 'run' AND j.finished_at >= $2 GROUP BY c.engine",
             tenant_id,

@@ -12,7 +12,7 @@ import { TenantsTable } from '../components/TenantsTable';
 import { useAuth } from '../hooks/useAuth';
 import { useSettings } from '../hooks/useSettings';
 import {
-  callerKey, configExport, createKeyError, healthTiles, hostRows, keyKpis, maxKeyAge, rotateWarning, whoMayWrite, type HostRow,
+  callerKey, configExport, createKeyError, healthTiles, hostRows, keyKpis, rotationRule, rotateWarning, whoMayWrite, type HostRow,
 } from '../lib/admin';
 import { api, ApiError, errorText, type Download } from '../lib/api';
 import { count, relative } from '../lib/format';
@@ -83,8 +83,8 @@ function ConnectionsCard({ connections, keys }: { connections: Connection[]; key
 
 /** Admin (mockup 11) as a view: data and actions in; dialogs and one-time keys in local state. */
 export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions }): JSX.Element {
-  const maxAge = maxKeyAge(d.posture);
-  const kpis = keyKpis(d.keys, maxAge);
+  const rule = rotationRule(d.posture);
+  const kpis = keyKpis(d.keys, rule);
   const me = callerKey(d.keys, d.apiKey);
   const tenantIds = useMemo(() => [...new Set([...d.tenants.map((t) => t.tenant_id), ...(d.tenant ? [d.tenant] : [])])], [d.tenants, d.tenant]);
   const hosts = useMemo(() => hostRows(d.tenants, d.connections), [d.tenants, d.connections]);
@@ -189,7 +189,7 @@ export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions
             <Kpi zero label="Keys stored in clear" value={0} delta="SHA-256 hashes only · each key shown once" />
           </div>
 
-          <KeysTable keys={d.keys} now={d.now} maxAge={maxAge} onRotate={(key) => setRotate({ key, grace: 24, busy: false, error: null })}
+          <KeysTable keys={d.keys} now={d.now} rule={rule} onRotate={(key) => setRotate({ key, grace: 24, busy: false, error: null })}
             onDisable={(key) => setToggle({ key, busy: false, error: null })} onEnable={(key) => setToggle({ key, busy: false, error: null })} />
           {rotatedCard}
 

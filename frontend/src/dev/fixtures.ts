@@ -204,26 +204,27 @@ export function tenants(now: Date): TenantView[] {
 export function posture(now: Date): PostureReport {
   const c = (id: string, name: string, ok: boolean, detail: string, boot = false): PostureReport['checks'][number] => ({ id, name, ok, detail, enforced_at_boot: boot });
   const checks = [
-    c('keys_rotated', 'Keys rotated within 90 days', false, 'ledger-recon-batch is 113 days old and never expires', false),
-    c('auth_enabled', 'Authentication on', true, 'DPS_AUTH_ENABLED=true · every /api/v1 call needs X-API-KEY', true),
-    c('bootstrap_key_absent', 'Bootstrap key absent', true, 'DPS_BOOTSTRAP_API_KEY is unset', true),
-    c('api_keys_from_file', 'API keys from a mounted secret', true, 'database keys · hashes only', true),
-    c('tls_egress', 'TLS on egress', true, 'https only · org CA bundle DPS_SSL_CERT_FILE', true),
-    c('audit_strict', 'Audit strict', true, 'append-only, partitioned · a failed write fails the request', true),
-    c('leakage_strict', 'Leakage verification strict', true, 'leakage_check: strict in every active policy', true),
-    c('llm_not_stub', 'LLM provider is not the stub', true, 'stellar · placeholder text only'),
-    c('kek_from_secret', 'Job KEK from the secret store', true, 'DPS_JOB_KEK_FILE · 32 bytes', true),
-    c('rls_posture', 'Row-level security forced', true, 'every tenant table: RLS enabled and forced'),
-    c('migrations_verified', 'Migrations verified', true, '44 applied · checksums match'),
+    // ids, names and the boot flags as dps/posture.py CHECKS builds them (failing first in the view)
+    c('auth_enabled', 'API authentication is on', true, 'DPS_AUTH_ENABLED=true · every /api/v1 call needs X-API-KEY', true),
+    c('bootstrap_key_absent', 'No bootstrap API key', true, 'DPS_BOOTSTRAP_API_KEY is unset', true),
+    c('api_keys_from_file', 'API keys from the database or a mounted file', true, 'database keys · hashes only', true),
+    c('tls_egress', 'TLS-only egress with the organisation CA bundle', true, 'https only · org CA bundle DPS_SSL_CERT_FILE', true),
+    c('audit_strict', 'Audit on and strict', true, 'append-only, partitioned · a failed write fails the request', true),
+    c('leakage_strict', 'Strict leakage verification everywhere', true, 'leakage_check: strict in every active policy', true),
+    c('llm_not_stub', 'A real (or no) LLM provider', true, 'stellar · placeholder text only', true),
+    c('kek_from_secret', 'Job KEK from a mounted secret (32 bytes)', true, 'DPS_JOB_KEK_FILE · 32 bytes', true),
+    c('keys_rotated', 'API keys rotated within the maximum age', false, 'ledger-recon-batch is 113 days old', false),
+    c('rls_posture', 'Row-level security on every tenant table', true, 'FORCE + tenant_isolation', true),
+    c('migrations_verified', 'Database migrations verified', true, '44 applied · checksums match'),
   ];
   return { env: 'production', enforced: true, passed: checks.filter((x) => x.ok).length, total: checks.length, checked_at: ago(now, 120_000), checks };
 }
 
 export function queue(now: Date): QueueOut {
   const w = (n: number, role: string, busy: boolean, draining = false): QueueOut['workers'][number] =>
-    ({ worker_id: `w-${String(n).padStart(2, '0')}`, role, version: '0.5.0', online: true, busy, draining, last_seen: ago(now, 4_000) });
+    ({ worker_id: `w-${String(n).padStart(2, '0')}`, role, version: '0.5.0', online: true, busy: busy ? 2 : 0, draining, last_seen: ago(now, 4_000) });
   return {
-    queues: [{ queue: 'run', waiting: 23, oldest_waiting_s: 41 }, { queue: 'scan', waiting: 1, oldest_waiting_s: 3 }],
+    queues: [{ table: 'dps_job', state: 'running', n: 5, oldest_s: 41 }, { table: 'dps_job_partition', state: 'queued', n: 23, oldest_s: 41 }],
     workers: [w(1, 'worker', true), w(2, 'worker', true), w(3, 'worker', true), w(4, 'worker', true), w(5, 'worker', true), w(6, 'worker', true),
       w(7, 'worker', false, true), w(8, 'browser-worker', true), w(9, 'browser-worker', false)],
   };

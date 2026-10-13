@@ -256,11 +256,13 @@ export function route(s: FixtureState, method: string, url: URL, rawBody: BodyIn
     if (parts[1] === 'keys' && parts.length === 2 && method === 'GET') return respond(200, { items: s.keys, next_cursor: null });
     if (parts[1] === 'keys' && parts.length === 2 && method === 'POST') {
       const name = String(body.name ?? '');
-      if (!/^[a-z0-9][a-z0-9-]{2,62}$/.test(name)) return refuse(422, 'invalid_name', 'use 3–63 lowercase letters, digits and dashes');
-      if (s.keys.some((k) => k.name === name)) return refuse(409, 'key_name_exists', 'a key with this name exists');
+      // dps/auth_db.py: names are not unique (a rotation keeps the name); refusals as built
+      if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(name)) return refuse(422, 'invalid_name', 'name must match ^[a-z0-9][a-z0-9-]{1,62}$');
       const exp = Number(body.expires_in_days);
       if (!(exp >= 1 && exp <= 365)) return refuse(422, 'invalid_expiry', 'expiry must be 1 to 365 days');
-      if (!Array.isArray(body.scopes) || body.scopes.length === 0) return refuse(422, 'invalid_scopes', 'choose at least one scope');
+      if (!Array.isArray(body.scopes) || body.scopes.length === 0 || !Array.isArray(body.tenant_ids) || body.tenant_ids.length === 0) {
+        return refuse(422, 'invalid_grant', 'a key needs at least one tenant and one scope');
+      }
       const raw = rawKey();
       s.seq += 1;
       const record: ApiKeyView = { id: `k_new${s.seq}`, name, key_prefix: raw.slice(0, 8), tenant_ids: body.tenant_ids, scopes: body.scopes, source: 'db', status: 'active',
@@ -274,17 +276,25 @@ export function route(s: FixtureState, method: string, url: URL, rawBody: BodyIn
     if (parts[1] === 'keys' && parts[2]) {
       const key = s.keys.find((k) => k.id === parts[2]);
       if (!key) return refuse(404, 'key_not_found', 'no such key');
-      if (key.source === 'static') return refuse(409, 'static_key', 'environment keys are managed in their secret file');
-      if (parts[3] === 'disable') { Object.assign(key, { status: 'disabled', disabled_at: new Date().toISOString() }); return respond(200, key); }
-      if (parts[3] === 'enable') { Object.assign(key, { status: 'active', disabled_at: null }); return respond(200, key); }
+      if (key.source === 'static') return refuse(404, 'key_not_found', 'key not found');
+      if (parts[3] === 'disable') { Object.assign(key, { status: 'disabled', disabled_at: key.disabled_at ?? new Date().toISOString() }); return respond(200, key); }
+      if (parts[3] === 'enable') {
+        if (key.rotated_at) return refuse(409, 'key_rotated', 'a rotated key cannot be re-enabled');
+        if (key.expires_at && Date.parse(key.expires_at) <= Date.now()) return refuse(409, 'key_expired', 'an expired key cannot be re-enabled');
+        Object.assign(key, { status: 'active', disabled_at: null }); return respond(200, key);
+      }
       if (parts[3] === 'rotate') {
+        if (key.rotated_at) return refuse(409, 'key_rotated', 'key was already rotated');
+        if (key.status !== 'active') return refuse(404, 'key_not_found', 'key not found, disabled or expired');
         const grace = Number(body.grace_hours ?? 24);
         if (!(grace >= 0 && grace <= 168)) return refuse(422, 'invalid_grace', 'grace must be 0 to 168 hours');
         const raw = rawKey();
         s.seq += 1;
         const fresh: ApiKeyView = { ...clone(key), id: `k_rot${s.seq}`, key_prefix: raw.slice(0, 8), created_at: new Date().toISOString(), last_used_at: null, rotated_from: key.id,
           rotated_at: null, age_days: 0, expires_at: key.expires_at ?? new Date(Date.now() + 90 * DAY).toISOString() };
-        Object.assign(key, { rotated_at: new Date().toISOString(), expires_at: new Date(Date.now() + grace * 3_600_000).toISOString(), status: grace === 0 ? 'expired' : 'active' });
+        // dps/auth_db.py::rotate_key: grace 0 disables the old key now; otherwise it expires after the grace
+        const nowIso = new Date().toISOString();
+        Object.assign(key, grace === 0 ? { rotated_at: nowIso, disabled_at: nowIso, status: 'disabled' } : { rotated_at: nowIso, expires_at: new Date(Date.now() + grace * 3_600_000).toISOString(), status: 'active' });
         s.keys = [fresh, ...s.keys];
         return respond(201, { new: { key: raw, record: fresh }, old: key }, { 'cache-control': 'no-store' });
       }

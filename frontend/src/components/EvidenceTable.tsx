@@ -1,8 +1,8 @@
 import { Link } from 'react-router-dom';
 import type { Download } from '../lib/api';
-import { count, utc, utcDay } from '../lib/format';
+import { count, plural, utc, utcDay } from '../lib/format';
 import { shortId } from '../lib/jobs';
-import { LAYER_LABEL, verificationChip, type EvidenceRow } from '../lib/reports';
+import { LAYER_LABEL, rollupRoute, verificationChip, type EvidenceRow } from '../lib/reports';
 import type { ApiRollup, EvidenceItem } from '../lib/types';
 import { DownloadButton } from './DownloadButton';
 
@@ -49,8 +49,8 @@ export function EvidenceTable({ rows, downloads, hasOlder, busy, onOlder, total 
             const label = `API roll-up for ${utcDay(r.day)}`;
             return (
               <tr key={`r-${r.day}-${r.action}`}>
-                <td className="sub" data-l="Job or request"><span className="mono">POST /api/v1/{r.action}</span> · daily roll-up, {utcDay(r.day)}
-                  <span className="s2">{count(r.calls)} calls · {count(r.findings)} findings · {count(r.values)} values</span></td>
+                <td className="sub" data-l="Job or request"><span className="mono">{rollupRoute(r.action)}</span> · daily roll-up, {utcDay(r.day)}{row.open ? ' · open until 00:05 UTC' : ''}
+                  <span className="s2">{plural(r.calls, 'call')} · {plural(r.findings, 'finding')} · {plural(r.values, 'value')}</span></td>
                 <td data-l="Layer">API</td>
                 <td data-l="Mode">{r.action === 'obfuscate' || r.action === 'synthesize' ? <span className={`chip ${r.action === 'synthesize' ? 'violet' : 'teal'}`}>{r.action}</span> : <span className="faint">{r.action}</span>}</td>
                 <td className="faint" data-l="Policy">—</td>

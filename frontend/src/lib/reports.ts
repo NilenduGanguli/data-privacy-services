@@ -87,20 +87,37 @@ export function failedSweepText(f: FailedSweep): { where: string; what: string }
 
 export type EvidenceRow =
   | { kind: 'pack'; item: EvidenceItem; created_at: string }
-  | { kind: 'rollup'; rollup: ApiRollup; created_at: string };
+  | { kind: 'rollup'; rollup: ApiRollup; created_at: string; open: boolean };
 
 /** Packs and daily API roll-ups in one list, newest first. A roll-up is sealed at 00:05 UTC the
- *  day after; it belongs to the API layer and fails when a sweep of that day failed. */
-export function evidenceRows(items: EvidenceItem[], rollups: ApiRollup[], f: ReportFilters): EvidenceRow[] {
+ *  day after; until then (today's, which the API refreshes live) it is dated `now` and `open`. It
+ *  belongs to the API layer and fails when a sweep of that day failed. */
+export function evidenceRows(items: EvidenceItem[], rollups: ApiRollup[], f: ReportFilters, now: Date = new Date()): EvidenceRow[] {
   const q = f.q.trim().toLowerCase();
   const packs: EvidenceRow[] = f.layer === 'api' ? [] : items.map((item) => ({ kind: 'pack', item, created_at: item.created_at }));
   const rolls: EvidenceRow[] = f.layer === 'all' || f.layer === 'api'
     ? rollups
       .filter((r) => f.outcome === 'all' || (f.outcome === 'ok' ? r.verify_failed === 0 : f.outcome === 'failed' ? r.verify_failed > 0 : false))
       .filter((r) => !q || r.action.toLowerCase().includes(q) || r.day.includes(q))
-      .map((rollup) => ({ kind: 'rollup', rollup, created_at: new Date(Date.parse(`${rollup.day}T00:05:00Z`) + 86_400_000).toISOString() }))
+      .map((rollup) => {
+        const sealed = Date.parse(`${rollup.day}T00:05:00Z`) + 86_400_000;
+        const open = sealed > now.getTime();
+        return { kind: 'rollup', rollup, open, created_at: new Date(open ? now.getTime() : sealed).toISOString() };
+      })
     : [];
   return [...packs, ...rolls].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+}
+
+/** The Layer 1 route behind a roll-up's audit action (`document.detect` → `/documents/detect`,
+ *  `schema.synthesize` → `/schema/synthesize`, `plan[:mode]` → `/policies/plan`). */
+export function rollupRoute(action: string): string {
+  if (action === 'artefact.read') return 'GET /api/v1/artefacts/{id}';
+  if (action === 'external.detokenize') return 'POST /api/v1/reveal · bank detokenizer';
+  const [head, ...rest] = action.split(/[.:]/);
+  if (head === 'plan') return 'POST /api/v1/policies/plan';
+  if (head === 'document' && rest.length) return `POST /api/v1/documents/${rest.join('/')}`;
+  if (head === 'schema' && rest.length) return `POST /api/v1/schema/${rest.join('/')}`;
+  return `POST /api/v1/${action}`;
 }
 
 export interface Chip { tone: 'emerald' | 'rose' | 'amber' | 'slate' | 'teal' | 'violet'; text: string }
@@ -139,7 +156,7 @@ const AMBER = new Set(['rejected', 'bad_request']);
 
 /** Outcome chip tone: emerald ok, rose failed, amber refused input, slate blocked by design. */
 export function auditOutcomeTone(outcome: string): Chip['tone'] {
-  if (outcome === 'ok' || outcome === 'replayed') return 'emerald';
+  if (outcome === 'ok' || outcome === 'replayed' || outcome === 'succeeded' || outcome === 'dry_run') return 'emerald';
   if (FAILED.has(outcome)) return 'rose';
   if (outcome === 'denied' || outcome === 'forbidden') return 'rose';
   return AMBER.has(outcome) ? 'amber' : 'slate';

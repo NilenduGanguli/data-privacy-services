@@ -29,7 +29,7 @@ export function CreateKeyCard({ tenants, defaultTenant, onCreate, created, onCre
     e.preventDefault();
     setErr(null); setNameErr(null);
     if (!KEY_NAME.test(name)) { setNameErr(createKeyError('invalid_name', '')); return; }
-    if (!scopes.size) { setErr(createKeyError('invalid_scopes', '')); return; }
+    if (!scopes.size) { setErr(createKeyError('invalid_grant', '')); return; }
     setBusy(true);
     try {
       const out = await onCreate({ name, tenant_ids: [chosen], scopes: SCOPES.filter((s) => scopes.has(s)), expires_in_days: expiry });
@@ -37,7 +37,7 @@ export function CreateKeyCard({ tenants, defaultTenant, onCreate, created, onCre
       setName('');
     } catch (x) {
       const msg = x instanceof ApiError ? createKeyError(x.code, x.message) : 'The key could not be created.';
-      if (x instanceof ApiError && (x.code === 'invalid_name' || x.code === 'key_name_exists')) setNameErr(msg); else setErr(msg);
+      if (x instanceof ApiError && x.code === 'invalid_name') setNameErr(msg); else setErr(msg);
     } finally { setBusy(false); }
   }
 

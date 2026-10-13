@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import type { ApiRollup } from './types';
 import * as fx from '../dev/fixtures';
 import {
-  auditFilters, auditOutcomeTone, evidenceRows, fromSummary, failedSweepText, filtersToParams, methodsSummary, parseFilters, policyLabel, sweepSeries,
+  auditFilters, auditOutcomeTone, evidenceRows, rollupRoute, fromSummary, failedSweepText, filtersToParams, methodsSummary, parseFilters, policyLabel, sweepSeries,
   verificationChip, type EvidenceRow,
 } from './reports';
 
@@ -42,6 +43,21 @@ describe('sweeps', () => {
   });
 });
 
+describe('roll-up routes', () => {
+  it('names the route an audit action of Layer 1 was called on (dps/layers/api/routers)', () => {
+    expect(rollupRoute('obfuscate')).toBe('POST /api/v1/obfuscate');
+    expect(rollupRoute('reveal')).toBe('POST /api/v1/reveal');
+    expect(rollupRoute('document.detect')).toBe('POST /api/v1/documents/detect');
+    expect(rollupRoute('schema.synthesize')).toBe('POST /api/v1/schema/synthesize');
+    expect(rollupRoute('schema.generator-spec')).toBe('POST /api/v1/schema/generator-spec');
+    expect(rollupRoute('plan')).toBe('POST /api/v1/policies/plan');
+    expect(rollupRoute('plan:synthesize')).toBe('POST /api/v1/policies/plan');
+    // API-layer actions that are not a POST of their own name (dps/layers/api/routers/artefacts.py, common.py)
+    expect(rollupRoute('artefact.read')).toBe('GET /api/v1/artefacts/{id}');
+    expect(rollupRoute('external.detokenize')).toBe('POST /api/v1/reveal · bank detokenizer');
+  });
+});
+
 describe('evidence rows', () => {
   const items = fx.evidenceItems(NOW);
   const rollups = fx.apiRollups(NOW, 14);
@@ -51,6 +67,15 @@ describe('evidence rows', () => {
     const times = rows.map((r) => new Date(r.created_at).getTime());
     expect([...times].sort((a, b) => b - a)).toEqual(times);
     expect(rows.filter((r) => r.kind === 'rollup')[0].created_at).toBe('2026-10-13T00:05:00.000Z');
+  });
+  it("dates today's roll-up now and marks it open (the API refreshes it live; it seals at 00:05 UTC tomorrow)", () => {
+    const now = new Date('2026-10-13T15:56:00Z');
+    const today: ApiRollup = { day: '2026-10-13', action: 'detect', calls: 1, findings: 8, values: 0, verify_failed: 0 };
+    const yesterday: ApiRollup = { ...today, day: '2026-10-12' };
+    const rows = evidenceRows([], [today, yesterday], { days: 14, layer: 'all', outcome: 'all', q: '', scope: 'tenant' }, now);
+    expect(rows.map((r) => [r.created_at, r.kind === 'rollup' && r.open])).toEqual([
+      ['2026-10-13T15:56:00.000Z', true], ['2026-10-13T00:05:00.000Z', false],
+    ]);
   });
   it('filters roll-ups by layer, outcome and search', () => {
     expect(evidenceRows(items, rollups, { days: 14, layer: 'conn', outcome: 'all', q: '', scope: 'tenant' }).some((r) => r.kind === 'rollup')).toBe(false);
@@ -63,7 +88,7 @@ describe('evidence rows', () => {
     expect(verificationChip({ kind: 'pack', item: byId.ev_01K7ZQS7B2, created_at: '' })).toEqual({ tone: 'emerald', text: 'passed · 0 exact rows' });
     expect(verificationChip({ kind: 'pack', item: byId.ev_01K6MXSC88, created_at: '' })).toEqual({ tone: 'emerald', text: 'passed · 0 POSTs left' });
     expect(verificationChip({ kind: 'pack', item: byId.ev_01K7F2E5D5, created_at: '' })).toEqual({ tone: 'rose', text: 'failed · 2 leaks caught' });
-    expect(verificationChip({ kind: 'rollup', rollup: rollups[2], created_at: '' })).toEqual({ tone: 'rose', text: '1 failed · fell back' });
+    expect(verificationChip({ kind: 'rollup', rollup: rollups[2], created_at: '', open: false })).toEqual({ tone: 'rose', text: '1 failed · fell back' });
   });
 });
 
@@ -106,6 +131,12 @@ describe('audit helpers', () => {
     expect(auditOutcomeTone('leakage')).toBe('rose');
     expect(auditOutcomeTone('rejected')).toBe('amber');
     expect(auditOutcomeTone('blocked')).toBe('slate');
+    // job.finalize rows carry the job's outcome (dps/layers/connectors/jobs_run.py), grouped as
+    // dps/audit_query.py OUTCOME_GROUPS does: ok, failed, blocked
+    expect(auditOutcomeTone('succeeded')).toBe('emerald');
+    expect(auditOutcomeTone('dry_run')).toBe('emerald');
+    expect(auditOutcomeTone('dead')).toBe('rose');
+    expect(auditOutcomeTone('canceled')).toBe('slate');
     expect(methodsSummary({ keep: 1, fpe_digits: 5, email: 2 })).toEqual({ first: 'fpe_digits', more: 2 });
     expect(methodsSummary({})).toBeNull();
     expect(policyLabel('gdpr-pseudonymise@v3')).toBe('gdpr-pseudonymise v3');

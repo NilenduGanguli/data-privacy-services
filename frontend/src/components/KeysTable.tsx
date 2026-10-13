@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { PRIVILEGED, SCOPES, keyMeta, rotationDue, tenantsLabel } from '../lib/admin';
+import { SCOPES, keyActions, scopeChips, keyMeta, rotationDue, tenantsLabel, type RotationRule } from '../lib/admin';
 import { relative, utcDate } from '../lib/format';
 import type { ApiKeyView } from '../lib/types';
 
 /** API keys (mockup 11): prefixes only, scopes, last use, expiry and rotation due, actions. */
-export function KeysTable({ keys, now, maxAge, onRotate, onDisable, onEnable }: {
-  keys: ApiKeyView[]; now: Date; maxAge: number; onRotate: (k: ApiKeyView) => void; onDisable: (k: ApiKeyView) => void; onEnable: (k: ApiKeyView) => void;
+export function KeysTable({ keys, now, rule, onRotate, onDisable, onEnable }: {
+  keys: ApiKeyView[]; now: Date; rule: RotationRule; onRotate: (k: ApiKeyView) => void; onDisable: (k: ApiKeyView) => void; onEnable: (k: ApiKeyView) => void;
 }): JSX.Element {
   const [filter, setFilter] = useState('');
   const q = filter.trim().toLowerCase();
@@ -18,22 +18,23 @@ export function KeysTable({ keys, now, maxAge, onRotate, onDisable, onEnable }: 
       <div className="tbl-wrap"><table className="tbl stack" id="keysTbl"><thead><tr><th>Name</th><th>Tenants</th><th>Scopes</th><th>Created</th><th>Last used</th><th>Expires</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead><tbody>
         {shown.map((k) => {
           const t = tenantsLabel(k.tenant_ids);
-          const due = rotationDue(k, maxAge);
+          const due = rotationDue(k, rule);
+          const acts = keyActions(k, now);
           return (
             <tr key={k.id} className={k.status === 'active' ? '' : 'off'}>
               <td data-l="Name"><div className="kname">{k.name}</div><div className="kpref">{keyMeta(k, now)}</div></td>
               <td className="mono nw" data-l="Tenants">{t.main}{t.more && <div className="sub">{t.more}</div>}</td>
-              <td data-l="Scopes"><div className="scopes">{k.scopes.map((s) => <span key={s} className={`chip ${PRIVILEGED.has(s) ? 'amber' : 'slate'}`}>{s}</span>)}</div></td>
+              <td data-l="Scopes"><div className="scopes">{scopeChips(k.scopes).map((c) => <span key={c.scope} className={`chip ${c.privileged ? 'amber' : 'slate'}`}>{c.scope}</span>)}</div></td>
               <td className="dt" data-l="Created">{k.source === 'static' ? 'env' : utcDate(k.created_at)}</td>
               <td className="dt" data-l="Last used">{relative(k.last_used_at, now)}</td>
               <td data-l="Expires"><span className="dt">{k.expires_at ? utcDate(k.expires_at) : 'never'}</span>{due && <div style={{ marginTop: 4 }}><span className="chip amber">rotate · {k.age_days} days</span></div>}</td>
               <td className="acts-td" data-l=""><div className="acts">
-                {k.source === 'static' ? <span className="faint sm" title="Environment keys live in DPS_API_KEYS_FILE; rotate them there.">env</span>
-                  : k.status === 'disabled' ? <button className="btn btn-sm" type="button" onClick={() => onEnable(k)}>Re-enable</button>
-                    : <>
-                      <button className="btn btn-sm" type="button" onClick={() => onRotate(k)} aria-label={`Rotate ${k.name}`}>Rotate</button>
-                      {k.status === 'active' && <button className="btn btn-sm btn-ghost danger" type="button" onClick={() => onDisable(k)} aria-label={`Disable ${k.name}`}>Disable</button>}
-                    </>}
+                {k.source === 'static' ? <span className="faint sm" title="Environment keys live in DPS_API_KEYS_FILE; rotate them there.">env</span> : <>
+                  {acts.includes('enable') && <button className="btn btn-sm" type="button" onClick={() => onEnable(k)} aria-label={`Re-enable ${k.name}`}>Re-enable</button>}
+                  {acts.includes('rotate') && <button className="btn btn-sm" type="button" onClick={() => onRotate(k)} aria-label={`Rotate ${k.name}`}>Rotate</button>}
+                  {acts.includes('disable') && <button className="btn btn-sm btn-ghost danger" type="button" onClick={() => onDisable(k)} aria-label={`Disable ${k.name}`}>Disable</button>}
+                  {!acts.length && <span className="faint sm">{k.rotated_at ? 'rotated' : 'expired'}</span>}
+                </>}
               </div></td>
             </tr>
           );

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fx from '../dev/fixtures';
 import { diffBodies, flatten } from '../dev/fixtureServer';
 import {
-  addDeclaredField, changedEntities, declaredSince, diffLines, parseParam, removeTreatment, setTreatment, simulateFpe, splitPath, toPresidioYaml,
+  addDeclaredField, changedEntities, isTenantPolicy, planPolicy, declaredSince, diffLines, parseParam, removeTreatment, setTreatment, simulateFpe, splitPath, toPresidioYaml,
   upsertRecognizer,
 } from './policyEdit';
 import type { PlanRow } from './types';
@@ -188,5 +188,20 @@ describe('plan simulation and declared-since', () => {
     expect(since['CUSTOMER_ID']).toBe('v2');
     expect(since['CRM.CUSTOMERS.RISK_SCORE']).toBe('v3');
     expect(since['LOANS.APPLICANTS.EMPLOYER_NAME']).toBe('draft v4');
+  });
+});
+
+describe('wiring to the policy store as built (dps/layers/api/routers/policy_store.py)', () => {
+  const tenant = [{ name: 'retail-banking-apac', base_preset: 'gdpr-pseudonymise', active_version: 2, active_hash: 'h', draft: false, draft_changes: 0, published_at: null, published_by: null, jobs: 0 }];
+  it('asks GET /policies/{name} only for a tenant policy (a preset answers 404 policy_not_found)', () => {
+    expect(isTenantPolicy('retail-banking-apac', true, tenant)).toBe(true);
+    expect(isTenantPolicy('gdpr-pseudonymise', true, tenant)).toBe(false);
+    expect(isTenantPolicy('retail-banking-apac', false, tenant)).toBe(false);
+  });
+  it('plans with the shown body, else @name for a tenant policy (dps/layers/api/policy_refs.py), else the preset name', () => {
+    const body = { name: 'retail-banking-apac', version: 2 };
+    expect(planPolicy('retail-banking-apac', body, true)).toBe(body);
+    expect(planPolicy('retail-banking-apac', null, true)).toBe('@retail-banking-apac');
+    expect(planPolicy('gdpr-pseudonymise', null, false)).toBe('gdpr-pseudonymise');
   });
 });

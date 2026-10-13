@@ -210,14 +210,16 @@ def _s() -> str:
 async def _job_counts(
     conn: Any, tenant_id: str
 ) -> tuple[dict[str, int], dict[tuple[str, int], int]]:
-    """Run jobs per preset name (string policies) and per stored ``(name, version)``."""
+    """Run jobs per preset name (string policies) and per stored ``(name, version)``. A run
+    without ``spec.policy`` runs its snapshot's policy (``plan.policy_name``)."""
     rows = await conn.fetch(
         "SELECT CASE WHEN jsonb_typeof(spec->'policy') = 'string' THEN spec->>'policy' "
-        "ELSE spec->'policy'->>'name' END AS name, "
+        "WHEN jsonb_typeof(spec->'policy') = 'object' THEN spec->'policy'->>'name' "
+        "WHEN jsonb_typeof(plan) = 'object' AND jsonb_typeof(plan->'policy_name') = 'string' "
+        "THEN plan->>'policy_name' END AS name, "
         "CASE WHEN jsonb_typeof(spec->'policy'->'version') = 'number' "
         "THEN (spec->'policy'->>'version')::numeric::int END AS version, count(*)::int AS n "
-        f"FROM {_s()}.dps_job WHERE tenant_id = $1 AND kind = 'run' "
-        "AND jsonb_typeof(spec->'policy') IN ('string', 'object') GROUP BY 1, 2",
+        f"FROM {_s()}.dps_job WHERE tenant_id = $1 AND kind = 'run' GROUP BY 1, 2",
         tenant_id,
     )
     presets: dict[str, int] = {}

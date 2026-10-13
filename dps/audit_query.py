@@ -24,7 +24,8 @@ from dps import db
 
 LAYERS = ("api", "conn", "ui", "admin")
 OUTCOME_GROUPS: dict[str, list[str]] = {
-    "ok": ["ok"],
+    # job.finalize rows carry the job's outcome; an idempotent replay answered ok
+    "ok": ["ok", "succeeded", "dry_run", "replayed"],
     "failed": ["error", "failed", "verification_failed", "leakage", "dead", "upstream_error"],
     "blocked": ["rejected", "bad_request", "denied", "blocked", "forbidden", "canceled"],
 }
