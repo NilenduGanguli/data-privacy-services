@@ -851,3 +851,35 @@ Red as the plan foresaw for documents, plus one Oracle gap; each fix landed with
   `[*]` over 3/0/absent arrays, a flat document field, unclassified detect/keep/redact (and an unknown
   field inside an array element), unknown plan paths refused, leakage in an array element fails
   closed, and the TIMESTAMP(9) case.
+
+## Task 14 — the conformance suite on Oracle and MongoDB
+
+- **Harness interface as built** (plan: `create/fetch/ledger_rows/drop/connector` and an engine
+  registration list in `conformance.py`). M2 built the suite as a `ConformanceEnv` protocol
+  (`engine`, `source`, `rw`, `make_table`, `insert`, `read_all`, `target`, `rejected_selections`) bound
+  per engine by a test module that subclasses `ConnectorConformance` and provides an `env` fixture
+  (`test_conformance_postgres.py`). M3 follows that: `harness_oracle.OracleEnv` +
+  `test_conformance_oracle.py`, `harness_mongo.MongoEnv` + `test_conformance_mongo.py`; there is no
+  registration list to edit.
+- **The suite gained defaulted engine hooks; no assertion changed** (plan: "the suite's tests are not
+  edited", with a `composite_keys` capability flag the plan assumed the suite had). The suite as built
+  hard-coded PostgreSQL's names (`key == ["id"]`, `r["name"]`, `{"id": 1005, …}`), a key-less
+  `key_source == "none"` and a SQL `where` in the log test, which no Oracle (upper-case names, `ROWID`
+  paging) or MongoDB (`_id`, filters) binding can satisfy. `conformance.py` now reads optional env
+  members with PostgreSQL defaults — `names` (logical → physical column), `keyless` (Oracle
+  `(["ROWID"], "rowid")`), `composite_keys` (MongoDB: `False` → the composite paging case skips with
+  a reason and the partition-coverage case uses the text key; the describe case checks the composite
+  key only when it exists) and `equals_selection` (MongoDB: `{"name": value}`) — so the PostgreSQL
+  binding is unchanged and every assertion is the same for all three engines. One assertion was
+  *added*: the log test's bound equality count must be exactly 1 (it was not checked). Contract §12.3
+  records the members.
+- Oracle binding: tables in the session's test owner created and read back by SYSTEM (session
+  `NLS_SORT/NLS_COMP = BINARY` so `read_all` orders like the connector), `SELECT` granted to the
+  read-only login per table (the source connector reads as it, the writer writes as the owner),
+  quoted upper-case names, every table dropped before and after each test (`drop_all`).
+- MongoDB binding: one database per test; `id`/`code` map to `_id`; a key-less collection has
+  document `_id`s; rejected selections are `$where`, `$function`, SQL text (engine mismatch), a bad
+  field name and an empty `$and`.
+- Run on the lane's containers: `tests/connectors/test_conformance_{postgres,oracle,mongo}.py` —
+  29 passed, 1 skipped (MongoDB composite paging, by its capability flag); with
+  `DPS_TEST_REQUIRE_SERVICES=1 pytest -m "oracle or mongo"`: 132 passed, 1 skipped.

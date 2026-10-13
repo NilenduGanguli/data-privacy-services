@@ -12,6 +12,14 @@ partition ranges cover every key exactly once; bad selections are refused before
 ``table`` reload is idempotent; an ``in_place`` batch whose checkpoint was lost is never applied
 twice (the ledger mark wins); an append offset pre-check counts exactly the clashing keys; and
 nothing a connector logs carries a row value.
+
+Engines differ in names, not in promises (M3): a binding may set the optional members of
+:class:`ConformanceEnv` — ``names`` (logical → physical column names: Oracle folds to upper case,
+MongoDB's key is ``_id``), ``keyless`` (what ``describe`` reports for a table without a key:
+Oracle pages it on ``ROWID``), ``composite_keys`` (MongoDB has ``_id`` only; the composite cases then
+use the engine's text key or skip) and ``equals_selection`` (a bound equality filter in the engine's
+selection language). Defaults are PostgreSQL's, so its binding needs none of them. Every assertion
+is the same on every engine.
 """
 
 from __future__ import annotations
@@ -88,6 +96,30 @@ class ConformanceEnv(Protocol):
         """Selections the engine must refuse, with the code each one gets."""
         ...
 
+    # Optional members (read with ``getattr``; defaults in parentheses):
+    # names: dict[str, str]              logical column → physical name ({} = the same names)
+    # keyless: tuple[list[str], str]     describe() of a key-less table (([], "none"))
+    # composite_keys: bool               composite primary keys exist (True)
+    # def equals_selection(column: str, value: str) -> Selection   (SQL ``<column> = :n``)
+
+
+def _n(env: ConformanceEnv, logical: str) -> str:
+    """The engine's name for a logical column of the suite's tables (``id``, ``name`` …)."""
+    names: dict[str, str] = getattr(env, "names", {})
+    return names.get(logical, logical)
+
+
+def _composite(env: ConformanceEnv) -> bool:
+    return bool(getattr(env, "composite_keys", True))
+
+
+def _equals(env: ConformanceEnv, column: str, value: str) -> Selection:
+    make = getattr(env, "equals_selection", None)
+    if make is not None:
+        selection: Selection = make(column, value)
+        return selection
+    return Selection(where=f"{column} = :n", params={"n": value})
+
 
 def sql_rejected_selections() -> list[tuple[Selection, str]]:
     """The SQL engines' cases (PostgreSQL, Oracle): lock, two statements, a denied function, an
@@ -125,12 +157,12 @@ def _mark(job: str, part: int, batch: int, last: Row, shape: TableShape, rows: i
     )
 
 
-def _name_plan(shape: TableShape) -> list[ColumnPlan]:
-    col = shape.column("name")
+def _name_plan(shape: TableShape, name: str) -> list[ColumnPlan]:
+    col = shape.column(name)
     return [
         ColumnPlan(
             path=col.path,
-            name="name",
+            name=name,
             entity_type="PERSON_NAME",
             method=MethodSpec(method="det_token"),
             text_column=False,
@@ -146,17 +178,22 @@ class ConnectorConformance:
 
     async def test_describe_finds_the_key(self, env: ConformanceEnv) -> None:
         single = await env.source.describe(await env.make_table("k_int", key="int", rows=3))
-        assert single.key == ["id"] and single.key_source == "primary_key"
-        assert single.column("id").is_key and not single.column("name").is_key
-        pair = await env.source.describe(await env.make_table("k_pair", key="composite", rows=3))
-        assert pair.key == ["a", "b"] and pair.key_source == "primary_key"
+        assert single.key == [_n(env, "id")] and single.key_source == "primary_key"
+        assert single.column(_n(env, "id")).is_key and not single.column(_n(env, "name")).is_key
+        if _composite(env):
+            pair = await env.source.describe(
+                await env.make_table("k_pair", key="composite", rows=3)
+            )
+            assert pair.key == [_n(env, "a"), _n(env, "b")] and pair.key_source == "primary_key"
         bare = await env.source.describe(await env.make_table("k_none", key="none", rows=3))
-        assert bare.key == [] and bare.key_source == "none"
+        assert (bare.key, bare.key_source) == getattr(env, "keyless", ([], "none"))
 
     @pytest.mark.parametrize("key", ["int", "composite", "text"])
     async def test_keyset_paging_visits_each_row_once(
         self, env: ConformanceEnv, key: KeyKind
     ) -> None:
+        if key == "composite" and not _composite(env):
+            pytest.skip(f"{env.engine}: no composite keys (the text key case covers strings)")
         obj = await env.make_table(f"page_{key}", key=key, rows=53)
         shape = await env.source.describe(obj)
         batches = await _all_batches(env.source, shape, KeyRange(), batch=7)
@@ -174,7 +211,9 @@ class ConnectorConformance:
         assert rest == expected[21:]
 
     async def test_partitions_cover_every_row_exactly_once(self, env: ConformanceEnv) -> None:
-        obj = await env.make_table("parts", key="composite", rows=200)
+        obj = await env.make_table(
+            "parts", key="composite" if _composite(env) else "text", rows=200
+        )
         shape = await env.source.describe(obj)
         sample = await env.source.sample_keys(shape, Selection(), {}, 40)
         ranges = plan_partitions(sample, count=5, columns=shape.key_columns())
@@ -220,22 +259,22 @@ class ConnectorConformance:
         obj = await env.make_table("inplace", key="int", rows=30)
         shape = await env.rw.describe(obj)
         before = {key_tuple(r, shape): r for r in await env.read_all(obj)}
+        name, note = _n(env, "name"), _n(env, "note")
         transformer = BatchTransformer(
             _ENGINE,
             policy=load_preset("gdpr-pseudonymise"),
             mode="obfuscate",
-            columns=_name_plan(shape),
+            columns=_name_plan(shape, name),
             shape=shape,
             key=generate_key_material("key"),
             seed=None,
             locale="en_US",
         )
         once = {
-            key_tuple(r, shape): r["name"]
-            for r in transformer.transform(list(before.values())).rows
+            key_tuple(r, shape): r[name] for r in transformer.transform(list(before.values())).rows
         }
         job = _job()
-        target = env.target(obj, shape, "in_place", job_id=job, write_columns=["name"])
+        target = env.target(obj, shape, "in_place", job_id=job, write_columns=[name])
 
         async def batches(after: tuple[Any, ...] | None) -> AsyncIterator[list[Row]]:
             async for rows in env.rw.read_partition(
@@ -267,14 +306,15 @@ class ConnectorConformance:
         finally:
             await fresh.close()
         after_rows = await env.read_all(obj)
-        assert {key_tuple(r, shape): r["name"] for r in after_rows} == once  # no token of a token
-        assert all(r["note"] == before[key_tuple(r, shape)]["note"] for r in after_rows)
+        assert {key_tuple(r, shape): r[name] for r in after_rows} == once  # no token of a token
+        assert all(r[note] == before[key_tuple(r, shape)][note] for r in after_rows)
 
     async def test_append_offset_and_precheck(self, env: ConformanceEnv) -> None:
         obj = await env.make_table("appender", key="int", rows=20)
         shape = await env.rw.describe(obj)
+        ident, name, note = _n(env, "id"), _n(env, "name"), _n(env, "note")
         await env.insert(
-            obj, [{"id": 1005, "name": "x", "note": "x"}, {"id": 1012, "name": "y", "note": "y"}]
+            obj, [{ident: 1005, name: "x", note: "x"}, {ident: 1012, name: "y", note: "y"}]
         )
         strategy = PkOffset(offset=1000)
         job = _job()
@@ -292,7 +332,7 @@ class ConnectorConformance:
                 yield [(i + 1000,) for i in range(11, 21)]
 
             assert await writer.precheck_collisions(shifted()) == 2  # exactly 1005 and 1012
-            originals = [r for r in await env.read_all(obj) if r["id"] <= 3]
+            originals = [r for r in await env.read_all(obj) if r[ident] <= 3]
             out = apply_pk_strategy([dict(r) for r in originals], strategy=strategy, key=shape.key)
             assert await writer.read_ledger(job, 0) is None
             assert (
@@ -301,7 +341,7 @@ class ConnectorConformance:
             await writer.clear_ledger(job)
         finally:
             await writer.close()
-        ids = [r["id"] for r in await env.read_all(obj)]
+        ids = [r[ident] for r in await env.read_all(obj)]
         assert ids == [*range(1, 21), 1001, 1002, 1003, 1005, 1012]
 
     async def test_no_values_in_logs(
@@ -324,12 +364,11 @@ class ConnectorConformance:
                 await writer.close()
             with pytest.raises(SelectionError):
                 await env.source.count(shape, Selection(where="name = 'Name 7'; SELECT 1"), {})
-            await env.source.count(
-                shape, Selection(where="name = :n", params={"n": "Name 7"}), {"n": "Name 7"}
-            )
+            equals = _equals(env, _n(env, "name"), "Name 7")
+            assert await env.source.count(shape, equals, dict(equals.params)) == 1
         finally:
             configure_logging("INFO", json_output=False)
         captured = capsys.readouterr()
         logged = captured.out + captured.err
         for row in rows:
-            assert row["name"] not in logged and row["note"] not in logged
+            assert row[_n(env, "name")] not in logged and row[_n(env, "note")] not in logged
