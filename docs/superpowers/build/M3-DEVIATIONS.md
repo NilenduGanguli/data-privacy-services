@@ -456,3 +456,86 @@ plan's "Seams with M2"; `same` = the name/signature the plan assumes exists as b
   that the e-mail it masked is absent from the target (`DBMS_LOB.INSTR` = 0). The `IS JSON` CLOB case
   is kept as a fourth measured pitfall (the plan's).
 - `tests/connectors/test_codec_m3.py` adds a microsecond `TIMESTAMP(6)` case (still a `datetime`).
+
+## Task 8 — Oracle wired into the pipeline (registry, discovery, finalize, wildcard paths)
+
+Resumed from an earlier attempt's uncommitted `registry.py`, `discovery.py`, `docpaths.py` and four
+test files (reviewed, kept, extended). An in-process pipeline test (submit → discover → accept → run
+→ finalize on the lane's Oracle Free) found four M2 seams the plan did not foresee; each is fixed
+test-first below.
+
+- `dps/layers/connectors/registry.py`: the Oracle branch as planned (lazy import → `engine_unavailable`
+  without the extra, credentials flattened to `{username, password, dsn?}`, `client_id=job_id`), plus:
+  the import is attempted before credentials are loaded (a host without the extra never opens a
+  secret), and a failed `open()` closes the pool before re-raising. `mongo` keeps M2's
+  `engine_unavailable` until Task 12 (the plan's combined branch would import a module that does
+  not exist yet). The docstring lists `secret_unavailable` (from `from_secret`).
+- `tests/connectors/test_registry_m3.py`: passes `Credentials` (or replaces `load_credentials`)
+  instead of writing a `DPS_SECRET_DIR/<ref>/` tree (plan). Why: the queued SEC-2 fix makes refs
+  tenant-scoped at integration; this unit test must not depend on the layout. The real `secret_ref`
+  resolution of an Oracle connection is exercised by `test_oracle_pipeline.py` (below). Added: easy
+  connect fallback without a `dsn` file, `secret_unavailable` without a password, a failed open
+  closes the pool, `engine_unavailable` without the driver, mongo still unavailable.
+- **M2 touch point** `tests/test_registry.py`: the `("oracle", "engine_unavailable")` row is removed
+  (with the driver installed and empty credentials the Oracle branch now answers
+  `secret_unavailable`); Oracle's registry behaviour is pinned in `test_registry_m3.py`.
+- `dps/layers/connectors/docpaths.py`: the plan's functions, plus `top_level(column)` (one key of a
+  flat row) and `row_locator(column)` (the ROWID pseudo key and real `ROWID`/`UROWID` columns).
+  `forced_keep` = `row_locator` or a never-transformed kind (plan: `pseudo`, the three kinds, or
+  `data_type == "ROWID"`; `UROWID(n)` was missed). `expand_wildcards`/`dotted` also swallow
+  `ValueError` from the path parser (a malformed path addresses nothing; `dotted` → `None`).
+- `dps/layers/connectors/discovery.py`: values are read through `docpaths.column_values` and
+  `forced_keep` columns skip value detectors (plan). Two refinements: a **row locator is never
+  classified, not even by its name** (a stored `ROWID` column named `ACCOUNT_NUMBER` would otherwise
+  get a token method that cannot be bound into it), while binary columns and ObjectIds keep M2's
+  name-only classification and then `keep` (`binary_kept`) — the plan said every `forced_keep`
+  column gets `entity_type None`, which would hide a sensitive BLOB's name from the review; and
+  `null_rate` of a wildcard document path counts a document once however many array elements
+  matched. PostgreSQL rows read exactly as before (`top_level`: by column name; a missing key
+  contributes nothing, as `to_engine_text(None)` did).
+- **M2 touch points, the engine gates** (`dps/layers/connectors/submit.py`, `targets.py`, new
+  `base.PIPELINE_ENGINES = {"postgres", "oracle"}`): `submit_discover` refused every non-PostgreSQL
+  source ("M2 discovers PostgreSQL sources only") and `validate_run` every non-PostgreSQL run source,
+  so no Oracle job could reach the registry. Both now admit `PIPELINE_ENGINES`; MongoDB joins it with
+  its connector (Task 12). Same code (`engine_unavailable` 422), engine-neutral message. Tests:
+  `test_targets.py::test_an_oracle_source_passes_the_engine_gate`, the static
+  `test_pipeline_seams_m3.py::test_oracle_sources_pass_the_pipeline_engine_gates`.
+- **M2 touch point** `targets.created_column_type(column, plan, *, engine="postgres")`: M2 checked
+  every created type with PostgreSQL's lower-case `TYPE_RE`, so a table-mode run into a created
+  Oracle table failed `target_invalid` ("`$.CUSTOMER_ID`: the column type cannot be copied",
+  `NUMBER(12)`). The check now uses the target engine's pattern (`ORACLE_TYPE_RE =
+  ^[A-Z][A-Z0-9 _(),]*$` for Oracle; an unknown engine is refused). The Oracle writer still reads
+  only the `text` marker (Task 6). Contract §4 `ResolvedTarget.column_types` comment updated (open
+  question 14 resolved this way). Test `test_created_column_types_follow_the_target_engine`.
+- **M2 touch point** `jobs_run.py` finalize: M2 cleared the write ledger only for `in_place` /
+  `append`; `OracleWriter` also ledgers a `table` load of a key-less source (ROWID pages, Task 6), so
+  its rows stayed in `DPS_WRITE_LEDGER` after success (measured: 2 rows). `prepare` now records
+  `plan.prepare["ledger"] = report.ledger` and finalize clears when the mode is `in_place`/`append`
+  **or** prepare reported a ledger (PostgreSQL's `table` mode reports none: unchanged). Evidence then
+  carries `write_ledger_cleared`.
+- **M2 touch point** `jobs_run.py` post-write sample: the scan is now the module function
+  `post_sample_hits(rows, shape, *, written, planned, detector)` and skips `forced_keep` columns and
+  reads values through `docpaths.column_values` (a hit = one row × one column, any element of a
+  wildcard path). Why: `in_place` scans every column of the table, and a packed ROWID can pass a Luhn
+  check (counted as a kept-column hit → a needless review outcome); Mongo paths need the same read as
+  discovery. Mutation check: with `forced_keep` stubbed to `False`, the unit test reports 10 kept hits
+  instead of 5. PostgreSQL columns are scanned exactly as before.
+- `tests/connectors/test_pipeline_seams_m3.py`: the plan's static checks (`open_connector` calls carry
+  `job_id`, discovery calls `column_values`/`forced_keep`, finalize calls `clear_ledger` — matched as
+  AST calls, not text) plus the gate, post-sample and ledger checks above. `jobs_run.py` already
+  passed `job_id=job.id` and called `clear_ledger` (Task 1 audit).
+- `tests/connectors/test_discovery_m3.py` (new, offline): ROWID pseudo key kept with Luhn-valid
+  packed values while a real card column is classified; a stored ROWID column with a sensitive name
+  kept; a BLOB keeps its name entity with `keep`/`binary_kept`; wildcard e-mail paths classified by
+  value with a per-document null rate.
+- `tests/connectors/test_oracle_pipeline.py` (new; markers `db`, `integration`, `oracle`): an Oracle
+  connection stored with a `secret_ref` holding only username/password (DSN by easy connect from the
+  params), then through M2's real handlers (`tests/connectors/helpers.drive`): (1) keyed `CUSTOMERS`
+  (1,500 rows) discovered and loaded into a created `CUSTOMERS_UAT` — 0 surviving source values in
+  `EMAIL`, `FULL_NAME`, `NOTES` (SQL counts; created token columns may be CLOB, so both sides compare
+  as text), kept `SEGMENT` multiset identical, no ledger rows, key purged, evidence verified;
+  (2) `in_place` on 900 rows with the key kept — row-by-row 0 equal `EMAIL`/`FULL_NAME`/`NOTES`,
+  `SEGMENT`/`INCOME`/`LAST_CONTACT_AT` (TIMESTAMP(9)) unchanged on all 900, ledger cleared and
+  `write_ledger_cleared` true; (3) a key-less table: discovery shows `ROWID` as the `rowid` key, kept,
+  never classified; the `table` load writes 1,200 rows with 0 surviving e-mails, the created target
+  has only the 3 table columns, and finalize clears the ledger.

@@ -43,7 +43,7 @@ from dps.jobs_models import (
     SpecError,
     redact_spec,
 )
-from dps.layers.connectors.base import Engine
+from dps.layers.connectors.base import PIPELINE_ENGINES, Engine
 from dps.layers.connectors.selection import (
     SelectionError,
     parameterize_literals,
@@ -111,8 +111,8 @@ async def submit_discover(
     source = await _connection(tenant_id, spec.connection_id, "source")
     if "source" not in source.roles or source.engine not in _TABULAR_ENGINES:
         raise SpecError("connection_role", 422, "discovery reads a source database connection")
-    if source.engine != "postgres":
-        raise SpecError("engine_unavailable", 422, "M2 discovers PostgreSQL sources only")
+    if source.engine not in PIPELINE_ENGINES:
+        raise SpecError("engine_unavailable", 422, "discovery cannot read this engine yet")
     engine = cast(Engine, source.engine)
     selection = _bind(spec.selection, engine, None)
     job_id = new_id(PREFIX_JOB)

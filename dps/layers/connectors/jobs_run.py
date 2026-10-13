@@ -41,6 +41,7 @@ from dps.connections import (
     load_credentials,
 )
 from dps.engine.batch import BatchResult, BatchTransformer, IncompatibleMethod, LeakageError
+from dps.engine.detect.ensemble import Detector
 from dps.engine.policy import Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_from_caller
@@ -54,6 +55,7 @@ from dps.jobs_models import (
     Selection,
     SpecError,
 )
+from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
     BatchWriter,
     ColumnInfo,
@@ -66,6 +68,7 @@ from dps.layers.connectors.base import (
     PkOffset,
     PkToken,
     PrepareReport,
+    Row,
     TableShape,
     decode_key,
     encode_key,
@@ -484,6 +487,8 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             "truncated": report.truncated,
             "collisions": collisions,
             "existing_rows": report.existing_rows,
+            # a writer may ledger a table load too (Oracle: a key-less source paged on ROWID)
+            "ledger": report.ledger,
         }
         base: dict[str, Any] = {"rows_estimated": rows, "stage": ""}
         if spec.options.dry_run:
@@ -942,6 +947,34 @@ async def finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _retry(ctx, job, code, type(exc).__name__)
 
 
+def post_sample_hits(
+    rows: list[Row],
+    shape: TableShape,
+    *,
+    written: set[str],
+    planned: set[str],
+    detector: Detector,
+) -> tuple[int, int]:
+    """``(kept_column_hits, detector_hits)`` over re-read target rows (counts only).
+
+    A hit is one row and one written column whose value (any element, for a wildcard document
+    path) the detector flags; it counts as ``detector_hits`` when the column was transformed,
+    else as ``kept_column_hits``. Columns discovery keeps without detection (row locators such as
+    Oracle's ROWID pseudo key, binary data, ObjectIds) are skipped, as discovery skips them.
+    """
+    kept_hits = transformed_hits = 0
+    columns = [c for c in shape.columns if c.name in written and not docpaths.forced_keep(c)]
+    for row in rows:
+        for column in columns:
+            texts = (to_engine_text(v, column) for v in docpaths.column_values([row], column))
+            if any(t and detector.detect(data={column.name: t}).findings for t in texts):
+                if column.name in planned:
+                    transformed_hits += 1
+                else:
+                    kept_hits += 1
+    return kept_hits, transformed_hits
+
+
 async def _post_sample(
     ctx: HandlerContext,
     job: JobInternal,
@@ -969,24 +1002,9 @@ async def _post_sample(
     )
     policy = _policy(ctx, spec, plan.policy_name)
     detector = ctx.engine.detector(policy, plan.locale)
-
-    def scan(sample: list[dict[str, Any]]) -> tuple[int, int]:
-        kept_hits = transformed_hits = 0
-        for row in sample:
-            for column in shape.columns:
-                if column.name not in written:
-                    continue
-                text = to_engine_text(row.get(column.name), column)
-                if not text:
-                    continue
-                if detector.detect(data={column.name: text}).findings:
-                    if column.name in planned:
-                        transformed_hits += 1
-                    else:
-                        kept_hits += 1
-        return kept_hits, transformed_hits
-
-    kept_hits, transformed_hits = await asyncio.to_thread(scan, rows)
+    kept_hits, transformed_hits = await asyncio.to_thread(
+        post_sample_hits, rows, shape, written=written, planned=planned, detector=detector
+    )
     count = len(rows)
     rows.clear()  # the sample never outlives the count
     return {"rows": count, "detector_hits": transformed_hits, "kept_column_hits": kept_hits}
@@ -1077,7 +1095,8 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             post_sample = await _best_effort(
                 _post_sample(ctx, job, spec, plan, source_conn, target_conn)
             )
-    if plan is not None and mode in ("in_place", "append") and outcome in ("succeeded", "canceled"):
+    ledgered = mode in ("in_place", "append") or bool(plan and plan.prepare.get("ledger"))
+    if plan is not None and ledgered and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
         cleared = await _best_effort(_clear_ledger(ctx, job, spec, plan, source_conn, target_conn))
         ledger_cleared = "error" not in cleared

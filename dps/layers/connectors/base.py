@@ -51,6 +51,9 @@ Key = tuple[Any, ...]
 EncodedKey = list[dict[str, str]]
 
 NEVER_TRANSFORMED_KINDS = frozenset({"binary", "lob_binary", "object_id"})
+#: Source engines whose connector the registry opens, so discovery and runs may read them (M2:
+#: PostgreSQL; M3 Task 8: Oracle; MongoDB joins with its connector, M3 Task 12).
+PIPELINE_ENGINES: frozenset[str] = frozenset({"postgres", "oracle"})
 KEYABLE_KINDS = frozenset(
     {"int", "decimal", "text", "char", "date", "timestamp", "uuid", "binary", "object_id"}
 )

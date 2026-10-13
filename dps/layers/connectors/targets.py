@@ -44,6 +44,7 @@ from dps.engine.policy import MethodSpec
 from dps.engine.transform.methods import METHODS
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
 from dps.layers.connectors.base import (
+    PIPELINE_ENGINES,
     ColumnInfo,
     ObjectRef,
     PkGenerate,
@@ -59,6 +60,10 @@ from dps.secrets import seed_fingerprint
 
 #: Catalogue type strings (``format_type``) allowed in created-table DDL and SQL casts.
 TYPE_RE = re.compile(r'^[a-z][a-z0-9 _(),\[\]".]*$')
+#: An Oracle catalogue type as the M3 connector formats it (``NUMBER(12)``, ``VARCHAR2(120 CHAR)``,
+#: ``TIMESTAMP(6) WITH TIME ZONE``); the Oracle writer builds DDL from its closed type table.
+ORACLE_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9 _(),]*$")
+_CREATED_TYPE_RE = {"postgres": TYPE_RE, "oracle": ORACLE_TYPE_RE}
 #: ``(kid, seed_fingerprint)`` of a job group.
 GroupKeys = tuple[str, str]
 FREE_TEXT_METHOD = "det_token"
@@ -269,8 +274,8 @@ def validate_run(
     mode = target.write_mode
     if kek is None:
         raise _fail("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
-    if source_conn.engine != "postgres":
-        raise _fail("engine_unavailable", 422, "M2 runs read PostgreSQL sources only")
+    if source_conn.engine not in PIPELINE_ENGINES:
+        raise _fail("engine_unavailable", 422, "runs cannot read this engine's sources yet")
     if (
         snapshot is None
         or snapshot.status != "accepted"
@@ -389,15 +394,22 @@ def build_column_plans(
     return plans
 
 
-def created_column_type(column: ColumnInfo, plan: ColumnPlan | None) -> str:
-    """DDL type of ``column`` in a created table (``plan`` None = kept).
+def created_column_type(
+    column: ColumnInfo, plan: ColumnPlan | None, *, engine: str = "postgres"
+) -> str:
+    """DDL type of ``column`` in a created table of ``engine`` (``plan`` None = kept).
+
+    A planned text-like column is ``text`` (the writer widens it); otherwise the catalogue type,
+    checked against the target engine's pattern (contract open question 14: the types are the
+    target engine's; the Oracle writer reads only the ``text`` marker).
 
     Raises:
         PrepareFailure: ``target_invalid`` when the catalogue type cannot be used in SQL.
     """
     if plan is not None and column.kind in _TEXT_OUTPUT_KINDS:
         return "text"
-    if not TYPE_RE.fullmatch(column.data_type):
+    pattern = _CREATED_TYPE_RE.get(engine)
+    if pattern is None or not pattern.fullmatch(column.data_type):
         raise PrepareFailure("target_invalid", f"{column.path}: the column type cannot be copied")
     return column.data_type
 
@@ -561,7 +573,8 @@ def resolve_target(
                 raise PrepareFailure("target_invalid", "the target table does not exist")
             by_name = {p.name: p for p in plans}
             types = {
-                n: created_column_type(source_shape.column(n), by_name.get(n)) for n in projection
+                n: created_column_type(source_shape.column(n), by_name.get(n), engine=conn.engine)
+                for n in projection
             }
             resolved = ResolvedTarget(
                 **common,

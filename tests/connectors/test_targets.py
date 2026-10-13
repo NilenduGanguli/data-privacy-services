@@ -579,3 +579,52 @@ def test_same_table_and_run_plan_round_trip() -> None:
     )
     again = RunPlan.model_validate(plan.model_dump(mode="json"))
     assert again == plan and again.prepare == {}
+
+
+def test_an_oracle_source_passes_the_engine_gate(settings: Settings) -> None:
+    """M3 wires the Oracle connector into runs (the M2 gate admitted PostgreSQL only)."""
+    ora = make_connection(
+        "c_src",
+        engine="oracle",
+        roles=["source", "target"],
+        params={"host": "oracle", "port": 1521, "service_name": "FREEPDB1"},
+    )
+    _check(spec(**UAT_TABLE), settings=settings, source_conn=ora)  # raises nothing
+
+
+def test_created_column_types_follow_the_target_engine() -> None:
+    """M2 validated every created type with PostgreSQL's catalogue pattern, so an Oracle target
+    (``NUMBER(12)``) failed ``target_invalid``; the Oracle writer derives its DDL from the closed
+    type table and reads only the ``text`` marker (open question 14)."""
+    num = ColumnInfo(path="$.CUSTOMER_ID", name="CUSTOMER_ID", data_type="NUMBER(12)", kind="int")
+    name = ColumnInfo(
+        path="$.FULL_NAME",
+        name="FULL_NAME",
+        data_type="VARCHAR2(120 CHAR)",
+        kind="text",
+        length=120,
+    )
+    zoned = ColumnInfo(
+        path="$.AT", name="AT", data_type="TIMESTAMP(6) WITH TIME ZONE", kind="timestamp"
+    )
+    snap = accepted_snapshot("c_src", "bank.customers")
+    plan = next(
+        p
+        for p in build_column_plans(
+            snap,
+            mode="obfuscate",
+            write_mode="table",
+            pk_strategy=None,
+            projection=[c.name for c in snap.shape.columns],
+        )
+        if p.name == "full_name"
+    )
+    assert created_column_type(num, None, engine="oracle") == "NUMBER(12)"
+    assert created_column_type(zoned, None, engine="oracle") == "TIMESTAMP(6) WITH TIME ZONE"
+    assert created_column_type(name, plan, engine="oracle") == "text"
+    for bad in ('NUMBER(12); DROP TABLE "X"', "number(12)", "VARCHAR2(10) -- x"):
+        with pytest.raises(PrepareFailure) as err:
+            created_column_type(num.model_copy(update={"data_type": bad}), None, engine="oracle")
+        assert err.value.code == "target_invalid"
+    with pytest.raises(PrepareFailure):  # PostgreSQL keeps its own (lower-case) pattern
+        created_column_type(num, None)

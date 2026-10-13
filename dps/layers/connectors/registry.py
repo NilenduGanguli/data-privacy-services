@@ -21,10 +21,16 @@ async def open_connector(
 ) -> Connector:
     """An **opened** connector for a database connection (the caller closes it).
 
+    ``job_id`` tags the sessions (PostgreSQL ``application_name``, Oracle ``client_identifier``).
+    The Oracle driver is imported only here, so a host without the ``connectors`` extra still
+    serves PostgreSQL.
+
     Raises:
-        ConnectorError: ``engine_not_tabular`` for ``s3``/``pvc`` (file targets only) and
-            ``engine_unavailable`` for engines whose connector arrives later (``oracle``,
-            ``mongo``: milestone M3); neither is retryable.
+        ConnectorError: ``engine_not_tabular`` for ``s3``/``pvc`` (file targets only),
+            ``engine_unavailable`` for ``mongo`` (until its connector lands) and for ``oracle``
+            without the driver extra, ``secret_unavailable`` for a secret without a username or
+            password, and the connector's own ``connection_failed`` (retryable only for a
+            network failure).
     """
     if conn.engine in ("s3", "pvc"):
         raise ConnectorError(
@@ -37,6 +43,28 @@ async def open_connector(
         connector = PostgresConnector(conn, creds, settings, action=action, job_id=job_id)
         await connector.open()
         return connector
+    if conn.engine == "oracle":
+        try:
+            from dps.layers.connectors.oracle import OracleConnector
+        except ImportError:
+            raise ConnectorError(
+                "engine_unavailable", "the oracle driver extra is not installed"
+            ) from None
+        creds = credentials or await load_credentials(conn, settings=settings, kek=kek)
+        secret = {
+            "username": creds.username,
+            "password": creds.password.get_secret_value(),
+            **{name: value.get_secret_value() for name, value in creds.extra.items()},
+        }
+        oracle = OracleConnector.from_secret(
+            secret, conn.params, settings, action=action, client_id=job_id
+        )
+        try:
+            await oracle.open()
+        except BaseException:
+            await oracle.close()
+            raise
+        return oracle
     raise ConnectorError(
         "engine_unavailable", f"the {conn.engine} connector arrives with milestone M3"
     )

@@ -42,6 +42,7 @@ from dps.jobs_models import (
     SealedSelection,
     Selection,
 )
+from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
     NEVER_TRANSFORMED_KINDS,
     ColumnInfo,
@@ -184,12 +185,22 @@ def classify_columns(
     """One :class:`ColumnClassification` per column of ``shape`` (no values retained)."""
     out: list[ColumnClassification] = []
     for column in shape.columns:
-        by_name_only = column.kind in NEVER_TRANSFORMED_KINDS
-        texts = [] if by_name_only else [to_engine_text(r.get(column.name), column) for r in rows]
+        # M3: pseudo keys (Oracle ROWID), binary data and ObjectIds skip value detectors; values
+        # are read by column name (SQL rows) or by wildcard path (documents)
+        by_name_only = docpaths.forced_keep(column)
+        cells = [] if by_name_only else docpaths.column_values(rows, column)
+        texts = [to_engine_text(v, column) for v in cells]
         values = [t for t in texts if t]
-        present = (
-            sum(1 for r in rows if r.get(column.name) is not None) if by_name_only else len(values)
-        )
+        if by_name_only:
+            present = sum(1 for r in rows if r.get(column.name) is not None)
+        elif docpaths.top_level(column):
+            present = len(values)
+        else:  # a document counts once however many array elements the path matched
+            present = sum(
+                1
+                for r in rows
+                if any(to_engine_text(v, column) for v in docpaths.column_values([r], column))
+            )
         whole: dict[str, list[float]] = defaultdict(list)
         detectors: dict[str, set[str]] = defaultdict(set)
         span_rows = 0
@@ -204,7 +215,13 @@ def classify_columns(
             if spans:
                 span_rows += 1
                 span_detectors.update(d.split(":")[0] for f in spans for d in f.detectors)
-        names = {k.entity_type: k.score for k in classify_key(column.path)}
+        # a row locator is not table data: never classified, not even by its name (binary
+        # columns and ObjectIds keep M2's name-only classification, then keep: binary_kept)
+        names = (
+            {}
+            if docpaths.row_locator(column)
+            else {k.entity_type: k.score for k in classify_key(column.path)}
+        )
         scores: dict[str, float] = {}
         for candidate in set(whole) | set(names):
             hits = whole.get(candidate, [])
