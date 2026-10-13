@@ -31,6 +31,7 @@ from dps.engine.detect.ensemble import Detector
 from dps.engine.detect.structural import classify_key
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import EngineError
+from dps.engine.synth.keys import LINK_ENTITIES
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.apply import ANCHOR_ENTITIES
 from dps.ids import PREFIX_SNAPSHOT, new_id
@@ -63,8 +64,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: Keys of joins: kept in synthesize mode so synthetic copies still join (contract §5.3).
-JOIN_ENTITIES = frozenset({"CUSTOMER_ID", "EMPLOYEE_ID", "CASE_ID"})
+#: Keys of joins: kept in synthesize mode so synthetic copies still join (contract §5.3) — and
+#: replaced there by keyed pseudonyms (D-A, ``dps.engine.synth.keys``), never copied.
+JOIN_ENTITIES = LINK_ENTITIES
 SHAPE_PRESERVING_METHODS = frozenset(
     {
         "fpe_digits",

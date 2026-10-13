@@ -20,6 +20,7 @@ from dps.layers.connectors.evidence import get_evidence
 from dps.layers.connectors.submit import submit_run
 from dps.worker import HandlerContext
 from tests.connectors.helpers import (
+    KEY_NOT_PERSONAL,
     db_key_enc,
     discover_and_accept,
     drive,
@@ -258,7 +259,7 @@ async def test_append_offset_to_the_same_table(
     rw = await register_source(
         "t1", ref="dps/src/test-pg-rw", roles={"source", "target"}, name="append-rw"
     )
-    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj)
+    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj, overrides=KEY_NOT_PERSONAL)
     target = {
         "write_mode": "append",
         "confirm_write": True,

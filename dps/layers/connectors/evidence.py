@@ -386,6 +386,23 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
                         "text_column": p.text_column,
                     }
                 )
+        for k in plan.pseudonyms:  # D-A: identifiers replaced by keyed pseudonyms, never copied
+            review = reviewed.get(k.path)
+            columns.append(
+                {
+                    "path": k.path,
+                    "entity_type": k.entity_type,
+                    "data_type": review.data_type if review else None,
+                    "confidence": review.confidence if review else None,
+                    "override": review.override if review else False,
+                    "method": "key_pseudonym",
+                    "params": {},
+                    "reversible": False,
+                    "text_column": False,
+                    "values": per_column.get(k.name),
+                    "fallbacks": None,
+                }
+            )
     progress = job.progress
     rows_written = int(progress.rows_written)
     started = job.started_at or job.created_at

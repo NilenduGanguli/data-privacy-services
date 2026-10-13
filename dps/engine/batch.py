@@ -64,7 +64,8 @@ from dps.engine.findings import (
 from dps.engine.planner import build_plan
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import PrivacyEngine
-from dps.engine.synth.surrogates import SynthesisSeed
+from dps.engine.synth.keys import KeyPseudonyms, PseudonymError
+from dps.engine.synth.surrogates import SynthesisSeed, seed_bytes
 from dps.engine.taxonomy import entity_info, record_sensitivity
 from dps.engine.transform.apply import (
     ApplyOptions,
@@ -188,6 +189,22 @@ class ColumnPlan(BaseModel):
             precision=self.precision,
             scale=self.scale,
         )
+
+
+class PseudonymColumn(BaseModel):
+    """D-A: a column whose identifiers a synthesize run replaces by keyed pseudonyms
+    (:class:`~dps.engine.synth.keys.KeyPseudonyms`) instead of copying them (value-free).
+
+    ``kind`` is ``int`` (integers, ``numeric(p, 0)``), ``text`` (text, char) or ``uuid``;
+    ``digits`` the decimal digits an integer column holds (a longer pseudonym fails the batch).
+    """
+
+    model_config = _HIDDEN
+    path: str
+    name: str
+    entity_type: str
+    kind: Literal["int", "text", "uuid"]
+    digits: int | None = None
 
 
 class BatchResult(BaseModel):
@@ -317,15 +334,21 @@ class BatchTransformer:
         verify: Literal["strict", "warn"] = "strict",
         constraints: ConstraintSet | None = None,
         max_resample: int = 8,
+        pseudonyms: Sequence[PseudonymColumn] = (),
     ) -> None:
         """Validate the mode's prerequisites and the plans against ``shape``.
+
+        ``pseudonyms`` (synthesize mode, D-A): identifier columns replaced by keyed pseudonyms
+        under the synthesis seed after the row is transformed (never planned, never sampled).
 
         Raises:
             ValueError: obfuscate without key material, synthesize without a seed, a plan (or
                 the anchor) naming a column the table does not have, or a plan whose method
                 params lack their plan defaults (copied around :class:`ColumnPlan`'s validator);
                 a tabular sampler outside synthesize mode, on a table without a key, or writing
-                a key column, a planned column or a column the table does not have.
+                a key column, a planned column or a column the table does not have; pseudonyms
+                outside synthesize mode, on a planned or sampled column or a column the table
+                does not have.
             IncompatibleMethod: ``incompatible_method`` for a synthesize-mode method that needs
                 key material, or ``fpe_digits`` without ``leading_zero: preserve`` on a numeric
                 column.
@@ -370,6 +393,15 @@ class BatchTransformer:
                     "the tabular sampler writes a key column, a planned column or a column "
                     "the table does not have"
                 )
+        if pseudonyms:
+            if mode != "synthesize":
+                raise ValueError("key pseudonyms run in synthesize mode only")
+            names = {p.name for p in pseudonyms}
+            if any(n not in known for n in names):
+                raise ValueError("a pseudonym column names a column the table does not have")
+            sampled = set(tabular.columns) if tabular is not None else set()
+            if names & ({c.name for c in columns} | sampled):
+                raise ValueError("a pseudonym column is also planned or sampled")
         if max_resample < 0:
             raise ValueError("max_resample must not be negative")
         self.engine, self.policy, self.mode = engine, policy, mode
@@ -387,6 +419,8 @@ class BatchTransformer:
         self.text = [c for c in columns if c.text_column]
         self.detector = engine.detector(policy, locale) if self.text else None
         self.out_cols = {c.name: c.output_column() for c in columns}
+        self.pseudonyms = list(pseudonyms)
+        self._keys = KeyPseudonyms(seed_bytes(seed)) if pseudonyms and seed is not None else None
 
     def _entry(self, finding: Finding, spec: MethodSpec) -> PlanEntry:
         method, params, reason = spec.method, dict(spec.params), "snapshot"
@@ -537,6 +571,15 @@ class BatchTransformer:
                 inputs = {self.out_cols[name].path: doc[name] for name in searched}
                 hits += verify_row(originals, outputs, inputs=inputs)
             out_rows.append(out)
+        if self.pseudonyms:
+            for row, out in zip(rows, out_rows, strict=True):
+                checked += self._pseudonymise(row, out, hits)
+            methods["key_pseudonym"] += sum(
+                1 for row in rows for p in self.pseudonyms if row.get(p.name) is not None
+            )
+            per_column.update(
+                p.name for row in rows for p in self.pseudonyms if row.get(p.name) is not None
+            )
         resample_counts: dict[str, int] = {}
         if self.tabular is not None:
             written, resamples = self._apply_tabular(rows, out_rows, tabular_anchors, key_ints)
@@ -562,6 +605,36 @@ class BatchTransformer:
             verification=verification,
             values_by_column=dict(per_column),
         )
+
+    def _pseudonymise(self, row: Row, out: Row, hits: list[dict[str, str]]) -> int:
+        """Replace the row's identifiers by their keyed pseudonyms (D-A); returns the values
+        checked. A pseudonym equal to its source (impossible by construction) is a hit.
+
+        Raises:
+            IncompatibleMethod: the pseudonym does not fit its column (value-free).
+        """
+        assert self._keys is not None
+        checked = 0
+        for p in self.pseudonyms:
+            column = self.shape.column(p.name)
+            source = to_engine_text(row.get(p.name), column)
+            if not source:
+                continue
+            try:
+                if p.kind == "int":
+                    number = self._keys.integer(p.entity_type, int(source))
+                    if p.digits is not None and len(str(abs(number))) > p.digits:
+                        raise IncompatibleMethod(p.path, "incompatible_method")
+                    text = str(number)
+                else:
+                    text = self._keys.text(p.entity_type, source, kind=p.kind)
+                out[p.name] = from_engine_text(text, column)
+            except (PseudonymError, IncompatibleValue, ValueError):
+                raise IncompatibleMethod(p.path, "incompatible_method") from None
+            checked += 1
+            if normalise(text) == normalise(source):
+                hits.append({"path": p.path, "entity_type": p.entity_type, "rule": "fixed_point"})
+        return checked
 
     def _pretokenize(self, rows: list[Row]) -> dict[tuple[str, str], str] | None:
         """M5 ``external_tokenize``: one call per entity type and profile for the batch's whole

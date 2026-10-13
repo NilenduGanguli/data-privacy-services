@@ -423,6 +423,65 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   credentials (HTTP 401) and a tampered token refused without values, the https rule, and a service
   whose answer does not tokenize back.
 
+## G2 review fix — D-A: synthetic tables never carry linkable real identifiers
+
+- **Process note:** `tests/test_key_pseudonyms.py` was written before `dps/engine/synth/keys.py` and
+  the `BatchTransformer` change but first run after them (both were new interfaces, so the run would
+  have failed on the import); the targets, integration and review tests were seen failing first
+  (missing `pseudonym_columns`, `KeyError: '$.customer_id'` in the evidence, no `review_required`).
+- **Which columns.** D-A names "a sensitive key (`CUSTOMER_ID`, `ACCOUNT_NUMBER`, … per taxonomy) or
+  any column discovery classified as personal". As built (`targets._identifiers`): projected,
+  non-free-text columns with an entity type whose synthesize method is `keep` **and** that are a key,
+  a join identifier (`LINK_ENTITIES` = discovery's `JOIN_ENTITIES`, now one constant in
+  `dps/engine/synth/keys.py`) or of MEDIUM+ sensitivity. Classified columns with any other synthesize
+  method are not copied anyway (surrogate, null, …). LOW attributes a policy keeps on purpose
+  (`keep_non_sensitive`: city, gender, age, postal code, amount, …) stay: they are quasi-identifier
+  attributes, not identifiers, and the copula models them when they qualify — an owner decision
+  recorded in the policy, open for the privacy review (report).
+- **Pseudonym** (`dps/engine/synth/keys.py`, pure Python): `KeyPseudonyms(seed)` maps `v →
+  p⁻¹(p(v)+1 mod N)` with `p` a keyed Feistel permutation (HMAC-SHA256 rounds, counter-mode output for
+  wide halves, cycle walking) keyed by the synthesis seed and entity type — injective, deterministic,
+  consistent across the tables of a job group, and **without fixed points** (a plain keyed
+  permutation maps about one value in N to itself, i.e. copies it). Integer tiers do not depend on
+  the column type (so `integer` and `bigint` columns of one group agree): below 10⁹ → below 10⁹,
+  else the same digit count (≤ 18). Text: length and ASCII character class kept per position; other
+  characters kept; uuid → uuid. The constraints module keeps its own `feistel_permute` (Task 4,
+  ≤ 18 digits); the new one is wider (arbitrary domains).
+- `dps/engine/batch.py`: `PseudonymColumn` (value-free) and `BatchTransformer(..., pseudonyms=())`
+  (synthesize only; never a planned or sampled column); applied after the row transform and before
+  the tabular draw, counted as `key_pseudonym`, `incompatible_method` when the pseudonym does not fit
+  the column's digits; a pseudonym equal to its source would be a `fixed_point` hit.
+- `dps/layers/connectors/targets.py`: `pseudonym_columns(...)`, `RunPlan.pseudonyms`,
+  `resolve_target(..., pseudonyms=)` (written in place); `validate_run` (synthesize) refuses
+  `synthesize_in_place_sensitive_key` (422), an `offset`/prefix append of a sensitive key
+  (`pk_strategy_invalid`; D-A said "use table, files or append" — append with `generate` stays) and
+  `synthesize_pseudonym_unsupported` (422: integer columns under 9 digits — a `smallint` key; dates,
+  floats). `INT_DIGITS` moved to `keys.py` (tabular re-imports it).
+- `dps/layers/connectors/tabular.py` `prepare_tabular(..., pseudonyms=)`: pseudonymised columns leave
+  the exact-row reject columns (a pseudonym never equals its real value, so comparing on it would let
+  a row that copies every other column through).
+- **Kept-column review.** The lane predates main's `review_required` (main `89a9e98`, all modes,
+  console). Here, for synthesize runs only: `jobs_run.synthetic_kept_columns` (written, unclassified,
+  not key, not planned, not pseudonymised, not sampled) and `kept_review` (MEDIUM+ findings; numeric
+  columns only above discovery's bar, like main's `scan_written`) run on the **preflight** output
+  (`plan.prepare.kept_review`, every target, files included — files have no post-write sample) and on
+  the post-write sample of database targets (`post_sample.synthetic_kept`); any flagged column makes
+  `verification.review_required` true, `review_columns` its names and `passed` false. At integration
+  main's `verification_outcome` should absorb this (one rule, all modes).
+- `dps/layers/connectors/evidence.py`: one `columns[]` entry per pseudonymised identifier (method
+  `key_pseudonym`, not reversible, its value count).
+- Tests changed: `tests/connectors/test_synthesize_copula.py` (the key is now the pseudonym: the
+  target is re-keyed through `KeyPseudonyms` and asserted disjoint from the source keys);
+  `test_resume_after_kill[append_offset_named]`, `test_run_failures::test_same_table_append_refuses_
+  an_offset_inside_the_key_span`, `test_run_modes::test_append_offset_to_the_same_table` review the
+  demo key as not personal (`tests.connectors.helpers.KEY_NOT_PERSONAL`) — they test offset-append
+  mechanics, which D-A no longer allows on a sensitive key. New: `tests/test_key_pseudonyms.py` (7),
+  `tests/test_kept_review.py` (2), `tests/connectors/test_targets.py` (+3),
+  `tests/connectors/test_synthesize_identifiers.py` (3, integration: two tables of one seed, 0
+  survivors per identifier column, the FK joins all 900 rows, no source value anywhere in either
+  target; in-place refusal before a job exists; review_required for a PII column reviewed as not
+  personal).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

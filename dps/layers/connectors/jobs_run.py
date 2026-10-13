@@ -41,7 +41,8 @@ import contextlib
 import tempfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable
+from collections import Counter, defaultdict
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,6 +59,7 @@ from dps.connections import (
     load_credentials,
 )
 from dps.engine.batch import (
+    NUMERIC_KINDS,
     BatchResult,
     BatchTransformer,
     IncompatibleMethod,
@@ -65,9 +67,11 @@ from dps.engine.batch import (
     TabularSampler,
     row_anchor,
 )
+from dps.engine.detect.ensemble import Detector
 from dps.engine.policy import Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_bytes, seed_from_caller
+from dps.engine.taxonomy import Sensitivity
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.engine.transform.external import ExternalServiceError
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobPhase, JobState, PartitionState
@@ -91,6 +95,7 @@ from dps.layers.connectors.base import (
     PkOffset,
     PkToken,
     PrepareReport,
+    Row,
     TableShape,
     decode_key,
     encode_key,
@@ -113,6 +118,7 @@ from dps.layers.connectors.targets import (
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    pseudonym_columns,
     resolve_target,
 )
 from dps.observability import LEASES_LOST, ROWS_WRITTEN, get_logger
@@ -276,6 +282,7 @@ def _transformer(
         tabular=tabular,
         constraints=constraints,
         max_resample=ctx.settings.copula_max_resample,
+        pseudonyms=plan.pseudonyms if spec.mode == "synthesize" else (),
     )
 
 
@@ -462,6 +469,13 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             pk_strategy=spec.target.pk_strategy,
             projection=projection,
         )
+        pseudonyms = pseudonym_columns(
+            snapshot,
+            mode=spec.mode,
+            write_mode=mode,
+            pk_strategy=spec.target.pk_strategy,
+            projection=projection,
+        )
         store: ObjectStore | None = None
         target_shape: TableShape | None = None
         if mode == "files":
@@ -490,6 +504,7 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             target_shape=target_shape,
             plans=plans,
             projection=projection,
+            pseudonyms=[p.name for p in pseudonyms],
         )
         anchor = next(
             ([c.name, c.entity_type] for c in snapshot.columns if c.anchor and c.entity_type),
@@ -509,6 +524,7 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             locale=policy.locale.default or settings.default_locale,
             batch_rows=spec.source.batch_rows or settings.batch_rows,
             same_table_append=mode == "append" and resolved.same_as_source,
+            pseudonyms=pseudonyms,
         )
         tabular: TabularSampler | None = None
         constraints: ConstraintSet | None = None
@@ -527,6 +543,21 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         )
         preflight = await asyncio.to_thread(transformer.transform, sample)
         del sample
+        kept_prewrite: dict[str, Any] | None = None
+        if spec.mode == "synthesize":
+            kept_prewrite = await asyncio.to_thread(
+                kept_review,
+                preflight.rows,
+                shape,
+                kept=synthetic_kept_columns(
+                    plan,
+                    snapshot,
+                    [c.name for c in shape.columns],
+                    set(tabular.columns) if tabular is not None else set(),
+                ),
+                detector=ctx.engine.detector(policy, plan.locale),
+                min_score=policy.detect.min_score,
+            )
         writer: BatchWriter
         if mode == "files":
             assert store is not None and target_conn is not None
@@ -555,6 +586,8 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             "collisions": collisions,
             "existing_rows": report.existing_rows,
         }
+        if kept_prewrite is not None:
+            plan.prepare["kept_review"] = kept_prewrite
         base: dict[str, Any] = {"rows_estimated": rows, "stage": ""}
         if metrics:
             base["metrics"] = metrics
@@ -667,6 +700,7 @@ async def _prepare_tabular(
             anchor_of=lambda row: row_anchor(row, shape, None),
             projection=plan.projection,
             dp=_dp_config(ctx, spec),
+            pseudonyms=[p.name for p in plan.pseudonyms],
         )
     except TabularGateError as exc:
         raise PrepareFailure(exc.code, exc.detail) from None
@@ -1417,6 +1451,82 @@ async def finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _retry(ctx, job, code, type(exc).__name__)
 
 
+def synthetic_kept_columns(
+    plan: RunPlan,
+    snapshot: ClassificationSnapshot | None,
+    table_columns: Sequence[str],
+    sampled: set[str],
+) -> set[str]:
+    """D-A: what a synthesize run writes as **source values** although nothing modelled them —
+    written columns that are unclassified (no entity type, not free text), not a key, not
+    planned, not pseudonymised and not drawn by the tabular sampler (``sampled``). In place, every
+    column of the table is output."""
+    classified = {
+        c.name for c in (snapshot.columns if snapshot else []) if c.entity_type or c.text_column
+    }
+    written = (
+        set(table_columns)
+        if plan.target.write_mode == "in_place"
+        else set(plan.target.write_columns) | set(plan.key)
+    )
+    replaced = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms}
+    return written - classified - set(plan.key) - replaced - sampled
+
+
+def kept_review(
+    rows: Sequence[Row],
+    shape: TableShape,
+    *,
+    kept: set[str],
+    detector: Detector,
+    min_score: float,
+) -> dict[str, Any]:
+    """D-A: MEDIUM+ detector findings in synthetic rows' source-kept columns (counts and column
+    names only; the rows are not kept).
+
+    A numeric column counts only when its hits reach discovery's bar (hit rate × mean score at
+    or above ``min_score``): a column of 12-digit ids holds a checksum-valid "Aadhaar" by chance.
+    """
+    cells: Counter[str] = Counter()
+    present: Counter[str] = Counter()
+    scores: dict[str, list[float]] = defaultdict(list)
+    columns = {c.name: c for c in shape.columns if c.name in kept}
+    for row in rows:
+        for name, column in columns.items():
+            text = to_engine_text(row.get(name), column)
+            if not text:
+                continue
+            present[name] += 1
+            found = [
+                f
+                for f in detector.detect(data={name: text}).findings
+                if f.sensitivity.rank >= Sensitivity.MEDIUM.rank
+            ]
+            if found:
+                cells[name] += 1
+                scores[name].append(max(f.score for f in found))
+    flagged = sorted(
+        name
+        for name in cells
+        if columns[name].kind not in NUMERIC_KINDS
+        or cells[name] / present[name] * (sum(scores[name]) / len(scores[name])) >= min_score
+    )
+    return {
+        "rows": len(rows),
+        "kept_column_hits": sum(cells[n] for n in flagged),
+        "kept_columns": flagged,
+    }
+
+
+def _sampled_columns(job: JobInternal) -> set[str]:
+    """Names of the columns the tabular sampler drew (``progress.metrics.tabular.columns``)."""
+    tabular = (job.progress.metrics or {}).get("tabular") or {}
+    paths = tabular.get("columns") if isinstance(tabular, dict) else None
+    if not isinstance(paths, list):
+        return set()
+    return {str(p).removeprefix("$.") for p in paths}
+
+
 async def _post_sample(
     ctx: HandlerContext,
     job: JobInternal,
@@ -1424,8 +1534,10 @@ async def _post_sample(
     plan: RunPlan,
     source_conn: Connection,
     target_conn: Connection | None,
+    snapshot: ClassificationSnapshot | None = None,
 ) -> dict[str, Any]:
-    """Re-read up to 200 written rows and run the detector over them (counts only)."""
+    """Re-read up to 200 written rows and run the detector over them (counts only); a
+    synthesize run also reviews its source-kept columns (D-A, ``synthetic_kept``)."""
     conn = source_conn if _same_connection(spec, source_conn) else target_conn
     if conn is None or plan.target.object is None:
         return {}
@@ -1463,8 +1575,25 @@ async def _post_sample(
 
     kept_hits, transformed_hits = await asyncio.to_thread(scan, rows)
     count = len(rows)
+    out: dict[str, Any] = {
+        "rows": count,
+        "detector_hits": transformed_hits,
+        "kept_column_hits": kept_hits,
+    }
+    if spec.mode == "synthesize":
+        kept = synthetic_kept_columns(
+            plan, snapshot, [c.name for c in shape.columns], _sampled_columns(job)
+        )
+        out["synthetic_kept"] = await asyncio.to_thread(
+            kept_review,
+            rows,
+            shape,
+            kept=kept,
+            detector=detector,
+            min_score=policy.detect.min_score,
+        )
     rows.clear()  # the sample never outlives the count
-    return {"rows": count, "detector_hits": transformed_hits, "kept_column_hits": kept_hits}
+    return out
 
 
 async def _write_manifest(
@@ -1617,7 +1746,7 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             files = await _write_manifest(ctx, job, spec, plan, target_conn, parts)
         elif mode != "files":
             post_sample = await _best_effort(
-                _post_sample(ctx, job, spec, plan, source_conn, target_conn)
+                _post_sample(ctx, job, spec, plan, source_conn, target_conn, snapshot)
             )
     if plan is not None and mode in ("in_place", "append") and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
@@ -1725,7 +1854,7 @@ async def _store_evidence(
     counters = progress.values_by_method
     hits = int(counters.get("verify:hits", 0)) + int(progress.verification.get("hits", 0))
     leakage = job.error_code == "leakage" or any(p.error_code == "leakage" for p in parts)
-    verification = {
+    verification: dict[str, Any] = {
         "mode": spec.options.verify,
         "batches": sum(p.batch_no for p in parts),
         "values_checked": int(progress.verification.get("checked", 0)),
@@ -1735,6 +1864,15 @@ async def _store_evidence(
     }
     if ledger_cleared is not None:
         verification["write_ledger_cleared"] = ledger_cleared
+    if job.mode == "synthesize" and plan is not None:
+        # D-A: a source value is kept only in a column reviewed as not personal whose written
+        # sample (before the write: the preflight; after it: the post-write sample) is clean
+        reviews = [plan.prepare.get("kept_review"), (post_sample or {}).get("synthetic_kept")]
+        flagged = sorted({c for r in reviews if r for c in r.get("kept_columns", [])})
+        verification["review_required"] = bool(flagged)
+        verification["review_columns"] = flagged
+        if flagged:
+            verification["passed"] = False
     errors: list[dict[str, str]] = []
     if job.error_code:
         errors.append({"code": job.error_code, "where": "prepare"})

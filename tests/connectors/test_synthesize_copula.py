@@ -19,6 +19,8 @@ pytest.importorskip("scipy")
 
 from dps.auth import LOCAL_PRINCIPAL  # noqa: E402
 from dps.connections import Connection  # noqa: E402
+from dps.engine.synth.keys import KeyPseudonyms  # noqa: E402
+from dps.engine.synth.surrogates import seed_bytes, seed_from_caller  # noqa: E402
 from dps.jobs import JobState  # noqa: E402
 from dps.jobs_models import ObjectRef, RunSpec  # noqa: E402
 from dps.layers.connectors.evidence import LABEL_SYNTHESIZE, get_evidence  # noqa: E402
@@ -32,8 +34,8 @@ PURPOSE = {"ticket": "CHG-51770", "legal_basis": "legitimate interest — synthe
 RegisterSource = Callable[..., Awaitable[Connection]]
 ROWS = 1500
 #: Columns that hold personal data in the demo customers table (ground truth, not discovery's
-#: verdict): none of their source values may reach the target. The key ``customer_id`` is kept by
-#: the synthesize-mode key rule (contract §5.3) and is checked separately.
+#: verdict): none of their source values may reach the target. The key ``customer_id`` is replaced
+#: by its keyed pseudonym (D-A) and is checked separately.
 HIGH_ENTROPY = ("full_name", "national_id", "tax_id", "email", "mobile")
 NON_KEY = (
     "full_name, date_of_birth, national_id, id_type, tax_id, email, mobile, country_code, "
@@ -131,7 +133,13 @@ async def test_copula_job_writes_measured_synthetic_rows(
 
     source = await _rows(source_pg, "customers")
     target = await _rows(source_pg, "customers_synth")
-    assert len(target) == ROWS and set(target) == set(source)  # one synthetic row per source row
+    # D-A: every key is its keyed pseudonym (one synthetic row per source row); no source key
+    # survives in the target
+    keys = KeyPseudonyms(seed_bytes(seed_from_caller(sub.synthesis_seed)))
+    pseudonym = {k: keys.integer("CUSTOMER_ID", k) for k in source}
+    assert len(target) == ROWS and set(target) == set(pseudonym.values())
+    assert not set(target) & set(source)
+    target = {k: target[pseudonym[k]] for k in source}  # re-keyed by the source row
     # no synthetic row equals a source row on its non-key columns
     overlap = await source_pg.admin.fetchval(
         f'SELECT count(*) FROM (SELECT {NON_KEY} FROM "{source_pg.schema}".customers '

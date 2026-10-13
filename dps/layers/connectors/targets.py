@@ -43,8 +43,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from dps.auth import Principal
 from dps.config import Settings
 from dps.connections import Connection
-from dps.engine.batch import KEYLESS_METHODS, ColumnPlan
+from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
 from dps.engine.policy import MethodSpec
+from dps.engine.synth.keys import INT_DIGITS, LINK_ENTITIES, MIN_PSEUDONYM_DIGITS
+from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.methods import METHODS
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
 from dps.layers.connectors.base import (
@@ -106,6 +108,8 @@ class RunPlan(BaseModel):
     batch_rows: int
     same_table_append: bool = False
     prepare: dict[str, Any] = Field(default_factory=dict)
+    #: D-A (synthesize): identifier columns replaced by keyed pseudonyms, never copied
+    pseudonyms: list[PseudonymColumn] = Field(default_factory=list)
 
 
 def _fail(code: str, status: int, detail: str) -> SpecError:
@@ -138,6 +142,123 @@ def method_for_column(col: ColumnClassification, mode: str) -> MethodSpec:
     if mode == "synthesize":
         return col.synthesize_method or col.synthesize_suggested or MethodSpec(method="surrogate")
     return col.method
+
+
+def _identifiers(
+    snapshot: ClassificationSnapshot,
+    *,
+    write_mode: WriteMode,
+    pk_strategy: PkStrategy | dict[str, Any] | None,
+    projection: list[str] | set[str],
+) -> list[ColumnClassification]:
+    """D-A: the projected columns a synthesize run would copy although they identify someone —
+    kept (``keep``) columns with an entity type that are a key, a join identifier
+    (:data:`~dps.engine.synth.keys.LINK_ENTITIES`) or of MEDIUM or higher sensitivity. LOW
+    attributes a policy keeps (``keep_non_sensitive``: city, gender, …) are not identifiers; keys
+    the target generates (``append`` + ``generate``) are not written at all."""
+    wanted = set(projection)
+    generated = write_mode == "append" and _strategy_kind(pk_strategy) == "generate"
+    out: list[ColumnClassification] = []
+    for c in snapshot.columns:
+        if c.name not in wanted or c.entity_type is None or c.text_column:
+            continue
+        if c.is_key and generated:
+            continue
+        if method_for_column(c, "synthesize").method != "keep":
+            continue
+        rank = entity_info(c.entity_type).sensitivity.rank
+        if c.is_key or c.entity_type in LINK_ENTITIES or rank >= Sensitivity.MEDIUM.rank:
+            out.append(c)
+    return out
+
+
+def _pseudonym_of(c: ColumnClassification, shape: TableShape) -> PseudonymColumn | None:
+    """The pseudonym form of ``c``, or ``None`` when no keyed pseudonym fits its type."""
+    try:
+        info = shape.column(c.name)
+    except KeyError:
+        info = None
+    kind = info.kind if info is not None else c.kind
+    data_type = (info.data_type if info is not None else c.data_type).strip().lower()
+    if kind in ("int", "decimal") and (kind == "int" or not (info and info.scale)):
+        digits = (info.precision if info is not None else None) or INT_DIGITS.get(data_type)
+        if digits is not None and digits < MIN_PSEUDONYM_DIGITS:
+            return None
+        return PseudonymColumn(
+            path=c.path, name=c.name, entity_type=str(c.entity_type), kind="int", digits=digits
+        )
+    if kind in _TEXTUAL:
+        return PseudonymColumn(
+            path=c.path, name=c.name, entity_type=str(c.entity_type), kind="text"
+        )
+    if kind == "uuid":
+        return PseudonymColumn(
+            path=c.path, name=c.name, entity_type=str(c.entity_type), kind="uuid"
+        )
+    return None
+
+
+def pseudonym_columns(
+    snapshot: ClassificationSnapshot,
+    *,
+    mode: str,
+    write_mode: WriteMode,
+    pk_strategy: PkStrategy | dict[str, Any] | None,
+    projection: list[str],
+) -> list[PseudonymColumn]:
+    """D-A: the identifier columns a synthesize run replaces by keyed pseudonyms (none in
+    obfuscate mode).
+
+    Raises:
+        PrepareFailure: ``synthesize_pseudonym_unsupported`` — an identifier column whose type
+            no pseudonym fits (``validate_run`` refuses the run first).
+    """
+    if mode != "synthesize":
+        return []
+    out: list[PseudonymColumn] = []
+    for c in _identifiers(
+        snapshot, write_mode=write_mode, pk_strategy=pk_strategy, projection=projection
+    ):
+        p = _pseudonym_of(c, snapshot.shape)
+        if p is None:
+            raise PrepareFailure(
+                "synthesize_pseudonym_unsupported",
+                f"{c.path}: no keyed pseudonym fits this column type",
+            )
+        out.append(p)
+    return out
+
+
+def _check_identifiers(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
+    """D-A at submit: a synthesize run never copies a sensitive key or identifier."""
+    target = spec.target
+    sensitive_key = any(c.entity_type for c in _key_columns(snapshot))
+    if target.write_mode == "in_place" and sensitive_key:
+        raise _fail(
+            "synthesize_in_place_sensitive_key",
+            422,
+            "a synthesize run in place would keep the real key of every row: write a table, "
+            "files or an append with generated keys",
+        )
+    if target.write_mode == "append" and sensitive_key and isinstance(target.pk_strategy, PkOffset):
+        raise _fail(
+            "pk_strategy_invalid",
+            422,
+            "a sensitive key is never copied into synthetic rows, shifted or prefixed: use generate",
+        )
+    for c in _identifiers(
+        snapshot,
+        write_mode=target.write_mode,
+        pk_strategy=target.pk_strategy,
+        projection=_projection(spec, snapshot),
+    ):
+        if _pseudonym_of(c, snapshot.shape) is None:
+            raise _fail(
+                "synthesize_pseudonym_unsupported",
+                422,
+                f"{c.path}: an identifier that synthetic rows must not copy, and no keyed "
+                "pseudonym fits its type (integers of at least 9 digits, text, uuid)",
+            )
 
 
 def _strategy_kind(strategy: PkStrategy | dict[str, Any] | None) -> str | None:
@@ -368,6 +489,8 @@ def validate_run(
                 f"{mode} on a production-tagged connection needs the admin scope",
             )
     keys = _key_columns(snapshot)
+    if spec.mode == "synthesize":
+        _check_identifiers(spec, snapshot)
     if mode == "in_place":
         if (
             target.connection_id not in (None, source_conn.id)
@@ -588,9 +711,11 @@ def resolve_target(
     target_shape: TableShape | None,
     plans: list[ColumnPlan],
     projection: list[str],
+    pseudonyms: list[str] | None = None,
 ) -> tuple[ResolvedTarget, list[ColumnPlan]]:
     """The :class:`ResolvedTarget` of a validated run and the plans with the **target**
-    column's kind and length (created text columns are unbounded).
+    column's kind and length (created text columns are unbounded). ``pseudonyms`` (D-A) are
+    written in place like planned columns.
 
     Raises:
         PrepareFailure: ``target_invalid`` (missing target, missing or incompatible columns, no
@@ -662,7 +787,7 @@ def resolve_target(
         raise PrepareFailure("target_invalid", "the target table does not exist")
     generated = isinstance(t.pk_strategy, PkGenerate)
     if t.write_mode == "in_place":
-        write_columns = [p.name for p in plans]
+        write_columns = [p.name for p in plans] + [n for n in pseudonyms or [] if n not in planned]
         if not write_columns:
             raise PrepareFailure("target_invalid", "no column of this run is transformed in place")
         checked = list(source_shape.key) + write_columns

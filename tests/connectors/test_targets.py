@@ -22,6 +22,7 @@ from dps.layers.connectors.targets import (
     created_column_type,
     is_same_table,
     method_for_column,
+    pseudonym_columns,
     resolve_target,
     validate_run,
     worst_case_length,
@@ -597,3 +598,136 @@ def test_same_table_and_run_plan_round_trip() -> None:
     )
     again = RunPlan.model_validate(plan.model_dump(mode="json"))
     assert again == plan and again.prepare == {}
+
+
+# -- D-A: synthetic tables never carry linkable real identifiers ---------------------------------
+
+
+def _with(snap: Any, name: str, **update: Any) -> Any:
+    columns = [c.model_copy(update=update) if c.name == name else c for c in snap.columns]
+    return snap.model_copy(update={"columns": columns})
+
+
+def test_synthesize_pseudonymises_sensitive_keys_and_kept_identifiers() -> None:
+    snap = accepted_snapshot("c_src", "bank.customers")
+    projection = [c.name for c in snap.columns]
+    got = pseudonym_columns(
+        snap, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert [(p.name, p.entity_type, p.kind, p.digits) for p in got] == [
+        ("customer_id", "CUSTOMER_ID", "int", 18)
+    ]
+    # a kept MEDIUM+ column (an owner override to keep) is pseudonymised, a LOW attribute is not
+    keep = MethodSpec(method="keep")
+    kept_email = _with(snap, "email", synthesize_method=keep)
+    names = [
+        p.name
+        for p in pseudonym_columns(
+            kept_email,
+            mode="synthesize",
+            write_mode="files",
+            pk_strategy=None,
+            projection=projection,
+        )
+    ]
+    assert names == ["customer_id", "email"]
+    city = _with(snap, "country_code", entity_type="CITY", synthesize_method=keep)
+    assert [
+        p.name
+        for p in pseudonym_columns(
+            city, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+        )
+    ] == ["customer_id"]
+    # obfuscate runs, keys the target generates and columns outside the projection: none
+    assert not pseudonym_columns(
+        snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert not pseudonym_columns(
+        snap,
+        mode="synthesize",
+        write_mode="append",
+        pk_strategy=PkGenerate(),
+        projection=projection,
+    )
+    assert not pseudonym_columns(
+        snap, mode="synthesize", write_mode="table", pk_strategy=None, projection=["email"]
+    )
+
+
+def test_synthesize_refuses_to_copy_or_shift_a_sensitive_key(settings: Settings) -> None:
+    in_place = dict(write_mode="in_place", confirm_write=True)
+    assert _code(spec(**in_place, mode="synthesize"), settings, target_conn=None) == (
+        "synthesize_in_place_sensitive_key",
+        422,
+    )
+    offset = dict(
+        write_mode="append", confirm_write=True, pk_strategy={"kind": "offset", "offset": 10**8}
+    )
+    assert _code(spec(**offset, mode="synthesize"), settings, target_conn=None) == (
+        "pk_strategy_invalid",
+        422,
+    )
+    generate = dict(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    _check(spec(**generate, mode="synthesize"), settings=settings, target_conn=None)
+    # a key without an entity type is not an identifier of a person: in place stays possible
+    plain = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    _check(spec(**in_place, mode="synthesize"), plain, settings=settings, target_conn=None)
+    # an identifier the pseudonym cannot fit (a smallint key; a float join column)
+    snap = accepted_snapshot("c_src", "bank.customers")
+    small = _with(snap, "customer_id", data_type="smallint")
+    shape = small.shape.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"data_type": "smallint"}) if c.name == "customer_id" else c
+                for c in small.shape.columns
+            ]
+        }
+    )
+    small = small.model_copy(update={"shape": shape})
+    assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, small) == (
+        "synthesize_pseudonym_unsupported",
+        422,
+    )
+    dated = _with(snap, "dob", synthesize_method=MethodSpec(method="keep"))
+    assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, dated) == (
+        "synthesize_pseudonym_unsupported",
+        422,
+    )
+
+
+def test_in_place_writes_the_pseudonymised_join_columns() -> None:
+    snap = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    snap = _with(snap, "country_code", entity_type="CUSTOMER_ID", sensitivity="medium")
+    run = spec(write_mode="in_place", confirm_write=True, mode="synthesize")
+    projection = [c.name for c in snap.columns]
+    plans = build_column_plans(
+        snap, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    pseudonyms = pseudonym_columns(
+        snap, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    assert [p.name for p in pseudonyms] == ["country_code"]
+    resolved, _ = resolve_target(
+        run,
+        job_id="job_1",
+        source_conn=SRC,
+        target_conn=None,
+        source_shape=snap.shape,
+        target_shape=snap.shape,
+        plans=plans,
+        projection=projection,
+        pseudonyms=[p.name for p in pseudonyms],
+    )
+    assert "country_code" in resolved.write_columns

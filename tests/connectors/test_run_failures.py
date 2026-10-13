@@ -17,7 +17,7 @@ from dps.layers.connectors.evidence import get_evidence
 from dps.layers.connectors.jobs_run import RUNTIMES, prepare
 from dps.layers.connectors.submit import submit_run
 from dps.worker import HandlerContext
-from tests.connectors.helpers import db_key_enc, discover_and_accept, drive
+from tests.connectors.helpers import KEY_NOT_PERSONAL, db_key_enc, discover_and_accept, drive
 from tests.connectors.test_run_modes import IN_PLACE_REVIEW, run_spec
 from tests.fixtures.sources import SourcePg
 
@@ -177,7 +177,7 @@ async def test_same_table_append_refuses_an_offset_inside_the_key_span(
     rw = await register_source(
         "t1", ref="dps/src/test-pg-rw", roles={"source", "target"}, name="gapped-rw"
     )
-    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj)
+    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj, overrides=KEY_NOT_PERSONAL)
 
     async def append(offset: int) -> jobs.Job:
         spec = run_spec(

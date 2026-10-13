@@ -46,6 +46,7 @@ from dps.engine.metrics import (
 from dps.engine.policy import Policy
 from dps.engine.synth.constraints import ColumnSpec, ConstraintError, ConstraintSet
 from dps.engine.synth.copula import CopulaError, GaussianCopula
+from dps.engine.synth.keys import INT_DIGITS  # digits an integer column holds (Task 4 note)
 from dps.engine.synth.mostly import TabularUnavailable
 from dps.engine.synth.personas import seed_int
 from dps.jobs_models import ClassificationSnapshot
@@ -72,17 +73,6 @@ QI_ENTITIES: dict[str, str] = {
     "POSTAL_CODE": "prefix3",
     "CITY": "exact",
     "NATIONALITY": "exact",
-}
-#: Decimal digits an integer column holds when the catalogue reports no precision (PostgreSQL),
-#: so a ``unique`` constraint never draws a number its column cannot store (Task 4 note).
-INT_DIGITS: dict[str, int] = {
-    "smallint": 4,
-    "int2": 4,
-    "integer": 9,
-    "int": 9,
-    "int4": 9,
-    "bigint": 18,
-    "int8": 18,
 }
 GATE_CODES = frozenset({"tabular_invalid", "leakage", "privacy_gate", "incompatible_method"})
 _CACHE: OrderedDict[tuple[str, str, str], TabularSampler] = OrderedDict()
@@ -507,8 +497,13 @@ async def prepare_tabular(
     anchor_of: Callable[[Row], str],
     projection: Sequence[str] | None = None,
     dp: Any = None,
+    pseudonyms: Sequence[str] = (),
 ) -> TabularPrepared:
     """Fit, preview, measure and gate. Never writes.
+
+    ``pseudonyms`` (D-A): identifier columns the run replaces by keyed pseudonyms; they are left
+    out of the exact-row comparison (a pseudonym never equals the real value, so comparing on it
+    would let a row that copies every other column through).
 
     Raises:
         TabularGateError: ``tabular_invalid`` (engine off, no column, too few rows, the model
@@ -534,7 +529,7 @@ async def prepare_tabular(
     rows, anchors = keyed_order(sampled, [anchor_of(r) for r in sampled], seed)
     del sampled
     train, holdout = split_holdout(rows, anchors, seed, max_holdout=settings.copula_holdout_rows)
-    key_names = set(shape.key)
+    key_names = set(shape.key) | set(pseudonyms)
     wanted = set(projection) if projection is not None else None
     reject_columns = sorted(
         c.name

@@ -629,6 +629,19 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     keys (`1..n`, `S00000001…`, `C00000001…`): joins back to production keys are impossible by
     design, and free-text and other unmodelled, non-sensitive columns are written as null. It needs
     the `synth-ml` extra (never in the default image).
+  - **M5 synthetic identifiers (D-A).** Synthesize jobs (copula and surrogate) never copy a key or
+    identifier: a key with an entity type, a join column (`CUSTOMER_ID`, `EMPLOYEE_ID`, `CASE_ID`)
+    and any kept MEDIUM+ column become **keyed pseudonyms** under the job's synthesis seed — use one
+    job group (one seed) for tables that must join, and their foreign keys still match. Integer
+    pseudonyms of values below 10⁹ are below 10⁹ (an `integer` column holds them); a `smallint` or
+    `numeric(p<9)` identifier is refused (`synthesize_pseudonym_unsupported`), so is an `in_place`
+    synthesize of a table whose key has an entity type (`synthesize_in_place_sensitive_key`) and an
+    `offset` append of such a key; use `table`, `files` or `append` + `generate`. A key the owner
+    reviews as *not personal* (entity type cleared) is a technical id and is kept. A column reviewed
+    as not personal is copied as it is — if its written sample shows personal data the pack says
+    `review_required` (not "passed"). A pseudonym may by chance equal another real key in a small
+    domain (text keys of few characters); the permutation guarantees only that no value maps to
+    itself.
 
 ## 9. Next milestones
 
