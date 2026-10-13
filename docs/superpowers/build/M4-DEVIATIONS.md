@@ -1220,3 +1220,41 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   allowed); `/__received` `non_get: 0` (fresh container). Then, against the containers,
   `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/test_no_values_in_logs_m4.py
   tests/scanner/test_demo_site.py tests/scanner/test_no_submit.py tests/test_compose.py` → 45 passed.
+
+## Task 24 — Smoke test extension and the compose-level scanner gate
+
+- `tools/smoke_test.py`: the plan's scanner block behind `DPS_SMOKE_SCANNER=1`, called in `main()`
+  before the final "console served" check, plus:
+  - **Eleven checks, not ten:** an added "masked capture served" (`summary.captures >= 1`, a page
+    with a `masked_capture` artefact, served as a PNG), so the smoke covers the Captures tab too.
+  - **Demo-site address is lane-safe:** the script reads the counters at `DPS_TEST_DEMO_SITE`, else
+    `http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}` (plan: `DPS_TEST_DEMO_SITE` or a literal 8410,
+    which on a lane would read another stack's demo site); `DPS_SMOKE_DEMO_URL` stays the in-network
+    address the scan uses.
+  - **Stronger "no submission" check:** besides `non_get` and `form_get`, the demo site's
+    `logout_hits` and `admin_hits` (the scan's deny list) must not move either; the verdict prints
+    each counter's delta and `non_get_allowed`/`blocked_requests` (counts only).
+  - **Export check uses every demo-site customer value** (`demo/onboarding/data.json`, all eleven
+    values except the birth date, which a generated persona may share), not the plan's five literals;
+    the verdict prints how many were found, never which.
+  - **Browser readiness is awaited** (up to 60 s): the app refreshes the `browser` component from
+    `dps_worker` heartbeats every 15 s, so right after `up` it reads `unknown` and the plan's
+    single read failed the first live run. A browser-worker that never shows up still fails the check,
+    and no scan is created.
+  - Key material and seed are dropped from the create answer as soon as the check has looked at
+    them; the seed check reads `synthesis_seed.seed` (the model's field) rather than the object's
+    truthiness. `DPS_SMOKE_SCAN_TIMEOUT` (default 300 s) replaces the literal timeout; a scan that is
+    still running at the deadline fails "scan succeeded" with its state.
+  - `scanner_checks(c, demo, *, timeout, interval, browser_wait)` takes the demo-site client as an
+    argument (testability); `scanner_wanted(setting)` and `demo_from_here(env)` are small helpers.
+- `tests/test_tools_m4.py` (the plan has no offline test for this task; written first, failed with
+  `AttributeError` before the code existed): `scanner_checks` against an `httpx.MockTransport` fake
+  app and demo site — a clean scan passes all eleven checks and prints no demo value, key or seed;
+  any movement of the four site counters, a demo value in the export, a scan not finished by the
+  deadline, or no browser-worker (no scan created) each fail with exit 1; readiness that turns ok on
+  the third poll passes; `DPS_SMOKE_SCANNER` must be exactly `1`; the lane-safe demo address.
+- Live (lane `dps-wt-m4`, `docker compose --profile scanner up -d --build`, then `docker compose
+  restart app` to reproduce the fresh-readiness race): `DPS_SMOKE_M2=off DPS_SMOKE_SCANNER=1
+  ./lane.sh python tools/smoke_test.py` → **all 34 checks passed** (23 Layer 1 + 11 scanner; the two
+  OCR checks skip without the `docs` profile); without `DPS_SMOKE_SCANNER` → 23 checks, as before.
+  The plan's "M0's checks plus the ten scanner checks" predates M1's document checks.
