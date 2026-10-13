@@ -94,3 +94,21 @@ def test_finalize_clears_a_ledger_any_write_mode_prepared() -> None:
     only the ``in_place``/``append`` ledgers M2's PostgreSQL writer keeps."""
     text = (ROOT / "jobs_run.py").read_text(encoding="utf-8")
     assert '"ledger": report.ledger' in text and 'plan.prepare.get("ledger")' in text
+
+
+def test_the_run_transformer_restores_leaf_types_by_source_engine() -> None:
+    """Review G3 r1 B1: every run transformer is built for its source engine, and MongoDB sources
+    restore written leaves to their original BSON type (``mongo_docs.restore_leaf``)."""
+    calls = _calls("jobs_run.py", "_transformer")
+    assert len(calls) == 2
+    assert all(any(k.arg == "engine" for k in c.keywords) for c in calls)
+    builds = _calls("jobs_run.py", "BatchTransformer")
+    assert builds and all(any(k.arg == "leaf_restore" for k in c.keywords) for c in builds)
+    from dps.layers.connectors.jobs_run import leaf_restorer
+
+    assert leaf_restorer("postgres") is None and leaf_restorer("oracle") is None
+    try:
+        from dps.layers.connectors.mongo_docs import restore_leaf
+    except ImportError:  # the mongo extra is not installed: nothing to restore with
+        return
+    assert leaf_restorer("mongo") is restore_leaf

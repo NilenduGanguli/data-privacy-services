@@ -218,3 +218,53 @@ def test_a_timestamp9_date_shift_keeps_its_nanoseconds() -> None:
     assert out != "2025-02-01T10:00:00.123456789" and out.endswith("T10:00:00.123456789")
     with pytest.raises(IncompatibleMethod):  # without it, the nanoseconds would be lost
         run(plan(None))
+
+
+def test_leaf_restore_sees_only_written_leaves_and_text_leaves_stay_text() -> None:
+    """Review G3 r1 B1: the restore hook runs for the leaves a plan wrote, with their originals;
+    an out-of-sample string in a numeric field keeps the engine's text (no number, no lost zero)."""
+    calls: list[tuple[Any, Any]] = []
+
+    def restore(original: Any, value: Any) -> Any:
+        calls.append((original, value))
+        return value
+
+    shape = TableShape(
+        object=ObjectRef(name="c"),
+        columns=[
+            _col("$._id", "_id", "int", "int"),
+            _col("$.acct", "acct", "int", "long"),
+            _col("$.score", "score", "int", "long"),
+        ],
+        key=["_id"],
+        key_source="primary_key",
+    )
+    plan = ColumnPlan(
+        path="$.acct",
+        name="acct",
+        entity_type="ACCOUNT_NUMBER",
+        method=MethodSpec(method="det_token"),
+        text_column=False,
+        reversible=True,
+        kind="text",
+        length=None,
+    )
+    rows = [{"_id": 1, "acct": 12345678, "score": 7}, {"_id": 2, "acct": "00412345", "score": 8}]
+    out = BatchTransformer(
+        ENGINE,
+        policy=load_preset("gdpr-pseudonymise"),
+        mode="obfuscate",
+        columns=[plan],
+        shape=shape,
+        key=KEY,
+        seed=None,
+        locale="en_IN",
+        unclassified="keep",
+        leaf_restore=restore,
+    ).transform(rows)
+    assert [original for original, _ in calls] == [12345678]  # the text leaf is not converted
+    first, second = out.rows
+    assert calls[0][1] == first["acct"] != 12345678  # the hook's result is what is written
+    assert first["score"] == 7  # untouched: no hook call
+    assert isinstance(second["acct"], str) and second["acct"] != "00412345"
+    assert second["score"] == 8

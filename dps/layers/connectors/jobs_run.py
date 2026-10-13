@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -212,6 +212,17 @@ def _policy(ctx: HandlerContext, spec: RunSpec, name: str) -> Policy:
         raise PrepareFailure("policy_invalid", "the run policy is not valid") from None
 
 
+def leaf_restorer(engine: str) -> Callable[[Any, Any], Any] | None:
+    """How a source engine's written leaves get their original driver type back (contract §6.4):
+    MongoDB documents keep each transformed leaf's BSON type (``mongo_docs.restore_leaf``); SQL
+    rows are written through the target column's codec alone (``None``)."""
+    if engine != "mongo":
+        return None
+    from dps.layers.connectors.mongo_docs import restore_leaf
+
+    return restore_leaf
+
+
 def _transformer(
     ctx: HandlerContext,
     spec: RunSpec,
@@ -219,6 +230,8 @@ def _transformer(
     plan: RunPlan,
     policy: Policy,
     shape: TableShape,
+    *,
+    engine: str,
 ) -> BatchTransformer:
     if spec.mode == "obfuscate" and not secret.key_material:
         raise SecretUnavailable()
@@ -239,6 +252,7 @@ def _transformer(
         unclassified=spec.options.unclassified,
         anchor=anchor,
         verify=spec.options.verify,
+        leaf_restore=leaf_restorer(engine),
     )
 
 
@@ -462,7 +476,7 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             batch_rows=spec.source.batch_rows or settings.batch_rows,
             same_table_append=mode == "append" and resolved.same_as_source,
         )
-        transformer = _transformer(ctx, spec, secret, plan, policy, shape)
+        transformer = _transformer(ctx, spec, secret, plan, policy, shape, engine=source.engine)
         await _stage(ctx, job, "preflight")
         sample = await source.sample(
             shape, selection, selection.params, max(1, min(settings.preflight_rows, rows))
@@ -686,7 +700,7 @@ class RuntimeCache:
                     assert target_conn is not None
                     target = await _open(ctx, job, target_conn, "run")
                 writer = await target.writer(plan.target, shape)
-            transformer = _transformer(ctx, spec, secret, plan, policy, shape)
+            transformer = _transformer(ctx, spec, secret, plan, policy, shape, engine=source.engine)
         except BaseException:
             if target is not None and target is not source:
                 with contextlib.suppress(Exception):

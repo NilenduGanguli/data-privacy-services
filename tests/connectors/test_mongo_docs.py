@@ -1,4 +1,5 @@
-"""BSON labels, path-shape inference from a sample, and BSON type restoration (offline)."""
+"""BSON labels, path-shape inference from a sample and the _id bounds, BSON type restoration of
+written leaves, upsert ``$set`` documents (offline)."""
 
 from __future__ import annotations
 
@@ -116,35 +117,70 @@ def test_unpageable_id_types_have_no_range_key() -> None:
         encode_key((value,), shape.key_columns())  # the codec accepts the key kind
 
 
-def test_coerce_restores_bson_types() -> None:
-    shape = md.infer_shape(OBJ, [_doc(1)], row_estimate=1)
-    out = {
-        "_id": "0123456789abcdef01234567",
-        "customerId": "CUST-73104482",
-        "riskScore": 731,
-        "profile": {"fullName": "Tilqoe Mzvhrpkat", "dob": dt.date(1979, 6, 2)},
-        "accounts": [{"iban": "GB00TEST0000000001", "balance": decimal.Decimal("10.50")}],
+def test_id_bounds_of_another_type_make_the_shape_keyless() -> None:
+    """The sample saw only ObjectIds; the smallest or largest _id says otherwise (review B2)."""
+    docs = [{"_id": ObjectId(), "v": i} for i in range(5)]
+    assert md.infer_shape(OBJ, docs, row_estimate=5).key == ["_id"]
+    for bounds in ([7, docs[0]["_id"]], [docs[0]["_id"], "S1"], [{"a": 1}, docs[1]["_id"]]):
+        shape = md.infer_shape(OBJ, docs, row_estimate=7, id_bounds=bounds)
+        assert shape.key == [] and shape.key_source == "none"
+        assert not any(c.is_key for c in shape.columns)
+    same = md.infer_shape(OBJ, docs, row_estimate=5, id_bounds=[docs[0]["_id"], docs[4]["_id"]])
+    assert same.key == ["_id"]
+    ints = [{"_id": 1}, {"_id": Int64(2)}]
+    assert md.infer_shape(OBJ, ints, row_estimate=2, id_bounds=[1, Int64(9)]).key == ["_id"]
+    assert md.infer_shape(OBJ, ints, row_estimate=2, id_bounds=[1, 2.5]).key == []
+    binary = bson.Binary(b"0123456789abcdef", 0)  # another binData subtype sorts outside UUIDs
+    uids = [{"_id": uuid.uuid4()}]
+    assert md.infer_shape(OBJ, uids, row_estimate=2, id_bounds=[binary, uids[0]["_id"]]).key == []
+
+
+def test_restore_leaf_returns_the_original_leaf_type() -> None:
+    assert md.restore_leaf(Int64(5), 731) == Int64(731)
+    assert isinstance(md.restore_leaf(Int64(5), 731), Int64)
+    kept = md.restore_leaf(5, 731)  # an int32 original stays int32
+    assert kept == 731 and type(kept) is int
+    assert isinstance(md.restore_leaf(5, 2**40), Int64)  # unless it needs 64 bits
+    assert md.restore_leaf(Decimal128("1.50"), decimal.Decimal("10.50")) == Decimal128("10.50")
+    assert md.restore_leaf(1.5, 2) == 2.0 and isinstance(md.restore_leaf(1.5, 2), float)
+    assert md.restore_leaf(dt.datetime(2020, 1, 1), dt.date(1979, 6, 2)) == dt.datetime(1979, 6, 2)
+    uid = uuid.uuid4()
+    assert md.restore_leaf(uuid.uuid4(), str(uid)) == uid
+    assert md.restore_leaf(Int64(5), "42") == Int64(42)
+    assert md.restore_leaf(Int64(5), "k7fq2wxb3n") == "k7fq2wxb3n"  # cannot be restored: as is
+
+
+def test_restore_leaf_never_converts_a_matching_or_untyped_value() -> None:
+    value = Int64(9)
+    assert md.restore_leaf(Int64(1), value) is value
+    text = "0042"
+    assert md.restore_leaf("x", text) is text  # a string original is not a number
+    oid = "0123456789abcdef01234567"
+    assert md.restore_leaf(ObjectId(), oid) is oid  # ObjectIds are never transformed
+    assert md.restore_leaf(True, "true") == "true"
+    assert md.restore_leaf(None, 5) == 5
+
+
+def test_upsert_fields_set_through_sub_documents_only() -> None:
+    doc = {
+        "_id": 1,
+        "name": "T",
+        "profile": {"fullName": "F", "addr": {"pin": "560001"}},
+        "accounts": [{"iban": "GB00TEST"}],
+        "empty": {},
+        "n": None,
     }
-    md.coerce_bson(out, shape)
-    assert isinstance(out["_id"], ObjectId) and isinstance(out["riskScore"], Int64)
-    assert out["riskScore"] == 731
-    assert out["profile"]["dob"] == dt.datetime(1979, 6, 2)
-    assert out["accounts"][0]["balance"] == Decimal128("10.50")
-    assert out["customerId"] == "CUST-73104482"
-    token = {"riskScore": "k7fq2wxb3n"}
-    md.coerce_bson(token, shape)
-    assert token["riskScore"] == "k7fq2wxb3n"  # cannot be restored: left as is
-
-
-def test_coerce_text_numbers_and_every_array_element() -> None:
-    docs = [{"_id": 1, "n": Int64(1), "d": 1.5, "a": [{"v": Decimal128("1")}]}]
-    shape = md.infer_shape(OBJ, docs, row_estimate=1)
-    out = {"_id": 1, "n": "42", "d": "2.25", "a": [{"v": "3.5"}, {"v": "4"}, {"w": 1}]}
-    md.coerce_bson(out, shape)
-    assert out["n"] == Int64(42) and isinstance(out["n"], Int64)
-    assert out["d"] == 2.25 and isinstance(out["d"], float)
-    assert out["a"] == [{"v": Decimal128("3.5")}, {"v": Decimal128("4")}, {"w": 1}]
-    md.coerce_bson({"_id": 2}, shape)  # absent paths are nothing to restore
+    assert md.upsert_fields(doc) == {
+        "name": "T",
+        "profile.fullName": "F",
+        "profile.addr.pin": "560001",
+        "accounts": [{"iban": "GB00TEST"}],
+        "empty": {},
+        "n": None,
+    }
+    assert md.upsert_fields({"_id": 1}) == {}
+    for bad in ({"a.b": 1}, {"$x": 1}, {"p": {"a.b": 1}}, {"p": {"": 1}}):
+        assert md.upsert_fields({"_id": 1, **bad}) is None
 
 
 def test_make_bson_safe_is_recursive() -> None:

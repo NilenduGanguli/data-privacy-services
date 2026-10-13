@@ -883,3 +883,71 @@ Red as the plan foresaw for documents, plus one Oracle gap; each fix landed with
 - Run on the lane's containers: `tests/connectors/test_conformance_{postgres,oracle,mongo}.py` —
   29 passed, 1 skipped (MongoDB composite paging, by its capability flag); with
   `DPS_TEST_REQUIRE_SERVICES=1 pytest -m "oracle or mongo"`: 132 passed, 1 skipped.
+
+## Review G3 round 1 fixes (Tasks 9-14) — `M3-G3-review-r1.md` B1, B2, B3
+
+- **B1 (the Mongo writer retyped untouched values) — fixed by restoring types only where the engine
+  wrote, from the original leaf (the review's first option).** `MongoWriter._documents` no longer runs
+  `coerce_bson` (removed with its tests): it only makes a copy BSON-safe (`make_bson_safe`:
+  `decimal.Decimal` → `Decimal128`, `datetime.date` → `datetime`, which pymongo cannot encode and never
+  decodes), so every value no plan covers reaches the target as the driver decoded it. Restoration moved
+  into `BatchTransformer`, which holds each written leaf's input value: new additive constructor argument
+  `leaf_restore: Callable[[Any, Any], Any] | None = None` (contract §6.4 amended), called once per value a
+  plan *wrote* with `(original, codec value)`; MongoDB passes `mongo_docs.restore_leaf`, which returns the
+  value in the original leaf's BSON type (`Int64` stays `Int64`, int32 stays int32 unless it needs 64
+  bits, `Decimal128`, double, date, UUID) and returns a value whose type already matches unchanged. With a
+  hook, a leaf that held **text** keeps the engine's text instead of the plan column's codec (an
+  out-of-sample `"0042"` in a field sampled as `long` is not turned into `42`). `jobs_run.leaf_restorer(
+  engine)` picks the hook (`None` for PostgreSQL/Oracle: SQL rows unchanged) and `_transformer` now takes
+  the source `engine` (both call sites pass `source.engine`; MongoDB is still outside `PIPELINE_ENGINES`
+  until T15/T19, the wiring is in place so it cannot be forgotten).
+  - Test change: `test_mongo_writer.py::_mask` hands the writer `Int64` risk scores (what the transformer
+    now emits) instead of plain ints, since the writer no longer converts them; the restoration it used to
+    prove is proven end to end in `test_mongo_write_fidelity.py::test_planned_leaves_keep_their_original_
+    bson_type` (transformer + writer: 21/21 written `acct` leaves keep int32 or Int64 as in the source,
+    0 equal to the source).
+  - Tests (failed before the fix): `test_mongo_write_fidelity.py::test_untouched_leaves_keep_their_raw_
+    bson_on_full_documents[table|in_place]` — 40 sampled documents (int32/Int64 mixed `score`/`acct`,
+    nested int/date/ObjectId/UUID, arrays with `Decimal128`/int/double) plus one drift document written
+    after discovery with text in typed fields, read **unprojected**, `$.name` transformed, written whole:
+    every other top-level field compared as raw BSON element bytes, **0 changed** (was 44 in both modes),
+    0 surviving names; `test_planned_leaves_keep_their_original_bson_type` (was 10/21 same type);
+    offline `test_batch_documents_m3.py::test_leaf_restore_sees_only_written_leaves_and_text_leaves_stay_
+    text`, `test_mongo_docs.py::test_restore_leaf_*`, `test_pipeline_seams_m3.py::test_the_run_
+    transformer_restores_leaf_types_by_source_engine`. Reviewer probe `probe_untouched.py`: 24 → 0
+    retyped leaves in `table` and `in_place`; drift values stay strings.
+- **B2 (a minority `_id` type the sample missed was dropped from range reads) — fixed exactly at
+  describe, plus a fail-closed read guard.** `MongoConnector.describe` reads the smallest and largest
+  `_id` (`find({}, {_id: 1}).sort(_id, ±1).limit(1)`, two `_id` index lookups) and passes them to
+  `infer_shape(…, id_bounds=…)`; the collection is keyed only when the sample *and* both bounds share one
+  range-pageable family (`mongo_docs.id_label`: int32/int64 one family). BSON sorts by type bracket
+  first, so both ends in the bracket ⇒ every `_id` in it; otherwise the shape is key-less (`none`) and
+  M2's run handler refuses it with `no_key`, as the plan intends. The run's `prepare` re-runs `describe`
+  (M2 `_prepare`), so the check is repeated before every run. Inside a bracket a foreign type (a double
+  among ints; a non-UUID binary sorts outside the UUIDs and is caught by the bounds) is not dropped by
+  ranges but its key would not round-trip through the codec: a keyed `read_partition` now raises
+  `ConnectorError("key_type_mixed", …)` (value-free) when a page holds an `_id` of another family.
+  Contract §4.2 amended. Tests (failed before): `test_mongo_write_fidelity.py::test_a_foreign_id_type_the_
+  sample_missed_makes_the_collection_keyless` (20,000 ObjectIds + an int and a string `_id`, sample 10:
+  was keyed; now key-less 3/3, count 20,002 = read 20,002), `…::test_a_foreign_id_inside_the_key_bracket_
+  fails_the_read_closed` (no error before; now `key_type_mixed`, value absent from the message), and the
+  control `…::test_a_uniform_id_collection_stays_keyed_and_reads_every_partition` (3,000 over 4
+  partitions); offline `test_mongo_docs.py::test_id_bounds_of_another_type_make_the_shape_keyless`.
+  Reviewer probe `probe_idtypes.py`: keyed 5/5 → 0/5.
+- **B3 (a projected `table` upsert wiped matched documents' other fields) — fixed with `$set`
+  upserts (the review's first option).** `table_load: upsert` now writes `UpdateOne({_id}, {$set:
+  mongo_docs.upsert_fields(doc)}, upsert=True)`: every field except `_id` at its dotted path **through
+  sub-documents** (so a `profile.fullName` projection updates that leaf and keeps `profile.dob`), arrays,
+  scalars and empty sub-documents set whole (array elements cannot be merged by position — the reason the
+  Task 12 log gave for not doing a leaf `$set`), a field name with `.`/leading `$` → `PrepareFailure(
+  "path_unsupported")`. `truncate_insert` and created targets keep `ReplaceOne(upsert=True)` (the target
+  is empty, a replay stays idempotent). The Task 12 "open question" is closed; contract §4.2/§5.2
+  amended (a projected array is overwritten whole on matched documents). Test (failed before: `KeyError:
+  'segment'`): `test_mongo_write_fidelity.py::test_a_projected_upsert_keeps_the_other_fields_of_matched_
+  documents` — 12 source documents, 10 already in a wider target with a target-only field: 10/10 matched
+  keep `segment`, `accounts`, `profile.dob` and the target-only field, 0 surviving source names, the 2
+  inserted documents hold the projection only; offline `test_upsert_fields_set_through_sub_documents_
+  only`. Reviewer probe `probe_upsert.py`: 10/10 → 0/10 documents lost fields.
+- Open (not in this round's findings): a **key-less** collection counted with `selection.sample` still
+  pages `_id`s with `$gt` (`_scan_ids`), which skips documents of other BSON types; M2's run handler
+  refuses key-less sources, so only a discovery count is affected (review N-notes otherwise unchanged).

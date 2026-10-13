@@ -31,7 +31,10 @@ addresses in the row (``[*]`` expanded per document); the engine sees those leav
 concrete paths (the paths L1 uses for the same JSON document). Values no plan covers are never
 converted: they leave as the driver's objects (``Int64``, ``Decimal128``, ``ObjectId``,
 ``datetime``), by reference, and the input rows are never changed (each container on a written
-path is shallow-copied once).
+path is shallow-copied once). A leaf a plan *wrote* keeps its original leaf's type when the caller
+passes ``leaf_restore`` (MongoDB: ``mongo_docs.restore_leaf``, so an ``Int64`` stays an ``Int64``
+and an int32 stays an int32); a leaf that held text keeps the engine's text (a value the discovery
+sample saw in a numeric field but which is a string here is not turned into a number).
 Leaves whose generalised path the shape does not know (fields the discovery sample never saw) follow
 ``unclassified``: ``detect`` runs the detector over string leaves and replaces the spans
 (``det_token`` envelopes in obfuscate mode), ``redact`` replaces every such scalar with the
@@ -52,6 +55,7 @@ import copy
 import dataclasses
 import json
 from collections import Counter
+from collections.abc import Callable
 from typing import Any, Literal, NamedTuple, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -355,8 +359,12 @@ class BatchTransformer:
         tabular: TabularSampler | None = None,
         anchor: tuple[str, str] | None = None,
         verify: Literal["strict", "warn"] = "strict",
+        leaf_restore: Callable[[Any, Any], Any] | None = None,
     ) -> None:
         """Validate the mode's prerequisites and the plans against ``shape``.
+
+        ``leaf_restore(original, written)`` (document sources) returns a written value in its
+        original leaf's driver type; it is called only for values a plan wrote.
 
         Raises:
             ValueError: obfuscate without key material, synthesize without a seed, a plan (or
@@ -405,6 +413,7 @@ class BatchTransformer:
         self.shape, self.key, self.seed, self.locale = shape, key, seed, locale
         self.anchor, self.verify_mode = anchor, verify
         self.unclassified, self.tabular = unclassified, tabular
+        self.leaf_restore = leaf_restore
         self.whole = [c for c in columns if not c.text_column]
         self.text = [c for c in columns if c.text_column]
         self.detector = engine.detector(policy, locale) if self.text else None
@@ -540,6 +549,26 @@ class BatchTransformer:
             length=None,
         )
 
+    def _stored(self, row: Row, unit: _Unit, result: str | None) -> Any:
+        """The value written at ``unit.path``: the output column's codec, then (document rows) the
+        original leaf's type — a leaf that held text keeps the engine's text."""
+        column = unit.out
+        original: Any = None
+        if self.leaf_restore is not None and result is not None:
+            try:
+                original = get_path(row, unit.path)
+            except (KeyError, IndexError, TypeError, ValueError):
+                original = None
+            if isinstance(original, str):
+                return result
+        try:
+            stored = from_engine_text(result, column)
+        except IncompatibleValue as exc:
+            raise IncompatibleMethod(column.path, exc.code) from None
+        if self.leaf_restore is not None and original is not None:
+            stored = self.leaf_restore(original, stored)
+        return stored
+
     def transform(self, rows: list[Row]) -> BatchResult:
         """Transform ``rows`` (not mutated); raises :class:`LeakageError` under ``strict``.
 
@@ -642,10 +671,7 @@ class BatchTransformer:
                     result = None if value is None else str(value)
                     column = unit.out
                     outputs[unit.path] = result
-                    try:
-                        stored = from_engine_text(result, column)
-                    except IncompatibleValue as exc:
-                        raise IncompatibleMethod(column.path, exc.code) from None
+                    stored = self._stored(row, unit, result)
                     if unit.path in reversible and to_engine_text(stored, column) != result:
                         # the column would change a token reveal must read back exactly
                         raise IncompatibleMethod(column.path, "incompatible_method")

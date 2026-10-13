@@ -90,11 +90,13 @@ async def _writer(c: MongoConnector, shape: TableShape, mode: str, **kw: Any) ->
 
 
 def _mask(rows: list[Row]) -> list[Row]:
-    """What the engine hands the writer: text names, plain ints and Decimals in numeric leaves."""
+    """What the engine hands the writer: text names, written numeric leaves in their original
+    leaf's type (``BatchTransformer`` with ``mongo_docs.restore_leaf``), Decimals where the codec
+    produced them (the writer makes them ``Decimal128``)."""
     out = []
     for i, r in enumerate(rows):
         d = {**r, "profile": {**r["profile"], "fullName": f"T-{i:05d}"}}
-        d["riskScore"] = int(r["riskScore"])
+        d["riskScore"] = Int64(int(r["riskScore"]) + 1)
         d["accounts"] = [{**a, "balance": decimal.Decimal("1.25")} for a in r["accounts"]]
         out.append(d)
     return out
@@ -119,7 +121,7 @@ async def test_table_mode_upserts_idempotently_and_keeps_bson_types(
     assert len(docs) == 40 and set(docs) == {r["_id"] for r in rows}
     for r in rows:
         d = docs[r["_id"]]
-        assert isinstance(d["riskScore"], Int64) and d["riskScore"] == r["riskScore"]
+        assert isinstance(d["riskScore"], Int64) and d["riskScore"] == r["riskScore"] + 1
         assert d["accounts"][0]["balance"] == Decimal128("1.25")
         assert d["profile"]["dob"] == r["profile"]["dob"] and d["contact"] == r["contact"]
     names = [r["profile"]["fullName"] for r in rows]

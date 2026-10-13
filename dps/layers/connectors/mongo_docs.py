@@ -1,9 +1,11 @@
 """BSON-aware helpers for the MongoDB connector (pure, offline).
 
 Type labels, a path shape inferred from a ``$sample`` (one column per generalised leaf path,
-``[*]`` for array elements), and type restoration before writes, so a masked copy keeps its
-``Int64``, ``Decimal128``, date and ``ObjectId`` fields as their BSON types after the engine turned
-values into text and back. Nothing here logs or raises a value.
+``[*]`` for array elements), and type restoration of the leaves the engine wrote
+(:func:`restore_leaf`: a transformed ``Int64``, ``Decimal128``, date or UUID leaf goes back to its
+*original* leaf's BSON type after the engine turned it into text and back). Values no plan covers
+are never converted: they reach the target as the driver decoded them (contract §6.4). Nothing here
+logs or raises a value.
 """
 
 from __future__ import annotations
@@ -17,9 +19,9 @@ from typing import Any, Final, Literal
 
 from bson import Binary, Decimal128, Int64, ObjectId
 
-from dps.engine.jsonpath import flatten, get_path, parse_path, set_path
+from dps.engine.jsonpath import flatten, parse_path
 from dps.layers.connectors.base import ColumnInfo, ColumnKind, ObjectRef, TableShape
-from dps.layers.connectors.docpaths import expand_wildcards, generalise
+from dps.layers.connectors.docpaths import generalise
 
 #: BSON label → ``ColumnInfo.kind``.
 KIND_OF: Final[dict[str, ColumnKind]] = {
@@ -40,7 +42,9 @@ KIND_OF: Final[dict[str, ColumnKind]] = {
 _RANGE_ID_LABELS: Final = frozenset({"int", "long", "string", "objectId", "date", "uuid"})
 _INT_TEXT: Final = re.compile(r"-?\d{1,19}")
 _NUM_TEXT: Final = re.compile(r"-?\d+(\.\d+)?([eE][-+]?\d+)?")
-_SKIP_LABELS: Final = frozenset({"string", "bool", "null", "other", "binData"})
+#: Labels :func:`restore_leaf` restores (a string, bool, null, binary or ObjectId leaf is never
+#: converted back from another type).
+_RESTORED_LABELS: Final = frozenset({"int", "long", "double", "decimal", "date", "uuid"})
 _INT32 = range(-(2**31), 2**31)
 
 
@@ -79,9 +83,13 @@ def top_level(path: str) -> str:
     return str(parse_path(path.replace("[*]", "[0]"))[0])
 
 
-def _id_label(doc: dict[str, Any]) -> str:
-    value = doc.get("_id")
-    return "document" if isinstance(value, dict | list) else bson_type(value)
+def id_label(value: Any) -> str:
+    """The key family of an ``_id`` value: its BSON label, ``int`` for int32 and int64 alike (one
+    family: they compare and page together), ``document`` for an embedded document or array."""
+    if isinstance(value, dict | list):
+        return "document"
+    label = bson_type(value)
+    return "int" if label == "long" else label
 
 
 def _label(counts: Counter[str]) -> tuple[str, ColumnKind]:
@@ -96,14 +104,23 @@ def _label(counts: Counter[str]) -> tuple[str, ColumnKind]:
 
 
 def infer_shape(
-    obj: ObjectRef, docs: list[dict[str, Any]], *, row_estimate: int | None
+    obj: ObjectRef,
+    docs: list[dict[str, Any]],
+    *,
+    row_estimate: int | None,
+    id_bounds: list[Any] | None = None,
 ) -> TableShape:
     """One column per generalised leaf path across ``docs`` (``_id`` first).
 
-    ``key = ["_id"]`` (``primary_key``) when every sampled ``_id`` has one range-pageable scalar
-    BSON type (ints and longs count as one); otherwise no key (``none``): BSON type bracketing
-    would drop documents of the other types from a range read, so the collection is one
-    partition and ``in_place``/``append`` refuse it.
+    ``key = ["_id"]`` (``primary_key``) when every sampled ``_id`` — and every value of
+    ``id_bounds`` — has one range-pageable scalar BSON type (ints and longs count as one);
+    otherwise no key (``none``): BSON type bracketing would drop documents of the other types from
+    a range read, so the collection is one partition and ``in_place``/``append`` refuse it.
+
+    ``id_bounds`` are the collection's smallest and largest ``_id`` (``MongoConnector.describe``
+    reads both from the ``_id`` index). BSON orders values by type bracket first, so when both
+    bounds share the sample's type every ``_id`` lies in that bracket: a minority type the sample
+    missed can no longer make the collection look keyed (review G3 r1 B2).
     """
     types: dict[str, Counter[str]] = {}
     present: Counter[str] = Counter()
@@ -114,9 +131,8 @@ def infer_shape(
             types.setdefault(g, Counter())[bson_type(value)] += 1
             seen.add(g)
         present.update(seen)
-    ids = {_id_label(d) for d in docs}
-    uniform = bool(docs) and (len(ids) == 1 or ids <= {"int", "long"})
-    keyed = uniform and ids <= _RANGE_ID_LABELS
+    ids = {id_label(d.get("_id")) for d in docs} | {id_label(v) for v in id_bounds or []}
+    keyed = bool(docs) and len(ids) == 1 and ids <= _RANGE_ID_LABELS
     columns: list[ColumnInfo] = []
     for g in sorted(types, key=lambda p: (p != "$._id", p)):
         label, kind = _label(types[g])
@@ -185,17 +201,44 @@ def _coerce(value: Any, label: str) -> Any:
     return value
 
 
-def coerce_bson(doc: dict[str, Any], shape: TableShape) -> dict[str, Any]:
-    """Restore the shape's BSON type at every typed path of ``doc`` (in place); returns ``doc``."""
-    for col in shape.columns:
-        if col.data_type in _SKIP_LABELS or col.data_type.startswith("mixed"):
-            continue
-        for path in expand_wildcards(doc, col.path):
-            old = get_path(doc, path)
-            new = _coerce(old, col.data_type)
-            if new is not old:
-                set_path(doc, path, new)
-    return doc
+def restore_leaf(original: Any, value: Any) -> Any:
+    """``value`` (what the engine wrote at a leaf) in ``original``'s BSON type (contract §6.4).
+
+    Called by ``BatchTransformer`` for each document leaf a plan *wrote*, never for untouched
+    leaves. A value whose type already matches the original is returned as is; an int32 original
+    stays int32 unless the new value needs 64 bits; text that cannot be restored (a token in a
+    numeric field) is returned unchanged.
+    """
+    label = bson_type(original)
+    if label not in _RESTORED_LABELS or bson_type(value) == label:
+        return value
+    return _coerce(value, label)
+
+
+def upsert_fields(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """``$set`` document of a ``table`` upsert: every field but ``_id`` at its dotted path through
+    sub-documents, so a matched target document keeps the fields the row does not carry (contract
+    §5.2: an upsert leaves the target's other columns untouched). Arrays, scalars and empty
+    sub-documents are set whole (an array element cannot be merged by position). None when a field
+    name cannot be dot-addressed (empty, with a ``.``, or starting with ``$``).
+    """
+    out: dict[str, Any] = {}
+
+    def walk(node: dict[str, Any], prefix: str) -> bool:
+        for key, value in node.items():
+            if not prefix and key == "_id":
+                continue
+            if not isinstance(key, str) or not key or "." in key or key.startswith("$"):
+                return False
+            path = f"{prefix}{key}"
+            if isinstance(value, dict) and value:
+                if not walk(value, path + "."):
+                    return False
+            else:
+                out[path] = value
+        return True
+
+    return out if walk(doc, "") else None
 
 
 def make_bson_safe(value: Any) -> Any:

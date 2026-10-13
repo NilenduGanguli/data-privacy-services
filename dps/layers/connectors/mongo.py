@@ -1,18 +1,25 @@
 """MongoDB connector over pymongo's ``AsyncMongoClient`` (contract §1: Motor is deprecated).
 
-Reads. A keyed collection (one range-pageable ``_id`` type, ``mongo_docs.infer_shape``) pages on
-``_id`` with a fresh ``find`` per batch (``_id >= lower AND _id < upper AND _id > after``, sorted by
-``_id`` in the server, ``limit = batch``), so no server cursor outlives a batch; a key-less
-collection (mixed or document ``_id``s, where BSON type bracketing would drop documents from a
-range) is one partition read through one cursor in ``_id`` order. Reads use ``readConcern:
-majority`` on a replica set (contract §4.2). Documents travel whole: the engine transforms nested
-paths and arrays (``[*]``), and ``mongo_docs.coerce_bson`` restores BSON types before writes.
+Reads. A keyed collection (one range-pageable ``_id`` type in the ``$sample`` *and* at both ends of
+the ``_id`` index, ``describe``) pages on ``_id`` with a fresh ``find`` per batch (``_id >= lower
+AND _id < upper AND _id > after``, sorted by ``_id`` in the server, ``limit = batch``), so no server
+cursor outlives a batch; a document whose ``_id`` has another type inside the same BSON bracket (a
+double among ints) fails the read closed (``key_type_mixed``). A key-less collection (mixed or
+document ``_id``s, where BSON type bracketing would drop documents from a range) is one partition
+read through one cursor in ``_id`` order. Reads use ``readConcern: majority`` on a replica set
+(contract §4.2). Documents travel whole: the engine transforms nested paths and arrays (``[*]``)
+and restores each leaf it wrote to the original leaf's BSON type (``mongo_docs.restore_leaf``);
+every other value reaches the writer as the driver decoded it.
 ``selection.sample`` keeps a document when ``HMAC-SHA256(seed, BSON({_id}))[:4] < percent·2³²`` —
 a function of the document alone, so the count, every partition and a resumed page read one sample.
 
-Writes (:class:`MongoWriter`). Every document goes through ``make_bson_safe`` and ``coerce_bson``
-first. ``table`` upserts whole documents by ``_id`` (``ReplaceOne(upsert=True)``, unordered;
-idempotent, no ledger). ``in_place`` (``$set`` of the document's leaf paths, so a projected read
+Writes (:class:`MongoWriter`). Every document goes through ``make_bson_safe`` (a copy; only
+``decimal.Decimal`` and ``datetime.date``, which the driver cannot encode, change). A ``table`` load
+into a created or emptied collection replaces whole documents by ``_id``
+(``ReplaceOne(upsert=True)``); ``table_load: upsert`` sets the row's fields through sub-documents
+(``UpdateOne({_id}, {$set: mongo_docs.upsert_fields(doc)}, upsert=True)``), so a matched target
+document keeps every field the row does not carry (arrays are set whole). Both are unordered,
+idempotent and unledgered. ``in_place`` (``$set`` of the document's leaf paths, so a projected read
 never drops fields) and ``append`` (``InsertOne``; ``generate`` lets the driver assign a new
 ObjectId) run in one multi-document transaction with the partition's ledger document in
 ``dps_write_ledger``: the batch is applied only when the ledger holds ``mark.batch_no - 1`` (the
@@ -77,7 +84,7 @@ from dps.layers.connectors.base import (
     encode_key,
 )
 from dps.layers.connectors.docpaths import leaf_updates
-from dps.layers.connectors.mongo_docs import coerce_bson, infer_shape, make_bson_safe
+from dps.layers.connectors.mongo_docs import id_label, infer_shape, make_bson_safe, upsert_fields
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.selection import compile_mongo_filter, validate_selection
 from dps.layers.connectors.targets import PrepareFailure
@@ -178,6 +185,13 @@ def _projection(selection: Selection) -> dict[str, int] | None:
             continue
         kept.append(path)
     return {**{p: 1 for p in kept}, "_id": 1}
+
+
+def _key_family(shape: TableShape) -> str:
+    """The ``id_label`` every ``_id`` of a keyed shape has (``int`` covers int32 and int64)."""
+    col = next((c for c in shape.columns if c.path == "$._id"), None)
+    label = col.data_type if col is not None else "other"
+    return "int" if label == "long" else label
 
 
 def _sampler(selection: Selection) -> Callable[[Any], bool] | None:
@@ -416,8 +430,26 @@ class MongoConnector:
 
         return await self._guard("sample", run())
 
+    async def _id_bounds(self, name: str) -> list[Any]:
+        """The smallest and largest ``_id`` of the collection (two ``_id`` index lookups)."""
+        coll = self.read_collection(name)
+        out: list[Any] = []
+        for direction in (1, -1):
+            cursor = coll.find(
+                {},
+                projection={"_id": 1},
+                sort=[("_id", direction)],
+                limit=1,
+                comment=self.comment,
+                max_time_ms=self.max_time_ms,
+            )
+            docs = await self._guard("describe", cursor.to_list(length=1))
+            out += [d["_id"] for d in docs]
+        return out
+
     async def describe(self, obj: ObjectRef) -> TableShape:
-        """The path shape of ``obj`` from a ``$sample`` (``mongo_docs.infer_shape``).
+        """The path shape of ``obj`` from a ``$sample`` (``mongo_docs.infer_shape``); the ``_id``
+        is the key only when the smallest and largest ``_id`` share the sample's type too.
 
         Raises:
             ConnectorError: ``object_not_found``, ``object_invalid``.
@@ -430,7 +462,8 @@ class MongoConnector:
         )
         n = min(DESCRIBE_SAMPLE_MAX, self._settings.discovery_sample_rows)
         docs = await self._sample_docs(name, {}, n)
-        return infer_shape(ObjectRef(name=name), docs, row_estimate=int(estimate))
+        bounds = await self._id_bounds(name)
+        return infer_shape(ObjectRef(name=name), docs, row_estimate=int(estimate), id_bounds=bounds)
 
     # -- selection --------------------------------------------------------------------------------
     @staticmethod
@@ -578,6 +611,7 @@ class MongoConnector:
                 yield page
             return
         keys: list[ColumnInfo] = shape.key_columns()
+        family = _key_family(shape)
         lower = bson_id(decode_key(key_range.lower, keys)[0], shape) if key_range.lower else None
         upper = bson_id(decode_key(key_range.upper, keys)[0], shape) if key_range.upper else None
         after = bson_id(after_key[0], shape) if after_key else None
@@ -605,6 +639,11 @@ class MongoConnector:
             docs: list[dict[str, Any]] = await self._guard("read", cursor.to_list(length=batch))
             if not docs:
                 return
+            if any(id_label(d["_id"]) != family for d in docs):
+                raise ConnectorError(
+                    "key_type_mixed",
+                    "a document _id has another BSON type than the collection key: discover again",
+                )
             after = docs[-1]["_id"]
             out = [d for d in docs if keep(d["_id"])] if keep else docs
             if out:
@@ -1036,8 +1075,24 @@ class MongoWriter:
 
     # -- writes -----------------------------------------------------------------------------------
     def _documents(self, rows: list[Row]) -> list[dict[str, Any]]:
-        """BSON-safe copies of ``rows`` with the source's BSON types restored (input unchanged)."""
-        return [coerce_bson(make_bson_safe(dict(r)), self._src) for r in rows]
+        """BSON-safe copies of ``rows`` (input unchanged). No other value is converted: the engine
+        restored the leaves it wrote, and every other leaf is the driver's own value."""
+        return [make_bson_safe(dict(r)) for r in rows]
+
+    def _table_ops(self, docs: list[dict[str, Any]]) -> list[Any]:
+        """Whole documents for a created or emptied target; ``$set`` of the row's fields for an
+        upsert, so matched documents keep what the row does not carry (contract §5.2)."""
+        if self._t.table_load != "upsert":
+            return [ReplaceOne({"_id": d["_id"]}, d, upsert=True) for d in docs]
+        ops: list[Any] = []
+        for doc in docs:
+            fields = upsert_fields(doc)
+            if fields is None:
+                raise PrepareFailure(
+                    "path_unsupported", "a field name cannot be addressed with dot notation"
+                )
+            ops.append(UpdateOne({"_id": doc["_id"]}, {"$set": fields}, upsert=True))
+        return ops
 
     def _in_place_ops(self, docs: list[dict[str, Any]]) -> list[UpdateOne]:
         writable = set(self._t.write_columns)
@@ -1065,7 +1120,7 @@ class MongoWriter:
         Raises:
             LedgerConflict: the ledger does not hold ``mark.batch_no - 1`` (nothing written).
             PkCollision: a duplicate key in the rows (the batch rolled back).
-            PrepareFailure: ``path_unsupported`` (in place, a field name with a dot).
+            PrepareFailure: ``path_unsupported`` (in place or upsert, a field name with a dot).
             ConnectorError: ``target_error`` / ``connection_failed`` / ``statement_timeout``.
         """
         if not rows and not self._ledgered:
@@ -1073,7 +1128,7 @@ class MongoWriter:
         docs = self._documents(rows)
         try:
             if self._t.write_mode == "table":
-                ops = [ReplaceOne({"_id": d["_id"]}, d, upsert=True) for d in docs]
+                ops = self._table_ops(docs)
                 res = await self._durable().bulk_write(ops, ordered=False, comment=self._c.comment)
                 written = int(res.upserted_count + res.matched_count)
             else:
