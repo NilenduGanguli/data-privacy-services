@@ -583,6 +583,46 @@ real survivors).
 - `HANDOFF.md`: the bootstrap path and the key-store behaviour went into §5 (probes and ops), where
   `/readyz` and the metrics are described.
 
+## Task 10 — Tenants, quotas and the tenant directory
+
+- `dps/migrations/040_tenant_quotas.sql`:
+  - **`registered_hosts`** is M4's column (`031_tenant_hosts.sql`), which this lane does not have; the
+    M5 tenant API edits it, so 040 adds it with `ADD COLUMN IF NOT EXISTS` (a no-op after 031 once the
+    lanes are merged, since 031 sorts first). **Integration note (WP-I):** a database migrated on the
+    `m5` lane before the merge would then get 031 as a pending file *after* 040; make M4's 031
+    `ADD COLUMN IF NOT EXISTS` too (it is not applied anywhere outside lane test databases), or
+    recreate lane databases (`docker compose down -v`).
+  - The `owner_directory` policies are `TO CURRENT_USER` (the migration role that owns
+    `dps_tenant_directory()`), not a hard-coded `dps_owner`: production may name the migration login
+    differently (`DPS_PG_MIGRATION_USER`), and the policy must target the function's owner.
+- `dps/tenants.py`:
+  - `TenantSpec`/`TenantPatch` use `hide_input_in_errors` and `extra="forbid"`; a host error names the
+    entry index only (`registered_hosts: entry N is not a valid host`). `normalize_host` also maps a
+    malformed port or an IDNA failure to the same value-free `ValueError`.
+  - `TenantPatch` writes exactly the fields present in the request (`model_fields_set`); an explicit
+    `null` resets an override to the settings default (a retention reset re-stamps with the default).
+    The retention re-stamp also updates `dps_evidence.expires_at` (the plan named jobs and artefacts;
+    evidence rows carry the same expiry column).
+  - `create_tenant`/`update_tenant` refuse a tenant the caller is not granted (403
+    `tenant_forbidden`, checked before existence); `create_tenant` on an existing row (e.g. one the
+    first job inserted) is 409 `tenant_exists` — change it with PATCH.
+  - `check_daily_quota` reads the quota **uncached** (one primary-key lookup) instead of through the
+    30 s `effective_tenant` cache: a quota an admin just set applies to the next submission on every
+    replica, like the claim-side check (and tests that truncate tables never see a stale quota).
+  - `TenantView.keys` is `{"active", "disabled"}` from the global key table (keys granted the tenant
+    or `*`).
+- `dps/jobs.py::checkpoint` now runs in a transaction and uses `UPDATE … RETURNING tenant_id` to
+  learn the tenant for the usage row (it had no tenant in hand); an empty batch writes no usage row.
+- `POST /jobs/run`: the quota check runs only when the request is not an idempotent replay of an
+  accepted job (a replay never counts as a new submission). A refusal is audited like any
+  `job.create` rejection.
+- Tests: `tests/test_tenants.py` adds `test_view_counts_usage_and_keys` and a connection-only tenant
+  in the directory test; `tests/test_quota.py` builds partitions through M2's queue functions and the
+  API test runs through the `api_client` fixture (a `RunSpec` that is valid but names unknown ids:
+  the quota refusal comes first, a tenant without a quota fails later on lookup). Shared fixtures:
+  `tests/fixtures/db.py::_truncate` truncates the M5 tables when they exist; `tests/db/test_rls.py`
+  seeds one row per M5 tenant table (`M5_SEEDS`) so the per-table isolation test covers them.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

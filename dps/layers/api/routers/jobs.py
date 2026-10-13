@@ -37,6 +37,7 @@ from dps.layers.api.errors import DpsHttpError
 from dps.layers.api.idempotency import REPLAY_HEADER
 from dps.layers.connectors.submit import seal_retry_secret, submit_discover, submit_run
 from dps.ratelimit import enforce_rate_limit
+from dps.tenants import TenantError, check_daily_quota
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"])
 _JOBS = [Depends(require_scope("jobs")), Depends(enforce_rate_limit), Depends(require_db)]
@@ -104,8 +105,14 @@ async def run(body: RunSpec, request: Request, response: Response) -> dict[str, 
     try:
         key = idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
+        earlier = None
         if key:  # a key reused with another request is refused before any validation (as on L1)
-            await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+            earlier = await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+        if earlier is None:  # M5: a replay of an accepted job is never refused for the quota
+            try:
+                await check_daily_quota(tenant_of(request), _settings(request))
+            except TenantError as exc:
+                raise DpsHttpError(exc.status, exc.code, exc.detail) from None
         sub = await submit_run(
             body,
             tenant_id=tenant_of(request),

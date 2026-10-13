@@ -41,14 +41,17 @@ TENANT_TABLES: tuple[str, ...] = (
     "dps_artefact",
     "dps_evidence",
     "dps_audit_log",
+    "dps_tenant_usage",  # M5 (040)
 )
 GLOBAL_TABLES: tuple[str, ...] = ("dps_tenant", "dps_api_key", "dps_worker", "dps_migration_ledger")
 #: Policies besides tenant_isolation that the posture check accepts, per table. A set per table so
 #: later milestones can add theirs (M5: owner_directory on dps_job/dps_connection, worker_usage on
 #: dps_tenant_usage).
 ALLOWED_EXTRA_POLICIES: dict[str, frozenset[str]] = {
-    "dps_job": frozenset({"worker_claim"}),
+    "dps_job": frozenset({"worker_claim", "owner_directory"}),
     "dps_job_partition": frozenset({"worker_claim"}),
+    "dps_connection": frozenset({"owner_directory"}),
+    "dps_tenant_usage": frozenset({"worker_usage"}),
 }
 _SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _AUDIT_PART_RE = re.compile(r"^dps_audit_log_(\d{4})_(\d{2})$")

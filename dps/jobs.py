@@ -945,7 +945,13 @@ ranked AS (
            row_number() OVER (PARTITION BY p.job_id ORDER BY p.run_after, p.partition_no) AS rn_job
     FROM {s}.dps_job_partition p JOIN {s}.dps_job j ON j.id = p.job_id
     WHERE p.state = 'queued' AND p.run_after <= now()
-      AND j.state = 'waiting' AND j.phase = 'partitions'),
+      AND j.state = 'waiting' AND j.phase = 'partitions'
+      AND NOT EXISTS (  -- M5 daily row quota: a tenant over quota waits for 00:00 UTC
+        SELECT 1 FROM {s}.dps_tenant t
+        JOIN {s}.dps_tenant_usage u
+          ON u.tenant_id = t.tenant_id AND u.day = (now() AT TIME ZONE 'UTC')::date
+        WHERE t.tenant_id = p.tenant_id AND t.daily_row_quota IS NOT NULL
+          AND u.rows_written >= t.daily_row_quota)),
 job_ok AS (
     SELECT r.id, r.tenant_id, r.job_id, r.partition_no, r.priority, r.job_created,
            row_number() OVER (PARTITION BY r.tenant_id
@@ -998,18 +1004,23 @@ async def checkpoint(
     values_by_method: dict[str, int],
     verify_checked: int,
 ) -> bool:
-    """Record one committed batch (deltas) and renew the lease; fenced. ``False`` = stop now."""
+    """Record one committed batch (deltas) and renew the lease; fenced. ``False`` = stop now.
+
+    M5: the written rows also count towards the tenant's usage of the UTC day
+    (``dps_tenant_usage``, the daily row quota) in the same transaction — a fenced-out call
+    counts nothing.
+    """
     settings = db.active_settings()
     s = db.schema_ident()
-    async with db.acquire_queue(None) as conn:
-        tag = await conn.execute(
+    async with db.acquire_queue(None) as conn, conn.transaction():
+        tenant = await conn.fetchval(
             f"UPDATE {s}.dps_job_partition SET last_key = $3::jsonb, batch_no = $4, "
             "rows_read = rows_read + $5, rows_written = rows_written + $6, "
             "rows_skipped = rows_skipped + $7, "
             f"values_by_method = {s}.dps_jsonb_add(values_by_method, $8::jsonb), "
             "verify_checked = verify_checked + $9, "
             "lease_expires_at = now() + make_interval(secs => $10), updated_at = now() "
-            "WHERE id = $1 AND locked_by = $2 AND state = 'running'",
+            "WHERE id = $1 AND locked_by = $2 AND state = 'running' RETURNING tenant_id",
             partition_id,
             worker_id,
             last_key,
@@ -1021,7 +1032,17 @@ async def checkpoint(
             verify_checked,
             float(settings.partition_lease_seconds),
         )
-    return db.rowcount(tag) > 0
+        if tenant is not None and rows_written > 0:
+            await conn.execute(
+                f"INSERT INTO {s}.dps_tenant_usage (tenant_id, day, rows_written) "
+                "VALUES ($1, (now() AT TIME ZONE 'UTC')::date, $2) "
+                "ON CONFLICT (tenant_id, day) DO UPDATE "
+                "SET rows_written = dps_tenant_usage.rows_written + EXCLUDED.rows_written, "
+                "updated_at = now()",
+                tenant,
+                rows_written,
+            )
+    return tenant is not None
 
 
 async def finish_partition(

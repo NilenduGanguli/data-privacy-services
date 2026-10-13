@@ -63,6 +63,15 @@ async def _seed(conn: asyncpg.Connection, tenant: str) -> None:
         "VALUES ($1, '/api/v1/jobs', 'job.create', 'ok')",
         tenant,
     )
+    for table, statement in M5_SEEDS.items():
+        if table in db.TENANT_TABLES:
+            await conn.execute(statement, tenant)
+
+
+#: M5 tenant tables (040+): one minimal row each.
+M5_SEEDS = {
+    "dps_tenant_usage": "INSERT INTO dps.dps_tenant_usage (tenant_id, day) VALUES ($1, current_date)",
+}
 
 
 async def test_posture_is_clean_for_the_api_role(migrated_db) -> None:  # noqa: ANN001
