@@ -238,6 +238,51 @@ async def test_a_kept_column_that_holds_personal_data_needs_review(
     assert "example-mail.in" not in json.dumps(ev.pack.model_dump(mode="json"))
 
 
+async def test_a_real_identifier_in_the_target_needs_review(
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: RegisterSource,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M5 verify r2, the backstop: should a national-id surrogate ever land on another
+    customer's real value (as a keyed permutation of the issued space did), the post-write
+    identifier check counts it and the run needs review instead of passing."""
+    customers = await source_pg.customers_table(rows=200)
+    real = sorted({str(v) for v in await _column(source_pg, "customers", "national_id") if v})
+    assert len(real) > 2
+    generate = SurrogateEngine._generate
+
+    def leaky(self: SurrogateEngine, entity: str, original: str, *rest: Any) -> str:
+        if entity in ("AADHAAR", "NATIONAL_ID"):
+            return real[0] if original != real[0] else real[1]  # another customer's value
+        return generate(self, entity, original, *rest)
+
+    monkeypatch.setattr(SurrogateEngine, "_generate", leaky)
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, customers)
+    nid = next(c for c in snap.columns if c.name == "national_id")
+    assert nid.entity_type in ("AADHAAR", "NATIONAL_ID"), nid.entity_type
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "customers_leaky"},
+    }
+    job = await _submit(handler_ctx, _spec(src.id, customers, snap.id, target))
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    leaked = len(set(await _column(source_pg, "customers_leaky", "national_id")) & set(real))
+    assert leaked == 2  # the source-vs-target comparison the check must agree with
+    ev = await get_evidence("t1", job.progress.evidence_id)
+    assert ev is not None
+    v = ev.pack.verification
+    ids = v["post_sample"]["identifier_check"]
+    assert ids["columns"]["national_id"]["in_source"] == leaked
+    assert v["review_required"] is True and v["passed"] is False
+    assert "national_id" in v["review_columns"]
+    dump = json.dumps(ev.pack.model_dump(mode="json"))
+    assert real[0] not in dump and real[1] not in dump  # counts only
+
+
 # -- G2 review r1: B1 (classified attributes) and B2 (unclassified keys) ----------------------
 
 ADDRESSES = 400

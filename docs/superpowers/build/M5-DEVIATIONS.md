@@ -1021,6 +1021,65 @@ Findings (`~/.cache/dps-build/reports/M5-verify-r1.md`, blocking 1 and 2):
   referenced key's; `test_a_plan_conflict_fails_prepare_without_retrying`). Contract §5.3 D-A
   paragraph and HANDOFF §8 updated.
 
+## Lane verification r2 fix — real national ids in synthetic targets (D-A, programme §2.4)
+
+Finding (`~/.cache/dps-build/reports/M5-verify-r2.md`, blocker): synthesize jobs on the demo
+`bank.customers` (copula and surrogate) wrote 1, 1, 2, 0, 2 and 3 real source `national_id` values
+(all NINOs, each unique in the source) onto unrelated target rows. `NATIONAL_ID`, `NINO`, `CURP`,
+`PASSPORT` and the other government identifiers without a generator fell back to the `Reshaper`, a
+keyed derangement of the *issued* value space that keeps the NINO prefix: it maps real ids onto
+other real ids (~n²/|space| per column; at bank scale most outputs would be issued to somebody).
+
+- **`dps/engine/synth/unissued.py` (new):** generators and the `never_issued(entity, value)`
+  predicate for every government identifier with a range its issuer never allocates —
+  NINO (a prefix with a letter HMRC never uses; **not `QQ`**: deviation from mockup 05's "QQ prefix",
+  because test fixtures, the demo seed included, use `QQ`, so a `QQ` surrogate can equal a source
+  value — the predicate still counts `QQ` and BG/GB/NK/KN/NT/ZZ as never issued), CURP and personal
+  RFC (first four letters an "inconvenient word" RENAPO/SAT never issue; CURP check digit valid), NHS
+  (`999` test range, mod-11 valid), EIN (unassigned campus prefixes), PAN (sequence `0000`, which
+  stdnum also rejects), SSN (9xx with groups 01–49: no ITIN/ATIN either; was any group, i.e. could
+  equal a real ITIN), ITIN (group 89 only; 93 is the ATINs', issued), and a generic `NATIONAL_ID`
+  by recognised sub-shape (12 digits → leading `1`, Verhoeff-valid; 9 digits → `000…`, Luhn-valid,
+  never an SSN area nor a SIN; 10 digits → NHS `999`; NINO, CURP, RFC shapes as above). Shapes and
+  types with no such range (PASSPORT, DRIVER_LICENSE, VOTER_ID, INE_CLAVE, BN, MRZ document numbers,
+  company RFCs, other national-id shapes) are still reshaped and **fail closed to review** (below).
+  `SurrogateEngine` routes NINO, CURP, RFC, NHS_NUMBER, EIN and NATIONAL_ID to them. Applies in
+  every mode that uses the `surrogate` method (masking too), not only synthesize: a real id mapped
+  onto another real id is as wrong there.
+- **Post-write identifier check (`dps/layers/connectors/identifier_check.py`, `jobs_run._identifier_check`):**
+  after a successful synthesize to a database target the run reads **every** written value of every
+  written government-ID-family or financial-identifier column (`CARD_PAN`, `IBAN`, `ACCOUNT_NUMBER`,
+  `CRYPTO_ADDRESS`) through the connector (keyset pages of 5,000, projection of those columns), then
+  every source value of the same columns, and counts `in_source` (distinct target values found in the
+  source column, compared as keyed 64-bit BLAKE2b hashes of the leakage sweep's normalised form under a
+  fresh random key; numpy-sorted when installed, 8 bytes a value) and `issuable` (government ids not
+  in a never-issued range). Either above 0 → the column joins `review_columns`, `review_required`
+  true, `passed` false. A check that errors flags every identifier column (fail closed). In place:
+  the ranges only (`source_compared: false`). A same-table append: `not_run`. Files targets:
+  `not_run: files_target` (the generator guarantee holds; reading the written objects back is left
+  open). Value-free: column names, entity types and counts. The finding suggested an SQL join; a
+  connector-level stream works across servers and credentials (the source connection is read-only and
+  need not see the target schema) — at the cost of two full scans per run.
+- **Tools that need rule-valid PANs** no longer take them from the engine: `tools/seed_sources.py`
+  draws customers' and applicants' PANs itself (per-customer generator, no other seeded value moves;
+  `tests/test_seed_sources.py` now also validates them), and `dps.evaluation.corpus.rule_valid_pan`
+  reproduces the engine's former draw exactly, so the committed eval corpus and demo documents are
+  byte-identical (checked by regenerating both).
+- Console: the Policies matrix's synthesize hints for PAN_IN, NINO, CURP, NHS_NUMBER, NATIONAL_ID and
+  PASSPORT describe the new ranges / review.
+- Tests (written first): `tests/test_unissued.py` (20,000 demo-style QQ NINOs → 0 surrogates among
+  them, as NINO and as NATIONAL_ID — the old reshape kept QQ; real-format NINOs map outside the
+  issued space; CURP; sub-shapes; SSN/ITIN groups; NHS/EIN/PAN/RFC; no-range types never claimed
+  unissued; the demo's mixed column → 0 survivors, 0 issuable), `tests/test_identifier_check.py`,
+  `tests/connectors/test_synthesize_copula.py` (`test_copula_job_on_the_seeded_demo_customers` and the
+  new `test_surrogate_job_on_the_seeded_demo_customers`: 0 target `national_id`/`tax_id` in the source
+  by SQL on the normalised value, and the run's own check agrees: checked = rows with a value,
+  `in_source` 0, `issuable` 0; with the r2 fix reverted for NATIONAL_ID they fail: 2 and 1 real ids,
+  18,044 issuable), `tests/connectors/test_synthesize_identifiers.py`
+  (`test_a_real_identifier_in_the_target_needs_review`: a deliberately leaky generator → the check's
+  `in_source` equals the source-vs-target count and the pack needs review), `tests/test_surrogates.py` (PAN now
+  `0000`, invalid by design).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

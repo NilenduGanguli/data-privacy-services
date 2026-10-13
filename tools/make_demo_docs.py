@@ -26,6 +26,7 @@ from reportlab.pdfgen import canvas
 
 from dps.engine.detect.checksums import verhoeff_check_digit
 from dps.engine.synth.surrogates import SurrogateEngine
+from dps.evaluation.corpus import rule_valid_pan
 from dps.layers.documents.redact import build_image_pdf
 from dps.layers.documents.render import PdfRenderer
 
@@ -56,7 +57,8 @@ def _values() -> dict[str, str]:
         "email": engine.surrogate("EMAIL", "x", "en_IN", "kyc"),
         "phone": engine.surrogate("PHONE", "+91 98451 20377", "en_IN", "kyc"),
         "aadhaar": _aadhaar(SEED),
-        "pan": engine.surrogate("PAN_IN", "AAAAA0000A", "en_IN", "kyc"),
+        # rule-valid (the engine's surrogate PANs carry the never-issued 0000)
+        "pan": rule_valid_pan(SEED, persona.last_name),
         "card": engine.surrogate("CARD_PAN", "0000 0000 0000 0000", "en_IN", "kyc"),
         "account": engine.surrogate("ACCOUNT_NUMBER", "0000 0000 0000 00", "en_IN", "kyc"),
         "payee": engine.persona("payee", "en_IN").full_name,

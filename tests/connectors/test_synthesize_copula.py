@@ -328,18 +328,48 @@ async def test_copula_job_on_a_table_with_a_declared_foreign_key(
     )
 
 
-async def test_copula_job_on_the_seeded_demo_customers(
-    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
-) -> None:
-    """The lane verification's reproduction: copula ``bank.customers`` (the seeded demo table,
-    declared foreign key to ``bank.employees``) succeeds, with 0 exact-row matches and no real
-    key in the target."""
+async def _demo_customers(source_pg: SourcePg) -> int:
     rows = int(await source_pg.admin.fetchval("SELECT count(*) FROM bank.customers"))
     if rows < 1000:
         message = "the demo bank is not seeded (docker compose --profile sources up seed-sources)"
         if os.environ.get("DPS_TEST_REQUIRE_SERVICES") == "1":
             pytest.fail(message)
         pytest.skip(message)
+    return rows
+
+
+#: Normalised like the leakage sweep (letters and digits, one case): a layout change is no escape.
+_NORM = "upper(regexp_replace({}, '[^A-Za-z0-9]', '', 'g'))"
+
+
+async def _assert_no_real_identifier(source_pg: SourcePg, ev: Any, target: str) -> None:
+    """M5 verify r2, source vs target (counts only): no target ``national_id`` or ``tax_id`` is
+    any customer's real one, and the run's own post-write identifier check says the same."""
+    survivors = {}
+    for column in ("national_id", "tax_id"):
+        survivors[column] = await source_pg.admin.fetchval(
+            f"SELECT count(DISTINCT t.{column}) FROM {target} t JOIN bank.customers s "
+            f"ON {_NORM.format('s.' + column)} = {_NORM.format('t.' + column)}"
+        )
+    assert survivors == {"national_id": 0, "tax_id": 0}, survivors
+    checked = await source_pg.admin.fetchval(f"SELECT count(national_id) FROM {target}")
+    assert checked > 1000
+    v = ev.pack.verification
+    ids = v["post_sample"]["identifier_check"]
+    assert ids["source_compared"] is True
+    nid = ids["columns"]["national_id"]
+    assert nid["checked"] == checked
+    assert (nid["in_source"], nid["issuable"]) == (0, 0), nid
+    assert "national_id" not in v["review_columns"] and "tax_id" not in v["review_columns"]
+
+
+async def test_copula_job_on_the_seeded_demo_customers(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """The lane verification's reproduction: copula ``bank.customers`` (the seeded demo table,
+    declared foreign key to ``bank.employees``) succeeds, with 0 exact-row matches, no real key
+    and (r2) no real national id in the target."""
+    rows = await _demo_customers(source_pg)
     obj = ObjectRef(owner="bank", name="customers")
     src = await register_source("t1")
     uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
@@ -352,6 +382,7 @@ async def test_copula_job_on_the_seeded_demo_customers(
     assert ev.pack.privacy["exact_row_matches"] == 0
     assert "$.relationship_manager_id" not in ev.pack.tabular["columns"]
     target = f'"{source_pg.schema}".demo_customers_synth'
+    await _assert_no_real_identifier(source_pg, ev, target)
     overlap = await source_pg.admin.fetchval(
         f"SELECT count(*) FROM (SELECT {NON_KEY} FROM bank.customers "
         f"INTERSECT SELECT {NON_KEY} FROM {target}) q"
@@ -365,6 +396,34 @@ async def test_copula_job_on_the_seeded_demo_customers(
         employees="bank.employees",
         target=target,
     )
+
+
+async def test_surrogate_job_on_the_seeded_demo_customers(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """M5 verify r2: a surrogate-only synthesize of the demo ``bank.customers`` wrote 0-3 real
+    NINOs per run (a keyed permutation of the issued space). Now: none."""
+    rows = await _demo_customers(source_pg)
+    obj = ObjectRef(owner="bank", name="customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    _, job = await _run(
+        handler_ctx,
+        src,
+        uat,
+        source_pg,
+        obj,
+        snap.id,
+        "demo_customers_surrogate",
+        options={"tabular": "none"},
+    )
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    assert job.progress.rows_written == rows
+    ev = await get_evidence("t1", job.progress.evidence_id)
+    assert ev is not None and ev.pack.tabular is None
+    target = f'"{source_pg.schema}".demo_customers_surrogate'
+    await _assert_no_real_identifier(source_pg, ev, target)
 
 
 async def test_a_plan_conflict_fails_prepare_without_retrying(

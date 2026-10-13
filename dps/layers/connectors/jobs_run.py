@@ -110,6 +110,7 @@ from dps.layers.connectors.files import (
     manifest_bytes,
     write_manifest,
 )
+from dps.layers.connectors.identifier_check import check_identifiers, identifier_columns
 from dps.layers.connectors.partitions import partition_count, plan_partitions
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.registry import open_connector, open_target_store
@@ -1634,6 +1635,61 @@ async def _post_sample(
     return out
 
 
+def _written_identifiers(plan: RunPlan, snapshot: ClassificationSnapshot | None) -> dict[str, str]:
+    """``{column: entity type}`` of the identifier-family columns the run wrote."""
+    written = (
+        list(plan.projection)
+        if plan.target.write_mode == "in_place"
+        else [*plan.target.write_columns, *plan.key]
+    )
+    return identifier_columns(plan.columns, snapshot, written)
+
+
+async def _identifier_check(
+    ctx: HandlerContext,
+    job: JobInternal,
+    spec: RunSpec,
+    plan: RunPlan,
+    source_conn: Connection,
+    target_conn: Connection | None,
+    snapshot: ClassificationSnapshot | None,
+) -> dict[str, Any]:
+    """D-A (M5 verify r2): every written identifier value, against every source value and the
+    issuers' never-issued ranges (``identifier_check.py``; counts only). In place, the table
+    holds only synthetic rows now: the ranges are checked, the source cannot be. An append to
+    the source table itself mixes both, so it is not run."""
+    columns = _written_identifiers(plan, snapshot)
+    if not columns:
+        return {}
+    if plan.same_table_append:
+        return {"not_run": "same_table_append"}
+    same = _same_connection(spec, source_conn)
+    conn = source_conn if same else target_conn
+    if conn is None or plan.target.object is None:
+        return {"error": "target_unreadable"}
+    target = await _open(ctx, job, conn, "finalize")
+    source: Connector | None = None
+    try:
+        target_shape = await target.describe(plan.target.object)
+        if plan.target.write_mode == "in_place":
+            return await check_identifiers(
+                columns, target=target, target_shape=target_shape, source=None, source_shape=None
+            )
+        source = target if same else await _open(ctx, job, source_conn, "finalize")
+        source_shape = await source.describe(spec.source.object)
+        return await check_identifiers(
+            columns,
+            target=target,
+            target_shape=target_shape,
+            source=source,
+            source_shape=source_shape,
+        )
+    finally:
+        if source is not None and source is not target:
+            await source.close()
+        await target.close()
+
+
 async def _write_manifest(
     ctx: HandlerContext,
     job: JobInternal,
@@ -1786,6 +1842,16 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             post_sample = await _best_effort(
                 _post_sample(ctx, job, spec, plan, source_conn, target_conn, snapshot)
             )
+        if spec.mode == "synthesize":
+            ids = (
+                {"not_run": "files_target"}
+                if mode == "files"
+                else await _best_effort(
+                    _identifier_check(ctx, job, spec, plan, source_conn, target_conn, snapshot)
+                )
+            )
+            if ids and _written_identifiers(plan, snapshot):
+                post_sample = {**(post_sample or {}), "identifier_check": ids}
     if plan is not None and mode in ("in_place", "append") and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
         cleared = await _best_effort(_clear_ledger(ctx, job, spec, plan, source_conn, target_conn))
@@ -1906,7 +1972,14 @@ async def _store_evidence(
         # D-A: a source value is kept only in a column reviewed as not personal whose written
         # sample (before the write: the preflight; after it: the post-write sample) is clean
         reviews = [plan.prepare.get("kept_review"), (post_sample or {}).get("synthetic_kept")]
-        flagged = sorted({c for r in reviews if r for c in r.get("kept_columns", [])})
+        review = {c for r in reviews if r for c in r.get("kept_columns", [])}
+        # M5 verify r2: a written identifier found in the source or outside the never-issued
+        # ranges needs review; a check that could not run fails closed on every such column
+        ids = (post_sample or {}).get("identifier_check") or {}
+        review |= set(ids.get("review_columns") or [])
+        if "error" in ids:
+            review |= set(_written_identifiers(plan, snapshot))
+        flagged = sorted(review)
         verification["review_required"] = bool(flagged)
         verification["review_columns"] = flagged
         if flagged:

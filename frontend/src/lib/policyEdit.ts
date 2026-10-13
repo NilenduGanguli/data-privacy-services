@@ -245,8 +245,10 @@ export function declaredSince(bodies: Record<number, Body>, draft: Body | null, 
 /** What each synthesize method produces, for the matrix's hint column. */
 export const SYNTH_HINTS: Record<string, string> = {
   SSN: 'area 900–999, never issued', CARD_PAN: 'test IIN, Luhn-valid', EMAIL: 'RFC 2606 domains', PHONE: 'reserved fictional ranges',
-  AADHAAR: 'Verhoeff-valid, outside the issued space', PAN_IN: 'format-valid, fictional', IBAN: 'checksum-valid test banks',
-  PERSON_NAME: 'one persona per row', DATE_OF_BIRTH: 'persona-consistent', NINO: 'reserved prefixes', CVV: 'random 3 digits',
+  AADHAAR: 'Verhoeff-valid, outside the issued space', PAN_IN: 'sequence 0000, never issued', IBAN: 'checksum-valid test banks',
+  PERSON_NAME: 'one persona per row', DATE_OF_BIRTH: 'persona-consistent', NINO: 'prefixes HMRC never allocates', CVV: 'random 3 digits',
+  CURP: 'inconvenient-word prefix, never issued', NHS_NUMBER: '999 test range', NATIONAL_ID: 'never-issued range by shape, else review',
+  PASSPORT: 'no never-issued range: the run needs review',
 };
 
 /** Whether `name` is one of the tenant's stored policies (GET /policies/{name} answers 404

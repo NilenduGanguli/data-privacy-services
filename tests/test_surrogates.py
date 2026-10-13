@@ -341,7 +341,8 @@ def test_shapes_follow_the_original() -> None:
     assert 35 <= age <= 39 and age != 36
     assert eng.surrogate("DATE", "2024-02-10T09:30:00Z", "en_US", "r1").endswith("T09:30:00Z")
     pan = eng.surrogate("PAN_IN", "ABCPK1234F", "en_IN", "r1")
-    assert validate("PAN_IN", pan) is True and pan != "ABCPK1234F"
+    # the PAN's shape and holder type, with the never-issued sequence number 0000
+    assert re.fullmatch(r"[A-Z]{3}P[A-Z]0000[A-Z]", pan) and validate("PAN_IN", pan) is False
 
 
 def test_names_are_single_tokens_in_every_locale() -> None:

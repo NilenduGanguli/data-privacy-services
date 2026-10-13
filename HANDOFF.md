@@ -718,7 +718,18 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     equal another real key of that shape (probability ~n²/|shape|: nil for UUIDs and long mixed
     keys, not for short digit-only text keys); the permutation guarantees that no value maps to
     itself. Columns the run pseudonymises (identifiers, written keys, declared foreign keys) are
-    never modelled by the copula.
+    never modelled by the copula. **Government identifiers** (M5 verify r2) are surrogated from
+    ranges their issuers never allocate (`dps/engine/synth/unissued.py`: NINO prefixes HMRC never
+    uses — not `QQ`, which test data uses —, CURP/RFC inconvenient-word prefixes, NHS `999`, EIN
+    unassigned campuses, PAN sequence `0000`, SSN 9xx groups 01–49, ITIN group 89; a generic
+    `NATIONAL_ID` by recognised sub-shape); PASSPORT, DRIVER_LICENSE, VOTER_ID, INE_CLAVE, BN, MRZ
+    and unrecognised national-id shapes have no such range and are reshaped. After a `table`,
+    `append` or `in_place` synthesize the run reads **every** written government/financial
+    identifier value and counts (`post_sample.identifier_check`) those found in the same source
+    column (keyed 64-bit hashes of the normalised value) and those outside a never-issued range;
+    any count above 0, or a check that could not run, makes the pack `review_required`. Files
+    targets record `not_run: files_target`. Tools that need *rule-valid* PANs (the demo seed, the
+    demo documents, the eval corpus) draw them themselves (`evaluation.corpus.rule_valid_pan`).
 
 ## 9. Next milestones
 

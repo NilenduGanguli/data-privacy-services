@@ -32,7 +32,7 @@ from stdnum.mx import curp as mx_curp
 from stdnum.mx import rfc as mx_rfc
 
 from dps.engine.detect.checksums import luhn_check_digit, validate, verhoeff_check_digit
-from dps.engine.synth.personas import seed_int
+from dps.engine.synth.personas import ascii_fold, seed_int
 from dps.engine.synth.surrogates import SurrogateEngine
 
 CORPUS_VERSION = "dps.evalcorpus.v1"
@@ -275,6 +275,21 @@ def _nino(rng: random.Random) -> str:
             return f"{prefix} {body[:2]} {body[2:4]} {body[4:]} {rng.choice('ABCD')}"
 
 
+_PAN_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+
+def rule_valid_pan(engine_seed: bytes, surname: str, template: str = "aaaaa0000a") -> str:
+    """A rule-valid individual's PAN (holder type ``P``, the surname's initial), drawn exactly as
+    the M0 surrogate engine drew one for the normalised ``template`` before its PAN surrogates
+    moved to the never-issued sequence number ``0000`` (M5 verify r2, ``unissued.py``).
+    Synthetic material that must *validate* (this corpus, the demo documents) keeps its
+    committed values."""
+    rng = random.Random(seed_int(engine_seed, f"PAN_IN|{template}"))
+    letters = "".join(rng.choice(_PAN_LETTERS) for _ in range(3))
+    initial = ascii_fold(surname)[:1].upper() or "K"
+    return f"{letters}P{initial}{rng.randint(1, 9999):04d}{rng.choice(_PAN_LETTERS)}"
+
+
 PERSONA_ENTITIES = frozenset(
     {"PERSON_NAME", "DATE_OF_BIRTH", "EMAIL", "PHONE", "STREET_ADDRESS", "CITY", "POSTAL_CODE"}
 )
@@ -307,10 +322,11 @@ class ValueFactory:
         self.locale = JURISDICTIONS[jurisdiction]
         self._fakers: dict[str, Faker] = {}
 
+    def _engine_seed(self, label: str) -> bytes:
+        return hmac.new(self.seed, label.encode(), hashlib.sha256).digest()
+
     def _engine(self, label: str) -> SurrogateEngine:
-        return SurrogateEngine(
-            hmac.new(self.seed, label.encode(), hashlib.sha256).digest(), default_locale=self.locale
-        )
+        return SurrogateEngine(self._engine_seed(label), default_locale=self.locale)
 
     def _faker(self, locale: str, rng: random.Random) -> Faker:
         fake = self._fakers.setdefault(locale, Faker(locale))
@@ -357,7 +373,11 @@ class ValueFactory:
             return f"{letters}0{rng.randint(0, 999999):06d}", "rule"
         if entity == "CUSTOMER_ID":
             return f"CUST-{rng.randint(100000, 999999)}", "rule"
-        engine = self._engine(f"value|{entity}|{record_no}|{slot_no}|{attempt}")
+        label = f"value|{entity}|{record_no}|{slot_no}|{attempt}"
+        engine = self._engine(label)
+        if entity == "PAN_IN":  # surrogate PANs carry the never-issued 0000: not rule-valid
+            surname = engine.persona("record", loc).last_name
+            return rule_valid_pan(self._engine_seed(label), surname), "surrogate"
         return engine.surrogate(
             entity, SURROGATE_TEMPLATES.get(entity, "x"), loc, "record"
         ), "surrogate"
