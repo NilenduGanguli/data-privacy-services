@@ -1136,3 +1136,41 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   `test_the_replay_click_never_clicks_a_hash_route_the_deny_list_names` (the same ordinal points
   to the allowed route at discovery and to `#/logout` at replay). Both fail on `6eac062`.
 
+
+## Task 19 — No values in logs (contract §0.1 log-scan test for M4)
+
+- `tests/test_no_values_in_logs_m4.py`: the plan's three tests, plus the static half of M2's log
+  scan and a self-test, and stronger dynamic checks:
+  - **Static (offline), as M2's scan:** every `logger.<level>(…)` call in every M4 module (the 14
+    files of `dps/layers/scanner/`, `dps/browser_worker.py`, `dps/layers/api/routers/scans.py`) has
+    a snake_case literal event, no positional argument, no `**` splat and allow-listed keywords
+    only; no `print`, no stdlib `logging` call. Plus a coverage test naming the key modules.
+  - **Self-test:** a value logged through an allow-listed field (`reason`, `error`) is caught both
+    verbatim and with its separators changed; a value under a dropped field is not in the output.
+    The matcher normalises (M0's `normalise`) **per JSON string / per non-JSON line**, never across
+    the whole log (a value would otherwise be "found" across two adjacent fields); needles under 6
+    normalised characters are matched verbatim only.
+  - `test_guard_and_crawl_logs_are_value_free` (`browser`): the start URL carries
+    `?email=ananya.k%40example-mail.in` (the plan's crawl had no query, so its "no `?email=`" check
+    was vacuous); the needles are the demo values (`DEMO_VALUE_KEYS` + account number, customer id,
+    application ref, each part of the applicant's name; `dob` left out because `14031988` is the
+    shape of a `14:03:19.88` timestamp once separators go), the query, the session cookie name and
+    value, the scan's DEK and seed, and every persona value **and token** (`fill_synthesize`,
+    `fill_obfuscate`) the crawl produced; it asserts the crawl did real work (≥ 3 pages done, ≥ 5
+    persona values/tokens, one `scan_page` line per page) and that the demo site received no
+    non-GET and no GET-form submission.
+  - `test_api_logs_are_value_free` (`db`): the plan's `api_client` audits into a
+    `MemoryAuditSink`, so the API wrote no log line at all and the scan was vacuous. The test builds
+    its own app (`api_settings`, same truncation as `api_client`) whose audit sink is M0's
+    `LogAuditSink`, inside the capture window (startup and shutdown lines scanned too) with JSON
+    output, and drives a refused create (`host_not_registered`, the query and inline state in the
+    body), a create with inline storage state, `GET` pages / events / summary / inventory and a
+    cancel; it asserts the three audit lines (`scan.create:ok`, `scan.create:rejected`,
+    `scan.cancel:ok`) were logged and scanned, every JSON line is allow-listed, and none of
+    `ananya`, the query (raw and URL-encoded), the refused host, `demo_session`, `demo-valid`, the
+    returned DEK or seed appears.
+- Mutation checks run once (then reverted, not committed): `crawler.py` logging a persona value as
+  `reason` → the crawl test fails with 2 values found; `routers/scans.py` logging the inline storage
+  state as `reason` → the API test fails with 2 values found.
+- Result: `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/test_no_values_in_logs_m4.py` → 21 passed
+  (plan: 3).
