@@ -903,3 +903,20 @@ enforced below the page. Each item was established by a probe of the pinned Chro
 - Process note: the plan gives the crawler code in full, so `crawler.py` was written from it before
   the test file; the tests were then run against it (all green on the first run, each assertion
   checked against a probe crawl's page/event dump and by viewing the filled and masked PNGs).
+
+## Task 15 — The proof: nothing is ever submitted
+
+- `tests/scanner/test_no_submit.py`: the plan's four layers, with the G2 amendments (`await
+  guard.arm`, `guard.close` for every tab) and:
+  - the full crawls run in `obfuscate` mode (tokens typed, the guard's needles armed) and also
+    assert `by_path` and `logout_hits` unchanged;
+  - the adversarial test also asserts `by_path` unchanged;
+  - **static check:** `.click(` must appear exactly once in the scanner (in `crawler.py`, on a
+    `data-dps-click` locator) and `self._click(` exactly twice (discovery and replay) — Task 14
+    funnels both clicks through one method; `.mouse`, `.tap(` and `.check(` are banned beside the
+    plan's `.press(`, `.keyboard`, `.dispatch_event(`; docstrings removed with `[rbf]?"""…"""`
+    (the plan's pattern missed `b`/`f` prefixes). `scans.py` and `browser_worker.py` are covered
+    once they exist (Tasks 17–18).
+- Result: 5 passed (control, 2 full scans with the hardening off and on, adversarial, static).
+  With the hardening off the auto-submitting select on `/apply/card` fired a real form POST,
+  which the request log shows as blocked; the demo site's `/__received` counters did not move.
