@@ -975,3 +975,27 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   evidence HTML, a positive control for the leak haystack, the obfuscate token of the display
   persona equal to the export's, plus `test_a_queued_scan_is_canceled_at_once` and
   `test_storage_state_ref_resolves_under_the_tenant_folder_only`): 5.
+
+## Task 17 — The browser-worker process
+
+- `dps/browser_worker.py`: the plan's `serve_ops`, `build_consumer`, `amain`, `main`, plus:
+  - **Readiness follows Chromium.** `api-core` (the one required component) is `False` ("starting")
+    until Chromium is up, then `True`; `browser` is set with the Chromium version. The plan set
+    `api-core` ready before the browser launched, so `/readyz` answered 200 for a worker that
+    could not scan.
+  - `serve_ops(port, host="0.0.0.0")` takes the bind host (the process passes `DPS_HOST`, as M2's
+    worker does); `DPS_BROWSER_METRICS_PORT=0` starts no ops server (Task 1's bound). The request
+    head is read with a 5 s timeout per line and at most 100 header lines; a request line that is
+    not `GET` + one of the three paths (query ignored) is 404.
+  - The API pool is opened too (`init_pool` + `init_worker_pool`, as M2's worker): the handlers'
+    `jobs.get_job` reads go through it.
+  - The `DbAuditSink` is started/stopped only when the context holds one (`isinstance`, as M2's
+    worker) instead of the plan's `type: ignore` calls.
+  - `python -m dps.browser_worker` runs the canonical module (M2's `__main__` idiom).
+- `tests/scanner/test_browser_worker.py`: the plan's 4 tests (the refusal test also patches
+  `init_pool`; `serve_ops` binds 127.0.0.1 in tests; more 404 cases) plus
+  `test_process_runs_a_scan_and_drains_on_sigterm`: `python -m dps.browser_worker` as a real
+  process on the test database becomes ready with `browser.ok`, claims a queued scan job of the
+  demo site's `/profile`, finishes it (`succeeded`, evidence id, `key_enc` purged), serves
+  `dps_scan_pages_total` on `/metrics` and exits 0 on SIGTERM; the demo site received no non-GET
+  and no GET-form submission: 5 tests (plan: 4).
