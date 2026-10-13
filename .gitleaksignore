@@ -1,0 +1,17 @@
+# Reviewed gitleaks findings (2026-10-14): all are test fixtures or documentation examples, no real secrets:
+# fake tokens/passwords in unit tests, the public jwt.io sample JWT in pattern tests, console test API keys,
+# and curl examples using the local demo key. Listed by exact fingerprint so any NEW finding still fails the scan.
+
+87a80af564e6b48b0a1e4671560f5f6c6098accf:HANDOFF.md:curl-auth-header:795
+86b19208773ba7cbfd083efaf3c6c200fc153728:tests/test_llm_egress.py:generic-api-key:180
+2c219d684bd8d3d1d4ad73e25e92736f2dc5b883:tests/test_posture_m5.py:generic-api-key:17
+2fac5a48511580369b7db70dda51c7a0e3d7341e:frontend/src/lib/admin.test.ts:generic-api-key:17
+2fac5a48511580369b7db70dda51c7a0e3d7341e:frontend/src/pages/Admin.test.tsx:generic-api-key:14
+664247f9e5fbab8705441a9cbef0b13ba312b27f:tests/api/test_api_connections.py:generic-api-key:25
+43c774f1247ee0a7dc88b63ddf1fc61c291a915e:tests/test_api.py:generic-api-key:197
+da1e861bd6f91d773420b573e7ca8bad93336508:tests/test_patterns.py:jwt:26
+3c4812f1cd055f723d121075960b11703869cb7f:docs/superpowers/plans/2026-10-11-m5-hardening-and-showcase.md:generic-api-key:5178
+3c4812f1cd055f723d121075960b11703869cb7f:docs/superpowers/plans/2026-10-11-m5-hardening-and-showcase.md:generic-api-key:5219
+4e97b6f8da05946cf582b614af34f48061b123b0:docs/superpowers/plans/2026-10-11-m4-ui-scanner.md:curl-auth-header:5112
+19af654fd109476a0a41b7b342955b732e21ad46:docs/superpowers/plans/2026-10-11-m0-foundation-engine-api-playground.md:curl-auth-header:7893
+19af654fd109476a0a41b7b342955b732e21ad46:docs/superpowers/plans/2026-10-11-m0-foundation-engine-api-playground.md:jwt:1389
