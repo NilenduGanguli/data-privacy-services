@@ -15,7 +15,10 @@ from typing import Any
 import pytest
 
 pymongo = pytest.importorskip("pymongo")
+import bson  # noqa: E402
 from bson import Decimal128, Int64, ObjectId  # noqa: E402
+from bson.codec_options import CodecOptions  # noqa: E402
+from bson.raw_bson import RawBSONDocument  # noqa: E402
 from pymongo.errors import OperationFailure  # noqa: E402
 
 from dps.jobs_models import Selection  # noqa: E402
@@ -168,6 +171,16 @@ async def test_in_place_sets_leaves_only(
             assert new[field] == old[field]
     names = [d["profile"]["fullName"] for d in before.values()]
     assert _coll(mongo_client, mongo_db).count_documents({"profile.fullName": {"$in": names}}) == 0
+    # untouched fields are byte-identical BSON in the collection, not just equal after decoding
+    raw = CodecOptions(document_class=RawBSONDocument)
+    stored = {
+        d["_id"]: d
+        for d in mongo_client[mongo_db].get_collection("profiles", codec_options=raw).find()
+    }
+    for _id, old in before.items():
+        for field in ("contact", "accounts", "kyc"):
+            assert bson.encode({"v": stored[_id][field]}) == bson.encode({"v": old[field]})
+        assert stored[_id]["riskScore"] == old["riskScore"]
     mark = await writer.read_ledger("j_test", 0)
     assert mark is not None and mark.batch_no == 2 and mark.rows == 30
     assert decode_key(mark.last_key, shape.key_columns())[0] == str(changed[29]["_id"])
