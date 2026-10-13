@@ -223,7 +223,10 @@ SQLSTATE only), 2 `DPS_PG_HOST` unset. Applied files are never edited: fix forwa
 (M2 owns 001–019). `010_job_idempotency_fp.sql` (M1+M2 integration) adds `dps_job.idempotency_fp`: a
 durable `Idempotency-Key` is bound to a keyed fingerprint of its request, so the same key with another
 body is 422 `idempotency_key_reused` on the job routes, as on Layer 1 (contract §9); a running stack
-picks it up when the `migrate` one-shot runs again (`docker compose up -d` recreates it). Against the compose database:
+picks it up when the `migrate` one-shot runs again (`docker compose up -d` recreates it). M3 adds
+`020_job_group_last_check.sql`: `dps_job_group.last_check` / `last_check_at` hold the latest result of
+`POST /api/v1/job-groups/{id}/consistency-check` (counts and codes only; returned by `GET /job-groups`
+and `GET /job-groups/{id}`); a stack on an older schema needs the `migrate` one-shot again. Against the compose database:
 `DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
 **M2 compose environment** (`x-dps-env`, shared by app, migrate and worker): `DPS_PG_HOST=dps-db`, logins
 `dps_app` / `dps_worker_login` / `dps_owner` (local passwords = role name), `DPS_MIGRATIONS_MODE=verify`
