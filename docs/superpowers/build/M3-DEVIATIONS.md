@@ -1112,3 +1112,99 @@ Red as the plan foresaw for documents, plus one Oracle gap; each fix landed with
   in a connector's detail never reaches the body and that a failed check stores no `last_check`;
   the foreign-group case checks the two `rejected` 404 audit events. `python -m dps.migrate` then
   `--verify` on a scratch database of the lane's `dps-db`: 11 applied (020 last), `verified`.
+
+## Task 19 — end to end: three-way join through the API and worker; resume after kill
+
+MongoDB joins the job pipeline here (`PIPELINE_ENGINES = {postgres, oracle, mongo}`; Task 12 kept it
+out until "Tasks 15/19 adapt the pipeline"). What that took, each change test-first:
+
+- **The run handler plans and checks document columns by path** (M2 touch points
+  `jobs_run._check_snapshot`, `targets.build_column_plans`, `_target_plans`, `_check_lengths`,
+  `_unbounded_plans`). They looked columns up by *name*; a document's columns share their top-level
+  name (`$.profile.fullName` and `$.profile.dob` are both `profile`), so the first real Mongo run
+  failed `snapshot_stale: column $.accounts[*].iban changed type since review` (it compared against
+  `$.accounts[*].balance`) and the `$.profile.dob` plan took the text column's kind. New
+  `targets.column_at(shape, path, name)`: the column at `path`, else the column called `name` only
+  when that one is a flat column (a SQL column, a top-level field) — a document sibling is never
+  taken for it. SQL behaviour is unchanged (a SQL column's path is its name's).
+  Tests: `test_pipeline_seams_m3.py::test_document_columns_are_planned_and_checked_by_path`
+  (fails on the old code: `column_at` missing / stale).
+- **Created MongoDB targets take no DDL types** (`resolve_target`, `table` + `create_if_missing`):
+  the column types are the source labels, recorded only (M2 refused them with `target_invalid:
+  the column type cannot be copied`, its patterns being SQL's).
+- **Same-collection `append` with `generate` on an ObjectId key** passes `validate_run`
+  (`_check_append`; M2: "a same-table append needs a single integer key column"). The Mongo writer
+  bounds the read with `append_upper_key` (Task 12) and assigns ObjectIds above it. An `offset` on
+  an ObjectId key is still refused (`test_a_same_collection_append_generates_object_ids`).
+- **M2 touch point** `tests/connectors/test_targets.py::test_engine_roles_and_in_place_key_rules`:
+  the `engine_unavailable` row now uses an `s3` source (MongoDB is a run source now; a file store
+  never is). `test_pipeline_seams_m3.py`: the gate test asserts the three engines.
+- **G3 review r3 blockers fixed** (they became reachable once MongoDB entered the pipeline; the
+  review's fix directions):
+  - **B1** (`dps/engine/batch.py`): for document rows (a leaf-restoring source, or a shape with
+    nested paths) `_unclassified` now searches a flat field unless a plan covers it whole; a scalar
+    there is the shape's own path and stays skipped, SQL rows keep the old rule (a `jsonb` value is
+    its column's). Test `test_batch_documents_m3.py::test_a_scalar_sampled_field_holding_documents_
+    is_searched` (`detect` and `redact`: 0 of the sentinels survive; was 2 + 1).
+  - **B2** (`docpaths.py`, `mongo_docs.top_level`): paths are handled per **segment**
+    (`path_parts`/`render`: `.name`, `[3]`, `[*]`, `['quoted key']`); `generalise` replaces index
+    segments only, `expand_wildcards` walks segments, `dotted` drops `[*]` segments only, and
+    `top_level` reads the first segment — so `iban[1]`, `a[0]x`, `no[2]` are field names, never
+    indexes. Tests: `test_docpaths.py::test_bracket_text_inside_a_quoted_key_is_part_of_the_key`,
+    `test_mongo_docs.py::test_field_names_with_brackets_keep_their_name`,
+    `test_batch_documents_m3.py::test_a_planned_field_name_with_brackets_is_transformed` (shape from
+    `infer_shape`: was `$['iban[*]']`, 20/20 values unchanged before).
+- **Bug found by the API path: an Oracle connection test always failed** (`oracle.OraclePool.acquire`).
+  A connector opened without a job id (`POST /connections/{id}/test`) set
+  `conn.client_identifier = ""`, and python-oracledb thin mode then had the session dropped
+  (`DPY-4011` on the next call, measured on 23ai). The identifier is now set only when there is one.
+  Test `test_oracle_session_live.py::test_a_pool_without_a_job_id_opens_sessions` (fails before).
+- **`tests/e2e/conftest.py`** (plan: `m3_secret_dir`, `m3_settings` with auth off, `m3_app`,
+  `m3_worker`, `worker_env` and `wait_job` of its own): the app is M2's `api_settings` (auth on, the
+  `dps_jobs` key, tenant `t1`) with the M3 refs written into its secret dir (`m3/oracle-crm-ro`,
+  `m3/oracle-crm-owner`, `m3/oracle-crm-masked` with username/password — the DSN comes from the
+  connection's `host/port/service_name` — and `m3/mongo` with the URI); workers use M2's
+  `tests.fixtures.db.worker_env` (fast leases and reaper) with 4 slots.
+- **`test_m3_three_way.py`** (plan's flow and assertions, plus):
+  - the PostgreSQL member is a copy of the M2 bank customers seeded into schema `m3e2e` (target
+    `m3e2e_uat`) with `--reset`, not the stack's `bank` (left untouched); the connection uses the
+    test's `postgres` ref;
+  - targets an earlier run left are dropped first (Oracle `CRM_MASKED.CUSTOMERS_E2E`, Mongo
+    `crm_uat.profiles_e2e`/`profiles_drift`);
+  - **per-column source ≠ target** for every column each accepted snapshot transforms, in all three
+    targets (programme verification rule): rows are lined up through the masked key (the test
+    recomputes the run's `fpe_digits` of each source id with the group key — Oracle and
+    PostgreSQL; MongoDB keeps `_id`), counting rows whose target value equals the same customer's
+    source value, and, for text columns, target values equal to *any* source value. Result: 0 / 0
+    for 10 Oracle, 8 PostgreSQL and 8 MongoDB columns (2,400 rows each). A set-only comparison is
+    wrong for dates (a shifted birth date equals some other customer's: 282 / 2,400), hence the
+    row alignment;
+  - **drift member is MongoDB** (plan: a second Oracle run with `det_token` on `CUSTOMER_ID`,
+    assuming "M2 widens the created target"). By the code, `targets.created_column_type` widens
+    only text-like planned columns, so a `det_token` on Oracle's `NUMBER(12)` key would be created
+    as `NUMBER(12)` (not run here); `$.customerId` (text) with `det_token` into
+    `crm_uat.profiles_drift` runs and the check reports `method_mismatch` (and
+    `join_form_mismatch`), `matched == 0`;
+  - the log scan covers e-mail, name, phone, national id and `CUST-<id>` of 200 seeded customers
+    (plan: 30, and the plain id, which can occur in unrelated numbers);
+  - the value-free result is printed under `-s` (`M3_THREE_WAY {…}`) for the build report.
+- **`test_m3_resume_after_kill.py`** drives the run like M2's `tests/connectors/test_resume_after_kill.py`
+  (whose helpers it reuses: `submit_run` in process, `python -m dps.worker` subprocesses, kill once
+  five batches are committed) instead of `POST /jobs/run` and polling partitions (plan); same
+  behaviour. Oracle copies are demo-schema tables in the session's test owner (identity key for
+  `append`, `START WITH LIMIT VALUE` after the load); in place the reviewer keeps the key and picks
+  length-preserving methods for `NATIONAL_ID` (`fpe_digits`), `PIN_CODE` and `TAX_ID`
+  (`mask_partial`: a PAN's four digits are too few for FF1 and the `det_token` fallback cannot fit
+  `CHAR(10)`), `ADDR_LINE1` (`fpe_text`). Each case also counts seeded e-mails/names left in the
+  written rows of both runs (0) and scans the worker logs (0 seeded values).
+- `tests/connectors/test_mongo_pipeline.py` (new, in process, marker `mongo`/`db`): discover →
+  accept → `table` into a created collection, `in_place` (structure and untouched leaves
+  identical), same-collection `append` with `generate`; per-leaf-path survivors 0, evidence verified.
+
+Open (not fixed here):
+- Without NER, discovery does not classify MongoDB `contact.addresses[*].line1` / `pin` (no column
+  name to go by; Oracle's `ADDR_LINE1`/`PIN_CODE` are found by name): the three-way demo copies them
+  unmasked unless the reviewer maps them (the pipeline test does). A discovery accuracy item.
+- A snapshot override to `surrogate` in **obfuscate** mode passes submit and fails every prepare with
+  `internal_error` (`MethodError`: no surrogate engine without a seed) until the job is dead; it
+  should be refused at submit (`check_projected_methods`) — M2 behaviour, not changed here.

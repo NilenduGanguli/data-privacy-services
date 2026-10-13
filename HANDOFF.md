@@ -118,6 +118,13 @@ up --build -d` runs app, worker, metadata DB and migrate (then `DPS_SMOKE_M2=off
 tools/smoke_test.py`: 25 checks with the two OCR checks skipped — the job checks need the
 `sources` profile's demo source); `--profile docs` adds the OCR mock, `--profile sources` the demo
 source, MinIO and the demo secrets. M3's sources alone: `docker compose --profile oracle --profile sources up -d oracle mongo`, then poll `docker compose ps` until both are healthy (never `up --wait`, which fails on the exited one-shots) and run `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle or mongo"` with the lane's port variables exported.
+The M3 end-to-end tests (`tests/e2e/`: shared seed ids, the three-way consistency join through the API
+and a worker subprocess, resume after kill on Oracle and MongoDB for `in_place` and `append`) need
+`dps-db`, `source-pg`, `oracle` and `mongo` (`docker compose --profile oracle --profile sources up -d
+dps-db source-pg oracle mongo`), then `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/e2e`
+(about 3 minutes). They seed `CRM.*`, `crm.profiles` and a PostgreSQL copy in schema `m3e2e`
+themselves and leave `bank` alone. MongoDB is a run source since M3 Task 19 (discovery; `table`, `in_place`, `append` proven; `files` not yet tested for documents); without NER, discovery does not classify nested address fields of a document (no
+column name to go by): map them in review.
 
 
 **Measured throughput (M2, 2026-10-12; image of `17e14a2`, tools of `8204191`)** — `python
