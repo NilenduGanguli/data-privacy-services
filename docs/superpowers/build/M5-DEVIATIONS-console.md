@@ -23,3 +23,14 @@ wins over older plan text; each row says file, change and why.
 | page crumb bars | The mockups' topbar crumb and status pills render as a `.crumbbar` row at the top of each page. | `Layout`'s topbar holds the tenant/API-key settings shared by every page (M0); M2 pages already put their crumbs in the page. |
 | tests | Pages are tested by server-rendering pure view components (`react-dom/server`, already a dependency) under Vitest's Node environment; interactions are tested through pure helpers and walked in the browser check. | Rule "no new npm dependency": no jsdom/testing-library. |
 | `frontend/src/dev/{fixtures,fixtureServer}.ts`, `main.tsx`, `package.json` (`dev:fixtures`) | **Dev-only fixture mode** (not in the plan): with `VITE_DPS_FIXTURES=1` the dev server's `window.fetch` is wrapped and the console's API calls are answered from typed fixtures with in-memory state (create/rotate/disable keys, tenants, hosts, policy drafts/publish, audit paging). Scenarios via `?fixture=degraded\|noadmin\|nostore\|empty`. `main.tsx` imports it only under `import.meta.env.DEV`, so a build drops it (checked: no `dps-fixture-server` marker in `dist`). | Programme plan WP-M5 UI: pages are built and browser-checked against fixtures while the backend is built in the other lane. |
+
+## Task 19 — Overview (mockup 01)
+
+| File | Change | Why |
+|---|---|---|
+| `frontend/src/pages/Overview.tsx` | Split into a pure `OverviewView` (tested) and the `Overview` loader; helpers `readinessPill`, `postureBars`, `mostUsedPolicy` exported. | Testable without a DOM library (Task 18 row "tests"). |
+| same | "policy pack <name vN>" = the policy with the most jobs from `GET /policies` (tenant policies, then presets); omitted when the store answers nothing. | `SummaryOut` carries no policy; the store's `jobs` counts do. |
+| same | Degraded mode also covers a summary refused for another reason (401/403/5xx): the M0 tiles render with the refusal named, instead of the database callout. | "The page never errors." |
+| same | Layer 3 card's big number is the scan count (`ui.scans`) with pages, fields and risk flags in the line under it; the last scan id links to `/scanner/scans/:id`. Recent jobs link scans to `/scanner/scans/:id` (M4) and runs/discovers to `/data-sources/jobs/:id`. | The mockup's "forms so far" has no field in `SummaryOut`. |
+| same | Days are labelled UTC (mockup: IST) and the chart's y axis is compact (45M). | Roll-ups are by UTC day (Task 12). |
+| `frontend/src/components/BarChart.tsx` | `yFormat` prop (default `compact`). | Axis labels such as 43,800,000 crowd the chart. |

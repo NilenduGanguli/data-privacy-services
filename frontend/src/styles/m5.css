@@ -203,6 +203,8 @@ dialog.cdlg .seg button { padding: 6px 12px; }
 }
 @media (max-width: 720px) {
   .m5-page .grid.cols-4 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+  .m5-page .kpi .value { font-size: 22px; overflow-wrap: anywhere; }
+  .m5-page .kpi.hero .value { font-size: 22px; }
   .m5-page .filters select.input, .m5-page .filters .search { width: 100%; min-width: 0; }
   .m5-page .filters .seg { width: 100%; }
   .m5-page .filters .seg button { flex: 1; padding: 7px 8px; }

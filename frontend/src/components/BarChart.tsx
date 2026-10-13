@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { axisDay } from '../lib/format';
+import { axisDay, compact } from '../lib/format';
 
 /** One stacked series; `color` is a CSS variable such as `var(--emerald)`. */
 export interface Series { key: string; label: string; color: string }
@@ -9,9 +9,9 @@ export interface Series { key: string; label: string; color: string }
  * that shows the same numbers as an accessible table. `xKey` values are ISO days unless
  * `xFormat` says otherwise.
  */
-export function BarChart({ data, series, xKey, label, height = 200, xFormat = axisDay, initialTable = false, legend = true }: {
+export function BarChart({ data, series, xKey, label, height = 200, xFormat = axisDay, yFormat = compact, initialTable = false, legend = true }: {
   data: Record<string, string | number>[]; series: Series[]; xKey: string; label: string; height?: number;
-  xFormat?: (x: string) => string; initialTable?: boolean; legend?: boolean;
+  xFormat?: (x: string) => string; yFormat?: (n: number) => string; initialTable?: boolean; legend?: boolean;
 }): JSX.Element {
   const [asTable, setAsTable] = useState(initialTable);
   const width = 640;
@@ -41,7 +41,7 @@ export function BarChart({ data, series, xKey, label, height = 200, xFormat = ax
           {[0, 0.5, 1].map((f) => (
             <g key={f}>
               <line x1={pad.l} x2={width - pad.r} y1={y(max * f)} y2={y(max * f)} stroke={f === 0 ? 'var(--border-strong)' : 'var(--border)'} />
-              <text x={pad.l - 6} y={y(max * f) + 4} textAnchor="end" fontSize="10" fill="var(--ink-3)" fontFamily="var(--mono)">{Math.round(max * f).toLocaleString('en-US')}</text>
+              <text x={pad.l - 6} y={y(max * f) + 4} textAnchor="end" fontSize="10" fill="var(--ink-3)" fontFamily="var(--mono)">{yFormat(Math.round(max * f))}</text>
             </g>
           ))}
           {data.map((d, i) => {
