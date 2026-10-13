@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 from collections.abc import Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -251,6 +252,70 @@ EXTERNAL_CALLS = Counter(
     "dps_external_token_calls_total", "Calls to the tokenization service", ["op", "outcome"]
 )
 KEYS_LOADED = Gauge("dps_auth_keys_loaded", "Active DB-backed API keys in this process's snapshot")
+
+# M5 per-tenant LLM exposure (spec P1, §10; contract §8.3). M0's LLM_RAW_PII stays the process
+# counter; these add the tenant dimension. Labels are tenant ids and purposes, never a value.
+LLM_CALLS_TENANT = Counter(
+    "dps_llm_calls_by_tenant", "LLM gateway calls per tenant", ["tenant_id", "purpose"]
+)
+LLM_RAW_PII_TENANT = Counter(
+    "dps_llm_raw_pii_sent_by_tenant",
+    "Raw sensitive values sent to the LLM per tenant. Must stay 0.",
+    ["tenant_id"],
+)
+LLM_BLOCKED_TENANT = Counter(
+    "dps_llm_exposure_blocked_by_tenant",
+    "Prompts the LLM egress verifier blocked per tenant",
+    ["tenant_id"],
+)
+#: The tenant the current request (``run_engine``/``begin_call``) or job handler
+#: (``Consumer._guard``) acts for; ``None`` outside both (counted as tenant ``-``).
+CURRENT_TENANT: ContextVar[str | None] = ContextVar("dps_tenant", default=None)
+
+
+@dataclass
+class LlmStats:
+    """LLM figures of one request or job handler (counts only): calls sent, raw values found
+    in a sent prompt (``warn`` mode), prompts blocked by the egress verifier."""
+
+    calls: int = 0
+    raw_values: int = 0
+    blocked: int = 0
+
+    def counts(self) -> dict[str, int]:
+        """``{"llm_calls", "llm_raw_values", "llm_blocked"}`` (audit counts)."""
+        return {
+            "llm_calls": self.calls,
+            "llm_raw_values": self.raw_values,
+            "llm_blocked": self.blocked,
+        }
+
+
+#: The current request's / job handler's :class:`LlmStats` (``None`` when nothing is bound).
+LLM_STATS: ContextVar[LlmStats | None] = ContextVar("dps_llm_stats", default=None)
+
+
+def record_llm(*, purpose: str, raw_values: int = 0, blocked: bool = False) -> None:
+    """Count one LLM egress decision for the bound tenant (``-`` when unbound).
+
+    ``blocked``: the verifier stopped the prompt (nothing sent). Otherwise the call was sent and
+    ``raw_values`` is the number of raw sensitive values it carried (``warn`` mode only; any
+    increase fires the ``DpsRawPiiSentToLlm`` alert). Never takes a value.
+    """
+    tenant = CURRENT_TENANT.get() or "-"
+    stats = LLM_STATS.get()
+    if blocked:
+        LLM_BLOCKED_TENANT.labels(tenant).inc()
+        if stats is not None:
+            stats.blocked += 1
+        return
+    LLM_CALLS_TENANT.labels(tenant, purpose).inc()
+    if raw_values > 0:
+        LLM_RAW_PII_TENANT.labels(tenant).inc(raw_values)
+        LLM_RAW_PII.inc(raw_values)
+    if stats is not None:
+        stats.calls += 1
+        stats.raw_values += raw_values
 
 
 def metrics_payload() -> tuple[bytes, str]:

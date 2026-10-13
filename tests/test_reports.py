@@ -357,3 +357,25 @@ def test_rollups_are_tenant_isolated(reports_app) -> None:  # noqa: ANN001
 
     assert reports_app.portal.call(peek) == 0
     assert json.dumps(body).count("r1") == 0
+
+
+async def test_summary_llm_tiles_are_per_tenant(migrated_db, db_settings) -> None:  # noqa: ANN001
+    from dps.reports import summary
+
+    await _audit("t1", "obfuscate", {"llm_calls": 3, "llm_blocked": 1}, mode="obfuscate")
+    await _audit("t1", "synthesize", {"llm_calls": "x", "llm_raw_values": None}, mode="synthesize")
+    await _audit("t2", "synthesize", {"llm_calls": 5}, mode="synthesize")
+    job = await jobs.create_job(
+        tenant_id="t1", kind=JobKind.run, phase=JobPhase.prepare, mode="synthesize", spec={}
+    )
+    async with db.acquire("t1") as conn:  # a job handler that called the LLM (Task 8B)
+        await conn.execute(
+            f"UPDATE {db.schema_ident()}.dps_job SET state = 'succeeded', finished_at = now(), "
+            "progress = $2::jsonb WHERE id = $1",
+            job.id,
+            {"metrics": {"llm": {"calls": 2, "raw_values": 0, "blocked": 0}}},
+        )
+    t1 = (await summary("t1", 14, db_settings)).tiles
+    assert t1["llm_calls"] == 5 and t1["llm_blocked"] == 1 and t1["raw_pii_sent_to_llm"] == 0
+    t2 = (await summary("t2", 14, db_settings)).tiles
+    assert t2["llm_calls"] == 5 and t2["llm_blocked"] == 0 and t2["raw_pii_sent_to_llm"] == 0

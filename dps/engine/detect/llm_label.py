@@ -41,6 +41,7 @@ from dps.engine.jsonpath import Scalar
 from dps.engine.shapes import MAX_SHAPE_CHARS, value_shape
 from dps.engine.synth.llm_text import LeakToModelError, assert_placeholder_safe
 from dps.engine.taxonomy import TAXONOMY, is_builtin_entity
+from dps.llm.egress import LlmEgressBlocked
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmUnavailable
 from dps.observability import LLM_LABEL_FIELDS, get_logger
 
@@ -277,8 +278,16 @@ async def label(
         return LabelOutcome(fallback="leak_guard")
     try:
         reply = await gateway.complete(
-            messages, temperature=0.0, max_tokens=2048, purpose=LABEL_PURPOSE
+            messages,
+            temperature=0.0,
+            max_tokens=2048,
+            purpose=LABEL_PURPOSE,
+            protected=[str(p) for p in protected],
         )
+    except LlmEgressBlocked:  # M5: the egress verifier stopped it — nothing was sent
+        LLM_LABEL_FIELDS.labels("blocked").inc(len(sent))
+        logger.warning("llm.label", fields=len(sent), verdicts=0, fallback="egress_blocked")
+        return LabelOutcome(fallback="egress_blocked")
     except (LlmUnavailable, LlmCallError) as exc:
         LLM_LABEL_FIELDS.labels("failed").inc(len(sent))
         logger.warning("llm.label", fields=len(sent), verdicts=0, fallback=type(exc).__name__)

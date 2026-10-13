@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +35,7 @@ from dps.engine.transform.methods import (
     run_method,
 )
 from dps.engine.verify import NAME_ENTITY, collect_originals, name_parts, normalise
+from dps.llm.egress import LlmEgressBlocked
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmUnavailable
 
 PLACEHOLDER_RE = re.compile(r"\{([A-Z][A-Z0-9_]*?)_(\d+)\}")
@@ -246,14 +247,23 @@ def fill_placeholders(
 
 
 async def rewrite_placeholders(
-    templated: str, gateway: LlmGateway, *, temperature: float = REWRITE_TEMPERATURE
+    templated: str,
+    gateway: LlmGateway,
+    *,
+    temperature: float = REWRITE_TEMPERATURE,
+    protected: Sequence[str] = (),
 ) -> str:
-    """Ask the model for a different but plausible text; reject it if any placeholder changed."""
+    """Ask the model for a different but plausible text; reject it if any placeholder changed.
+
+    ``protected`` (M5) are the text's originals: the gateway's egress verifier refuses to send
+    a prompt that still holds one (:class:`~dps.llm.egress.LlmEgressBlocked`).
+    """
     result = await gateway.complete(
         [{"role": "system", "content": REWRITE_SYSTEM}, {"role": "user", "content": templated}],
         temperature=temperature,
         max_tokens=min(REWRITE_MAX_TOKENS, max(256, len(templated))),
         purpose="rewrite",
+        protected=protected,
     )
     if set(PLACEHOLDER_RE.findall(templated)) != set(PLACEHOLDER_RE.findall(result.text)):
         raise LlmRewriteRejected("placeholders_missing")
@@ -331,9 +341,13 @@ async def synthesize_text(
         return deterministic, info
     info["llm_calls"] = 1
     try:
-        rewritten = await rewrite_placeholders(ph.text, gateway)
+        rewritten = await rewrite_placeholders(ph.text, gateway, protected=originals)
     except LlmRewriteRejected as exc:
         info["fallback"] = str(exc)
+        return deterministic, info
+    except LlmEgressBlocked:  # M5: the egress verifier stopped it — nothing was sent
+        info["llm_calls"] = 0
+        info["fallback"] = "egress_blocked"
         return deterministic, info
     except (LlmCallError, LlmUnavailable) as exc:
         info["fallback"] = type(exc).__name__

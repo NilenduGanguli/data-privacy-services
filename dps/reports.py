@@ -45,14 +45,15 @@ _STATEMENTS = r"""
 DELETE FROM __S__.dps_report_daily WHERE tenant_id = $1 AND day BETWEEN $2 AND $3;
 DELETE FROM __S__.dps_report_entity_daily WHERE tenant_id = $1 AND day BETWEEN $2 AND $3;
 INSERT INTO __S__.dps_report_daily (tenant_id, day, layer, action, mode, outcome, calls, findings,
-       values_transformed, verify_passed, verify_failed)
+       values_transformed, verify_passed, verify_failed, llm_calls, llm_raw_values, llm_blocked)
 SELECT a.tenant_id, (a.ts AT TIME ZONE 'UTC')::date, __LAYER__, a.action, coalesce(a.mode, '-'),
        a.outcome, count(*),
        coalesce(sum(CASE WHEN jsonb_typeof(a.counts->'findings_total') = 'number'
                          THEN (a.counts->>'findings_total')::numeric::bigint END), 0),
        coalesce(sum(m.n), 0),
        count(*) FILTER (WHERE a.counts->>'verification_passed' = 'true'),
-       count(*) FILTER (WHERE a.counts->>'verification_passed' = 'false')
+       count(*) FILTER (WHERE a.counts->>'verification_passed' = 'false'),
+       __AUDIT_NUM(llm_calls)__, __AUDIT_NUM(llm_raw_values)__, __AUDIT_NUM(llm_blocked)__
 FROM __S__.dps_audit_log a
 LEFT JOIN LATERAL (
   SELECT sum(e.value::bigint) AS n
@@ -70,7 +71,8 @@ WHERE a.tenant_id = $1 AND __W(a.ts)__ AND __LAYER__ = 'api'
   AND e.key ~ '__ENTITY__' AND e.value ~ '__COUNT__'
 GROUP BY 1, 2, 4;
 INSERT INTO __S__.dps_report_daily (tenant_id, day, layer, action, mode, outcome, calls,
-       values_transformed, rows_written, pages, fields, blocked_requests)
+       values_transformed, rows_written, pages, fields, blocked_requests, llm_calls,
+       llm_raw_values, llm_blocked)
 SELECT j.tenant_id, (j.finished_at AT TIME ZONE 'UTC')::date,
        CASE WHEN j.kind = 'scan' THEN 'ui' ELSE 'conn' END, 'job.' || j.kind, coalesce(j.mode, '-'),
        j.state, count(*), coalesce(sum(v.n), 0),
@@ -81,7 +83,8 @@ SELECT j.tenant_id, (j.finished_at AT TIME ZONE 'UTC')::date,
        coalesce(sum(CASE WHEN jsonb_typeof(j.progress->'fields') = 'number'
                          THEN (j.progress->>'fields')::numeric::bigint END), 0),
        coalesce(sum(CASE WHEN jsonb_typeof(j.progress->'blocked_requests') = 'number'
-                         THEN (j.progress->>'blocked_requests')::numeric::bigint END), 0)
+                         THEN (j.progress->>'blocked_requests')::numeric::bigint END), 0),
+       __JOB_LLM(calls)__, __JOB_LLM(raw_values)__, __JOB_LLM(blocked)__
 FROM __S__.dps_job j
 LEFT JOIN LATERAL (
   SELECT sum(e.value::bigint) AS n
@@ -133,6 +136,14 @@ def _window(column: str) -> str:
     )
 
 
+def _number(json_path: str) -> str:
+    """``sum`` of a JSON number at ``json_path`` (non-numbers count 0), as bigint."""
+    return (
+        f"coalesce(sum(CASE WHEN jsonb_typeof({json_path}) = 'number' "
+        f"THEN ({json_path})::text::numeric::bigint END), 0)"
+    )
+
+
 def _statements(schema: str) -> list[str]:
     """The roll-up statements with the schema, layer mapping and window inlined."""
     text = (
@@ -143,6 +154,12 @@ def _statements(schema: str) -> list[str]:
     )
     for column in ("a.ts", "j.finished_at", "p.finished_at", "e.created_at"):
         text = text.replace(f"__W({column})__", _window(column))
+    for key in ("llm_calls", "llm_raw_values", "llm_blocked"):  # M5 Task 16B (044)
+        text = text.replace(f"__AUDIT_NUM({key})__", _number(f"a.counts->'{key}'"))
+    for key in ("calls", "raw_values", "blocked"):
+        text = text.replace(
+            f"__JOB_LLM({key})__", _number(f"j.progress->'metrics'->'llm'->'{key}'")
+        )
     return [s.strip() for s in text.split(";\n") if s.strip()]
 
 
@@ -519,10 +536,10 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
         "jobs_completed": sum(int(r["calls"]) for r in job_rows if r["outcome"] == "succeeded"),
         "jobs_failed": sum(int(r["calls"]) for r in job_rows if r["outcome"] in ("failed", "dead")),
         "snapshots_awaiting_review": int(proposed),
-        # per-tenant LLM exposure arrives with migration 044 (Task 16B); 0 until then
-        "raw_pii_sent_to_llm": 0,
-        "llm_calls": 0,
-        "llm_blocked": 0,
+        # per-tenant LLM exposure (Task 16B, migration 044): this tenant's window sums
+        "raw_pii_sent_to_llm": sum(int(r.get("llm_raw_values") or 0) for r in current),
+        "llm_calls": sum(int(r.get("llm_calls") or 0) for r in current),
+        "llm_blocked": sum(int(r.get("llm_blocked") or 0) for r in current),
     }
     return SummaryOut(
         tenant_id=tenant_id,

@@ -890,6 +890,52 @@ real survivors).
 - Contract: §5.1 (`protocol` option + the TLS rule), §5.3 (`tls_required` row), §9 (the posture
   report shape), §10 (secret files, TLS egress, CORS, docs, `dps.rekey`).
 
+## Task 16B — Per-tenant LLM exposure counter, egress verifier and alerts
+
+- `dps/llm/egress.py`: `residual_values(messages, *, protected=(), region="US")` instead of the
+  plan's `detector: Detector` argument — the gateway holds no detector, and the full `Detector`
+  (structural keys, name cues, NER) over-matches prompt text. It runs M0's T1 scanners
+  (`scan_text`, `scan_phones`) and counts only self-identifying hits (checksum-validated, `EMAIL`,
+  `PHONE`) outside `{TYPE_N}` placeholders. Two false-positive guards keep M1's labelling and
+  spec-proposal prompts sendable under `strict`: a match made only of value-shape characters
+  (`x`/`X`/`9` + punctuation — e.g. the e-mail shape `xxx.x@x.xx`) is not a value, and a protected
+  original of exactly 3 characters must be a whole word (4+ characters match anywhere in the
+  normalised text, like M0's leak guard). Each distinct value counts once. `LlmEgressBlocked`
+  lives in `dps/llm/egress.py`; the gateway imports it lazily (egress imports the gateway's
+  `LlmCallError`).
+- `dps/llm/gateway.py`: a blocked prompt is also counted as `dps_llm_calls_total{outcome="blocked"}`
+  and logged `llm_egress_blocked` (purpose, count); a sent prompt with raw values (warn) is logged
+  `llm_egress_raw_values_sent` at error level. The verifier runs after the availability check (an
+  unconfigured provider sends nothing either way).
+- `dps/observability.py`: `record_llm(blocked=True)` counts a blocked prompt only (it is not a
+  call); `LlmStats.counts()` gives the audit/job keys `llm_calls`, `llm_raw_values`, `llm_blocked`.
+- Tenant binding: in `begin_call` (`dps/layers/api/common.py`) rather than in `run_engine` only, so
+  NDJSON streams, refusals and idempotency paths bind it too; `_audit_event` adds the three counts
+  **only when the request reached the gateway** (calls or blocked > 0), so every other audit row is
+  unchanged. `Consumer._guard(..., tenant_id=)` binds the job's or partition's tenant.
+- Callers: M0 `synthesize_text`/`rewrite_placeholders` pass the text's originals; M1's spec proposer
+  is `dps/engine/synth/schema_profile.py::propose_spec` (the plan said `schema_gen.py`) and passes
+  `profile_originals`; M1's `label` passes its `protected`. Each handles `LlmEgressBlocked` before
+  `LlmCallError`: `llm_calls` 0 and `fallback: egress_blocked` (labelling counts the fields
+  `blocked`).
+- Jobs: no L2 handler calls the LLM on this lane (T3 labelling in discovery is Task 8B, deferred);
+  roll-up statement 3 already sums `progress.metrics.llm.{calls,raw_values,blocked}` and the
+  `_guard` binding is in place for it. The engine report's `llm.raw_pii_sent` stays the constant 0
+  it was in M0 (only a local `warn` deployment can send one; the per-tenant counter and the audit
+  counts carry the real figure) — open item for the final stage.
+- Tests (`tests/test_llm_egress.py`, 8): the plan's six plus `record_llm` without a tenant/stats and
+  a log scan of both egress decisions. The `warn` test counts M0's process counter into a private
+  `Counter` (monkeypatched module attribute): M0's tests assert `dps_llm_raw_pii_sent` is 0 for the
+  whole session. The blocked-fallback test forces the leak by wrapping `rewrite_placeholders` (the
+  plan's `to_placeholders` patch would leave the original in the deterministic fill too, which the
+  leakage sweep then refuses — a different failure). The audit test also checks that a request that
+  never reached the gateway carries no LLM counts. `tests/test_reports.py` gains
+  `test_summary_llm_tiles_are_per_tenant` (audit rows and a job's `progress.metrics.llm`, a
+  non-numeric count ignored). The gateway doubles in `tests/test_no_values_in_logs_m1.py` and
+  `tests/test_schema_profile.py` accept the new `protected` argument.
+- `HANDOFF.md` §5 (metrics bullet) describes the counters, the verifier, the alerts and the
+  roll-ups; contract §2.2 (044) and §8.3 ("as built").
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

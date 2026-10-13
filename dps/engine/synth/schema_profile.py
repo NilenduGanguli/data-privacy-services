@@ -48,6 +48,7 @@ from dps.engine.synth.schema_gen import (
 )
 from dps.engine.taxonomy import entity_info
 from dps.engine.verify import Verification, verify_output
+from dps.llm.egress import LlmEgressBlocked
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmUnavailable
 
 FieldType = Literal["string", "integer", "number", "boolean", "date", "datetime", "uuid", "unknown"]
@@ -1035,17 +1036,22 @@ async def propose_spec(
     ):
         return heuristic, info
     messages = render_prompt(result.profile)
+    originals = profile_originals(result)
     try:
-        assert_placeholder_safe(messages[1]["content"], profile_originals(result))
+        assert_placeholder_safe(messages[1]["content"], originals)
     except LeakToModelError:
         info["fallback"] = "leak_guard"
         return heuristic, info
     info["llm_calls"] = 1
     try:
         reply = await gateway.complete(
-            messages, temperature=0.2, max_tokens=4096, purpose="genspec"
+            messages, temperature=0.2, max_tokens=4096, purpose="genspec", protected=originals
         )
         spec = merge_llm_spec(reply.text, heuristic, result)
+    except LlmEgressBlocked:  # M5: the egress verifier stopped it — nothing was sent
+        info["llm_calls"] = 0
+        info["fallback"] = "egress_blocked"
+        return heuristic, info
     except (LlmUnavailable, LlmCallError) as exc:
         info["fallback"] = type(exc).__name__
         return heuristic, info

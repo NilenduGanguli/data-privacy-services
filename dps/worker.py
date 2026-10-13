@@ -46,8 +46,11 @@ from dps.config import Settings, get_settings
 from dps.engine.service import PrivacyEngine
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobKind, JobPhase
 from dps.observability import (
+    CURRENT_TENANT,
     LEASES_LOST,
+    LLM_STATS,
     QUEUE_DEPTH,
+    LlmStats,
     configure_logging,
     get_logger,
     metrics_payload,
@@ -178,7 +181,9 @@ class Consumer:
         if old is not None and not old.done():
             LEASES_LOST.labels("job").inc()
             old.cancel()
-        task = asyncio.create_task(self._guard(handler(self.ctx, job), old), name=f"job:{job.id}")
+        task = asyncio.create_task(
+            self._guard(handler(self.ctx, job), old, tenant_id=job.tenant_id), name=f"job:{job.id}"
+        )
         self._jobs[job.id] = task
         task.add_done_callback(functools.partial(self._forget, self._jobs, job.id))
 
@@ -189,7 +194,9 @@ class Consumer:
             LEASES_LOST.labels("partition").inc()
             old.cancel()
         coro = self.partition_handler(self.ctx, internal, part)
-        task = asyncio.create_task(self._guard(coro, old), name=f"partition:{part.id}")
+        task = asyncio.create_task(
+            self._guard(coro, old, tenant_id=part.tenant_id), name=f"partition:{part.id}"
+        )
         self._parts[part.id] = task
         task.add_done_callback(functools.partial(self._forget, self._parts, part.id))
 
@@ -199,9 +206,21 @@ class Consumer:
             del tasks[key]
 
     async def _guard(
-        self, coro: Awaitable[None], predecessor: asyncio.Task[None] | None = None
+        self,
+        coro: Awaitable[None],
+        predecessor: asyncio.Task[None] | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> None:
-        """Run one handler; an earlier task of the same row must have ended first."""
+        """Run one handler; an earlier task of the same row must have ended first.
+
+        M5 (spec P1): the handler's task binds its job's tenant (``CURRENT_TENANT``) and a fresh
+        ``LlmStats``, so LLM calls it makes count for that tenant (a task copies the context at
+        creation: the binding is per task). Handlers that call the LLM copy the stats into
+        ``progress.metrics.llm`` (:func:`dps.observability.LlmStats.counts`).
+        """
+        CURRENT_TENANT.set(tenant_id)
+        LLM_STATS.set(LlmStats())
         try:
             if predecessor is not None and not predecessor.done():
                 await asyncio.wait({predecessor})

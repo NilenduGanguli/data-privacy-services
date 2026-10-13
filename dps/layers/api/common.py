@@ -41,7 +41,14 @@ from dps.auth import coded_http_exception_handler as coded_http_exception_handle
 from dps.engine.policy import preset_names
 from dps.engine.service import EngineError, Payload, TokenizationUnavailable, VerificationFailed
 from dps.errors import IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL, CodedError
-from dps.observability import LATENCY, REQUESTS, get_logger
+from dps.observability import (
+    CURRENT_TENANT,
+    LATENCY,
+    LLM_STATS,
+    REQUESTS,
+    LlmStats,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -191,6 +198,8 @@ def _audit_event(
     status_code: int,
 ) -> AuditEvent:
     principal = getattr(request.state, "principal", None)
+    stats = LLM_STATS.get()  # M5 (spec P1): the call's LLM figures, when it reached the gateway
+    llm = stats.counts() if stats is not None and (stats.calls or stats.blocked) else {}
     return AuditEvent(
         trace_id=tid,
         route=route_template(request),
@@ -201,6 +210,7 @@ def _audit_event(
         duration_ms=round(duration_ms, 2),
         outcome=outcome,
         status=status_code,
+        counts={**counts.pop("counts", {}), **llm},
         **counts,
     )
 
@@ -289,6 +299,10 @@ def begin_call(request: Request) -> str:
     tid = getattr(request.state, "replay_trace_id", None) or trace_id(request)
     request.state.trace_id = tid
     structlog.contextvars.bind_contextvars(trace_id=tid, route=route_template(request))
+    # M5 (spec P1): LLM calls made for this request count for its tenant (per-tenant counters)
+    # and land in its audit event. Worker threads the engine runs on copy this context.
+    CURRENT_TENANT.set(str(getattr(request.state, "tenant_id", "") or "") or None)
+    LLM_STATS.set(LlmStats())
     return tid
 
 

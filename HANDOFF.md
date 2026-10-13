@@ -408,7 +408,20 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   `dps_ocr_calls_total{engine,outcome}` (engine `azure-read-v3.2` or `tesseract`),
   `dps_ocr_seconds` and `dps_llm_label_fields_total{outcome}` (T3 labelling: `labelled`,
   `unlabelled`, `skipped` over the per-call cap, `blocked` by the leak guard, `failed`; the call
-  itself is `dps_llm_calls_total{purpose="label"}`).
+  itself is `dps_llm_calls_total{purpose="label"}`). M5 (spec P1, Task 16B) adds the tenant
+  dimension: `dps_llm_calls_by_tenant_total{tenant_id,purpose}`,
+  **`dps_llm_raw_pii_sent_by_tenant_total{tenant_id}` (must stay 0; alert `DpsRawPiiSentToLlm`,
+  critical, on any increase)** and `dps_llm_exposure_blocked_by_tenant_total{tenant_id}` (alert
+  `DpsLlmExposureBlocked`, warning) — tenant `-` for calls outside a request or job. The gateway's
+  **egress verifier** (`dps/llm/egress.py`) checks every prompt before it leaves: a protected original
+  the caller names, or a self-identifying T1 value (checksum-validated id or card, e-mail, phone)
+  outside a `{TYPE_N}` placeholder. `DPS_LLM_EGRESS_CHECK=strict` (staging/prod) blocks the prompt
+  — nothing is sent, the caller falls back to its deterministic path (`fallback: egress_blocked`);
+  `warn` (local diagnosis) sends it and counts it on the raw counters. Each request's audit event
+  carries `counts.llm_calls`, `llm_raw_values`, `llm_blocked` when it reached the gateway; the daily
+  roll-ups sum them per tenant (migration 044) into the Overview tiles `llm_calls`,
+  `raw_pii_sent_to_llm`, `llm_blocked`; a job handler that calls the LLM records the same three in
+  `progress.metrics.llm`.
 - Audit: one `audit` log line per engine request, rejections included (trace id, route, tenant, key
   id, mode, policy label, outcome, counts, methods, verification, duration — never a value or a key).
   Document routes audit mode `document.detect|obfuscate|synthesize`; the outcome is the error code
@@ -436,7 +449,8 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   `DPS_BOOTSTRAP_API_KEY` unset. `list`, `rotate ID [--grace-hours H]`, `disable ID` and `enable ID`
   manage keys the same way (exit 2 with `{"error", "detail"}` on a refusal); every mutating command
   writes an audit row owned by `_system` (`key_id = route = cli`).
-- `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json`. Probe and metrics routes are not in the schema.
+- `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json` (not served in staging/prod, M5). Probe and
+  metrics routes are not in the schema.
 - **Worker (M2).** `python -m dps.worker` claims `discover`, `run` (prepare/finalize, partitions)
   and `retention` jobs with `DPS_WORKER_CONCURRENCY` tasks; it needs `DPS_PG_HOST` and `DPS_JOB_KEK`
   (refuses to start without either, exit 1, no traceback). It serves `GET /health`, `GET /readyz`

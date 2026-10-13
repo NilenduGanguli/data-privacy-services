@@ -25,6 +25,7 @@ M5_FILES = [
     "041_report_rollups.sql",
     "042_key_rotation.sql",
     "043_policies.sql",
+    "044_llm_exposure.sql",
 ]
 
 
