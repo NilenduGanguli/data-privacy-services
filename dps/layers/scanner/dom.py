@@ -18,6 +18,9 @@ a fresh load of the same page re-runs the same script and gets the same numbers.
 
 from __future__ import annotations
 
+import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -35,12 +38,10 @@ from dps.layers.scanner.models import (
     TextFacts,
 )
 
-EXTRACT_JS = r"""
-(args) => {
-  const { frameIndex, shadow, startField, startForm, maxFields } = args;
-  const NON_FIELD = new Set(['submit', 'button', 'reset', 'image']);
+#: Shared by ``EXTRACT_JS`` and ``LIVE_TEXT_JS``: which text nodes count as rendered text, and the
+#: row/column header, ``<dt>`` or ``Label:`` hint next to one.
+_TEXT_HELPERS_JS = r"""
   const SKIP_TEXT = 'script,style,noscript,template,select,option,textarea,button';
-  const CLICKABLE = '[role="link"]:not([href]), a[href^="#"], a[href^="javascript:" i]';
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const text = (el) => clean(el ? (el.innerText || el.textContent) : '');
   const visible = (el) => {
@@ -48,6 +49,38 @@ EXTRACT_JS = r"""
     const st = getComputedStyle(el);
     return st.visibility !== 'hidden' && st.display !== 'none' && el.getClientRects().length > 0;
   };
+  const textOk = (node) => {
+    const parent = node.parentElement;
+    return !!parent && clean(node.nodeValue || '').length >= 2 && !parent.closest(SKIP_TEXT) && visible(parent);
+  };
+  const inTable = (el) => !!el.closest('table,[role=grid],[role=table]');
+  const labelHint = (el) => {
+    const cell = el.closest('td,[role=cell],[role=gridcell]');
+    if (cell) {
+      const row = cell.parentElement;
+      const th = row ? row.querySelector('th,[role=rowheader]') : null;
+      if (th && th !== cell) return text(th);
+      const table = cell.closest('table');
+      const head = table ? table.querySelector('thead tr') : null;
+      if (head && row) { const idx = Array.prototype.indexOf.call(row.children, cell); if (head.children[idx]) return text(head.children[idx]); }
+    }
+    const dd = el.closest('dd');
+    if (dd) { let p = dd.previousElementSibling; while (p && p.tagName !== 'DT') p = p.previousElementSibling; if (p) return text(p); }
+    const prev = el.previousElementSibling;
+    if (prev && /:\s*$/.test(text(prev)) && text(prev).length <= 40) return text(prev).replace(/:\s*$/, '');
+    return null;
+  };
+"""
+
+EXTRACT_JS = (
+    r"""
+(args) => {
+  const { frameIndex, shadow, startField, startForm, maxFields, token } = args;
+"""
+    + _TEXT_HELPERS_JS
+    + r"""
+  const NON_FIELD = new Set(['submit', 'button', 'reset', 'image']);
+  const CLICKABLE = '[role="link"]:not([href]), a[href^="#"], a[href^="javascript:" i]';
   const byId = (el, id) => {
     const root = el.getRootNode();
     return (root && root.getElementById ? root.getElementById(id) : null) || document.getElementById(id);
@@ -94,22 +127,6 @@ EXTRACT_JS = r"""
     const ti = clean(el.getAttribute('title')); if (ti) return [ti, 'title'];
     return ['', 'none'];
   };
-  const labelHint = (el) => {
-    const cell = el.closest('td,[role=cell],[role=gridcell]');
-    if (cell) {
-      const row = cell.parentElement;
-      const th = row ? row.querySelector('th,[role=rowheader]') : null;
-      if (th && th !== cell) return text(th);
-      const table = cell.closest('table');
-      const head = table ? table.querySelector('thead tr') : null;
-      if (head && row) { const idx = Array.prototype.indexOf.call(row.children, cell); if (head.children[idx]) return text(head.children[idx]); }
-    }
-    const dd = el.closest('dd');
-    if (dd) { let p = dd.previousElementSibling; while (p && p.tagName !== 'DT') p = p.previousElementSibling; if (p) return text(p); }
-    const prev = el.previousElementSibling;
-    if (prev && /:\s*$/.test(text(prev)) && text(prev).length <= 40) return text(prev).replace(/:\s*$/, '');
-    return null;
-  };
   const formOf = (el) => {
     if (el.form) return el.form;
     const direct = el.closest('form');
@@ -125,6 +142,8 @@ EXTRACT_JS = r"""
     return host + own;
   };
   window.__dpsTextNodes = [];
+  window.__dpsTextValues = [];
+  window.__dpsSnap = null;
   const fields = [], forms = new Map(), texts = [], links = [], clickables = [];
   let truncated = false, clickOrdinal = 0;
   const sx = window.scrollX, sy = window.scrollY;
@@ -160,14 +179,14 @@ EXTRACT_JS = r"""
       rect: { x: r.left + sx, y: r.top + sy, w: r.width, h: r.height }, selector: describe(el, inShadow) });
   };
   const onText = (node) => {
-    const parent = node.parentElement;
-    const raw = node.nodeValue || '';
-    if (!parent || clean(raw).length < 2 || parent.closest(SKIP_TEXT) || !visible(parent)) return;
+    if (!textOk(node)) return;
     if (texts.length >= 5000) { truncated = true; return; }
+    const parent = node.parentElement;
+    const raw = (node.nodeValue || '').slice(0, 2000);
     const i = window.__dpsTextNodes.length;
     window.__dpsTextNodes.push(node);
-    texts.push({ frame_index: frameIndex, i, text: raw.slice(0, 2000), in_table: !!parent.closest('table,[role=grid],[role=table]'),
-      label_hint: labelHint(parent) });
+    window.__dpsTextValues.push(raw);
+    texts.push({ frame_index: frameIndex, i, text: raw, in_table: inTable(parent), label_hint: labelHint(parent) });
   };
   const walk = (root, inShadow) => {
     const it = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
@@ -193,9 +212,61 @@ EXTRACT_JS = r"""
   };
   const top = document.body || document.documentElement;
   if (top) walk(top, false);
+  // the stamp captures check: this frame was read by THIS extraction, under THIS number
+  window.__dpsSnap = { id: token, frameIndex, shadow, base: window.__dpsTextNodes.length };
   return { title: clean(document.title), fields, forms: Array.from(forms.values()), texts, links, clickables, truncated };
 }
 """
+)
+
+STAMP_JS = r"""
+([token, frameIndex]) => !!window.__dpsSnap && window.__dpsSnap.id === token && window.__dpsSnap.frameIndex === frameIndex
+"""
+
+#: Text the frame renders NOW that its extraction did not read: every qualifying text node that is
+#: not among the extraction's nodes (appended to them, so it can be measured) or that was appended
+#: by an earlier call, and every extracted node whose text changed. ``null``: the frame is not the
+#: one the extraction read (stamp), so nothing about it can be trusted.
+LIVE_TEXT_JS = (
+    r"""
+(token) => {
+"""
+    + _TEXT_HELPERS_JS
+    + r"""
+  const snap = window.__dpsSnap;
+  const nodes = window.__dpsTextNodes, values = window.__dpsTextValues;
+  if (!snap || snap.id !== token || !Array.isArray(nodes) || !Array.isArray(values)) return null;
+  const known = new Map();
+  nodes.forEach((n, i) => known.set(n, i));
+  const items = [];
+  let overflow = false;
+  const visit = (root) => {
+    const it = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    let node = it.nextNode();
+    while (node && !overflow) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (textOk(node)) {
+          const raw = (node.nodeValue || '').slice(0, 2000);
+          let i = known.get(node);
+          if (i === undefined) { i = nodes.length; nodes.push(node); values.push(raw); known.set(node, i); }
+          if (i >= snap.base || values[i] !== raw) {
+            if (items.length >= 5000) { overflow = true; break; }
+            const parent = node.parentElement;
+            items.push({ i, text: raw, changed: i < snap.base, in_table: inTable(parent), label_hint: labelHint(parent) });
+          }
+        }
+      } else if (snap.shadow && node.shadowRoot && node.shadowRoot.mode === 'open') {
+        visit(node.shadowRoot);
+      }
+      node = it.nextNode();
+    }
+  };
+  const top = document.body || document.documentElement;
+  if (top) visit(top);
+  return overflow ? null : items;
+}
+"""
+)
 
 CLICKABLES_JS = r"""
 (arg) => {   // re-stamp data-dps-click on a fresh load without a full extract (same ordinals)
@@ -281,6 +352,57 @@ SCROLL_JS = (
 _NO_OFFSET = Rect(x=0, y=0, w=0, h=0)
 
 
+@dataclass(frozen=True)
+class Extraction:
+    """The live identity of one ``extract_page`` call (memory only, bound to its snapshot).
+
+    ``frames`` maps every frame number the snapshot read to the very ``Frame`` object it read
+    (identity, not position: a frame that attaches or detaches later never takes another frame's
+    number), and ``token`` is stamped into each of them (``window.__dpsSnap``) so a capture can tell
+    that a frame still shows the document this extraction read (not reloaded, navigated or read
+    again by a later extraction).
+    """
+
+    token: str
+    frames: Mapping[int, Frame]
+    iframes: bool
+    shadow_dom: bool
+
+
+def extraction_of(snapshot: PageSnapshot) -> Extraction | None:
+    """The live identity of ``snapshot``'s extraction (``None``: not from ``extract_page``)."""
+    ext = snapshot.extraction
+    return ext if isinstance(ext, Extraction) else None
+
+
+async def stamped(frame: Frame, token: str, frame_index: int) -> bool:
+    """Whether ``frame`` still shows the document extraction ``token`` read as ``frame_index``."""
+    try:
+        return bool(await frame.evaluate(STAMP_JS, [token, frame_index]))
+    except PlaywrightError:
+        return False
+
+
+async def late_texts(ext: Extraction) -> list[tuple[TextFacts, bool]] | None:
+    """Text the read frames render now that the extraction did not read: ``(facts, changed)`` —
+    ``changed`` for an extracted node whose text is different now, else a node the extraction
+    never saw (``facts.i`` numbers it after the extracted ones, so ``text_rects`` can measure it).
+    ``None`` (fail closed): a frame is not the one the extraction read, failed, or renders more new
+    text than can be checked."""
+    out: list[tuple[TextFacts, bool]] = []
+    for index, frame in ext.frames.items():
+        try:
+            raw = await frame.evaluate(LIVE_TEXT_JS, ext.token)
+        except PlaywrightError:
+            return None
+        if raw is None:
+            return None
+        for item in raw:
+            changed = bool(item.pop("changed"))
+            out.append((TextFacts.model_validate({**item, "frame_index": index}), changed))
+    return out
+
+
 def utf16_offset(text: str, index: int) -> int:
     """Python code-point offset -> JavaScript UTF-16 code-unit offset (astral characters count 2).
 
@@ -346,6 +468,7 @@ async def extract_page(
     capture must black out. The main frame's errors propagate.
     """
     frames = await frame_map(page, iframes=iframes)
+    token = secrets.token_hex(12)
     sx, sy, _ = await page.evaluate(SCROLL_JS)
     fields: list[FieldFacts] = []
     forms: list[FormFacts] = []
@@ -363,6 +486,7 @@ async def extract_page(
             "startField": len(fields),
             "startForm": len(forms),
             "maxFields": max(0, max_fields - len(fields)),
+            "token": token,
         }
         try:
             offset = await _frame_offset(frame, (sx, sy))
@@ -417,7 +541,7 @@ async def extract_page(
                 read=False,
             )
         )
-    return PageSnapshot(
+    snapshot = PageSnapshot(
         url=page.url,
         title=title,
         forms=forms,
@@ -429,6 +553,11 @@ async def extract_page(
         truncated=truncated,
         frames_failed=failed,
     )
+    read = {index: frame for index, frame in frames.items() if index not in failed}
+    snapshot.bind_extraction(
+        Extraction(token=token, frames=read, iframes=iframes, shadow_dom=shadow_dom)
+    )
+    return snapshot
 
 
 def unread_frame_boxes(snapshot: PageSnapshot) -> list[Rect] | None:

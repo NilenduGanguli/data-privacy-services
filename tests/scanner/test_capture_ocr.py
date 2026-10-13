@@ -184,3 +184,52 @@ async def test_obfuscated_captures_hold_no_readable_value(
         )
     assert res.status == "captured" and res.png is not None, res.reason
     assert _readable(_ocr(cmd, res.png), demo_data, keys, strict=False) == []
+
+
+#: Made-up names standing for a customer: one ASCII, one with letters outside ASCII.
+TWICE_NAMES: dict[str, str] = {
+    "ascii": "Zebulon Quixotic Hartwell",
+    "non_ascii": "Renée Østergård Blackwood",
+}
+TWICE_JS = """(name) => {
+  const d = document.createElement('div');
+  d.innerHTML = `<table><tbody><tr><th>Full name</th><td>${name}</td></tr></tbody></table>
+                 <p style="font-size:22px">Welcome back, ${name}</p>`;
+  document.body.prepend(d);
+  return true;
+}"""
+
+
+@pytest.mark.parametrize("label", list(TWICE_NAMES))
+async def test_a_value_rendered_twice_is_masked_in_both_places(
+    label: str,
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    demo_site_url: str,
+) -> None:
+    """M4-G3 review r1 B1: the detectors find the name through its row header only; the second,
+    undetected copy in the greeting must not be readable in the masked original either."""
+    cmd = _tesseract()
+    name = TWICE_NAMES[label]
+    words = {normalise(w) for w in name.split() if len(normalise(w)) >= 5}
+    det = scan_engine.detector(scan_engine.policy(None), "en_IN")
+    async with guarded_context(chromium, scan_settings, demo_site_url, cookies=True) as (ctx, _g):
+        page = await ctx.new_page()
+        await page.goto(f"{demo_site_url}/help")
+        await page.evaluate(TWICE_JS, name)
+        snap = await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
+        frames = await frame_map(page, iframes=True)
+        rendered = classify_rendered(snap.texts, detector=det)
+        raw = await capture_screen(
+            page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, unmasked=True
+        )
+        masked = await capture_screen(
+            page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, detector=det
+        )
+    assert raw is not None and masked is not None
+    control = _ocr(cmd, raw)
+    family = normalise(name.split()[-1])
+    assert control.count(family) >= 2  # the OCR reads both copies when nothing is masked
+    seen = _ocr(cmd, masked)
+    assert [w for w in words if w in seen] == []

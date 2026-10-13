@@ -6,9 +6,17 @@ Rules:
   never leaves memory: :func:`capture_screen` paints a solid box (labelled with the entity type)
   over every rendered finding and every pre-filled field that shows a value *before* PNG
   encoding, and returns ``None`` (withheld, fail closed) when any of them cannot be located.
-* Every capture also paints the box of every child frame that was never read (cross-origin, or
-  iframes off) and is withheld when a frame failed while it was read or an unread frame cannot be
-  located (``dom.unread_frame_boxes`` / ``PageSnapshot.frames_failed``; M4-G2 fix, D-C).
+  Every *other* copy of those values the page renders (text or field, ``SWEEP_MIN_CHARS``+
+  letters/digits, compared normalised) is boxed too; a copy split across text nodes withholds
+  (``sweep_copies``; M4-G3 review r1 B1).
+* Frames are those the snapshot's extraction read, matched **by identity** (``dom.Extraction``),
+  never by the caller's positional frame numbers; a read frame that no longer shows the document
+  read (reloaded, navigated, read again) withholds. Every capture paints the box of every live
+  child frame that was not read (cross-origin, iframes off, attached after the extraction) and is
+  withheld when a frame failed while it was read or an unread frame cannot be located (M4-G2 fix,
+  D-C; M4-G3 review r1 B2).
+* Text the read frames render that the extraction did not read (added or changed later) is
+  classified with the caller's detector and its hits boxed; without a detector such text withholds.
 * Boxes are measured on the live page right before the screenshot and again right after it
   (child-frame offsets included, CSS animations and transitions off); if anything moved while the
   screenshot was taken the capture is withheld rather than masked in the wrong place.
@@ -25,7 +33,7 @@ import io
 import json
 import re
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -34,6 +42,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Frame, Page
 
 from dps.config import Settings
+from dps.engine.detect.ensemble import Detector
 from dps.engine.findings import Finding, Locator, hash_value
 from dps.engine.planner import build_plan
 from dps.engine.policy import Policy
@@ -43,15 +52,27 @@ from dps.engine.taxonomy import entity_info
 from dps.engine.transform.apply import ApplyOptions, apply_plan
 from dps.engine.transform.crypto import KeyMaterial
 from dps.engine.verify import collect_originals, normalise, verify_output
+from dps.layers.scanner.classify import classify_rendered
 from dps.layers.scanner.dom import (
     REPLACE_TEXT_JS,
     SCROLL_JS,
     SET_VALUES_JS,
+    Extraction,
     extract_page,
+    extraction_of,
+    late_texts,
+    stamped,
     text_rects,
 )
 from dps.layers.scanner.guard import ScanGuard
-from dps.layers.scanner.models import FieldFacts, FrameFacts, PageSnapshot, Rect, RenderedFinding
+from dps.layers.scanner.models import (
+    FieldFacts,
+    FrameFacts,
+    PageSnapshot,
+    Rect,
+    RenderedFinding,
+    TextFacts,
+)
 
 VARIANT_COLOUR: dict[str, tuple[int, int, int]] = {
     "original": (251, 191, 36),
@@ -76,6 +97,10 @@ _NO_MOTION_JS = (
     " s.textContent = css; (document.head || document.documentElement).appendChild(s); return true; }"
 )
 _ZERO = Rect(x=0, y=0, w=0, h=0)
+#: A value is swept for (every copy the page renders is boxed) from this many letters/digits on.
+SWEEP_MIN_CHARS = 4
+#: ``(frame_index, text node i, start, end, label)``
+Span = tuple[int, int, int, int, str]
 
 
 @dataclass(frozen=True)
@@ -193,28 +218,56 @@ async def _frame_box(frame: Frame) -> Rect | None:
     return Rect(x=box["x"], y=box["y"], w=box["width"], h=box["height"])
 
 
-async def _fresh_frames(
-    page: Page, frames: dict[int, Frame], snapshot: PageSnapshot
-) -> tuple[PageSnapshot, list[Rect]] | None:
-    """``snapshot`` with the read frames' offsets measured now, and the boxes of every child
-    frame that is not read (measured now too). ``None``: withhold (a frame failed while it was
-    read, or a frame cannot be located)."""
-    if snapshot.frames_failed:
+async def _read_frames(
+    page: Page, frames: Mapping[int, Frame], snapshot: PageSnapshot
+) -> Extraction | None:
+    """The frames ``snapshot`` read, by identity (``dom.Extraction``), when each of them still shows
+    the document that was read and the caller's ``frames`` agree with them; ``None``: withhold.
+
+    The caller's map is positional (``dom.frame_map`` numbers ``page.frames`` in order), so a frame
+    that attached or detached after the extraction shifts it: such a map never decides which frame
+    is measured. A frame in it that the snapshot did not read is treated like every other live
+    child frame that was not read (boxed); one that names a read frame under another number, or
+    another frame under a read frame's number, withholds."""
+    ext = extraction_of(snapshot)
+    if ext is None or snapshot.frames_failed or ext.frames.get(0) is not page.main_frame:
         return None
-    by_index = {f.frame_index: f for f in snapshot.frames}
-    fresh: list[FrameFacts] = []
     for index, frame in frames.items():
+        read = ext.frames.get(index)
+        if read is not None and read is not frame:
+            return None
+        if read is None and any(frame is f for f in ext.frames.values()):
+            return None
+    for index, frame in ext.frames.items():
+        if not await stamped(frame, ext.token, index):
+            return None  # reloaded, navigated or read again by a later extraction
+    return ext
+
+
+async def _fresh_frames(
+    page: Page, frames: Mapping[int, Frame], snapshot: PageSnapshot
+) -> tuple[PageSnapshot, Extraction, list[Rect]] | None:
+    """``snapshot`` with the read frames' offsets measured now, its extraction, and the boxes of
+    every live child frame that was not read (by identity; measured now too). ``None``: withhold (a
+    frame failed while it was read, a read frame changed or cannot be located, an unread frame
+    cannot be located)."""
+    ext = await _read_frames(page, frames, snapshot)
+    if ext is None:
+        return None
+    by_index = {f.frame_index: f for f in snapshot.frames if f.read}
+    fresh: list[FrameFacts] = []
+    for index, frame in ext.frames.items():
         facts = by_index.get(index)
         if facts is None:
-            continue
+            return None
         offset = _ZERO if index == 0 else await _frame_box(frame)
         if offset is None:
             return None
         fresh.append(facts.model_copy(update={"offset": offset}))
-    read = list(frames.values())
+    read = list(ext.frames.values())
     unread: list[Rect] = []
     for frame in page.frames:
-        if frame is page.main_frame or frame in read:
+        if frame is page.main_frame or any(frame is r for r in read):
             continue
         box = await _frame_box(frame)
         if box is None:
@@ -223,37 +276,157 @@ async def _fresh_frames(
             return None
         if box.w > 0 and box.h > 0:
             unread.append(box)
-    return snapshot.model_copy(update={"frames": fresh}), unread
+    return snapshot.model_copy(update={"frames": fresh}), ext, unread
+
+
+# --- every copy of a value --------------------------------------------------------------------
+def _flat(text: str) -> tuple[str, list[int]]:
+    """``normalise(text)`` built character by character, with the code-point index in ``text`` of
+    every character of it."""
+    chars: list[str] = []
+    where: list[int] = []
+    for k, ch in enumerate(text):
+        for c in normalise(ch):
+            chars.append(c)
+            where.append(k)
+    return "".join(chars), where
+
+
+def _shown(f: FieldFacts) -> list[str]:
+    """What a field shows: its value, or a select's selected option texts."""
+    if f.tag == "select":
+        return [o.text for o in f.options if o.selected and o.text]
+    return [f.value] if f.value else []
+
+
+def sweep_copies(
+    texts: list[TextFacts], fields: list[FieldFacts], values: list[tuple[str, str]]
+) -> tuple[list[Span], list[tuple[FieldFacts, str]]] | None:
+    """Every copy of every ``(value, label)`` with at least ``SWEEP_MIN_CHARS`` letters/digits that
+    the page renders: text spans ``(frame, i, start, end, label)`` and visible fields showing it,
+    compared in ``normalise`` form (case, accents, spacing and punctuation do not hide a copy).
+    ``None`` (fail closed): a copy cannot be located — split across text nodes, or in a form the
+    character-wise mapping does not reproduce."""
+    needles: dict[str, str] = {}
+    for value, label in values:
+        n = normalise(value)
+        if len(n) >= SWEEP_MIN_CHARS:
+            needles.setdefault(n, label)
+    if not needles:
+        return [], []
+    normed = [normalise(t.text) for t in texts]
+    haystack = "".join(normed)
+    spans: list[Span] = []
+    boxed: list[tuple[FieldFacts, str]] = []
+    for needle, label in needles.items():
+        located = 0
+        for t, n in zip(texts, normed, strict=True):
+            count = n.count(needle)
+            if not count:
+                continue
+            flat, where = _flat(t.text)
+            pos = flat.find(needle)
+            while pos >= 0:
+                spans.append(
+                    (t.frame_index, t.i, where[pos], where[pos + len(needle) - 1] + 1, label)
+                )
+                located += 1
+                pos = flat.find(needle, pos + len(needle))
+            if flat.count(needle) != count:
+                return None
+        if haystack.count(needle) > located:
+            return None  # a copy split across nodes cannot be boxed as one value
+        boxed += [
+            (f, label)
+            for f in fields
+            if f.visible and any(needle in normalise(s) for s in _shown(f))
+        ]
+    return spans, boxed
+
+
+def _unique_spans(spans: list[Span]) -> list[Span]:
+    seen: set[tuple[int, int, int, int]] = set()
+    out: list[Span] = []
+    for s in spans:
+        if s[:4] not in seen:
+            seen.add(s[:4])
+            out.append(s)
+    return out
+
+
+def _unique_fields(fields: list[tuple[FieldFacts, str]]) -> list[tuple[FieldFacts, str]]:
+    seen: set[str] = set()
+    out: list[tuple[FieldFacts, str]] = []
+    for f, label in fields:
+        if f.key not in seen:
+            seen.add(f.key)
+            out.append((f, label))
+    return out
+
+
+@dataclass(frozen=True)
+class _MaskPlan:
+    """What a capture masks: ``spans`` and ``fields`` as given, every copy of ``values`` the page
+    renders (``sweep_copies``), and — with ``census`` — text rendered after the extraction
+    (classified with ``detector``; withheld without one)."""
+
+    spans: list[Span]
+    fields: list[tuple[FieldFacts, str]]
+    values: list[tuple[str, str]]
+    detector: Detector | None
+    census: bool
 
 
 Measure = Callable[[], Awaitable[list[MaskBox] | None]]
 
 
 def _measurer(
-    page: Page,
-    frames: dict[int, Frame],
-    snapshot: PageSnapshot,
-    spans: list[tuple[int, int, int, int, str]],
-    fields: list[tuple[FieldFacts, str]],
+    page: Page, frames: Mapping[int, Frame], snapshot: PageSnapshot, plan: _MaskPlan
 ) -> Measure:
-    """Measure the masks for ``spans`` (frame, text node, start, end, label) and ``fields`` on the
-    live page; ``None`` when one of them (or a frame) cannot be located."""
+    """Measure the masks of ``plan`` on the live page; ``None`` when one of them (or a frame)
+    cannot be located, or text appeared that cannot be checked."""
 
     async def measure() -> list[MaskBox] | None:
         await page.evaluate(SCROLL_JS)
         state = await _fresh_frames(page, frames, snapshot)
         if state is None:
             return None
-        live, unread = state
+        live, ext, unread = state
         masks = [MaskBox(rect=r, label=FRAME_LABEL) for r in unread]
+        spans, fields, values = list(plan.spans), list(plan.fields), list(plan.values)
+        if plan.census:
+            late = await late_texts(ext)
+            if late is None:
+                return None
+            if late:
+                if plan.detector is None:
+                    return None  # text nobody classified: fail closed
+                changed = {(t.frame_index, t.i) for t, c in late if c}
+                if any((s[0], s[1]) in changed for s in spans):
+                    return None  # a finding's node changed: its offsets are stale
+                new = [t for t, _ in late]
+                keys = {(t.frame_index, t.i) for t in new}
+                kept = [t for t in live.texts if (t.frame_index, t.i) not in keys]
+                live = live.model_copy(update={"texts": kept + new})
+                text_of = {(t.frame_index, t.i): t.text for t in new}
+                for r in classify_rendered(new, detector=plan.detector):
+                    spans.append((r.frame_index, r.i, r.start, r.end, r.entity_type))
+                    values.append((text_of[(r.frame_index, r.i)][r.start : r.end], r.entity_type))
+        if values:
+            swept = sweep_copies(live.texts, live.fields, values)
+            if swept is None:
+                return None
+            spans += swept[0]
+            fields += swept[1]
+        spans, fields = _unique_spans(spans), _unique_fields(fields)
         if spans:
-            rects = await text_rects(page, frames, live, [s[:4] for s in spans])
+            rects = await text_rects(page, dict(ext.frames), live, [s[:4] for s in spans])
             for span, found in zip(spans, rects, strict=True):
                 if not found:
                     return None
                 masks += [MaskBox(rect=r, label=span[4]) for r in found]
         for f, entity in fields:
-            box = await _element_box(frames.get(f.frame_index), f.key)
+            box = await _element_box(ext.frames.get(f.frame_index), f.key)
             if box is None:
                 return None
             masks.append(MaskBox(rect=box, label=entity))
@@ -276,7 +449,7 @@ def _same(a: list[MaskBox], b: list[MaskBox]) -> bool:
     return True
 
 
-async def _stop_motion(page: Page, frames: dict[int, Frame]) -> None:
+async def _stop_motion(frames: Mapping[int, Frame]) -> None:
     for frame in frames.values():
         try:
             await frame.evaluate(_NO_MOTION_JS, _NO_MOTION_CSS)
@@ -293,10 +466,10 @@ async def _full_page_png(page: Page, max_height: int) -> bytes:
 
 
 async def _shoot(
-    page: Page, frames: dict[int, Frame], measure: Measure, max_height: int
+    page: Page, frames: Mapping[int, Frame], measure: Measure, max_height: int
 ) -> bytes | None:
     """Measure, screenshot, measure again; masks painted before encoding. ``None``: withheld."""
-    await _stop_motion(page, frames)
+    await _stop_motion(frames)
     await page.wait_for_timeout(SETTLE_BEFORE_SHOT_MS)
     masks = await measure()
     if masks is None:
@@ -330,16 +503,40 @@ async def capture_screen(
     prefilled: list[tuple[FieldFacts, str]],
     max_height: int,
     unmasked: bool = False,
+    detector: Detector | None = None,
 ) -> bytes | None:
-    """A full-page PNG with every rendered finding, every pre-filled field in ``prefilled`` and
-    every unread frame painted over; ``None`` = withheld (something could not be located, or the
-    page moved). ``unmasked`` (local only; posture refuses it in staging/prod) skips the value
-    masks but still paints unread frames."""
-    spans = (
-        [] if unmasked else [(r.frame_index, r.i, r.start, r.end, r.entity_type) for r in rendered]
-    )
-    fields = [] if unmasked else prefilled
-    return await _shoot(page, frames, _measurer(page, frames, snapshot, spans, fields), max_height)
+    """A full-page PNG with every rendered finding, every pre-filled field in ``prefilled``, every
+    other copy of their values the page renders (text or field) and every child frame the
+    snapshot did not read painted over; ``None`` = withheld (something could not be located, a
+    copy is split across text nodes, the page moved, a read frame no longer shows what was read, or
+    text rendered after the extraction could not be classified).
+
+    Frames are those ``snapshot`` read, by identity (``frames`` must agree with them). Text the page
+    renders that the extraction did not read is classified with ``detector`` and its hits boxed;
+    without a ``detector`` such text withholds. ``unmasked`` (local only; posture refuses it in
+    staging/prod) skips the value masks but still paints unread frames."""
+    ext = extraction_of(snapshot)
+    if ext is None:
+        return None
+    if unmasked:
+        plan = _MaskPlan(spans=[], fields=[], values=[], detector=None, census=False)
+    else:
+        text_of = {(t.frame_index, t.i): t.text for t in snapshot.texts}
+        values = [
+            (text_of[(r.frame_index, r.i)][r.start : r.end], r.entity_type)
+            for r in rendered
+            if (r.frame_index, r.i) in text_of
+        ]
+        values += [(shown, entity) for f, entity in prefilled for shown in _shown(f)]
+        plan = _MaskPlan(
+            spans=[(r.frame_index, r.i, r.start, r.end, r.entity_type) for r in rendered],
+            fields=list(prefilled),
+            values=values,
+            detector=detector,
+            census=True,
+        )
+    measure = _measurer(page, frames, snapshot, plan)
+    return await _shoot(page, ext.frames, measure, max_height)
 
 
 _T_INDEX = re.compile(r"^\$\.t\[(\d+)\]")
@@ -366,6 +563,9 @@ async def obfuscated_capture(
     mode only) holds the tokens of the text nodes that had a finding (every other node ``null``),
     the tokenised pre-filled values, the reveal hints and the key id — never an original."""
     if unread_failed(snapshot):
+        return CaptureResult(status="withheld", reason="frame")
+    ext = await _read_frames(page, frames, snapshot)
+    if ext is None:  # not from extract_page, a read frame changed, or the caller's map disagrees
         return CaptureResult(status="withheld", reason="frame")
     texts = snapshot.texts
     g_of = {(t.frame_index, t.i): g for g, t in enumerate(texts)}
@@ -435,51 +635,38 @@ async def obfuscated_capture(
             if out_t[g] != t.text:
                 text_pairs[t.frame_index].append([t.i, out_t[g]])
         for frame_index, pairs in text_pairs.items():
-            await frames[frame_index].evaluate(REPLACE_TEXT_JS, pairs)
+            await ext.frames[frame_index].evaluate(REPLACE_TEXT_JS, pairs)
         value_pairs: dict[int, list[list[str]]] = defaultdict(list)
         for j, (f, _) in enumerate(inputs):
             value_pairs[f.frame_index].append([f.key, str(out_v[j])])
         for frame_index, pairs in value_pairs.items():
-            await frames[frame_index].evaluate(SET_VALUES_JS, pairs)
-        # Residual sweep over what the page renders NOW: any original still present is boxed;
-        # one that cannot be located as text (split across nodes, inside an input) withholds.
+            await ext.frames[frame_index].evaluate(SET_VALUES_JS, pairs)
+        # Residual sweep over what the page renders NOW: every copy of an original that is
+        # still there is boxed; one that cannot be located (split across nodes) withholds.
         after = await extract_page(
             page,
-            iframes=len(frames) > 1,
-            shadow_dom=True,
+            iframes=ext.iframes,
+            shadow_dom=ext.shadow_dom,
             max_fields=settings.scan_max_fields_per_page,
         )
     except (PlaywrightError, KeyError):
         return CaptureResult(status="withheld", reason="residual")
-    haystack = normalise(
-        json.dumps({"t": [t.text for t in after.texts], "v": [f.value or "" for f in after.fields]})
+    values = [
+        (original, finding.entity_type)
+        for finding, original in originals
+        if (finding.locator.path, finding.locator.start, finding.locator.end) not in kept
+    ]
+    if sweep_copies(after.texts, after.fields, values) is None:
+        return CaptureResult(status="withheld", reason="residual")
+    plan_masks = _MaskPlan(
+        spans=[],
+        fields=list(selects),
+        values=values,
+        detector=engine.detector(policy, locale),
+        census=True,
     )
-    spans: list[tuple[int, int, int, int, str]] = []
-    for finding, original in originals:
-        loc = finding.locator
-        needle = original.strip()
-        if (
-            (loc.path, loc.start, loc.end) in kept
-            or len(normalise(needle)) < 4
-            or normalise(needle) not in haystack
-        ):
-            continue
-        located = [
-            (
-                t.frame_index,
-                t.i,
-                t.text.find(needle),
-                t.text.find(needle) + len(needle),
-                finding.entity_type,
-            )
-            for t in after.texts
-            if needle in t.text
-        ]
-        if not located:
-            return CaptureResult(status="withheld", reason="residual")
-        spans += located
-    measure = _measurer(page, frames, after, spans, selects)
-    png = await _shoot(page, frames, measure, settings.scan_screenshot_max_height)
+    measure = _measurer(page, ext.frames, after, plan_masks)
+    png = await _shoot(page, ext.frames, measure, settings.scan_screenshot_max_height)
     if png is None:
         return CaptureResult(status="withheld", reason="mask")
     capture_json: bytes | None = None

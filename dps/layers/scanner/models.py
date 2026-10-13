@@ -22,7 +22,14 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from dps.config import Settings
 from dps.engine.synth.personas import SUPPORTED_LOCALES
@@ -180,11 +187,24 @@ class PageSnapshot(BaseModel):
     #: same-origin child frames that failed while they were read (detached or navigated): what
     #: they rendered is in no finding, so no masked capture of this page may be emitted
     frames_failed: list[int] = Field(default_factory=list)
+    #: the live identity of the extraction (``dom.Extraction``: the Frame objects read and the
+    #: token stamped into each of them) — memory only, never serialised, copied by ``model_copy``
+    _extraction: Any = PrivateAttr(default=None)
 
     @property
     def unread_frames(self) -> list[FrameFacts]:
         """Rendered child frames whose content was not read (cross-origin, iframes off, or failed)."""
         return [f for f in self.frames if not f.read]
+
+    @property
+    def extraction(self) -> Any:
+        """The live identity of the extraction (``dom.Extraction``), ``None`` for a snapshot that
+        was not produced by ``dom.extract_page`` (no capture of it may be emitted)."""
+        return self._extraction
+
+    def bind_extraction(self, extraction: Any) -> None:
+        """Attach the live identity of the extraction (``dom.extract_page`` only)."""
+        self._extraction = extraction
 
 
 # --- classification -----------------------------------------------------------------------

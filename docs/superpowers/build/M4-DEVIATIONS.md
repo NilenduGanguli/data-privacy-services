@@ -717,3 +717,56 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   leaves Chromium's error page), plus the stored validation records/counts, an auto-submitting
   select and a checkbox inside a link (no submission, no navigation), and a missing field / frame
   failing only that field: 5 tests (plan: 3).
+
+## G3 review round 1 — fix (M4-G3-review-r1 B1, B2)
+
+- **B1 — every copy of a masked value is boxed (`capture.py`).** New public
+  `sweep_copies(texts, fields, values)` and `SWEEP_MIN_CHARS = 4`: every `(value, label)` with at
+  least 4 normalised letters/digits (`verify.normalise`: case, accents, spacing, punctuation folded)
+  is searched in every text node and every visible field (a select's selected option text); each
+  occurrence becomes a span `(frame, i, start, end, label)` mapped back to code-point offsets of the
+  node text, or a field box. A copy split across text nodes (normalised concatenation holds more
+  copies than the per-node search located), or one the character mapping cannot reproduce,
+  returns `None` and the capture is **withheld**. `capture_screen` (masked path) sweeps for the
+  originals of every rendered finding and every pre-filled value; `obfuscated_capture`'s residual
+  sweep uses the same function (normalised per node, so non-ASCII originals are found — this also
+  closes nit **N2**, the `json.dumps(ensure_ascii=True)` haystack).
+- **B2 — frames by identity (`dom.py`, `models.py`, `capture.py`).** `extract_page` now binds a
+  memory-only `dom.Extraction` to the snapshot (`PageSnapshot.extraction`, a pydantic private attr,
+  never serialised): the `Frame` objects it read under each number and a random token stamped into
+  each read frame (`window.__dpsSnap`). Captures measure only those frames. The caller's `frames`
+  map no longer decides anything: a frame in it that the snapshot did not read is treated like any
+  other live child frame that was not read (boxed `FRAME`), and a map that names a read frame under
+  another number (or another frame under a read frame's number) withholds. Every live child frame
+  of `page.frames` that is not a read frame is boxed (measured now; detached frames skipped; one
+  that cannot be measured withholds). A read frame whose stamp is gone (reloaded, navigated, or
+  read again by a later `extract_page`) withholds. A snapshot not produced by `extract_page`
+  (`extraction is None`) is never captured.
+- **Live text census (the review's "related" item, done rather than deferred).** New
+  `dom.LIVE_TEXT_JS` / `late_texts(ext)`: every qualifying text node a read frame renders now that
+  the extraction did not read (added, or extracted but changed) is appended to the frame's node
+  list (so `text_rects` can measure it) and returned. `capture_screen` gained an optional
+  keyword `detector: Detector | None = None`: late text is classified with it
+  (`classify_rendered`), its hits boxed and their values swept for; **without a detector, late
+  text withholds**; a rendered finding whose node changed withholds (stale offsets). More than
+  5000 late nodes withholds. `obfuscated_capture` passes `engine.detector(policy, locale)`.
+  **Task 14 must pass `detector=`** to `capture_screen` (the plan's call at "original = await
+  capture_screen(...)" omits it, which is fail-closed but withholds every page whose text changes
+  after extraction, e.g. a clock).
+- Shared JS: the text-node predicate and label-hint helpers moved into `_TEXT_HELPERS_JS`, used by
+  both `EXTRACT_JS` and `LIVE_TEXT_JS` (identical rules for "rendered text").
+- **Tests (each fails on `a5ff949`, checked by running the new file against an export of HEAD):**
+  new `tests/scanner/test_capture_residual.py` (6 browser tests: a value rendered twice — table
+  cell found via the row header, greeting not detected — boxed in both places; the same value
+  split by `<b>` withholds; a same-origin frame attached after `extract_page` but before the
+  caller's `frame_map` is boxed; a disagreeing caller map withholds; a stale/reloaded snapshot
+  withholds; text added after extraction withholds without a detector and is boxed with one);
+  `tests/scanner/test_capture.py` +3 (sweep in any spelling incl. astral/accents and selects, split
+  copy and short values, a snapshot not from `extract_page` is refused); `test_capture_ocr.py` +2
+  (OCR: a name rendered twice, ASCII and non-ASCII — the unmasked control reads the family name
+  in both places, the masked capture reads no 5+-letter part of it).
+- **Over-withholding risk (accepted, fail closed):** the split-copy check concatenates normalised
+  node texts in document order, so two unrelated adjacent nodes whose joint letters/digits spell a
+  swept value withhold the capture.
+- **Open for Task 14 (unchanged by this fix):** pre-filled input values changed by a script after
+  extraction are not re-read (the census covers text nodes only); closed shadow roots (see Task 12).

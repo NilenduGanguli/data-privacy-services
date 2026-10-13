@@ -25,10 +25,18 @@ from dps.layers.scanner.capture import (
     draw_overlays,
     field_boxes,
     obfuscated_capture,
+    sweep_copies,
 )
 from dps.layers.scanner.classify import classify_field, classify_rendered, sensitive_prefilled
 from dps.layers.scanner.dom import extract_page, frame_map, text_rects
-from dps.layers.scanner.models import Rect, RenderedFinding
+from dps.layers.scanner.models import (
+    FieldFacts,
+    OptionFacts,
+    PageSnapshot,
+    Rect,
+    RenderedFinding,
+    TextFacts,
+)
 from tests.scanner.helpers import DEMO_VALUE_KEYS, guarded_context
 
 
@@ -62,6 +70,88 @@ def test_masks_fill_rects_and_crop_limits_height() -> None:
     assert edge.getpixel((30, 15)) == MASK_FILL
     assert Image.open(io.BytesIO(crop_height(_png(200, 100), 60))).size == (200, 60)
     assert crop_height(_png(200, 50), 60) == _png(200, 50)
+
+
+def _t(i: int, text: str) -> TextFacts:
+    return TextFacts(frame_index=0, i=i, text=text, in_table=False, label_hint=None)
+
+
+def _field(key: str, *, value: str | None = None, selected: str | None = None) -> FieldFacts:
+    return FieldFacts(
+        key=key,
+        field_no=int(key.split(":")[1]),
+        form_index=0,
+        frame_index=0,
+        in_shadow=False,
+        tag="select" if selected is not None else "input",
+        input_type="select-one" if selected is not None else "text",
+        name=None,
+        id=None,
+        label="",
+        label_source="none",
+        placeholder=None,
+        title=None,
+        aria_label=None,
+        selector="",
+        autocomplete=None,
+        pattern=None,
+        maxlength=None,
+        minlength=None,
+        required=False,
+        readonly=False,
+        disabled=False,
+        visible=True,
+        inputmode=None,
+        options=(
+            [OptionFacts(value="x", text=selected, disabled=False, selected=True)]
+            if selected is not None
+            else []
+        ),
+        value=value,
+    )
+
+
+def test_sweep_boxes_every_copy_in_any_spelling() -> None:
+    texts = [
+        _t(0, "Zebulon Quixotic"),
+        _t(1, "Welcome back, ZEBULON  quixotic! Again: Zebulon Quixotic."),
+        _t(2, "Nothing here"),
+    ]
+    spans, fields = sweep_copies(
+        texts,
+        [_field("0:1", value="zebulon quixotic"), _field("0:2", value="other")],
+        [("Zebulon Quixotic", "PERSON_NAME")],
+    ) or ([], [])
+    assert [(s[1], texts[s[1]].text[s[2] : s[3]]) for s in spans] == [
+        (0, "Zebulon Quixotic"),
+        (1, "ZEBULON  quixotic"),
+        (1, "Zebulon Quixotic"),
+    ]
+    assert {s[4] for s in spans} == {"PERSON_NAME"} and [f.key for f, _ in fields] == ["0:1"]
+    # a select shows its selected option's text
+    _, boxed = sweep_copies(
+        [], [_field("0:3", selected="Zebulon Quixotic")], [("zebulon quixotic", "N")]
+    ) or ([], [])
+    assert [f.key for f, _ in boxed] == ["0:3"]
+
+
+def test_sweep_withholds_a_copy_split_across_nodes_and_ignores_short_values() -> None:
+    split = [_t(0, "Zebulon Quixotic"), _t(1, "Welcome back, Zebulon"), _t(2, "Quixotic")]
+    assert sweep_copies(split, [], [("Zebulon Quixotic", "PERSON_NAME")]) is None
+    # astral characters and accents: offsets are code points into the node text
+    accented = [_t(0, "\U0001f600 Renée Østergård, RENEE ØSTERGARD")]
+    spans, _ = sweep_copies(accented, [], [("Renée Østergård", "PERSON_NAME")]) or ([], [])
+    assert [accented[0].text[s[2] : s[3]] for s in spans] == ["Renée Østergård", "RENEE ØSTERGARD"]
+    assert sweep_copies([_t(0, "ab-c ab-c")], [], [("ab c", "X")]) == ([], [])
+
+
+async def test_a_snapshot_not_read_by_extract_page_is_never_captured() -> None:
+    snap = PageSnapshot(
+        url="", title="", forms=[], fields=[], texts=[], links=[], clickables=[], frames=[]
+    )
+    assert snap.extraction is None
+    page: Any = object()  # never touched: the capture is refused before the page is used
+    assert await capture_screen(page, {}, snap, rendered=[], prefilled=[], max_height=10) is None
 
 
 @pytest.mark.browser
