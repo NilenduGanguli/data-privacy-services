@@ -25,7 +25,9 @@ Rejection codes: ``selection_parse_error``, ``selection_multiple_statements``,
 ``selection_function_denied``, ``selection_identifier_invalid``, ``selection_positional_param``,
 ``selection_param_missing``, ``selection_unknown_column``, ``selection_query_missing_key``,
 ``selection_not_parameterized``, ``selection_literal_unsupported``, ``selection_operator_denied``,
-``selection_engine_mismatch``, ``selection_query_alias``.
+``selection_engine_mismatch``, ``selection_query_alias``; MongoDB filters also
+``selection_invalid``, ``selection_too_complex``, ``selection_regex_too_long``
+(:func:`validate_mongo_filter`).
 
 Given the object's shape, a query's outputs are bound to the object's columns by name (the read
 projection, :func:`read_projection`), so an output that carries a column's name must be that
@@ -36,6 +38,8 @@ column would be applied to another column's, an expression's or another table's 
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
 
 import sqlglot
@@ -715,7 +719,8 @@ def _check_query_outputs(sel: Selection, engine: Engine, shape: TableShape) -> N
 def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None) -> None:
     """Raise the first :class:`SelectionError`; ``shape`` (when given) enables column/key checks."""
     if engine == "mongo":
-        if sel.where is not None or sel.query is not None:
+        if sel.where is not None or sel.query is not None or sel.params:
+            # MongoDB literals live in the filter; SQL text and bind values do not apply
             raise SelectionError("selection_engine_mismatch", "MongoDB selections use mongo_filter")
         if sel.mongo_filter is not None:
             validate_mongo_filter(sel.mongo_filter)
@@ -750,7 +755,16 @@ def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None)
 
 
 _CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("one_statement", ("selection_multiple_statements", "selection_parse_error")),
+    (
+        "one_statement",
+        (
+            "selection_multiple_statements",
+            "selection_parse_error",
+            "selection_invalid",
+            "selection_too_complex",
+            "selection_regex_too_long",
+        ),
+    ),
     ("select_only", ("selection_not_select", "selection_dml", "selection_engine_mismatch")),
     (
         "no_into_lock_procs",
@@ -831,23 +845,256 @@ def selection_checks(
     return out
 
 
-def validate_mongo_filter(flt: dict[str, Any], _depth: int = 0) -> None:
-    """Operator allow-list (``$where``, ``$expr``, ``$function`` … refused) and field-path rules."""
-    if _depth > 20:
-        raise SelectionError("selection_operator_denied", "filter nesting is too deep")
-    for key, value in flt.items():
+# --- MongoDB filters (contract §5.2; M3 Task 10) ----------------------------------------------
+
+#: Extended-JSON literal wrappers, accepted in value positions only (``{"$oid": "…"}``).
+EJSON_WRAPPERS = frozenset({"$date", "$oid", "$numberLong", "$numberDecimal"})
+MAX_FILTER_DEPTH = 8
+MAX_FILTER_NODES = 500
+MAX_REGEX_LEN = 256
+MAX_IN_ITEMS = 1000
+_LOGICAL = frozenset({"$and", "$or", "$nor"})
+_OID_TEXT = re.compile(r"[0-9A-Fa-f]{24}")
+_LONG_TEXT = re.compile(r"-?[0-9]{1,19}")
+_INT64 = range(-(2**63), 2**63)
+
+
+def _deny(code: str) -> SelectionError:
+    """A value-free :class:`SelectionError`: the message names the rule, never the filter."""
+    return SelectionError(code, f"the MongoDB filter breaks rule {code}")
+
+
+class _Budget:
+    """Counts operator and document nodes; scalars (``$in`` items) cost nothing."""
+
+    def __init__(self) -> None:
+        self.left = MAX_FILTER_NODES
+
+    def take(self) -> None:
+        self.left -= 1
+        if self.left < 0:
+            raise _deny("selection_too_complex")
+
+
+def _is_wrapper(value: Any) -> bool:
+    return isinstance(value, dict) and len(value) == 1 and next(iter(value)) in EJSON_WRAPPERS
+
+
+def _is_operator_doc(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and all(isinstance(k, str) and k.startswith("$") for k in value)
+    )
+
+
+def _parse_date(raw: Any) -> datetime:
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return datetime.fromtimestamp(raw / 1000, tz=UTC)
+    if not isinstance(raw, str):
+        raise ValueError("not a date")
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _wrapped(tag: str, raw: Any) -> Any:
+    """The checked literal of one wrapper: ``datetime``, hex text, ``int`` or ``Decimal``.
+
+    Raises ``ValueError`` / ``ArithmeticError`` / ``OverflowError`` when it does not parse.
+    """
+    if tag == "$date":
+        return _parse_date(raw)
+    if isinstance(raw, bool) or not isinstance(raw, str | int):
+        raise ValueError("not a literal")
+    text = str(raw)
+    if tag == "$oid":
+        if not _OID_TEXT.fullmatch(text):
+            raise ValueError("not an ObjectId")
+        return text
+    if tag == "$numberLong":
+        if not _LONG_TEXT.fullmatch(text) or int(text) not in _INT64:
+            raise ValueError("not a 64-bit integer")
+        return int(text)
+    number = Decimal(text)
+    if not number.is_finite():
+        raise ValueError("not a finite decimal")
+    return number
+
+
+def _check_wrapper(value: dict[str, Any]) -> None:
+    ((tag, raw),) = value.items()
+    try:
+        _wrapped(tag, raw)
+    except (ValueError, ArithmeticError, OverflowError):
+        raise _deny("selection_invalid") from None
+
+
+def _literal(value: Any, budget: _Budget, depth: int) -> None:
+    """A value compared with (a scalar, an embedded document or an array, never an operator)."""
+    if value is None or isinstance(value, str | int | float | bool):
+        return
+    if _is_wrapper(value):
+        _check_wrapper(value)
+        return
+    budget.take()
+    if depth > MAX_FILTER_DEPTH:
+        raise _deny("selection_too_complex")
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str) or k.startswith("$"):
+                raise _deny("selection_operator_denied")
+            _literal(v, budget, depth + 1)
+    elif isinstance(value, list):
+        if len(value) > MAX_IN_ITEMS:
+            raise _deny("selection_too_complex")
+        for v in value:
+            _literal(v, budget, depth + 1)
+    else:
+        raise _deny("selection_invalid")
+
+
+def _operator(op: str, arg: Any, budget: _Budget, depth: int) -> None:
+    budget.take()
+    if op not in MONGO_OPERATORS:
+        raise _deny("selection_operator_denied")
+    if op in _LOGICAL:
+        raise _deny("selection_invalid")  # $and/$or/$nor belong at document level
+    if op in ("$in", "$nin", "$all"):
+        if not isinstance(arg, list):
+            raise _deny("selection_invalid")
+        if len(arg) > MAX_IN_ITEMS:
+            raise _deny("selection_too_complex")
+        for item in arg:
+            _literal(item, budget, depth + 1)
+    elif op == "$not":
+        if not _is_operator_doc(arg) or _is_wrapper(arg):
+            raise _deny("selection_invalid")
+        _condition(arg, budget, depth + 1)
+    elif op == "$elemMatch":
+        if not isinstance(arg, dict) or not arg:
+            raise _deny("selection_invalid")
+        if _is_operator_doc(arg):
+            _condition(arg, budget, depth + 1)
+        else:
+            _document(arg, budget, depth + 1)
+    elif op == "$regex":
+        if not isinstance(arg, str):
+            raise _deny("selection_invalid")
+        if len(arg) > MAX_REGEX_LEN:
+            raise _deny("selection_regex_too_long")
+    elif op == "$exists":
+        if not isinstance(arg, bool):
+            raise _deny("selection_invalid")
+    elif op == "$size":
+        if not isinstance(arg, int) or isinstance(arg, bool) or arg < 0:
+            raise _deny("selection_invalid")
+    elif op == "$type":
+        items = arg if isinstance(arg, list) else [arg]
+        if not items or not all(
+            isinstance(t, str | int) and not isinstance(t, bool) for t in items
+        ):
+            raise _deny("selection_invalid")
+    else:  # $eq $ne $gt $gte $lt $lte
+        _literal(arg, budget, depth + 1)
+
+
+def _condition(value: Any, budget: _Budget, depth: int) -> None:
+    """The condition on one field: an operator document or a literal (implicit ``$eq``)."""
+    if depth > MAX_FILTER_DEPTH:
+        raise _deny("selection_too_complex")
+    if _is_wrapper(value) or not _is_operator_doc(value):
+        if isinstance(value, dict) and not _is_wrapper(value):
+            if any(isinstance(k, str) and k.startswith("$") for k in value):
+                raise _deny("selection_invalid")  # operators mixed with plain keys
+        _literal(value, budget, depth)
+        return
+    for op, arg in value.items():
+        _operator(op, arg, budget, depth)
+
+
+def _document(doc: Any, budget: _Budget, depth: int) -> None:
+    """A filter document: field conditions and the logical operators over sub-documents."""
+    if not isinstance(doc, dict):
+        raise _deny("selection_invalid")
+    if depth > MAX_FILTER_DEPTH:
+        raise _deny("selection_too_complex")
+    for key, value in doc.items():
+        budget.take()
         if not isinstance(key, str):
-            raise SelectionError("selection_identifier_invalid", "filter keys must be strings")
+            raise _deny("selection_invalid")
         if key.startswith("$"):
-            if key not in MONGO_OPERATORS:
-                raise SelectionError(
-                    "selection_operator_denied", "a MongoDB operator outside the allow-list is used"
-                )
-        elif not MONGO_PATH.fullmatch(key):
-            raise SelectionError("selection_identifier_invalid", "not a valid MongoDB field path")
-        for item in value if isinstance(value, list) else [value]:
-            if isinstance(item, dict):
-                validate_mongo_filter(item, _depth + 1)
+            if key in _LOGICAL:
+                if not isinstance(value, list) or not value:
+                    raise _deny("selection_invalid")
+                for sub in value:
+                    _document(sub, budget, depth + 1)
+            elif key in MONGO_OPERATORS:
+                raise _deny("selection_invalid")  # e.g. a top-level $eq
+            else:
+                raise _deny("selection_operator_denied")
+        else:
+            if not MONGO_PATH.fullmatch(key):
+                raise _deny("selection_identifier_invalid")
+            _condition(value, budget, depth)
+
+
+def validate_mongo_filter(flt: dict[str, Any]) -> None:
+    """Allow-list validation of a MongoDB filter document (contract §5.2).
+
+    Any operator outside :data:`MONGO_OPERATORS` (``$where``, ``$expr``, ``$function``,
+    ``$accumulator``, ``$jsonSchema``, ``$text``, ``$near``, ``$options`` …) anywhere in the tree —
+    top level, inside ``$and``/``$or``/``$nor``, a field condition, ``$not``, ``$elemMatch``, an
+    ``$in`` item or a literal embedded document — is ``selection_operator_denied``; field names
+    follow :data:`MONGO_PATH` (``selection_identifier_invalid``); malformed operator arguments and
+    Extended-JSON literals are ``selection_invalid``; more than :data:`MAX_FILTER_DEPTH` levels,
+    :data:`MAX_FILTER_NODES` nodes or :data:`MAX_IN_ITEMS` array items are
+    ``selection_too_complex``; a ``$regex`` over :data:`MAX_REGEX_LEN` characters is
+    ``selection_regex_too_long`` (case-insensitive matching uses the inline ``(?i)`` flag).
+
+    Raises:
+        SelectionError: the first rule broken (value-free message).
+    """
+    _document(flt, _Budget(), 0)
+
+
+def _ejson(value: Any) -> Any:
+    from bson import Decimal128, Int64, ObjectId  # the connectors extra ships bson (pymongo)
+
+    if isinstance(value, dict):
+        if _is_wrapper(value):
+            ((tag, raw),) = value.items()
+            try:
+                literal = _wrapped(tag, raw)
+            except (ValueError, ArithmeticError, OverflowError):
+                raise _deny("selection_invalid") from None
+            if tag == "$oid":
+                return ObjectId(literal)
+            if tag == "$numberLong":
+                return Int64(literal)
+            if tag == "$numberDecimal":
+                return Decimal128(literal)
+            return literal
+        return {k: _ejson(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_ejson(v) for v in value]
+    return value
+
+
+def compile_mongo_filter(flt: dict[str, Any] | None) -> dict[str, Any]:
+    """A validated filter as a new dict with Extended-JSON literals turned into BSON values
+    (``$date`` → aware ``datetime`` (UTC when no offset), ``$oid`` → ``ObjectId``,
+    ``$numberLong`` → ``Int64``, ``$numberDecimal`` → ``Decimal128``); the input is unchanged.
+
+    Raises:
+        SelectionError: as :func:`validate_mongo_filter`.
+    """
+    if not flt:
+        return {}
+    validate_mongo_filter(flt)
+    out = _ejson(flt)
+    if not isinstance(out, dict):  # pragma: no cover - a dict in is a dict out
+        raise _deny("selection_invalid")
+    return out
 
 
 def mongo_filter_template(flt: dict[str, Any]) -> dict[str, Any]:

@@ -655,3 +655,27 @@ test-first below.
 - Tests (`tests/connectors/test_mongo_docs.py`, 9): the plan's 5 plus `top_level` (quoted
   segments), int/long and mixed labels, the unpageable `_id` labels (and that every keyed label
   encodes), and restoration of numeric text in every array element.
+
+## Task 10 — Mongo filter validation and compilation (`selection.py`)
+
+- **Extended-JSON wrappers are checked by `validate_mongo_filter` itself** (plan: the validator accepted
+  any wrapper shape and only `compile_mongo_filter` parsed the value). Why: submit, discovery and the
+  wizard's checklist call `validate_selection` without compiling, so `{"$oid": {"$where": "1"}}` or an
+  unparseable `$date` would pass submit and fail only at run. The check is pure Python (24 hex digits,
+  a 64-bit integer, a finite decimal, an ISO date or epoch milliseconds), so the API needs no `bson`;
+  `compile_mongo_filter` converts with `bson` as planned. Errors are value-free and raised `from None`.
+- **Depth counts nesting levels** (filter documents, `$not`/`$elemMatch` and literal containers), not
+  field conditions: eight nested `$and` levels pass, nine are `selection_too_complex` (plan: the field
+  condition added a level, so eight already failed; the plan's test uses nine and still passes).
+- A `$not` whose argument is a wrapper and an empty `$elemMatch` are `selection_invalid`.
+- `_CHECKS` (the wizard checklist) maps the new codes `selection_invalid`, `selection_too_complex` and
+  `selection_regex_too_long` to `one_statement` (the filter's structure), so `failed_checks` names an
+  entry for every Mongo refusal (`check_for` returned `None` for them).
+- The M2 helper `_deny`-style messages: `SelectionError(code, "the MongoDB filter breaks rule <code>")`.
+- Contract §5.2: the limits, codes, wrappers and the `params` rule are added after the Mongo allow-list.
+- `tests/connectors/test_selection_oracle.py`: the plan's cases pass on M2's code unchanged (no M2 gap);
+  the allowed cases carry their `params` (named binds without values are M2's `selection_param_missing`
+  only at compile time, but the binds test compiles), plus a case pinning that literals compile only
+  after `parameterize_literals`. Mongo tests (`test_selection_mongo.py`, 69): the plan's cases plus more
+  denied shapes (`$text`, `$near`, operators inside `$in`/`$eq`/`$all` items and literal arrays,
+  `$comment`), malformed wrappers, value-free errors, the node budget, template of wrapped literals.
