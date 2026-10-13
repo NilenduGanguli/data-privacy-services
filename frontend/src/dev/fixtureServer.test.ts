@@ -79,7 +79,15 @@ describe('fixture server', () => {
   it('runs the policy store: draft, diff, publish, YAML', async () => {
     const s = createFixtureState(NOW);
     const diff = await call(s, 'GET', '/api/v1/policies/gdpr-pseudonymise/diff?from=2&to=3');
-    expect(diff.json.changes.map((c: { path: string }) => c.path)).toEqual(expect.arrayContaining(['detect.min_score', 'treat.CVV', 'treat.POSTAL_CODE']));
+    // the backend's flatten_policy shape (M5 plan Task 15): method specs by leaf, list items by name or path
+    expect(diff.json.changes.map((c: { path: string }) => c.path)).toEqual([
+      'detect.declared_fields[CRM.CUSTOMERS.RISK_SCORE].entity_type', 'detect.declared_fields[CRM.CUSTOMERS.RISK_SCORE].path', 'detect.min_score',
+      'treat.CVV.method', 'treat.POSTAL_CODE.method', 'treat.POSTAL_CODE.params.keep_chars',
+    ]);
+    const draft = await call(s, 'GET', '/api/v1/policies/gdpr-pseudonymise/diff?from=3&to=draft');
+    expect(draft.json.changes.map((c: { path: string }) => c.path)).toEqual(expect.arrayContaining([
+      'detect.custom_recognizers[employee-id].patterns[employee-id].regex', 'detect.declared_fields[LOANS.APPLICANTS.EMPLOYER_NAME].entity_type', 'treat.ORG_NAME.method',
+    ]));
     const pub = await call(s, 'POST', '/api/v1/policies/gdpr-pseudonymise/publish', { change_ticket: 'CHG-1', note: null });
     expect(pub.status).toBe(201);
     expect(pub.json.version).toBe(4);

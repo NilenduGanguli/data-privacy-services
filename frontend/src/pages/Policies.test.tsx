@@ -80,7 +80,10 @@ describe('PoliciesView', () => {
     expect(t).toContain('v3 → draft v4');
     expect(t).toContain('3 jobs are pinned to v2');
     expect(out).toContain('<div class="add">');
-    expect(t).toContain('ORG_NAME: { method: det_token }');
+    expect(t).toContain('declared_fields: - { path: "LOANS.APPLICANTS.EMPLOYER_NAME", entity_type: ORG_NAME }');
+    expect(out).toContain('<div class="add">    method: det_token</div>');
+    expect(out).toContain('<div class="del">    method: keep</div>');
+    expect(t).not.toContain('LOANS:');
   });
 });
 

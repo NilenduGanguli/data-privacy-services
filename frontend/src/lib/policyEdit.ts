@@ -59,8 +59,8 @@ export function parseParam(text: string): unknown {
 export function changedEntities(changes: PolicyChange[]): Set<string> {
   const out = new Set<string>();
   for (const c of changes) {
-    const [top, entity] = c.path.split('.');
-    if (top === 'treat' && entity) out.add(entity);
+    const [top, entity] = splitPath(c.path);
+    if (top?.key === 'treat' && !top.label && entity && !entity.label) out.add(entity.key);
   }
   return out;
 }
@@ -85,23 +85,99 @@ export function flow(v: unknown): string {
 
 export interface DiffLine { kind: 'ctx' | 'add' | 'del'; text: string }
 
-/** `PolicyChange`s as YAML-like lines: nested keys as context, `-` removed (rose), `+` added
- *  (emerald); a changed list shows its kept items as context. */
+/** One step of a `PolicyChange.path`: a mapping key, plus the item label when the key holds a
+ *  list of mappings (`declared_fields[LOANS.APPLICANTS.EMPLOYER_NAME]`). */
+export interface PathSeg { key: string; label?: string }
+
+/** Split a backend `flatten_policy` path (M5 plan Task 15) at the dots outside brackets: item
+ *  labels are a `name` or a declared `path` and keep their dots and JSONPath brackets. */
+export function splitPath(path: string): PathSeg[] {
+  const raw: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of path) {
+    if (ch === '[') depth += 1;
+    else if (ch === ']' && depth > 0) depth -= 1;
+    if (ch === '.' && depth === 0) { raw.push(cur); cur = ''; } else cur += ch;
+  }
+  raw.push(cur);
+  return raw.map((seg) => {
+    const open = seg.indexOf('[');
+    return open > 0 && seg.endsWith(']') ? { key: seg.slice(0, open), label: seg.slice(open + 1, -1) } : { key: seg };
+  });
+}
+
+/** A node of the diff tree: a mapping key (`item` false) or a list item (`item` true, `name` is
+ *  its label); `leaf` is the change at exactly this path. */
+interface DiffNode { name: string; item: boolean; leaf: PolicyChange | null; children: Map<string, DiffNode> }
+
+const node = (name: string, item: boolean): DiffNode => ({ name, item, leaf: null, children: new Map() });
+const child = (parent: DiffNode, id: string, name: string, item: boolean): DiffNode => {
+  let n = parent.children.get(id);
+  if (!n) { n = node(name, item); parent.children.set(id, n); }
+  return n;
+};
+const byCodepoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+function changesUnder(n: DiffNode): PolicyChange[] {
+  return [...(n.leaf ? [n.leaf] : []), ...[...n.children.values()].flatMap(changesUnder)];
+}
+
+/** The side of a change that a one-line add/remove shows. */
+const side = (c: PolicyChange): unknown => (c.op === 'remove' ? c.before : c.after);
+const isEmptyList = (v: unknown): boolean => Array.isArray(v) && v.length === 0;
+
+/** The value a fully added or removed node had, rebuilt from its leaves (items as a list, the
+ *  item's label key first). */
+function rebuild(n: DiffNode): unknown {
+  if (n.leaf && !n.children.size) return side(n.leaf);
+  const kids = [...n.children.values()];
+  if (kids.length && kids.every((k) => k.item)) return kids.map(rebuild);
+  const entries: [string, unknown][] = kids.filter((k) => !k.item).map((k) => [k.name, rebuild(k)]);
+  if (n.item) {
+    const first = entries.findIndex(([key, v]) => (key === 'name' || key === 'path') && String(v) === n.name);
+    if (first > 0) entries.unshift(...entries.splice(first, 1));
+  }
+  return Object.fromEntries(entries);
+}
+
+/** One line for a node whose every change is the same add or remove and that is new (or gone) as a
+ *  whole: an item whose `name`/`path` leaf equal to its label is part of the change, or a treatment
+ *  whose `method` is. A partly changed node is never folded — its unchanged fields are not in the
+ *  diff, so a folded line would misstate it. */
+function foldOp(n: DiffNode): 'add' | 'remove' | null {
+  const all = changesUnder(n);
+  const op = all[0]?.op;
+  if ((op !== 'add' && op !== 'remove') || !all.every((c) => c.op === op)) return null;
+  const leafOf = (key: string): PolicyChange | null => n.children.get(`k:${key}`)?.leaf ?? null;
+  if (n.item) {
+    return [leafOf('name'), leafOf('path')].some((c) => c && String(side(c)) === n.name) ? op : null;
+  }
+  return leafOf('method') ? op : null;
+}
+
+/** `PolicyChange`s (backend `diff_policies` shape) as YAML-like lines: nested keys and unchanged
+ *  list items as context, `-` removed (rose), `+` added (emerald). A list item is a `- …` line: one
+ *  flow line when the whole item is added or removed (mockup 05), else `- [label]` with its changed
+ *  fields beneath. A whole new or removed treatment is one flow line; a changed list of scalars
+ *  shows its kept items as context. */
 export function diffLines(changes: PolicyChange[]): DiffLine[] {
+  const root = node('', false);
+  for (const c of [...changes].sort((a, b) => byCodepoint(a.path, b.path))) {
+    let at = root;
+    for (const seg of splitPath(c.path)) {
+      at = child(at, `k:${seg.key}`, seg.key, false);
+      if (seg.label !== undefined) at = child(at, `i:${seg.label}`, seg.label, true);
+    }
+    at.leaf = c;
+  }
   const out: DiffLine[] = [];
-  let open: string[] = [];
-  for (const c of [...changes].sort((a, b) => a.path.localeCompare(b.path))) {
-    const parts = c.path.split('.');
-    const parents = parts.slice(0, -1);
-    const key = parts[parts.length - 1];
-    let same = 0;
-    while (same < parents.length && same < open.length && parents[same] === open[same]) same += 1;
-    for (let d = same; d < parents.length; d += 1) out.push({ kind: 'ctx', text: `${'  '.repeat(d)}${parents[d]}:` });
-    open = parents;
-    const pad = '  '.repeat(parents.length);
+  const kindOf = (op: 'add' | 'remove'): DiffLine['kind'] => (op === 'add' ? 'add' : 'del');
+
+  function leafLines(key: string, c: PolicyChange, pad: string): void {
     const before = c.op === 'add' ? undefined : c.before;
     const after = c.op === 'remove' ? undefined : c.after;
-    if (Array.isArray(before) || Array.isArray(after)) {
+    if ((Array.isArray(before) && before.length) || (Array.isArray(after) && after.length)) {
       const b = (Array.isArray(before) ? before : []) as unknown[];
       const a = (Array.isArray(after) ? after : []) as unknown[];
       const keyOf = (x: unknown): string => JSON.stringify(x);
@@ -110,11 +186,30 @@ export function diffLines(changes: PolicyChange[]): DiffLine[] {
       out.push({ kind: c.op === 'add' ? 'add' : c.op === 'remove' ? 'del' : 'ctx', text: `${pad}${key}:` });
       for (const x of b) if (!inA.has(keyOf(x))) out.push({ kind: 'del', text: `${pad}  - ${flow(x)}` });
       for (const x of a) out.push({ kind: inB.has(keyOf(x)) ? 'ctx' : 'add', text: `${pad}  - ${flow(x)}` });
-    } else {
-      if (before !== undefined) out.push({ kind: 'del', text: `${pad}${key}: ${flow(before)}` });
-      if (after !== undefined) out.push({ kind: 'add', text: `${pad}${key}: ${flow(after)}` });
+      return;
+    }
+    if (before !== undefined) out.push({ kind: 'del', text: `${pad}${key}: ${flow(before)}` });
+    if (after !== undefined) out.push({ kind: 'add', text: `${pad}${key}: ${flow(after)}` });
+  }
+
+  function render(n: DiffNode, depth: number): void {
+    const pad = '  '.repeat(depth);
+    const fold = foldOp(n);
+    if (n.item) {
+      if (fold) { out.push({ kind: kindOf(fold), text: `${pad}- ${flow(rebuild(n))}` }); return; }
+      out.push({ kind: 'ctx', text: `${pad}- [${n.name}]` });
+      for (const k of n.children.values()) render(k, depth + 1);
+      return;
+    }
+    if (fold) { out.push({ kind: kindOf(fold), text: `${pad}${n.name}: ${flow(rebuild(n))}` }); return; }
+    // an empty list that became items (or items that became an empty list) reads as the items alone
+    if (n.leaf && !(n.children.size && isEmptyList(side(n.leaf)))) leafLines(n.name, n.leaf, pad);
+    if (n.children.size) {
+      out.push({ kind: 'ctx', text: `${pad}${n.name}:` });
+      for (const k of n.children.values()) render(k, depth + 1);
     }
   }
+  for (const k of root.children.values()) render(k, 0);
   return out;
 }
 

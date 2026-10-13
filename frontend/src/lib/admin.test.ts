@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as fx from '../dev/fixtures';
 import {
-  callerKey, configExport, createKeyError, healthTiles, hostRows, keyKpis, keyMeta, maxKeyAge, quotaTone, tenantsLabel, whoMayWrite,
+  callerKey, configExport, rotateWarning, createKeyError, healthTiles, hostRows, keyKpis, keyMeta, maxKeyAge, quotaTone, tenantsLabel, whoMayWrite,
 } from './admin';
 
 const NOW = new Date('2026-10-13T10:15:00Z');
@@ -56,5 +56,24 @@ describe('admin helpers', () => {
     expect(cfg.keys[0]).not.toHaveProperty('key');
     expect(json).not.toMatch(/password|credentials/);
     expect(cfg.generated_at).toBe('2026-10-13T10:15:00.000Z');
+  });
+});
+
+describe('rotateWarning (r1 B1)', () => {
+  const NOW2 = new Date('2026-10-13T10:15:00Z');
+  const keys = fx.apiKeys(NOW2);
+  const me = keys.find((k) => k.name === 'platform-admin')!;
+  const other = keys.find((k) => k.name !== 'platform-admin' && k.status === 'active')!;
+  const own = 'dps_9Fq2remainder-of-a-fictional-key';
+  it('warns hard when the console rotates its own key with grace now', () => {
+    const w = rotateWarning(me, 0, keys, own);
+    expect(w?.tone).toBe('rose');
+    expect(w?.text).toContain('This is the key this console uses');
+    expect(w?.text).toContain('stops working as soon as the rotation completes');
+  });
+  it('notes its own key with a grace period, and says nothing for another key', () => {
+    expect(rotateWarning(me, 24, keys, own)?.tone).toBe('amber');
+    expect(rotateWarning(other, 0, keys, own)).toBeNull();
+    expect(rotateWarning(me, 0, keys, '')).toBeNull();
   });
 });

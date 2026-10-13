@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { CreateKeyCard } from '../components/CreateKeyCard';
+import { CreateKeyCard, type OneTimeKey } from '../components/CreateKeyCard';
 import { DownloadButton } from '../components/DownloadButton';
 import { HealthGrid } from '../components/HealthGrid';
 import { HostsCard } from '../components/HostsCard';
@@ -12,7 +12,7 @@ import { TenantsTable } from '../components/TenantsTable';
 import { useAuth } from '../hooks/useAuth';
 import { useSettings } from '../hooks/useSettings';
 import {
-  callerKey, configExport, createKeyError, healthTiles, hostRows, keyKpis, maxKeyAge, whoMayWrite, type HostRow,
+  callerKey, configExport, createKeyError, healthTiles, hostRows, keyKpis, maxKeyAge, rotateWarning, whoMayWrite, type HostRow,
 } from '../lib/admin';
 import { api, ApiError, errorText, type Download } from '../lib/api';
 import { count, relative } from '../lib/format';
@@ -35,7 +35,12 @@ export interface AdminActions {
 export interface AdminData {
   now: Date; apiKey: string; tenant: string; ready: Readiness | null; keys: ApiKeyView[]; tenants: TenantView[]; posture: PostureReport | null;
   queue: QueueOut | null; connections: Connection[]; forbidden: boolean; error: string | null;
+  /** Raw keys shown once, held by the page container so they outlive a refused reload (r1 B1). */
+  oneTime: OneTimeKeys; onOneTime: Dispatch<SetStateAction<OneTimeKeys>>;
 }
+
+export interface OneTimeKeys { rotated: OneTimeKey | null; created: OneTimeKey | null }
+export const NO_ONE_TIME_KEYS: OneTimeKeys = { rotated: null, created: null };
 
 const GRACE: [number, string][] = [[0, 'now'], [24, 'in 24 hours'], [168, 'in 7 days']];
 const message = (e: unknown): string => (e instanceof ApiError ? createKeyError(e.code, `${e.message}${e.code ? ` (${e.code})` : ''}`) : errorText(e));
@@ -89,7 +94,12 @@ export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions
   const failing = d.posture?.checks.filter((c) => !c.ok) ?? [];
 
   const [rotate, setRotate] = useState<{ key: ApiKeyView; grace: number; busy: boolean; error: string | null } | null>(null);
-  const [rotated, setRotated] = useState<{ n: number; name: string; key: string | null } | null>(null);
+  const { rotated, created } = d.oneTime;
+  const setOneTime = d.onOneTime;
+  const dropRotated = (): void => setOneTime((o) => ({ ...o, rotated: o.rotated ? { ...o.rotated, key: null } : null }));
+  const dropCreated = (): void => setOneTime((o) => ({ ...o, created: o.created ? { ...o.created, key: null } : null }));
+  const rotatedCard = rotated && <KeyOnceCard key={`r${rotated.n}`} name={rotated.name} rawKey={rotated.key} onStored={dropRotated} />;
+  const warn = rotate ? rotateWarning(rotate.key, rotate.grace, d.keys, d.apiKey) : null;
   const [toggle, setToggle] = useState<{ key: ApiKeyView; busy: boolean; error: string | null } | null>(null);
   const [tenantDlg, setTenantDlg] = useState<{ edit: TenantView | null; form: TenantForm; busy: boolean; error: string | null } | null>(null);
   const [removeHost, setRemoveHost] = useState<{ row: HostRow; busy: boolean; error: string | null } | null>(null);
@@ -99,7 +109,7 @@ export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions
     setRotate({ ...rotate, busy: true, error: null });
     try {
       const out = await actions.rotateKey(rotate.key.id, rotate.grace);
-      setRotated((r) => ({ n: (r?.n ?? 0) + 1, name: out.new.record.name, key: out.new.key }));
+      setOneTime((o) => ({ ...o, rotated: { n: (o.rotated?.n ?? 0) + 1, name: out.new.record.name, key: out.new.key } }));
       setRotate(null);
     } catch (e) { setRotate({ ...rotate, busy: false, error: message(e) }); }
   }
@@ -162,6 +172,11 @@ export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions
       {d.forbidden ? (
         <>
           <div className="callout amber">Admin needs a key with the admin scope. Paste one in the API key field above; health below is public.</div>
+          {rotated?.key && <div className="callout rose" role="alert">{me?.name === rotated.name
+            ? 'The key this console used was rotated and no longer works. Store the new key below now (it is shown once), then paste it in the API key field above.'
+            : 'A new key is shown once below. Store it now; it cannot be shown again.'}</div>}
+          {rotatedCard}
+          {created?.key && <KeyOnceCard key={`c${created.n}`} name={created.name} rawKey={created.key} onStored={dropCreated} />}
           <HealthGrid tiles={tiles} />
         </>
       ) : (
@@ -176,10 +191,11 @@ export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions
 
           <KeysTable keys={d.keys} now={d.now} maxAge={maxAge} onRotate={(key) => setRotate({ key, grace: 24, busy: false, error: null })}
             onDisable={(key) => setToggle({ key, busy: false, error: null })} onEnable={(key) => setToggle({ key, busy: false, error: null })} />
-          {rotated && <KeyOnceCard key={rotated.n} name={rotated.name} rawKey={rotated.key} onStored={() => setRotated((r) => (r ? { ...r, key: null } : r))} />}
+          {rotatedCard}
 
           <div className="row-c">
-            <CreateKeyCard tenants={tenantIds} defaultTenant={d.tenant} onCreate={actions.createKey} />
+            <CreateKeyCard tenants={tenantIds} defaultTenant={d.tenant} onCreate={actions.createKey} created={created} onStored={dropCreated}
+              onCreated={(out) => setOneTime((o) => ({ ...o, created: { n: (o.created?.n ?? 0) + 1, name: out.record.name, key: out.key } }))} />
             <TenantsTable tenants={d.tenants} onEdit={(t) => setTenantDlg({ edit: t, form: tenantForm(t), busy: false, error: null })} onAdd={() => setTenantDlg({ edit: null, form: tenantForm(null), busy: false, error: null })} />
           </div>
           <ConnectionsCard connections={d.connections} keys={d.keys} />
@@ -197,6 +213,7 @@ export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions
         <div className="sm" style={{ fontWeight: 600, color: 'var(--ink-2)', marginBottom: 6 }}>Old key stops working</div>
         <div className="seg" role="group" aria-label="Old key stops working">{GRACE.map(([h, label]) => (
           <button key={h} type="button" className={rotate?.grace === h ? 'on' : ''} aria-pressed={rotate?.grace === h} onClick={() => setRotate((r) => (r ? { ...r, grace: h } : r))}>{label}</button>))}</div>
+        {warn && <div className={`callout ${warn.tone} sm`} role="note" style={{ marginTop: 10 }}>{warn.text}</div>}
       </ConfirmDialog>
       <ConfirmDialog open={!!toggle} title={toggle ? `${toggle.key.status === 'disabled' ? 'Re-enable' : 'Disable'} ${toggle.key.name}` : ''} danger={toggle?.key.status !== 'disabled'}
         confirmLabel={toggle?.key.status === 'disabled' ? 'Re-enable' : 'Disable'} busy={toggle?.busy} error={toggle?.error}
@@ -232,6 +249,7 @@ export function Admin(): JSX.Element {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [forbidden, setForbidden] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [oneTime, setOneTime] = useState<OneTimeKeys>(NO_ONE_TIME_KEYS);
 
   const load = useCallback(async (): Promise<void> => {
     api.readyz().then(setReady).catch(() => setReady(null));
@@ -262,5 +280,5 @@ export function Admin(): JSX.Element {
     }),
   };
   return <AdminView now={new Date()} apiKey={apiKey} tenant={tenant} ready={ready} keys={keys} tenants={tenants} posture={posture} queue={queue}
-    connections={connections} forbidden={forbidden} error={error} actions={actions} />;
+    connections={connections} forbidden={forbidden} error={error} oneTime={oneTime} onOneTime={setOneTime} actions={actions} />;
 }

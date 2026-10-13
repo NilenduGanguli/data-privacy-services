@@ -49,26 +49,37 @@ const file = (body: string, type: string, name: string): Response =>
   new Response(body, { status: 200, headers: { 'content-type': type, 'content-disposition': `attachment; filename="${name}"` } });
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-const isMethodSpec = (v: object): boolean => 'method' in v && Object.keys(v).every((k) => k === 'method' || k === 'params');
+const isMapping = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const byCodepoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** Flatten a policy body for a diff: nested objects by dotted path; lists and method specs
- *  (`{method, params}`) are leaves, so a treatment change reads as one line. */
-export function flatten(body: unknown, prefix = '', out: Record<string, unknown> = {}): Record<string, unknown> {
-  if (body && typeof body === 'object' && !Array.isArray(body) && !(prefix && isMethodSpec(body))) {
-    for (const [k, v] of Object.entries(body as Record<string, unknown>)) {
-      if (k === 'name' || k === 'version') continue;
-      flatten(v, prefix ? `${prefix}.${k}` : k, out);
-    }
-    if (prefix && Object.keys(body as object).length === 0) out[prefix] = {};
-  } else if (prefix) out[prefix] = body;
+/** The backend's `flatten_policy` (M5 plan Task 15, full code there), reproduced exactly so the
+ *  fixture diff has the real shape: dotted leaves in sorted key order; a non-empty list whose items
+ *  are all mappings is keyed per item by its `name`, else its `path`, else its index
+ *  (`declared_fields[LOANS.APPLICANTS.EMPLOYER_NAME].entity_type`); other lists are leaves; an
+ *  empty mapping yields nothing. Python's `or` treats '', 0, null and false as missing. */
+export function flatten(body: Record<string, unknown>, prefix = ''): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(body).sort(byCodepoint)) {
+    const value = body[key];
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (isMapping(value)) Object.assign(out, flatten(value, path));
+    else if (Array.isArray(value) && value.length && value.every(isMapping)) {
+      value.forEach((item, index) => {
+        const label = (item.name || item.path || index) as string | number;
+        Object.assign(out, flatten(item, `${path}[${String(label)}]`));
+      });
+    } else out[path] = value;
+  }
   return out;
 }
 
+/** The backend's `diff_policies`: sorted paths, top-level `name` and `version` ignored. */
 export function diffBodies(before: unknown, after: unknown): PolicyChange[] {
-  const a = flatten(before);
-  const b = flatten(after);
+  const a = flatten(isMapping(before) ? before : {});
+  const b = flatten(isMapping(after) ? after : {});
   const changes: PolicyChange[] = [];
-  for (const path of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
+  for (const path of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort(byCodepoint)) {
+    if (path === 'name' || path === 'version') continue;
     const x = a[path];
     const y = b[path];
     if (!(path in a)) changes.push({ op: 'add', path, after: y });

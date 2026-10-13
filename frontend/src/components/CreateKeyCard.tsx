@@ -4,10 +4,16 @@ import { ApiError } from '../lib/api';
 import type { CreatedKey, CreateKeyBody } from '../lib/types';
 import { KeyOnceCard } from './KeyOnceCard';
 
-/** Create key (mockup 11): the raw key comes back once and lives only in this card's state until
- *  the operator confirms it is stored. */
-export function CreateKeyCard({ tenants, defaultTenant, onCreate }: {
+/** A raw key shown once: `n` remounts the card for each new key; `key` is dropped (null) once the
+ *  operator confirms it is stored. Held in React state only — never storage, URL or logs. */
+export interface OneTimeKey { n: number; name: string; key: string | null }
+
+/** Create key (mockup 11): the raw key comes back once; the page holds it (`created`, set through
+ *  `onCreated`) so it survives a reload that the server refuses (r1 B1). `showKey` is false when the
+ *  page shows the key elsewhere. */
+export function CreateKeyCard({ tenants, defaultTenant, onCreate, created, onCreated, onStored, showKey = true }: {
   tenants: string[]; defaultTenant: string; onCreate: (body: CreateKeyBody) => Promise<CreatedKey>;
+  created: OneTimeKey | null; onCreated: (out: CreatedKey) => void; onStored: () => void; showKey?: boolean;
 }): JSX.Element {
   const [name, setName] = useState('');
   const [tenant, setTenant] = useState('');
@@ -18,7 +24,6 @@ export function CreateKeyCard({ tenants, defaultTenant, onCreate }: {
   const [nameErr, setNameErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [created, setCreated] = useState<{ n: number; name: string; key: string | null } | null>(null);
 
   async function submit(e: FormEvent): Promise<void> {
     e.preventDefault();
@@ -28,7 +33,7 @@ export function CreateKeyCard({ tenants, defaultTenant, onCreate }: {
     setBusy(true);
     try {
       const out = await onCreate({ name, tenant_ids: [chosen], scopes: SCOPES.filter((s) => scopes.has(s)), expires_in_days: expiry });
-      setCreated((c) => ({ n: (c?.n ?? 0) + 1, name: out.record.name, key: out.key }));
+      onCreated(out);
       setName('');
     } catch (x) {
       const msg = x instanceof ApiError ? createKeyError(x.code, x.message) : 'The key could not be created.';
@@ -56,7 +61,7 @@ export function CreateKeyCard({ tenants, defaultTenant, onCreate }: {
         {err && <div className="err" role="alert" style={{ marginBottom: 10 }}>{err}</div>}
         <div className="rowx" style={{ gap: 10, flexWrap: 'wrap', display: 'flex', alignItems: 'center' }}><button className="btn btn-primary" type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create key'}</button><span className="faint sm">DPS keeps only a SHA-256 hash of the key.</span></div>
       </form>
-      {created && <KeyOnceCard key={created.n} name={created.name} rawKey={created.key} onStored={() => setCreated((c) => (c ? { ...c, key: null } : c))} />}
+      {showKey && created && <KeyOnceCard key={created.n} name={created.name} rawKey={created.key} onStored={onStored} />}
     </section>
   );
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fx from '../dev/fixtures';
 import {
   auditFilters, auditOutcomeTone, evidenceRows, fromSummary, failedSweepText, filtersToParams, methodsSummary, parseFilters, policyLabel, sweepSeries,
-  verificationChip,
+  verificationChip, type EvidenceRow,
 } from './reports';
 
 const NOW = new Date('2026-10-13T10:15:00Z');
@@ -64,6 +64,39 @@ describe('evidence rows', () => {
     expect(verificationChip({ kind: 'pack', item: byId.ev_01K6MXSC88, created_at: '' })).toEqual({ tone: 'emerald', text: 'passed · 0 POSTs left' });
     expect(verificationChip({ kind: 'pack', item: byId.ev_01K7F2E5D5, created_at: '' })).toEqual({ tone: 'rose', text: 'failed · 2 leaks caught' });
     expect(verificationChip({ kind: 'rollup', rollup: rollups[2], created_at: '' })).toEqual({ tone: 'rose', text: '1 failed · fell back' });
+  });
+});
+
+describe('verification of runs that did not finish (r1 B2, main N3)', () => {
+  const pack = (outcome: string, summary: Record<string, unknown>, layer = 'conn', job_kind = 'run'): EvidenceRow => ({
+    kind: 'pack', created_at: '2026-10-13T00:00:00Z',
+    item: { id: 'e', job_id: 'j', job_kind, outcome, created_at: '2026-10-13T00:00:00Z', pack_sha256: '', layer, summary },
+  });
+  for (const outcome of ['canceled', 'dead', 'failed']) {
+    for (const vp of [undefined, null, true]) {
+      it(`${outcome} with verification_passed=${String(vp)} and no hit never reads as passed`, () => {
+        const chip = verificationChip(pack(outcome, { mode: 'obfuscate', verification_passed: vp, hits: 0 }));
+        expect(chip.text).toBe(`not verified · job ${outcome}`);
+        expect(chip.tone).toBe(outcome === 'canceled' ? 'slate' : 'rose');
+      });
+    }
+  }
+  it('a run with hits reads as caught, whatever its outcome', () => {
+    expect(verificationChip(pack('canceled', { verification_passed: false, hits: 3 }))).toEqual({ tone: 'rose', text: 'failed · 3 leaks caught' });
+    expect(verificationChip(pack('failed', { verification_passed: false, hits: 1 }))).toEqual({ tone: 'rose', text: 'failed · 1 leak caught' });
+  });
+  it('passes only a finished run whose verification_passed is true', () => {
+    expect(verificationChip(pack('succeeded', { verification_passed: true, hits: 0 }))).toEqual({ tone: 'emerald', text: 'passed · 0 leaks' });
+    expect(verificationChip(pack('dry_run', { verification_passed: true, hits: 0 }))).toEqual({ tone: 'emerald', text: 'passed · 0 leaks' });
+    expect(verificationChip(pack('succeeded', { verification_passed: null, hits: 0 }))).toEqual({ tone: 'slate', text: 'not verified · no verification recorded' });
+    expect(verificationChip(pack('succeeded', {}))).toEqual({ tone: 'slate', text: 'not verified · no verification recorded' });
+    // a finished run whose verification failed before a hit was counted (a preflight leak)
+    expect(verificationChip(pack('succeeded', { verification_passed: false, hits: 0 }))).toEqual({ tone: 'rose', text: 'failed closed' });
+  });
+  it('a scan passes only when it succeeded (no dry run for scans)', () => {
+    expect(verificationChip(pack('succeeded', { verification_passed: true, submissions: 0 }, 'ui', 'scan'))).toEqual({ tone: 'emerald', text: 'passed · 0 POSTs left' });
+    expect(verificationChip(pack('dry_run', { verification_passed: true, submissions: 0 }, 'ui', 'scan')).tone).not.toBe('emerald');
+    expect(verificationChip(pack('canceled', { verification_passed: true, submissions: 0 }, 'ui', 'scan'))).toEqual({ tone: 'slate', text: 'not verified · scan canceled' });
   });
 });
 

@@ -105,21 +105,33 @@ export function evidenceRows(items: EvidenceItem[], rollups: ApiRollup[], f: Rep
 
 export interface Chip { tone: 'emerald' | 'rose' | 'amber' | 'slate' | 'teal' | 'violet'; text: string }
 
-/** The verification chip of an evidence row (mockup 09). */
+/** A pack whose verification can pass: a failed, canceled or dead run's output is incomplete, so
+ *  it never reads as passed (main's N3, 6ed65be). Scans have no dry run. */
+export function finishedPack(item: EvidenceItem): boolean {
+  return item.outcome === 'succeeded' || (item.layer !== 'ui' && item.outcome === 'dry_run');
+}
+
+/** The verification chip of an evidence row (mockup 09). Passed only for a finished pack whose
+ *  `verification_passed` is exactly true; hits read as caught; an unfinished run without a hit is
+ *  "not verified · job <outcome>" (slate when canceled, rose otherwise — main's verificationTone). */
 export function verificationChip(row: EvidenceRow): Chip {
   if (row.kind === 'rollup') {
     const n = row.rollup.verify_failed;
     return n > 0 ? { tone: 'rose', text: `${n} failed · fell back` } : { tone: 'emerald', text: 'passed · 0 leaks' };
   }
-  const s = row.item.summary;
-  const passed = s.verification_passed !== false && row.item.outcome !== 'failed';
-  if (!passed) {
-    const hits = Number(s.hits ?? 0);
-    return { tone: 'rose', text: hits > 0 ? `failed · ${hits} ${hits === 1 ? 'leak' : 'leaks'} caught` : 'failed closed' };
+  const { item } = row;
+  const s = item.summary;
+  const hits = Number(s.hits ?? 0);
+  const finished = finishedPack(item);
+  if (finished && s.verification_passed === true) {
+    if (item.layer === 'ui') return { tone: 'emerald', text: `passed · ${Number(s.submissions ?? 0)} POSTs left` };
+    if (s.mode === 'synthesize' && s.fidelity_score !== undefined && s.fidelity_score !== null) return { tone: 'emerald', text: `passed · ${Number(s.exact_row_matches ?? 0)} exact rows` };
+    return { tone: 'emerald', text: `passed · ${hits} leaks` };
   }
-  if (row.item.layer === 'ui') return { tone: 'emerald', text: `passed · ${Number(s.submissions ?? 0)} POSTs left` };
-  if (s.mode === 'synthesize' && s.fidelity_score !== undefined && s.fidelity_score !== null) return { tone: 'emerald', text: `passed · ${Number(s.exact_row_matches ?? 0)} exact rows` };
-  return { tone: 'emerald', text: `passed · ${Number(s.hits ?? 0)} leaks` };
+  if (hits > 0) return { tone: 'rose', text: `failed · ${hits} ${hits === 1 ? 'leak' : 'leaks'} caught` };
+  if (!finished) return { tone: item.outcome === 'canceled' ? 'slate' : 'rose', text: `not verified · ${item.layer === 'ui' ? 'scan' : 'job'} ${item.outcome}` };
+  if (s.verification_passed === false) return { tone: 'rose', text: 'failed closed' };
+  return { tone: 'slate', text: 'not verified · no verification recorded' };
 }
 
 const FAILED = new Set(['error', 'failed', 'verification_failed', 'leakage', 'dead', 'upstream_error']);

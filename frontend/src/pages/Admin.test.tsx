@@ -13,7 +13,10 @@ const actions: AdminActions = {
 const data = {
   now: NOW, apiKey: 'dps_9Fq2fictional', tenant: 'retail-banking-apac', ready: fx.readiness(), keys: fx.apiKeys(NOW), tenants: fx.tenants(NOW),
   posture: fx.posture(NOW), queue: fx.queue(NOW), connections: fx.connections(NOW), forbidden: false, error: null,
+  oneTime: { rotated: null, created: null }, onOneTime: () => undefined,
 };
+// a fictional raw key (the shape of one, never a real secret)
+const RAW = 'dps_FICTIONALrotatedKEYforTHEtestONLY0000000000';
 
 describe('AdminView', () => {
   const out = html(<AdminView {...data} actions={actions} />);
@@ -83,5 +86,32 @@ describe('AdminView without the admin scope', () => {
     expect(t).toContain('Admin needs a key with the admin scope');
     expect(t).toContain('Service health');
     expect(t).not.toContain('Create key');
+  });
+});
+
+describe('AdminView one-time keys survive a refused reload (r1 B1)', () => {
+  const rotated = { n: 1, name: 'platform-admin', key: RAW };
+  it('shows a rotated key while the page is forbidden (own key rotated with grace now)', () => {
+    const t = text(html(<AdminView {...data} forbidden oneTime={{ rotated, created: null }} actions={actions} />));
+    expect(t).toContain('Admin needs a key with the admin scope');
+    expect(t).toContain(RAW);
+    expect(t).toContain('shown once');
+    expect(t).toContain('New key for platform-admin');
+    expect(t).toContain('The key this console used was rotated');
+  });
+  it('shows a created key while the page is forbidden', () => {
+    const t = text(html(<AdminView {...data} forbidden oneTime={{ rotated: null, created: { n: 1, name: 'ops-new', key: RAW } }} actions={actions} />));
+    expect(t).toContain('New key for ops-new');
+    expect(t).toContain(RAW);
+  });
+  it('shows each one-time key once when the page is not forbidden', () => {
+    const out = html(<AdminView {...data} oneTime={{ rotated, created: { n: 1, name: 'ops-new', key: RAW } }} actions={actions} />);
+    expect(occurrences(out, RAW)).toBe(2);
+    expect(text(out)).not.toContain('The key this console used was rotated');
+  });
+  it('shows nothing once the key is stored (dropped from state)', () => {
+    const t = text(html(<AdminView {...data} forbidden oneTime={{ rotated: { ...rotated, key: null }, created: null }} actions={actions} />));
+    expect(t).not.toContain('New key for');
+    expect(t).not.toMatch(/dps_[A-Za-z0-9]{12,}/);
   });
 });

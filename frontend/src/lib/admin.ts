@@ -33,6 +33,17 @@ export function callerKey(keys: ApiKeyView[], apiKey: string): ApiKeyView | null
   return keys.find((k) => k.key_prefix === apiKey.slice(0, 8)) ?? null;
 }
 
+/** What the rotate dialog says when the key being rotated is the one this console calls with:
+ *  with grace "now" the console loses access the moment the rotation completes (r1 B1). */
+export function rotateWarning(key: ApiKeyView, graceHours: number, keys: ApiKeyView[], apiKey: string): { tone: 'rose' | 'amber'; text: string } | null {
+  if (callerKey(keys, apiKey)?.id !== key.id) return null;
+  if (graceHours === 0) {
+    return { tone: 'rose', text: 'This is the key this console uses. It stops working as soon as the rotation completes: the new key is shown once below, '
+      + 'store it, then paste it in the API key field above to keep using Admin.' };
+  }
+  return { tone: 'amber', text: 'This is the key this console uses. Store the new key, then paste it in the API key field above before the old one stops working.' };
+}
+
 /** "dps_9Fq2…", plus "· new" for a key created today or "· disabled 02 Sep 2026". */
 export function keyMeta(k: ApiKeyView, now: Date = new Date()): string {
   const parts = [`${k.key_prefix}…`];
