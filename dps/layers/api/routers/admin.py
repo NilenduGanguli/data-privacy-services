@@ -429,6 +429,7 @@ async def queue(request: Request) -> dict[str, Any]:
 async def posture(request: Request) -> dict[str, Any]:
     """The runtime posture report (M5 Task 16): eleven value-free checks, evaluated as if
     production; ``enforced`` in staging/prod. Database checks read "database unavailable"
-    while it is down (this route itself does not need the database)."""
-    report = await posture_report(_settings(request))
+    while it is down (this route itself does not need the database). Tenant policies and stale
+    keys are scoped to the caller's tenants, like ``/admin/keys`` (review G4 B1)."""
+    report = await posture_report(_settings(request), principal=principal_of(request))
     return report.model_dump(mode="json")

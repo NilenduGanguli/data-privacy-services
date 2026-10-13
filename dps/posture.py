@@ -16,6 +16,7 @@ import binascii
 import os
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -23,6 +24,9 @@ from pydantic import BaseModel
 from dps.config import Settings
 from dps.engine.policy import preset_names, resolve_policy
 from dps.observability import get_logger
+
+if TYPE_CHECKING:
+    from dps.auth import Principal
 
 logger = get_logger(__name__)
 
@@ -273,14 +277,20 @@ class PostureReport(BaseModel):
     checks: list[PostureCheck]
 
 
-async def _tenant_warn_policies() -> list[str]:
-    """``<tenant>/<name>`` of every tenant's active policy whose leakage check is not strict."""
+async def _tenant_warn_policies(principal: Principal | None) -> list[str]:
+    """``<tenant>/<name>`` of every visible tenant's active policy whose leakage check is not strict.
+
+    ``principal=None`` (internal callers) or a wildcard key sees every directory tenant; any other
+    key sees only the tenants it is granted (contract §9: admin views are the caller's tenants).
+    """
     from dps import db
     from dps.tenants import tenant_directory
 
     out: list[str] = []
     s = db.schema_ident()
     for tenant in await tenant_directory():
+        if principal is not None and not principal.can_access(tenant):
+            continue
         async with db.acquire(tenant) as conn:
             rows = await conn.fetch(
                 f"SELECT p.name FROM {s}.dps_policy p JOIN {s}.dps_policy_version v "
@@ -293,19 +303,29 @@ async def _tenant_warn_policies() -> list[str]:
     return out
 
 
-async def _stale_keys(settings: Settings) -> list[str]:
-    """``<name> (<n> days)`` of active keys older than the rotation age that were never rotated."""
+async def _stale_keys(settings: Settings, principal: Principal | None) -> list[str]:
+    """``<name> is <n> days old`` of active keys older than the rotation age, never rotated.
+
+    Only keys the caller may see (:func:`dps.auth_db.covers`, as ``GET /admin/keys``) are listed;
+    ``principal=None`` (internal callers) sees every key.
+    """
     from dps import db
+    from dps.auth_db import covers
 
     async with db.acquire(None) as conn:
         rows = await conn.fetch(
-            "SELECT name, floor(extract(epoch FROM now() - created_at) / 86400)::int AS days "
+            "SELECT name, tenant_ids, "
+            "floor(extract(epoch FROM now() - created_at) / 86400)::int AS days "
             f"FROM {db.schema_ident()}.dps_api_key WHERE disabled_at IS NULL "
             "AND (expires_at IS NULL OR expires_at > now()) AND rotated_at IS NULL "
             "AND created_at < now() - make_interval(days => $1) ORDER BY created_at, name",
             settings.key_rotation_max_age_days,
         )
-    return [f"{r['name']} is {r['days']} days old" for r in rows]
+    return [
+        f"{r['name']} is {r['days']} days old"
+        for r in rows
+        if principal is None or covers(principal, list(r["tenant_ids"]))
+    ]
 
 
 def _check(check_id: str, ok: bool, detail: str) -> PostureCheck:
@@ -318,12 +338,18 @@ def _joined(items: list[str], ok_text: str) -> str:
 
 
 async def posture_report(
-    settings: Settings, *, environ: Mapping[str, str] | None = None
+    settings: Settings,
+    *,
+    environ: Mapping[str, str] | None = None,
+    principal: Principal | None = None,
 ) -> PostureReport:
     """The eleven posture checks (ids fixed, see :data:`CHECKS`), value-free.
 
     Static checks reuse the boot rules; database checks (tenant policies, key ages, RLS,
     migrations) report ``ok=False, detail="database unavailable"`` without a reachable database.
+    The two checks that name tenant objects (``leakage_strict`` tenant policies, ``keys_rotated``)
+    are scoped to ``principal``: a key granted some tenants sees, and is judged on, only those
+    tenants' policies and the keys it covers; a wildcard key (or ``None``) sees the whole platform.
     """
     env = os.environ if environ is None else environ
     checks: list[PostureCheck] = [
@@ -359,7 +385,7 @@ async def posture_report(
         try:
             leakage += [
                 f"tenant policy {p} must use verify.leakage_check=strict"
-                for p in await _tenant_warn_policies()
+                for p in await _tenant_warn_policies(principal)
             ]
             db_ok = True
         except Exception as exc:  # noqa: BLE001 - reported as "database unavailable"
@@ -382,7 +408,7 @@ async def posture_report(
     checks.append(
         _check("kek_from_secret", kek_ok, "DPS_JOB_KEK_FILE" if kek_ok else "no KEK file")
     )
-    checks += await _db_checks(settings, db_ok)
+    checks += await _db_checks(settings, db_ok, principal)
     passed = sum(c.ok for c in checks)
     return PostureReport(
         env=settings.env,
@@ -394,7 +420,9 @@ async def posture_report(
     )
 
 
-async def _db_checks(settings: Settings, reachable: bool) -> list[PostureCheck]:
+async def _db_checks(
+    settings: Settings, reachable: bool, principal: Principal | None
+) -> list[PostureCheck]:
     if not (settings.pg_host and reachable):
         return [_check(i, False, DB_DOWN) for i in ("keys_rotated", "rls_posture")] + [
             _check("migrations_verified", False, DB_DOWN)
@@ -403,7 +431,7 @@ async def _db_checks(settings: Settings, reachable: bool) -> list[PostureCheck]:
 
     out: list[PostureCheck] = []
     try:
-        stale = await _stale_keys(settings)
+        stale = await _stale_keys(settings, principal)
         out.append(_check("keys_rotated", not stale, _joined(stale, "all within the rotation age")))
     except Exception as exc:  # noqa: BLE001
         logger.warning("posture_db_unavailable", error=type(exc).__name__)

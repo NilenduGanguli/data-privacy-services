@@ -502,7 +502,9 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   every tenant's active policy, `llm_not_stub`, `kek_from_secret`, `keys_rotated` (names and ages of
   active keys older than `DPS_KEY_ROTATION_MAX_AGE_DAYS` never rotated), `rls_posture`,
   `migrations_verified`), evaluated as if production in every environment; `enforced` is true in
-  staging/prod. Database checks read "database unavailable" while it is down.
+  staging/prod. Database checks read "database unavailable" while it is down. The tenant policies
+  of `leakage_strict` and the keys of `keys_rotated` are scoped to the caller's tenants (keys as in
+  `GET /admin/keys`); use a wildcard (`*`) admin key for the platform-wide view.
 - **KEK rotation runbook** (`python -m dps.rekey [--dry-run]`): mount the new KEK as
   `DPS_JOB_KEK_FILE` and the old one as `DPS_JOB_KEK_PREVIOUS_FILE`; roll the app and worker
   deployments; run `python -m dps.rekey` once (any pod with the image, the worker's database login

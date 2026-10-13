@@ -85,8 +85,12 @@ async def test_directory_crosses_tenants_without_bypassing_rls(migrated_db) -> N
             f"INSERT INTO {db.schema_ident()}.dps_connection (id, tenant_id, name, engine, params) "
             "VALUES ('c_only', 'c', 'x', 'postgres', '{}')"
         )
+    async with db.acquire("d") as conn:  # a policy-only tenant (045, review G4 B1)
+        await conn.execute(
+            f"INSERT INTO {db.schema_ident()}.dps_policy (tenant_id, name) VALUES ('d', 'retail')"
+        )
     directory = await tenant_directory()
-    assert {"a", "b", "c"} <= set(directory)
+    assert {"a", "b", "c", "d"} <= set(directory)
     s = db.schema_ident()
     async with db.acquire("a") as conn:
         assert await conn.fetchval(f"SELECT count(*) FROM {s}.dps_job") == 1
@@ -106,10 +110,11 @@ async def test_rls_posture_accepts_the_m5_policies(migrated_db, db_settings) -> 
             db_settings.pg_schema,
         )
     names = {(r["tablename"], r["policyname"]) for r in rows}
-    assert ("dps_job", "owner_directory") in names and (
-        "dps_connection",
-        "owner_directory",
-    ) in names
+    assert {
+        ("dps_job", "owner_directory"),
+        ("dps_connection", "owner_directory"),
+        ("dps_policy", "owner_directory"),
+    } <= names
     assert ("dps_tenant_usage", "worker_usage") in names
     assert not any(t == "dps_tenant" for t, _ in names)
 

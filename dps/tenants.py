@@ -6,7 +6,7 @@ for :data:`CACHE_SECONDS`. Daily usage (``dps_tenant_usage``, a tenant table) is
 worker at every checkpoint (:func:`dps.jobs.checkpoint`); :func:`check_daily_quota` refuses new runs
 once the day's rows reach the quota, and the partition claim leaves a tenant's partitions queued
 until 00:00 UTC. The tenant directory is the one cross-tenant read of tenant tables the app role
-has: ``dps_tenant_directory()`` (migration 040) returns ids only.
+has: ``dps_tenant_directory()`` (migration 040, policies added by 045) returns ids only.
 
 Ids starting with ``_`` are DPS pseudo-tenants (``_system``, contract §3.6); the admin API can
 never create, list or edit one. Nothing here logs or raises a value: errors name the rule.
@@ -153,7 +153,7 @@ def _s() -> str:
 
 
 async def tenant_directory(*, include_system: bool = False, worker: bool = False) -> list[str]:
-    """Every tenant id with a ``dps_tenant`` row, a job or a connection (ids only).
+    """Every tenant id with a ``dps_tenant`` row, a job, a connection or a policy (ids only).
 
     Pseudo-tenants (``_system``) are included only when asked (retention); ``worker=True`` reads
     through the worker pool (the retention handler runs in a worker process).

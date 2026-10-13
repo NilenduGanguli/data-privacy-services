@@ -26,6 +26,7 @@ M5_FILES = [
     "042_key_rotation.sql",
     "043_policies.sql",
     "044_llm_exposure.sql",
+    "045_policy_directory.sql",
 ]
 
 

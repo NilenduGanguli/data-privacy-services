@@ -307,6 +307,103 @@ async def test_posture_report_reads_keys_and_tenant_policies(migrated_db: Settin
     assert "b" * 64 not in report.model_dump_json()
 
 
+@pytest.mark.db
+async def test_a_policy_only_tenants_warn_version_fails_leakage_strict(
+    migrated_db: Settings,
+) -> None:
+    """Review G4 B1(b): a tenant with policies but no tenant row, job or connection is checked."""
+    from dps.engine.policy import load_preset
+    from dps.policy_store import create_policy, publish, save_draft
+    from dps.posture import posture_report
+    from dps.tenants import tenant_directory
+
+    await create_policy("p-only", "retail", "gdpr-pseudonymise", actor="tester")
+    body = load_preset("gdpr-pseudonymise").model_dump(mode="json")
+    body["verify"] = {"leakage_check": "warn"}
+    await save_draft("p-only", "retail", body, actor="tester")
+    await publish(
+        "p-only", "retail", change_ticket=None, note=None, actor="a", settings=migrated_db
+    )
+    assert "p-only" in await tenant_directory()
+    report = await posture_report(migrated_db.model_copy(update={"verify_warn_allowed": False}))
+    leakage = next(c for c in report.checks if c.id == "leakage_strict")
+    assert leakage.ok is False
+    assert "tenant policy p-only/retail must use verify.leakage_check=strict" in leakage.detail
+
+
+def test_posture_shows_a_single_tenant_admin_only_its_tenants(
+    api_client: Any, db_settings: Settings
+) -> None:
+    """Review G4 B1(a): no other tenant's key or policy name reaches a t1-only admin."""
+    import asyncio
+
+    from dps import db
+    from dps.engine.policy import load_preset
+
+    c, _ = api_client
+    wild_t1 = {"X-API-KEY": "dps_full", "X-DPS-Tenant": "t1"}
+    wild_t2 = {"X-API-KEY": "dps_full", "X-DPS-Tenant": "t2"}
+    body = load_preset("gdpr-pseudonymise").model_dump(mode="json")
+    body["verify"] = {"leakage_check": "warn"}
+    for tenant, headers in (("t1", wild_t1), ("t2", wild_t2)):
+        name = f"{tenant}-merger-project"
+        made = c.post(
+            "/api/v1/policies",
+            json={"name": name, "base_preset": "gdpr-pseudonymise"},
+            headers=headers,
+        )
+        assert made.status_code == 201, made.text
+        assert (
+            c.put(
+                f"/api/v1/policies/{name}/draft", json={"body": body}, headers=headers
+            ).status_code
+            == 200
+        )
+        assert c.post(f"/api/v1/policies/{name}/publish", headers=headers).status_code == 201
+        key = c.post(
+            "/api/v1/admin/keys",
+            json={
+                "name": f"{tenant}-ledger-recon",
+                "tenant_ids": [tenant],
+                "scopes": ["detect"],
+                "expires_in_days": 365,
+            },
+            headers=headers,
+        )
+        assert key.status_code == 201, key.text
+    admin = c.post(
+        "/api/v1/admin/keys",
+        json={"name": "t1-admin", "tenant_ids": ["t1"], "scopes": ["admin"], "expires_in_days": 30},
+        headers=wild_t1,
+    )
+    assert admin.status_code == 201, admin.text
+    raw = admin.json()["key"]
+
+    async def age() -> None:
+        conn = await db.open_migration_connection(db_settings)
+        try:
+            await conn.execute(
+                f"UPDATE {db.schema_ident(db_settings)}.dps_api_key "
+                "SET created_at = now() - interval '200 days' WHERE name LIKE '%-ledger-recon'"
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(age())
+    scoped = c.get("/api/v1/admin/posture", headers={"X-API-KEY": raw, "X-DPS-Tenant": "t1"})
+    assert scoped.status_code == 200, scoped.text
+    assert "t2-" not in scoped.text and "t2/" not in scoped.text
+    checks = {x["id"]: x for x in scoped.json()["checks"]}
+    assert checks["keys_rotated"]["detail"] == "t1-ledger-recon is 200 days old"
+    assert "t1/t1-merger-project" in checks["leakage_strict"]["detail"]
+    full = c.get("/api/v1/admin/posture", headers=wild_t1)
+    assert full.status_code == 200, full.text
+    full_checks = {x["id"]: x for x in full.json()["checks"]}
+    assert "t2-ledger-recon is 200 days old" in full_checks["keys_rotated"]["detail"]
+    assert "t2/t2-merger-project" in full_checks["leakage_strict"]["detail"]
+    assert raw not in scoped.text and raw not in full.text
+
+
 async def db_tenant(settings: Settings, tenant: str) -> None:
     """A ``dps_tenant`` row, so the tenant directory lists the tenant."""
     from dps import db

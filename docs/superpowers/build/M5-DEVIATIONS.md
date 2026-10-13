@@ -936,6 +936,36 @@ real survivors).
 - `HANDOFF.md` §5 (metrics bullet) describes the counters, the verifier, the alerts and the
   roll-ups; contract §2.2 (044) and §8.3 ("as built").
 
+## G4 review r1 fix — B1: the posture report is scoped to the caller and covers policy-only tenants (Task 16)
+
+- (a) `GET /admin/posture` listed every tenant's stale DB keys and every tenant's non-strict policies
+  as `<tenant>/<name>`, so a key that is admin for t1 only read t2's key and policy names. Contract
+  §9 scopes admin views to the caller's tenants. `posture_report(settings, *, environ=None,
+  principal=None)` now takes the caller: `_tenant_warn_policies` keeps only tenants the principal
+  `can_access`, and `_stale_keys` keeps only keys the principal `covers` (the `GET /admin/keys`
+  rule, so a key granted `*` is hidden from a non-wildcard admin). The route passes
+  `principal_of(request)`. A wildcard key, or `principal=None` (internal callers), keeps the full
+  platform view. Consequence, by design: a single-tenant admin's `leakage_strict` and
+  `keys_rotated` are judged on that admin's tenants only; the deployment-wide checks (settings,
+  RLS, migrations) are unchanged. The report shape is unchanged (m5ui `PostureReport` holds).
+- (b) `leakage_strict` reported "strict everywhere" while a policy-only tenant had an active warn
+  version: `dps_tenant_directory()` (040) unioned `dps_tenant`, `dps_job` and `dps_connection` but
+  not `dps_policy`. New migration `045_policy_directory.sql` (inside M5's 040–059 range) adds an
+  owner SELECT-only `owner_directory` policy on `dps_policy` (FORCE RLS applies to the owner) and
+  redefines the function with `UNION SELECT tenant_id FROM dps_policy`; it still returns ids only.
+  `ALLOWED_EXTRA_POLICIES["dps_policy"] = {"owner_directory"}` so the RLS posture check accepts it.
+  Side effect: every directory reader (admin tenant list and `*` audit expansion, retention, rekey)
+  now also sees policy-only tenants, which is correct for all of them.
+- Tests (both failed before the fix): `tests/test_posture_m5.py::
+  test_a_policy_only_tenants_warn_version_fails_leakage_strict` (the policy-only tenant is in the
+  directory and fails `leakage_strict`) and `test_posture_shows_a_single_tenant_admin_only_its_tenants`
+  (over HTTP: a t1-only admin sees `t1-ledger-recon` and `t1/t1-merger-project` and nothing of t2;
+  the wildcard key sees both tenants; no raw key in either body). `tests/test_tenants.py` adds a
+  policy-only tenant to the directory test and the new owner policy to the RLS-posture test;
+  `tests/db/test_migrations.py` lists 045. Contract §1 (M5 migration files), §2.1 (`ALLOWED_EXTRA_POLICIES`), §2.2 (045) and
+  §9 (posture scope) updated. The reviewer's probes p1/p3/p5 now show no t2 names and
+  `leakage_strict` failing on the warn version.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -960,3 +990,6 @@ real survivors).
   an adapter (or without `DPS_JOB_KEK` on the worker — always set for jobs) fails at the preflight
   with an `internal_error` retry (`MethodError`) instead of a coded refusal at submit. The `tokenizer-mock`
   container itself runs once an `m5` image exists (Task 24 smoke).
+- Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
+  `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
+  semantics are documented in HANDOFF §5 and contract §8.3.
