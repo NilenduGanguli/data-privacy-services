@@ -62,7 +62,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents + the job platform; extras `fpe`, `docs`, `db`, `connectors` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` / `e2e` (Playwright 1.55.0 for `tools/console_check.py` and `tests/console/test_console_m2.py`, never in the image) |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
-| `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2) |
+| `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
 
 ## 2. Build
@@ -234,8 +234,16 @@ picks it up when the `migrate` one-shot runs again (`docker compose up -d` recre
 MinIO (`DPS_ARTEFACT_STORE=s3`, `DPS_S3_ENDPOINT_URL=http://minio:9000`, `minioadmin`).
 Demo seeding: `python tools/seed_sources.py --target postgres [--dsn …] [--schema bank] [--rows 20000]
 [--seed 7] [--restore-copy] [--reset]` (DSN default from `DPS_TEST_SOURCE_PG_DSN` /
-`DPS_SOURCE_PG_PORT`; `--target oracle|mongo` exits 2 until M3; a schema seeded with other
-parameters exits 3 unless `--reset`; another `--schema` gets `<schema>_restore`/`<schema>_perf`).
+`DPS_SOURCE_PG_PORT`; a schema seeded with other parameters exits 3 unless `--reset`; another
+`--schema` gets `<schema>_restore`/`<schema>_perf`). M3: `--target oracle|mongo|all [--oracle-dsn …]
+[--mongo-uri …]` (defaults from `DPS_TEST_ORACLE_DSN`/`DPS_ORACLE_PORT` and
+`DPS_TEST_MONGO_URI`/`DPS_MONGO_PORT`) seeds `CRM.*`/`LOANS.APPLICANTS` (as the demo owners) and
+`crm.profiles`; markers `CRM.DPS_SEED_INFO` / `crm.dps_seed_info` make a repeat run with the same
+`(rows, seed)` print `<table>: unchanged`, another pair replaces the data. The customers' personal
+fields of all three engines come from `tools/seed_model.py` (M3 changed the values a fresh
+PostgreSQL seed produces: reseed `bank` with `--reset` before a three-way demo).
+`CRM.CUSTOMERS.NATIONAL_ID` is `VARCHAR2(18)` (a CURP): an Oracle container initialised before M3
+Task 15 must be recreated (`docker compose rm -sfv oracle`).
 Hardening: `read_only: true` with a 256 MB `tmpfs` on `/tmp`, `cap_drop: [ALL]`,
 `no-new-privileges`, `mem_limit: 1536m`; labels `app=data-privacy-services`, `component=api`,
 `env=local`. Compose sets `DPS_ENV=local`, the bootstrap key, `DPS_DEFAULT_LOCALE=en_IN`,
