@@ -374,3 +374,45 @@ async def test_a_unique_rule_needs_a_single_integer_key() -> None:
     with pytest.raises(TabularGateError) as err:
         await _prepare(rows, shape=shape, snapshot=snap, plans=[], policy=policy)
     assert err.value.code == "incompatible_method"
+
+
+def test_classified_attributes_kept_by_policy_are_modelled_not_copied() -> None:
+    """B1 (G2 review r1): a LOW attribute synthesize would keep (city, gender, age …) is modelled
+    by the tabular engine of a single-table run (``personal=True``) instead of being copied; an
+    identifier or a column with another method never is."""
+    shape = TableShape(
+        object=ObjectRef(owner="bank", name="addresses"),
+        key=["ID"],
+        key_source="primary_key",
+        columns=[
+            _col("ID", "int", is_key=True, nullable=False),
+            _col("CITY", "text"),
+            _col("AGE", "int"),
+            _col("POSTAL", "text"),
+            _col("CUST", "int"),
+            _col("SEGMENT", "text"),
+        ],
+    )
+    keep = MethodSpec(method="keep")
+
+    def kept(name: str, kind: str, entity: str, distinct: float) -> ColumnClassification:
+        return _cc(name, kind, entity, distinct).model_copy(
+            update={"synthesize_suggested": keep, "sensitivity": "low"}
+        )
+
+    snap = _snapshot(
+        shape,
+        [
+            _cc("ID", "int", None, 1.0),
+            kept("CITY", "text", "CITY", 0.05),
+            kept("AGE", "int", "AGE", 0.1),
+            kept("POSTAL", "text", "POSTAL_CODE", 1.0),
+            kept("CUST", "int", "CUSTOMER_ID", 0.6),
+            _cc("SEGMENT", "text", None, 0.003),
+        ],
+    )
+    cols, excluded = tabular_columns(shape, snap, personal=True)
+    assert [c.path for c in cols] == ["$.AGE", "$.CITY", "$.SEGMENT"]
+    assert excluded == [{"path": "$.POSTAL", "reason": "high_cardinality"}]
+    # linked generation (and the default) leave classified columns out entirely
+    assert [c.path for c in tabular_columns(shape, snap)[0]] == ["$.SEGMENT"]

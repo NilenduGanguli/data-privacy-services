@@ -118,6 +118,7 @@ from dps.layers.connectors.targets import (
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    kept_attribute,
     pseudonym_columns,
     resolve_target,
 )
@@ -475,6 +476,7 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             write_mode=mode,
             pk_strategy=spec.target.pk_strategy,
             projection=projection,
+            shape=shape,
         )
         store: ObjectStore | None = None
         target_shape: TableShape | None = None
@@ -537,6 +539,16 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         transformer = _transformer(
             ctx, spec, secret, plan, policy, shape, tabular=tabular, constraints=constraints
         )
+        if spec.mode == "synthesize":
+            copied = copied_personal_columns(
+                plan, snapshot, set(tabular.columns) if tabular is not None else set()
+            )
+            if copied:  # D-A invariant (G2 review r1): never reached, fails closed if it is
+                raise PrepareFailure(
+                    "leakage",
+                    f"{len(copied)} classified column(s) or key(s) would be copied into "
+                    "synthetic rows; nothing was written",
+                )
         await _stage(ctx, job, "preflight")
         sample = await source.sample(
             shape, selection, selection.params, max(1, min(settings.preflight_rows, rows))
@@ -680,9 +692,15 @@ async def _prepare_tabular(
     selection = spec.source.selection
 
     def make(sampler: TabularSampler, constraints: ConstraintSet | None) -> BatchTransformer:
+        # D-A B1: a kept attribute the engine models is drawn, not surrogated (its plan goes;
+        # the stored plan the partitions rebuild from is the one without it)
+        drawn = set(sampler.columns)
+        plan.columns = [p for p in plan.columns if p.name not in drawn or p.name not in personal]
         return _transformer(
             ctx, spec, secret, plan, policy, shape, tabular=sampler, constraints=constraints
         )
+
+    personal = {c.name for c in snapshot.columns if kept_attribute(c, set(shape.key))}
 
     try:
         prepared = await prepare_tabular(
@@ -1449,6 +1467,23 @@ async def finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         code = exc.code if isinstance(exc, ConnectorError | StorageError) else "finalize_error"
         logger.error("finalize_failed", job_id=job.id, error=type(exc).__name__)
         await _retry(ctx, job, code, type(exc).__name__)
+
+
+def copied_personal_columns(
+    plan: RunPlan, snapshot: ClassificationSnapshot, sampled: set[str]
+) -> list[str]:
+    """D-A: written columns a synthesize run would copy although discovery classified them, or
+    keys it would write with their real values — neither planned, pseudonymised nor drawn by the
+    tabular sampler. Empty by construction (:func:`~targets.build_column_plans`,
+    :func:`~targets.pseudonym_columns`); ``prepare`` fails closed on anything else."""
+    if plan.target.write_mode == "in_place":
+        return []  # in place rewrites the planned and pseudonymised columns only
+    written = set(plan.target.write_columns)
+    if not plan.target.generated_key:
+        written |= set(plan.key)
+    replaced = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms} | sampled
+    classified = {c.name for c in snapshot.columns if c.entity_type and not c.text_column}
+    return sorted((written & (classified | set(plan.key))) - replaced)
 
 
 def synthetic_kept_columns(

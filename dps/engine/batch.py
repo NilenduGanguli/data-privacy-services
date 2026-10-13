@@ -121,6 +121,11 @@ NUMERIC_KINDS = frozenset({"int", "decimal", "float"})
 #: Minimum normalised lengths: an unchanged whole value, and a value (or a name part) found
 #: elsewhere in the row's outputs.
 EXACT_MIN, CONTAIN_MIN = 4, 8
+#: Low-cardinality attributes the surrogate engine draws from the record's persona and may
+#: draw equal to the original (M0 ``surrogates._IDENTITY_OK``; the schema-generation sweep's
+#: ``SWEEP_EXEMPT``): a surrogate ``Female`` for a ``Female`` is chance, not a copy, so it is not
+#: a fixed point. An unequal one is still searched for in the row's other outputs.
+CHANCE_EQUAL_ENTITIES = frozenset({"GENDER", "NATIONALITY"})
 _MAX_HITS = 50
 _HIDDEN = ConfigDict(hide_input_in_errors=True)
 
@@ -197,6 +202,8 @@ class PseudonymColumn(BaseModel):
 
     ``kind`` is ``int`` (integers, ``numeric(p, 0)``), ``text`` (text, char) or ``uuid``;
     ``digits`` the decimal digits an integer column holds (a longer pseudonym fails the batch).
+    ``label`` keys the pseudonym when it is not the entity type: an unclassified key or foreign
+    key (``entity_type`` ``KEY``) is keyed by the referenced key, ``KEY|owner.table.column``.
     """
 
     model_config = _HIDDEN
@@ -205,6 +212,7 @@ class PseudonymColumn(BaseModel):
     entity_type: str
     kind: Literal["int", "text", "uuid"]
     digits: int | None = None
+    label: str | None = None
 
 
 class BatchResult(BaseModel):
@@ -287,7 +295,8 @@ def verify_row(
     for column, original, whole in originals:
         needle = normalise(original)
         if whole and len(needle) >= EXACT_MIN and hays.get(column.path) == needle:
-            hit(column.path, column.entity_type, "fixed_point")
+            if column.entity_type not in CHANCE_EQUAL_ENTITIES:
+                hit(column.path, column.entity_type, "fixed_point")
         elif len(needle) >= CONTAIN_MIN:
             for path, hay in hays.items():
                 if needle in hay:
@@ -620,14 +629,15 @@ class BatchTransformer:
             source = to_engine_text(row.get(p.name), column)
             if not source:
                 continue
+            label = p.label or p.entity_type
             try:
                 if p.kind == "int":
-                    number = self._keys.integer(p.entity_type, int(source))
+                    number = self._keys.integer(label, int(source))
                     if p.digits is not None and len(str(abs(number))) > p.digits:
                         raise IncompatibleMethod(p.path, "incompatible_method")
                     text = str(number)
                 else:
-                    text = self._keys.text(p.entity_type, source, kind=p.kind)
+                    text = self._keys.text(label, source, kind=p.kind)
                 out[p.name] = from_engine_text(text, column)
             except (PseudonymError, IncompatibleValue, ValueError):
                 raise IncompatibleMethod(p.path, "incompatible_method") from None

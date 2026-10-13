@@ -731,3 +731,152 @@ def test_in_place_writes_the_pseudonymised_join_columns() -> None:
         pseudonyms=[p.name for p in pseudonyms],
     )
     assert "country_code" in resolved.write_columns
+
+
+def _referencing(snap: Any, name: str, references: str) -> Any:
+    """``snap`` whose shape declares ``name`` a foreign key to ``references`` (owner.table.col)."""
+    columns = [
+        c.model_copy(update={"references": references}) if c.name == name else c
+        for c in snap.shape.columns
+    ]
+    return snap.model_copy(update={"shape": snap.shape.model_copy(update={"columns": columns})})
+
+
+def test_synthesize_pseudonymises_every_written_key_and_its_foreign_keys() -> None:
+    """B2 (G2 review r1): an unclassified key is never written with its real value next to a
+    pseudonymised identifier — it gets a pseudonym under a stable per-key label, and a declared
+    foreign key to it gets the same label (so joins inside a job group hold)."""
+    plain = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    projection = [c.name for c in plain.columns]
+    for write_mode in ("table", "files"):
+        got = pseudonym_columns(
+            plain, mode="synthesize", write_mode=write_mode, pk_strategy=None, projection=projection
+        )
+        assert [(p.name, p.entity_type, p.label, p.kind, p.digits) for p in got] == [
+            ("customer_id", "KEY", "KEY|bank.customers.customer_id", "int", 18)
+        ]
+    # a key the target generates is not written; in place the key is the row it rewrites
+    assert not pseudonym_columns(
+        plain,
+        mode="synthesize",
+        write_mode="append",
+        pk_strategy=PkGenerate(),
+        projection=projection,
+    )
+    assert not pseudonym_columns(
+        plain, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    # a declared foreign key (unclassified) is labelled by the key it references
+    fk = _referencing(plain, "country_code", "bank.countries.code")
+    got = pseudonym_columns(
+        fk, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert [(p.name, p.label) for p in got] == [
+        ("customer_id", "KEY|bank.customers.customer_id"),
+        ("country_code", "KEY|bank.countries.code"),
+    ]
+    # the live shape at prepare is what names the foreign keys
+    live = _referencing(plain, "country_code", "bank.countries.code").shape
+    got = pseudonym_columns(
+        plain,
+        mode="synthesize",
+        write_mode="table",
+        pk_strategy=None,
+        projection=projection,
+        shape=live,
+    )
+    assert [p.name for p in got] == ["customer_id", "country_code"]
+    # in place a foreign key keeps pointing at the (real) parent rows of the same database
+    assert not pseudonym_columns(
+        fk, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    # a classified key keeps its entity label (joins with other columns of that entity)
+    snap = accepted_snapshot("c_src", "bank.customers")
+    got = pseudonym_columns(
+        snap, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert [(p.entity_type, p.label) for p in got] == [("CUSTOMER_ID", None)]
+
+
+def test_synthesize_never_shifts_or_copies_any_written_key(settings: Settings) -> None:
+    """B2: an offset append writes ``real key + offset`` — linkable whatever the key's class."""
+    plain = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    offset = dict(
+        write_mode="append", confirm_write=True, pk_strategy={"kind": "offset", "offset": 10**8}
+    )
+    assert _code(spec(**offset, mode="synthesize"), settings, plain, target_conn=None) == (
+        "pk_strategy_invalid",
+        422,
+    )
+    generate = dict(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    _check(spec(**generate, mode="synthesize"), plain, settings=settings, target_conn=None)
+    # an unclassified key no pseudonym fits is refused for a written key (table), not in place
+    small = plain.model_copy(
+        update={
+            "shape": plain.shape.model_copy(
+                update={
+                    "columns": [
+                        c.model_copy(update={"data_type": "smallint"})
+                        if c.name == "customer_id"
+                        else c
+                        for c in plain.shape.columns
+                    ]
+                }
+            )
+        }
+    )
+    assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, small) == (
+        "synthesize_pseudonym_unsupported",
+        422,
+    )
+    in_place = dict(write_mode="in_place", confirm_write=True)
+    _check(spec(**in_place, mode="synthesize"), small, settings=settings, target_conn=None)
+
+
+def test_synthesize_never_keeps_a_classified_attribute() -> None:
+    """B1 (G2 review r1): a LOW attribute a policy keeps (``keep_non_sensitive``: city, gender,
+    age, postal code, date …) is personal data — a synthesize run plans a surrogate for it (the
+    tabular engine draws it instead when it models the column); obfuscate keeps it."""
+    keep = MethodSpec(method="keep")
+    snap = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "country_code",
+        entity_type="CITY",
+        sensitivity="low",
+        synthesize_method=keep,
+    )
+    projection = [c.name for c in snap.columns]
+    for write_mode in ("table", "files", "in_place"):
+        plans = {
+            p.name: p.method.method
+            for p in build_column_plans(
+                snap,
+                mode="synthesize",
+                write_mode=write_mode,  # type: ignore[arg-type]
+                pk_strategy=None,
+                projection=projection,
+            )
+        }
+        assert plans["country_code"] == "surrogate", (write_mode, plans)
+    obfuscate = build_column_plans(
+        snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert "country_code" not in {p.name for p in obfuscate}
+    # a column the owner reviewed as not personal stays kept (the kept review covers it)
+    unclassified = _with(snap, "country_code", entity_type=None, sensitivity=None)
+    plans = build_column_plans(
+        unclassified, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert "country_code" not in {p.name for p in plans}

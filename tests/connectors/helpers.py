@@ -24,9 +24,8 @@ from dps.layers.connectors.discovery import discover_job
 from dps.layers.connectors.jobs_run import finalize, prepare, run_partition
 from dps.worker import HandlerContext
 
-#: D-A: a synthesize run never copies (or shifts) a sensitive key. Tests of key *mechanics* (an
-#: append with an offset) review the demo key as not personal, as an owner would for a
-#: technical id.
+#: The demo key reviewed as not personal, as an owner would for a technical id. D-A (G2 review
+#: r1, B2): even then a synthesize run never copies or shifts it — offsets are obfuscate mechanics.
 KEY_NOT_PERSONAL = [SnapshotOverride(path="$.customer_id", entity_type=None, anchor=False)]
 
 PHASES: dict[JobPhase, Callable[[HandlerContext, ClaimedJob], Awaitable[None]]] = {

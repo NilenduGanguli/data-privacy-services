@@ -144,35 +144,90 @@ def method_for_column(col: ColumnClassification, mode: str) -> MethodSpec:
     return col.method
 
 
+def _identifies(c: ColumnClassification, keys: set[str]) -> bool:
+    """A classified column a synthesize run must not copy *as an identifier*: a key, a join
+    identifier (:data:`~dps.engine.synth.keys.LINK_ENTITIES`) or MEDIUM+ sensitivity."""
+    assert c.entity_type is not None
+    rank = entity_info(c.entity_type).sensitivity.rank
+    return (
+        c.is_key or c.name in keys or c.entity_type in LINK_ENTITIES
+    ) or rank >= Sensitivity.MEDIUM.rank
+
+
+def kept_attribute(c: ColumnClassification, keys: set[str] | None = None) -> bool:
+    """D-A (G2 review r1, B1): a classified, non-free-text column a synthesize run would keep
+    although it is personal data — a LOW attribute such as a city, postal code, gender, age or
+    date that ``keep_non_sensitive`` (or an owner) set to ``keep``. It is never copied: the
+    tabular engine draws it when it models the column, otherwise it gets a ``surrogate``
+    (:func:`build_column_plans`). Identifiers are pseudonymised instead (:func:`_identifiers`)."""
+    if c.entity_type is None or c.text_column:
+        return False
+    if method_for_column(c, "synthesize").method != "keep":
+        return False
+    return not _identifies(c, keys or set())
+
+
+def _label(reference: str) -> str:
+    """The pseudonym label of an unclassified key ``owner.table.column`` (and of every declared
+    foreign key to it): the same customer of a job group gets the same pseudonym in both."""
+    return f"KEY|{reference}"
+
+
 def _identifiers(
     snapshot: ClassificationSnapshot,
     *,
     write_mode: WriteMode,
     pk_strategy: PkStrategy | dict[str, Any] | None,
     projection: list[str] | set[str],
-) -> list[ColumnClassification]:
-    """D-A: the projected columns a synthesize run would copy although they identify someone —
-    kept (``keep``) columns with an entity type that are a key, a join identifier
-    (:data:`~dps.engine.synth.keys.LINK_ENTITIES`) or of MEDIUM or higher sensitivity. LOW
-    attributes a policy keeps (``keep_non_sensitive``: city, gender, …) are not identifiers; keys
-    the target generates (``append`` + ``generate``) are not written at all."""
+    shape: TableShape | None = None,
+) -> list[tuple[ColumnClassification, str | None]]:
+    """D-A: the projected columns a synthesize run would copy although they identify someone,
+    each with the label its pseudonym is keyed by (``None``: the entity type).
+
+    * kept (``keep``) classified columns that are a key, a join identifier
+      (:data:`~dps.engine.synth.keys.LINK_ENTITIES`) or of MEDIUM or higher sensitivity;
+    * (G2 review r1, B2) every **unclassified key** a ``table``, ``files`` or ``append`` run
+      writes, labelled ``KEY|owner.table.column``, and every unclassified **declared foreign
+      key** (``ColumnInfo.references``, from ``shape``: the live shape at prepare, else the
+      snapshot's) labelled by the key it references — so a real key never sits next to a
+      pseudonymised identifier, and the tables of one job group still join.
+
+    Keys the target generates (``append`` + ``generate``) are not written at all; in place an
+    unclassified key is the row being rewritten (and a sensitive one is refused), and foreign
+    keys keep pointing at the real parent rows of the same database. LOW attributes are
+    :func:`kept_attribute` (modelled or surrogated, never pseudonymised)."""
+    live = shape or snapshot.shape
+    keys = set(live.key) | set(snapshot.shape.key)
     wanted = set(projection)
     generated = write_mode == "append" and _strategy_kind(pk_strategy) == "generate"
-    out: list[ColumnClassification] = []
+    owner = live.object.owner or "public"
+    out: list[tuple[ColumnClassification, str | None]] = []
     for c in snapshot.columns:
-        if c.name not in wanted or c.entity_type is None or c.text_column:
+        if c.name not in wanted or c.text_column:
             continue
-        if c.is_key and generated:
+        is_key = c.is_key or c.name in keys
+        if is_key and generated:
             continue
-        if method_for_column(c, "synthesize").method != "keep":
+        if c.entity_type is not None:
+            if method_for_column(c, "synthesize").method == "keep" and _identifies(c, keys):
+                out.append((c, None))
             continue
-        rank = entity_info(c.entity_type).sensitivity.rank
-        if c.is_key or c.entity_type in LINK_ENTITIES or rank >= Sensitivity.MEDIUM.rank:
-            out.append(c)
+        if write_mode == "in_place":
+            continue
+        try:
+            reference = live.column(c.name).references
+        except KeyError:
+            reference = None
+        if reference:
+            out.append((c, _label(reference)))
+        elif is_key:
+            out.append((c, _label(f"{owner}.{live.object.name}.{c.name}")))
     return out
 
 
-def _pseudonym_of(c: ColumnClassification, shape: TableShape) -> PseudonymColumn | None:
+def _pseudonym_of(
+    c: ColumnClassification, shape: TableShape, label: str | None = None
+) -> PseudonymColumn | None:
     """The pseudonym form of ``c``, or ``None`` when no keyed pseudonym fits its type."""
     try:
         info = shape.column(c.name)
@@ -180,21 +235,17 @@ def _pseudonym_of(c: ColumnClassification, shape: TableShape) -> PseudonymColumn
         info = None
     kind = info.kind if info is not None else c.kind
     data_type = (info.data_type if info is not None else c.data_type).strip().lower()
+    entity = str(c.entity_type) if c.entity_type is not None else "KEY"
+    common: dict[str, Any] = {"path": c.path, "name": c.name, "entity_type": entity, "label": label}
     if kind in ("int", "decimal") and (kind == "int" or not (info and info.scale)):
         digits = (info.precision if info is not None else None) or INT_DIGITS.get(data_type)
         if digits is not None and digits < MIN_PSEUDONYM_DIGITS:
             return None
-        return PseudonymColumn(
-            path=c.path, name=c.name, entity_type=str(c.entity_type), kind="int", digits=digits
-        )
+        return PseudonymColumn(**common, kind="int", digits=digits)
     if kind in _TEXTUAL:
-        return PseudonymColumn(
-            path=c.path, name=c.name, entity_type=str(c.entity_type), kind="text"
-        )
+        return PseudonymColumn(**common, kind="text")
     if kind == "uuid":
-        return PseudonymColumn(
-            path=c.path, name=c.name, entity_type=str(c.entity_type), kind="uuid"
-        )
+        return PseudonymColumn(**common, kind="uuid")
     return None
 
 
@@ -205,9 +256,10 @@ def pseudonym_columns(
     write_mode: WriteMode,
     pk_strategy: PkStrategy | dict[str, Any] | None,
     projection: list[str],
+    shape: TableShape | None = None,
 ) -> list[PseudonymColumn]:
     """D-A: the identifier columns a synthesize run replaces by keyed pseudonyms (none in
-    obfuscate mode).
+    obfuscate mode); ``shape`` is the live shape at prepare (its declared foreign keys).
 
     Raises:
         PrepareFailure: ``synthesize_pseudonym_unsupported`` — an identifier column whose type
@@ -216,10 +268,10 @@ def pseudonym_columns(
     if mode != "synthesize":
         return []
     out: list[PseudonymColumn] = []
-    for c in _identifiers(
-        snapshot, write_mode=write_mode, pk_strategy=pk_strategy, projection=projection
+    for c, label in _identifiers(
+        snapshot, write_mode=write_mode, pk_strategy=pk_strategy, projection=projection, shape=shape
     ):
-        p = _pseudonym_of(c, snapshot.shape)
+        p = _pseudonym_of(c, shape or snapshot.shape, label)
         if p is None:
             raise PrepareFailure(
                 "synthesize_pseudonym_unsupported",
@@ -240,23 +292,24 @@ def _check_identifiers(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
             "a synthesize run in place would keep the real key of every row: write a table, "
             "files or an append with generated keys",
         )
-    if target.write_mode == "append" and sensitive_key and isinstance(target.pk_strategy, PkOffset):
+    if target.write_mode == "append" and isinstance(target.pk_strategy, PkOffset):
+        # G2 review r1 (B2): ``real key + offset`` (or a prefix) links back whatever the class
         raise _fail(
             "pk_strategy_invalid",
             422,
-            "a sensitive key is never copied into synthetic rows, shifted or prefixed: use generate",
+            "a real key is never copied into synthetic rows, shifted or prefixed: use generate",
         )
-    for c in _identifiers(
+    for c, label in _identifiers(
         snapshot,
         write_mode=target.write_mode,
         pk_strategy=target.pk_strategy,
         projection=_projection(spec, snapshot),
     ):
-        if _pseudonym_of(c, snapshot.shape) is None:
+        if _pseudonym_of(c, snapshot.shape, label) is None:
             raise _fail(
                 "synthesize_pseudonym_unsupported",
                 422,
-                f"{c.path}: an identifier that synthetic rows must not copy, and no keyed "
+                f"{c.path}: an identifier or key that synthetic rows must not copy, and no keyed "
                 "pseudonym fits its type (integers of at least 9 digits, text, uuid)",
             )
 
@@ -551,10 +604,14 @@ def build_column_plans(
     """One :class:`ColumnPlan` per projected column that is transformed in ``mode``.
 
     Kept columns and columns without an entity get no plan; key columns get none in place
-    (never rewritten) or on an append whose keys come from ``generate`` / ``offset``.
+    (never rewritten) or on an append whose keys come from ``generate`` / ``offset``. In
+    synthesize mode a classified attribute the policy keeps (:func:`kept_attribute`, D-A B1) is
+    planned ``surrogate`` — the tabular engine replaces that plan by its draw when it models the
+    column (``jobs_run``).
     """
     kind = _strategy_kind(pk_strategy)
     wanted = set(projection)
+    keys = set(snapshot.shape.key)
     plans: list[ColumnPlan] = []
     for col in snapshot.columns:
         if col.name not in wanted:
@@ -564,7 +621,9 @@ def build_column_plans(
             write_mode == "in_place" or (write_mode == "append" and kind in ("generate", "offset"))
         ):
             continue
-        if not col.text_column and (col.entity_type is None or method.method == "keep"):
+        if mode == "synthesize" and kept_attribute(col, keys):
+            method = MethodSpec(method="surrogate")
+        elif not col.text_column and (col.entity_type is None or method.method == "keep"):
             continue
         info = snapshot.shape.column(col.name)
         plans.append(

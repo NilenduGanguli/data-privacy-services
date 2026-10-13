@@ -9,10 +9,14 @@ anything is written. The fitted model is returned base64-encoded for the caller 
 ``JobSecret.tabular_model``; it is never stored unsealed, never logged and purged with the job key.
 
 Which columns are modelled (:func:`tabular_columns`): top-level, non-key columns the accepted
-snapshot classifies non-sensitive (no entity type, not free text) whose kind the engine models,
-categorical ones only up to ``max_distinct_ratio`` distinct values. Other non-sensitive columns
-keep their source values and are listed in the evidence (``tabular.excluded``) with a reason.
-Sensitive columns are not listed: they get surrogates as before.
+snapshot classifies non-sensitive (no entity type, not free text) and — for a single-table run
+(``personal=True``, D-A B1) — classified attributes the policy keeps
+(:func:`~dps.layers.connectors.targets.kept_attribute`: city, gender, age …), whose kind the
+engine models, categorical ones only up to ``max_distinct_ratio`` distinct values. Other
+non-sensitive columns keep their source values and are listed in the evidence
+(``tabular.excluded``) with a reason; a kept attribute the engine does not model keeps its
+``surrogate`` plan (it is never copied). Other sensitive columns are not listed: they get
+surrogates or pseudonyms as before.
 
 Every metric, gate detail and evidence field is value-free: numbers, column paths, counts, codes.
 """
@@ -51,6 +55,7 @@ from dps.engine.synth.mostly import TabularUnavailable
 from dps.engine.synth.personas import seed_int
 from dps.jobs_models import ClassificationSnapshot
 from dps.layers.connectors.base import Connector, Row, TableShape
+from dps.layers.connectors.targets import kept_attribute
 
 #: Fewest sampled rows a tabular job accepts (the engine refuses fewer fit rows on its own).
 MIN_ROWS = 50
@@ -130,10 +135,14 @@ def tabular_columns(
     *,
     max_distinct_ratio: float = 0.5,
     projection: Sequence[str] | None = None,
+    personal: bool = False,
 ) -> tuple[list[TabularColumn], list[dict[str, str]]]:
-    """Modellable columns and the non-sensitive columns left as source values (with reasons).
+    """Modellable columns and the columns the engine leaves (with reasons).
 
     ``projection`` (the run's projected column names) leaves every other column out entirely.
+    ``personal`` (single-table runs, D-A B1) also models classified attributes the policy keeps
+    (:func:`~dps.layers.connectors.targets.kept_attribute`); one it cannot model is listed in
+    ``excluded`` and keeps its surrogate plan. Linked generation leaves them out entirely.
     """
     info = {c.path: c for c in shape.columns}
     keys = set(shape.key)
@@ -141,7 +150,9 @@ def tabular_columns(
     out: list[TabularColumn] = []
     excluded: list[dict[str, str]] = []
     for cc in sorted(snapshot.columns, key=lambda c: c.path):
-        if cc.is_key or cc.name in keys or cc.entity_type is not None or cc.text_column:
+        if cc.is_key or cc.name in keys or cc.text_column:
+            continue
+        if cc.entity_type is not None and not (personal and kept_attribute(cc, keys)):
             continue
         if wanted is not None and cc.name not in wanted:
             continue
@@ -306,7 +317,7 @@ def runtime_sampler(
     """
     sampler = load_sampler(engine, model_b64, seed)
     written = set(sampler.columns)
-    columns = [c for c in tabular_columns(shape, snapshot)[0] if c.name in written]
+    columns = [c for c in tabular_columns(shape, snapshot, personal=True)[0] if c.name in written]
     constraints = build_constraints(policy, columns, seed=seed, object_fqn=object_fqn)
     check_constraints(constraints, shape)
     return sampler, constraints
@@ -515,7 +526,7 @@ async def prepare_tabular(
         raise TabularGateError(
             "tabular_invalid", f"tabular engine {engine_name} is not enabled on this deployment"
         )
-    columns, excluded = tabular_columns(shape, snapshot, projection=projection)
+    columns, excluded = tabular_columns(shape, snapshot, projection=projection, personal=True)
     if not columns:
         raise TabularGateError("tabular_invalid", "no column qualifies for tabular synthesis")
     sampled = await connector.sample(

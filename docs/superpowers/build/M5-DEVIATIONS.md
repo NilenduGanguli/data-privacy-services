@@ -434,10 +434,10 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   non-free-text columns with an entity type whose synthesize method is `keep` **and** that are a key,
   a join identifier (`LINK_ENTITIES` = discovery's `JOIN_ENTITIES`, now one constant in
   `dps/engine/synth/keys.py`) or of MEDIUM+ sensitivity. Classified columns with any other synthesize
-  method are not copied anyway (surrogate, null, …). LOW attributes a policy keeps on purpose
-  (`keep_non_sensitive`: city, gender, age, postal code, amount, …) stay: they are quasi-identifier
-  attributes, not identifiers, and the copula models them when they qualify — an owner decision
-  recorded in the policy, open for the privacy review (report).
+  method are not copied anyway (surrogate, null, …). ~~LOW attributes a policy keeps on purpose
+  stay … the copula models them when they qualify~~ — **withdrawn in the G2 review r1 fix
+  (below)**: that sentence was false (the copula never modelled a classified column) and the
+  narrowing contradicted D-A; LOW attributes are now never copied.
 - **Pseudonym** (`dps/engine/synth/keys.py`, pure Python): `KeyPseudonyms(seed)` maps `v →
   p⁻¹(p(v)+1 mod N)` with `p` a keyed Feistel permutation (HMAC-SHA256 rounds, counter-mode output for
   wide halves, cycle walking) keyed by the synthesis seed and entity type — injective, deterministic,
@@ -481,6 +481,70 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   survivors per identifier column, the FK joins all 900 rows, no source value anywhere in either
   target; in-place refusal before a job exists; review_required for a PII column reviewed as not
   personal).
+
+## G2 review r1 fix — D-A B1 (classified attributes) and B2 (unclassified keys)
+
+Review `M5-G2-review-r1.md`: B1 — LOW attributes kept by `keep_non_sensitive` (city, postal code,
+gender, age, date …) were copied row-aligned (probe: 400/400 on each) while the evidence passed;
+B2 — an unclassified key (`loan_id`) was written with its real value next to the pseudonymised
+`customer_id` (a re-link path). Tests were written first and seen failing (unit:
+`pseudonym_columns` returned `[]` for an unclassified key, the offset append was accepted,
+`country_code` had no plan, `tabular_columns` had no `personal`; integration: city, postal code,
+gender and age 400/400 for both `copula` and `none`, `loan_id` 300/300 and `repayment_id` 900/900
+real survivors).
+
+- **B1, never copied.** `targets.kept_attribute(c)`: a classified, non-free-text column whose
+  synthesize method is `keep` and that is not an identifier (key, `LINK_ENTITIES`, MEDIUM+).
+  `build_column_plans` plans it `surrogate` in synthesize mode (every write mode, in place too).
+  Single-table tabular runs model it instead when the engine can (`tabular_columns(...,
+  personal=True)`, used by `prepare_tabular` and `runtime_sampler`; categorical cardinality and
+  kind rules unchanged): `_prepare_tabular`'s `make` drops the surrogate plan of every kept
+  attribute the fitted sampler draws, so the stored plan the partitions rebuild from is the one
+  without it; anything the engine declines (high cardinality, kind, fit-time exclusion) keeps the
+  surrogate. Linked generation (Task 7B) is unchanged: it leaves classified columns out entirely.
+  Choice among the review's options (a)/(b): (a) where the engine can, (b) otherwise — no
+  refusal, no `review_required` needed. The snapshot still shows `keep` (discovery and the
+  console are unchanged); the evidence shows `surrogate` or the column in `tabular.columns`.
+- **Verification.** A surrogate gender or nationality is persona-drawn and may equal the original
+  (M0 `_IDENTITY_OK`; the schema sweep's `SWEEP_EXEMPT`), which the strict sweep reported as
+  `fixed_point` (206 hits on 400 rows, the job failed). `batch.CHANCE_EQUAL_ENTITIES = {GENDER,
+  NATIONALITY}`: an equal whole value of these two is not a fixed point (an unequal one is still
+  searched for elsewhere in the row). No other rule changed; every other entity still fails on an
+  unchanged value (`tests/test_batch.py`).
+- **B2, keys.** `targets._identifiers` now also returns every unclassified key a `table`/`files`/
+  `append` (non-`generate`) run writes, labelled `KEY|owner.table.column`, and every unclassified
+  declared foreign key labelled by the key it references. `PseudonymColumn.label` (new, optional)
+  keys the pseudonym (`entity_type` is `KEY` for these); classified columns keep their entity label.
+  `ColumnInfo.references` (new, optional) is filled by the PostgreSQL `describe` from
+  `pg_constraint` (single-column FKs; the first by constraint name); `pseudonym_columns(...,
+  shape=)` reads the live shape at prepare (submit reads the snapshot's). In place: unclassified
+  keys and foreign keys are not pseudonymised (the key is the row rewritten; the parent rows are
+  real). Offsets: `validate_run` refuses any `offset`/prefix append in synthesize mode
+  (`pk_strategy_invalid`), not only of a sensitive key — `real key + offset` links back.
+- **Fail-closed guard.** `jobs_run.copied_personal_columns(plan, snapshot, sampled)` — written
+  classified columns or keys that are neither planned, pseudonymised nor drawn — fails prepare with
+  `leakage` before the preflight. Empty by construction; a unit test shows it names the columns of a
+  wrong plan.
+- **Tests changed.** The three offset-append tests (`test_resume_after_kill[append_offset_named]`,
+  `test_run_failures::test_same_table_append_refuses_an_offset_inside_the_key_span`,
+  `test_run_modes::test_append_offset_to_the_same_table`) now run in **obfuscate** mode with
+  `IN_PLACE_REVIEW` (offset mechanics; the default obfuscate review overflows the same table's
+  `varchar` columns); the last one first asserts that a synthesize offset append of a key reviewed
+  as not personal is refused (422) before a job exists. New: `tests/connectors/test_targets.py`
+  (+3), `tests/test_tabular_prepare.py` (+1), `tests/test_batch.py` (+1),
+  `tests/test_kept_review.py` (+1), `tests/connectors/test_synthesize_identifiers.py` (+3
+  integration: B1 `copula` and `none` — row-aligned equality per LOW-classified column at chance
+  level, QI combination ≤ 2 rows; B2 — 0 real survivors of `loan_id`, `repayment_id` and the
+  declared FK `repayments.loan_id`, the FK joins all 900 rows, both labels
+  `KEY|<schema>.loans.loan_id`).
+- **Limitations (open, for the privacy review).** (1) A surrogate DATE is the original shifted by
+  ±30 days and a surrogate AGE stays in its 5-year band (the M0 generators): not equal, but close;
+  the copula path draws them independently when it models the column. (2) An unclassified foreign
+  key that references a *classified* key (or the reverse) gets a different label than the key, so it
+  is pseudonymised (no leak) but no longer joins; a reference without a declared constraint is not
+  known and is copied unless discovery classified it. (3) A written key or declared FK no pseudonym
+  fits (smallint, date, float) refuses the run (`synthesize_pseudonym_unsupported`); a FK can be
+  left out of `selection.columns`. (4) Multi-column foreign keys are not named.
 
 ## Deferred to final stage
 

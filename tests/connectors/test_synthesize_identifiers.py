@@ -12,6 +12,8 @@ and a column reviewed as "not personal" that holds personal data is kept only wi
 from __future__ import annotations
 
 import json
+import math
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import date
 from decimal import Decimal
@@ -25,9 +27,20 @@ from dps import jobs  # noqa: E402
 from dps.auth import LOCAL_PRINCIPAL  # noqa: E402
 from dps.connections import Connection  # noqa: E402
 from dps.engine.synth.keys import KeyPseudonyms  # noqa: E402
-from dps.engine.synth.surrogates import generate_synthesis_seed, seed_bytes  # noqa: E402
+from dps.engine.synth.surrogates import (  # noqa: E402
+    SurrogateEngine,
+    generate_synthesis_seed,
+    seed_bytes,
+)
+from dps.engine.taxonomy import Sensitivity, entity_info  # noqa: E402
 from dps.jobs import JobState  # noqa: E402
-from dps.jobs_models import ObjectRef, RunSpec, SnapshotOverride, SpecError  # noqa: E402
+from dps.jobs_models import (  # noqa: E402
+    ClassificationSnapshot,
+    ObjectRef,
+    RunSpec,
+    SnapshotOverride,
+    SpecError,
+)
 from dps.layers.connectors.evidence import get_evidence  # noqa: E402
 from dps.layers.connectors.submit import submit_run  # noqa: E402
 from dps.worker import HandlerContext  # noqa: E402
@@ -223,3 +236,258 @@ async def test_a_kept_column_that_holds_personal_data_needs_review(
     assert v["review_columns"] == ["contact"]
     assert v["post_sample"]["synthetic_kept"]["kept_column_hits"] > 0
     assert "example-mail.in" not in json.dumps(ev.pack.model_dump(mode="json"))
+
+
+# -- G2 review r1: B1 (classified attributes) and B2 (unclassified keys) ----------------------
+
+ADDRESSES = 400
+ADDRESSES_DDL = (
+    "address_id bigint PRIMARY KEY, customer_id bigint NOT NULL, kind varchar(12) NOT NULL, "
+    "line1 varchar(200) NOT NULL, city varchar(80) NOT NULL, state_code varchar(8), "
+    "postal_code varchar(10) NOT NULL, country_code char(2) NOT NULL, gender varchar(6), "
+    "age smallint, moved_in date NOT NULL"
+)
+
+
+def _addresses(n: int) -> list[tuple[Any, ...]]:
+    """The demo ``bank.addresses`` shape plus gender, age and a date (synthetic fixture values)."""
+    eng = SurrogateEngine(seed_bytes(generate_synthesis_seed()), default_locale="en_IN")
+    return [
+        (
+            700_000_001 + i,
+            10_000_001 + i % 300,
+            ["home", "work"][i % 2],
+            eng.surrogate("STREET_ADDRESS", "12 Placeholder Road", "en_IN", f"a{i}")[:200],
+            eng.surrogate("CITY", "Pune", "en_IN", f"c{i}")[:80],
+            "MH",
+            f"{400001 + (i * 7919) % 99000:06d}",
+            "IN",
+            ["female", "male"][i % 2],
+            18 + (i * 13) % 70,
+            date(2010 + i % 12, 1 + i % 12, 1 + (i * 7) % 28),
+        )
+        for i in range(n)
+    ]
+
+
+def _chance_bound(values: list[Any], n: int) -> int:
+    """Most row-aligned equalities ``n`` independent draws can reach by chance: a draw from any
+    distribution equals a given row's value with probability at most the source's top frequency
+    ``p``; 5 standard deviations above ``n·p`` (plus 3) is never reached by chance, and a copied
+    column reaches ``n``."""
+    p = max(Counter(values).values()) / len(values)
+    return math.ceil(n * p + 5 * math.sqrt(n * p * (1 - p)) + 3)
+
+
+def _personal_attributes(snap: ClassificationSnapshot) -> list[str]:
+    """Columns discovery classified with an entity type that is neither a key, a join identifier
+    nor MEDIUM+ (the LOW attributes ``keep_non_sensitive`` keeps) and whose synthesize method is
+    ``keep``: B1's columns."""
+    keep = {"keep"}
+    out = []
+    for c in snap.columns:
+        method = c.synthesize_method or c.synthesize_suggested
+        if c.entity_type is None or c.is_key or method is None or method.method not in keep:
+            continue
+        if entity_info(c.entity_type).sensitivity.rank < Sensitivity.MEDIUM.rank:
+            out.append(c.name)
+    return out
+
+
+def _pseudonym_label(job: Any, column: str) -> str:
+    assert job.plan is not None
+    entry = next(p for p in job.plan["pseudonyms"] if p["name"] == column)
+    return str(entry.get("label") or entry["entity_type"])
+
+
+@pytest.mark.parametrize("tabular", ["copula", "none"])
+async def test_classified_attributes_are_never_copied_row_aligned(
+    tabular: str,
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: RegisterSource,
+) -> None:
+    """B1: city, postal code, gender, age and dates a policy keeps (LOW) are drawn by the copula
+    or surrogated — row-aligned equality with the target row's own source row stays at chance."""
+    addresses = await source_pg.table("addresses", ADDRESSES_DDL, _addresses(ADDRESSES))
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, addresses)
+    personal = _personal_attributes(snap)
+    assert {"city", "postal_code", "gender", "age"} <= set(personal), personal
+    seed = generate_synthesis_seed()
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": f"addresses_{tabular}"},
+    }
+    job = await _submit(
+        handler_ctx,
+        _spec(
+            src.id,
+            addresses,
+            snap.id,
+            target,
+            options={"tabular": tabular},
+            consistency={"synthesis_seed": seed.model_dump(mode="json")},
+        ),
+    )
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+
+    # -- source vs target, counts only: align each target row with its own source row ----------
+    keys = KeyPseudonyms(seed_bytes(seed))
+    label = _pseudonym_label(job, "address_id")
+    source_rows = {
+        keys.integer(label, r["address_id"]): dict(r)
+        for r in await source_pg.admin.fetch(f'SELECT * FROM "{source_pg.schema}".addresses')
+    }
+    target_rows = [
+        dict(r)
+        for r in await source_pg.admin.fetch(
+            f'SELECT * FROM "{source_pg.schema}"."addresses_{tabular}"'
+        )
+    ]
+    real_keys = {r["address_id"] for r in source_rows.values()}
+    assert len(target_rows) == ADDRESSES
+    assert sum(1 for r in target_rows if r["address_id"] in real_keys) == 0
+    aligned = [(r, source_rows[r["address_id"]]) for r in target_rows]  # every row aligns
+    equal = {c: sum(1 for t, s in aligned if t[c] is not None and t[c] == s[c]) for c in personal}
+    bounds = {c: _chance_bound([s[c] for s in source_rows.values()], ADDRESSES) for c in personal}
+    over = {c: (equal[c], bounds[c]) for c in personal if equal[c] > bounds[c]}
+    assert not over, over  # before the fix: city, postal_code, gender, age 400/400
+    qi = ("city", "postal_code", "gender", "age")
+    assert sum(1 for t, s in aligned if all(t[c] == s[c] for c in qi)) <= 2
+
+    # -- the evidence says how each of them was produced ----------------------------------------
+    ev = await get_evidence("t1", job.progress.evidence_id)
+    assert ev is not None
+    pack = ev.pack.model_dump(mode="json")
+    methods = {c["path"]: c["method"] for c in pack["columns"]}
+    drawn = set((pack.get("tabular") or {}).get("columns") or [])
+    for c in personal:
+        assert methods.get(f"$.{c}") == "surrogate" or f"$.{c}" in drawn, (c, methods, drawn)
+    if tabular == "copula":
+        assert {"$.gender", "$.age"} <= drawn, drawn  # modelled where the engine can
+    assert pack["verification"]["passed"] is True, pack["verification"]
+
+
+LOANS = 300
+LOANS_DDL = (
+    "loan_id bigint PRIMARY KEY, customer_id bigint NOT NULL, product varchar(24) NOT NULL, "
+    "principal numeric(14,2) NOT NULL, rate numeric(5,3) NOT NULL, term_months smallint NOT NULL, "
+    "status varchar(12) NOT NULL, internal_score smallint NOT NULL"
+)
+
+
+def _loans(n: int) -> list[tuple[Any, ...]]:
+    return [
+        (
+            5_000_000_001 + i * 3,
+            10_000_001 + i % 250,
+            ["home", "auto", "personal"][i % 3],
+            Decimal(100000 + (i * 7919) % 9_000_000) / 100,
+            Decimal(5 + (i * 37) % 900) / 100,
+            [12, 24, 36, 60][i % 4],
+            ["active", "closed"][i % 2],
+            300 + (i * 31) % 600,
+        )
+        for i in range(n)
+    ]
+
+
+def _repayments(n: int) -> list[tuple[Any, ...]]:
+    return [
+        (
+            8_000_000_001 + i * 7,
+            5_000_000_001 + (i % LOANS) * 3,
+            Decimal(1000 + (i * 331) % 90_000) / 100,
+            ["ach", "card", "cash"][i % 3],
+        )
+        for i in range(n)
+    ]
+
+
+async def test_unclassified_keys_and_their_foreign_keys_are_pseudonymised(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """B2: ``loan_id`` (a key discovery does not classify) is never written with its real value
+    next to the pseudonymised ``customer_id`` — nor is a declared foreign key to it — and the
+    group's tables still join."""
+    loans = await source_pg.table("loans", LOANS_DDL, _loans(LOANS))
+    repayments = await source_pg.table(
+        "repayments",
+        "repayment_id bigint PRIMARY KEY, "
+        f'loan_id bigint NOT NULL REFERENCES "{source_pg.schema}".loans, '
+        "amount numeric(12,2) NOT NULL, channel varchar(8) NOT NULL",
+        _repayments(900),
+    )
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap_l = await discover_and_accept(handler_ctx, "t1", src.id, loans)
+    snap_r = await discover_and_accept(handler_ctx, "t1", src.id, repayments)
+    entity_l = {c.name: c.entity_type for c in snap_l.columns}
+    entity_r = {c.name: c.entity_type for c in snap_r.columns}
+    assert entity_l["loan_id"] is None and entity_l["customer_id"] == "CUSTOMER_ID", entity_l
+    assert entity_r["loan_id"] is None and entity_r["repayment_id"] is None, entity_r
+    seed = generate_synthesis_seed()
+    consistency = {"synthesis_seed": seed.model_dump(mode="json")}
+
+    def table(name: str) -> dict[str, Any]:
+        return {
+            "write_mode": "table",
+            "connection_id": uat.id,
+            "object": {"owner": source_pg.schema, "name": name},
+        }
+
+    job_l = await _submit(
+        handler_ctx,
+        _spec(
+            src.id,
+            loans,
+            snap_l.id,
+            table("loans_synth"),
+            options={"tabular": "copula"},
+            consistency=consistency,
+        ),
+    )
+    assert job_l.state == JobState.succeeded, (job_l.error_code, job_l.error)
+    job_r = await _submit(
+        handler_ctx,
+        _spec(src.id, repayments, snap_r.id, table("repayments_synth"), consistency=consistency),
+    )
+    assert job_r.state == JobState.succeeded, (job_r.error_code, job_r.error)
+
+    # -- source vs target, counts only ----------------------------------------------------------
+    real_loan_ids = set(await _column(source_pg, "loans", "loan_id"))
+    real_repayment_ids = set(await _column(source_pg, "repayments", "repayment_id"))
+    real_customers = set(await _column(source_pg, "loans", "customer_id"))
+    tgt_loan_ids = await _column(source_pg, "loans_synth", "loan_id")
+    tgt_fk = await _column(source_pg, "repayments_synth", "loan_id")
+    tgt_repayment_ids = await _column(source_pg, "repayments_synth", "repayment_id")
+    tgt_customers = await _column(source_pg, "loans_synth", "customer_id")
+    survivors = {
+        "loans_synth.loan_id": len(real_loan_ids & set(tgt_loan_ids)),
+        "loans_synth.customer_id": len(real_customers & set(tgt_customers)),
+        "repayments_synth.loan_id": len(real_loan_ids & set(tgt_fk)),
+        "repayments_synth.repayment_id": len(real_repayment_ids & set(tgt_repayment_ids)),
+    }
+    assert survivors == dict.fromkeys(survivors, 0), survivors  # before the fix: loan_id 300
+    assert len(set(tgt_loan_ids)) == LOANS and len(set(tgt_repayment_ids)) == 900  # still keys
+    joined = await source_pg.admin.fetchval(
+        f'SELECT count(*) FROM "{source_pg.schema}".repayments_synth r '
+        f'JOIN "{source_pg.schema}".loans_synth l USING (loan_id)'
+    )
+    assert joined == 900  # the foreign key still joins inside the job group
+    labels = {
+        "loans.loan_id": _pseudonym_label(job_l, "loan_id"),
+        "repayments.loan_id": _pseudonym_label(job_r, "loan_id"),
+    }
+    assert (
+        labels["loans.loan_id"]
+        == labels["repayments.loan_id"]
+        == (f"KEY|{source_pg.schema}.loans.loan_id")
+    ), labels
+    for job, column in ((job_l, "loan_id"), (job_r, "repayment_id"), (job_r, "loan_id")):
+        ev = await get_evidence("t1", job.progress.evidence_id)
+        assert ev is not None
+        assert {c["path"]: c["method"] for c in ev.pack.columns}[f"$.{column}"] == "key_pseudonym"
