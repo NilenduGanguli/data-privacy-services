@@ -747,6 +747,32 @@ real survivors).
   test for the roll-up PDF.
 - `HANDOFF.md`: the `DPS_REPORT_PDF_ENABLED` row is in §4's M5 settings table (the plan said §3).
 
+## G3 review r1 fix — B1: the evidence PDF for wide synthetic tables (Task 14)
+
+- The review found that `_corr` gave each correlation-matrix column `120 / (n - 1)` mm. From 58
+  numeric columns on, that is narrower than the 6 pt cell padding, so reportlab raised "negative
+  availWidth" and `GET /evidence/{id}/pdf` answered 500. `metrics.py` puts every numeric column into
+  `fidelity.corr_matrix`, so a wide bank table (monthly balances) triggered it. The Task 14 note
+  that the renderer "never trusts the pack's shape" was false for wide matrices.
+- `dps/layers/reports/pdf.py`: the lower triangle prints only up to `_CORR_MATRIX_MAX = 16`
+  columns. That is the widest matrix whose 15 value columns fit 8 mm each in the 120 mm beside the
+  40 mm name column. The review said "about 20", but 19 columns of 8 mm would overflow the 180 mm
+  A4 frame. Value columns are clamped to `_CORR_MIN_WIDTH = 8` mm as a backstop.
+- A wider matrix prints a summary line instead: the column count, the mean pair delta
+  (`corr_delta`), and the largest delta (`corr_max`, or the computed maximum when the pack lacks it).
+  After the line comes a table of the `_CORR_TOP_PAIRS = 10` largest pair deltas, using names and
+  numbers only. Cells that are not finite numbers (text, `None`, NaN) and rows that are not lists are
+  skipped. The same rule applies to each table of a linked `fidelity.tables` pack. The pack format
+  and the contract are unchanged.
+- New tests in `tests/test_evidence_pdf.py`:
+  - an 80-column pack, checking the summary and the largest pair;
+  - a linked parent/child pack of the same width;
+  - widths 2, 8, 16, 17, 20, 57, 58 and 120;
+  - a wide matrix with malformed cells;
+  - a DB route test showing that an 80-column pack gets 200 with a PDF.
+  Before the fix, the 58, 80 and 120 cases raised `ValueError`. The reviewer's probes
+  `p8_isolate.py` and `p8b_threshold.py` now report every count as ok and no failing threshold.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

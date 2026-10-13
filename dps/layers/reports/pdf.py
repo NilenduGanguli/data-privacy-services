@@ -5,7 +5,9 @@ live link, and folded to Latin-1 because the standard fonts have no glyphs beyon
 carries only what the pack carries: counts, hashes, names, paths, methods — never ``reveal_map``.
 
 The renderer never trusts the pack's shape: a missing key renders as "—" and a value that is not
-a number where a number is expected renders as text, so an older or partial pack still prints.
+a number where a number is expected renders as text, so an older or partial pack still prints;
+a correlation matrix wider than the page (every numeric column is in it) prints as a summary
+line and its largest pair deltas instead of the lower triangle.
 Sections follow mockup 10 (same order and headings).
 """
 
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from xml.sax.saxutils import escape
@@ -82,6 +85,12 @@ _GRID = TableStyle(
     ]
 )
 _PARAMS_MAX = 120
+# The correlation-matrix delta prints as a lower triangle up to this many columns: 15 value columns
+# of ``_CORR_MIN_WIDTH`` mm fill the 120 mm next to the 40 mm name column (A4 frame: 180 mm). A
+# narrower cell than the 6 pt padding made reportlab raise "negative availWidth" (58+ columns).
+_CORR_MATRIX_MAX = 16
+_CORR_MIN_WIDTH = 8.0
+_CORR_TOP_PAIRS = 10
 REGULATORY = {
     "obfuscate": (
         "The target holds pseudonymised data: values were replaced by keyed, consistent "
@@ -402,22 +411,58 @@ def _column_rows(report: Mapping[str, Any]) -> tuple[list[list[str]], float]:
     return rows or [[DASH] * 5], limit if isinstance(limit, int | float) else 0.05
 
 
+def _pair_deltas(names: Sequence[str], delta: Sequence[Any]) -> list[tuple[float, str, str]]:
+    """The lower triangle's finite numeric cells as ``(delta, row name, column name)``."""
+    pairs = []
+    for i, name in enumerate(names):
+        row = delta[i] if i < len(delta) and isinstance(delta[i], list) else []
+        for j in range(min(i, len(row))):
+            value = row[j]
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                if math.isfinite(value):
+                    pairs.append((abs(float(value)), name, names[j]))
+    return pairs
+
+
 def _corr(report: Mapping[str, Any]) -> list[Any]:
+    """The correlation-matrix delta: the lower triangle up to ``_CORR_MATRIX_MAX`` columns, else
+    (a wide table: every numeric column is in the matrix) a summary line and the
+    ``_CORR_TOP_PAIRS`` largest pair deltas — a full matrix would not fit the page."""
     matrix = report.get("corr_matrix") if isinstance(report.get("corr_matrix"), Mapping) else {}
     names = [str(n) for n in _list(matrix.get("columns"))] if isinstance(matrix, Mapping) else []
     delta = _list(matrix.get("delta")) if isinstance(matrix, Mapping) else []
     if len(names) < 2 or len(delta) < len(names):
         return []
+    caption = "Correlation-matrix delta |synthetic - source|"
+    if len(names) > _CORR_MATRIX_MAX:
+        pairs = sorted(_pair_deltas(names, delta), key=lambda p: -p[0])
+        largest = report.get("corr_max", pairs[0][0] if pairs else None)
+        line = (
+            f"{caption}: the matrix of {len(names)} columns is too wide to print; mean pair delta "
+            f"{_num(report.get('corr_delta'), '.3f')}, largest {_num(largest, '.3f')}."
+        )
+        flow: list[Any] = [Spacer(1, 3 * mm), _p(line, SMALL)]
+        if pairs:
+            top = pairs[:_CORR_TOP_PAIRS]
+            flow += [
+                _p(f"The {len(top)} largest pair deltas:", SMALL),
+                _table(
+                    ["Column", "Column", "Delta"],
+                    [[a, b, _num(d, ".3f")] for d, a, b in top],
+                    [75, 75, 20],
+                ),
+            ]
+        return flow
 
     def cell(i: int, j: int) -> str:
         row = delta[i] if isinstance(delta[i], list) else []
         return _num(row[j], ".3f") if j < i and j < len(row) else ""
 
     rows = [[names[i]] + [cell(i, j) for j in range(len(names) - 1)] for i in range(1, len(names))]
-    width = 120 / max(1, len(names) - 1)
+    width = max(_CORR_MIN_WIDTH, 120 / max(1, len(names) - 1))
     return [
         Spacer(1, 3 * mm),
-        _p("Correlation-matrix delta |synthetic - source|", SMALL),
+        _p(caption, SMALL),
         _table([""] + names[:-1], rows, [40] + [width] * (len(names) - 1)),
     ]
 

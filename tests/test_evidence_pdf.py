@@ -153,6 +153,55 @@ def test_malformed_numbers_never_break_the_render() -> None:
     assert render_evidence_pdf(odd, pack_sha256=SHA).startswith(b"%PDF-")
 
 
+def _wide_fidelity(n: int) -> dict[str, Any]:
+    """A fidelity report shaped like ``metrics.fidelity_report`` for ``n`` numeric columns."""
+    names = [f"$.BALANCE_M{i:02d}" for i in range(n)]
+    delta = [[0.0 if i == j else round(0.001 * ((i * 7 + j * 3) % 50), 4) for j in range(n)]
+             for i in range(n)]  # fmt: skip
+    if n > 3:
+        delta[n - 1][2] = delta[2][n - 1] = 0.731  # the largest pair delta
+    return {
+        **FIDELITY,
+        "corr_delta": 0.024,
+        "corr_max": 0.731,
+        "columns": [{"path": p, "metric": "ks", "distance": 0.02} for p in names],
+        "corr_matrix": {"columns": names, "delta": delta},
+    }
+
+
+def test_wide_correlation_matrix_renders_the_largest_pairs() -> None:
+    """80 numeric columns (review B1: 58+ raised "negative availWidth" and the route answered 500)."""
+    wide = _wide_fidelity(80)
+    text = _text(
+        render_evidence_pdf({**BASE, "fidelity": wide, "privacy": PRIVACY}, pack_sha256=SHA)
+    )
+    assert "matrix of 80 columns" in text and "0.731" in text
+    assert "$.BALANCE_M79" in text and "$.BALANCE_M02" in text  # the largest pair is listed
+
+
+def test_wide_linked_tables_render() -> None:
+    wide = _wide_fidelity(80)
+    linked = {"engine": "mostly", "score": 0.9, "tables": {"parent": wide, "child": wide}}
+    pack = {**BASE, "fidelity": linked, "privacy": PRIVACY}
+    text = _text(render_evidence_pdf(pack, pack_sha256=SHA))
+    assert text.count("matrix of 80 columns") == 2
+
+
+@pytest.mark.parametrize("n", [2, 8, 16, 17, 20, 57, 58, 120])
+def test_every_matrix_width_renders(n: int) -> None:
+    pack = {**BASE, "fidelity": _wide_fidelity(n), "privacy": PRIVACY}
+    assert render_evidence_pdf(pack, pack_sha256=SHA).startswith(b"%PDF-")
+
+
+def test_wide_matrix_with_malformed_cells_still_renders() -> None:
+    wide = _wide_fidelity(60)
+    wide["corr_matrix"]["delta"][5] = "x"
+    wide["corr_matrix"]["delta"][6][1] = None
+    wide["corr_matrix"]["delta"][7][1] = float("nan")
+    pack = {**BASE, "fidelity": wide, "privacy": PRIVACY}
+    assert render_evidence_pdf(pack, pack_sha256=SHA).startswith(b"%PDF-")
+
+
 def test_scan_pack_renders_the_ui_scan_section() -> None:
     scan = {"pages": 12, "forms": 3, "fields": 40, "personas": 5, "blocked_requests": {"POST": 7}}
     text = _text(render_evidence_pdf({**BASE, "job_kind": "scan", "scan": scan}, pack_sha256=SHA))
@@ -207,7 +256,7 @@ def pdf_app(db_settings, tmp_path: Path) -> Iterator[tuple[Any, Any]]:  # noqa: 
         asyncio.run(_truncate(db_settings))
 
 
-async def _seed_pack(tenant: str) -> str:
+async def _seed_pack(tenant: str, extra: dict[str, Any] | None = None) -> str:
     from dps import db, jobs
     from dps.jobs import JobKind, JobPhase
 
@@ -225,6 +274,7 @@ async def _seed_pack(tenant: str) -> str:
                 "job_id": job.id,
                 "reveal_map": [],
                 "errors": [],
+                **(extra or {}),
             },
             SHA,
         )
@@ -260,6 +310,19 @@ def test_pdf_route_renders_once_and_then_streams_the_artefact(pdf_app) -> None: 
         assert n == 1 and linked is not None
         listed = client.get("/api/v1/evidence/ev_pdf", headers=h).json()
         assert "evidence_pdf" in [a["kind"] for a in listed["artefacts"]]
+
+
+@pytest.mark.db
+def test_pdf_route_serves_a_wide_synthetic_pack(pdf_app) -> None:  # noqa: ANN001
+    """Review B1: an 80-numeric-column synthetic pack answered 500 internal_error."""
+    client_cls, make = pdf_app
+    with client_cls(make()) as client:
+        wide = {"fidelity": _wide_fidelity(80), "privacy": PRIVACY}
+        client.portal.call(functools.partial(_seed_pack, "pdfw", wide))
+        h = {"X-API-KEY": "dps_full", "X-DPS-Tenant": "pdfw"}
+        r = client.get("/api/v1/evidence/ev_pdf/pdf", headers=h)
+        assert r.status_code == 200 and r.content.startswith(b"%PDF-")
+        assert "matrix of 80 columns" in _text(r.content)
 
 
 @pytest.mark.db
