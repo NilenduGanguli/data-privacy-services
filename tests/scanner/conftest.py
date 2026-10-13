@@ -122,13 +122,18 @@ def scan_settings(settings: Settings) -> Settings:
 
 
 class RotCipher:
-    """Deterministic FF1 stand-in (the M0 test cipher)."""
+    """Deterministic FF1 stand-in: reverse, then rotate every character by 3.
+
+    A plain rotation (the M0 test cipher) is degenerate under M0's leading-zero cycle walking:
+    the first digit returns to ``0`` after exactly ten rounds, when every other digit has turned
+    full circle too, so ``CUST0048213`` "encrypts" to itself (the capture's leakage check then
+    rightly withholds it). Reversing first breaks that alignment."""
 
     def encrypt(self, alphabet: str, plaintext: str) -> str:
-        return "".join(alphabet[(alphabet.index(c) + 3) % len(alphabet)] for c in plaintext)
+        return "".join(alphabet[(alphabet.index(c) + 3) % len(alphabet)] for c in plaintext[::-1])
 
     def decrypt(self, alphabet: str, ciphertext: str) -> str:
-        return "".join(alphabet[(alphabet.index(c) - 3) % len(alphabet)] for c in ciphertext)
+        return "".join(alphabet[(alphabet.index(c) - 3) % len(alphabet)] for c in ciphertext)[::-1]
 
 
 @pytest.fixture

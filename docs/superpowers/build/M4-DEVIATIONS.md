@@ -640,3 +640,56 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   options list with no real option, more `plan_field` cases, a leaking transform raises
   `LeakageError("leakage")`, and neutral/credential/radio/checkbox/file/number/select-without-match
   fills: 14 tests (plan: 8).
+
+## Task 12 — Captures
+
+- `dps/layers/scanner/capture.py`: the plan's interface (`VARIANT_COLOUR`, `MASK_FILL`,
+  `OverlayBox`, `MaskBox`, `CaptureResult`, `crop_height`, `draw_masks`, `draw_overlays`,
+  `field_boxes`, `capture_screen`, `obfuscated_capture`), made stricter:
+  - **Frames (D-C).** Every capture, `unmasked=True` included, paints the box of every child frame
+    that was not read (label `FRAME`), and is withheld when the snapshot has `frames_failed` or an
+    unread frame cannot be located. Frame boxes and read frames' offsets are **measured on the live
+    page** at capture time (the snapshot's offsets can be stale after a late reflow); the plan's
+    `dom.unread_frame_boxes` rule is applied with fresh boxes.
+  - **Measured twice, fail closed.** Masks are measured right before and right after the
+    screenshot (CSS animations/transitions switched off in every read frame first); if any box
+    moved by more than 0.5 px, or one cannot be located the second time, the capture is withheld.
+    The plan measured once, so a page that moved while it was shot would get masks in the wrong
+    place.
+  - Field boxes use `bounding_box(timeout=2000)` (Playwright's default waits 30 s for an element
+    that is not there) and a missing element withholds.
+  - Mask rectangles round their far edge up (`int(x + w + 0.999)`): the plan's `int()` could leave
+    a one-pixel sliver of a glyph.
+  - `obfuscated_capture`: a pre-selected **select** cannot show a token, so it is boxed instead of
+    DOM-replaced; a rendered finding whose text node is unknown withholds (`residual`), a page that
+    errors while it is modified withholds; withheld reasons are codes (`frame`, `leakage`,
+    `guard_lock`, `residual`, `mask`).
+- `dps/layers/scanner/classify.py`: new `sensitive_prefilled(fields, classes, detector)` — the
+  `prefilled` argument the plan leaves to the caller: inputs/textareas showing a value and selects
+  showing a real selected option, when the field is classified or the detectors find something in
+  what it shows. Task 14 should use it.
+- `tests/scanner/helpers.py`: the plan's `DEMO_VALUE_KEYS`, `demo_cookie_state`, `guarded_context`
+  (Playwright/guard imports inside the function so the helpers stay importable without the extra).
+- `tests/scanner/conftest.py` — **`RotCipher` reverses before it rotates.** The plain rotation is
+  degenerate under M0's leading-zero cycle walking (`fpe_digits`, `leading_zero: preserve`): the
+  first digit returns to `0` after exactly ten rounds, when every other digit has turned full
+  circle, so `CUST0048213` "encrypted" to itself; the capture's leakage check then (rightly)
+  withheld the profile capture. A real FF1 key has no such cycle. Tests using the fixture keep
+  their assertions.
+- `tests/scanner/test_capture.py`: the plan's 6 tests (the synthesize one written out) plus
+  pre-filled inputs masked, obfuscated pre-filled inputs (no original left in any input), a fractional
+  mask edge, unread frames painted (also unmasked) and a failed frame withholding, numbered field
+  boxes, and the capture JSON holding no original: 10 tests (plan: 6).
+- **New `tests/scanner/test_capture_ocr.py` (programme acceptance G3).** Captures of `/profile`,
+  `/profile/contact` and `/apply/review` are read back with tesseract (2× upscale, `--psm 11`).
+  Positive control: the `unmasked` capture of each page reads **every** demo value (10/10, 3/3,
+  4/4). Masked originals: 0 readable (whole values, 5+-letter runs, 4+-digit runs). Obfuscate and
+  synthesize captures of `/profile` and `/profile/contact`: 0 readable (whole values, 5+-letter
+  runs, 6+-digit runs; policy-kept parts — an email token's domain, an Aadhaar token's last four,
+  a card token's IIN/last four, a test IIN — are not counted). Markers `browser` + `tesseract`;
+  tesseract from `DPS_TEST_TESSERACT_CMD` or `PATH` (the Mac has none: the run used a wrapper around
+  `docker run --network none --entrypoint tesseract data-privacy-services:local`). 7 tests.
+- **Open (not in Tasks 9–13):** text inside a *closed* shadow root, or inside an open one when a
+  scan runs with `scope.shadow_dom=false`, is rendered but never read, so no finding masks it.
+  Task 14 should extract with shadow DOM on for captures (or box open shadow hosts when it is off);
+  closed shadow roots need CDP (`DOM.getDocument(pierce=true)`) to be seen at all.

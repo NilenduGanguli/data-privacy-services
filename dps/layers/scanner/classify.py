@@ -432,3 +432,33 @@ def placeholder_shape(text: str | None) -> str | None:
         "9" if ch.isdigit() else "X" if ch.isupper() else "x" if ch.isalpha() else ch
         for ch in text[:24]
     )
+
+
+def sensitive_prefilled(
+    fields: list[FieldFacts],
+    classes: dict[str, FieldClassification],
+    detector: Detector,
+) -> list[tuple[FieldFacts, str]]:
+    """``(field, entity)`` for every field that *shows* a value a capture must hide: an input or
+    textarea pre-filled with a value, and a select with a real option selected, when the field is
+    classified or the detectors find something in what it shows. Password values are never read
+    (``FieldFacts.value`` is ``None`` for them)."""
+    out: list[tuple[FieldFacts, str]] = []
+    for f in fields:
+        if not f.visible:
+            continue
+        if f.tag == "select":
+            chosen = [o for o in f.options if o.selected and o.value.strip()]
+            shown = chosen[0].text if chosen else ""
+        else:
+            shown = f.value or ""
+        if not shown.strip():
+            continue
+        cls = classes.get(f.key)
+        entity = cls.entity_type if cls is not None else None
+        if entity is None:
+            hits = detector.detect(text=shown).findings
+            entity = hits[0].entity_type if hits else None
+        if entity is not None:
+            out.append((f, entity))
+    return out
