@@ -261,6 +261,9 @@ class PrepareReport(BaseModel):
     existing_rows: int | None = None
     checks: list[dict[str, Any]] = Field(default_factory=list)
     append_upper: int | None = None  # same-table append: exclusive upper bound = max(key) + 1
+    #: same-table append whose key is not an integer (Mongo ObjectId / prefixed text): the
+    #: exclusive read bound, encoded; every existing key sorts below it, every appended one above
+    append_upper_key: EncodedKey | None = None
 
 
 class LedgerMark(BaseModel):

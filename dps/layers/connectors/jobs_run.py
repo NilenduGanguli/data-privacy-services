@@ -537,9 +537,8 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             if max_rows
             else None
         )
-        if plan.same_table_append and report.append_upper is not None:
-            bound = report.append_upper
-            upper = (bound,) if upper is None else (min(int(upper[0]), bound),)
+        if plan.same_table_append:
+            upper = append_read_bound(upper, report, shape.key_columns())
         count = partition_count(
             total,
             partition_rows=spec.source.partition_rows or settings.partition_rows,
@@ -559,6 +558,33 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         if target is not None and target is not source:
             await target.close()
         await source.close()
+
+
+def _sort_value(value: Any, column: ColumnInfo) -> Any:
+    """A key value in a form that compares like the database orders it (an ObjectId as its hex
+    text, which the key codec also decodes to)."""
+    return str(value) if column.kind == "object_id" else value
+
+
+def append_read_bound(
+    upper: tuple[Any, ...] | None, report: PrepareReport, columns: list[ColumnInfo]
+) -> tuple[Any, ...] | None:
+    """The read bound of a same-table append: the writer's ``append_upper`` (integer keys) or
+    ``append_upper_key`` (M3: an ObjectId or a text prefix), clipped with the ``max_rows`` bound
+    ``upper``; every key the run appends sorts at or above it, so none is read back."""
+    if report.append_upper is not None:
+        bound: tuple[Any, ...] = (report.append_upper,)
+    elif report.append_upper_key is not None:
+        bound = decode_key(report.append_upper_key, columns)
+    else:
+        return upper
+    if upper is None:
+        return bound
+    first, second = (
+        tuple(_sort_value(v, c) for v, c in zip(key, columns, strict=True))
+        for key in (bound, upper)
+    )
+    return bound if first < second else upper
 
 
 async def _check_same_table_offset(

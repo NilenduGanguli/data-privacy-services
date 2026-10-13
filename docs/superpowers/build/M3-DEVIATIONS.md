@@ -731,3 +731,76 @@ test-first below.
 - Tests (`tests/connectors/test_mongo_connector.py`, 19): the plan's 14 plus UUID `_id` paging and
   range bounds, `sample_keys` under an upper bound and `key_at_offset` (with a filter and with a
   sample), `from_secret` rules, value-free driver error mapping, and the key tuple of a document.
+
+## Task 12 — `MongoWriter`, the registry branch, the run handler's non-integer append bound
+
+- **The ledger guard is the caller's mark** (contract §4.2, amendment 2026-10-12; plan: `update_one(
+  {_id, batch_no: {$lt: n}}, upsert=True)`, which applies a *skipped* batch and treats any lower
+  mark as free). In the batch's transaction `_advance` updates `{_id: "<job>:<partition>", batch_no:
+  mark.batch_no - 1}`; the first batch upserts on `batch_no: 0`, so a concurrent first batch either
+  write-conflicts (the driver's `with_transaction` retries it) or, once the other holder committed,
+  hits the duplicate `_id` → `LedgerConflict`. No match → `LedgerConflict` (M2's class, which the
+  partition handler stops on quietly; the plan's `ConnectorError("ledger_conflict")` would be
+  retried). An empty ledgered batch still records its mark (contract amendment; plan: `return 0`).
+  Mongo needs no batch-0 document before locking: document-level write conflicts serialise holders.
+  Tests: replayed and skipped batches fenced; two writers on two clients racing batch 1 with
+  `asyncio.gather` → exactly one `LedgerConflict`, one holder's values in every document.
+  Mutation checks: with the guard removed the replay and concurrency tests fail; with the ledger
+  update outside the session the commit-together test fails.
+- **Prepare refusals raise M2's `PrepareFailure(code, detail)`** (plan: `ConnectorError(code)`), as
+  the Oracle writer does (Task 6): `transactions_unsupported`, `no_key`, `target_missing`,
+  `pk_strategy_invalid`; write-time `path_unsupported` is a `PrepareFailure` too (the batch can
+  never succeed, so the partition fails instead of retrying).
+- **A duplicate key in the rows is M2's `PkCollision`** (`pk_collision`; plan: `ConnectorError(
+  "target_error", "mongo:11000")`), like PostgreSQL and Oracle, for append collisions and a unique
+  secondary index in a `table` load alike. `BulkWriteError.details` / messages are never read; the
+  test asserts the sentinel is absent from `str`, `repr`, `args` and that the context is suppressed.
+- **Key rules** (`_check_append`; plan: offset/prefix/token checks only):
+  - `generate` needs an ObjectId `_id` **and a target holding only ObjectIds** (new ObjectIds next
+    to int ids would make the collection key-less: mixed `_id` types);
+  - same-collection `generate`: the bound is the first ObjectId of a second after the newest `_id`
+    (`append_upper_key`), and `prepare` returns only once the clock is **one second past** it (plan:
+    returns as soon as the second turned), so a worker whose clock lags by up to a second still
+    generates ids above the bound; newest ids more than 5 s ahead (a skewed writer) →
+    `pk_strategy_invalid`. Residual: a worker clock skewed by more than a second could generate ids
+    below the bound (NTP assumed; logged as an open issue);
+  - same-collection `prefix` (text `_id`): the prefix must sort above every existing `_id` and is
+    itself the bound (`append_upper_key`); otherwise prefixed ids could fall inside the read range and
+    be read and appended again (plan: no bound for text ids);
+  - `token` refuses ObjectIds (plan) and also a same-collection target (tokens land anywhere in the
+    read range).
+- **`table` loads replace whole documents** (`ReplaceOne(upsert=True)`, as planned) also for
+  `table_load: upsert`; a projected read therefore writes projected documents. PostgreSQL's
+  "upsert leaves the other columns of matched rows untouched" is not mirrored: a leaf `$set` upsert
+  would turn an array path (`accounts.0.iban`) into an object with a `"0"` field on insert. Open
+  question for Task 19 (the console offers `truncate_insert` for Mongo table targets).
+- **Write concerns**: `table` loads write with `majority` on a replica set; transactions commit with
+  `majority` (`with_transaction(write_concern=…)`); operations inside a transaction use the default
+  handle (a transaction carries its own concern). Every write carries the `dps:` comment.
+- `prepare` reports `existing_rows` (estimated count) and value-free `checks` (`create_target`,
+  `existing_target`, `write_ledger`, `indexes_not_copied`) like PostgreSQL/Oracle; dry runs create
+  and delete nothing (test).
+- Documents are made BSON-safe on a copy before types are restored (`make_bson_safe` then
+  `coerce_bson`), so the transformer's rows are never mutated (plan: `coerce_bson` on a shallow copy
+  changed nested documents of the caller's rows).
+- `MongoWriter.target_collection()` is public (the commit-together test swaps it).
+- **Registry** (`registry.py`): the `mongo` branch (plan: "no registry change" — M2's registry had
+  no branch to reuse): lazy import (`engine_unavailable` without the driver), credentials flattened
+  by the shared `_flat_secret` (Oracle now uses it too), `client_id = job_id` (the comment), a
+  failed `open()` closes the client. **M2 touch point** `tests/test_registry.py`: the `("mongo",
+  "engine_unavailable")` row is removed (pinned in `test_registry_m3.py`, as Oracle's was in Task 8).
+- **`PIPELINE_ENGINES` stays `{postgres, oracle}`** (Task 8's log said MongoDB joins with Task 12).
+  Why: M2's run handler and discovery plan, project and write by *column name*, and the columns of a
+  Mongo shape share names (`$.profile.fullName` and `$.profile.dob` are both `profile`); admitting
+  Mongo jobs before Tasks 15/19 adapt the pipeline would accept jobs that cannot run correctly.
+  `test_pipeline_seams_m3.py`'s docstring records it.
+- **M2 touch point** `jobs_run.py`: the plan assumed the run handler bounds same-table appends with
+  `append_upper_key`; M2 read only `append_upper`. New `append_read_bound(upper, report, columns)`
+  (used by `_prepare`) clips the read to either bound, comparing ObjectIds as hex text (the codec's
+  form); M2's integer behaviour is unchanged (`tests/connectors/test_append_bound_m3.py`; M2's
+  `test_run_modes.py`, `test_run_failures.py` and the PostgreSQL conformance suite re-run green on the
+  lane's `source-pg`). Contract §4.2 `PrepareReport` documents the field.
+- Tests (`tests/connectors/test_mongo_writer.py`, 15): the plan's 13 (the duplicate-key case now
+  expects `PkCollision`; the commit-together case swaps the target handle instead of patching the
+  driver class) plus the concurrent holder, and "targets must exist / dry runs change nothing";
+  writes of changed values assert 0 surviving source values (`$in` counts).

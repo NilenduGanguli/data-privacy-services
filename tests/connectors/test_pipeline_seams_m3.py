@@ -34,7 +34,9 @@ def test_finalize_clears_the_write_ledger() -> None:
 
 def test_oracle_sources_pass_the_pipeline_engine_gates() -> None:
     """Discovery (``submit_discover``) and runs (``validate_run``) admit exactly the engines whose
-    connector is wired in the registry; MongoDB joins with its connector (Task 12)."""
+    connector is wired in the registry *and* whose rows the run pipeline has been proven on.
+    MongoDB's connector is in the registry (Task 12) but joins the gates with the pipeline's
+    document-path work and its end-to-end test (Tasks 15 and 19)."""
     from dps.layers.connectors.base import PIPELINE_ENGINES
 
     assert {"postgres", "oracle"} <= PIPELINE_ENGINES and "mongo" not in PIPELINE_ENGINES

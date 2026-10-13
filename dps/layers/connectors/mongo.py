@@ -10,6 +10,16 @@ paths and arrays (``[*]``), and ``mongo_docs.coerce_bson`` restores BSON types b
 ``selection.sample`` keeps a document when ``HMAC-SHA256(seed, BSON({_id}))[:4] < percent·2³²`` —
 a function of the document alone, so the count, every partition and a resumed page read one sample.
 
+Writes (:class:`MongoWriter`). Every document goes through ``make_bson_safe`` and ``coerce_bson``
+first. ``table`` upserts whole documents by ``_id`` (``ReplaceOne(upsert=True)``, unordered;
+idempotent, no ledger). ``in_place`` (``$set`` of the document's leaf paths, so a projected read
+never drops fields) and ``append`` (``InsertOne``; ``generate`` lets the driver assign a new
+ObjectId) run in one multi-document transaction with the partition's ledger document in
+``dps_write_ledger``: the batch is applied only when the ledger holds ``mark.batch_no - 1`` (the
+caller's own mark, contract §4.2), else :class:`LedgerConflict` and nothing is written. A standalone
+server has no transactions and is refused at ``prepare`` (``transactions_unsupported``). A
+duplicate key in the rows is :class:`PkCollision`; server messages are never read.
+
 Every operation carries ``comment = "dps:<action>:<job id>"`` (the analogue of Oracle's
 module/action/client_identifier; visible in the profiler and ``currentOp``).
 
@@ -21,24 +31,30 @@ quote the URI, so only error *codes* leave this module (:func:`mongo_code`), rai
 
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import hashlib
 import hmac
 import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, Final, Literal, TypeVar
 
 import bson
 from bson import ObjectId
-from pymongo import AsyncMongoClient
+from pymongo import AsyncMongoClient, InsertOne, ReplaceOne, UpdateOne
 from pymongo.errors import (
     BulkWriteError,
+    CollectionInvalid,
     ConfigurationError,
     ConnectionFailure,
+    DuplicateKeyError,
     PyMongoError,
     ServerSelectionTimeoutError,
 )
 from pymongo.read_concern import ReadConcern
 from pymongo.uri_parser import parse_uri
+from pymongo.write_concern import WriteConcern
 
 from dps.config import Settings
 from dps.jobs_models import ConnectionParams, Selection
@@ -49,14 +65,22 @@ from dps.layers.connectors.base import (
     Engine,
     JsonScalar,
     KeyRange,
+    LedgerConflict,
+    LedgerMark,
     ObjectRef,
+    PrepareReport,
+    ResolvedTarget,
     Row,
     TableShape,
     WriteMode,
     decode_key,
+    encode_key,
 )
-from dps.layers.connectors.mongo_docs import infer_shape
+from dps.layers.connectors.docpaths import leaf_updates
+from dps.layers.connectors.mongo_docs import coerce_bson, infer_shape, make_bson_safe
+from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.selection import compile_mongo_filter, validate_selection
+from dps.layers.connectors.targets import PrepareFailure
 from dps.observability import CONNECTOR_CALLS, get_logger
 
 logger = get_logger(__name__)
@@ -72,6 +96,10 @@ _AUTH_FAILED: Final = 18  # AuthenticationFailed: a retry cannot fix a refused l
 _TIME_LIMIT: Final = 50  # MaxTimeMSExpired
 _INTERNAL: Final = frozenset({LEDGER_COLLECTION})
 _SCAN_BATCH: Final = 1000
+_DUPLICATE_KEY: Final = 11000
+#: How long ``prepare`` waits for the clock to pass the newest ObjectId's second (same-collection
+#: ``generate``); a collection whose ids are further ahead was written by a skewed clock.
+_CLOCK_WAIT_MAX_S: Final = 5.0
 _CAPS: Final[dict[str, bool]] = {
     "transactions": False,
     "merge": True,
@@ -615,6 +643,18 @@ class MongoConnector:
         finally:
             await cursor.close()
 
+    async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> MongoWriter:
+        """A :class:`MongoWriter` for an ``in_place``, ``append`` or ``table`` target in the
+        connection's database.
+
+        Raises:
+            ConnectorError: ``target_invalid`` for a ``files`` target or one without an object.
+        """
+        if target.write_mode == "files" or target.object is None:
+            raise ConnectorError("target_invalid", "a MongoDB writer needs a collection target")
+        await self.open()
+        return MongoWriter(self, target, source_shape)
+
     # -- connection test --------------------------------------------------------------------------
     async def _privileges(self) -> list[dict[str, Any]] | None:
         """The session's privileges, or None on a server without authentication."""
@@ -708,3 +748,378 @@ class MongoConnector:
                 )
             )
         return checks
+
+
+# --- the writer (contract §4.2) ---------------------------------------------------------------------
+
+
+def _ledger_id(job_id: str, partition_no: int) -> str:
+    return f"{job_id}:{partition_no}"
+
+
+def _oid_floor(seconds: int) -> ObjectId:
+    """The smallest ObjectId of a second (timestamp, zero tail)."""
+    return ObjectId(seconds.to_bytes(4, "big") + bytes(8))
+
+
+class MongoWriter:
+    """Contract §4.2 ``BatchWriter`` for MongoDB targets (module docstring: atomicity, resume)."""
+
+    def __init__(
+        self, connector: MongoConnector, target: ResolvedTarget, source_shape: TableShape
+    ) -> None:
+        if target.object is None:
+            raise ConnectorError("target_invalid", "a MongoDB writer needs a collection target")
+        self._c, self._t, self._src = connector, target, source_shape
+        self._name = collection_name(target.object)
+        self._ledgered = target.write_mode in ("in_place", "append")
+
+    def __repr__(self) -> str:
+        return f"MongoWriter(collection={self._name!r}, mode={self._t.write_mode!r})"
+
+    # -- handles ----------------------------------------------------------------------------------
+    def target_collection(self) -> Any:
+        """The target collection with the default write concern (operations inside a
+        transaction take the transaction's)."""
+        return self._c.db.get_collection(self._name)
+
+    def _durable(self) -> Any:
+        """The target collection acknowledging by majority on a replica set (``table`` loads)."""
+        concern = WriteConcern("majority") if self._c.replica_set else WriteConcern()
+        return self.target_collection().with_options(write_concern=concern)
+
+    def _ledger(self) -> Any:
+        return self._c.db.get_collection(LEDGER_COLLECTION)
+
+    def _id_column(self) -> ColumnInfo | None:
+        return next((c for c in self._src.columns if c.path == "$._id"), None)
+
+    def _id_kind(self) -> str:
+        col = self._id_column()
+        return col.kind if col is not None else "other"
+
+    async def _call(self, op: str, call: Awaitable[T]) -> T:
+        return await self._c._guard(op, call, "target_error")
+
+    # -- prepare ----------------------------------------------------------------------------------
+    async def prepare(self, *, dry_run: bool) -> PrepareReport:
+        """Create (or empty) a ``table`` target, or check an ``in_place``/``append`` target and
+        create the ledger collection; ``dry_run`` only checks.
+
+        Raises:
+            PrepareFailure: ``transactions_unsupported`` (no replica set for a ledgered mode),
+                ``no_key`` (in place without a range key), ``target_missing``,
+                ``pk_strategy_invalid`` (module docstring of the key rules in :meth:`_check_append`).
+            ConnectorError: ``target_error`` / ``connection_failed`` from the server.
+        """
+        await self._c.open()
+        mode = self._t.write_mode
+        if mode not in ("table", "in_place", "append"):
+            raise PrepareFailure("target_invalid", "a MongoDB target is a collection")
+        if self._ledgered and not self._c.replica_set:
+            raise PrepareFailure(
+                "transactions_unsupported",
+                "in_place and append need a replica set: the batch and its ledger mark commit "
+                "together in one transaction",
+            )
+        if mode == "in_place" and self._src.key_source != "primary_key":
+            raise PrepareFailure("no_key", "in place needs one _id type to page and update by")
+        report = PrepareReport()
+        present = self._name in await self._collections()
+        if mode == "table":
+            await self._prepare_table(report, present=present, dry_run=dry_run)
+            return report
+        if not present:
+            raise PrepareFailure("target_missing", "the target collection does not exist")
+        if mode == "append":
+            await self._check_append(report)
+        if not dry_run:
+            await self._create(LEDGER_COLLECTION)
+            report.ledger = True
+        report.checks.append({"name": "write_ledger", "ok": True, "dry_run": dry_run})
+        return report
+
+    async def _collections(self) -> set[str]:
+        names = await self._call(
+            "prepare",
+            self._c.db.list_collection_names(
+                filter={"type": "collection"}, comment=self._c.comment
+            ),
+        )
+        return set(names)
+
+    async def _create(self, name: str) -> None:
+        try:
+            await self._c.db.create_collection(name, comment=self._c.comment)
+        except CollectionInvalid:
+            pass  # created concurrently: fine
+        except PyMongoError as exc:
+            raise connector_error("target_error", exc) from None
+
+    async def _prepare_table(self, report: PrepareReport, *, present: bool, dry_run: bool) -> None:
+        if not present:
+            if not self._t.create_if_missing:
+                raise PrepareFailure("target_missing", "the target collection does not exist")
+            if not dry_run:
+                await self._create(self._name)
+                report.created = True
+            report.checks.append({"name": "create_target", "ok": True, "dry_run": dry_run})
+            # a created collection holds no secondary index of the source's
+            report.checks.append({"name": "indexes_not_copied", "ok": True, "severity": "info"})
+            return
+        report.existing_rows = int(
+            await self._call(
+                "prepare",
+                self.target_collection().estimated_document_count(comment=self._c.comment),
+            )
+        )
+        if self._t.table_load == "truncate_insert" and not dry_run:
+            await self._call("prepare", self._durable().delete_many({}, comment=self._c.comment))
+            report.truncated = True
+        report.checks.append({"name": "existing_target", "ok": True})
+
+    async def _top_id(self) -> Any:
+        doc = await self._call(
+            "prepare",
+            self.target_collection().find_one(
+                {}, projection={"_id": 1}, sort=[("_id", -1)], comment=self._c.comment
+            ),
+        )
+        return None if doc is None else doc["_id"]
+
+    async def _check_append(self, report: PrepareReport) -> None:
+        """Key rules of ``append`` (``pk_strategy_invalid`` otherwise) and the read bound of a
+        same-collection append (every existing ``_id`` below it, every appended one above it).
+
+        * ``generate``: the source ``_id`` is an ObjectId and the target holds only ObjectIds
+          (new ids would otherwise mix types and leave the collection without a range key); on
+          the same collection the bound is the first ObjectId of a second after the newest id,
+          and ``prepare`` returns only once the clock has passed it by a second.
+        * ``offset``: an ``offset`` needs integer ids (bound ``max + 1``), a ``prefix`` text ids
+          (on the same collection the prefix must sort above every id; it is the bound).
+        * ``token``: never ObjectIds, and not on the same collection (a token can land anywhere
+          in the read range and be read and appended again).
+        """
+        pk, kind, same = self._t.pk_strategy, self._id_kind(), self._t.same_as_source
+        col = self._id_column()
+        invalid = PrepareFailure
+        if pk is None:
+            return
+        if pk.kind == "generate":
+            if kind != "object_id":
+                raise invalid(
+                    "pk_strategy_invalid", "generate assigns ObjectIds: the _id is not one"
+                )
+            other = await self._call(
+                "prepare",
+                self.target_collection().find_one(
+                    {"_id": {"$not": {"$type": "objectId"}}},
+                    projection={"_id": 1},
+                    comment=self._c.comment,
+                ),
+            )
+            if other is not None:
+                raise invalid("pk_strategy_invalid", "the target holds _ids that are not ObjectIds")
+            if same and col is not None:
+                bound = await self._clock_bound(await self._top_id())
+                report.append_upper_key = encode_key((bound,), [col])
+            return
+        if pk.kind == "offset":
+            if pk.offset is not None and kind != "int":
+                raise invalid("pk_strategy_invalid", "an offset needs integer _ids")
+            if pk.prefix is not None and kind != "text":
+                raise invalid("pk_strategy_invalid", "a prefix needs text _ids")
+            if not same or col is None:
+                return
+            top = await self._top_id()
+            if pk.offset is not None:
+                report.append_upper = int(top) + 1 if top is not None else None
+            elif pk.prefix is not None:
+                if top is not None and not pk.prefix > str(top):
+                    raise invalid(
+                        "pk_strategy_invalid",
+                        "a same-collection prefix must sort above every existing _id",
+                    )
+                report.append_upper_key = encode_key((pk.prefix,), [col])
+            return
+        if kind == "object_id":
+            raise invalid("pk_strategy_invalid", "ObjectIds cannot be tokenized")
+        if same:
+            raise invalid(
+                "pk_strategy_invalid", "a same-collection token append would read its own output"
+            )
+
+    async def _clock_bound(self, top: Any) -> ObjectId:
+        """The first ObjectId of a second after ``top``'s, once the clock is a second past it."""
+        floor = int(top.generation_time.timestamp()) if isinstance(top, ObjectId) else 0
+        bound_ts = max(floor + 1, int(time.time()))
+        started = time.monotonic()
+        while time.time() < bound_ts + 1:  # a second of margin for the other workers' clocks
+            if time.monotonic() - started > _CLOCK_WAIT_MAX_S:
+                raise PrepareFailure(
+                    "pk_strategy_invalid",
+                    "the collection holds ObjectIds from a clock ahead of ours",
+                )
+            await asyncio.sleep(0.05)
+        return _oid_floor(bound_ts)
+
+    # -- collisions and the ledger ----------------------------------------------------------------
+    async def precheck_collisions(self, keys: AsyncIterator[list[tuple[Any, ...]]]) -> int:
+        """How many of the streamed (transformed) ``_id``s already exist in the target."""
+        total = 0
+        async for batch in keys:
+            ids = [k[0] for k in batch]
+            for start in range(0, len(ids), _SCAN_BATCH):
+                chunk = ids[start : start + _SCAN_BATCH]
+                total += int(
+                    await self._call(
+                        "precheck",
+                        self.target_collection().count_documents(
+                            {"_id": {"$in": chunk}}, comment=self._c.comment
+                        ),
+                    )
+                )
+        return total
+
+    async def read_ledger(self, job_id: str, partition_no: int) -> LedgerMark | None:
+        """The partition's last committed mark, or None before its first batch."""
+        doc = await self._call(
+            "ledger",
+            self._ledger().find_one(
+                {"_id": _ledger_id(job_id, partition_no)}, comment=self._c.comment
+            ),
+        )
+        if doc is None or int(doc.get("batch_no", 0)) == 0:
+            return None
+        return LedgerMark(
+            job_id=job_id,
+            partition_no=partition_no,
+            batch_no=int(doc["batch_no"]),
+            last_key=doc["last_key"],
+            rows=int(doc.get("rows", 0)),
+        )
+
+    async def clear_ledger(self, job_id: str) -> int:
+        """Finalize: delete the job's ledger documents (the collection stays)."""
+        res = await self._call(
+            "ledger", self._ledger().delete_many({"job_id": job_id}, comment=self._c.comment)
+        )
+        return int(res.deleted_count)
+
+    async def _advance(self, session: Any, mark: LedgerMark) -> None:
+        """Move the partition's ledger from ``mark.batch_no - 1`` to ``mark.batch_no`` in the
+        batch's transaction; anything else is another holder's work (:class:`LedgerConflict`).
+
+        The first batch creates the document (upsert on ``batch_no: 0``); a concurrent first batch
+        conflicts on the document and, once the other commits, finds it taken (duplicate key).
+        """
+        fields = {
+            "job_id": mark.job_id,
+            "partition_no": mark.partition_no,
+            "batch_no": mark.batch_no,
+            "last_key": mark.last_key,
+            "rows": mark.rows,
+            "updated_at": dt.datetime.now(dt.UTC),
+        }
+        try:
+            res = await self._ledger().update_one(
+                {"_id": _ledger_id(mark.job_id, mark.partition_no), "batch_no": mark.batch_no - 1},
+                {"$set": fields},
+                upsert=mark.batch_no == 1,
+                session=session,
+                comment=self._c.comment,
+            )
+        except DuplicateKeyError:
+            raise LedgerConflict() from None
+        if res.matched_count != 1 and res.upserted_id is None:
+            raise LedgerConflict()
+
+    # -- writes -----------------------------------------------------------------------------------
+    def _documents(self, rows: list[Row]) -> list[dict[str, Any]]:
+        """BSON-safe copies of ``rows`` with the source's BSON types restored (input unchanged)."""
+        return [coerce_bson(make_bson_safe(dict(r)), self._src) for r in rows]
+
+    def _in_place_ops(self, docs: list[dict[str, Any]]) -> list[UpdateOne]:
+        writable = set(self._t.write_columns)
+        ops: list[UpdateOne] = []
+        for doc in docs:
+            updates = leaf_updates(doc)
+            if updates is None:
+                raise PrepareFailure(
+                    "path_unsupported", "a field name cannot be addressed with dot notation"
+                )
+            if writable:
+                updates = {k: v for k, v in updates.items() if k.split(".")[0] in writable}
+            if updates:
+                ops.append(UpdateOne({"_id": doc["_id"]}, {"$set": updates}))
+        return ops
+
+    def _append_doc(self, doc: dict[str, Any]) -> dict[str, Any]:
+        if self._t.generated_key:
+            return {k: v for k, v in doc.items() if k != "_id"}  # the driver assigns an ObjectId
+        return doc
+
+    async def write_batch(self, rows: list[Row], *, mark: LedgerMark) -> int:
+        """Write ``rows`` (and, for in_place/append, the ledger ``mark``) — one transaction.
+
+        Raises:
+            LedgerConflict: the ledger does not hold ``mark.batch_no - 1`` (nothing written).
+            PkCollision: a duplicate key in the rows (the batch rolled back).
+            PrepareFailure: ``path_unsupported`` (in place, a field name with a dot).
+            ConnectorError: ``target_error`` / ``connection_failed`` / ``statement_timeout``.
+        """
+        if not rows and not self._ledgered:
+            return 0
+        docs = self._documents(rows)
+        try:
+            if self._t.write_mode == "table":
+                ops = [ReplaceOne({"_id": d["_id"]}, d, upsert=True) for d in docs]
+                res = await self._durable().bulk_write(ops, ordered=False, comment=self._c.comment)
+                written = int(res.upserted_count + res.matched_count)
+            else:
+                written = await self._transaction(docs, mark)
+        except (LedgerConflict, PrepareFailure, ConnectorError):
+            raise
+        except (BulkWriteError, DuplicateKeyError) as exc:
+            CONNECTOR_CALLS.labels("mongo", "write", "error").inc()
+            if mongo_code(exc) == f"mongo:{_DUPLICATE_KEY}":
+                raise PkCollision() from None
+            raise connector_error("target_error", exc) from None
+        except PyMongoError as exc:
+            CONNECTOR_CALLS.labels("mongo", "write", "error").inc()
+            err = connector_error("target_error", exc)
+            logger.warning("mongo_call_failed", op="write", driver_code=err.detail)
+            raise err from None
+        CONNECTOR_CALLS.labels("mongo", "write", "ok").inc()
+        return written
+
+    async def _transaction(self, docs: list[dict[str, Any]], mark: LedgerMark) -> int:
+        mode = self._t.write_mode
+        ops: list[Any] = (
+            self._in_place_ops(docs)
+            if mode == "in_place"
+            else [InsertOne(self._append_doc(d)) for d in docs]
+        )
+
+        async def apply(session: Any) -> int:
+            await self._advance(session, mark)
+            if not ops:
+                return 0
+            res = await self.target_collection().bulk_write(
+                ops, ordered=False, session=session, comment=self._c.comment
+            )
+            return int(res.matched_count if mode == "in_place" else res.inserted_count)
+
+        concern = WriteConcern("majority")
+        async with self._c.client().start_session() as session:
+            return int(await session.with_transaction(apply, write_concern=concern))
+
+    async def finish_partition(
+        self, job_id: str, partition_no: int, *, batch_no: int | None = None
+    ) -> dict[str, Any]:
+        """Nothing to upload for a database target."""
+        return {}
+
+    async def close(self) -> None:
+        """The connector owns the client; nothing to release here."""
+        return None

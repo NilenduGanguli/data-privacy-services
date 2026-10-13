@@ -21,16 +21,17 @@ async def open_connector(
 ) -> Connector:
     """An **opened** connector for a database connection (the caller closes it).
 
-    ``job_id`` tags the sessions (PostgreSQL ``application_name``, Oracle ``client_identifier``).
-    The Oracle driver is imported only here, so a host without the ``connectors`` extra still
-    serves PostgreSQL.
+    ``job_id`` tags the sessions (PostgreSQL ``application_name``, Oracle ``client_identifier``,
+    MongoDB ``comment``). The Oracle and MongoDB drivers are imported only here, so a host without
+    the ``connectors`` extra still serves PostgreSQL.
 
     Raises:
         ConnectorError: ``engine_not_tabular`` for ``s3``/``pvc`` (file targets only),
-            ``engine_unavailable`` for ``mongo`` (until its connector lands) and for ``oracle``
-            without the driver extra, ``secret_unavailable`` for a secret without a username or
-            password, and the connector's own ``connection_failed`` (retryable only for a
-            network failure).
+            ``engine_unavailable`` for ``oracle``/``mongo`` without the driver extra,
+            ``secret_unavailable`` for an Oracle secret without a username or password,
+            ``database_required``/``connection_invalid`` for a MongoDB connection without a
+            database or with a URI/host that does not parse, and the connector's own
+            ``connection_failed`` (retryable only for a network failure).
     """
     if conn.engine in ("s3", "pvc"):
         raise ConnectorError(
@@ -51,13 +52,8 @@ async def open_connector(
                 "engine_unavailable", "the oracle driver extra is not installed"
             ) from None
         creds = credentials or await load_credentials(conn, settings=settings, kek=kek)
-        secret = {
-            "username": creds.username,
-            "password": creds.password.get_secret_value(),
-            **{name: value.get_secret_value() for name, value in creds.extra.items()},
-        }
         oracle = OracleConnector.from_secret(
-            secret, conn.params, settings, action=action, client_id=job_id
+            _flat_secret(creds), conn.params, settings, action=action, client_id=job_id
         )
         try:
             await oracle.open()
@@ -65,9 +61,32 @@ async def open_connector(
             await oracle.close()
             raise
         return oracle
-    raise ConnectorError(
-        "engine_unavailable", f"the {conn.engine} connector arrives with milestone M3"
-    )
+    if conn.engine == "mongo":
+        try:
+            from dps.layers.connectors.mongo import MongoConnector
+        except ImportError:
+            raise ConnectorError(
+                "engine_unavailable", "the mongo driver extra is not installed"
+            ) from None
+        creds = credentials or await load_credentials(conn, settings=settings, kek=kek)
+        mongo = MongoConnector.from_secret(
+            _flat_secret(creds), conn.params, settings, action=action, client_id=job_id
+        )
+        try:
+            await mongo.open()
+        except BaseException:
+            await mongo.close()
+            raise
+        return mongo
+    raise ConnectorError("engine_unavailable", f"no tabular connector for {conn.engine}")
+
+
+def _flat_secret(creds: Credentials) -> dict[str, str]:
+    """``username``/``password`` and the extra files (``dsn``, ``uri``) as plain strings, for a
+    connector's ``from_secret`` (which keeps them out of ``repr`` and errors)."""
+    secret = {"username": creds.username, "password": creds.password.get_secret_value()}
+    secret.update({name: value.get_secret_value() for name, value in creds.extra.items()})
+    return secret
 
 
 async def open_target_store(
