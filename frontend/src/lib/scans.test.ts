@@ -53,6 +53,25 @@ describe('the scan spec', () => {
     const cfg = configFromSpec(scanJob().spec);
     expect(cfg).toMatchObject({ url: 'http://demo-site:8410/apply', maxPages: 50, maxDepth: 3, deny: ['/logout', '/admin'], session: 'dps/ui/demo-onboarding', locale: 'en_IN', personas: 20 });
   });
+  it('keeps the RSA key wrap of a scan opened by link: the operator pastes the public key again', () => {
+    const spec = { ...scanJob().spec, mode: 'obfuscate', consistency: { scope: 'request', key_wrapped: true, wrapped: true, caller_key: false, caller_seed: false } };
+    const cfg = configFromSpec(spec);
+    expect(cfg).toMatchObject({ mode: 'obfuscate', wrap: 'rsa', pem: '' });
+    expect(configError(cfg)).toBe('Paste the RSA public key (PEM) to wrap the key with, or return it in clear.');
+    expect(buildSpec(cfg, null).consistency).toBeUndefined();
+    expect(configFromSpec({ ...spec, consistency: { key_wrapped: false } }).wrap).toBe('clear');
+    expect(configFromSpec(scanJob().spec).wrap).toBe('clear');
+  });
+  it('refuses a redacted start URL (a scan opened by link) until the full URL is entered again', () => {
+    const msg = 'The start URL of a saved scan is stored redacted; enter the full start URL again.';
+    for (const url of ['http://demo-site:8410/apply/{id}', 'http://demo-site:8410/apply?ref=<v>', 'http://demo-site:8410/track?email=<EMAIL>',
+      'http://demo-site:8410/a?<k>=<v>', 'http://demo-site:8410/accounts/%3CACCOUNT_NUMBER%3E', 'http://demo-site:8410/apply/%7Bid%7D/x']) {
+      expect(configError({ ...DEFAULT_CONFIG, url })).toBe(msg);
+    }
+    const cfg = configFromSpec({ ...scanJob().spec, url: 'http://demo-site:8410/apply/{id}?ref=<v>' });
+    expect(configError(cfg)).toBe(msg);
+    expect(configError({ ...cfg, url: 'http://demo-site:8410/apply/12345?ref=ABC' })).toBeNull();
+  });
 });
 
 describe('form checks', () => {
@@ -104,6 +123,13 @@ describe('session check', () => {
     expect(verdict.ok).toBe(true);
     expect(calls[0]).toBe('POST /api/v1/scans');
     expect(calls.filter((c) => c === 'GET /api/v1/scans/s_probe')).toHaveLength(2);
+  });
+  it('never probes a redacted start URL', async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (path: string) => { calls.push(path); return json({}, 500); }) as typeof fetch;
+    const verdict = await checkSession(auth, { ...DEFAULT_CONFIG, url: 'http://demo-site:8410/apply/{id}?ref=<v>' }, { sleep: async () => undefined });
+    expect(verdict).toEqual({ ok: false, text: '✗ The start URL of a saved scan is stored redacted; enter the full start URL again.' });
+    expect(calls).toEqual([]);
   });
   it('gives up after the timeout and cancels the probe', async () => {
     const calls: string[] = [];

@@ -92,6 +92,18 @@ describe('ScanFixtureServer', () => {
     expect(end.body.summary.evidence_id).toBeTruthy();
   });
 
+  it('stores the start URL value-free and the wrap as a flag, the way dps_job.spec does', async () => {
+    const { s } = server();
+    const pem = '-----BEGIN PUBLIC KEY-----\nAAA\n-----END PUBLIC KEY-----';
+    const { body } = await call<ScanCreated>(s, 'POST', '/api/v1/scans', spec({
+      url: 'http://demo-site:8410/apply/12345?ref=ABC#top', mode: 'obfuscate', consistency: { wrap_key: { type: 'rsa-oaep-256', public_key_pem: pem } },
+    }));
+    const got = await call<ScanDetail>(s, 'GET', `/api/v1/scans/${body.scan.id}`);
+    expect(got.body.scan.spec.url).toBe('http://demo-site:8410/apply/{id}?ref=<v>');
+    expect(got.body.scan.spec.consistency).toMatchObject({ key_wrapped: true });
+    expect(JSON.stringify(got.body.scan.spec)).not.toMatch(/12345|ABC|BEGIN PUBLIC KEY/);
+  });
+
   it('cancels a running scan and keeps what it found', async () => {
     const { s, advance } = server();
     const { body } = await call<ScanCreated>(s, 'POST', '/api/v1/scans', spec());

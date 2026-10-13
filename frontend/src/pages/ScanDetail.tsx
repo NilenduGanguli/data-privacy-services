@@ -18,7 +18,14 @@ export type DetailTab = 'parallel' | 'inventory' | 'captures';
 export interface DetailState {
   scanId: string; detail: Detail | undefined; pages: ScanPage[] | undefined; pageNo: number | null; pageDetail: ScanPageDetail | undefined;
   inventory: { items: InventoryRow[]; risk_flags: NumberedRiskFlag[] } | undefined; tab: DetailTab; side: ScanMode; view: DetailView;
-  notice?: string | null; error?: Error;
+  notice?: string | null;
+  /** The last refusal of GET /scans/{id}, /pages, /pages/{n} and /inventory (usePoll keeps retrying). */
+  error?: Error; pagesError?: Error; pageError?: Error; inventoryError?: Error;
+}
+
+/** A refusal in words (status, code, the server's value-free message), with the retry it implies. */
+function Refused({ what, error }: { what: string; error: Error }): JSX.Element {
+  return <div className="callout amber" role="alert">The {what} could not be loaded: {errorText(error)}. Retrying.</div>;
 }
 
 const TABS: [DetailTab, string][] = [['parallel', 'Parallel view'], ['inventory', 'Inventory'], ['captures', 'Captures']];
@@ -56,6 +63,7 @@ function PagesCard({ s, pages, flags }: { s: DetailState; pages: ScanPage[]; fla
   return (
     <div className="card crawl">
       <div className="card-head"><div className="card-title">Pages with forms</div><span className="chip slate">{forms.length}{isTerminal(s.detail?.scan) ? '' : ' so far'}</span></div>
+      {s.pagesError && <Refused what="pages" error={s.pagesError} />}
       {forms.map((p) => (
         <Link key={p.page_no} to={q('parallel', p.page_no)} className={p.page_no === s.pageNo ? 'on' : undefined} aria-current={p.page_no === s.pageNo ? 'true' : undefined}>
           <span className="pth">{pathOf(p.url_redacted, origin)}</span>
@@ -64,7 +72,7 @@ function PagesCard({ s, pages, flags }: { s: DetailState; pages: ScanPage[]; fla
             {p.personal_field_count === 0 && <span className="chip slate">{plural(p.field_count, 'field')}</span>}</span>
         </Link>
       ))}
-      {!forms.length && <div className="more">No page with forms has been filled yet.</div>}
+      {!forms.length && s.pages && <div className="more">No page with forms has been filled yet.</div>}
       {queued.length > 0 && <div className="more">Queued: {queued.slice(0, 5).join(', ')}{queued.length > 5 ? ` and ${queued.length - 5} more` : ''}</div>}
       <div className="card-head sub-head"><div className="card-title">Rendered personal data</div><span className="chip slate">{plural(rendered.length, 'page')}</span></div>
       {rendered.map((p) => (
@@ -140,18 +148,25 @@ export function ScanDetailBody({ s, onTab, onSide, onView, onExport }: {
             ) : page ? (
               <section className="card"><div className="card-title">{pathOf(page.page.url_redacted, crumbOrigin)} has no form</div>
                 <p className="hint">{rendersPii(page.page) ? 'It renders personal data: open its masked capture in the Captures tab.' : 'Nothing on this page needed filling.'}</p></section>
+            ) : s.pageNo && s.pageError instanceof ApiError && s.pageError.status === 404 ? (
+              <section className="card"><div className="card-title">This page is not part of the scan</div>
+                <p className="hint">Choose a page from the list.</p></section>
+            ) : s.pageNo && s.pageError ? (
+              <Refused what="page" error={s.pageError} />
             ) : s.pageNo ? (
               <section className="card"><div className="card-title">Loading the page…</div><div className="skeleton" style={{ height: 240, marginTop: 12 }} aria-hidden="true" /></section>
             ) : (
               <section className="card"><div className="card-title">Parallel view</div>
-                <p className="hint">{running ? 'Pages appear here as soon as the browser worker has filled and captured them.' : 'This scan found no page with a form.'}</p></section>
+                <p className="hint">{!s.pages ? 'Pages appear here once the list of pages has loaded.'
+                  : running ? 'Pages appear here as soon as the browser worker has filled and captured them.' : 'This scan found no page with a form.'}</p></section>
             )}
           </div>
         </div>
       )}
+      {s.tab === 'inventory' && s.inventoryError && <Refused what="inventory" error={s.inventoryError} />}
       {s.tab === 'inventory' && (s.inventory
         ? <ScanInventory rows={s.inventory.items} flags={s.inventory.risk_flags} onDownload={(f) => onExport('inventory', f)} />
-        : <section className="card"><div className="card-title">Inventory · whole scan</div><div className="skeleton" style={{ height: 200, marginTop: 12 }} aria-hidden="true" /></section>)}
+        : s.inventoryError ? null : <section className="card"><div className="card-title">Inventory · whole scan</div><div className="skeleton" style={{ height: 200, marginTop: 12 }} aria-hidden="true" /></section>)}
       {s.tab === 'captures' && <CapturesTab scanId={s.scanId} pages={pages} selected={s.pageNo} mode={sum.mode} origin={crumbOrigin} />}
     </main>
   );
@@ -195,7 +210,7 @@ export function ScanDetail(): JSX.Element {
 
   const s: DetailState = {
     scanId, detail: detail.data, pages: pages.data, pageNo, pageDetail: pageDetail.data, inventory: inventory.data, tab, side, view,
-    notice, error: detail.error,
+    notice, error: detail.error, pagesError: pages.error, pageError: pageDetail.error, inventoryError: tab === 'inventory' ? inventory.error : undefined,
   };
   return <ScanDetailBody s={s} onTab={(t) => set({ tab: t })} onSide={(m) => set({ fill: m })} onView={setView} onExport={(w, f) => void onExport(w, f)} />;
 }

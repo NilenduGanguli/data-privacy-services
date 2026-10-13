@@ -44,6 +44,13 @@ const refuse = (status: number, code: string, detail: string): Response => json(
 
 function params(url: string): URLSearchParams { return new URLSearchParams(url.split('?')[1] ?? ''); }
 
+/** The stored start URL as `redact_url` writes it (roughly): numeric path segments `{id}`, query values `<v>`, no fragment. */
+function redactedStart(url: string): string {
+  const [base, query] = url.split('#')[0].split('?');
+  const path = base.replace(/\/\d+(?=\/|$)/g, '/{id}');
+  return query ? `${path}?${query.split('&').map((kv) => `${kv.split('=')[0]}=<v>`).sort().join('&')}` : path;
+}
+
 export class ScanFixtureServer {
   private readonly now: () => number;
   private readonly durationMs: number;
@@ -206,7 +213,7 @@ export class ScanFixtureServer {
       id: rec.id, state, mode: spec.mode, created_at: new Date(rec.createdAt).toISOString(), updated_at: new Date(endMs).toISOString(),
       started_at: started, finished_at: terminal ? new Date(endMs).toISOString() : null,
       spec: {
-        url: spec.url.split('?')[0], url_origin: rec.origin, scope: spec.scope, auth: { storage_state_ref: spec.auth.storage_state_ref },
+        url: redactedStart(spec.url), url_origin: rec.origin, scope: spec.scope, auth: { storage_state_ref: spec.auth.storage_state_ref },
         mode: spec.mode, fill: spec.fill, parallel_view: spec.parallel_view, capture: spec.capture,
         consistency: { scope: spec.consistency?.scope ?? 'request', key_wrapped: !!spec.consistency?.wrap_key }, policy: spec.policy ?? null,
       },

@@ -87,7 +87,11 @@ export function compactJson(value: unknown, indent = ''): string {
 /** The one-page probe the Check session button runs (no fill, no screenshots, no SPA clicks). */
 export function probeSpec(cfg: ScanConfig): ScanSpecIn { return body(cfg, true); }
 
-/** The form state from a scan's value-free `dps_job.spec` (to restart with the same settings). */
+/**
+ * The form state from a scan's value-free `dps_job.spec` (to restart with the same settings). The
+ * stored `url` is redacted and the wrap key is not stored, so `configError` makes the operator enter
+ * the full start URL (when it holds a placeholder) and the RSA public key (when it was wrapped) again.
+ */
 export function configFromSpec(spec: Record<string, any>): ScanConfig {
   const scope = spec.scope ?? {};
   return {
@@ -98,7 +102,23 @@ export function configFromSpec(spec: Record<string, any>): ScanConfig {
     shadowDom: scope.shadow_dom ?? true, session: spec.auth?.storage_state_ref ?? '', mode: spec.mode === 'obfuscate' ? 'obfuscate' : 'synthesize',
     personas: spec.fill?.personas ?? DEFAULT_CONFIG.personas, locale: spec.fill?.locale ?? DEFAULT_CONFIG.locale,
     screenshots: spec.capture?.screenshots ?? true,
+    // the stored spec keeps only the flag, never the key: ask for the public key again rather than
+    // silently returning the restarted scan's key in clear
+    wrap: spec.consistency?.key_wrapped === true ? 'rsa' : 'clear', pem: '',
   };
+}
+
+/**
+ * The placeholders `redact_url` writes into a stored start URL (`<v>`, `<ENTITY>`, `<k>`, `{id}`,
+ * also percent-encoded). A URL holding one is the value-free copy of a saved scan, not a target.
+ */
+const REDACTION_PLACEHOLDER = /<[A-Za-z_]+>|%3C[A-Za-z_]+%3E|\{id\}|%7Bid%7D/i;
+
+/** Why the start URL cannot be crawled or probed, or null. */
+export function startUrlError(url: string): string | null {
+  if (!/^https?:\/\/[^/\s@]+/i.test(url.trim())) return 'The start URL must be an http(s) address without a user name or password.';
+  if (REDACTION_PLACEHOLDER.test(url)) return 'The start URL of a saved scan is stored redacted; enter the full start URL again.';
+  return null;
 }
 
 const DENY_PATH = /^\/[A-Za-z0-9._~\-/*{}]*$/;
@@ -112,7 +132,8 @@ export function denyPathError(path: string, existing: string[]): string | null {
 
 /** The first input the API would refuse, in words, or null. */
 export function configError(cfg: ScanConfig): string | null {
-  if (!/^https?:\/\/[^/\s@]+/i.test(cfg.url.trim())) return 'The start URL must be an http(s) address without a user name or password.';
+  const url = startUrlError(cfg.url);
+  if (url) return url;
   if (!Number.isInteger(cfg.maxPages) || cfg.maxPages < 1 || cfg.maxPages > MAX_PAGES) return `Max pages must be between 1 and ${MAX_PAGES}.`;
   if (!Number.isInteger(cfg.maxDepth) || cfg.maxDepth < 0 || cfg.maxDepth > MAX_DEPTH) return `Max depth must be between 0 and ${MAX_DEPTH}.`;
   if (!Number.isInteger(cfg.personas) || cfg.personas < 1 || cfg.personas > MAX_PERSONAS) return `Personas must be between 1 and ${MAX_PERSONAS}.`;
@@ -155,6 +176,8 @@ export async function checkSession(auth: Auth, cfg: ScanConfig, opts: { sleep?: 
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => { window.setTimeout(r, ms); }));
   const now = opts.now ?? (() => Date.now());
   const until = now() + (opts.timeoutMs ?? 60_000);
+  const bad = startUrlError(cfg.url);
+  if (bad) return { ok: false, text: `✗ ${bad}` };
   const created = await api.scans.create(auth, probeSpec(cfg));
   const id = created.scan.id;
   for (;;) {

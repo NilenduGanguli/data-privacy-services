@@ -6,6 +6,7 @@ import { FieldInventory, ScanInventory } from '../components/scanner/FieldInvent
 import { ParallelView } from '../components/scanner/ParallelView';
 import { RiskFlags } from '../components/scanner/RiskFlags';
 import { demoScan, inventoryRows, scanJob, summary } from '../lib/scanFixtures';
+import { ApiError } from '../lib/api';
 import type { ScanPageDetail } from '../lib/types';
 import { render, text } from '../test/render';
 import { ScanDetail, ScanDetailBody, type DetailState } from './ScanDetail';
@@ -165,6 +166,30 @@ describe('Inventory and captures tabs in the page', () => {
   });
   it('renders the captures tab', () => {
     expect(text(body({ tab: 'captures', pageNo: 9 }))).toContain('Capture · /profile');
+  });
+});
+
+describe('refusals of the pages, page and inventory routes', () => {
+  const refused = new ApiError(500, 'internal error', 'internal');
+  it('a page that is not part of the scan (404) says so instead of loading forever', () => {
+    const t = text(body({ pageNo: 999, pageDetail: undefined, pageError: new ApiError(404, 'not found', 'not_found') }));
+    expect(t).toContain('This page is not part of the scan');
+    expect(t).not.toContain('Loading the page');
+  });
+  it('any other refusal of the page shows the error, not a skeleton', () => {
+    const h = body({ pageNo: 2, pageDetail: undefined, pageError: refused });
+    expect(text(h)).toContain('The page could not be loaded: 500 internal: internal error. Retrying.');
+    expect(text(h)).not.toContain('Loading the page');
+    expect(h).toMatch(/class="callout amber" role="alert"[^>]*>The page could not be loaded/);
+  });
+  it('a refused pages list is shown in the pages card', () => {
+    const t = text(body({ pages: undefined, pageNo: null, pageDetail: undefined, pagesError: new ApiError(403, 'scope missing', 'forbidden') }));
+    expect(t).toContain('The pages could not be loaded: 403 forbidden: scope missing. Retrying.');
+  });
+  it('a refused inventory is shown in the inventory tab', () => {
+    const h = body({ tab: 'inventory', inventory: undefined, inventoryError: new ApiError(403, 'scope missing', 'forbidden') });
+    expect(text(h)).toContain('The inventory could not be loaded: 403 forbidden: scope missing. Retrying.');
+    expect(h).not.toContain('class="skeleton"');
   });
 });
 
