@@ -835,3 +835,71 @@ enforced below the page. Each item was established by a probe of the pinned Chro
 - **Still open (unchanged):** an input value changed by script after extraction (N8, Task 14);
   closed shadow roots; strings rendered from CSS `content`, `placeholder` attributes or canvas are
   not in the census.
+
+## Task 14 — The crawler
+
+- `dps/layers/scanner/runtime.py` as planned (`ScanSink`, `MemoryScanSink`, `ScanRuntime`,
+  `RunOutcome`, `LeaseLost`, no Playwright import), plus:
+  - `ScanRuntime` holds the raw start URL, the key, the seed and the storage state: those fields are
+    `repr=False` and `__repr__` shows the origin and the limits only.
+  - `RunOutcome.fills_skipped` (additive): fills not done (leakage, a frame the guard could not lock,
+    a tab that navigated during the fill); the evidence `scan` block carries it.
+- `dps/layers/scanner/crawler.py`: the plan's loop with the G2/G3 amendments the deviation log asks
+  of Task 14 (guard before the context, `close_scan_context` in `finally`, every tab through
+  `guard.close`, `await guard.arm(...)` → no fill on `False`, `beforeunload` left to the guard,
+  `CLICKABLES_JS` called with `{frameIndex, shadow}`, `template(url, classify)`), plus:
+  - **One click call site.** Both clicks (SPA discovery and SPA replay) go through
+    `ScanRunner._click`, which re-stamps the frame's clickables and clicks
+    `[data-dps-click="<frame>:<ordinal>"]`. The plan had two `.click(` sites; Task 15's static
+    check now asserts exactly one `.click(` in the whole scanner (crawler, on a `data-dps-click`
+    locator) and exactly two `self._click(` calls.
+  - **Pre-filled values via `classify.sensitive_prefilled`** (Task 12 deviation) instead of the
+    plan's inline list (it also covers a pre-selected option of a select).
+  - **`capture_screen(..., detector=self.detector)`** everywhere (G3 r1: without it every page
+    whose text changes after extraction is withheld).
+  - **Filled screens are read again after the fill.** The plan captured a filled tab with the
+    pre-fill snapshot; that snapshot's field values are the page's own pre-filled values (customer
+    data on `/profile/contact`), so its masks would cover the persona values the parallel view
+    exists to show, or, the other way round, miss text the fill caused. The tab is re-extracted
+    after the fill: the fields the fill touched stay readable (persona values or tokens), every
+    field the page pre-filled that the fill did not touch is masked, rendered findings of the
+    re-read text are masked, and every value the page showed before the fill (its rendered findings
+    and pre-filled values) is **swept** — boxed wherever the filled page still renders a copy.
+    For that `capture_screen` gained an additive keyword `sweep: Sequence[(value, label)] = ()`
+    (copies boxed, fields not boxed for it) and `capture.shown_values(fields)` is public.
+  - **A fill whose tab navigated is never captured.** After `fill_page` the tab's URL is compared
+    with the extracted one (Task 6 found an aborted navigation leaves `chrome-error://`); a
+    mismatch logs `fill/failed/navigated` and keeps the validation counts.
+  - **Navigation-log targets are value-free for other hosts.** A blocked request or a skipped
+    link to a host the scan may not reach is shown as `scheme://` + `guard.stored_host(host)`
+    (`*.bank-assets.invalid`, `{host}`), not `redact_origin` (which keeps the full host name — a
+    page can put data in a host name). Allowed hosts keep `redact_url`.
+  - Links are resolved against the page URL (`canonical(href, base=final)`); a form's `method` is
+    stored lower-cased and cut to 8 characters (page data).
+  - A replay whose parent frame or element is gone fails the navigation with code `replay`; a
+    scan that runs out of time marks the page in flight `failed/timeout` (the plan left it
+    `visiting`) and the rest of the frontier `skipped/budget`; blocked requests drained after the
+    context is closed are logged too.
+  - `_close` calls `guard.close` before `guard.release` (the plan released first, which drops
+    the page's attribution before its unload traffic is counted).
+- `dps/layers/scanner/inventory.py`: `field_records` as specified (labels, selectors, name/id,
+  autocomplete and pattern through `redact_text`; options counted; `prefilled` a flag); it builds
+  the validation messages with Task 13's `validation_records` (both modes).
+- `dps/layers/scanner/dom.py`: one comment reworded (`input[type=button|submit|reset]` →
+  "button-type `<input>`"); the Task 15 static check bans the word in scanner code outside
+  docstrings and JavaScript.
+- `demo/onboarding/site.mjs`: `/fixtures/dialogs` as planned. `tests/scanner/helpers.py`:
+  `make_runtime` as planned, plus `screenshots=` (fast tests switch captures off); it builds the
+  spec with `model_validate` (the scan models are `extra="forbid"`).
+- `tests/scanner/test_crawler.py`: the plan's 5 tests (the full crawl also checks the
+  credential field shows nothing, every visit is audited and logged, `customer_id`,
+  `account_number` and `application_ref` are absent from every row too) plus: runtime/target
+  `repr`, the memory sink, an SPA replay + time-budget test, and **an OCR test of every PNG the
+  crawler stores** for `/profile` and `/profile/contact` in both modes (original, annotated, both
+  filled screens, masked capture: 0 demo values readable; positive control: the same crawl with
+  unmasked originals shows ≥ half of them): 10 tests (plan: 5). The OCR test needs tesseract
+  (`DPS_TEST_TESSERACT_CMD`; run here with a wrapper around `docker run --network none
+  --entrypoint tesseract data-privacy-services:local`).
+- Process note: the plan gives the crawler code in full, so `crawler.py` was written from it before
+  the test file; the tests were then run against it (all green on the first run, each assertion
+  checked against a probe crawl's page/event dump and by viewing the filled and masked PNGs).

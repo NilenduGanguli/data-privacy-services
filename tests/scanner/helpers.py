@@ -9,8 +9,13 @@ from typing import Any
 import httpx
 
 from dps.config import Settings
+from dps.engine.service import PrivacyEngine
+from dps.engine.synth.surrogates import generate_synthesis_seed
+from dps.engine.transform.crypto import generate_key_material
+from dps.jobs_models import FillSpec, ScanScope, ScanSpec
 from dps.layers.scanner.models import FieldClassification, FieldFacts
-from dps.layers.scanner.urls import CrawlScope, Origin
+from dps.layers.scanner.runtime import ScanRuntime
+from dps.layers.scanner.urls import CrawlScope, Origin, canonical
 
 #: data.json keys whose values the demo site renders (customer data for the leak tests).
 DEMO_VALUE_KEYS = ("full_name", "aadhaar", "pan", "card_number", "email", "mobile", "address")
@@ -87,6 +92,53 @@ def demo_cookie_state(host: str) -> dict[str, Any]:
         ],
         "origins": [],
     }
+
+
+def make_runtime(
+    base_url: str,
+    settings: Settings,
+    engine: PrivacyEngine,
+    *,
+    path: str = "/apply",
+    deny: tuple[str, ...] = ("/logout", "/admin"),
+    cookies: bool = True,
+    personas: int = 3,
+    max_pages: int = 30,
+    max_depth: int = 3,
+    mode: str = "synthesize",
+    spa: bool = True,
+    screenshots: bool = True,
+) -> ScanRuntime:
+    """A scan of the demo site as the worker would open it (fresh key and seed, demo cookie)."""
+    spec = ScanSpec.model_validate(
+        {
+            "url": base_url + path,
+            "mode": mode,
+            "scope": ScanScope(
+                max_pages=max_pages, max_depth=max_depth, deny=list(deny), spa_clicks=spa
+            ).model_dump(),
+            "fill": FillSpec(personas=personas, locale="en_IN").model_dump(),
+            "capture": {"screenshots": screenshots},
+        }
+    )
+    origin = Origin.of(spec.url)
+    return ScanRuntime(
+        spec=spec,
+        start_url=canonical(spec.url) or spec.url,
+        key=generate_key_material("key"),
+        seed=generate_synthesis_seed(),
+        storage_state=demo_cookie_state(origin.host) if cookies else None,
+        policy=engine.policy(None),
+        locale="en_IN",
+        max_pages=max_pages,
+        max_depth=max_depth,
+        scope=CrawlScope(
+            start=origin,
+            same_origin=True,
+            registered_hosts=frozenset(settings.scan_registered_hosts_list),
+            deny=deny,
+        ),
+    )
 
 
 @asynccontextmanager

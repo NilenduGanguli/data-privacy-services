@@ -1,4 +1,5 @@
-"""Risk flags of a scanned page (spec §8 "Risk flags"); inventory, exports and evidence: Task 16.
+"""Risk flags of a scanned page (spec §8 "Risk flags"), the value-free field records the crawler
+stores; the inventory, the exports and the scan evidence pack.
 
 Every flag is value-free: field numbers, entity types and query key names that are plain names
 (:func:`dps.layers.scanner.urls.safe_key`) — never a value, a label or a URL. Each rule yields at
@@ -10,22 +11,34 @@ Nothing here imports Playwright or Pillow (the API imports this module).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from typing import Literal
 from urllib.parse import parse_qsl, urlsplit
 
+from dps.engine.detect.ensemble import Detector
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.layers.scanner.classify import (
     CREDENTIAL_ENTITIES,
     autocomplete_token,
     key_candidates,
+    placeholder_shape,
+    redact_text,
 )
 from dps.layers.scanner.models import (
     FieldClassification,
     FieldFacts,
+    FieldRecord,
     FormFacts,
     NumberedRiskFlag,
     RenderedFinding,
     RiskFlag,
     RiskFlagKind,
+    ValidationMessage,
+)
+from dps.layers.scanner.personas_fill import (
+    FieldPlan,
+    FillResult,
+    PersonaFill,
+    validation_records,
 )
 from dps.layers.scanner.urls import safe_key
 
@@ -253,4 +266,85 @@ def risk_codes_by_field(flags: list[RiskFlag]) -> dict[int, list[str]]:
             kinds = out.setdefault(field_no, [])
             if flag.flag not in kinds:
                 kinds.append(flag.flag)
+    return out
+
+
+# --- field records (what dps_scan_field holds) ---------------------------------------------------
+_MODES: tuple[Literal["synthesize", "obfuscate"], ...] = ("synthesize", "obfuscate")
+
+
+def field_records(
+    page_no: int,
+    fields: list[FieldFacts],
+    classes: dict[str, FieldClassification],
+    plans: dict[str, FieldPlan],
+    fills: dict[str, PersonaFill],
+    results: dict[str, dict[str, FillResult]],
+    flags: list[RiskFlag],
+    *,
+    detector: Detector,
+) -> list[FieldRecord]:
+    """One value-free :class:`FieldRecord` per extracted field.
+
+    Page text (label, selector, name and id attributes, the autocomplete attribute, the pattern)
+    goes through :func:`redact_text`; options are counted, never stored; a pre-filled value is
+    reduced to ``prefilled=True``. ``fill_synthesize`` / ``fill_obfuscate`` are what the two fills
+    showed (persona values, tokens of them, neutral samples; ``None`` for credentials), the
+    validation messages are both modes' verdicts with their text detector-redacted, and
+    ``fill_status`` is the plan's status, or ``failed`` when the synthesize fill of the field
+    failed. ``fills`` / ``results`` are keyed by mode (a mode that was not filled is absent).
+    """
+    risk = risk_codes_by_field(flags)
+    messages: dict[str, list[ValidationMessage]] = {}
+    for mode in _MODES:
+        if mode in results:
+            for key, recs in validation_records(
+                results[mode], mode=mode, detector=detector
+            ).items():
+                messages.setdefault(key, []).extend(recs)
+    syn, obf = fills.get("synthesize"), fills.get("obfuscate")
+    out: list[FieldRecord] = []
+    for f in fields:
+        cls = classes.get(f.key)
+        plan = plans.get(f.key)
+        status = plan.fill_status if plan is not None else "not_filled"
+        synth_result = results.get("synthesize", {}).get(f.key)
+        if synth_result is not None and synth_result.status == "failed":
+            status = "failed"
+        out.append(
+            FieldRecord(
+                page_no=page_no,
+                form_index=f.form_index,
+                field_no=f.field_no,
+                selector=redact_text(f.selector, detector, limit=200) or "",
+                tag=f.tag,
+                input_type=f.input_type or None,
+                name_attr=redact_text(f.name, detector),
+                id_attr=redact_text(f.id, detector),
+                label=redact_text(f.label, detector) if f.label else None,
+                label_source=f.label_source,
+                autocomplete=redact_text(f.autocomplete, detector, limit=64),
+                pattern=redact_text(f.pattern, detector, limit=200),
+                maxlength=f.maxlength,
+                required=f.required,
+                options_count=len(f.options) if f.tag == "select" else None,
+                entity_type=cls.entity_type if cls is not None else None,
+                sensitivity=cls.sensitivity if cls is not None else None,
+                confidence=cls.confidence if cls is not None else None,
+                detectors=list(cls.detectors) if cls is not None else [],
+                evidence=list(cls.evidence) if cls is not None else [],
+                fill_synthesize=syn.shown.get(f.key) if syn is not None else None,
+                fill_obfuscate=obf.shown.get(f.key) if obf is not None else None,
+                validation_messages=messages.get(f.key, []),
+                frame_index=f.frame_index,
+                in_shadow=f.in_shadow,
+                placeholder_shape=placeholder_shape(f.placeholder),
+                prefilled=bool(f.value),
+                persona_attr=plan.persona_attr if plan is not None else None,
+                obfuscate_method=obf.methods.get(f.key) if obf is not None else None,
+                fill_format=syn.formats.get(f.key) if syn is not None else None,
+                fill_status=status,  # type: ignore[arg-type]
+                risk_codes=risk.get(f.field_no, []),
+            )
+        )
     return out

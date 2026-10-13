@@ -138,6 +138,8 @@ ${[['Full name', DATA.full_name], ['Date of birth', DATA.dob], ['Customer ID', D
     { label: 'Email', name: 'email', id: 'email', type: 'email', autocomplete: 'email', required: true },
     { label: 'Application reference', name: 'ref', id: 'ref', pattern: 'APP-\\d{4}-\\d{4}' }] } },
   '/thanks': { title: 'Thank you', body: () => '<p>We received your details.</p>' },
+  // Not linked from any page: the crawler's dialog and popup handling (tests only).
+  '/fixtures/dialogs': { title: 'Dialogs', body: () => "<p>Pop-ups and alerts.</p><script>alert('Welcome to the demo'); window.open('/help', '_blank');</script>" },
   '/fixtures/labels': { title: 'Label fixture', body: () => `<form id="fixture" action="/fixture" method="post">
 <label for="a1">Customer email</label><input id="a1" name="a1">
 <label>Mobile number <input name="a2"></label>

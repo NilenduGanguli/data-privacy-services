@@ -350,7 +350,7 @@ REPLACE_TEXT_JS = r"""
 #: no ``button`` exclusion (only ``script``/``style``/``noscript``/``template``/``title`` and a
 #: ``textarea``'s source text, whose shown value is a field, are left out), every visible
 #: ``<option>`` (a listbox shows its options; a closed select's are not rendered and its shown
-#: option is swept as a field) and the label of every visible ``input[type=button|submit|reset]``.
+#: option is swept as a field) and the label of every visible button-type ``<input>``.
 #: Open shadow roots are always descended (whether or not the extraction read them). Text nodes are
 #: measured by range (``box: false``); options and input labels by their element box
 #: (``box: true``). ``known``: a text node the classification list holds (extracted or late).

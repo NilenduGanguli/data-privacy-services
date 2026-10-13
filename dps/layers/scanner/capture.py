@@ -43,7 +43,7 @@ import io
 import json
 import re
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -312,6 +312,11 @@ def _shown(f: FieldFacts) -> list[str]:
     if f.tag == "select":
         return [o.text for o in f.options if o.selected and o.text]
     return [f.value] if f.value else []
+
+
+def shown_values(fields: Sequence[tuple[FieldFacts, str]]) -> list[tuple[str, str]]:
+    """``(value, entity)`` for what each field shows (memory only: these are page values)."""
+    return [(shown, entity) for f, entity in fields for shown in _shown(f)]
 
 
 def _needles(values: list[tuple[str, str]]) -> dict[str, str]:
@@ -626,6 +631,7 @@ async def capture_screen(
     max_height: int,
     unmasked: bool = False,
     detector: Detector | None = None,
+    sweep: Sequence[tuple[str, str]] = (),
 ) -> bytes | None:
     """A full-page PNG with every rendered finding, every pre-filled field in ``prefilled``, every
     other copy of their values the page renders (any rendered string or field) and every child
@@ -636,7 +642,9 @@ async def capture_screen(
 
     Frames are those ``snapshot`` read, by identity (``frames`` must agree with them). Text the page
     renders that the extraction did not read is classified with ``detector`` and its hits boxed;
-    without a ``detector`` such text withholds. ``unmasked`` (local only; posture refuses it in
+    without a ``detector`` such text withholds. ``sweep`` adds ``(value, label)`` pairs whose
+    copies are boxed wherever the page still renders them (a filled screen: the originals the page
+    showed before the fill replaced them). ``unmasked`` (local only; posture refuses it in
     staging/prod) skips the value masks but still paints unread frames."""
     ext = extraction_of(snapshot)
     if ext is None:
@@ -652,7 +660,8 @@ async def capture_screen(
             for r in rendered
             if (r.frame_index, r.i) in text_of
         ]
-        values += [(shown, entity) for f, entity in prefilled for shown in _shown(f)]
+        values += shown_values(prefilled)
+        values += [(v, label) for v, label in sweep if v]
         plan = _MaskPlan(
             spans=[(r.frame_index, r.i, r.start, r.end, r.entity_type) for r in rendered],
             fields=list(prefilled),
