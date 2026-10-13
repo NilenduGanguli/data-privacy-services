@@ -109,11 +109,12 @@ export function evidenceLabel(detectors: string[]): string {
   return [...known, ...other].join(' + ') || '—';
 }
 
-/** "text · name=fullName", "text · pattern …", "text · maxlength=10", "select · name=gender". */
+/** "text · name=fullName", "text · pattern …", "text · maxlength=10", "select · name=gender" (one qualifier). */
 export function inputText(f: Pick<ScanField, 'tag' | 'input_type' | 'name_attr' | 'pattern' | 'maxlength'>): string {
   const kind = f.tag === 'input' ? (f.input_type ?? 'text') : f.tag;
-  return [kind, f.name_attr ? `name=${f.name_attr}` : null, f.pattern ? `pattern ${f.pattern}` : null,
-    !f.pattern && f.maxlength ? `maxlength=${f.maxlength}` : null].filter(Boolean).join(' · ');
+  // one qualifier, as in mockup 04: the pattern, else the maxlength, else the name
+  const q = f.pattern ? `pattern ${f.pattern}` : f.maxlength ? `maxlength=${f.maxlength}` : f.name_attr ? `name=${f.name_attr}` : null;
+  return q ? `${kind} · ${q}` : kind;
 }
 
 /**

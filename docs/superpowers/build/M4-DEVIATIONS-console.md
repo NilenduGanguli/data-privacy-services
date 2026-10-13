@@ -32,3 +32,16 @@ text; each row says what changed and why. The contract needed no change (no cont
 | `CrawlMap.tsx` | the per-page chip counts blocked **POST** events only ("2 POST blocked"); other blocked methods stay in the log | the mockup's chip names POST. |
 | `NavLog.tsx` | header says "local time" (mockup: "times in IST") | times render in the browser's zone (`fmtClock`). |
 | Visual check (plan Step 3) | done against the Vite dev server in fixture mode (private Playwright, 1440/390, dark/light; screenshots in `~/.cache/dps-build/shots-m4ui/`), not the compose stack | the scans API is built concurrently in `dps-wt-m4`; the compose-level walk runs after the lanes merge. |
+
+## Task 23 — Scan detail (`/scanner/scans/:scanId`, mockup 04)
+
+| File | Change | Why |
+|---|---|---|
+| `frontend/src/pages/ScanDetail.tsx` | Split into `ScanDetailBody` (pure: renders a `DetailState`) and `ScanDetail` (route container: polling, search params, downloads) | page tests render the body from the typed demo scan; the container is tested for its first frame. |
+| `ScanDetail.tsx` tabs | `.seg.tabs` of `role="tab"` buttons writing `?tab=` (replace, no history entry); the Screens/Fields switch is local state, not in the URL | contract §14 names only `tab`, `page`, `fill` as URL state. |
+| `ScanDetail.tsx` head actions | "Evidence pack" links to this scan's pack (`/reports/evidence/:id`; disabled with a tooltip until `evidence_id`); "Export inventory so far" while running; "Export personas" disabled with a tooltip until `export_artefacts.json` | the plan's table; the mockup's "Evidence packs" pointed at the reports list. |
+| `ScanDetail.tsx` pages list | a page without personal fields shows a slate `N fields` chip; pages being visited are listed with the queued ones ("Queued: …") instead of a "filling" chip | a page row has no form count before it is processed, so "filling" cannot be shown for a form page only. |
+| `CapturesTab.tsx` | per captured page: the masked capture PNG, a sentence naming the replaced entity types (from `rendered_findings`), "Download reversible map" (`capture_json`) with the reveal hint; `withheld` pages get the fail-closed sentence. The mockup's masked-DOM-text pane and replacement facts are not shown | no route returns the masked DOM text or per-value facts (contract §9); the reveal map is downloaded as the artefact it is. The selected page (`?page=`) is listed first and outlined. |
+| `ParallelView.tsx` Fields view | the original side shows `(empty)` or `••• masked` (pre-filled) per field with its number; it never shows a value; a password reads "typed, never stored", a file input "listed, never filled" | value-free rule (plan conventions); the mockup's left-side values are illustrative originals that DPS never stores. |
+| `FieldInventory.tsx` | adds a "Filled value" column (active side) and a per-field "N messages" toggle that expands the page's validation messages; `ScanInventory` (Inventory tab) with entity/sensitivity/"risk flags only" filters and CSV/JSON downloads | the plan's table (filled value column, expandable validation, whole-scan filters). |
+| `components/scanner/format.ts` `inputText` | one qualifier per input — the pattern, else the maxlength, else the name (`text · pattern …`, `select · name=gender`) | mockup 04's Input column; three qualifiers overflowed the table at 1440 px. |
