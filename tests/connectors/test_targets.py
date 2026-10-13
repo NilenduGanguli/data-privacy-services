@@ -12,13 +12,14 @@ from dps.engine.policy import MethodSpec
 from dps.engine.synth.surrogates import generate_synthesis_seed
 from dps.engine.transform.crypto import generate_key_material
 from dps.jobs_models import RunSpec, SpecError
-from dps.layers.connectors.base import ColumnInfo, PkGenerate, PkOffset
+from dps.layers.connectors.base import ColumnInfo, ObjectRef, PkGenerate, PkOffset
 from dps.layers.connectors.targets import (
     TYPE_RE,
     PrepareFailure,
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    check_projected_methods,
     created_column_type,
     is_same_table,
     method_for_column,
@@ -628,3 +629,114 @@ def test_created_column_types_follow_the_target_engine() -> None:
         assert err.value.code == "target_invalid"
     with pytest.raises(PrepareFailure):  # PostgreSQL keeps its own (lower-case) pattern
         created_column_type(num, None)
+
+
+def _oracle(snap: Any) -> Any:
+    """``snap`` as discovery stores an Oracle table: upper-case owner, table and column names."""
+    shape = snap.shape
+    columns = [
+        c.model_copy(update={"name": c.name.upper(), "path": f"$.{c.name.upper()}"})
+        for c in shape.columns
+    ]
+    upper_shape = shape.model_copy(
+        update={
+            "object": ObjectRef(owner="BANK", name="CUSTOMERS"),
+            "columns": columns,
+            "key": [k.upper() for k in shape.key],
+        }
+    )
+    classified = [
+        c.model_copy(update={"name": c.name.upper(), "path": f"$.{c.name.upper()}"})
+        for c in snap.columns
+    ]
+    return snap.model_copy(
+        update={
+            "engine": "oracle",
+            "object_ref": "BANK.CUSTOMERS",
+            "shape": upper_shape,
+            "columns": classified,
+        }
+    )
+
+
+ORA_SRC = make_connection(
+    "c_src",
+    engine="oracle",
+    roles=["source", "target"],
+    params={"host": "oracle", "port": 1521, "service_name": "FREEPDB1"},
+)
+
+
+def _ora_spec(selection: dict[str, Any], **target: Any) -> RunSpec:
+    run = spec(**(target or UAT_TABLE), selection=selection)
+    source = run.source.model_copy(update={"object": ObjectRef(owner="BANK", name="CUSTOMERS")})
+    return run.model_copy(update={"source": source})
+
+
+def test_submit_method_checks_cover_what_the_run_reads(settings: Settings) -> None:
+    """M3 G2 B4: the submit-time method checks run over the projection the run itself reads
+    (``read_projection``): an Oracle ``columns`` entry in lower case folds to the same column,
+    so a kept free-text column cannot pass unchecked."""
+    kept_notes = _oracle(
+        accepted_snapshot("c_src", "BANK.CUSTOMERS", notes_method=MethodSpec(method="keep"))
+    )
+    for columns in (["NOTES"], ["notes"], ["Notes"]):
+        run = _ora_spec({"columns": columns})
+        assert _code(run, settings, kept_notes, source_conn=ORA_SRC) == (
+            "text_method_invalid",
+            422,
+        ), columns
+    # a column outside the projection is not checked (it is neither read nor written)
+    _check(_ora_spec({"columns": ["email"]}), kept_notes, settings=settings, source_conn=ORA_SRC)
+    # synthesize mode: a key-needing method on a lower-case Oracle column is refused too
+    det = _oracle(accepted_snapshot("c_src", "BANK.CUSTOMERS"))
+    needs_key = det.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"synthesize_method": MethodSpec(method="det_token")})
+                if c.name == "FULL_NAME"
+                else c
+                for c in det.columns
+            ]
+        }
+    )
+    for columns in (["FULL_NAME"], ["full_name"]):
+        run = _ora_spec({"columns": columns}, **UAT_TABLE, mode="synthesize")
+        assert _code(run, settings, needs_key, source_conn=ORA_SRC) == (
+            "method_needs_key",
+            422,
+        ), columns
+    # a query's own select list is the projection too (PostgreSQL and Oracle alike)
+    pg_notes = accepted_snapshot("c_src", "bank.customers", notes_method=MethodSpec(method="keep"))
+    with_notes = spec(
+        **UAT_TABLE, selection={"query": "SELECT customer_id, notes FROM bank.customers"}
+    )
+    assert _code(with_notes, settings, pg_notes) == ("text_method_invalid", 422)
+    without = spec(
+        **UAT_TABLE, selection={"query": "SELECT customer_id, email FROM bank.customers"}
+    )
+    _check(without, pg_notes, settings=settings)
+
+
+def test_projected_method_checks_are_shared_with_prepare() -> None:
+    """The same rules ``prepare`` re-applies to its final projection (defence in depth)."""
+    kept_notes = accepted_snapshot(
+        "c_src", "bank.customers", notes_method=MethodSpec(method="keep")
+    )
+    with pytest.raises(SpecError) as err:
+        check_projected_methods(kept_notes, "obfuscate", ["customer_id", "notes"])
+    assert err.value.code == "text_method_invalid"
+    check_projected_methods(kept_notes, "obfuscate", ["customer_id", "email"])
+
+
+def test_a_keyless_upsert_is_refused_at_submit(settings: Settings) -> None:
+    """M3 G2 B3: an upsert needs a key to be idempotent; a key-less (ROWID-paged) source would
+    append on every run. Refused at submit; ``truncate_insert`` stays allowed."""
+    snap = _oracle(accepted_snapshot("c_src", "BANK.CUSTOMERS"))
+    keyless = snap.model_copy(
+        update={"shape": snap.shape.model_copy(update={"key_source": "rowid"})}
+    )
+    upsert = _ora_spec({}, **UAT_TABLE, table_load="upsert")
+    assert _code(upsert, settings, keyless, source_conn=ORA_SRC) == ("no_key", 422)
+    _check(_ora_spec({}), keyless, settings=settings, source_conn=ORA_SRC)
+    _check(upsert, snap, settings=settings, source_conn=ORA_SRC)  # keyed: upsert allowed

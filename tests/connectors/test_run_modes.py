@@ -15,9 +15,16 @@ from dps.engine.batch import reveal_row
 from dps.engine.policy import MethodSpec
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.jobs import JobState
-from dps.jobs_models import ClassificationSnapshot, ObjectRef, RunSpec, SnapshotOverride
+from dps.jobs_models import (
+    ClassificationSnapshot,
+    DiscoverSpec,
+    ObjectRef,
+    RunSpec,
+    SnapshotOverride,
+    SpecError,
+)
 from dps.layers.connectors.evidence import get_evidence
-from dps.layers.connectors.submit import submit_run
+from dps.layers.connectors.submit import submit_discover, submit_run
 from dps.worker import HandlerContext
 from tests.connectors.helpers import (
     db_key_enc,
@@ -193,6 +200,59 @@ async def test_table_mode_query_subset_writes_only_the_projected_columns(
     )
     ev = await get_evidence("t1", job.progress.evidence_id or "")
     assert ev is not None and ev.pack.verification["passed"]
+
+
+async def test_a_query_alias_cannot_put_a_column_under_a_kept_columns_name(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """M3 G2 B5: ``SELECT customer_id, email AS segment`` would give e-mail addresses
+    SEGMENT's reviewed method (``keep``); it is refused at submit (nothing queued or written)
+    and by a discovery job. The plain subset query still runs (the test above)."""
+    obj = await source_pg.customers_table(rows=200, name="a_customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat-a")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    methods = {c.name: c.method.method for c in snap.columns}
+    assert methods["segment"] == "keep" and methods["email"] != "keep"
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "a_customers_uat"},
+    }
+    table = f'"{source_pg.schema}".a_customers'
+    for query in (
+        f"SELECT customer_id, email AS segment FROM {table}",
+        f"SELECT c.customer_id, lower(c.email) AS segment FROM {table} c",
+        f"SELECT * FROM (SELECT customer_id, email AS segment FROM {table}) x",
+    ):
+        with pytest.raises(SpecError) as err:
+            await submit_run(
+                run_spec(src.id, obj, snap.id, target, source={"selection": {"query": query}}),
+                tenant_id="t1",
+                principal=LOCAL_PRINCIPAL,
+                settings=handler_ctx.settings,
+                kek=handler_ctx.kek,
+            )
+        assert (err.value.code, err.value.status) == ("selection_query_alias", 422), query
+    created = await source_pg.admin.fetchval(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = $1 AND table_name = 'a_customers_uat'",
+        source_pg.schema,
+    )
+    assert created == 0
+    disc = await submit_discover(
+        DiscoverSpec(
+            connection_id=src.id,
+            objects=[obj],
+            selection={"query": f"SELECT customer_id, email AS segment FROM {table}"},
+        ),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    failed = await drive(handler_ctx, "t1", disc.id)
+    assert (failed.state, failed.error_code) == (JobState.failed, "selection_query_alias")
 
 
 async def test_in_place_round_trips_with_the_returned_key(

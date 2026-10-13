@@ -25,7 +25,12 @@ Rejection codes: ``selection_parse_error``, ``selection_multiple_statements``,
 ``selection_function_denied``, ``selection_identifier_invalid``, ``selection_positional_param``,
 ``selection_param_missing``, ``selection_unknown_column``, ``selection_query_missing_key``,
 ``selection_not_parameterized``, ``selection_literal_unsupported``, ``selection_operator_denied``,
-``selection_engine_mismatch``.
+``selection_engine_mismatch``, ``selection_query_alias``.
+
+Given the object's shape, a query's outputs are bound to the object's columns by name (the read
+projection, :func:`read_projection`), so an output that carries a column's name must be that
+column itself (M3 G2 B5, :func:`_check_query_outputs`): otherwise the reviewed method of one
+column would be applied to another column's, an expression's or another table's values.
 """
 
 from __future__ import annotations
@@ -618,6 +623,95 @@ def read_projection(shape: TableShape, sel: Selection, engine: Engine) -> list[C
     return [c for c in shape.columns if c.name in names]
 
 
+def _object_name(shape: TableShape, engine: Engine) -> tuple[str | None, str]:
+    """The object's ``(owner, name)`` as folded query identifiers (Oracle upper case; a
+    PostgreSQL object without an owner lives in ``public``)."""
+    owner, name = shape.object.owner, shape.object.name
+    if engine == "oracle":
+        return (owner.upper() if owner else None), name.upper()
+    return owner or "public", name
+
+
+def _query_sources(stmt: exp.Select, shape: TableShape, engine: Engine) -> tuple[set[str], bool]:
+    """``(qualifiers, only)``: the names that qualify the object's columns in the query's own
+    ``FROM`` (the table alias, else the table name), and whether the object is its only source.
+
+    A source is the object when it is a plain table with the object's name (and, when
+    qualified, its owner); an unqualified name that a ``WITH`` clause defines is that CTE, not
+    the object. Derived tables, table functions, laterals and other tables are other sources.
+    """
+    owner, name = _object_name(shape, engine)
+    with_ = stmt.args.get("with_") or stmt.args.get("with")
+    ctes = {cte.alias_or_name for cte in with_.expressions} if with_ is not None else set()
+    from_ = stmt.args.get("from_") or stmt.args.get("from")
+    sources = [from_.this] if from_ is not None else []
+    sources += [join.this for join in stmt.args.get("joins") or []]
+    qualifiers: set[str] = set()
+    found = 0
+    for src in sources:
+        if not isinstance(src, exp.Table) or src.args.get("catalog") is not None:
+            continue
+        if not isinstance(src.this, exp.Identifier) or src.name != name:
+            continue
+        if src.args.get("db") is None:
+            if src.name in ctes:
+                continue
+        elif src.db != owner:
+            continue
+        qualifiers.add(src.alias_or_name)
+        found += 1
+    return qualifiers, found == 1 and len(sources) == 1
+
+
+def _own_column(node: exp.Expression, name: str, qualifiers: set[str], only: bool) -> bool:
+    """True when ``node`` is a plain reference to the object's column ``name``."""
+    if not isinstance(node, exp.Column) or isinstance(node.this, exp.Star) or node.name != name:
+        return False
+    if node.args.get("catalog") is not None or node.args.get("db") is not None:
+        return False
+    if node.args.get("table") is None:
+        return only  # unqualified: the object must be the only source it can come from
+    return node.table in qualifiers
+
+
+def _check_query_outputs(sel: Selection, engine: Engine, shape: TableShape) -> None:
+    """Refuse a query output that carries a column's name without being that column (B5).
+
+    Methods are reviewed per column of the object, and the read takes each output by name, so
+    ``email AS channel`` would give e-mail addresses CHANNEL's method (perhaps ``keep``). An
+    output named like a column must be that column: unaliased or aliased to itself, qualified
+    only by the object or its own alias (unqualified only when the object is the sole source).
+    ``*`` needs the object as the sole source and ``t.*`` the object's qualifier. Outputs with
+    other names are not columns of the object and are not read (:func:`read_projection`).
+    """
+    if sel.query is None:
+        return
+    stmt = _parse(sel.query, engine, wrap_where=False)
+    _fold(stmt, engine)
+    qualifiers, only = _query_sources(stmt, shape, engine)
+    known = {c.name for c in shape.columns}
+    refused = SelectionError(
+        "selection_query_alias",
+        "a query output named like a column of the object must be that column itself "
+        "(no alias, expression or other source)",
+    )
+    for proj in stmt.expressions:
+        if isinstance(proj, exp.Star):
+            if not only:
+                raise refused
+            continue
+        if isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star):
+            if proj.args.get("db") is not None or proj.table not in qualifiers:
+                raise refused
+            continue
+        name = proj.alias_or_name
+        if name not in known:
+            continue
+        inner = proj.this if isinstance(proj, exp.Alias) else proj
+        if not _own_column(inner, name, qualifiers, only):
+            raise refused
+
+
 def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None) -> None:
     """Raise the first :class:`SelectionError`; ``shape`` (when given) enables column/key checks."""
     if engine == "mongo":
@@ -648,6 +742,7 @@ def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None)
                 raise SelectionError(
                     "selection_unknown_column", "a projected column does not exist"
                 )
+        _check_query_outputs(sel, engine, shape)
         if not query_projects_keys(sel, engine, shape.key):
             raise SelectionError(
                 "selection_query_missing_key", "the query must project every key column"
@@ -667,7 +762,10 @@ _CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "selection_operator_denied",
         ),
     ),
-    ("identifiers_validated", ("selection_identifier_invalid", "selection_unknown_column")),
+    (
+        "identifiers_validated",
+        ("selection_identifier_invalid", "selection_unknown_column", "selection_query_alias"),
+    ),
     (
         "literals_bound",
         ("selection_param_missing", "selection_not_parameterized", "selection_literal_unsupported"),

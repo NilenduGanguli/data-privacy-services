@@ -10,8 +10,9 @@ detail): ``kek_unconfigured`` · ``engine_unavailable`` · ``snapshot_not_accept
 ``in_place_invalid`` · ``pk_transform_in_place`` · ``pk_strategy_required`` ·
 ``pk_strategy_invalid`` (token key not reversible, synthesize token, same-table token/prefix or a
 key that is not one integer column, an offset on a non-integer key or a prefix on a non-text key)
-· ``target_invalid`` (table, files) · ``key_method_not_injective`` · ``method_needs_key`` ·
-``text_method_invalid`` · ``group_not_found`` / ``group_key_mismatch`` · ``tabular_invalid``.
+· ``target_invalid`` (table, files) · ``no_key`` (a ``table`` upsert from a key-less source) ·
+``key_method_not_injective`` · ``method_needs_key`` · ``text_method_invalid`` (both over the
+projection the run reads) · ``group_not_found`` / ``group_key_mismatch`` · ``tabular_invalid``.
 
 A same-table append re-reads its own new rows unless every new key sorts above every selected
 key; only one integer key with ``generate`` (an owned, ascending, non-cycling sequence ahead of the
@@ -32,7 +33,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -46,6 +48,7 @@ from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpe
 from dps.layers.connectors.base import (
     PIPELINE_ENGINES,
     ColumnInfo,
+    Engine,
     ObjectRef,
     PkGenerate,
     PkOffset,
@@ -56,6 +59,7 @@ from dps.layers.connectors.base import (
     TableShape,
     WriteMode,
 )
+from dps.layers.connectors.selection import SelectionError, read_projection
 from dps.secrets import seed_fingerprint
 
 #: Catalogue type strings (``format_type``) allowed in created-table DDL and SQL casts.
@@ -153,11 +157,46 @@ def _reversible(method: MethodSpec) -> bool:
     return bool(spec and spec.reversible)
 
 
-def _projection(spec: RunSpec, snapshot: ClassificationSnapshot) -> set[str]:
-    columns = spec.source.selection.columns
-    if not columns:
-        return {c.name for c in snapshot.columns}
-    return set(columns) | set(snapshot.shape.key)
+def _projection(spec: RunSpec, snapshot: ClassificationSnapshot, engine: str) -> set[str]:
+    """The columns the run reads and writes, computed exactly as ``prepare`` computes them
+    (:func:`~dps.layers.connectors.selection.read_projection`: the query's own select list,
+    ``columns`` folded per engine, keys always), so no column the run writes escapes the method
+    checks (M3 G2 B4: a lower-case Oracle ``columns`` entry did). A selection that does not parse
+    yields every reviewed column, the strictest set; the selection itself is refused after."""
+    try:
+        read = read_projection(snapshot.shape, spec.source.selection, cast(Engine, engine))
+    except SelectionError:
+        return {c.name for c in snapshot.columns} | {c.name for c in snapshot.shape.columns}
+    return {c.name for c in read}
+
+
+def check_projected_methods(
+    snapshot: ClassificationSnapshot, mode: str, projection: Iterable[str]
+) -> None:
+    """Refuse a projected column whose method ``mode`` cannot run (value-free detail).
+
+    ``method_needs_key``: synthesize mode has no key material, so only key-less methods apply to
+    structured columns. ``text_method_invalid``: obfuscate mode tokenizes free text. Called by
+    :func:`validate_run` at submit and again by ``prepare`` over the run's final projection.
+
+    Raises:
+        SpecError: ``method_needs_key`` or ``text_method_invalid`` (422).
+    """
+    projected = set(projection)
+    for c in snapshot.columns:
+        if c.name not in projected:
+            continue
+        method = method_for_column(c, mode)
+        if mode == "synthesize" and not c.text_column and method.method not in KEYLESS_METHODS:
+            raise _fail(
+                "method_needs_key",
+                422,
+                f"{c.path}: {method.method} needs key material, which synthesize mode has none of",
+            )
+        if mode == "obfuscate" and c.text_column and method.method != FREE_TEXT_METHOD:
+            raise _fail(
+                "text_method_invalid", 422, f"{c.path}: free-text columns are tokenized (det_token)"
+            )
 
 
 def _key_columns(snapshot: ClassificationSnapshot) -> list[ColumnClassification]:
@@ -320,6 +359,14 @@ def validate_run(
     if mode == "append":
         _check_append(spec, snapshot)
     _check_target(spec, source_conn, target_conn)
+    if (
+        mode == "table"
+        and target.table_load == "upsert"
+        and snapshot.shape.key_source in ("rowid", "none")
+    ):
+        raise _fail(
+            "no_key", 422, "upsert needs a key: a key-less table loads with truncate_insert"
+        )
     token_keys = mode == "append" and isinstance(target.pk_strategy, PkToken)
     if mode in ("table", "files") or token_keys:
         for c in keys:
@@ -330,21 +377,7 @@ def validate_run(
                     422,
                     f"key column {c.path}: the method must be keep or reversible",
                 )
-    projected = _projection(spec, snapshot)
-    for c in snapshot.columns:
-        if c.name not in projected:
-            continue
-        method = method_for_column(c, spec.mode)
-        if spec.mode == "synthesize" and not c.text_column and method.method not in KEYLESS_METHODS:
-            raise _fail(
-                "method_needs_key",
-                422,
-                f"{c.path}: {method.method} needs key material, which synthesize mode has none of",
-            )
-        if spec.mode == "obfuscate" and c.text_column and method.method != FREE_TEXT_METHOD:
-            raise _fail(
-                "text_method_invalid", 422, f"{c.path}: free-text columns are tokenized (det_token)"
-            )
+    check_projected_methods(snapshot, spec.mode, _projection(spec, snapshot, source_conn.engine))
     _check_group(spec, group)
     if spec.options.tabular != "none":
         raise _fail("tabular_invalid", 422, "tabular synthesis arrives with milestone M5")

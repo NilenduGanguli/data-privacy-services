@@ -697,3 +697,32 @@ async def test_writer_needs_a_table_target(
 def test_customer_rows_are_synthetic() -> None:
     rows = customer_rows(3)
     assert all(str(r[3]).endswith("@example.com") for r in rows)
+
+
+async def test_a_keyless_upsert_is_refused_and_writes_nothing(
+    c: OracleConnector, oracle_conn: Any, oracle_schema: OracleTestSchema
+) -> None:
+    """M3 G2 B3: a key-less (ROWID-paged) source has no key to MERGE on, so an upsert would
+    append on every run. Prepare refuses it with ``no_key`` before touching the target; the
+    same load with ``truncate_insert`` is allowed."""
+    o = oracle_schema.owner
+    with oracle_conn.cursor() as cur:
+        cur.execute(f'CREATE TABLE "{o}"."H" (A NUMBER, B VARCHAR2(8))')
+        cur.execute(f'CREATE TABLE "{o}"."H_UP" (A NUMBER, B VARCHAR2(8))')
+        cur.executemany(f'INSERT INTO "{o}"."H_UP" VALUES (:1, :2)', [(i, "x") for i in range(7)])
+    oracle_conn.commit()
+    shape = await c.describe(_obj(oracle_schema, "H"))
+    assert shape.key_source == "rowid"
+    for name, dry_run in (("H_UP", False), ("H_UP", True), ("H_NEW", False)):
+        target = make_target(
+            shape, write_mode="table", table_load="upsert", object=_obj(oracle_schema, name)
+        )
+        writer = await c.writer(target, shape)
+        with pytest.raises(PrepareFailure) as err:
+            await writer.prepare(dry_run=dry_run)
+        assert err.value.code == "no_key"
+    assert _select(oracle_conn, f'SELECT COUNT(*) FROM "{o}"."H_UP"') == [(7,)]  # untouched
+    assert not _table_exists(oracle_conn, o, "H_NEW")  # nothing created
+    allowed = make_target(shape, write_mode="table", object=_obj(oracle_schema, "H_UP"))
+    report = await (await c.writer(allowed, shape)).prepare(dry_run=True)
+    assert report.checks

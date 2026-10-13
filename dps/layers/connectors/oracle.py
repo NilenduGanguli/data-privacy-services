@@ -983,7 +983,7 @@ class OracleWriter:
     ``in_place`` is an ``executemany`` UPDATE by key of the transformed columns only; ``append``
     an ``executemany`` INSERT (key omitted for an identity/default, or filled from the named
     sequence); ``table`` an idempotent ``MERGE`` on the key (key-less sources INSERT under the
-    ledger). For ``in_place``, ``append`` and key-less ``table`` loads every ``write_batch`` is ONE
+    ledger, after ``truncate_insert`` only: a key-less ``upsert`` is refused ``no_key``). For ``in_place``, ``append`` and key-less ``table`` loads every ``write_batch`` is ONE
     transaction: the partition's ledger row is made sure of (batch 0), advanced only from
     ``mark.batch_no - 1`` by a guarded UPDATE whose row count is the fence (else
     :class:`LedgerConflict`, nothing written), then the rows, then commit (contract §0 amendment
@@ -1152,6 +1152,11 @@ class OracleWriter:
         if mode == "in_place" and src.key_source in ("none", "rowid"):
             raise PrepareFailure(
                 "no_key", "in_place needs a primary key or a unique not-null index"
+            )
+        if mode == "table" and t.table_load == "upsert" and src.key_source in ("none", "rowid"):
+            # no key to MERGE on: an upsert would append on every run (M3 G2 B3)
+            raise PrepareFailure(
+                "no_key", "upsert needs a key: a key-less table loads with truncate_insert"
             )
         if mode == "append":
             if src.key_source == "none":

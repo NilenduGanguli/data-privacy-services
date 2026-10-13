@@ -581,3 +581,59 @@ test-first below.
   after_a_lost_checkpoint` — checkpoint #2 raises after its batch committed; the job succeeds with 1,200
   rows written and 1,200 in the target, 0 repeated rows, one resumed partition (evidence
   `resumed_partitions` 1), 0 surviving source e-mails, ledger cleared.
+
+## Review G2 round 2 fixes (Tasks 5-8) — `M3-G2-review-r2.md` B3, B4, B5
+
+- **B3 (a key-less Oracle `upsert` appended on every run) — refused twice.** `validate_run` refuses
+  `write_mode: table` + `table_load: upsert` when the snapshot's `shape.key_source` is `rowid`/`none` with
+  `no_key` · 422 (placed after the target checks; module docstring and contract §5.3 table amended), and
+  `OracleWriter._prepare_sync` refuses the same combination with `PrepareFailure("no_key", …)` before it
+  creates, truncates or ledgers anything (defence in depth for a spec that reaches prepare). Contract §4.2
+  now says key-less `table` loads are `truncate_insert` only. **Behaviour change:** a PostgreSQL key-less
+  `upsert` is also refused at submit now (it already failed `no_key` at prepare, like every key-less PG
+  load). Tests (failed before the fix): `test_targets.py::test_a_keyless_upsert_is_refused_at_submit`;
+  `test_oracle_writer.py::test_a_keyless_upsert_is_refused_and_writes_nothing` (existing target keeps its 7
+  rows, no target created, dry run refused too; `truncate_insert` still prepares);
+  `test_oracle_pipeline.py::test_a_keyless_upsert_is_refused_and_truncate_insert_reloads_exactly` (500-row
+  `LEADS`: upsert → 422 `no_key`; `truncate_insert` twice → 500 rows each time, 0 duplicated `LEAD_NO`
+  groups, 0 surviving source e-mails).
+- **B4 (lower-case Oracle `columns` bypassed the submit-time method checks; regression of r1) — one
+  projection at submit and run.** `targets._projection` now computes `read_projection(snapshot.shape,
+  selection, engine)` (the run's own projection: query select list, `columns` folded per engine, keys);
+  a selection that does not parse yields every column (strictest; the selection is refused right after by
+  `_bind`). The method rules moved into `targets.check_projected_methods(snapshot, mode, projection)`,
+  which `validate_run` calls at submit and `jobs_run._prepare` calls again over the final projection
+  (`SpecError` → `PrepareFailure`, same code). This reverses r1's "not changed: `targets._projection`"
+  entry. **Behaviour change:** a query that leaves a column out no longer has that column's method
+  checked at submit (it is neither read nor written). Tests (failed before the fix):
+  `test_targets.py::test_submit_method_checks_cover_what_the_run_reads` (Oracle `columns` `NOTES`/`notes`/
+  `Notes` with kept free-text NOTES → `text_method_invalid`; synthesize `full_name` with `det_token` →
+  `method_needs_key`; PG query subset with/without `notes`), `…::test_projected_method_checks_are_shared_
+  with_prepare`, `test_oracle_pipeline.py::test_lower_case_columns_meet_the_same_method_checks` (all three
+  spellings → 422, no target created).
+- **B5 (a query alias put a sensitive column under a kept column's name) — refused in `selection.py`, both
+  engines.** New `_check_query_outputs`, run by `validate_selection` whenever a shape is given (submit's
+  `_bind`, the discovery job, `jobs_run._prepare`, `OracleConnector._compile`, the `runs_as` preview): a
+  select-list item whose folded output name is a column of the object must be a plain reference to that
+  column (unaliased or aliased to itself; qualified only by the object's own `FROM` alias or unaliased
+  table name; unqualified only when the object is the only `FROM` source); `*` needs the object as the sole
+  source and `t.*` the object's qualifier. A source counts as the object when it is a plain table with the
+  object's name and, if qualified, owner (PG: `public` when the object has none); an unqualified name a
+  `WITH` clause defines is the CTE. New code `selection_query_alias` (checklist `identifiers_validated`).
+  Contract §5.2 amended (it had codified output names as column identities in r1). **Behaviour change
+  (M2 too):** queries such as `SELECT key, email AS channel`, `SELECT key, upper(channel) AS channel`, a
+  join that takes the object's column name from another table, `SELECT *` over a join or a derived table,
+  and a CTE shadowing the object's name are refused. Tests (failed before the fix):
+  `test_selection.py::test_a_query_output_named_like_a_column_must_be_that_column[postgres|oracle]` (15
+  refused and 9 allowed shapes per engine; checklist entry; no check without a shape);
+  `test_oracle_pipeline.py::test_a_query_alias_cannot_put_a_column_under_a_kept_columns_name` (three
+  alias queries → 422, no target created; a discovery job with the alias query fails
+  `selection_query_alias`; the plain query writes 400 rows, 0 surviving e-mails, 400/400 CHANNEL kept,
+  0 CHANNEL values equal a source e-mail, evidence passed); `test_run_modes.py::test_a_query_alias_cannot_
+  put_a_column_under_a_kept_columns_name` (PG: three alias queries → 422, no target created, discovery
+  job fails `selection_query_alias`).
+  - **Residual (not changed):** an *unqualified* table name in a query is taken to be the object when its
+    name matches, although the database resolves it through the PostgreSQL `search_path` or the Oracle
+    login's schema and synonyms. A query reading a same-named table of another schema would be read under
+    the object's reviewed methods. Qualifying the table (as every test and the console do) avoids it;
+    refusing unqualified names would break plain queries. Logged as an open issue.

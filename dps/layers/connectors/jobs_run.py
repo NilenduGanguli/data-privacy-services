@@ -95,6 +95,7 @@ from dps.layers.connectors.targets import (
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    check_projected_methods,
     resolve_target,
 )
 from dps.observability import LEASES_LOST, ROWS_WRITTEN, get_logger
@@ -388,6 +389,10 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         # what the connector reads (a query's own select list, ``columns``, keys always) is what
         # is planned, created and written: no column outside it is ever NULL-filled
         projection = [c.name for c in read_projection(shape, selection, engine)]
+        try:  # submit checked the same projection; re-checked over what is actually read
+            check_projected_methods(snapshot, spec.mode, projection)
+        except SpecError as exc:
+            raise PrepareFailure(exc.code, exc.detail) from None
         reviewed = {c.name for c in snapshot.columns}
         unreviewed = [n for n in projection if n not in reviewed]
         if unreviewed and mode != "in_place" and spec.options.unclassified != "keep":

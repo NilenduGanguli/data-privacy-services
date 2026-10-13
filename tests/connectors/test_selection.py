@@ -648,3 +648,80 @@ def test_read_projection_is_the_query_select_list_on_both_engines() -> None:
         "customer_id",
         "risk_score",
     ]
+
+
+PG_CONTACTS = TableShape(
+    object=ObjectRef(owner="crm", name="contacts"),
+    key=["contact_id"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=f"$.{n}", name=n, data_type="text", kind="text")
+        for n in ("contact_id", "email", "channel")
+    ],
+)
+ORA_CONTACTS = TableShape(
+    object=ObjectRef(owner="CRM", name="CONTACTS"),
+    key=["CONTACT_ID"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=f"$.{n}", name=n, data_type="VARCHAR2", kind="text")
+        for n in ("CONTACT_ID", "EMAIL", "CHANNEL")
+    ],
+)
+#: Queries that put something other than the object's own column under a column's name: the
+#: run would apply that column's reviewed method (``keep`` for CHANNEL) to other values.
+ALIAS_REFUSED = [
+    "SELECT contact_id, email AS channel FROM crm.contacts",
+    "SELECT contact_id, upper(channel) AS channel FROM crm.contacts",
+    "SELECT contact_id, email || '' AS channel FROM crm.contacts",
+    "SELECT c.contact_id, c.email AS channel FROM crm.contacts c",
+    "SELECT contact_id, (SELECT max(email) FROM crm.contacts) AS channel FROM crm.contacts",
+    # another source's column under the object's column name
+    "SELECT c.contact_id, o.channel FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT c.contact_id, channel FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT contacts.contact_id, contacts.channel FROM crm.other contacts",
+    "SELECT contact_id, channel FROM crm.other",
+    "SELECT contact_id, channel FROM other.contacts",
+    # a derived table or a CTE that shadows the object
+    "SELECT * FROM (SELECT contact_id, email AS channel FROM crm.contacts) x",
+    "SELECT x.contact_id, x.channel FROM (SELECT contact_id, email AS channel FROM crm.contacts) x",
+    "WITH contacts AS (SELECT contact_id, email AS channel FROM crm.contacts) "
+    "SELECT contact_id, channel FROM contacts",
+    "SELECT * FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT o.* FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+]
+ALIAS_ALLOWED = [
+    "SELECT contact_id, channel FROM crm.contacts",
+    "SELECT contact_id, channel AS channel FROM crm.contacts",
+    "SELECT c.contact_id, c.channel FROM crm.contacts c",
+    "SELECT contacts.contact_id, contacts.channel FROM crm.contacts",
+    "SELECT contact_id, channel FROM contacts",
+    "SELECT * FROM crm.contacts",
+    "SELECT c.* FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT c.contact_id, c.channel, o.x FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    # outputs that are not columns of the object are dropped from the read, not refused
+    "SELECT contact_id, upper(email) AS shout FROM crm.contacts",
+]
+
+
+@pytest.mark.parametrize("engine,shape", [("postgres", PG_CONTACTS), ("oracle", ORA_CONTACTS)])
+def test_a_query_output_named_like_a_column_must_be_that_column(
+    engine: Any, shape: TableShape
+) -> None:
+    """M3 G2 B5: the reviewed snapshot binds methods to the object's columns, so a query output
+    under a column's name must be that very column (unaliased or aliased to itself, qualified
+    only by the object or its own alias); anything else is refused at submit and discovery."""
+    for query in ALIAS_REFUSED:
+        with pytest.raises(SelectionError) as err:
+            validate_selection(Selection(query=query), engine, shape)
+        assert err.value.code == "selection_query_alias", query
+        checks = {c["name"]: c for c in selection_checks(Selection(query=query), engine, shape)}
+        assert checks["identifiers_validated"] == {
+            "name": "identifiers_validated",
+            "ok": False,
+            "code": "selection_query_alias",
+            "count": 0,
+        }, query
+        validate_selection(Selection(query=query), engine, None)  # no shape: no column check
+    for query in ALIAS_ALLOWED:
+        validate_selection(Selection(query=query), engine, shape)
