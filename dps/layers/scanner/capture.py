@@ -6,9 +6,17 @@ Rules:
   never leaves memory: :func:`capture_screen` paints a solid box (labelled with the entity type)
   over every rendered finding and every pre-filled field that shows a value *before* PNG
   encoding, and returns ``None`` (withheld, fail closed) when any of them cannot be located.
-  Every *other* copy of those values the page renders (text or field, ``SWEEP_MIN_CHARS``+
-  letters/digits, compared normalised) is boxed too; a copy split across text nodes withholds
-  (``sweep_copies``; M4-G3 review r1 B1).
+  Every *other* copy of those values the page renders (``SWEEP_MIN_CHARS``+ letters/digits,
+  compared normalised) is boxed too: the capture takes its own census of every string the read
+  frames render now (``dom.render_census``: every visible text node with no minimum length,
+  button text included, visible listbox options and ``input[type=button|submit|reset]`` labels)
+  and boxes every copy in it, plus every visible field showing one; a copy that is not wholly
+  inside located copies (split across nodes, e.g. one character per ``<span>``) withholds
+  (M4-G3 review r1 B1, r2 B1). With a detector, census strings the classification list does not
+  hold (buttons, options, input labels, short nodes) are classified and their hits boxed too.
+* A page whose extraction did not read everything it renders (``PageSnapshot.truncated``: a text
+  node longer than ``dom.TEXT_READ_CAP``, more than ``max_fields`` fields, more text than the read
+  budget) is never captured (M4-G3 review r2 B3, N9).
 * Frames are those the snapshot's extraction read, matched **by identity** (``dom.Extraction``),
   never by the caller's positional frame numbers; a read frame that no longer shows the document
   read (reloaded, navigated, read again) withholds. Every capture paints the box of every live
@@ -22,9 +30,11 @@ Rules:
   screenshot was taken the capture is withheld rather than masked in the wrong place.
 * :func:`obfuscated_capture` replaces rendered values and pre-filled input values **in the DOM**
   (tokens with a reversible map in ``obfuscate`` mode, surrogates in ``synthesize`` mode), arms
-  the guard first (a modified page must never navigate), re-reads what the page renders now,
-  boxes every original that survived (values split across nodes) and is withheld when one cannot
-  be boxed. A select cannot show a token, so a sensitive pre-selected option is boxed instead.
+  the guard first (a modified page must never navigate), rewrites each node whole (only while it
+  still holds the text read), re-reads what the page renders now, boxes every original that
+  survived (in buttons, options, input labels, or values split across nodes) through the same
+  census and is withheld when one cannot be boxed. A select cannot show a token, so a sensitive
+  pre-selected option is boxed instead.
 """
 
 from __future__ import annotations
@@ -57,10 +67,13 @@ from dps.layers.scanner.dom import (
     REPLACE_TEXT_JS,
     SCROLL_JS,
     SET_VALUES_JS,
+    CensusItem,
     Extraction,
+    census_rects,
     extract_page,
     extraction_of,
     late_texts,
+    render_census,
     stamped,
     text_rects,
 )
@@ -101,6 +114,8 @@ _ZERO = Rect(x=0, y=0, w=0, h=0)
 SWEEP_MIN_CHARS = 4
 #: ``(frame_index, text node i, start, end, label)``
 Span = tuple[int, int, int, int, str]
+#: ``(position in the census list, start, end, label)``
+CensusSpan = tuple[int, int, int, str]
 
 
 @dataclass(frozen=True)
@@ -299,49 +314,105 @@ def _shown(f: FieldFacts) -> list[str]:
     return [f.value] if f.value else []
 
 
-def sweep_copies(
-    texts: list[TextFacts], fields: list[FieldFacts], values: list[tuple[str, str]]
-) -> tuple[list[Span], list[tuple[FieldFacts, str]]] | None:
-    """Every copy of every ``(value, label)`` with at least ``SWEEP_MIN_CHARS`` letters/digits that
-    the page renders: text spans ``(frame, i, start, end, label)`` and visible fields showing it,
-    compared in ``normalise`` form (case, accents, spacing and punctuation do not hide a copy).
-    ``None`` (fail closed): a copy cannot be located — split across text nodes, or in a form the
-    character-wise mapping does not reproduce."""
+def _needles(values: list[tuple[str, str]]) -> dict[str, str]:
+    """normalised value -> label, for every value with ``SWEEP_MIN_CHARS``+ letters/digits."""
     needles: dict[str, str] = {}
     for value, label in values:
         n = normalise(value)
         if len(n) >= SWEEP_MIN_CHARS:
             needles.setdefault(n, label)
+    return needles
+
+
+def _occurrences(hay: str, needle: str) -> list[int]:
+    """Every start of ``needle`` in ``hay``, overlapping ones included."""
+    out: list[int] = []
+    pos = hay.find(needle)
+    while pos >= 0:
+        out.append(pos)
+        pos = hay.find(needle, pos + 1)
+    return out
+
+
+def _sweep(
+    texts: list[str], whole: list[bool], values: list[tuple[str, str]]
+) -> list[CensusSpan] | None:
+    """Every copy of every ``(value, label)`` (``SWEEP_MIN_CHARS``+ letters/digits, compared in
+    ``normalise`` form) in the strings ``texts``, rendered in this order: ``(piece, start, end,
+    label)`` with code-point offsets into the piece; a ``whole`` piece (measured as one box) is
+    returned once as ``(piece, 0, len, label)``.
+
+    ``None`` (fail closed): an occurrence of a value in the normalised concatenation of all pieces
+    is not wholly inside the copies located in single pieces — a copy split across pieces (one
+    character per node, or a periodic value straddling a located copy) — or a piece's
+    character-wise mapping does not reproduce its normalised form."""
+    needles = _needles(values)
     if not needles:
-        return [], []
-    normed = [normalise(t.text) for t in texts]
+        return []
+    normed = [normalise(t) for t in texts]
+    starts: list[int] = []
+    at = 0
+    for n in normed:
+        starts.append(at)
+        at += len(n)
     haystack = "".join(normed)
-    spans: list[Span] = []
-    boxed: list[tuple[FieldFacts, str]] = []
+    out: list[CensusSpan] = []
     for needle, label in needles.items():
-        located = 0
-        for t, n in zip(texts, normed, strict=True):
-            count = n.count(needle)
-            if not count:
+        hits = _occurrences(haystack, needle)
+        if not hits:
+            continue
+        size = len(needle)
+        covered: set[int] = set()
+        for piece, (text, n) in enumerate(zip(texts, normed, strict=True)):
+            if needle not in n:
                 continue
-            flat, where = _flat(t.text)
-            pos = flat.find(needle)
-            while pos >= 0:
-                spans.append(
-                    (t.frame_index, t.i, where[pos], where[pos + len(needle) - 1] + 1, label)
-                )
-                located += 1
-                pos = flat.find(needle, pos + len(needle))
-            if flat.count(needle) != count:
+            flat, where = _flat(text)
+            if flat != n:
                 return None
-        if haystack.count(needle) > located:
-            return None  # a copy split across nodes cannot be boxed as one value
-        boxed += [
+            base = starts[piece]
+            if whole[piece]:
+                out.append((piece, 0, len(text), label))
+                covered.update(range(base, base + len(n)))
+                continue
+            for pos in _occurrences(n, needle):
+                out.append((piece, where[pos], where[pos + size - 1] + 1, label))
+                covered.update(range(base + pos, base + pos + size))
+        for h in hits:
+            if any(q not in covered for q in range(h, h + size)):
+                return None  # a copy split across pieces cannot be boxed as one value
+    return out
+
+
+def _swept_fields(
+    fields: list[FieldFacts], values: list[tuple[str, str]]
+) -> list[tuple[FieldFacts, str]]:
+    """The visible fields showing a copy of one of ``values`` (``SWEEP_MIN_CHARS``+)."""
+    out: list[tuple[FieldFacts, str]] = []
+    for needle, label in _needles(values).items():
+        out += [
             (f, label)
             for f in fields
             if f.visible and any(needle in normalise(s) for s in _shown(f))
         ]
-    return spans, boxed
+    return out
+
+
+def sweep_copies(
+    texts: list[TextFacts], fields: list[FieldFacts], values: list[tuple[str, str]]
+) -> tuple[list[Span], list[tuple[FieldFacts, str]]] | None:
+    """Every copy of every ``(value, label)`` with at least ``SWEEP_MIN_CHARS`` letters/digits in
+    the text nodes ``texts`` and the visible fields: text spans ``(frame, i, start, end, label)``
+    and fields showing it, compared in ``normalise`` form (case, accents, spacing and punctuation
+    do not hide a copy). ``None`` (fail closed): a copy cannot be located — split across text
+    nodes, or in a form the character-wise mapping does not reproduce (``_sweep``). Captures sweep
+    their census (``dom.render_census``), which holds every rendered string, not only ``texts``."""
+    found = _sweep([t.text for t in texts], [False] * len(texts), values)
+    if found is None:
+        return None
+    spans: list[Span] = [
+        (texts[p].frame_index, texts[p].i, start, end, label) for p, start, end, label in found
+    ]
+    return spans, _swept_fields(fields, values)
 
 
 def _unique_spans(spans: list[Span]) -> list[Span]:
@@ -350,6 +421,16 @@ def _unique_spans(spans: list[Span]) -> list[Span]:
     for s in spans:
         if s[:4] not in seen:
             seen.add(s[:4])
+            out.append(s)
+    return out
+
+
+def _unique_census(spans: list[CensusSpan]) -> list[CensusSpan]:
+    seen: set[tuple[int, int, int]] = set()
+    out: list[CensusSpan] = []
+    for s in spans:
+        if s[:3] not in seen:
+            seen.add(s[:3])
             out.append(s)
     return out
 
@@ -366,9 +447,10 @@ def _unique_fields(fields: list[tuple[FieldFacts, str]]) -> list[tuple[FieldFact
 
 @dataclass(frozen=True)
 class _MaskPlan:
-    """What a capture masks: ``spans`` and ``fields`` as given, every copy of ``values`` the page
-    renders (``sweep_copies``), and — with ``census`` — text rendered after the extraction
-    (classified with ``detector``; withheld without one)."""
+    """What a capture masks: ``spans`` and ``fields`` as given and — with ``census`` — every copy
+    of ``values`` in the page's census of rendered strings and in its visible fields, text
+    rendered after the extraction (classified with ``detector``; withheld without one) and, with a
+    ``detector``, the hits in census strings the classification list does not hold."""
 
     spans: list[Span]
     fields: list[tuple[FieldFacts, str]]
@@ -412,19 +494,36 @@ def _measurer(
                 for r in classify_rendered(new, detector=plan.detector):
                     spans.append((r.frame_index, r.i, r.start, r.end, r.entity_type))
                     values.append((text_of[(r.frame_index, r.i)][r.start : r.end], r.entity_type))
-        if values:
-            swept = sweep_copies(live.texts, live.fields, values)
-            if swept is None:
-                return None
-            spans += swept[0]
-            fields += swept[1]
+        items: list[CensusItem] = []
+        census: list[CensusSpan] = []
+        if plan.census and (values or plan.detector is not None):
+            got = await render_census(ext)
+            if got is None:
+                return None  # a frame changed or renders more than can be checked
+            items = got
+            if plan.detector is not None:
+                census += _classify_census(items, plan.detector, values)
+            if values:
+                swept = _sweep([it.text for it in items], [it.box for it in items], values)
+                if swept is None:
+                    return None
+                census += swept
+                fields += _swept_fields(live.fields, values)
         spans, fields = _unique_spans(spans), _unique_fields(fields)
+        census = _unique_census(census)
         if spans:
             rects = await text_rects(page, dict(ext.frames), live, [s[:4] for s in spans])
             for span, found in zip(spans, rects, strict=True):
                 if not found:
                     return None
                 masks += [MaskBox(rect=r, label=span[4]) for r in found]
+        if census:
+            offsets = {f.frame_index: f.offset for f in live.frames if f.read and f.offset}
+            rects = await census_rects(ext.frames, offsets, items, [c[:3] for c in census])
+            for c, found in zip(census, rects, strict=True):
+                if not found:
+                    return None
+                masks += [MaskBox(rect=r, label=c[3]) for r in found]
         for f, entity in fields:
             box = await _element_box(ext.frames.get(f.frame_index), f.key)
             if box is None:
@@ -433,6 +532,29 @@ def _measurer(
         return masks
 
     return measure
+
+
+def _classify_census(
+    items: list[CensusItem], detector: Detector, values: list[tuple[str, str]]
+) -> list[CensusSpan]:
+    """Detector hits in the census strings the classification text list does not hold (button
+    text, input button labels, listbox options, nodes under two characters): their spans (a box
+    item whole); each hit's value is appended to ``values`` so its other copies are swept too."""
+    extra = [
+        TextFacts(frame_index=it.frame_index, i=pos, text=it.text, in_table=False, label_hint=None)
+        for pos, it in enumerate(items)
+        if not it.known
+    ]
+    out: list[CensusSpan] = []
+    for r in classify_rendered(extra, detector=detector):
+        it = items[r.i]
+        out.append(
+            (r.i, 0, len(it.text), r.entity_type)
+            if it.box
+            else (r.i, r.start, r.end, r.entity_type)
+        )
+        values.append((it.text[r.start : r.end], r.entity_type))
+    return out
 
 
 def _same(a: list[MaskBox], b: list[MaskBox]) -> bool:
@@ -506,10 +628,11 @@ async def capture_screen(
     detector: Detector | None = None,
 ) -> bytes | None:
     """A full-page PNG with every rendered finding, every pre-filled field in ``prefilled``, every
-    other copy of their values the page renders (text or field) and every child frame the
-    snapshot did not read painted over; ``None`` = withheld (something could not be located, a
-    copy is split across text nodes, the page moved, a read frame no longer shows what was read, or
-    text rendered after the extraction could not be classified).
+    other copy of their values the page renders (any rendered string or field) and every child
+    frame the snapshot did not read painted over; ``None`` = withheld (the extraction did not read
+    everything the page renders (``snapshot.truncated``), something could not be located, a copy is
+    split across nodes, the page moved, a read frame no longer shows what was read, or text
+    rendered after the extraction could not be classified).
 
     Frames are those ``snapshot`` read, by identity (``frames`` must agree with them). Text the page
     renders that the extraction did not read is classified with ``detector`` and its hits boxed;
@@ -518,6 +641,8 @@ async def capture_screen(
     ext = extraction_of(snapshot)
     if ext is None:
         return None
+    if snapshot.truncated and not unmasked:
+        return None  # text or fields the extraction did not read are in no finding
     if unmasked:
         plan = _MaskPlan(spans=[], fields=[], values=[], detector=None, census=False)
     else:
@@ -564,6 +689,8 @@ async def obfuscated_capture(
     the tokenised pre-filled values, the reveal hints and the key id — never an original."""
     if unread_failed(snapshot):
         return CaptureResult(status="withheld", reason="frame")
+    if snapshot.truncated:  # text or fields the extraction did not read are in no finding
+        return CaptureResult(status="withheld", reason="truncated")
     ext = await _read_frames(page, frames, snapshot)
     if ext is None:  # not from extract_page, a read frame changed, or the caller's map disagrees
         return CaptureResult(status="withheld", reason="frame")
@@ -635,7 +762,9 @@ async def obfuscated_capture(
             if out_t[g] != t.text:
                 text_pairs[t.frame_index].append([t.i, out_t[g]])
         for frame_index, pairs in text_pairs.items():
-            await ext.frames[frame_index].evaluate(REPLACE_TEXT_JS, pairs)
+            # a node is rewritten whole, and only while it still holds the text that was read
+            if await ext.frames[frame_index].evaluate(REPLACE_TEXT_JS, pairs) != len(pairs):
+                return CaptureResult(status="withheld", reason="residual")
         value_pairs: dict[int, list[list[str]]] = defaultdict(list)
         for j, (f, _) in enumerate(inputs):
             value_pairs[f.frame_index].append([f.key, str(out_v[j])])
@@ -651,6 +780,8 @@ async def obfuscated_capture(
         )
     except (PlaywrightError, KeyError):
         return CaptureResult(status="withheld", reason="residual")
+    if after.truncated:
+        return CaptureResult(status="withheld", reason="truncated")
     values = [
         (original, finding.entity_type)
         for finding, original in originals

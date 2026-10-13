@@ -14,13 +14,18 @@ out the boxes of frames never read and are withheld when a frame failed (``unrea
 field with ``data-dps-field="<frame>:<n>"`` and each clickable with ``data-dps-click="<frame>:<k>"``;
 a fresh load of the same page re-runs the same script and gets the same numbers.
 ``CLICKABLES_JS`` re-stamps the clickables alone with the same predicate and order.
+
+Text nodes are read whole up to ``TEXT_READ_CAP`` (a longer node marks the snapshot ``truncated``,
+which withholds every capture of the page). Captures do not rely on the classification text list
+alone: ``CENSUS_JS`` (``render_census``) lists every string a read frame renders at capture time
+(button text, listbox options and input button labels included), measured by ``census_rects``.
 """
 
 from __future__ import annotations
 
 import secrets
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -38,9 +43,18 @@ from dps.layers.scanner.models import (
     TextFacts,
 )
 
-#: Shared by ``EXTRACT_JS`` and ``LIVE_TEXT_JS``: which text nodes count as rendered text, and the
-#: row/column header, ``<dt>`` or ``Label:`` hint next to one.
+#: A text node is read whole up to this many UTF-16 code units. A longer one is read up to the cap
+#: for classification, and the extraction is marked ``truncated``, so no capture of the page is
+#: emitted (its tail is rendered but in no finding; M4-G3 review r2 B3).
+TEXT_READ_CAP = 20_000
+#: The text a frame's extraction (or one census of it) reads in all, in UTF-16 code units; past it
+#: the extraction is ``truncated`` and a census fails closed.
+TEXT_READ_BUDGET = 2_000_000
+
+#: Shared by ``EXTRACT_JS`` and ``LIVE_TEXT_JS``: which text nodes count as rendered text for
+#: classification, and the row/column header, ``<dt>`` or ``Label:`` hint next to one.
 _TEXT_HELPERS_JS = r"""
+  const TEXT_CAP = __TEXT_CAP__, TEXT_BUDGET = __TEXT_BUDGET__;
   const SKIP_TEXT = 'script,style,noscript,template,select,option,textarea,button';
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const text = (el) => clean(el ? (el.innerText || el.textContent) : '');
@@ -70,7 +84,7 @@ _TEXT_HELPERS_JS = r"""
     if (prev && /:\s*$/.test(text(prev)) && text(prev).length <= 40) return text(prev).replace(/:\s*$/, '');
     return null;
   };
-"""
+""".replace("__TEXT_CAP__", str(TEXT_READ_CAP)).replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
 
 EXTRACT_JS = (
     r"""
@@ -145,7 +159,7 @@ EXTRACT_JS = (
   window.__dpsTextValues = [];
   window.__dpsSnap = null;
   const fields = [], forms = new Map(), texts = [], links = [], clickables = [];
-  let truncated = false, clickOrdinal = 0;
+  let truncated = false, clickOrdinal = 0, budget = TEXT_BUDGET;
   const sx = window.scrollX, sy = window.scrollY;
   const onField = (el, inShadow) => {
     const tag = el.tagName.toLowerCase();
@@ -182,10 +196,15 @@ EXTRACT_JS = (
     if (!textOk(node)) return;
     if (texts.length >= 5000) { truncated = true; return; }
     const parent = node.parentElement;
-    const raw = (node.nodeValue || '').slice(0, 2000);
+    const full = node.nodeValue || '';
+    // a node longer than the cap is read up to it; its tail is in no finding (no capture)
+    if (full.length > TEXT_CAP) truncated = true;
+    const raw = full.length > TEXT_CAP ? full.slice(0, TEXT_CAP) : full;
+    budget -= raw.length;
+    if (budget < 0) { truncated = true; return; }
     const i = window.__dpsTextNodes.length;
     window.__dpsTextNodes.push(node);
-    window.__dpsTextValues.push(raw);
+    window.__dpsTextValues.push(full);  // the whole node: the census compares the whole node
     texts.push({ frame_index: frameIndex, i, text: raw, in_table: inTable(parent), label_hint: labelHint(parent) });
   };
   const walk = (root, inShadow) => {
@@ -225,8 +244,10 @@ STAMP_JS = r"""
 
 #: Text the frame renders NOW that its extraction did not read: every qualifying text node that is
 #: not among the extraction's nodes (appended to them, so it can be measured) or that was appended
-#: by an earlier call, and every extracted node whose text changed. ``null``: the frame is not the
-#: one the extraction read (stamp), so nothing about it can be trusted.
+#: by an earlier call, and every extracted node whose text changed (compared whole, not a prefix).
+#: ``null``: the frame is not the one the extraction read (stamp), so nothing about it can be
+#: trusted, or it renders more text than can be checked (a node past ``TEXT_READ_CAP``, more than
+#: 5000 such nodes, more than ``TEXT_READ_BUDGET`` in all).
 LIVE_TEXT_JS = (
     r"""
 (token) => {
@@ -239,18 +260,20 @@ LIVE_TEXT_JS = (
   const known = new Map();
   nodes.forEach((n, i) => known.set(n, i));
   const items = [];
-  let overflow = false;
+  let overflow = false, budget = TEXT_BUDGET;
   const visit = (root) => {
     const it = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
     let node = it.nextNode();
     while (node && !overflow) {
       if (node.nodeType === Node.TEXT_NODE) {
         if (textOk(node)) {
-          const raw = (node.nodeValue || '').slice(0, 2000);
+          const raw = node.nodeValue || '';
+          if (raw.length > TEXT_CAP) { overflow = true; break; }
           let i = known.get(node);
           if (i === undefined) { i = nodes.length; nodes.push(node); values.push(raw); known.set(node, i); }
           if (i >= snap.base || values[i] !== raw) {
-            if (items.length >= 5000) { overflow = true; break; }
+            budget -= raw.length;
+            if (items.length >= 5000 || budget < 0) { overflow = true; break; }
             const parent = node.parentElement;
             items.push({ i, text: raw, changed: i < snap.base, in_table: inTable(parent), label_hint: labelHint(parent) });
           }
@@ -307,8 +330,101 @@ TEXT_RECTS_JS = r"""
 })
 """
 
+#: Rewrite extracted text nodes whole: a node is replaced only while it still holds exactly the text
+#: the extraction read (so no unread tail or later change is dropped or kept by mistake); returns
+#: how many were replaced (the caller withholds unless all of them were).
 REPLACE_TEXT_JS = r"""
-(pairs) => { let n = 0; for (const [i, t] of pairs) { const node = (window.__dpsTextNodes || [])[i]; if (node) { node.nodeValue = t; n += 1; } } return n; }
+(pairs) => {
+  const nodes = window.__dpsTextNodes || [], values = window.__dpsTextValues || [];
+  let n = 0;
+  for (const [i, t] of pairs) {
+    const node = nodes[i];
+    if (node && node.nodeValue === values[i]) { node.nodeValue = t; values[i] = t; n += 1; }
+  }
+  return n;
+}
+"""
+
+#: The capture's census of every string a read frame renders NOW, separate from (and wider than)
+#: the classification text list: every text node under a visible parent with no minimum length and
+#: no ``button`` exclusion (only ``script``/``style``/``noscript``/``template``/``title`` and a
+#: ``textarea``'s source text, whose shown value is a field, are left out), every visible
+#: ``<option>`` (a listbox shows its options; a closed select's are not rendered and its shown
+#: option is swept as a field) and the label of every visible ``input[type=button|submit|reset]``.
+#: Open shadow roots are always descended (whether or not the extraction read them). Text nodes are
+#: measured by range (``box: false``); options and input labels by their element box
+#: (``box: true``). ``known``: a text node the classification list holds (extracted or late).
+#: ``null``: the frame is not the one the extraction read, or it renders more than can be checked.
+CENSUS_JS = r"""
+(token) => {
+  const snap = window.__dpsSnap;
+  if (!snap || snap.id !== token) return null;
+""" + r"""
+  const TEXT_CAP = __TEXT_CAP__, TEXT_BUDGET = __TEXT_BUDGET__;
+  const SKIP = 'script,style,noscript,template,title,textarea,select';
+  const LABELLED = new Set(['button', 'submit', 'reset']);
+  const shown = new Map();
+  const visible = (el) => {
+    if (!shown.has(el)) {
+      const st = getComputedStyle(el);
+      shown.set(el, st.visibility !== 'hidden' && st.display !== 'none' && el.getClientRects().length > 0);
+    }
+    return shown.get(el);
+  };
+  const known = new Set(window.__dpsTextNodes || []);
+  const targets = [], items = [];
+  let over = false, budget = TEXT_BUDGET;
+  const add = (target, text, box) => {
+    if (!text || !/\S/.test(text)) return;
+    budget -= text.length;
+    if (text.length > TEXT_CAP || budget < 0 || items.length >= 50000) { over = true; return; }
+    items.push({ k: targets.length, text, box, known: !box && known.has(target) });
+    targets.push(target);
+  };
+  const visit = (root) => {
+    const it = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    let node = it.nextNode();
+    while (node && !over) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const parent = node.parentElement;
+        if (parent && !parent.closest(SKIP) && visible(parent)) add(node, node.nodeValue, false);
+      } else {
+        const el = node, tag = el.localName;
+        if (tag === 'option') { if (visible(el)) add(el, el.text, true); }
+        else if (tag === 'input' && LABELLED.has((el.getAttribute('type') || '').toLowerCase())) {
+          if (visible(el)) add(el, el.value, true);
+        }
+        if (el.shadowRoot && el.shadowRoot.mode === 'open') visit(el.shadowRoot);
+      }
+      node = it.nextNode();
+    }
+  };
+  const top = document.body || document.documentElement;
+  if (top) visit(top);
+  window.__dpsCensus = targets;
+  return over ? null : items;
+}
+""".replace("__TEXT_CAP__", str(TEXT_READ_CAP)).replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
+
+#: Client rects (page coordinates) of ``[k, start, end]`` census spans of the last ``CENSUS_JS``
+#: call: a range for a text node (UTF-16 offsets), the whole element box for an element.
+CENSUS_RECTS_JS = r"""
+(spans) => spans.map(([k, start, end]) => {
+  const t = (window.__dpsCensus || [])[k];
+  if (!t) return [];
+  const sx = window.scrollX, sy = window.scrollY;
+  let rects;
+  if (t.nodeType === Node.TEXT_NODE) {
+    const range = document.createRange();
+    try { range.setStart(t, start); range.setEnd(t, end); } catch (e) { return []; }
+    rects = Array.from(range.getClientRects());
+  } else {
+    if (!t.isConnected) return [];
+    rects = [t.getBoundingClientRect()];
+  }
+  return rects.filter((r) => r.width > 0 && r.height > 0)
+    .map((r) => ({ x: r.left + sx, y: r.top + sy, w: r.width, h: r.height }));
+})
 """
 
 SET_VALUES_JS = r"""
@@ -400,6 +516,76 @@ async def late_texts(ext: Extraction) -> list[tuple[TextFacts, bool]] | None:
         for item in raw:
             changed = bool(item.pop("changed"))
             out.append((TextFacts.model_validate({**item, "frame_index": index}), changed))
+    return out
+
+
+@dataclass(frozen=True)
+class CensusItem:
+    """One string a read frame renders, from a capture's census (``CENSUS_JS``; memory only, the
+    text never in ``repr``). ``k`` numbers it in its frame's last census; ``box``: measured as its
+    element's whole box (a listbox option, an input button label) rather than by text range;
+    ``known``: a text node the classification text list holds."""
+
+    frame_index: int
+    k: int
+    text: str = field(repr=False)
+    box: bool
+    known: bool
+
+
+async def render_census(ext: Extraction) -> list[CensusItem] | None:
+    """Every string the read frames of ``ext`` render now (``CENSUS_JS``), frame by frame in
+    document order. ``None`` (fail closed): a frame is not the one the extraction read, failed, or
+    renders more text than can be checked."""
+    out: list[CensusItem] = []
+    for index, frame in ext.frames.items():
+        try:
+            raw = await frame.evaluate(CENSUS_JS, ext.token)
+        except PlaywrightError:
+            return None
+        if raw is None:
+            return None
+        out += [
+            CensusItem(
+                frame_index=index,
+                k=int(item["k"]),
+                text=str(item["text"]),
+                box=bool(item["box"]),
+                known=bool(item["known"]),
+            )
+            for item in raw
+        ]
+    return out
+
+
+async def census_rects(
+    frames: Mapping[int, Frame],
+    offsets: Mapping[int, Rect],
+    items: list[CensusItem],
+    spans: list[tuple[int, int, int]],
+) -> list[list[Rect]]:
+    """Client rects (document coordinates of the top page) of ``(item, start, end)`` spans over
+    ``items`` (positions in that list; code-point offsets into the item's text, ignored for a
+    ``box`` item, which is measured whole), in the order given. ``offsets``: each read frame's box
+    now. A span that cannot be measured gets ``[]``. One evaluation per frame."""
+    out: list[list[Rect]] = [[] for _ in spans]
+    per_frame: dict[int, list[tuple[int, list[int]]]] = {}
+    for n, (pos, start, end) in enumerate(spans):
+        item = items[pos]
+        per_frame.setdefault(item.frame_index, []).append(
+            (n, [item.k, utf16_offset(item.text, start), utf16_offset(item.text, end)])
+        )
+    for frame_index, todo in per_frame.items():
+        frame = frames.get(frame_index)
+        if frame is None:
+            continue
+        try:
+            raw = await frame.evaluate(CENSUS_RECTS_JS, [js for _, js in todo])
+        except PlaywrightError:
+            continue
+        off = offsets.get(frame_index, _NO_OFFSET)
+        for (n, _), rects in zip(todo, raw, strict=True):
+            out[n] = [Rect(x=r["x"] + off.x, y=r["y"] + off.y, w=r["w"], h=r["h"]) for r in rects]
     return out
 
 

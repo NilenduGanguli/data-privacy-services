@@ -770,3 +770,68 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   swept value withhold the capture.
 - **Open for Task 14 (unchanged by this fix):** pre-filled input values changed by a script after
   extraction are not re-read (the census covers text nodes only); closed shadow roots (see Task 12).
+
+## G3 review round 2 — fix (M4-G3-review-r2 B1-r2, B3; N9, N11 folded in)
+
+- **B1-r2 — the capture's own census of rendered strings (`dom.py`, `capture.py`).** New
+  `dom.CENSUS_JS` / `render_census(ext)` / `census_rects(...)` and the memory-only
+  `dom.CensusItem` (text never in `repr`). At measure time, for every read frame (stamp checked,
+  open shadow roots always descended), the census lists every string rendered now, separate from
+  the classification text list: every text node under a visible parent with **no minimum length
+  and no `button` exclusion** (only `script`, `style`, `noscript`, `template`, `title` and the
+  source text of `textarea`/`select`, whose shown values are fields, are left out), every visible
+  `<option>` (a listbox renders its options; a closed select's options have no layout and its
+  shown option is swept as a field) and the label of every visible `input[type=button|submit|reset]`.
+  Text nodes are boxed by range; options and input labels by their whole element box (Chromium
+  gives no range rects for listbox option text). `capture_screen` (masked) and
+  `obfuscated_capture` (after the DOM replacement, on the re-extracted page) sweep every original
+  against the census instead of the extracted texts; a copy that cannot be measured withholds.
+  The census fails closed (`None`) above `TEXT_READ_CAP` per string, `TEXT_READ_BUDGET` in all or
+  50000 strings.
+- **Split copies, now by coverage (`capture._sweep`).** Occurrences are found **overlapping** in
+  the normalised concatenation of all census strings and each must lie wholly inside copies
+  located in single strings (or inside a whole-box string that holds one); otherwise the capture
+  is withheld. This keeps r1's rule (a copy split across nodes withholds — one character per
+  `<span>` now withholds because those 1-character nodes are in the census) and closes **N11**
+  (a periodic value straddling a located copy passed the old non-overlapping count).
+  `sweep_copies(texts, fields, values)` keeps its signature and return shape and runs on the same
+  `_sweep`.
+- **With a detector, census-only strings are classified too.** Census strings the classification
+  list does not hold (button text, input button labels, listbox options, nodes under two
+  characters) are run through `classify_rendered` and their hits boxed and swept for (closes
+  "Continue as <name>" when the name is not detected anywhere else on the page). Without a
+  detector they are only swept. Classification and risk flags (Tasks 9/10) are unchanged: they
+  still read the extraction's text list (`SKIP_TEXT` untouched).
+- **B3 — text nodes read whole up to a cap (`dom.py`).** `EXTRACT_JS` reads a text node whole up to
+  `dom.TEXT_READ_CAP = 20_000` UTF-16 units (was `slice(0, 2000)`); a longer node is read up to the
+  cap and marks the snapshot `truncated`; more than `TEXT_READ_BUDGET = 2_000_000` units per frame
+  also truncates. `window.__dpsTextValues` keeps the **whole** node text, so `LIVE_TEXT_JS`
+  compares whole nodes (a change anywhere in a node is late text); a node that has grown past the
+  cap fails the census closed. `REPLACE_TEXT_JS` rewrites a node only while it still holds exactly
+  the text read and returns the count; `obfuscated_capture` withholds (`residual`) unless every
+  rewrite happened, so no tail is dropped or kept by mistake.
+- **`PageSnapshot.truncated` widened (contract field unchanged).** It now means "the extraction did
+  not read everything the page renders" (fields past `max_fields`, more than 5000 text nodes, a
+  node past the cap, or the budget). No other code read it. `capture_screen` returns `None` and
+  `obfuscated_capture` returns `withheld` with the new reason code **`truncated`** for such a page,
+  and also when the post-replacement re-extraction is truncated. This closes **N9** (pre-filled
+  values in fields past `max_fields` were neither masked nor withheld). Unmasked local captures
+  are unaffected.
+- **Tests (each fails on `216bdd6`, checked by running them against an export of HEAD with the new
+  test files: 23 failed there, all pass here):** new `tests/scanner/test_capture_census.py` (17
+  browser tests: a copy in a button, an input button label and a listbox option is boxed in the
+  masked capture and in both obfuscated captures; one character per node withholds; a value after
+  character 2000 is read, classified and boxed; a change after character 2000 is late text; a node
+  longer than the cap withholds the masked and the obfuscated capture; a node grown past the cap
+  withholds; a truncated field extraction withholds; obfuscation rewrites a long node whole);
+  `test_capture_ocr.py` +5 (OCR, per case button / input_button / listbox / digits / long: the
+  unmasked control reads every value — and the copy twice — and the masked, synthesize and
+  obfuscate captures read none, or are all withheld for the per-character copy);
+  `test_capture.py` +1 (periodic value, N11). Shared probe pages in `tests/scanner/helpers.py`
+  (`CENSUS_PAGES`, made-up values).
+- **Over-withholding (accepted, fail closed):** the census concatenation now also holds button
+  text, labels and 1-character nodes, so unrelated adjacent strings that together spell a swept
+  value withhold more often than in r1.
+- **Still open (unchanged):** an input value changed by script after extraction (N8, Task 14);
+  closed shadow roots; strings rendered from CSS `content`, `placeholder` attributes or canvas are
+  not in the census.

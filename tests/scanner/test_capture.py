@@ -414,3 +414,11 @@ async def test_field_boxes_number_visible_fields(
         boxes = await field_boxes(frames, snap.fields)
         assert [b.number for b in boxes] == [f.field_no for f in snap.fields if f.visible]
         assert all(b.rect.w > 0 and b.rect.h > 0 for b in boxes)
+
+
+def test_sweep_withholds_a_periodic_value_straddling_a_located_copy() -> None:
+    """M4-G3 review r2 N11: occurrences are counted overlapping and must lie wholly inside located
+    copies; ``abcab`` + ``cab`` holds a second copy at 3 that shares two letters with the first."""
+    assert sweep_copies([_t(0, "abcab"), _t(1, "cab")], [], [("abcab", "X")]) is None
+    spans, _ = sweep_copies([_t(0, "abcabcab")], [], [("abcab", "X")]) or ([], [])
+    assert [(s[2], s[3]) for s in spans] == [(0, 5), (3, 8)]  # both (overlapping) copies boxed

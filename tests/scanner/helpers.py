@@ -122,3 +122,56 @@ async def guarded_context(
         yield ctx, guard
     finally:
         await close_scan_context(ctx, guard)
+
+
+# --- M4-G3 review r2: pages that render a detected value outside readable text nodes -----------
+#: Made-up values standing for customer data (a name, two emails and a PAN-shaped code).
+CENSUS_NAME = "Zebulon Quixotic"
+CENSUS_EMAIL = "zebulon.quixotic@example.org"
+CENSUS_EMAIL2 = "other.person.zq@example.org"
+CENSUS_PAN = "AQXPZ4821K"
+#: Boilerplate that pushes a value past the 2000th character of one text node.
+CENSUS_FILLER = "Terms and conditions apply to every account. " * 48  # 2160 characters
+
+
+def _table(*rows: tuple[str, str]) -> str:
+    cells = "".join(f"<tr><th>{h}</th><td>{v}</td></tr>" for h, v in rows)
+    return f"<table><tbody>{cells}</tbody></table>"
+
+
+#: case -> HTML prepended to a demo page's body (``INJECT_JS``): a table the detectors find
+#: through its row headers, plus a second copy of the value somewhere the r1 sweep did not look.
+CENSUS_PAGES: dict[str, str] = {
+    "button": _table(("Full name", CENSUS_NAME), ("Email", CENSUS_EMAIL))
+    + f'<p><button id="c-b1" type="button">Continue as {CENSUS_NAME}</button></p>'
+    + f'<p><button id="c-b2" type="button">Send statement to {CENSUS_EMAIL}</button></p>',
+    "input_button": _table(("Full name", CENSUS_NAME))
+    + f'<p><input id="c-in" type="button" value="Continue as {CENSUS_NAME}"></p>',
+    "listbox": _table(("Full name", CENSUS_NAME))
+    + '<p><select id="c-list" name="payee" size="3" style="width:600px"><option>Savings</option>'
+    + f'<option id="c-opt">{CENSUS_NAME}</option><option>Current</option></select></p>',
+    "digits": _table(("Email", CENSUS_EMAIL), ("PAN", CENSUS_PAN))
+    + '<p id="c-digits" style="letter-spacing:4px">Your PAN: '
+    + "".join(f"<span>{ch}</span>" for ch in CENSUS_PAN)
+    + "</p>",
+    "long": _table(("Email", CENSUS_EMAIL))
+    + f'<p id="c-long" style="font-size:14px;width:1200px">{CENSUS_FILLER} '
+    + f"Contact: {CENSUS_EMAIL2}</p>",
+}
+#: case -> the made-up values that page renders (OCR must read none of them where masked); the
+#: first is the one rendered twice (except ``long``, whose second email is the one past 2000).
+CENSUS_VALUES: dict[str, tuple[str, ...]] = {
+    "button": (CENSUS_NAME, CENSUS_EMAIL),
+    "input_button": (CENSUS_NAME,),
+    "listbox": (CENSUS_NAME,),
+    "digits": (CENSUS_PAN, CENSUS_EMAIL),
+    "long": (CENSUS_EMAIL, CENSUS_EMAIL2),
+}
+INJECT_JS = """(html) => {
+  const d = document.createElement('div');
+  d.id = 'c-root';
+  d.style.cssText = 'font-family:sans-serif;font-size:24px';
+  d.innerHTML = html;
+  document.body.prepend(d);
+  return true;
+}"""

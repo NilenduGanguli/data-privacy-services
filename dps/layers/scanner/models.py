@@ -183,6 +183,9 @@ class PageSnapshot(BaseModel):
     links: list[LinkFacts]
     clickables: list[ClickableFacts]
     frames: list[FrameFacts]
+    #: the extraction did not read everything the page renders: more than ``max_fields`` fields,
+    #: more than 5000 text nodes, a text node longer than ``dom.TEXT_READ_CAP`` (read up to it) or
+    #: more text than ``dom.TEXT_READ_BUDGET`` — no capture of this page may be emitted
     truncated: bool = False
     #: same-origin child frames that failed while they were read (detached or navigated): what
     #: they rendered is in no finding, so no masked capture of this page may be emitted

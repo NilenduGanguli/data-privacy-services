@@ -30,7 +30,12 @@ from dps.engine.verify import normalise
 from dps.layers.scanner.capture import capture_screen, obfuscated_capture
 from dps.layers.scanner.classify import classify_field, classify_rendered, sensitive_prefilled
 from dps.layers.scanner.dom import extract_page, frame_map
-from tests.scanner.helpers import guarded_context
+from tests.scanner.helpers import (
+    CENSUS_PAGES,
+    CENSUS_VALUES,
+    INJECT_JS,
+    guarded_context,
+)
 
 pytestmark = [pytest.mark.browser, pytest.mark.tesseract]
 
@@ -233,3 +238,77 @@ async def test_a_value_rendered_twice_is_masked_in_both_places(
     assert control.count(family) >= 2  # the OCR reads both copies when nothing is masked
     seen = _ocr(cmd, masked)
     assert [w for w in words if w in seen] == []
+
+
+async def _census_page(ctx: Any, url: str, case: str) -> tuple[Any, Any, dict[int, Any]]:
+    page = await ctx.new_page()
+    await page.goto(f"{url}/help")
+    await page.wait_for_load_state("load")
+    await page.evaluate(INJECT_JS, CENSUS_PAGES[case])
+    snap = await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
+    return page, snap, await frame_map(page, iframes=True)
+
+
+@pytest.mark.parametrize("case", list(CENSUS_PAGES))
+async def test_a_value_outside_readable_text_nodes_is_never_readable(
+    case: str,
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    demo_site_url: str,
+) -> None:
+    """M4-G3 review r2 B1/B3: a detected value copied into a button, an input button label, a
+    listbox option, one character per node, or past the 2000th character of a text node is not
+    readable in the masked capture nor in either obfuscated capture (or the capture is withheld:
+    the per-character copy must be). The unmasked control reads every value, and the copy too."""
+    cmd = _tesseract()
+    values = {v: v for v in CENSUS_VALUES[case]}
+    keys = tuple(values)
+    det = scan_engine.detector(scan_engine.policy(None), "en_IN")
+    policy = scan_engine.policy(None)
+    outputs: dict[str, bytes | None] = {}
+    async with guarded_context(chromium, scan_settings, demo_site_url, cookies=True) as (ctx, _g):
+        page, snap, frames = await _census_page(ctx, demo_site_url, case)
+        rendered = classify_rendered(snap.texts, detector=det)
+        raw = await capture_screen(
+            page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, unmasked=True
+        )
+        outputs["masked"] = await capture_screen(
+            page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, detector=det
+        )
+    for mode in ("synthesize", "obfuscate"):
+        async with guarded_context(chromium, scan_settings, demo_site_url, cookies=True) as (
+            ctx,
+            guard,
+        ):
+            page, snap, frames = await _census_page(ctx, demo_site_url, case)
+            res = await obfuscated_capture(
+                page,
+                frames,
+                snap,
+                rendered=classify_rendered(snap.texts, detector=det),
+                prefilled=[],
+                engine=scan_engine,
+                policy=policy,
+                mode=mode,  # type: ignore[arg-type]
+                key=generate_key_material("key") if mode == "obfuscate" else None,
+                seed=seed_bytes(generate_synthesis_seed()),
+                locale="en_IN",
+                guard=guard,
+                settings=scan_settings,
+                page_no=1,
+            )
+            outputs[mode] = res.png if res.status == "captured" else None
+    assert raw is not None
+    control = _ocr(cmd, raw)
+    assert _readable(control, values, keys, strict=True) == list(keys)  # the OCR reads them all
+    if case != "long":  # the second copy is readable unmasked (the long case has one copy each)
+        first = normalise(keys[0])
+        assert control.count(first) >= 2, case
+    if case == "digits":
+        assert outputs == {"masked": None, "synthesize": None, "obfuscate": None}
+        return
+    for name, png in outputs.items():
+        assert png is not None, name
+        strict = name == "masked"
+        assert _readable(_ocr(cmd, png), values, keys, strict=strict) == [], name
