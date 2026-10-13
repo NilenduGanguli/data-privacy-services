@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { DownloadButton } from '../components/DownloadButton';
+import { FidelityPanel } from '../components/FidelityPanel';
 import { useAuth } from '../hooks/useAuth';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, type Download } from '../lib/api';
 import {
   engineName, errorText, fmtCount, fmtDuration, fmtUtc, methodText, packTargetText, shortId, shortSha, shortType, typeNoteShort,
   writeModeLabel, verificationText,
@@ -25,7 +27,8 @@ function Sec({ n, title, right, keep, children }: { n: number; title: string; ri
   );
 }
 
-/** The evidence pack (mockup 10): the sealed, value-free record of one job, printable as the PDF look. */
+/** The evidence pack (mockup 10): the sealed, value-free record of one job, printable as the PDF
+ *  look; Download JSON is the sealed artefact, Download PDF the server-rendered archival copy. */
 export function EvidencePack(): JSX.Element {
   const { evidenceId = '' } = useParams();
   const auth = useAuth();
@@ -33,7 +36,6 @@ export function EvidencePack(): JSX.Element {
   const [job, setJob] = useState<Job | null>(null);
   const [snapshot, setSnapshot] = useState<ClassificationSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -48,14 +50,6 @@ export function EvidencePack(): JSX.Element {
     return () => { live = false; };
   }, [auth, evidenceId]);
 
-  async function download(kind: 'evidence_json' | 'evidence_html'): Promise<void> {
-    const art = ev?.artefacts.find((a) => a.kind === kind);
-    if (!ev || !art) { setError(`The pack has no ${kind === 'evidence_json' ? 'JSON' : 'HTML'} artefact.`); return; }
-    setBusy(kind);
-    try { await api.artefacts.download(auth, art.id, `dps-evidence-${ev.pack.id}.${kind === 'evidence_json' ? 'json' : 'html'}`); }
-    catch (e) { setError(apiMessage(e)); } finally { setBusy(null); }
-  }
-
   if (!ev) {
     return (
       <main className="page evidence-page">
@@ -65,6 +59,13 @@ export function EvidencePack(): JSX.Element {
     );
   }
 
+  return <EvidenceSheet ev={ev} job={job} snapshot={snapshot} onJson={() => api.evidence.json(auth, ev.id)} onPdf={() => api.evidence.pdf(auth, ev.id)} />;
+}
+
+/** The pack sheet as a pure view (tested): the pack, its job and snapshot when readable. */
+export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
+  ev: EvidenceOut; job: Job | null; snapshot: ClassificationSnapshot | null; onJson: () => Promise<Download>; onPdf: () => Promise<Download>;
+}): JSX.Element {
   const p = ev.pack;
   const v = p.verification ?? {};
   const hits = Number(v.hits ?? 0);
@@ -76,6 +77,7 @@ export function EvidencePack(): JSX.Element {
   const cons = p.consistency ?? {};
   const custody = (cons.key_custody ?? {}) as Record<string, any>;
   const synth = p.mode === 'synthesize';
+  const policyText = p.policy?.name ? `${p.policy.name}${p.policy.version ? ` v${p.policy.version}` : ''}` : '—';
   const targetText = packTargetText(tgt, src);
   const snapCols = snapshot?.columns ?? [];
   const byPath = new Map(snapCols.map((c) => [c.path, c]));
@@ -98,12 +100,11 @@ export function EvidencePack(): JSX.Element {
         <div className="faint sm rowx"><Link to="/reports" style={{ color: 'var(--ink-2)', fontWeight: 600 }}>Reports &amp; audit</Link><span>/</span><span>Evidence pack <span className="mono">{shortId(p.job_id)}</span></span></div>
         <div className="toolbar">
           <Link className="btn btn-sm" to="/reports">Back to reports</Link>
-          <button className="btn btn-sm" type="button" disabled={!!busy} onClick={() => void download('evidence_json')}>Download JSON</button>
-          <button className="btn btn-sm" type="button" disabled={!!busy} onClick={() => void download('evidence_html')}>Open HTML</button>
-          <button className="btn btn-sm btn-primary" type="button" onClick={() => window.print()}>Print or save as PDF</button>
+          <DownloadButton label="Download JSON" ariaLabel={`Download evidence pack ${shortId(p.job_id)} as JSON`} fetcher={onJson} />
+          <DownloadButton label="Download PDF" ariaLabel={`Download evidence pack ${shortId(p.job_id)} as PDF`} fetcher={onPdf} />
+          <button className="btn btn-sm btn-primary" type="button" onClick={() => window.print()}>Print</button>
         </div>
       </div>
-      {error && <div className="err no-print">{error}</div>}
 
       <article className="sheet" aria-labelledby="doc-title">
         <header className="doc-head">
@@ -149,12 +150,13 @@ export function EvidencePack(): JSX.Element {
 
         <Sec n={2} title="Configuration hashes" right="hashes identify exactly what ran">
           <dl className="kv">
-            <dt>Policy</dt><dd><b>{p.policy?.name || '—'}</b>{snapshot ? ` + ${snapshot.overrides.length} ${snapshot.overrides.length === 1 ? 'override' : 'overrides'} from the reviewed snapshot` : ''}<span className="s2">Policy hash <span className="mono">sha256:{p.policy?.hash || '—'}</span></span></dd>
+            <dt>Policy</dt><dd><b>{policyText}</b>{snapshot ? ` + ${snapshot.overrides.length} ${snapshot.overrides.length === 1 ? 'override' : 'overrides'} from the reviewed snapshot` : ''}<span className="s2">Policy hash <span className="mono">sha256:{p.policy?.hash || '—'}</span></span></dd>
             <dt>Snapshot</dt><dd><span className="mono">{text(p.snapshot?.id)}</span> · accepted by {text(p.snapshot?.accepted_by)}{p.snapshot?.accepted_at ? ` at ${fmtUtc(p.snapshot.accepted_at, false)}` : ''}<span className="s2">Content hash <span className="mono">sha256:{text(p.snapshot?.content_hash)}</span></span></dd>
             <dt>Configuration hash</dt><dd><span className="mono">sha256:{p.config_hash}</span><span className="s2">policy + reviewed snapshot + job specification, canonical JSON</span></dd>
             <dt>Engine</dt><dd>DPS engine {p.engine_version} · image <span className="mono">{p.image_digest || 'unset (local build)'}</span><span className="s2">{src.server_version ? `Source server ${src.server_version}` : ''}</span></dd>
             <dt>{synth ? 'Seed' : 'Key id'}</dt><dd>{synth ? <>seed fingerprint <span className="mono">{text(cons.seed_fingerprint)}</span></> : <>kid <span className="mono">{text(cons.kid)}</span></>} · consistency scope <b>{text(cons.scope)}</b>
               <span className="s2">{custody.returned ? 'Data key returned at job creation' : 'Key supplied by the caller'}{custody.wrapped ? ', wrapped with the caller\'s public key' : ''}; DPS stored no key. This pack holds the key id only.</span></dd>
+            <dt>Key custody</dt><dd>{synth ? 'Synthesis seed' : 'Data key'} {custody.returned ? 'returned to the requesting team at job creation' : 'supplied by the caller'}{custody.wrapped ? ", wrapped with the caller's public key" : ''}; DPS stored no key<span className="s2">This pack holds the {synth ? 'seed fingerprint' : 'key id'} only.</span></dd>
             <dt>Source</dt><dd>{engineName(src.engine)} · connection <span className="mono">{text(src.connection_name)}</span> · <span className="mono">{text(src.object)}</span>
               <span className="s2">Selection <span className="mono">{sel.where_template || sel.query_template || 'all rows'}</span> · {fmtCount(Number(sel.binds ?? 0))} bound {Number(sel.binds ?? 0) === 1 ? 'parameter' : 'parameters'}{sel.max_rows ? ` · at most ${fmtCount(sel.max_rows)} rows` : ''}{Array.isArray(sel.columns) ? ` · ${sel.columns.length} columns` : ''}</span></dd>
             <dt>Target</dt><dd>{engineName(tgt.engine)} · connection <span className="mono">{text(tgt.connection_name)}</span> · <span className="mono">{targetText}</span>
@@ -169,11 +171,11 @@ export function EvidencePack(): JSX.Element {
               return (
                 <tr key={String(c.path)}>
                   <td className="m" data-l="Column">{s?.name ?? String(c.path).replace(/^\$\./, '')}</td>
-                  <td className="faint" data-l="Type">{s ? shortType(s.data_type) : '—'}</td>
+                  <td className="faint" data-l="Type">{c.data_type ? shortType(String(c.data_type)) : s ? shortType(s.data_type) : '—'}</td>
                   <td data-l="Entity">{text(c.entity_type)}{c.text_column && c.entity_type !== 'FREE_TEXT' ? ' · free text' : ''}</td>
-                  <td className="num m" data-l="Conf.">{s?.entity_type ? s.confidence.toFixed(2) : '—'}</td>
+                  <td className="num m" data-l="Conf.">{typeof c.confidence === 'number' ? c.confidence.toFixed(2) : s?.entity_type ? s.confidence.toFixed(2) : '—'}</td>
                   <td data-l="Method"><span className="m">{methodText({ method: String(c.method), params: (c.params ?? {}) as Record<string, unknown> })}</span>{!c.reversible && <span className="prm"> · one-way</span>}</td>
-                  <td className="wide" data-l="Decision">{overridden.has(String(c.path)) ? <><b>overridden</b><span className="s2">{typeNoteShort(s?.type_note) ?? 'changed at review'}</span></> : 'accepted'}</td>
+                  <td className="wide" data-l="Decision">{c.override === true || overridden.has(String(c.path)) ? <><b>overridden</b><span className="s2">{typeNoteShort(s?.type_note) ?? 'changed at review'}</span></> : 'accepted'}</td>
                   <td className="num m" data-l="Values">{fmtCount(c.values as number | null)}</td>
                 </tr>
               );
@@ -218,8 +220,8 @@ export function EvidencePack(): JSX.Element {
         </Sec>
 
         {(p.fidelity || p.privacy) && (
-          <Sec n={6} title="Synthetic fidelity and privacy">
-            <dl className="kv"><dt>Fidelity</dt><dd className="mono">{text(p.fidelity)}</dd><dt>Privacy</dt><dd className="mono">{text(p.privacy)}</dd></dl>
+          <Sec n={6} title="Synthetic fidelity and privacy" right="measured on the deterministic preview">
+            <FidelityPanel fidelity={p.fidelity ?? null} privacy={p.privacy ?? null} utility={p.utility ?? null} tabular={p.tabular ?? null} rowsWritten={Number(counts.rows_written ?? 0)} />
           </Sec>
         )}
 
@@ -227,7 +229,7 @@ export function EvidencePack(): JSX.Element {
           <div className="reg">
             {p.label === LABEL_OBFUSCATE || !synth
               ? <div className="callout"><b>The output is pseudonymised, and pseudonymised data is still personal data</b> under GDPR Art. 4(5) and India&apos;s Digital Personal Data Protection Act 2023. Hold it under the same controls as the source. Whoever holds key <span className="mono">{text(cons.kid)}</span> can re-identify every row.</div>
-              : <div className="callout violet"><b>The output is synthetic — measured, not claimed anonymous.</b> Treat it as confidential until your data protection officer decides otherwise.</div>}
+              : <div className="callout amber"><b>The synthetic report is a measurement, not a claim.</b> {p.fidelity ? `The fidelity and privacy figures in section 6 describe this run${p.tabular ? ` against a ${fmtCount(p.tabular.holdout_rows)}-row holdout` : ''}. ` : ''}They do not state that the output is anonymous. Treat it as confidential until your data protection officer decides otherwise; the synthesis seed can link rows back if someone also holds candidate originals.</div>}
             <p className="note" style={{ margin: '2px 0 0' }}>DPS stores no customer values and no keys. This pack holds counts, hashes, column names, method names and key ids only. Its hash is written to the append-only audit log, so any later edit to the pack is detectable.</p>
           </div>
         </Sec>

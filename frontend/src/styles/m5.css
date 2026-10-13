@@ -241,7 +241,9 @@ dialog.cdlg .seg button { padding: 6px 12px; }
   dialog.cdlg .frow { grid-template-columns: minmax(0, 1fr); }
 }
 @media print {
-  .evidence-page .two { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+  .evidence-page .two { grid-template-columns: minmax(0, 1fr); }
+  .evidence-page .cmx { max-width: 520px; }
+  .evidence-page .synth-h { break-after: avoid; page-break-after: avoid; }
   .evidence-page .pm > div, .evidence-page .cmx { break-inside: avoid; page-break-inside: avoid; }
   .evidence-page .pm .v { font-size: 15pt; }
   .evidence-page .cmx .c { aspect-ratio: 2.6 / 1; }
