@@ -29,6 +29,11 @@ def test_one_engine_keyed_list_covers_every_engines_endpoint() -> None:
     }
     # M3's engines: covered by name before their params exist on main
     assert ENDPOINT_PARAMS["oracle"] >= {"host", "port", "service_name", "sid", "dsn"}
+    # M5's TLS option for Oracle (tcp vs tcps) decides whether credentials travel in clear text
+    assert "options.protocol" in ENDPOINT_PARAMS["oracle"]
+    tcps = ConnectionParams.model_validate({"host": "ora.example", "options": {"protocol": "tcps"}})
+    tcp = ConnectionParams.model_validate({"host": "ora.example", "options": {"protocol": "tcp"}})
+    assert endpoint_changes("oracle", tcps, tcp) == ["options.protocol"]
     assert ENDPOINT_PARAMS["mongo"] >= {"uri", "host", "port", "replica_set", "database"}
     assert ENDPOINT_PARAMS["mongo"] >= {"options.replicaSet", "options.directConnection"}
     assert ENDPOINT_PARAMS["s3"] >= {"endpoint_url", "bucket"}

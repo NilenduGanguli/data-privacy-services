@@ -82,6 +82,7 @@ ENDPOINT_PARAMS: dict[str, frozenset[str]] = {
             "options.sslmode",
             "options.sslrootcert_ref",
             "options.tls",
+            "options.protocol",  # M5: tcp vs tcps decides whether credentials travel in clear
         }
     ),
     "mongo": frozenset(
