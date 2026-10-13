@@ -5,7 +5,8 @@
  */
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Route, Routes } from 'react-router-dom';
+import { StaticRouter } from 'react-router-dom/server';
 import { SettingsProvider } from '../hooks/useSettings';
 
 /** SettingsProvider reads the theme attribute at first render; give node a minimal document. */
@@ -18,9 +19,9 @@ export function render(ui: ReactElement, { path = '/', route }: { path?: string;
   ensureDocument();
   return renderToStaticMarkup(
     <SettingsProvider>
-      <MemoryRouter initialEntries={[path]}>
+      <StaticRouter location={path}>
         {route ? <Routes><Route path={route} element={ui} /></Routes> : ui}
-      </MemoryRouter>
+      </StaticRouter>
     </SettingsProvider>,
   );
 }
