@@ -33,5 +33,5 @@ export default defineConfig({
       '/metrics': { target: appUrl, changeOrigin: true },
     },
   },
-  test: { environment: 'node', include: ['src/**/*.test.ts'] },
+  test: { environment: 'node', include: ['src/**/*.test.{ts,tsx}'] },
 });

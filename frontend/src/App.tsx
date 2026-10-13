@@ -9,6 +9,8 @@ import { Playground } from './pages/Playground';
 import { Policies } from './pages/Policies';
 import { PlaygroundDocuments } from './pages/PlaygroundDocuments';
 import { Reports } from './pages/Reports';
+import { ScanDetail } from './pages/ScanDetail';
+import { ScanNew } from './pages/ScanNew';
 
 function Soon({ title }: { title: string }): JSX.Element {
   return (
@@ -34,7 +36,9 @@ export function App(): JSX.Element {
         <Route path="/data-sources/jobs" element={<Jobs />} />
         <Route path="/data-sources/jobs/new" element={<JobWizard />} />
         <Route path="/data-sources/jobs/:jobId" element={<JobDetail />} />
-        <Route path="/scanner" element={<Soon title="UI scanner (M4)" />} />
+        <Route path="/scanner" element={<ScanNew />} />
+        <Route path="/scanner/new" element={<ScanNew />} />
+        <Route path="/scanner/scans/:scanId" element={<ScanDetail />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/reports/evidence/:evidenceId" element={<EvidencePack />} />
         <Route path="/admin" element={<Soon title="Admin (M5)" />} />

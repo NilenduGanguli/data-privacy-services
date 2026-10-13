@@ -4,6 +4,8 @@ import type {
   JobStats, KeyMaterial, ObjectRef, Page, PartitionView, PlanOut, PolicyDoc, Preset, PresetSummary, Readiness,
   RecognizerSpec, RecognizerTestOut, RevealOut, RunOut, RunSpec, Selection, SnapshotOverride, TableShape,
   TransformOut, WriteMode,
+  InventoryRow, NumberedRiskFlag, PersonaPreview, ScanCreated, ScanDetail, ScanEvent, ScanPage, ScanPageDetail, ScanSpecIn,
+  SynthesisSeed,
 } from './types';
 
 /** An API refusal: `message` is the server's value-free `detail`, `code` its machine code (absent on
@@ -88,6 +90,25 @@ function documentForm(file: File, policy: Policy, options: DocumentOptions): For
 /** A JSON POST's RequestInit for the L1 `call` sites. */
 const postInit = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body) });
 const enc = encodeURIComponent;
+/** An authenticated binary download (screenshots, exports); ApiError on a refusal, never an error body as a blob. */
+const blob = (path: string, auth: Auth): Promise<Blob> => request(path, auth).then((r) => r.blob());
+
+/** M4: the UI scanner (contract §9). There is no route that submits a form or returns a stored key. */
+export const scansApi = {
+  create: (auth: Auth, spec: ScanSpecIn, idempotencyKey?: string) =>
+    post<ScanCreated>('/api/v1/scans', auth, spec, idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined),
+  list: (auth: Auth, p: { state?: string; limit?: number; cursor?: string } = {}) => json<Page<Job>>(`/api/v1/scans${qs(p)}`, auth),
+  get: (auth: Auth, id: string) => json<ScanDetail>(`/api/v1/scans/${enc(id)}`, auth),
+  pages: (auth: Auth, id: string, after = 0, limit = 200) => json<Page<ScanPage>>(`/api/v1/scans/${enc(id)}/pages${qs({ after, limit })}`, auth),
+  page: (auth: Auth, id: string, pageNo: number) => json<ScanPageDetail>(`/api/v1/scans/${enc(id)}/pages/${pageNo}`, auth),
+  events: (auth: Auth, id: string, after = 0, limit = 200) => json<Page<ScanEvent>>(`/api/v1/scans/${enc(id)}/events${qs({ after, limit })}`, auth),
+  inventory: (auth: Auth, id: string) => json<{ items: InventoryRow[]; risk_flags: NumberedRiskFlag[] }>(`/api/v1/scans/${enc(id)}/inventory?format=json`, auth),
+  download: (auth: Auth, id: string, what: 'inventory' | 'export', format: 'json' | 'csv') => blob(`/api/v1/scans/${enc(id)}/${what}?format=${format}`, auth),
+  cancel: (auth: Auth, id: string) => post<Job>(`/api/v1/scans/${enc(id)}/cancel`, auth),
+  personaPreview: (auth: Auth, body: { locale: string; count?: number; synthesis_seed?: SynthesisSeed | null }) =>
+    post<PersonaPreview>('/api/v1/scans/personas/preview', auth, body),
+  artefact: (auth: Auth, artefactId: string) => blob(`/api/v1/artefacts/${enc(artefactId)}`, auth),
+};
 
 export const api = {
   // M0: readiness, metrics and the Layer 1 engine routes.
@@ -166,6 +187,8 @@ export const api = {
     list: (a: Auth, p: { job_id?: string; limit?: number; cursor?: string } = {}) => json<Page<EvidenceSummary>>(`/api/v1/evidence${qs(p)}`, a),
     get: (a: Auth, id: string) => json<EvidenceOut>(`/api/v1/evidence/${enc(id)}`, a),
   },
+  // M4: the UI scanner (contract §14: api.scans.*).
+  scans: scansApi,
   artefacts: {
     /** Fetch with the API key (artefacts are not public links), then hand the browser a blob to save. */
     download: async (a: Auth, id: string, filename: string): Promise<void> => {
