@@ -156,3 +156,55 @@ export interface EvidencePack {
 }
 export interface EvidenceOut { id: string; job_id: string; created_at: string; pack: EvidencePack; pack_sha256: string; artefacts: { id: string; kind: string; bytes: number; content_type: string }[] }
 export interface EvidenceSummary { id: string; job_id: string; created_at: string; outcome: string; mode: string | null; label: string; source_object: string | null; target: string | null; write_mode: string | null; policy: string | null; ticket: string | null; passed: boolean; hits: number; rows_written: number; html_artefact_id: string | null }
+
+// ---- M4: UI scanner (contract §9 / §14; field for field with dps/jobs_models.py::ScanSpec and
+// dps/layers/scanner/models.py). Key material and seeds of a scan live only in React state.
+export interface SynthesisSeed { alg: string; seed: string; created_at: string }
+export type ScanMode = 'obfuscate' | 'synthesize';
+export interface ScanScope { same_origin: boolean; max_pages: number | null; max_depth: number | null; allow: string[]; deny: string[]; iframes: boolean; shadow_dom: boolean; spa_clicks: boolean }
+export interface ScanSpecIn {
+  url: string; scope: ScanScope; auth: { storage_state_ref: string | null }; mode: ScanMode;
+  fill: { personas: number; locale: string; display_persona: number }; parallel_view: boolean;
+  capture: { screenshots: boolean; har: false };
+  consistency?: { scope?: 'request' | 'key' | 'entity'; synthesis_seed?: SynthesisSeed; wrap_key?: { type: 'rsa-oaep-256'; public_key_pem: string } };
+  policy?: string | null;
+  purpose?: { ticket?: string; legal_basis?: string } | null;
+}
+export interface ScanCreated { scan: Job; key_material: KeyMaterial | null; synthesis_seed: SynthesisSeed | null; replay: boolean }
+export type RiskFlagKind = 'autocomplete_enabled_sensitive' | 'password_without_autocomplete_token' | 'pii_in_query_string' | 'sensitive_form_uses_get' | 'pii_rendered_unmasked';
+export interface RiskFlag { flag: RiskFlagKind; severity: 'high' | 'medium'; page_no: number; field_nos: number[]; entity_types: string[]; query_keys: string[]; where: 'table' | 'text' | 'url' | 'link' | 'form' | null }
+export interface NumberedRiskFlag extends RiskFlag { code: string; path: string }
+export interface ScanSummary {
+  pages_by_status: Record<string, number>; pages_visited: number; pages_discovered: number; pages_queued: number;
+  pages_classified: number; pages_filled: number; forms: number; fields: number; personal_fields: number; critical_fields: number;
+  risk_flags: NumberedRiskFlag[]; blocked_requests: Record<string, number>; non_get_allowed: number; navigations: number;
+  captures: number; validation: Record<string, Record<string, number>>; personas: number; display_persona: number;
+  mode: ScanMode; locale: string; export_artefacts: Record<string, string>; evidence_id: string | null; elapsed_s: number | null;
+}
+export interface ScanDetail { scan: Job; summary: ScanSummary }
+export type PageStatus = 'queued' | 'visiting' | 'done' | 'redirected' | 'skipped' | 'failed';
+export type ScanArtefactKind = 'original' | 'annotated' | 'filled_synthesize' | 'filled_obfuscate' | 'masked_capture' | 'capture_json';
+export interface ScanPage {
+  page_no: number; url_redacted: string; title_redacted: string | null; depth: number; parent_page_no: number | null;
+  status: PageStatus; status_reason: string | null; discovered_via: 'start' | 'link' | 'spa_click' | 'redirect'; template: string;
+  http_status: number | null; final_url_redacted: string | null; form_count: number; field_count: number;
+  personal_field_count: number; critical_field_count: number; forms: Record<string, unknown>[];
+  artefacts: Partial<Record<ScanArtefactKind, string>>;
+  rendered_findings: Record<string, number>; risk_flags: RiskFlag[]; validation: Record<string, Record<string, number>>;
+  capture_status: 'captured' | 'withheld' | 'not_needed' | null; timings: Record<string, number>; created_at: string; updated_at: string;
+}
+export interface ValidationMessage { mode: ScanMode; source: 'native' | 'aria' | 'aria-invalid'; codes: string[]; text: string }
+export interface ScanField {
+  page_no: number; form_index: number; field_no: number; selector: string; tag: string; input_type: string | null;
+  name_attr: string | null; id_attr: string | null; label: string | null; label_source: string; autocomplete: string | null;
+  pattern: string | null; maxlength: number | null; required: boolean; options_count: number | null;
+  entity_type: string | null; sensitivity: Sensitivity | null; confidence: number | null; detectors: string[]; evidence: string[];
+  fill_synthesize: string | null; fill_obfuscate: string | null; validation_messages: ValidationMessage[];
+  frame_index: number; in_shadow: boolean; placeholder_shape: string | null; prefilled: boolean; persona_attr: string | null;
+  obfuscate_method: string | null; fill_format: string | null; fill_status: string; risk_codes: string[];
+}
+export interface ScanRequestCount { page_no: number | null; method: string; resource_type: string | null; decision: 'allowed' | 'blocked'; reason: string; host: string; count: number }
+export interface ScanPageDetail { page: ScanPage; fields: ScanField[]; requests: ScanRequestCount[] }
+export interface ScanEvent { seq: number; ts: string; kind: string; method: string | null; result: string; page_no: number | null; target: string; note_code: string; counts: Record<string, number> }
+export interface InventoryRow { page_no: number; path: string; form_index: number; field_no: number; label: string | null; tag: string; input_type: string | null; name_attr: string | null; autocomplete: string | null; pattern: string | null; maxlength: number | null; required: boolean; entity_type: string | null; sensitivity: Sensitivity | null; confidence: number | null; detectors: string[]; risk_codes: string[]; fill_status: string; persona_attr: string | null; obfuscate_method: string | null }
+export interface PersonaPreview { synthesis_seed: SynthesisSeed; personas: { persona: number; values: Record<string, string> }[]; notes: string[] }
