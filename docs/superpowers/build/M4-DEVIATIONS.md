@@ -1174,3 +1174,49 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   state as `reason` → the API test fails with 2 values found.
 - Result: `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/test_no_values_in_logs_m4.py` → 21 passed
   (plan: 3).
+
+## Task 20 — Browser-worker image and compose services
+
+- `Dockerfile.browser`: the plan's file, plus:
+  - **uv pinned** (`ghcr.io/astral-sh/uv:0.11.21`, the app image's pin) instead of `uv:latest`
+    (the app image's rule: never `:latest`); `--no-cache` on the installs.
+  - **Runs as uid 10001** (`useradd --uid 10001 appuser`, `/app/var/{artefacts,exports}` owned by
+    it) instead of the base image's `pwuser`. The browser-worker `extends` the worker and mounts the
+    same `dps-artefacts`/`dps-exports` named volumes, which the app image creates owned by 10001;
+    as `pwuser` every artefact save (screenshots, captures, exports, evidence HTML) would fail with
+    a permission error. Verified live: the app served a PNG the browser-worker stored.
+  - Labels (`org.opencontainers.image.*`) and usage comments.
+- `docker-compose.yml`: the plan's two services, made lane-safe as the contract §0 amendment
+  requires: image `data-privacy-services-browser:${DPS_IMAGE_TAG:-local}` (plan: `:local`), demo
+  port `127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}:8410` (plan: literal 8410); `DPS_FPE_ENABLED:
+  ${DPS_FPE_ENABLED:-true}` (plan: literal `"true"`) so it always equals the app's and the worker's
+  (tokens are made in the browser-worker); block-style YAML instead of flow maps; comments.
+- **Demo storage state (deferred here from Task 7):**
+  `docker/secrets/default/dps/ui/demo-onboarding/storage_state.json` (plan:
+  `docker/secrets/dps/ui/demo-onboarding/…`). Since the SEC-2 fix in Task 16 the scanner resolves a
+  `storage_state_ref` under `DPS_SECRET_DIR/<tenant_id>/<ref>/` only, so the file sits in the
+  folder of tenant `default` (the bootstrap key's tenant without `X-DPS-Tenant`); the ref stays
+  `dps/ui/demo-onboarding`. Content: the demo site's `demo_session=demo-valid` cookie for domain
+  `demo-site` — a local demo literal (it opens nothing but the demo site), committed like the
+  compose demo key; documented in HANDOFF §12.
+- `.dockerignore`: `demo` was already excluded (M1); added `docker/secrets` (compose bind-mounts
+  it; it must never enter a build context).
+- `HANDOFF.md`: new §12 (image, pinning, uid, compose services and env, run commands, the demo
+  session, the measured verification, seven traps), §2 points to the second image, the lane-safe
+  list names the browser image as current.
+- `tests/test_compose.py` (the plan has no offline test for this task; added test-first, they
+  failed before the files existed): the browser-worker extends the worker under the `scanner`/`full`
+  profiles with the overrides above and no host port; the demo-site's command, read-only mount,
+  lane-safe port and health check; `Dockerfile.browser` (one `FROM` = the Playwright 1.55.0 base, no
+  `playwright install` outside comments, uv pinned, both install branches carry
+  `fpe,db,connectors,scanner` and none of `docs,tabular,dev,uitest,e2e`, `ner` only in one, the
+  version assertion, uid 10001, health on 9401, the CMD; the `scanner` extra pins the same
+  Playwright); the demo storage state's tenant-scoped path, cookie and `.dockerignore` entry.
+  The existing rules (loopback lane-safe ports, health check + memory limit + labels on every
+  long-running service, one-shots awaited) cover both new services.
+- Live steps 1 and 2 (lane `dps-wt-m4`: app 8414, demo-site 8420, tag `m4`): all healthy; Playwright
+  1.55.0 in the container; app `/readyz` `browser: {"ok": true, "detail": "1 online"}`; the plan's
+  scan request → 202, `succeeded` in 68 s (21 pages done, 73 POST + 1 GET blocked, 0 non-GET
+  allowed); `/__received` `non_get: 0` (fresh container). Then, against the containers,
+  `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/test_no_values_in_logs_m4.py
+  tests/scanner/test_demo_site.py tests/scanner/test_no_submit.py tests/test_compose.py` → 45 passed.

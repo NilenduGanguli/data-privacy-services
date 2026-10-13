@@ -90,6 +90,10 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
   `migrate` one-shot) and
   `CMD uvicorn dps.app:create_app --factory --host 0.0.0.0 --port 8400 --no-access-log`.
 
+The browser-worker has its own image, `Dockerfile.browser` (M4, §12):
+`docker compose --profile scanner build` or `docker build -f Dockerfile.browser -t
+data-privacy-services-browser:local .`.
+
 Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (arm64, M1 lane: the
 `docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB. M2 lane
 (2026-10-12, arm64, without M1): 687 MB. The integrated image is in §11.
@@ -251,8 +255,8 @@ stack on this host, so `docker-compose.yml` fixes neither a host port nor an ima
   8400 and `DPS_OCR_PORT` 5016 today; as services arrive, `DPS_DB_PORT` 5441, `DPS_SOURCE_PG_PORT` 5442, `DPS_MINIO_PORT` 9010,
   `DPS_MINIO_CONSOLE_PORT` 9011, `DPS_ORACLE_PORT` 1522, `DPS_MONGO_PORT` 27018, `DPS_OCR_PORT` 5016,
   `DPS_DEMO_SITE_PORT` 8410, `DPS_TOKENIZER_MOCK_PORT` 8420 (worker metrics ports likewise if published);
-- every image compose builds is tagged `${DPS_IMAGE_TAG:-local}` (`data-privacy-services`, later
-  `data-privacy-services-browser`; the OCR mock `${DPS_IMAGE_TAG:-latest}`);
+- every image compose builds is tagged `${DPS_IMAGE_TAG:-local}` (`data-privacy-services`, and from
+  M4 `data-privacy-services-browser`, §12; the OCR mock `${DPS_IMAGE_TAG:-latest}`);
 - tests and tools read endpoints only from `DPS_TEST_*` (contract §12.2), whose defaults follow the same
   port variables; `tools/smoke_test.py` reads `DPS_TEST_APP_URL` / `DPS_APP_PORT`;
 - give each lane its own `COMPOSE_PROJECT_NAME` so containers, networks and volumes stay apart:
@@ -755,3 +759,83 @@ the M1 version; `v0.1.0-m2` is M2's lane tag).
    same `Idempotency-Key` is refused as `idempotency_key_reused`; mint a new key.
 4. New console CSS goes under its page root (`.<name>-page`); the M1 and M2 pages share short class
    names (`.m`, `.plan`, `.two`, `.grp`, `.stack`), so a global rule leaks into the other pages.
+
+## 12. M4 — UI scanner: browser-worker image and the `scanner` profile (lane `dps-wt-m4`)
+
+What M4 adds to the stack (contract §3.5, §11, §11.1): the **browser-worker** role (`python -m
+dps.browser_worker`, claims `scan` jobs only) on its own image, and the **demo-site** (the
+onboarding web app every scanner test, the smoke test and the demo scan). The app needs no change: it
+validates scan hosts against the same default `DPS_SCAN_REGISTERED_HOSTS`
+(`localhost,127.0.0.1,demo-site`) and serves the screenshots from the artefact store it shares with
+both workers.
+
+**Image `Dockerfile.browser`** → `data-privacy-services-browser:${DPS_IMAGE_TAG:-local}`:
+`FROM mcr.microsoft.com/playwright:v1.55.0-noble`, whose `/ms-playwright` holds Chromium build 1187 —
+exactly what `playwright==1.55.0` drives, so the image never runs `playwright install`
+(`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`; the build asserts the installed version is 1.55.0).
+`uv` 0.11.21 (pinned, as the app image) creates `/opt/venv` from the base's `/usr/bin/python3.12`
+(Ubuntu 24.04 has no `ensurepip`) and installs `.[fpe,db,connectors,scanner]` (`scanner` =
+`playwright==1.55.0` + Pillow; `WITH_NER=1` adds `ner` + `en_core_web_sm`); no `docs`/`tabular`
+and no console. It runs as **uid 10001** (`appuser`, as the app image — the base's `pwuser` could not
+write the shared `dps-artefacts`/`dps-exports` volumes, which the app image creates owned by 10001),
+`EXPOSE 9401`, a `urllib` `HEALTHCHECK` on `http://localhost:9401/health` (start period 30 s), `CMD
+["python", "-m", "dps.browser_worker"]`. Size (arm64, 2026-10-13): 4.22 GB, almost all of it the
+Playwright base (3.53 GB: Chromium, Firefox, WebKit and their system libraries).
+
+**Compose (`--profile scanner`, also in `full`):**
+
+| Service | Image | Host port | Notes |
+|---|---|---|---|
+| `browser-worker` | `data-privacy-services-browser:${DPS_IMAGE_TAG:-local}` | none (ops `/health` `/readyz` `/metrics` on 9401 inside the network) | `extends: worker` — the same database, `DPS_JOB_KEK`, artefact store, volumes and hardening (read-only root, `/tmp` tmpfs 512 MiB, `cap_drop: ALL`, `no-new-privileges`); overrides: `DPS_MIGRATIONS_MODE=off` (the `migrate` one-shot owns DDL), `DPS_BROWSER_CONCURRENCY=2`, `DPS_BROWSER_METRICS_PORT=9401`, `DPS_SCAN_REGISTERED_HOSTS=localhost,127.0.0.1,demo-site`, `DPS_FPE_ENABLED` (must equal the app's), `DPS_SECRET_DIR=/var/run/secrets/dps-local` ← `./docker/secrets:ro`; `shm_size: 1gb`, `init: true`, `mem_limit: 2g` |
+| `demo-site` | `node:22-slim` running `demo/onboarding/server.mjs` (bind-mounted read-only; no build) | `127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}:8410` | `GET /health`; `GET /__received` counts every non-GET request and GET-form submission it ever received (the D4 proof); `mem_limit: 256m`; in-network name `demo-site:8410` |
+
+```bash
+docker compose --profile scanner up -d --build       # + app, worker, dps-db, migrate (default services)
+docker compose --profile scanner ps                  # poll until app, browser-worker, demo-site are healthy
+curl -fsS http://127.0.0.1:${DPS_APP_PORT:-8400}/readyz        # components.browser: {"ok": true, "detail": "1 online"}
+curl -fsS -X POST http://127.0.0.1:${DPS_APP_PORT:-8400}/api/v1/scans \
+  -H 'X-API-KEY: dps_local_dev_key_change_me' -H 'Content-Type: application/json' \
+  -d '{"url":"http://demo-site:8410/apply","scope":{"max_pages":25,"deny":["/logout","/admin"]},
+       "auth":{"storage_state_ref":"dps/ui/demo-onboarding"},"fill":{"personas":5,"locale":"en_IN"}}'
+                                                     # 202 + key material and seed (shown once)
+curl -fsS http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}/__received   # "non_get":0 on a fresh demo-site
+docker compose --profile scanner down
+```
+
+**Demo session.** `docker/secrets/default/dps/ui/demo-onboarding/storage_state.json` is the demo
+site's session cookie (`demo_session`, domain `demo-site`) — a **local demo literal**, committed like
+the compose demo key; it opens nothing but the demo site. Storage states resolve tenant-scoped
+(`DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json`, SEC-2 layout), so ref `dps/ui/demo-onboarding`
+works for tenant `default` (the bootstrap key without `X-DPS-Tenant`); another tenant needs its own
+folder. Staging/prod mount real storage states the same way, from a secret, never from the repo.
+
+**Verified 2026-10-13 on this lane** (`COMPOSE_PROJECT_NAME` `dps-wt-m4`, `DPS_IMAGE_TAG=m4`,
+app 8414, demo-site 8420): `docker compose --profile scanner up -d --build` → app, worker,
+browser-worker, demo-site, dps-db healthy, migrate exited 0; `docker compose exec browser-worker
+python -c "…m.version('playwright')"` → `1.55.0`, running as uid 10001; app `/readyz` `browser: ok, 1
+online`; worker `:9401/readyz` `browser: chromium 140.0.7339.16`; the scan above → `succeeded` in
+68 s (21 pages done, 4 skipped, 63 fields, 9 risk flags, 73 POST + 1 GET blocked by the guard,
+`non_get_allowed` 0, evidence and CSV/JSON exports written; the logged-in `/profile` page was
+scanned, so the mounted storage state was read); the demo site's `/__received` stayed at `non_get
+0, form_get 0, logout_hits 0, admin_hits 0`; a screenshot the browser-worker stored was served by
+the app (`GET /api/v1/artefacts/{id}` → 200 `image/png`); the compose logs (168 lines) carry none of
+the demo values, the session cookie, the scan's key or seed.
+
+**Traps (M4).**
+
+1. Host browser tests need Chromium 1187: `python -m playwright install chromium` once (the host
+   cache may hold other builds — 1148, 1234, 1243 — that belong to other Playwright versions).
+2. Chromium in Docker needs shared memory: compose sets `shm_size: 1gb` and the worker also passes
+   `--disable-dev-shm-usage` (then Chromium uses `/tmp`, the 512 MiB tmpfs it inherits from the
+   worker).
+3. The browser image must run as uid 10001 (see above); with the base's `pwuser` every artefact save
+   fails with a permission error on the shared volume.
+4. Only registered hosts are scanned (`DPS_SCAN_REGISTERED_HOSTS` locally, `dps_tenant.registered_hosts`
+   in production); `http://demo-site:8410` is the in-network address — from the host the demo site is
+   `127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}`, which the browser-worker container cannot reach.
+5. HAR capture is not supported (`capture.har: true` → 422 `har_not_supported`).
+6. The demo site's counters only grow; compare before/after (the tests do) or restart `demo-site`
+   for a fresh `non_get: 0`. With the compose demo-site on the lane's port, host tests use it
+   instead of starting their own `node`.
+7. Never `up --wait` (the `migrate` one-shot exits); poll `docker compose ps`.
+

@@ -207,6 +207,74 @@ services:
       component: worker
       env: local
 
+  # Claims scan jobs only (M4, contract §3.5/§11.1), profile `scanner` (and `full`). It extends the
+  # worker, so it shares the same database, DPS_JOB_KEK, artefact store, volumes and hardening (the
+  # app seals scan secrets with that KEK and serves screenshots from that store); its own image
+  # carries Playwright 1.55.0 and the Chromium 1187 the base bakes. No host port: /health, /readyz
+  # and /metrics on 9401 inside the network. It never submits anything (D4). Storage states are read
+  # from ./docker/secrets (DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json; the demo session is a
+  # local literal for the demo site, ref `dps/ui/demo-onboarding`, tenant `default`).
+  #   docker compose --profile scanner up -d --build
+  browser-worker:
+    extends:
+      service: worker
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    image: data-privacy-services-browser:${DPS_IMAGE_TAG:-local}
+    command: ["python", "-m", "dps.browser_worker"]
+    profiles: ["scanner", "full"]
+    depends_on:
+      dps-db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DPS_MIGRATIONS_MODE: "off"                 # the migrate one-shot owns DDL
+      DPS_SECRET_DIR: /var/run/secrets/dps-local
+      DPS_BROWSER_CONCURRENCY: "2"
+      DPS_BROWSER_METRICS_PORT: "9401"
+      DPS_SCAN_REGISTERED_HOSTS: localhost,127.0.0.1,demo-site
+      DPS_FPE_ENABLED: ${DPS_FPE_ENABLED:-true}   # must match the app's (tokens are made here)
+    volumes:
+      - ./docker/secrets:/var/run/secrets/dps-local:ro
+    shm_size: "1gb"
+    init: true
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9401/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      app: data-privacy-services
+      component: browser-worker
+      env: local
+
+  # The demo onboarding web app (M4): the scan target of the tests, the smoke test and the demo. It
+  # counts every non-GET request and GET-form submission it receives (GET /__received), which is how
+  # D4 (nothing is ever submitted) is proven. Dependency-free Node; no build.
+  #   docker compose --profile scanner up -d demo-site     # http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}
+  demo-site:
+    image: node:22-slim
+    profiles: ["scanner", "full"]
+    command: ["node", "/srv/demo/server.mjs", "--host", "0.0.0.0", "--port", "8410"]
+    volumes:
+      - ./demo/onboarding:/srv/demo:ro
+    ports:
+      - "127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}:8410"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8410/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+    labels:
+      app: data-privacy-services
+      component: demo-site
+      env: local
+
   # Metadata database (M2, contract §2.3/§11). 01_roles.sql creates the contract roles and the `dps`
   # database on first start (empty volume); migrations run as dps_owner (`python -m dps.migrate`).
   # Superuser postgres/postgres is a local-only demo literal.

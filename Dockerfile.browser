@@ -1,0 +1,38 @@
+# Data Privacy Services — browser-worker image (M4, contract §11.1).
+# The base image bakes Chromium build 1187 under /ms-playwright; it matches playwright==1.55.0
+# exactly, so this file never runs `playwright install`. Ubuntu 24.04's Python 3.12 has no
+# ensurepip, so uv creates the virtualenv.
+#
+#   docker compose --profile scanner up -d --build        # what compose builds (tag ${DPS_IMAGE_TAG:-local})
+#   docker build -f Dockerfile.browser -t data-privacy-services-browser:local .
+#   docker build -f Dockerfile.browser --build-arg WITH_NER=1 ...           # + Presidio and spaCy
+FROM mcr.microsoft.com/playwright:v1.55.0-noble
+LABEL org.opencontainers.image.title="data-privacy-services-browser" \
+      org.opencontainers.image.description="Data Privacy Services: browser worker (UI scanner, never submits)"
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
+# uv pinned to an exact release (never :latest), the same as the app image.
+COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /usr/local/bin/uv
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY dps ./dps
+# [scanner] = playwright==1.55.0 (the base image's browsers) + Pillow; [fpe] FF1 (gated at runtime by
+# DPS_FPE_ENABLED, which must match the app's); [db] asyncpg; [connectors] for M2's job platform.
+# No [docs] or [tabular]: the browser worker runs scan jobs only.
+ARG WITH_NER=0
+RUN uv venv --python /usr/bin/python3.12 /opt/venv \
+ && if [ "$WITH_NER" = "1" ]; then \
+      uv pip install --python /opt/venv/bin/python --no-cache ".[fpe,db,connectors,scanner,ner]" \
+      && /opt/venv/bin/python -m spacy download en_core_web_sm; \
+    else uv pip install --python /opt/venv/bin/python --no-cache ".[fpe,db,connectors,scanner]"; fi \
+ && /opt/venv/bin/python -c "import importlib.metadata as m; assert m.version('playwright') == '1.55.0'"
+# uid 10001 like the app image: compose mounts the same artefact and export volumes (owned by
+# 10001) into app, worker and browser-worker. /app stays root-owned and read-only to the process.
+RUN useradd --create-home --uid 10001 appuser \
+ && mkdir -p /app/var/artefacts /app/var/exports \
+ && chown -R appuser /app/var
+USER 10001
+EXPOSE 9401
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9401/health', timeout=3).status==200 else 1)"
+CMD ["python", "-m", "dps.browser_worker"]
