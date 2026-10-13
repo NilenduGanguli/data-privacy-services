@@ -676,6 +676,58 @@ test-first below.
 - `tests/connectors/test_selection_oracle.py`: the plan's cases pass on M2's code unchanged (no M2 gap);
   the allowed cases carry their `params` (named binds without values are M2's `selection_param_missing`
   only at compile time, but the binds test compiles), plus a case pinning that literals compile only
-  after `parameterize_literals`. Mongo tests (`test_selection_mongo.py`, 69): the plan's cases plus more
+  after `parameterize_literals`. Mongo tests (`test_selection_mongo.py`, 62): the plan's cases plus more
   denied shapes (`$text`, `$near`, operators inside `$in`/`$eq`/`$all` items and literal arrays,
   `$comment`), malformed wrappers, value-free errors, the node budget, template of wrapped literals.
+
+## Task 11 — `MongoConnector` reads (`mongo.py`)
+
+- **No client-side `timeoutMS`** (plan: `timeoutMS = connector_statement_timeout_seconds·1000`).
+  Measured with pymongo 4.18.3: under a client `timeoutMS` an unreachable server fails only after
+  `timeoutMS` (3 s with `timeoutMS=3000`), not after `serverSelectionTimeoutMS` (0.5 s), so a lane or
+  bank outage would hang every call for the 300 s statement timeout. Now `socketTimeoutMS =
+  statement timeout + 5 s` bounds a hung call and every read carries `maxTimeMS` (= the statement
+  timeout; property `max_time_ms`) so the server stops the work; `MaxTimeMSExpired` (50) and a
+  socket timeout map to `statement_timeout`. The test asserts an unreachable server fails in < 10 s
+  and that profiled `find`s carry `maxTimeMS`.
+- **`connector_error` mapping** follows the Oracle split (Task 4): server selection / lost
+  connection → `connection_failed` retryable; a refused login (18) → `connection_failed` not
+  retryable (plan: retryable; a retried password can lock the account); a time limit →
+  `statement_timeout`; a bad URI or client option (`ConfigurationError`) → `connection_invalid`;
+  `Unauthorized` (13) keeps the caller's code (plan: `connection_failed`). Logged as
+  `mongo_call_failed` with `op` and `driver_code` only (Oracle's event shape).
+- **Key-less collections are read through one cursor** in `_id` order (plan: the same keyset loop).
+  `{_id: {$gt: after}}` matches only documents of `after`'s BSON type, so a keyset over mixed `_id`
+  types drops documents as soon as a batch boundary falls between types (the plan's test passed only
+  because 3 documents fitted one batch; the new test pages 33 mixed documents with batch 7). The
+  cursor is closed when the caller stops. M2's run handler refuses key-less sources (`no_key`), so
+  this path serves discovery and `table`-free reads only.
+- **`sample_keys`** bounds the set with `$match {_id: {$lt: upper}}` *before* `$sample` and sorts
+  the sample in the server (`$sort {_id: 1}`) (plan: Python filter after sampling, unsorted): M2's
+  `plan_partitions` needs keys in database order, and the review B2 lesson (quantiles of the bounded
+  set) applies here too.
+- **`selection.sample` in `count` and `key_at_offset`**: the HMAC sample is a client-side test, so
+  both scan the filter's `_id`s (keyset pages of `_id` only, 1,000 per page) and apply it (plan:
+  `count_documents` ignored the sample, and `key_at_offset` used `skip`, so the count, the
+  `max_rows` bound and the read disagreed). `count` without a sample uses `count_documents(limit=
+  max_rows)`.
+- `from_secret` raises `connection_invalid` for a URI that does not parse and validates the
+  database name (`connection_invalid`), `database_required` when none is given; `engine: Engine =
+  "mongo"` (not `Final`, as Oracle: the protocol's attribute is settable). `open()` closes the client
+  on failure and tags `hello`/`buildInfo` with the comment too.
+- `list_objects` clamps `limit` to 1..5000 and skips views, `system.*`, the ledger, names with `$`
+  and names `ObjectRef` refuses (like the SQL engines). `collection_name(obj)` refuses an owner, `$`
+  and `system.` names with `object_invalid`.
+- A projection drops a path that is under another listed path (MongoDB refuses `profile` together
+  with `profile.fullName`: path collision).
+- `test()` follows the Oracle/PostgreSQL check shape: every check has a `severity`; `connect`,
+  `session_tagged` (advisory), source `select_source` (collection present and `find`) and advisory
+  `no_dml_on_source`; targets `create_target` (missing, `table`), `insert_target`/`update_target`,
+  `select_target`/`update_target` (in place, collection present), `transactions` and
+  `create_ledger` for `in_place`/`append`; `ok` = every required check.
+- Small public helpers the writer and later tasks use: `collection_name`, `bson_id`,
+  `MongoConnector.client()`, `.db`, `.read_collection(name)`, `.collections()`, `.replica_set`,
+  `.database`, `.max_time_ms`. `writer()` arrives with Task 12, `lookup_values()` with Task 15.
+- Tests (`tests/connectors/test_mongo_connector.py`, 19): the plan's 14 plus UUID `_id` paging and
+  range bounds, `sample_keys` under an upper bound and `key_at_offset` (with a filter and with a
+  sample), `from_secret` rules, value-free driver error mapping, and the key tuple of a document.
