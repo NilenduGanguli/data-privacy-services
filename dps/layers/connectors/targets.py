@@ -14,7 +14,10 @@ key that is not one integer column, an offset on a non-integer key or a prefix o
 ``text_method_invalid`` · ``length_overflow`` (in place and same-table append write each value
 back into its own column: a method whose output cannot fit it is refused here, every such column
 named, instead of failing the job at prepare) · ``group_not_found`` / ``group_key_mismatch`` ·
-``tabular_invalid``.
+``tabular_invalid`` (M5: tabular synthesis outside synthesize mode, into an ``in_place``/``append``
+write, or with an engine this deployment has not enabled; differential privacy or linked
+generation without the ``mostly`` engine; a linked generation that does not write files, names
+the source object as its child, or lacks the child's accepted snapshot).
 
 A same-table append re-reads its own new rows unless every new key sorts above every selected
 key; only one integer key with ``generate`` (an owned, ascending, non-cycling sequence ahead of the
@@ -42,8 +45,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from dps.auth import Principal
 from dps.config import Settings
 from dps.connections import Connection
-from dps.engine.batch import KEYLESS_METHODS, ColumnPlan
-from dps.engine.policy import MethodSpec
+from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
+from dps.engine.policy import MethodSpec, resolve_policy
+from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSEUDONYM_LIMIT
+from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.methods import METHODS
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
 from dps.layers.connectors.base import (
@@ -105,6 +110,8 @@ class RunPlan(BaseModel):
     batch_rows: int
     same_table_append: bool = False
     prepare: dict[str, Any] = Field(default_factory=dict)
+    #: D-A (synthesize): identifier columns replaced by keyed pseudonyms, never copied
+    pseudonyms: list[PseudonymColumn] = Field(default_factory=list)
 
 
 def _fail(code: str, status: int, detail: str) -> SpecError:
@@ -137,6 +144,181 @@ def method_for_column(col: ColumnClassification, mode: str) -> MethodSpec:
     if mode == "synthesize":
         return col.synthesize_method or col.synthesize_suggested or MethodSpec(method="surrogate")
     return col.method
+
+
+def _identifies(c: ColumnClassification, keys: set[str]) -> bool:
+    """A classified column a synthesize run must not copy *as an identifier*: a key, a join
+    identifier (:data:`~dps.engine.synth.keys.LINK_ENTITIES`) or MEDIUM+ sensitivity."""
+    assert c.entity_type is not None
+    rank = entity_info(c.entity_type).sensitivity.rank
+    return (
+        c.is_key or c.name in keys or c.entity_type in LINK_ENTITIES
+    ) or rank >= Sensitivity.MEDIUM.rank
+
+
+def kept_attribute(c: ColumnClassification, keys: set[str] | None = None) -> bool:
+    """D-A (G2 review r1, B1): a classified, non-free-text column a synthesize run would keep
+    although it is personal data — a LOW attribute such as a city, postal code, gender, age or
+    date that ``keep_non_sensitive`` (or an owner) set to ``keep``. It is never copied: the
+    tabular engine draws it when it models the column, otherwise it gets a ``surrogate``
+    (:func:`build_column_plans`). Identifiers are pseudonymised instead (:func:`_identifiers`)."""
+    if c.entity_type is None or c.text_column:
+        return False
+    if method_for_column(c, "synthesize").method != "keep":
+        return False
+    return not _identifies(c, keys or set())
+
+
+def _label(reference: str) -> str:
+    """The pseudonym label of an unclassified key ``owner.table.column`` (and of every declared
+    foreign key to it): the same customer of a job group gets the same pseudonym in both."""
+    return f"KEY|{reference}"
+
+
+def _identifiers(
+    snapshot: ClassificationSnapshot,
+    *,
+    write_mode: WriteMode,
+    pk_strategy: PkStrategy | dict[str, Any] | None,
+    projection: list[str] | set[str],
+    shape: TableShape | None = None,
+) -> list[tuple[ColumnClassification, str | None]]:
+    """D-A: the projected columns a synthesize run would copy although they identify someone,
+    each with the label its pseudonym is keyed by (``None``: the entity type).
+
+    * kept (``keep``) classified columns that are a key, a join identifier
+      (:data:`~dps.engine.synth.keys.LINK_ENTITIES`) or of MEDIUM or higher sensitivity;
+    * (G2 review r1, B2) every **unclassified key** a ``table``, ``files`` or ``append`` run
+      writes, labelled ``KEY|owner.table.column``, and every unclassified **declared foreign
+      key** (``ColumnInfo.references``, from ``shape``: the live shape at prepare, else the
+      snapshot's) labelled by the key it references — so a real key never sits next to a
+      pseudonymised identifier, and the tables of one job group still join.
+
+    Keys the target generates (``append`` + ``generate``) are not written at all; in place an
+    unclassified key is the row being rewritten (and a sensitive one is refused), and foreign
+    keys keep pointing at the real parent rows of the same database. LOW attributes are
+    :func:`kept_attribute` (modelled or surrogated, never pseudonymised)."""
+    live = shape or snapshot.shape
+    keys = set(live.key) | set(snapshot.shape.key)
+    wanted = set(projection)
+    generated = write_mode == "append" and _strategy_kind(pk_strategy) == "generate"
+    owner = live.object.owner or "public"
+    out: list[tuple[ColumnClassification, str | None]] = []
+    for c in snapshot.columns:
+        if c.name not in wanted or c.text_column:
+            continue
+        is_key = c.is_key or c.name in keys
+        if is_key and generated:
+            continue
+        if c.entity_type is not None:
+            if method_for_column(c, "synthesize").method == "keep" and _identifies(c, keys):
+                out.append((c, None))
+            continue
+        if write_mode == "in_place":
+            continue
+        try:
+            reference = live.column(c.name).references
+        except KeyError:
+            reference = None
+        if reference:
+            out.append((c, _label(reference)))
+        elif is_key:
+            out.append((c, _label(f"{owner}.{live.object.name}.{c.name}")))
+    return out
+
+
+def _pseudonym_of(
+    c: ColumnClassification, shape: TableShape, label: str | None = None
+) -> PseudonymColumn | None:
+    """The pseudonym form of ``c``, or ``None`` when no keyed pseudonym fits its type."""
+    try:
+        info = shape.column(c.name)
+    except KeyError:
+        info = None
+    kind = info.kind if info is not None else c.kind
+    data_type = (info.data_type if info is not None else c.data_type).strip().lower()
+    entity = str(c.entity_type) if c.entity_type is not None else "KEY"
+    common: dict[str, Any] = {"path": c.path, "name": c.name, "entity_type": entity, "label": label}
+    if kind in ("int", "decimal") and (kind == "int" or not (info and info.scale)):
+        precision = info.precision if info is not None else None
+        digits = precision or INT_DIGITS.get(data_type)
+        # D-A: a pseudonym of a key below 10⁹ lies in [10⁹, 2·10⁹) (never a real key there):
+        # the column must hold it — integer, bigint, numeric(p ≥ 10, 0)
+        limit = 10**precision - 1 if precision else INT_LIMITS.get(data_type)
+        if limit is not None and limit < MIN_PSEUDONYM_LIMIT:
+            return None
+        return PseudonymColumn(**common, kind="int", digits=digits, limit=limit)
+    if kind in _TEXTUAL:
+        return PseudonymColumn(**common, kind="text")
+    if kind == "uuid":
+        return PseudonymColumn(**common, kind="uuid")
+    return None
+
+
+def pseudonym_columns(
+    snapshot: ClassificationSnapshot,
+    *,
+    mode: str,
+    write_mode: WriteMode,
+    pk_strategy: PkStrategy | dict[str, Any] | None,
+    projection: list[str],
+    shape: TableShape | None = None,
+) -> list[PseudonymColumn]:
+    """D-A: the identifier columns a synthesize run replaces by keyed pseudonyms (none in
+    obfuscate mode); ``shape`` is the live shape at prepare (its declared foreign keys).
+
+    Raises:
+        PrepareFailure: ``synthesize_pseudonym_unsupported`` — an identifier column whose type
+            no pseudonym fits (``validate_run`` refuses the run first).
+    """
+    if mode != "synthesize":
+        return []
+    out: list[PseudonymColumn] = []
+    for c, label in _identifiers(
+        snapshot, write_mode=write_mode, pk_strategy=pk_strategy, projection=projection, shape=shape
+    ):
+        p = _pseudonym_of(c, shape or snapshot.shape, label)
+        if p is None:
+            raise PrepareFailure(
+                "synthesize_pseudonym_unsupported",
+                f"{c.path}: no keyed pseudonym fits this column type",
+            )
+        out.append(p)
+    return out
+
+
+def _check_identifiers(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
+    """D-A at submit: a synthesize run never copies a sensitive key or identifier."""
+    target = spec.target
+    sensitive_key = any(c.entity_type for c in _key_columns(snapshot))
+    if target.write_mode == "in_place" and sensitive_key:
+        raise _fail(
+            "synthesize_in_place_sensitive_key",
+            422,
+            "a synthesize run in place would keep the real key of every row: write a table, "
+            "files or an append with generated keys",
+        )
+    if target.write_mode == "append" and isinstance(target.pk_strategy, PkOffset):
+        # G2 review r1 (B2): ``real key + offset`` (or a prefix) links back whatever the class
+        raise _fail(
+            "pk_strategy_invalid",
+            422,
+            "a real key is never copied into synthetic rows, shifted or prefixed: use generate",
+        )
+    for c, label in _identifiers(
+        snapshot,
+        write_mode=target.write_mode,
+        pk_strategy=target.pk_strategy,
+        projection=_projection(spec, snapshot),
+    ):
+        if _pseudonym_of(c, snapshot.shape, label) is None:
+            raise _fail(
+                "synthesize_pseudonym_unsupported",
+                422,
+                f"{c.path}: an identifier or key that synthetic rows must not copy, and no keyed "
+                "pseudonym fits its type (integer, bigint or numeric of at least 10 digits; "
+                "text; uuid)",
+            )
 
 
 def _strategy_kind(strategy: PkStrategy | dict[str, Any] | None) -> str | None:
@@ -252,6 +434,82 @@ def _check_target(spec: RunSpec, source_conn: Connection, target_conn: Connectio
             raise _fail(invalid, 422, "an append target must be a database connection")
 
 
+def _check_tabular(
+    spec: RunSpec,
+    settings: Settings,
+    *,
+    source_conn: Connection,
+    child_snapshot: ClassificationSnapshot | None,
+) -> None:
+    """M5 tabular synthesis: synthesize mode, a table or files target, an enabled engine;
+    differential privacy and linked generation with the MOSTLY engine only (Task 7B)."""
+    options = spec.options
+    engine = options.tabular
+    if options.tabular_dp and engine != "mostly":
+        raise _fail(
+            "tabular_invalid", 422, "differential privacy is an option of the mostly engine"
+        )
+    if options.linked is not None and engine != "mostly":
+        raise _fail("tabular_invalid", 422, "linked generation needs the mostly engine")
+    if engine == "none":
+        return
+    if spec.mode != "synthesize" or spec.target.write_mode in _DATABASE_WRITES:
+        raise _fail(
+            "tabular_invalid",
+            422,
+            "tabular synthesis runs in synthesize mode into a table or files target",
+        )
+    if engine not in settings.tabular_engines:
+        raise _fail(
+            "tabular_invalid", 422, f"tabular engine {engine} is not enabled on this deployment"
+        )
+    if engine == "mostly":
+        from dps.engine.synth.mostly import mostly_available  # needs the tabular extra only
+
+        if not mostly_available():
+            raise _fail(
+                "tabular_invalid", 422, "the synth-ml extra is not installed on this deployment"
+            )
+    if options.linked is not None:
+        _check_linked(spec, source_conn=source_conn, child_snapshot=child_snapshot)
+
+
+def _check_linked(
+    spec: RunSpec, *, source_conn: Connection, child_snapshot: ClassificationSnapshot | None
+) -> None:
+    """Linked generation writes files and needs the accepted snapshot of another table."""
+    linked = spec.options.linked
+    assert linked is not None
+    if spec.target.write_mode != "files":
+        raise _fail("tabular_invalid", 422, "linked generation writes a files target")
+    if _same_object(linked.child, spec.source.object):
+        raise _fail("tabular_invalid", 422, "the linked child must be another table")
+    if (
+        child_snapshot is None
+        or child_snapshot.status != "accepted"
+        or child_snapshot.id != linked.child_snapshot_id
+        or child_snapshot.connection_id != spec.source.connection_id
+        or child_snapshot.object_ref != _object_ref(linked.child, source_conn.engine)
+    ):
+        raise _fail(
+            "tabular_invalid",
+            422,
+            "linked generation needs the accepted snapshot of the child table",
+        )
+
+
+def _relaxes_verification(spec: RunSpec, settings: Settings) -> bool:
+    """True when the run asks for ``options.verify = "warn"`` or its policy's leakage check is
+    ``warn`` (an unresolvable policy is left to the later checks)."""
+    if spec.options.verify == "warn":
+        return True
+    try:
+        policy = resolve_policy(spec.policy, default_name=settings.default_policy)
+    except (KeyError, ValueError):
+        return False
+    return policy.verify.leakage_check == "warn"
+
+
 def validate_run(
     spec: RunSpec,
     *,
@@ -262,8 +520,11 @@ def validate_run(
     settings: Settings,
     kek: bytes | None = None,
     group: GroupKeys | None = None,
+    child_snapshot: ClassificationSnapshot | None = None,
 ) -> None:
     """Refuse a run DPS must not start (module docstring for the order and codes).
+
+    ``child_snapshot`` is the accepted snapshot a linked generation names (M5 Task 7B).
 
     Raises:
         SpecError: the first rule the spec breaks, with its code and HTTP status.
@@ -272,6 +533,13 @@ def validate_run(
     mode = target.write_mode
     if kek is None:
         raise _fail("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
+    if not settings.verify_warn_allowed and _relaxes_verification(spec, settings):
+        raise _fail(
+            "verify_warn_disallowed",
+            422,
+            "verify=warn (or a policy with verify.leakage_check=warn) is not allowed on this "
+            "deployment",
+        )
     if source_conn.engine != "postgres":
         raise _fail("engine_unavailable", 422, "M2 runs read PostgreSQL sources only")
     if (
@@ -300,6 +568,8 @@ def validate_run(
                 f"{mode} on a production-tagged connection needs the admin scope",
             )
     keys = _key_columns(snapshot)
+    if spec.mode == "synthesize":
+        _check_identifiers(spec, snapshot)
     if mode == "in_place":
         if (
             target.connection_id not in (None, source_conn.id)
@@ -346,8 +616,9 @@ def validate_run(
                 "text_method_invalid", 422, f"{c.path}: free-text columns are tokenized (det_token)"
             )
     _check_group(spec, group)
-    if spec.options.tabular != "none":
-        raise _fail("tabular_invalid", 422, "tabular synthesis arrives with milestone M5")
+    options = spec.options
+    if options.tabular != "none" or options.tabular_dp or options.linked is not None:
+        _check_tabular(spec, settings, source_conn=source_conn, child_snapshot=child_snapshot)
 
 
 def build_column_plans(
@@ -361,10 +632,14 @@ def build_column_plans(
     """One :class:`ColumnPlan` per projected column that is transformed in ``mode``.
 
     Kept columns and columns without an entity get no plan; key columns get none in place
-    (never rewritten) or on an append whose keys come from ``generate`` / ``offset``.
+    (never rewritten) or on an append whose keys come from ``generate`` / ``offset``. In
+    synthesize mode a classified attribute the policy keeps (:func:`kept_attribute`, D-A B1) is
+    planned ``surrogate`` — the tabular engine replaces that plan by its draw when it models the
+    column (``jobs_run``).
     """
     kind = _strategy_kind(pk_strategy)
     wanted = set(projection)
+    keys = set(snapshot.shape.key)
     plans: list[ColumnPlan] = []
     for col in snapshot.columns:
         if col.name not in wanted:
@@ -374,7 +649,9 @@ def build_column_plans(
             write_mode == "in_place" or (write_mode == "append" and kind in ("generate", "offset"))
         ):
             continue
-        if not col.text_column and (col.entity_type is None or method.method == "keep"):
+        if mode == "synthesize" and kept_attribute(col, keys):
+            method = MethodSpec(method="surrogate")
+        elif not col.text_column and (col.entity_type is None or method.method == "keep"):
             continue
         info = snapshot.shape.column(col.name)
         plans.append(
@@ -590,9 +867,11 @@ def resolve_target(
     target_shape: TableShape | None,
     plans: list[ColumnPlan],
     projection: list[str],
+    pseudonyms: list[str] | None = None,
 ) -> tuple[ResolvedTarget, list[ColumnPlan]]:
     """The :class:`ResolvedTarget` of a validated run and the plans with the **target**
-    column's kind and length (created text columns are unbounded).
+    column's kind and length (created text columns are unbounded). ``pseudonyms`` (D-A) are
+    written in place like planned columns.
 
     Raises:
         PrepareFailure: ``target_invalid`` (missing target, missing or incompatible columns, no
@@ -664,7 +943,7 @@ def resolve_target(
         raise PrepareFailure("target_invalid", "the target table does not exist")
     generated = isinstance(t.pk_strategy, PkGenerate)
     if t.write_mode == "in_place":
-        write_columns = [p.name for p in plans]
+        write_columns = [p.name for p in plans] + [n for n in pseudonyms or [] if n not in planned]
         if not write_columns:
             raise PrepareFailure("target_invalid", "no column of this run is transformed in place")
         checked = list(source_shape.key) + write_columns

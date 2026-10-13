@@ -459,6 +459,24 @@ class PostgresConnector:
                 key = list(r["cols"])
                 source = "primary_key" if r["indisprimary"] else "unique_index"
                 break
+        # D-A: declared single-column foreign keys (a synthesize run pseudonymises them under
+        # the label of the key they reference); multi-column foreign keys are not named
+        fks = await self.fetch_internal(
+            "SELECT a.attname AS col, rn.nspname AS ref_owner, rc.relname AS ref_table, "
+            "ra.attname AS ref_col FROM pg_constraint k "
+            "JOIN pg_class c ON c.oid = k.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_class rc ON rc.oid = k.confrelid "
+            "JOIN pg_namespace rn ON rn.oid = rc.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = k.conkey[1] "
+            "JOIN pg_attribute ra ON ra.attrelid = k.confrelid AND ra.attnum = k.confkey[1] "
+            "WHERE k.contype = 'f' AND n.nspname = $1 AND c.relname = $2 "
+            "AND cardinality(k.conkey) = 1 ORDER BY k.conname",
+            [owner, obj.name],
+        )
+        references: dict[str, str] = {}
+        for r in fks:
+            references.setdefault(r["col"], f"{r['ref_owner']}.{r['ref_table']}.{r['ref_col']}")
         estimate = await self.fetch_internal(
             "SELECT c.reltuples::bigint AS n FROM pg_class c "
             "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2",
@@ -474,6 +492,7 @@ class PostgresConnector:
                 is_key=r["attname"] in key,
                 has_default=r["atthasdef"],
                 is_identity=r["is_identity"],
+                references=references.get(r["attname"]),
                 **_typmod_fields(r["typname"], r["atttypmod"]),
             )
             for r in cols

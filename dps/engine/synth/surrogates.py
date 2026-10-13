@@ -10,10 +10,16 @@ below): the same seed gives the same fake across fields, tables, requests and sy
 P3).
 
 Generated identifiers are *valid in format* and *never issued* where an unissued range exists:
-SSNs in the 900 area, ITINs in groups 89/93, SINs starting with 0, Aadhaar numbers starting with
-1 (Verhoeff-valid; UIDAI never issues 0/1), cards on the 411111 test IIN, e-mails on RFC 2606
-domains, NANP 555-01xx and Ofcom 07700 900xxx phones, private / documentation IP ranges and
-locally administered MACs. Credentials are never synthesised; they are redacted.
+SSNs in the 900 area (groups 01-49, where no ITIN or ATIN is either), ITINs in group 89, SINs
+starting with 0, Aadhaar numbers starting with 1 (Verhoeff-valid; UIDAI never issues 0/1), NINOs
+with a prefix HMRC never allocates, CURPs and personal RFCs that start with a word RENAPO and the
+SAT never issue, NHS numbers in the 999 test range, EINs on unassigned campus prefixes, PANs with
+the sequence number 0000, generic national ids by recognised sub-shape (``unissued.py``), cards
+on the 411111 test IIN, e-mails on RFC 2606 domains, NANP 555-01xx and Ofcom 07700 900xxx
+phones, private / documentation IP ranges and locally administered MACs. A government
+identifier with no such range (passport, driving licence, voter id, ...) is reshaped, and a
+synthesize run reviews its column (``identifier_check``). Credentials are never synthesised; they
+are redacted.
 
 Guarantees beyond the plan's generators:
 
@@ -35,7 +41,8 @@ Guarantees beyond the plan's generators:
   it. A record's declaration changes a surrogate only when a draw collides, so the same seed
   still gives the same fake across records and requests everywhere else.
 * **Reshaped identifiers are a keyed derangement** (``reshape.py``): identifiers of unmapped
-  types, CVVs, sort codes, IFSC branch codes, amounts, diagnosis codes and BICs keep their
+  types (a derangement of an *issued* space maps real numbers onto other real ones, which is why
+  every government identifier with a never-issued range is drawn from it instead), CVVs, sort codes, IFSC branch codes, amounts, diagnosis codes and BICs keep their
   layout and have their digits and letters (every letter, in its own script) mapped by a
   seed-keyed, blockwise permutation of the shape's value space without fixed points. Two
   different originals of the same shape never share a surrogate, so foreign keys, joins and
@@ -72,6 +79,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from stdnum import iban as stdnum_iban
 
 from dps.engine.detect.checksums import luhn_check_digit, verhoeff_check_digit
+from dps.engine.synth import unissued
 from dps.engine.synth.formats import (
     crypto_surrogate,
     fill_layout,
@@ -341,6 +349,12 @@ class SurrogateEngine:
             "IBAN": self._iban,
             "ROUTING_ABA": self._aba,
             "SIN": self._sin,
+            "NINO": lambda o, loc, a, r: unissued.nino(o, r),
+            "CURP": lambda o, loc, a, r: unissued.curp(o, r),
+            "RFC": self._rfc,
+            "NHS_NUMBER": lambda o, loc, a, r: unissued.nhs(o, r),
+            "EIN": lambda o, loc, a, r: unissued.ein(o, r),
+            "NATIONAL_ID": self._national_id,
             "STREET_ADDRESS": self._street,
             "CITY": lambda o, loc, a, r: self.persona(a, loc).city,
             "LOCATION": lambda o, loc, a, r: self.persona(a, loc).city,
@@ -507,12 +521,28 @@ class SurrogateEngine:
         return self._phone(original, self.persona(anchor, loc).country_code, rng)
 
     def _ssn(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        group = f"{rng.randint(1, 99):02d}"
-        return _us_tin(original, f"9{rng.randint(0, 99):02d}{group}{rng.randint(1, 9999):04d}")
+        return _us_tin(original, unissued.tin_digits(rng))  # 9xx, groups no ITIN or ATIN has
 
     def _itin(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        group = rng.choice(("89", "93"))  # outside every group the IRS issues ITINs in
-        return _us_tin(original, f"9{rng.randint(0, 99):02d}{group}{rng.randint(1, 9999):04d}")
+        # 89 is outside every group the IRS issues ITINs in (93 is the ATINs': issued)
+        return _us_tin(original, unissued.tin_digits(rng, groups=(89,)))
+
+    def _rfc(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
+        """A natural person's RFC from a never-issued range; a company's RFC has none (it is
+        reshaped, and a synthesize run reviews the column: ``identifier_check``)."""
+        if unissued.national_shape(original) == "RFC":
+            return unissued.rfc_person(original, rng)
+        return self._reshape("RFC", original, rng, True, keep=code_letters(original) or None)
+
+    def _national_id(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
+        """By recognised sub-shape from a never-issued range (``unissued.py``); any other shape
+        is reshaped like an identifier of an unmapped type, and a synthesize run reviews it."""
+        fake = unissued.national_id(original, rng)
+        if fake is not None:
+            return fake
+        return self._reshape(
+            "NATIONAL_ID", original, rng, True, keep=code_letters(original) or None
+        )
 
     def _aadhaar(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         body = "1" + _digits(rng, 10)  # UIDAI never issues numbers starting with 0 or 1
@@ -522,7 +552,8 @@ class SurrogateEngine:
     def _pan_in(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         letters = "".join(rng.choice(_PAN_LETTERS) for _ in range(3))
         initial = ascii_fold(self.persona(anchor, loc).last_name)[:1].upper() or "K"
-        return f"{letters}P{initial}{rng.randint(1, 9999):04d}{rng.choice(_PAN_LETTERS)}"
+        # the sequential part runs 0001-9999: 0000 is never issued
+        return f"{letters}P{initial}0000{rng.choice(_PAN_LETTERS)}"
 
     def _card_pan(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         count = max(13, min(19, len(_DIGIT.findall(original)) or 16))

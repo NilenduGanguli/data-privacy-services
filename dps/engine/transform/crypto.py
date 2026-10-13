@@ -205,6 +205,37 @@ def hmac_bytes(key: bytes, data: str) -> bytes:
     return hmac.new(key, data.encode("utf-8"), hashlib.sha256).digest()
 
 
+#: Characters of an ``external_tokenize`` binding tag (130 bits of base32).
+BINDING_TAG_CHARS = 26
+
+
+def binding_key_from_kek(kek: bytes) -> bytes:
+    """The server-held key that binds external tokens to a caller's key (SEC-4, decision D-B).
+
+    HKDF-SHA256 of the job KEK under its own label, so the KEK itself never keys an HMAC.
+    """
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=SUBKEY_BYTES, salt=None, info=b"dps.v1|xtb")
+    return hkdf.derive(kek)
+
+
+def external_binding_tag(
+    binding_key: bytes, km: KeyMaterial, entity_type: str, profile: str | None, token: str
+) -> str:
+    """The ``bind`` tag of an external token: proof that DPS produced ``token`` under ``km``.
+
+    ``HMAC(HMAC(binding_key, subkey(km, "external_tokenize|<entity>|<profile>")), token)``,
+    base32, 26 characters. The caller holds its DEK, so a tag under the DEK alone could be
+    computed by anyone holding it; the server-held ``binding_key`` makes the tag unforgeable
+    outside DPS, and the DEK subkey ties it to this caller key, entity type and profile.
+
+    Raises:
+        KeyError: the material is wrapped-only. ValueError: the DEK is malformed.
+    """
+    sub = subkey(km, f"external_tokenize|{entity_type}|{profile or ''}")
+    mac_key = hmac.new(binding_key, sub, hashlib.sha256).digest()
+    return b32(hmac_bytes(mac_key, token))[:BINDING_TAG_CHARS]
+
+
 def derive_int(key: bytes, data: str, modulus: int) -> int:
     """A stable integer in ``[0, modulus)`` from ``HMAC(key, data)``."""
     if modulus <= 0:

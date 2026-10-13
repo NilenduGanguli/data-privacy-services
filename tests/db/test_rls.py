@@ -8,7 +8,8 @@ import pytest
 from dps import db
 
 pytestmark = pytest.mark.db
-APPEND_ONLY_FOR_THE_API = ("dps_audit_log", "dps_evidence")  # no DELETE grant (009)
+#: no DELETE grant: 009 (audit, evidence) and 043 (policies and versions are a governance record)
+APPEND_ONLY_FOR_THE_API = ("dps_audit_log", "dps_evidence", "dps_policy", "dps_policy_version")
 
 
 # Minimal valid row per tenant table, keyed by tenant (dps_audit_log and dps_job_partition need parents).
@@ -63,6 +64,24 @@ async def _seed(conn: asyncpg.Connection, tenant: str) -> None:
         "VALUES ($1, '/api/v1/jobs', 'job.create', 'ok')",
         tenant,
     )
+    for table, statement in M5_SEEDS.items():
+        if table in db.TENANT_TABLES:
+            await conn.execute(statement, tenant)
+
+
+#: M5 tenant tables (040+): one minimal row each.
+M5_SEEDS = {
+    "dps_tenant_usage": "INSERT INTO dps.dps_tenant_usage (tenant_id, day) VALUES ($1, current_date)",
+    "dps_report_daily": "INSERT INTO dps.dps_report_daily (tenant_id, day, layer, action, outcome) "
+    "VALUES ($1, current_date, 'api', 'detect', 'ok')",
+    "dps_report_entity_daily": "INSERT INTO dps.dps_report_entity_daily "
+    "(tenant_id, day, layer, entity_type) VALUES ($1, current_date, 'api', 'EMAIL')",
+    "dps_report_refresh": "INSERT INTO dps.dps_report_refresh (tenant_id, day) "
+    "VALUES ($1, current_date)",
+    "dps_policy": "INSERT INTO dps.dps_policy (tenant_id, name) VALUES ($1, 'retail-kyc')",
+    "dps_policy_version": "INSERT INTO dps.dps_policy_version (tenant_id, name, version, body, "
+    "policy_hash) VALUES ($1, 'retail-kyc', 1, '{}', repeat('a', 64))",
+}
 
 
 async def test_posture_is_clean_for_the_api_role(migrated_db) -> None:  # noqa: ANN001

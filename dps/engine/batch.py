@@ -32,6 +32,14 @@ there that starts with ``0`` would be stored without that digit and reveal would
 number. Any reversible output the target column would store differently (a dropped leading zero,
 a decimal re-scaled to the column's scale) fails the batch with ``incompatible_method`` instead
 of being written.
+
+**Tabular synthesis** (M5, contract §6.6). With a :class:`TabularSampler` (synthesize mode only),
+after the planned columns are transformed the sampler's columns (non-key, unplanned) are
+overwritten with one synthetic draw per row, keyed by the row's key anchor
+(``row:<hash(key)>``, unique per row even when rows share an entity anchor), then the policy's
+constraints run, and a row equal on every reject column to a real row — of the fit sample, the
+holdout or the batch's own sources — is redrawn (the stream salted by ``attempt``). More than
+``max_resample`` redraws for one row fails the batch closed: ``LeakageError("exact_row_match")``.
 """
 
 from __future__ import annotations
@@ -39,7 +47,9 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections import Counter
-from typing import Any, Literal, Protocol, cast
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,7 +64,8 @@ from dps.engine.findings import (
 from dps.engine.planner import build_plan
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import PrivacyEngine
-from dps.engine.synth.surrogates import SynthesisSeed
+from dps.engine.synth.keys import KeyPseudonyms, PseudonymError
+from dps.engine.synth.surrogates import SynthesisSeed, seed_bytes
 from dps.engine.taxonomy import entity_info, record_sensitivity
 from dps.engine.transform.apply import (
     ApplyOptions,
@@ -75,7 +86,11 @@ from dps.layers.connectors.base import (
     from_engine_text,
     to_engine_text,
 )
-from dps.observability import FINDINGS, TRANSFORMS, VERIFY_FAIL
+from dps.observability import FINDINGS, TABULAR_RESAMPLES, TRANSFORMS, VERIFY_FAIL
+
+if TYPE_CHECKING:  # the constraints module needs the [tabular] extra; M2 jobs run without it
+    from dps.engine.synth.constraints import ConstraintSet
+    from dps.engine.transform.external import ExternalTokenizer
 
 #: Methods that need no key material (usable in synthesize mode).
 KEYLESS_METHODS = frozenset(
@@ -106,14 +121,40 @@ NUMERIC_KINDS = frozenset({"int", "decimal", "float"})
 #: Minimum normalised lengths: an unchanged whole value, and a value (or a name part) found
 #: elsewhere in the row's outputs.
 EXACT_MIN, CONTAIN_MIN = 4, 8
+#: Low-cardinality attributes the surrogate engine draws from the record's persona and may
+#: draw equal to the original (M0 ``surrogates._IDENTITY_OK``; the schema-generation sweep's
+#: ``SWEEP_EXEMPT``): a surrogate ``Female`` for a ``Female`` is chance, not a copy, so it is not
+#: a fixed point. An unequal one is still searched for in the row's other outputs.
+CHANCE_EQUAL_ENTITIES = frozenset({"GENDER", "NATIONALITY"})
 _MAX_HITS = 50
 _HIDDEN = ConfigDict(hide_input_in_errors=True)
 
 
 class TabularSampler(Protocol):
-    """M5's per-row tabular sampler (contract §6.6); M2 always passes ``None``."""
+    """M5's per-row tabular sampler (contract §6.6): ``GaussianCopula``, or the MOSTLY pool.
+
+    Rows are keyed by column **name**; the same model, seed, anchor and attempt always give the
+    same row. ``row_digest``/``is_rejected`` decide exact-row matches over the sampler's reject
+    columns (the non-key output columns).
+    """
+
+    @property
+    def engine(self) -> str: ...  # "copula" | "mostly"
+
+    @property
+    def columns(self) -> list[str]: ...  # column NAMES the sampler writes
 
     def sample_row(self, anchor: str) -> dict[str, Any]: ...
+
+    def sample_rows(self, anchors: Sequence[str], *, attempt: int = 0) -> list[dict[str, Any]]: ...
+
+    def row_digest(self, row: Mapping[str, Any]) -> int: ...
+
+    def is_rejected(
+        self, row: Mapping[str, Any], *, extra: AbstractSet[int] = frozenset()
+    ) -> bool: ...
+
+    def to_bytes(self) -> bytes: ...
 
 
 class ColumnPlan(BaseModel):
@@ -155,6 +196,33 @@ class ColumnPlan(BaseModel):
         )
 
 
+class PseudonymColumn(BaseModel):
+    """D-A: a column whose identifiers a synthesize run replaces by keyed pseudonyms
+    (:class:`~dps.engine.synth.keys.KeyPseudonyms`) instead of copying them (value-free).
+
+    ``kind`` is ``int`` (integers, ``numeric(p, 0)``), ``text`` (text, char) or ``uuid``;
+    ``digits`` the decimal digits an integer column holds; ``limit`` the largest magnitude it
+    holds (a larger pseudonym fails the batch; without ``limit``, ``10**digits - 1``).
+    ``label`` keys the pseudonym when it is not the entity type: an unclassified key or foreign
+    key (``entity_type`` ``KEY``) is keyed by the referenced key, ``KEY|owner.table.column``.
+    """
+
+    model_config = _HIDDEN
+    path: str
+    name: str
+    entity_type: str
+    kind: Literal["int", "text", "uuid"]
+    digits: int | None = None
+    limit: int | None = None
+    label: str | None = None
+
+    def max_magnitude(self) -> int | None:
+        """The largest integer pseudonym the column holds (``None``: unbounded)."""
+        if self.limit is not None:
+            return self.limit
+        return 10**self.digits - 1 if self.digits is not None else None
+
+
 class BatchResult(BaseModel):
     """Transformed rows plus value-free counters for the job and the evidence pack."""
 
@@ -168,15 +236,22 @@ class BatchResult(BaseModel):
 
 
 class LeakageError(Exception):
-    """The per-row sweep found originals in the output under ``strict``; nothing is written."""
+    """The per-row sweep found originals in the output under ``strict``, or a synthetic row kept
+    equalling a real row (``rule="exact_row_match"``, the message is then the rule alone); nothing
+    is written. Value-free."""
 
     code = "leakage"
 
-    def __init__(self, hits: int) -> None:
-        super().__init__(
-            f"leakage: {hits} original value(s) found in the transformed batch; nothing was written"
-        )
-        self.hits = hits
+    def __init__(self, hits: int, *, rule: str | None = None) -> None:
+        message = f"leakage: {hits} original value(s) found in the transformed batch; "
+        super().__init__(rule if rule is not None else message + "nothing was written")
+        self.hits, self.rule = hits, rule
+
+
+class PlanConflict(ValueError):
+    """The column plans, the tabular sampler and the key pseudonyms of a run contradict each
+    other (a column planned twice, a pseudonym the table lacks …): a defect of the plan, not of
+    the data — deterministic, so a job fails instead of retrying it. Value-free."""
 
 
 class IncompatibleMethod(Exception):
@@ -234,7 +309,8 @@ def verify_row(
     for column, original, whole in originals:
         needle = normalise(original)
         if whole and len(needle) >= EXACT_MIN and hays.get(column.path) == needle:
-            hit(column.path, column.entity_type, "fixed_point")
+            if column.entity_type not in CHANCE_EQUAL_ENTITIES:
+                hit(column.path, column.entity_type, "fixed_point")
         elif len(needle) >= CONTAIN_MIN:
             for path, hay in hays.items():
                 if needle in hay:
@@ -279,13 +355,24 @@ class BatchTransformer:
         tabular: TabularSampler | None = None,
         anchor: tuple[str, str] | None = None,
         verify: Literal["strict", "warn"] = "strict",
+        constraints: ConstraintSet | None = None,
+        max_resample: int = 8,
+        pseudonyms: Sequence[PseudonymColumn] = (),
     ) -> None:
         """Validate the mode's prerequisites and the plans against ``shape``.
+
+        ``pseudonyms`` (synthesize mode, D-A): identifier columns replaced by keyed pseudonyms
+        under the synthesis seed after the row is transformed (never planned, never sampled).
 
         Raises:
             ValueError: obfuscate without key material, synthesize without a seed, a plan (or
                 the anchor) naming a column the table does not have, or a plan whose method
-                params lack their plan defaults (copied around :class:`ColumnPlan`'s validator).
+                params lack their plan defaults (copied around :class:`ColumnPlan`'s validator);
+                a tabular sampler outside synthesize mode, on a table without a key, or writing
+                a key column, a planned column or a column the table does not have; pseudonyms
+                outside synthesize mode, on a planned or sampled column or a column the table
+                does not have. The plan contradictions are :class:`PlanConflict` (a
+                ``ValueError``).
             IncompatibleMethod: ``incompatible_method`` for a synthesize-mode method that needs
                 key material, or ``fpe_digits`` without ``leading_zero: preserve`` on a numeric
                 column.
@@ -318,15 +405,46 @@ class BatchTransformer:
             raise IncompatibleMethod(lossy[0], "incompatible_method")
         known = {c.name for c in shape.columns}
         if any(c.name not in known for c in columns) or (anchor and anchor[0] not in known):
-            raise ValueError("a column plan names a column the table does not have")
+            raise PlanConflict("a column plan names a column the table does not have")
+        if tabular is not None:
+            if mode != "synthesize":
+                raise ValueError("tabular sampling runs in synthesize mode only")
+            if not shape.key:
+                raise PlanConflict("tabular sampling needs a table key")
+            writable = known - set(shape.key) - {c.name for c in columns}
+            if any(name not in writable for name in tabular.columns):
+                raise PlanConflict(
+                    "the tabular sampler writes a key column, a planned column or a column "
+                    "the table does not have"
+                )
+        if pseudonyms:
+            if mode != "synthesize":
+                raise ValueError("key pseudonyms run in synthesize mode only")
+            names = {p.name for p in pseudonyms}
+            if any(n not in known for n in names):
+                raise PlanConflict("a pseudonym column names a column the table does not have")
+            sampled = set(tabular.columns) if tabular is not None else set()
+            if names & ({c.name for c in columns} | sampled):
+                raise PlanConflict("a pseudonym column is also planned or sampled")
+        if max_resample < 0:
+            raise ValueError("max_resample must not be negative")
         self.engine, self.policy, self.mode = engine, policy, mode
         self.shape, self.key, self.seed, self.locale = shape, key, seed, locale
         self.anchor, self.verify_mode = anchor, verify
         self.unclassified, self.tabular = unclassified, tabular
+        self.constraints, self.max_resample = constraints, max_resample
+        self._int_key = False
+        if tabular is not None and len(shape.key) == 1 and shape.key[0] in known:
+            key_column = shape.column(shape.key[0])
+            self._int_key = key_column.kind == "int" or (
+                key_column.kind == "decimal" and not key_column.scale
+            )
         self.whole = [c for c in columns if not c.text_column]
         self.text = [c for c in columns if c.text_column]
         self.detector = engine.detector(policy, locale) if self.text else None
         self.out_cols = {c.name: c.output_column() for c in columns}
+        self.pseudonyms = list(pseudonyms)
+        self._keys = KeyPseudonyms(seed_bytes(seed)) if pseudonyms and seed is not None else None
 
     def _entry(self, finding: Finding, spec: MethodSpec) -> PlanEntry:
         method, params, reason = spec.method, dict(spec.params), "snapshot"
@@ -384,6 +502,9 @@ class BatchTransformer:
             cipher_factory=self.engine.cipher_factory,
             token_style="envelope",
             locale=self.locale,
+            tokenizer=self.engine.tokenizer,
+            external_cache=self._pretokenize(rows),
+            binding_keys=self.engine.token_binding,
         )
         out_rows: list[Row] = []
         methods: Counter[str] = Counter()
@@ -392,7 +513,13 @@ class BatchTransformer:
         findings_seen: Counter[tuple[str, str]] = Counter()
         hits: list[dict[str, str]] = []
         checked = 0
+        tabular_anchors: list[str] = []
+        key_ints: list[int | None] = []
         for row in rows:
+            if self.tabular is not None:
+                # keyed by the row key: rows sharing an entity anchor still get their own draws
+                tabular_anchors.append(row_anchor(row, self.shape, None))
+                key_ints.append(self._key_int(row))
             doc: dict[str, str] = {}
             for col in self.whole + self.text:
                 text = to_engine_text(row.get(col.name), self.shape.column(col.name))
@@ -468,6 +595,24 @@ class BatchTransformer:
                 inputs = {self.out_cols[name].path: doc[name] for name in searched}
                 hits += verify_row(originals, outputs, inputs=inputs)
             out_rows.append(out)
+        if self.pseudonyms:
+            for row, out in zip(rows, out_rows, strict=True):
+                checked += self._pseudonymise(row, out, hits)
+            methods["key_pseudonym"] += sum(
+                1 for row in rows for p in self.pseudonyms if row.get(p.name) is not None
+            )
+            per_column.update(
+                p.name for row in rows for p in self.pseudonyms if row.get(p.name) is not None
+            )
+        resample_counts: dict[str, int] = {}
+        if self.tabular is not None:
+            written, resamples = self._apply_tabular(rows, out_rows, tabular_anchors, key_ints)
+            engine_name = self.tabular.engine
+            methods[engine_name] += sum(written.values())
+            per_column.update(written)
+            if resamples:
+                resample_counts[f"{engine_name}_resample"] = resamples
+                TABULAR_RESAMPLES.inc(resamples)
         for method, count in methods.items():
             TRANSFORMS.labels(self.mode, method).inc(count)
         for (entity, detector), count in findings_seen.items():
@@ -479,11 +624,122 @@ class BatchTransformer:
                 raise LeakageError(len(hits))
         return BatchResult(
             rows=out_rows,
-            values_by_method=dict(methods),
+            values_by_method={**methods, **resample_counts},
             fallbacks=dict(notes),
             verification=verification,
             values_by_column=dict(per_column),
         )
+
+    def _pseudonymise(self, row: Row, out: Row, hits: list[dict[str, str]]) -> int:
+        """Replace the row's identifiers by their keyed pseudonyms (D-A); returns the values
+        checked. A pseudonym equal to its source (impossible by construction) is a hit.
+
+        Raises:
+            IncompatibleMethod: the pseudonym does not fit its column (value-free).
+        """
+        assert self._keys is not None
+        checked = 0
+        for p in self.pseudonyms:
+            column = self.shape.column(p.name)
+            source = to_engine_text(row.get(p.name), column)
+            if not source:
+                continue
+            label = p.label or p.entity_type
+            try:
+                if p.kind == "int":
+                    number = self._keys.integer(label, int(source))
+                    largest = p.max_magnitude()
+                    if largest is not None and abs(number) > largest:
+                        raise IncompatibleMethod(p.path, "incompatible_method")
+                    text = str(number)
+                else:
+                    text = self._keys.text(label, source, kind=p.kind)
+                out[p.name] = from_engine_text(text, column)
+            except (PseudonymError, IncompatibleValue, ValueError):
+                raise IncompatibleMethod(p.path, "incompatible_method") from None
+            checked += 1
+            if normalise(text) == normalise(source):
+                hits.append({"path": p.path, "entity_type": p.entity_type, "rule": "fixed_point"})
+        return checked
+
+    def _pretokenize(self, rows: list[Row]) -> dict[tuple[str, str], str] | None:
+        """M5 ``external_tokenize``: one call per entity type and profile for the batch's whole
+        values (spans in free text still go through ``apply``'s per-row pre-pass).
+
+        Raises:
+            ExternalServiceError: the tokenization service failed (value-free).
+        """
+        tokenizer = self.engine.tokenizer
+        columns = [c for c in self.whole if c.method.method == "external_tokenize"]
+        if tokenizer is None or not columns:
+            return None
+        groups: dict[tuple[str, str | None], set[str]] = {}
+        for col in columns:
+            info = self.shape.column(col.name)
+            profile = col.method.params.get("profile")
+            key = (col.entity_type, str(profile) if profile is not None else None)
+            for row in rows:
+                text = to_engine_text(row.get(col.name), info)
+                if text:
+                    groups.setdefault(key, set()).add(text)
+        cache: dict[tuple[str, str], str] = {}
+        for (entity, profile), values in groups.items():
+            ordered = sorted(values)
+            tokens = tokenizer.tokenize(entity, ordered, profile=profile)
+            cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
+        return cache
+
+    def _key_int(self, row: Row) -> int | None:
+        """The row's single integer key (for ``unique`` constraints), else ``None``."""
+        if not self._int_key:
+            return None
+        value = row.get(self.shape.key[0])
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+
+    def _apply_tabular(
+        self,
+        sources: list[Row],
+        outputs: list[Row],
+        anchors: list[str],
+        key_ints: list[int | None],
+    ) -> tuple[Counter[str], int]:
+        """Overwrite the sampler's columns with synthetic values, enforce constraints, and redraw
+        any row equal to a real row (fit sample, holdout, or a source row of this batch) on every
+        reject column. More than ``max_resample`` redraws for one row fails the batch closed.
+
+        Returns ``(non-null values written per column, redraws)``.
+
+        Raises:
+            LeakageError: ``exact_row_match`` — a row stayed equal to a real row.
+            ConstraintError: a ``unique`` rule without a usable integer key (value-free).
+        """
+        sampler = self.tabular
+        if sampler is None or not outputs:
+            return Counter(), 0
+        sampled = sampler.sample_rows(anchors)
+        batch_digests = frozenset(sampler.row_digest(src) for src in sources)
+        written: Counter[str] = Counter()
+        rejections = 0
+        for i, out in enumerate(outputs):
+            candidate, attempt = sampled[i], 0
+            while True:
+                out.update(candidate)
+                if self.constraints is not None:
+                    self.constraints.apply(out, key_int=key_ints[i])
+                if not sampler.is_rejected(out, extra=batch_digests):
+                    break
+                attempt += 1
+                if attempt > self.max_resample:
+                    raise LeakageError(1, rule="exact_row_match")
+                rejections += 1
+                candidate = sampler.sample_rows([anchors[i]], attempt=attempt)[0]
+            written.update(name for name, value in candidate.items() if value is not None)
+        return written, rejections
 
 
 def plans_digest(columns: list[ColumnPlan]) -> str:
@@ -563,6 +819,60 @@ def _reproduces(
     return out.output.get(column.name) == token
 
 
+def _external_entries(
+    reveal_map: list[dict[str, Any]], shape: TableShape
+) -> list[tuple[dict[str, Any], ColumnInfo]]:
+    by_path = {c.path: c for c in shape.columns}
+    return [
+        (e, by_path[e["path"]])
+        for e in reveal_map
+        if e.get("reveal")
+        and e.get("method") == "external_tokenize"
+        and not e.get("text_column")
+        and e.get("path") in by_path
+    ]
+
+
+def external_reveal_cache(
+    rows: Sequence[Row],
+    *,
+    reveal_map: list[dict[str, Any]],
+    shape: TableShape,
+    tokenizer: ExternalTokenizer,
+) -> dict[tuple[str, str], str]:
+    """L2 reveal of ``external_tokenize`` columns: ``(entity type, token) → value`` for ``rows``.
+
+    Runs where :func:`reveal_row` runs — on the key holder's side (``tools/reveal_rows.py``),
+    with the **key holder's own** tokenization-service client: DPS's credentials never detokenize
+    an L2 value (SEC-4). One detokenize call per entity type and profile; each answer must
+    tokenize back to its token, so a service (or a profile) that answers with another value is
+    refused instead of revealing it. Check the key against the evidence pack's key id first.
+
+    Raises:
+        MethodError: an answer does not tokenize back (value-free; names the entity type).
+        ExternalServiceError: the service failed or refused (value-free).
+    """
+    groups: dict[tuple[str, str | None], set[str]] = {}
+    for entry, column in _external_entries(reveal_map, shape):
+        profile = (entry.get("params") or {}).get("profile")
+        group = (str(entry["entity_type"]), str(profile) if profile is not None else None)
+        for row in rows:
+            token = to_engine_text(row.get(column.name), column)
+            if token:
+                groups.setdefault(group, set()).add(token)
+    cache: dict[tuple[str, str], str] = {}
+    for (entity, profile), tokens in groups.items():
+        ordered = sorted(tokens)
+        values = tokenizer.detokenize(entity, ordered, profile=profile)
+        if tokenizer.tokenize(entity, values, profile=profile) != ordered:
+            raise MethodError(
+                f"external_tokenize ({entity}): a detokenized value does not tokenize back to its "
+                "token; nothing was revealed"
+            )
+        cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
+    return cache
+
+
 def _reveal_value(
     entry: dict[str, Any],
     value: Any,
@@ -572,10 +882,21 @@ def _reveal_value(
     options: ApplyOptions,
     raw_anchor: str,
     field_scoped: bool,
+    external: Mapping[tuple[str, str], str] | None = None,
 ) -> Any:
     token = to_engine_text(value, column)
     if not token:
         return value
+    if entry.get("method") == "external_tokenize" and not entry.get("text_column"):
+        if external is None:
+            raise MethodError(
+                f"the external_tokenize column {column.path} needs the bank tokenization service "
+                "(pass --tokenizer-url and the key holder's --tokenizer-token-file)"
+            )
+        plain = external.get((str(entry["entity_type"]), token))
+        if plain is None:
+            raise MethodError(f"the value at {column.path} could not be detokenized")
+        return from_engine_text(plain, column)
     if entry.get("text_column"):
         doc = reveal(output={column.name: token}, key=key, hints=[], options=options)
         return from_engine_text(doc[column.name], column)
@@ -614,8 +935,12 @@ def reveal_row(
     policy: Policy,
     anchor: tuple[str, str] | None,
     kid: str | None = None,
+    external: Mapping[tuple[str, str], str] | None = None,
 ) -> Row:
     """Reveal one L2 output row with the caller's key and an evidence pack's ``reveal_map``.
+
+    ``external_tokenize`` columns read ``external`` (:func:`external_reveal_cache` for the rows,
+    built with the key holder's own tokenization-service client); without it they are refused.
 
     The anchor's inputs (the anchor column, else the key columns) are revealed first and the row
     anchor is recomputed from them, as ``date_shift`` needs it (contract §6.2). Entries with
@@ -670,5 +995,6 @@ def reveal_row(
                 options=options,
                 raw_anchor=raw,
                 field_scoped=field_scoped,
+                external=external,
             )
     return out

@@ -212,6 +212,10 @@ class StaticKeyStore:
         """The principal for ``raw_key``, or ``None``."""
         return self._by_hash.get(hash_key(raw_key))
 
+    def principals(self) -> list[Principal]:
+        """A read-only view of the configured keys (ids, names, grants — never a key or hash)."""
+        return [p.model_copy(deep=True) for p in self._by_hash.values()]
+
     def __len__(self) -> int:
         return len(self._by_hash)
 

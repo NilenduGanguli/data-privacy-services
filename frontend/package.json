@@ -6,6 +6,7 @@
   "description": "Data Privacy Services — Privacy Console (Vite + React SPA served by FastAPI from frontend/dist).",
   "scripts": {
     "dev": "vite",
+    "dev:fixtures": "VITE_DPS_FIXTURES=1 vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

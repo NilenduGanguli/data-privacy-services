@@ -379,7 +379,12 @@ class _BrokenEngine(PrivacyEngine):
         raise RuntimeError("Ananya Krishnan 123-45-6789")
 
     def reveal(
-        self, payload: Payload, key_material: dict[str, Any], hints: list[dict[str, Any]]
+        self,
+        payload: Payload,
+        key_material: dict[str, Any],
+        hints: list[dict[str, Any]],
+        *,
+        on_detokenize: Any = None,
     ) -> RevealResponse:
         return _Exploding()  # type: ignore[return-value]
 

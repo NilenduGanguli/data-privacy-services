@@ -12,6 +12,20 @@ resumed ``in_place``/``append`` partition takes the target ledger as authoritati
 batch ahead of the checkpoint after a crash), so no batch is ever applied twice; ``table`` resumes
 after its checkpoint (idempotent upserts) and ``files`` restarts from its lower bound.
 
+**Tabular synthesis** (M5, contract §6.6): a synthesize run with ``options.tabular`` fits the
+engine in ``prepare`` on a bounded sample, previews it through the real transformer, measures and
+gates it before anything is written (:mod:`dps.layers.connectors.tabular`), re-seals the job
+secret with the fitted model (``jobs.reseal_secret``) and stores the value-free figures in
+``progress.metrics``; partitions load the sealed model (and the policy's constraints) once per
+runtime.
+
+**Linked generation** (M5 Task 7B, ``options.linked``): ``prepare`` trains the MOSTLY generator on
+the parent and child tables, measures and gates the generated dataset, seals it as the job's
+tabular model and adds two partitions (0 = parent, 1 = child). Each partition writes its table's
+generated rows to its own folder of the files target (``<files.prefix>/<table>/<job_id>/part-…``);
+a restarted partition rewrites its objects (deterministic content). ``finalize`` writes one
+manifest (``<files.prefix>/<job_id>/manifest.json``) with a ``tables`` map.
+
 ``finalize`` (one fenced job row) decides the outcome, writes the files manifest last, clears the
 write ledger of a finished job, samples written rows for the evidence, stores the evidence pack,
 audits ``job.finalize`` and moves the job to its terminal state, purging the sealed key.
@@ -32,11 +46,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import tempfile
 import time
+import uuid
 from collections import Counter, defaultdict
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
@@ -49,13 +66,23 @@ from dps.connections import (
     get_connection,
     load_credentials,
 )
-from dps.engine.batch import BatchResult, BatchTransformer, IncompatibleMethod, LeakageError
+from dps.engine.batch import (
+    NUMERIC_KINDS,
+    BatchResult,
+    BatchTransformer,
+    IncompatibleMethod,
+    LeakageError,
+    PlanConflict,
+    TabularSampler,
+    row_anchor,
+)
 from dps.engine.detect.ensemble import Detector
 from dps.engine.policy import Policy
 from dps.engine.service import EngineError
-from dps.engine.synth.surrogates import seed_from_caller
+from dps.engine.synth.surrogates import seed_bytes, seed_from_caller
 from dps.engine.taxonomy import Sensitivity
 from dps.engine.transform.crypto import key_material_from_caller
+from dps.engine.transform.external import ExternalServiceError
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobPhase, JobState, PartitionState
 from dps.jobs_models import (
     ClassificationSnapshot,
@@ -78,6 +105,7 @@ from dps.layers.connectors.base import (
     PkOffset,
     PkToken,
     PrepareReport,
+    Row,
     TableShape,
     decode_key,
     encode_key,
@@ -87,9 +115,11 @@ from dps.layers.connectors.evidence import EvidenceInputs, build_pack, save_evid
 from dps.layers.connectors.files import (
     FilesWriter,
     build_manifest,
+    effective_compression,
     manifest_bytes,
     write_manifest,
 )
+from dps.layers.connectors.identifier_check import check_identifiers, identifier_columns
 from dps.layers.connectors.partitions import partition_count, plan_partitions
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.registry import open_connector, open_target_store
@@ -99,14 +129,17 @@ from dps.layers.connectors.targets import (
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    kept_attribute,
+    pseudonym_columns,
     resolve_target,
 )
 from dps.observability import LEASES_LOST, ROWS_WRITTEN, get_logger
-from dps.secrets import SealError, SecretUnavailable, open_json
+from dps.secrets import SealError, SecretUnavailable, open_json, seal_json
 from dps.snapshots import get_snapshot
 from dps.storage import ObjectStore, StorageError
 
 if TYPE_CHECKING:
+    from dps.engine.synth.constraints import ConstraintSet
     from dps.worker import HandlerContext
 
 logger = get_logger(__name__)
@@ -129,6 +162,19 @@ _TERMINAL = {
 
 class _Lost(Exception):
     """A fenced write found the lease gone: stop without touching the row again."""
+
+
+def _constraint_errors() -> tuple[type[Exception], ...]:
+    """``ConstraintError`` when the ``tabular`` extra is installed (M2 runs work without it)."""
+    try:
+        from dps.engine.synth.constraints import ConstraintError
+    except ImportError:  # pragma: no cover - the image and the dev venv install the extra
+        return ()
+    return (ConstraintError,)
+
+
+#: A tabular constraint the table cannot take, raised while transforming (value-free).
+CONSTRAINT_ERRORS = _constraint_errors()
 
 
 @dataclass
@@ -224,6 +270,9 @@ def _transformer(
     plan: RunPlan,
     policy: Policy,
     shape: TableShape,
+    *,
+    tabular: TabularSampler | None = None,
+    constraints: ConstraintSet | None = None,
 ) -> BatchTransformer:
     if spec.mode == "obfuscate" and not secret.key_material:
         raise SecretUnavailable()
@@ -244,6 +293,10 @@ def _transformer(
         unclassified=spec.options.unclassified,
         anchor=anchor,
         verify=spec.options.verify,
+        tabular=tabular,
+        constraints=constraints,
+        max_resample=ctx.settings.copula_max_resample,
+        pseudonyms=plan.pseudonyms if spec.mode == "synthesize" else (),
     )
 
 
@@ -333,8 +386,8 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
 
     Every refusal moves the job to a failed finalize with a code (``snapshot_stale``,
     ``no_key``, ``row_count_mismatch``, ``target_invalid``, ``length_overflow``,
-    ``incompatible_method``, ``leakage``, ``pk_collision``, ``secret_unavailable``, a selection or
-    connector code); a retryable connector failure is retried with backoff; anything unexpected
+    ``incompatible_method``, ``leakage``, ``pk_collision``, ``secret_unavailable``,
+    ``plan_conflict``, a selection or connector code); a retryable connector failure is retried with backoff; anything unexpected
     is retried as ``internal_error`` (class name only).
     """
     try:
@@ -347,8 +400,12 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
     except IncompatibleMethod as exc:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
+    except CONSTRAINT_ERRORS as exc:
+        await _fail_to_finalize(ctx, job, "incompatible_method", str(exc))
     except LeakageError as exc:
         await _fail_to_finalize(ctx, job, "leakage", str(exc))
+    except PlanConflict as exc:  # deterministic: a retry would refuse it again (value-free)
+        await _fail_to_finalize(ctx, job, "plan_conflict", str(exc))
     except (SealError, SecretUnavailable):
         await _fail_to_finalize(
             ctx, job, "secret_unavailable", "the job's sealed material could not be opened"
@@ -361,6 +418,13 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             await _retry(ctx, job, exc.code, str(exc))
         else:
             await _fail_to_finalize(ctx, job, exc.code, str(exc))
+    except ExternalServiceError:  # M5: the bank tokenization service failed — transient
+        if job.attempts < job.max_attempts:
+            await _retry(ctx, job, "tokenization_unavailable", "tokenization service unavailable")
+        else:
+            await _fail_to_finalize(
+                ctx, job, "tokenization_unavailable", "tokenization service unavailable"
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # unexpected: retry; never put the message in the row
@@ -400,6 +464,11 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             raise PrepareFailure("no_key", "the table has no primary key or unique not-null index")
         selection = spec.source.selection
         validate_selection(selection, cast(Engine, source.engine), shape)
+        if spec.options.linked is not None:
+            await _prepare_linked(
+                ctx, job, spec, secret, snapshot, policy, source, shape, source_conn, target_conn
+            )
+            return
         projection = [
             c.name
             for c in shape.columns
@@ -425,6 +494,14 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             write_mode=mode,
             pk_strategy=spec.target.pk_strategy,
             projection=projection,
+        )
+        pseudonyms = pseudonym_columns(
+            snapshot,
+            mode=spec.mode,
+            write_mode=mode,
+            pk_strategy=spec.target.pk_strategy,
+            projection=projection,
+            shape=shape,
         )
         store: ObjectStore | None = None
         target_shape: TableShape | None = None
@@ -454,6 +531,7 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             target_shape=target_shape,
             plans=plans,
             projection=projection,
+            pseudonyms=[p.name for p in pseudonyms],
         )
         anchor = next(
             ([c.name, c.entity_type] for c in snapshot.columns if c.anchor and c.entity_type),
@@ -473,14 +551,50 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             locale=policy.locale.default or settings.default_locale,
             batch_rows=spec.source.batch_rows or settings.batch_rows,
             same_table_append=mode == "append" and resolved.same_as_source,
+            pseudonyms=pseudonyms,
         )
-        transformer = _transformer(ctx, spec, secret, plan, policy, shape)
+        tabular: TabularSampler | None = None
+        constraints: ConstraintSet | None = None
+        metrics: dict[str, Any] = {}
+        if spec.mode == "synthesize" and spec.options.tabular != "none":
+            await _stage(ctx, job, "fitting the tabular model")
+            secret, tabular, constraints, metrics = await _prepare_tabular(
+                ctx, job, spec, secret, plan, policy, shape, snapshot, source
+            )
+        transformer = _transformer(
+            ctx, spec, secret, plan, policy, shape, tabular=tabular, constraints=constraints
+        )
+        if spec.mode == "synthesize":
+            copied = copied_personal_columns(
+                plan, snapshot, set(tabular.columns) if tabular is not None else set()
+            )
+            if copied:  # D-A invariant (G2 review r1): never reached, fails closed if it is
+                raise PrepareFailure(
+                    "leakage",
+                    f"{len(copied)} classified column(s) or key(s) would be copied into "
+                    "synthetic rows; nothing was written",
+                )
         await _stage(ctx, job, "preflight")
         sample = await source.sample(
             shape, selection, selection.params, max(1, min(settings.preflight_rows, rows))
         )
         preflight = await asyncio.to_thread(transformer.transform, sample)
         del sample
+        kept_prewrite: dict[str, Any] | None = None
+        if spec.mode == "synthesize":
+            kept_prewrite = await asyncio.to_thread(
+                kept_review,
+                preflight.rows,
+                shape,
+                kept=synthetic_kept_columns(
+                    plan,
+                    snapshot,
+                    [c.name for c in shape.columns],
+                    set(tabular.columns) if tabular is not None else set(),
+                ),
+                detector=ctx.engine.detector(policy, plan.locale),
+                min_score=policy.detect.min_score,
+            )
         writer: BatchWriter
         if mode == "files":
             assert store is not None and target_conn is not None
@@ -509,7 +623,11 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             "collisions": collisions,
             "existing_rows": report.existing_rows,
         }
+        if kept_prewrite is not None:
+            plan.prepare["kept_review"] = kept_prewrite
         base: dict[str, Any] = {"rows_estimated": rows, "stage": ""}
+        if metrics:
+            base["metrics"] = metrics
         if spec.options.dry_run:
             if not await jobs.advance_job(
                 ctx.worker_id,
@@ -569,6 +687,305 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         if target is not None and target is not source:
             await target.close()
         await source.close()
+
+
+async def _prepare_tabular(
+    ctx: HandlerContext,
+    job: ClaimedJob,
+    spec: RunSpec,
+    secret: JobSecret,
+    plan: RunPlan,
+    policy: Policy,
+    shape: TableShape,
+    snapshot: ClassificationSnapshot,
+    source: Connector,
+) -> tuple[JobSecret, TabularSampler, ConstraintSet | None, dict[str, Any]]:
+    """Fit, preview, measure and gate the tabular engine; re-seal the secret with the model.
+
+    Returns the re-sealed secret, the sampler and constraints the preflight and partitions use,
+    and the value-free metrics for ``progress.metrics``.
+
+    Raises:
+        PrepareFailure: a tabular gate (``tabular_invalid``, ``incompatible_method``,
+            ``leakage``, ``privacy_gate``); ``_Lost`` when the job row's lease is gone.
+    """
+    from dps.layers.connectors.tabular import TabularGateError, prepare_tabular, runtime_sampler
+
+    if not secret.synthesis_seed:
+        raise SecretUnavailable()
+    seed = seed_bytes(seed_from_caller(secret.synthesis_seed))
+    selection = spec.source.selection
+
+    def make(sampler: TabularSampler, constraints: ConstraintSet | None) -> BatchTransformer:
+        # D-A B1: a kept attribute the engine models is drawn, not surrogated (its plan goes;
+        # the stored plan the partitions rebuild from is the one without it)
+        drawn = set(sampler.columns)
+        plan.columns = [p for p in plan.columns if p.name not in drawn or p.name not in personal]
+        return _transformer(
+            ctx, spec, secret, plan, policy, shape, tabular=sampler, constraints=constraints
+        )
+
+    personal = {c.name for c in snapshot.columns if kept_attribute(c, set(shape.key))}
+
+    try:
+        prepared = await prepare_tabular(
+            settings=ctx.settings,
+            engine_name=spec.options.tabular,
+            connector=source,
+            shape=shape,
+            selection=selection,
+            params=selection.params,
+            snapshot=snapshot,
+            policy=policy,
+            seed=seed,
+            object_fqn=plan.source_object,
+            make_transformer=make,
+            anchor_of=lambda row: row_anchor(row, shape, None),
+            projection=plan.projection,
+            dp=_dp_config(ctx, spec),
+            pseudonyms=[p.name for p in plan.pseudonyms],
+        )
+    except TabularGateError as exc:
+        raise PrepareFailure(exc.code, exc.detail) from None
+    resealed = secret.model_copy(update={"tabular_model": prepared.model_b64})
+    sealed = seal_json(ctx.kek, resealed, aad=f"dps_job.key:{job.id}")
+    if not await jobs.reseal_secret(ctx.worker_id, job.id, sealed):
+        raise _Lost()  # the reaper re-queues prepare, which refits deterministically
+    sampler, constraints = runtime_sampler(
+        prepared.engine,
+        prepared.model_b64,
+        seed,
+        policy=policy,
+        shape=shape,
+        snapshot=snapshot,
+        object_fqn=plan.source_object,
+    )
+    logger.info(
+        "tabular_prepared",
+        job_id=job.id,
+        engine=prepared.engine,
+        columns=len(prepared.metrics["tabular"]["columns"]),
+    )
+    return resealed, sampler, constraints, prepared.metrics
+
+
+def _dp_config(ctx: HandlerContext, spec: RunSpec) -> Any:
+    """The MOSTLY differential-privacy budget of this run (``options.tabular_dp``, else the
+    deployment default), or ``None``; the copula takes none."""
+    from dps.engine.synth.mostly import DpConfig
+
+    settings = ctx.settings
+    wanted = spec.options.tabular_dp
+    enabled = settings.mostly_dp_enabled if wanted is None else wanted
+    if spec.options.tabular != "mostly" or not enabled:
+        return None
+    return DpConfig(max_epsilon=settings.mostly_dp_max_epsilon, delta=settings.mostly_dp_delta)
+
+
+def _linked_dirs(parent: str, child: str) -> tuple[str, str]:
+    """Folder names of the two generated tables (their object names, kept apart)."""
+    return parent, child if child != parent else f"{child}_child"
+
+
+def _linked_writer(
+    store: ObjectStore,
+    spec: RunSpec,
+    target_conn: Connection,
+    job_id: str,
+    table: dict[str, Any],
+    *,
+    spool: str = "",
+) -> FilesWriter:
+    """A files writer for one generated table: ``<files.prefix>/<table dir>/<job_id>/part-…``."""
+    files = spec.target.files
+    assert files is not None  # validate_run: linked generation writes files
+    prefix = "/".join(p for p in (files.prefix.strip("/"), table["dir"]) if p)
+    columns = [
+        ColumnInfo(path=f"$.{c['name']}", name=c["name"], data_type=c["data_type"], kind=c["kind"])
+        for c in table["columns"]
+    ]
+    root = Path(tempfile.gettempdir()) / "dps-spool" / job_id / f"linked-{spool or table['dir']}"
+    return FilesWriter(
+        store,
+        files.model_copy(update={"prefix": prefix}),
+        job_id=job_id,
+        base_prefix=target_conn.params.prefix,
+        columns=columns,
+        spool_root=root,
+    )
+
+
+async def _prepare_linked(
+    ctx: HandlerContext,
+    job: ClaimedJob,
+    spec: RunSpec,
+    secret: JobSecret,
+    snapshot: ClassificationSnapshot,
+    policy: Policy,
+    source: Connector,
+    shape: TableShape,
+    source_conn: Connection,
+    target_conn: Connection | None,
+) -> None:
+    """Task 7B: train and gate the linked generator, seal its pool, add the two partitions."""
+    from dps.layers.connectors.tabular import TabularGateError, prepare_linked
+
+    settings = ctx.settings
+    linked = spec.options.linked
+    assert linked is not None
+    if spec.target.write_mode != "files" or target_conn is None or spec.target.files is None:
+        raise PrepareFailure("tabular_invalid", "linked generation writes a files target")
+    if not secret.synthesis_seed:
+        raise SecretUnavailable()
+    async with db.acquire_queue(job.tenant_id) as conn:
+        child_snapshot = await get_snapshot(job.tenant_id, linked.child_snapshot_id, conn=conn)
+    if child_snapshot is None or child_snapshot.status != "accepted":
+        raise PrepareFailure("snapshot_stale", "the child table's accepted snapshot is gone")
+    child_shape = await source.describe(linked.child)
+    _check_snapshot(child_snapshot, child_shape)
+    try:
+        store = await open_target_store(target_conn, settings, kek=ctx.kek)
+    except ValueError:
+        raise PrepareFailure("target_invalid", "the files target is not usable") from None
+    dp = _dp_config(ctx, spec)
+    await _stage(ctx, job, "training the linked generator")
+    selection = spec.source.selection
+    try:
+        prepared = await prepare_linked(
+            settings=settings,
+            connector=source,
+            parent_shape=shape,
+            parent_snapshot=snapshot,
+            child_shape=child_shape,
+            child_snapshot=child_snapshot,
+            linked=linked,
+            selection=selection,
+            params=selection.params,
+            seed=seed_bytes(seed_from_caller(secret.synthesis_seed)),
+            dp=dp,
+            locale=policy.locale.default or settings.default_locale,
+        )
+    except TabularGateError as exc:
+        raise PrepareFailure(exc.code, exc.detail) from None
+    parent_dir, child_dir = _linked_dirs(shape.object.name, child_shape.object.name)
+    tables = {
+        "parent": {
+            "object": shape.object.fqn(),
+            "dir": parent_dir,
+            "columns": prepared.parent_columns,
+            "rows": prepared.parent_rows,
+        },
+        "child": {
+            "object": child_shape.object.fqn(),
+            "dir": child_dir,
+            "columns": prepared.child_columns,
+            "rows": prepared.child_rows,
+        },
+    }
+    probe = _linked_writer(store, spec, target_conn, job.id, tables["parent"], spool="probe")
+    try:
+        await probe.prepare(dry_run=spec.options.dry_run)
+    finally:
+        await probe.close()
+    resealed = secret.model_copy(update={"tabular_model": prepared.model_b64})
+    sealed = seal_json(ctx.kek, resealed, aad=f"dps_job.key:{job.id}")
+    if not await jobs.reseal_secret(ctx.worker_id, job.id, sealed):
+        raise _Lost()
+    projection = [c["name"] for c in prepared.parent_columns]
+    resolved, _ = resolve_target(
+        spec,
+        job_id=job.id,
+        source_conn=source_conn,
+        target_conn=target_conn,
+        source_shape=shape,
+        target_shape=None,
+        plans=[],
+        projection=projection,
+    )
+    plan = RunPlan(
+        columns=[],
+        anchor=None,
+        key=list(shape.key),
+        projection=projection,
+        target=resolved,
+        source_object=shape.object.fqn(),
+        policy_name=policy.name,
+        policy_hash=policy.config_hash(),
+        snapshot_id=snapshot.id,
+        snapshot_hash=snapshot.content_hash,
+        locale=policy.locale.default or settings.default_locale,
+        batch_rows=spec.source.batch_rows or settings.batch_rows,
+        prepare={
+            "created": False,
+            "truncated": False,
+            "collisions": 0,
+            "existing_rows": None,
+            "linked": tables,
+        },
+    )
+    base: dict[str, Any] = {
+        "rows_estimated": prepared.parent_rows + prepared.child_rows,
+        "stage": "",
+        "metrics": prepared.metrics,
+    }
+    if spec.options.dry_run:
+        if not await jobs.advance_job(
+            ctx.worker_id,
+            job.id,
+            phase=JobPhase.finalize,
+            state=JobState.queued,
+            plan=plan.model_dump(mode="json"),
+            progress={**base, "outcome": "dry_run"},
+        ):
+            raise _Lost()
+        return
+    added = await jobs.add_partitions(
+        ctx.worker_id,
+        job.id,
+        [KeyRange(), KeyRange()],
+        plan=plan.model_dump(mode="json"),
+        progress=base,
+    )
+    if added != 2:
+        raise _Lost()
+    logger.info("prepare_done", job_id=job.id, partitions=2, rows=base["rows_estimated"])
+
+
+async def _runtime_tabular(
+    job: JobInternal,
+    spec: RunSpec,
+    secret: JobSecret,
+    plan: RunPlan,
+    policy: Policy,
+    shape: TableShape,
+) -> tuple[TabularSampler, ConstraintSet | None]:
+    """The sealed model and its constraints for this job's partitions (once per runtime)."""
+    from dps.engine.synth.copula import CopulaError
+    from dps.engine.synth.mostly import TabularUnavailable
+    from dps.layers.connectors.tabular import runtime_sampler
+
+    if not secret.synthesis_seed or not secret.tabular_model:
+        raise SecretUnavailable()
+    async with db.acquire_queue(job.tenant_id) as conn:
+        snapshot = await get_snapshot(job.tenant_id, spec.snapshot_id, conn=conn)
+    if snapshot is None:
+        raise PrepareFailure("snapshot_stale", "the accepted snapshot no longer exists")
+    try:
+        return runtime_sampler(
+            spec.options.tabular,
+            secret.tabular_model,
+            seed_bytes(seed_from_caller(secret.synthesis_seed)),
+            policy=policy,
+            shape=shape,
+            snapshot=snapshot,
+            object_fqn=plan.source_object,
+        )
+    except (CopulaError, TabularUnavailable):
+        raise PrepareFailure(
+            "tabular_invalid", "the sealed tabular model could not be read"
+        ) from None
+    except CONSTRAINT_ERRORS as exc:
+        raise PrepareFailure("incompatible_method", str(exc)) from None
 
 
 async def _check_same_table_offset(
@@ -670,7 +1087,15 @@ class RuntimeCache:
                     assert target_conn is not None
                     target = await _open(ctx, job, target_conn, "run")
                 writer = await target.writer(plan.target, shape)
-            transformer = _transformer(ctx, spec, secret, plan, policy, shape)
+            tabular: TabularSampler | None = None
+            constraints: ConstraintSet | None = None
+            if secret.tabular_model:
+                tabular, constraints = await _runtime_tabular(
+                    job, spec, secret, plan, policy, shape
+                )
+            transformer = _transformer(
+                ctx, spec, secret, plan, policy, shape, tabular=tabular, constraints=constraints
+            )
         except BaseException:
             if target is not None and target is not source:
                 with contextlib.suppress(Exception):
@@ -740,6 +1165,9 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
     try:
         if part.job_id != job.id:
             raise ValueError("the partition belongs to another job")
+        if job.plan and (job.plan.get("prepare") or {}).get("linked"):
+            await _run_linked_partition(ctx, job, part)
+            return
         runtime = await RUNTIMES.get(ctx, job)
         await _run_partition(ctx, job, runtime, part)
     except _Lost:
@@ -752,6 +1180,8 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
         await _fail_partition(ctx, part, exc.code, str(exc))
     except PkCollision as exc:
         await _fail_partition(ctx, part, exc.code, str(exc))
+    except CONSTRAINT_ERRORS as exc:
+        await _fail_partition(ctx, part, "incompatible_method", str(exc))
     except PrepareFailure as exc:
         await _fail_partition(ctx, part, exc.code, exc.detail)
     except (SealError, SecretUnavailable):
@@ -762,6 +1192,8 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
         raise
     except Exception as exc:  # ConnectorError, StorageError and the unexpected: retry
         code = exc.code if isinstance(exc, ConnectorError | StorageError) else "internal_error"
+        if isinstance(exc, ExternalServiceError):  # M5: the tokenization service — transient
+            code = "tokenization_unavailable"
         if code == "internal_error":
             logger.error("partition_failed", job_id=job.id, error=type(exc).__name__)
         await jobs.retry_partition(
@@ -775,6 +1207,102 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
     finally:
         if runtime is not None:
             RUNTIMES.release(job.id)
+
+
+async def _run_linked_partition(
+    ctx: HandlerContext, job: JobInternal, part: ClaimedPartition
+) -> None:
+    """Write one generated table of a linked job (0 = parent, 1 = child) to the files target.
+
+    The rows come from the sealed pool, so a restarted partition rewrites the same objects; each
+    call has its own writer and spool folder.
+    """
+    from dps.engine.synth.mostly import TabularUnavailable
+    from dps.layers.connectors.tabular import load_linked_pool
+
+    spec, secret = _spec(ctx, job), _secret(ctx, job)
+    plan = RunPlan.model_validate(job.plan)
+    role = "parent" if part.partition_no == 0 else "child"
+    table = plan.prepare["linked"][role]
+    if not secret.tabular_model or not secret.synthesis_seed:
+        raise SecretUnavailable()
+    try:
+        pool = load_linked_pool(
+            secret.tabular_model, seed_bytes(seed_from_caller(secret.synthesis_seed))
+        )
+    except TabularUnavailable:
+        raise PrepareFailure(
+            "tabular_invalid", "the sealed linked pool could not be read"
+        ) from None
+    rows: list[dict[str, Any]] = pool.parent_rows if role == "parent" else pool.child_rows
+    _, target_conn = await _connections(job, spec)
+    if target_conn is None:
+        raise PrepareFailure("target_invalid", "the files target is gone")
+    try:
+        store = await open_target_store(target_conn, ctx.settings, kek=ctx.kek)
+    except ValueError:
+        raise PrepareFailure("target_invalid", "the files target is not usable") from None
+    worker = ctx.worker_id
+    writer = _linked_writer(
+        store,
+        spec,
+        target_conn,
+        job.id,
+        table,
+        spool=f"p{part.partition_no}-{uuid.uuid4().hex[:8]}",
+    )
+    position = ColumnInfo(path="$.__row", name="__row", data_type="bigint", kind="int")
+    try:
+        if (part.batch_no > 0 or part.attempts > 1) and not await jobs.reset_partition_progress(
+            worker, part.id
+        ):
+            raise _Lost()
+        batch_no = 0
+        size = max(1, plan.batch_rows)
+        for start in range(0, len(rows), size):
+            chunk = rows[start : start + size]
+            batch_no += 1
+            encoded = encode_key((start + len(chunk),), [position])  # a row position, no value
+            written = await writer.write_batch(
+                chunk,
+                mark=LedgerMark(
+                    job_id=job.id,
+                    partition_no=part.partition_no,
+                    batch_no=batch_no,
+                    last_key=encoded,
+                    rows=start + len(chunk),
+                ),
+            )
+            ROWS_WRITTEN.labels("synthesize", "files").inc(written)
+            if not await jobs.checkpoint(
+                worker,
+                part.id,
+                last_key=encoded,
+                batch_no=batch_no,
+                rows_read=len(chunk),
+                rows_written=written,
+                rows_skipped=0,
+                values_by_method={"mostly": written},
+                verify_checked=0,
+            ):
+                if await jobs.partition_control(worker, part.id) == "cancel":
+                    await jobs.abandon_partition(worker, part.id)
+                raise _Lost()
+            control = await jobs.partition_control(worker, part.id)
+            if control == "pause":
+                await jobs.release(worker, job_ids=[], partition_ids=[part.id])
+                return
+            if control == "cancel":
+                await jobs.abandon_partition(worker, part.id)
+                return
+            if control == "lost":
+                raise _Lost()
+        meta = await writer.finish_partition(job.id, part.partition_no, batch_no=batch_no)
+        meta["table"] = role
+        if not await jobs.finish_partition(worker, part.id, PartitionState.done, meta=meta):
+            raise _Lost()
+    finally:
+        await writer.close()
 
 
 async def _fail_partition(
@@ -1066,6 +1594,99 @@ def verification_outcome(
     return True, "passed", False
 
 
+def copied_personal_columns(
+    plan: RunPlan, snapshot: ClassificationSnapshot, sampled: set[str]
+) -> list[str]:
+    """D-A: written columns a synthesize run would copy although discovery classified them, or
+    keys it would write with their real values — neither planned, pseudonymised nor drawn by the
+    tabular sampler. Empty by construction (:func:`~targets.build_column_plans`,
+    :func:`~targets.pseudonym_columns`); ``prepare`` fails closed on anything else."""
+    if plan.target.write_mode == "in_place":
+        return []  # in place rewrites the planned and pseudonymised columns only
+    written = set(plan.target.write_columns)
+    if not plan.target.generated_key:
+        written |= set(plan.key)
+    replaced = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms} | sampled
+    classified = {c.name for c in snapshot.columns if c.entity_type and not c.text_column}
+    return sorted((written & (classified | set(plan.key))) - replaced)
+
+
+def synthetic_kept_columns(
+    plan: RunPlan,
+    snapshot: ClassificationSnapshot | None,
+    table_columns: Sequence[str],
+    sampled: set[str],
+) -> set[str]:
+    """D-A: what a synthesize run writes as **source values** although nothing modelled them —
+    written columns that are unclassified (no entity type, not free text), not a key, not
+    planned, not pseudonymised and not drawn by the tabular sampler (``sampled``). In place, every
+    column of the table is output."""
+    classified = {
+        c.name for c in (snapshot.columns if snapshot else []) if c.entity_type or c.text_column
+    }
+    written = (
+        set(table_columns)
+        if plan.target.write_mode == "in_place"
+        else set(plan.target.write_columns) | set(plan.key)
+    )
+    replaced = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms}
+    return written - classified - set(plan.key) - replaced - sampled
+
+
+def kept_review(
+    rows: Sequence[Row],
+    shape: TableShape,
+    *,
+    kept: set[str],
+    detector: Detector,
+    min_score: float,
+) -> dict[str, Any]:
+    """D-A: MEDIUM+ detector findings in synthetic rows' source-kept columns (counts and column
+    names only; the rows are not kept).
+
+    A numeric column counts only when its hits reach discovery's bar (hit rate × mean score at
+    or above ``min_score``): a column of 12-digit ids holds a checksum-valid "Aadhaar" by chance.
+    """
+    cells: Counter[str] = Counter()
+    present: Counter[str] = Counter()
+    scores: dict[str, list[float]] = defaultdict(list)
+    columns = {c.name: c for c in shape.columns if c.name in kept}
+    for row in rows:
+        for name, column in columns.items():
+            text = to_engine_text(row.get(name), column)
+            if not text:
+                continue
+            present[name] += 1
+            found = [
+                f
+                for f in detector.detect(data={name: text}).findings
+                if f.sensitivity.rank >= Sensitivity.MEDIUM.rank
+            ]
+            if found:
+                cells[name] += 1
+                scores[name].append(max(f.score for f in found))
+    flagged = sorted(
+        name
+        for name in cells
+        if columns[name].kind not in NUMERIC_KINDS
+        or cells[name] / present[name] * (sum(scores[name]) / len(scores[name])) >= min_score
+    )
+    return {
+        "rows": len(rows),
+        "kept_column_hits": sum(cells[n] for n in flagged),
+        "kept_columns": flagged,
+    }
+
+
+def _sampled_columns(job: JobInternal) -> set[str]:
+    """Names of the columns the tabular sampler drew (``progress.metrics.tabular.columns``)."""
+    tabular = (job.progress.metrics or {}).get("tabular") or {}
+    paths = tabular.get("columns") if isinstance(tabular, dict) else None
+    if not isinstance(paths, list):
+        return set()
+    return {str(p).removeprefix("$.") for p in paths}
+
+
 async def _post_sample(
     ctx: HandlerContext,
     job: JobInternal,
@@ -1075,7 +1696,8 @@ async def _post_sample(
     target_conn: Connection | None,
     snapshot: ClassificationSnapshot | None,
 ) -> dict[str, Any]:
-    """Re-read up to 200 written rows and run the detector over them (counts only)."""
+    """Re-read up to 200 written rows and run the detector over them (counts only); a
+    synthesize run also reviews its source-kept columns (D-A, ``synthetic_kept``)."""
     conn = source_conn if _same_connection(spec, source_conn) else target_conn
     if conn is None or plan.target.object is None:
         return {}
@@ -1085,7 +1707,8 @@ async def _post_sample(
         rows = await connector.sample(shape, Selection(), {}, POST_SAMPLE_ROWS)
     finally:
         await connector.close()
-    planned = {p.name for p in plan.columns}
+    # DPS wrote these: planned columns and (synthesize, D-A) keyed pseudonyms
+    planned = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms}
     # in place, every column of the table is output (kept columns too); else what was written
     written = (
         {c.name for c in shape.columns}
@@ -1100,10 +1723,13 @@ async def _post_sample(
         c.name for c in (snapshot.columns if snapshot else []) if c.entity_type or c.text_column
     }
     unclassified = {c.name for c in shape.columns} - classified - planned
+    # synthesize: columns the tabular sampler drew are synthetic, not source values
+    sampled = _sampled_columns(job) if spec.mode == "synthesize" else set()
+    unclassified -= sampled
     policy = _policy(ctx, spec, plan.policy_name)
     detector = ctx.engine.detector(policy, plan.locale)
     try:
-        return await asyncio.to_thread(
+        out = await asyncio.to_thread(
             scan_written,
             rows,
             shape,
@@ -1113,8 +1739,75 @@ async def _post_sample(
             detector=detector,
             min_score=policy.detect.min_score,
         )
+        if spec.mode == "synthesize":
+            out["synthetic_kept"] = await asyncio.to_thread(
+                kept_review,
+                rows,
+                shape,
+                kept=synthetic_kept_columns(
+                    plan, snapshot, [c.name for c in shape.columns], sampled
+                ),
+                detector=detector,
+                min_score=policy.detect.min_score,
+            )
+        return out
     finally:
         rows.clear()  # the sample never outlives the count
+
+
+def _written_identifiers(plan: RunPlan, snapshot: ClassificationSnapshot | None) -> dict[str, str]:
+    """``{column: entity type}`` of the identifier-family columns the run wrote."""
+    written = (
+        list(plan.projection)
+        if plan.target.write_mode == "in_place"
+        else [*plan.target.write_columns, *plan.key]
+    )
+    return identifier_columns(plan.columns, snapshot, written)
+
+
+async def _identifier_check(
+    ctx: HandlerContext,
+    job: JobInternal,
+    spec: RunSpec,
+    plan: RunPlan,
+    source_conn: Connection,
+    target_conn: Connection | None,
+    snapshot: ClassificationSnapshot | None,
+) -> dict[str, Any]:
+    """D-A (M5 verify r2): every written identifier value, against every source value and the
+    issuers' never-issued ranges (``identifier_check.py``; counts only). In place, the table
+    holds only synthetic rows now: the ranges are checked, the source cannot be. An append to
+    the source table itself mixes both, so it is not run."""
+    columns = _written_identifiers(plan, snapshot)
+    if not columns:
+        return {}
+    if plan.same_table_append:
+        return {"not_run": "same_table_append"}
+    same = _same_connection(spec, source_conn)
+    conn = source_conn if same else target_conn
+    if conn is None or plan.target.object is None:
+        return {"error": "target_unreadable"}
+    target = await _open(ctx, job, conn, "finalize")
+    source: Connector | None = None
+    try:
+        target_shape = await target.describe(plan.target.object)
+        if plan.target.write_mode == "in_place":
+            return await check_identifiers(
+                columns, target=target, target_shape=target_shape, source=None, source_shape=None
+            )
+        source = target if same else await _open(ctx, job, source_conn, "finalize")
+        source_shape = await source.describe(spec.source.object)
+        return await check_identifiers(
+            columns,
+            target=target,
+            target_shape=target_shape,
+            source=source,
+            source_shape=source_shape,
+        )
+    finally:
+        if source is not None and source is not target:
+            await source.close()
+        await target.close()
 
 
 async def _write_manifest(
@@ -1127,6 +1820,8 @@ async def _write_manifest(
 ) -> dict[str, Any]:
     assert spec.target.files is not None
     store = await open_target_store(target_conn, ctx.settings, kek=ctx.kek)
+    if plan.prepare.get("linked"):
+        return await _write_linked_manifest(ctx, job, spec, plan, target_conn, parts, store)
     files = [f for p in parts for f in (p.meta.get("files") or [])]
     columns = [
         ColumnInfo(
@@ -1159,6 +1854,71 @@ async def _write_manifest(
     )
     return {
         "objects": len(files),
+        "rows": manifest["rows_total"],
+        "manifest_artefact_id": artefact,
+        "manifest_key": stored.key,
+        "compression": manifest["compression"],
+    }
+
+
+async def _write_linked_manifest(
+    ctx: HandlerContext,
+    job: JobInternal,
+    spec: RunSpec,
+    plan: RunPlan,
+    target_conn: Connection,
+    parts: list[_Partition],
+    store: ObjectStore,
+) -> dict[str, Any]:
+    """One manifest for a linked job: ``tables`` = {parent, child: object, dir, columns,
+    objects, rows_total}; written last, at ``<files.prefix>/<job_id>/manifest.json``."""
+    files_spec = spec.target.files
+    assert files_spec is not None
+    now = datetime.now(UTC)
+    tables: dict[str, Any] = {}
+    for no, role in enumerate(("parent", "child")):
+        table = plan.prepare["linked"][role]
+        columns = [
+            ColumnInfo(
+                path=f"$.{c['name']}", name=c["name"], data_type=c["data_type"], kind=c["kind"]
+            )
+            for c in table["columns"]
+        ]
+        part_files = [f for p in parts if p.no == no for f in (p.meta.get("files") or [])]
+        one = build_manifest(
+            job_id=job.id, spec=files_spec, columns=columns, parts=part_files, created_at=now
+        )
+        tables[role] = {
+            "object": table["object"],
+            "dir": table["dir"],
+            "columns": one["columns"],
+            "objects": one["objects"],
+            "rows_total": one["rows_total"],
+        }
+    manifest = {
+        "manifest_version": "dps.files.v1",
+        "job_id": job.id,
+        "format": files_spec.format,
+        "compression": effective_compression(files_spec),
+        "linked": True,
+        "tables": tables,
+        "rows_total": sum(t["rows_total"] for t in tables.values()),
+        "created_at": now.isoformat(),
+    }
+    base = FilesWriter(
+        store, files_spec, job_id=job.id, base_prefix=target_conn.params.prefix, columns=[]
+    ).base_key()
+    stored = await write_manifest(store, base, manifest)
+    artefact = await ctx.artefacts.save(
+        tenant_id=job.tenant_id,
+        job_id=job.id,
+        kind="manifest",
+        data=manifest_bytes(manifest),
+        content_type="application/json",
+        meta={"object_key": stored.key, "sha256": stored.sha256},
+    )
+    return {
+        "objects": sum(len(t["objects"]) for t in tables.values()),
         "rows": manifest["rows_total"],
         "manifest_artefact_id": artefact,
         "manifest_key": stored.key,
@@ -1202,6 +1962,16 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             post_sample = await _best_effort(
                 _post_sample(ctx, job, spec, plan, source_conn, target_conn, snapshot)
             )
+        if spec.mode == "synthesize":
+            ids = (
+                {"not_run": "files_target"}
+                if mode == "files"
+                else await _best_effort(
+                    _identifier_check(ctx, job, spec, plan, source_conn, target_conn, snapshot)
+                )
+            )
+            if ids and _written_identifiers(plan, snapshot):
+                post_sample = {**(post_sample or {}), "identifier_check": ids}
     if plan is not None and mode in ("in_place", "append") and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
         cleared = await _best_effort(_clear_ledger(ctx, job, spec, plan, source_conn, target_conn))
@@ -1318,7 +2088,7 @@ async def _store_evidence(
     hits = int(counters.get("verify:hits", 0)) + int(progress.verification.get("hits", 0))
     leakage = job.error_code == "leakage" or any(p.error_code == "leakage" for p in parts)
     passed, status, review = verification_outcome(hits, leakage, post_sample, outcome=outcome)
-    verification = {
+    verification: dict[str, Any] = {
         "mode": spec.options.verify,
         "batches": sum(p.batch_no for p in parts),
         "values_checked": int(progress.verification.get("checked", 0)),
@@ -1330,6 +2100,28 @@ async def _store_evidence(
     }
     if ledger_cleared is not None:
         verification["write_ledger_cleared"] = ledger_cleared
+    if job.mode == "synthesize" and plan is not None:
+        # D-A: a source value is kept only in a column reviewed as not personal whose written
+        # sample (before the write: the preflight; after it: the post-write sample) is clean
+        reviews = [
+            plan.prepare.get("kept_review"),
+            (post_sample or {}).get("synthetic_kept"),
+            post_sample,  # main's post-write kept-column check (scan_written)
+        ]
+        review_cols = {c for r in reviews if r for c in r.get("kept_columns", [])}
+        # M5 verify r2: a written identifier found in the source or outside the never-issued
+        # ranges needs review; a check that could not run fails closed on every such column
+        ids = (post_sample or {}).get("identifier_check") or {}
+        review_cols |= set(ids.get("review_columns") or [])
+        if "error" in ids:
+            review_cols |= set(_written_identifiers(plan, snapshot))
+        flagged = sorted(review_cols)
+        verification["review_columns"] = flagged
+        if flagged:  # never downgrades a failed or incomplete verification
+            verification["review_required"] = True
+            verification["passed"] = False
+            if verification["status"] == "passed":
+                verification["status"] = "review_required"
     errors: list[dict[str, str]] = []
     if job.error_code:
         errors.append({"code": job.error_code, "where": "prepare"})
@@ -1361,6 +2153,10 @@ async def _store_evidence(
         )
         for p in parts
     ]
+    policy_version: str | None = None
+    if plan is not None:
+        with contextlib.suppress(PrepareFailure):
+            policy_version = str(_policy(ctx, spec, plan.policy_name).version)
     inputs = EvidenceInputs(
         job=job,
         spec=job.spec,
@@ -1383,6 +2179,7 @@ async def _store_evidence(
         errors=errors,
         engine_version=__version__,
         image_digest=ctx.settings.image_digest or None,
+        policy_version=policy_version,
     )
     record = await save_evidence(
         build_pack(inputs), artefacts=ctx.artefacts, acquire=db.acquire_queue, expires_at=None

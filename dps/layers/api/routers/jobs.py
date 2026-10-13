@@ -38,6 +38,7 @@ from dps.layers.api.deps import (
 )
 from dps.layers.api.errors import DpsHttpError
 from dps.layers.api.idempotency import REPLAY_HEADER
+from dps.layers.api.policy_refs import resolve
 from dps.layers.connectors.submit import (
     check_run,
     seal_retry_secret,
@@ -45,6 +46,7 @@ from dps.layers.connectors.submit import (
     submit_run,
 )
 from dps.ratelimit import enforce_rate_limit
+from dps.tenants import TenantError, check_daily_quota
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"])
 _JOBS = [Depends(require_scope("jobs")), Depends(enforce_rate_limit), Depends(require_db)]
@@ -84,6 +86,7 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
     """Queue a discover job (one proposed snapshot per object)."""
     counts = {"objects": len(body.objects)}
     try:
+        body.policy = await resolve(request, body.policy)  # M5: @name[:vN] at accept time
         tenant, key = tenant_of(request), idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
         earlier = await jobs.find_by_idempotency(tenant, key, fingerprint=fp) if key else None
@@ -112,6 +115,7 @@ async def validate_run_spec(body: RunSpec, request: Request, response: Response)
     run's own refusal. Nothing is queued, sealed, stored or returned."""
 
     async def body_() -> dict[str, bool]:
+        body.policy = await resolve(request, body.policy)  # M5: as POST /jobs/run resolves it
         await check_run(
             body,
             tenant_id=tenant_of(request),
@@ -131,8 +135,17 @@ async def run(body: RunSpec, request: Request, response: Response) -> dict[str, 
     try:
         key = idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
+        earlier = None
         if key:  # a key reused with another request is refused before any validation (as on L1)
-            await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+            earlier = await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+        # M5: an @name[:vN] reference becomes the stored body before validation, so the job
+        # records exactly the version it ran
+        body.policy = await resolve(request, body.policy)
+        if earlier is None:  # M5: a replay of an accepted job is never refused for the quota
+            try:
+                await check_daily_quota(tenant_of(request), _settings(request))
+            except TenantError as exc:
+                raise DpsHttpError(exc.status, exc.code, exc.detail) from None
         sub = await submit_run(
             body,
             tenant_id=tenant_of(request),

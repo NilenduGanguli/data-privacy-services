@@ -8,7 +8,12 @@ from starlette.concurrency import run_in_threadpool
 
 from dps.auth import require_scope
 from dps.engine.service import PrivacyEngine, RevealResponse, TransformResponse
-from dps.layers.api.common import payload_from, policy_label, run_engine, with_idempotency
+from dps.layers.api.common import (
+    detokenize_auditor,
+    payload_from,
+    run_engine,
+    with_idempotency,
+)
 from dps.layers.api.ndjson import (
     OPENAPI_NDJSON,
     NdjsonEnvelope,
@@ -17,6 +22,7 @@ from dps.layers.api.ndjson import (
     stream_reveal_array,
     streams_array,
 )
+from dps.layers.api.policy_refs import policy_label, resolved_policy
 from dps.layers.api.schemas import EngineRequest, RevealOut, RevealRequest, TransformOut
 from dps.ratelimit import enforce_rate_limit
 
@@ -40,18 +46,20 @@ async def obfuscate(body: EngineRequest, request: Request) -> TransformOut | Str
     ``Idempotency-Key`` makes a retry a replay — byte-identical only with caller key material.
     """
     engine: PrivacyEngine = request.app.state.engine
-    policy = policy_label(body.policy, engine.settings.default_policy)
+    ref = await resolved_policy(request, body.policy, mode="obfuscate")  # M5: @name[:vN]
+    policy = policy_label(ref, engine.settings.default_policy)
 
     async def run() -> TransformOut | StreamingResponse:
         if streams_array(body.data, body.text, request):
-            envelope = NdjsonEnvelope(policy=body.policy, options=body.options)
+            envelope = NdjsonEnvelope(options=body.options)
+            envelope.policy = ref  # kept as resolved (a stored version keeps its audit label)
             return await stream_lines(request, mode="obfuscate", envelope=envelope, items=body.data)
 
         async def call() -> TransformResponse:
             payload = payload_from(request, body.data, body.text)
-            extra = await engine.label_leftovers(payload, body.policy, body.options)  # T3 (opt-in)
+            extra = await engine.label_leftovers(payload, ref, body.options)  # T3 (opt-in)
             return await run_in_threadpool(
-                engine.obfuscate, payload, body.policy, body.options, extra_findings=extra
+                engine.obfuscate, payload, ref, body.options, extra_findings=extra
             )
 
         result, tid = await run_engine(request, mode="obfuscate", policy_name=policy, call=call)
@@ -76,19 +84,21 @@ async def synthesize(body: EngineRequest, request: Request) -> TransformOut | St
     rewrite, which is not deterministic).
     """
     engine: PrivacyEngine = request.app.state.engine
-    policy = policy_label(body.policy, engine.settings.default_policy)
+    ref = await resolved_policy(request, body.policy, mode="synthesize")  # M5: @name[:vN]
+    policy = policy_label(ref, engine.settings.default_policy)
 
     async def run() -> TransformOut | StreamingResponse:
         if streams_array(body.data, body.text, request):
-            envelope = NdjsonEnvelope(policy=body.policy, options=body.options)
+            envelope = NdjsonEnvelope(options=body.options)
+            envelope.policy = ref  # kept as resolved (a stored version keeps its audit label)
             return await stream_lines(
                 request, mode="synthesize", envelope=envelope, items=body.data
             )
 
         async def call() -> TransformResponse:
             payload = payload_from(request, body.data, body.text)
-            extra = await engine.label_leftovers(payload, body.policy, body.options)  # T3 (opt-in)
-            return await engine.synthesize(payload, body.policy, body.options, extra_findings=extra)
+            extra = await engine.label_leftovers(payload, ref, body.options)  # T3 (opt-in)
+            return await engine.synthesize(payload, ref, body.options, extra_findings=extra)
 
         result, tid = await run_engine(request, mode="synthesize", policy_name=policy, call=call)
         return TransformOut(**result.model_dump(), trace_id=tid)
@@ -124,7 +134,11 @@ async def reveal(body: RevealRequest, request: Request) -> RevealOut | Streaming
         async def call() -> RevealResponse:
             payload = payload_from(request, body.data, body.text)
             return await run_in_threadpool(
-                engine.reveal, payload, body.key_material, body.reveal_hints
+                engine.reveal,
+                payload,
+                body.key_material,
+                body.reveal_hints,
+                on_detokenize=detokenize_auditor(request),
             )
 
         result, tid = await run_engine(request, mode="reveal", policy_name="-", call=call)

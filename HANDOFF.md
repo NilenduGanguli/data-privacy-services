@@ -65,7 +65,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2) |
-| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
+| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
 ## 2. Build
 
@@ -81,8 +81,12 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
 - stage 2 `python:3.12-slim`: `tesseract-ocr` + `tesseract-ocr-eng` from apt and
   `ENV DPS_OCR_PROVIDER=auto` (M1: local OCR when no Azure endpoint is configured),
   `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
-  `uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"` (`tabular` arrives with
-  M5 and is skipped with a note until then; `ner` + `en_core_web_sm` added when `WITH_NER=1`), the
+  `uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"` (`tabular` = M5's
+  `numpy>=2.0` + `scipy>=1.13` for the Gaussian-copula engine and the fidelity/privacy metrics;
+  `ner` + `en_core_web_sm` added when `WITH_NER=1`; the optional `synth-ml` extra, MOSTLY AI, is
+  never installed in an image built from this Dockerfile: adding it is a bank-side opt-in after the
+  licence and image-size review (torch ≈ 2 GB; `uv pip install -e ".[synth-ml]"` in a derived
+  image), and without it `options.tabular="mostly"` is refused with `tabular_invalid`), the
   console dist at `/app/frontend/dist`, `tools/` at `/app/tools`, and `/app/var/{artefacts,exports}`
   owned by uid 10001;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
@@ -96,7 +100,8 @@ Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (ar
 `docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB. M2 lane
 (2026-10-12, arm64, without M1): 687 MB. The integrated image is in §11.
 
-Development install: `uv pip install -e ".[dev,fpe,docs,db,connectors,uitest,e2e]"` (`uitest` and
+Development install: `uv pip install -e ".[dev,fpe,docs,db,connectors,tabular,uitest,e2e]"` (`tabular`
+is M5's numpy + scipy; the unit tests of the copula engine and the metrics skip without it; `uitest` and
 `e2e` both pin Playwright 1.55.0, for the M1 and M2 console checks; then `python -m playwright install
 chromium`, a no-op when `~/Library/Caches/ms-playwright/chromium-1187` exists). The console's unit
 suites (`cd frontend && npm test`: `node --test` over `frontend/tests/*.test.ts` for M1, then Vitest
@@ -154,7 +159,7 @@ The M2 demo and checks against a running full stack:
 ```bash
 python tools/smoke_test.py                                   # 24 checks (15 Layer 1 + 9 job platform)
 python tools/demo_m2.py                                      # 10 bank tables → bank_uat (one job group), in place, append
-python tools/reveal_rows.py --help                           # local reveal of output rows with the key (no network)
+python tools/reveal_rows.py --help                           # local reveal of output rows with the key (no network but the key holder's own tokenizer for external_tokenize)
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"                      # integration gate
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after_kill.py
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py                # console vs mockups
@@ -184,6 +189,7 @@ Services (host ports bind `127.0.0.1` only):
 | `migrate` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot `python -m dps.migrate` as `dps_owner` after `dps-db` is healthy, exits 0; app and worker wait for it (`service_completed_successfully`) and run with `DPS_MIGRATIONS_MODE=verify` |
 | `worker` (M2) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — (9400 inside the network) | `python -m dps.worker`, `DPS_WORKER_CONCURRENCY=4`; healthcheck urllib `:9400/health`; scalable (`--scale worker=N`); read-only root, 512 MB `/tmp` tmpfs (files spools), `mem_limit: 1g` |
 | `demo-secrets` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot (root): writes the demo `secret_ref` files `dps/src/bank-pg-ro` (`dps_reader`), `dps/tgt/bank-uat` and `dps/src/bank-restore-rw` (`dps_writer`), `dps/s3/exports` (MinIO) under the demo tenant's folder `default/` of the `dps-secrets` volume (refs are tenant-scoped), which app and worker mount read-only at `/var/run/secrets/dps`; it removes an older volume's top-level `dps/` folder |
+| `tokenizer-mock` (M5, profiles `tokenizer`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | `${DPS_TOKENIZER_MOCK_PORT:-8420}` → 8420 | vaultless mock of a bank tokenization service for `external_tokenize` (`docker/tokenizer-mock/server.py`, mounted read-only): tokens `tk_` + base32(AES-SIV(value, entity\|profile)); bearer token `dps-local-tokenizer-token` and key are local demo literals; logs request lines only; healthcheck urllib `/health`, `mem_limit: 128m`. App and worker point `DPS_TOKENIZER_URL` at it (`DPS_TOKENIZER_PROVIDER=http`); without the profile the app reports `tokenizer` down and `external_tokenize` answers 502 |
 | `seed-sources` (M2, profiles `sources`/`full`) | `data-privacy-services:${DPS_IMAGE_TAG:-local}` | — | one-shot after `source-pg` is healthy: `python tools/seed_sources.py --target postgres --rows 20000 --seed 7 --restore-copy`; idempotent |
 
 The app talks to the mock as `http://azure-ocr-mock:5000` (`DPS_OCR_PROVIDER=azure`, key `mock-key`,
@@ -340,6 +346,28 @@ an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture che
 | `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
 | `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
 
+**M5 settings (contract §10; tabular synthesis, tokenization, keys, posture).** All have defaults;
+the posture rules that tighten them in staging/prod arrive with M5's posture task.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DPS_SYNTH_TABULAR_ENGINE` | `copula` | comma list of enabled tabular engines: `copula`, `mostly` (needs the `synth-ml` extra); `""` = tabular synthesis off; anything else is refused |
+| `DPS_COPULA_FIT_ROWS` / `_HOLDOUT_ROWS` / `_METRICS_ROWS` | 100,000 / 20,000 / 5,000 | rows fitted at prepare / extra rows held out (never fitted) to measure privacy / preview rows run through the real batch transformer |
+| `DPS_COPULA_RARE_FLOOR` / `DPS_COPULA_MAX_RESAMPLE` | 0.01 / 8 | categories below this share are never emitted (within [0, 0.2]); redraws per row before a batch fails closed with `exact_row_match` (≥ 1) |
+| `DPS_FIDELITY_COLUMN_LIMIT` / `DPS_FIDELITY_CORR_LIMIT` | 0.05 / 0.10 | KS/TVD per column and mean correlation delta shown as "within limit" in the evidence |
+| `DPS_PRIVACY_NNDR_TARGET` / `DPS_PRIVACY_NNDR_ENFORCE` | 0.95 / `false` | `true`: an NNDR ratio below the target fails prepare (`privacy_gate`) |
+| `DPS_MOSTLY_POOL_ROWS` / `DPS_MOSTLY_MAX_TRAINING_MINUTES` | 20,000 / 10 | optional MOSTLY engine |
+| `DPS_MOSTLY_DP_ENABLED` / `_DP_MAX_EPSILON` / `_DP_DELTA` | `false` / 5.0 / 1e-5 | MOSTLY differential-privacy training (epsilon > 0, 0 < delta < 1) |
+| `DPS_MOSTLY_LINKED_CHILD_ROWS` | 200,000 | MOSTLY linked generation: most child rows read for training (children of the sampled parents, keyset pages) |
+| `DPS_UTILITY_MAX_ROWS` / `DPS_MIA_MIN_HOLDOUT` / `DPS_MIA_AUC_TARGET` | 5,000 / 50 / 0.60 | train-on-synthetic/test-on-real budget; the membership-inference proxy needs this many holdout rows and passes at or below the AUC target |
+| `DPS_TOKENIZER_PROVIDER` | `""` | `external_tokenize` adapter: `""` (off) or `http` |
+| `DPS_TOKENIZER_URL` / `DPS_TOKENIZER_TOKEN` (`_FILE`) / `DPS_TOKENIZER_CA_FILE` | — | the bank tokenization service (http(s) with a host; the error never echoes the URL), its bearer token (prefer `DPS_TOKENIZER_TOKEN_FILE`) and CA bundle |
+| `DPS_TOKENIZER_TIMEOUT_SECONDS` / `_BATCH` / `_RETRIES` | 10 / 500 / 2 | |
+| `DPS_KEY_CACHE_SECONDS` / `DPS_KEY_MAX_TTL_DAYS` / `DPS_KEY_ROTATION_MAX_AGE_DAYS` / `DPS_KEY_ROTATION_MAX_GRACE_HOURS` | 30 / 365 / 90 / 168 | DB-backed API keys |
+| `DPS_REPORT_PDF_ENABLED` / `DPS_ROLLUP_RETENTION_DAYS` | `true` / 400 | PDFs: `GET /api/v1/evidence/{id}/pdf` (rendered once with reportlab's built-in Helvetica, stored as an `evidence_pdf` artefact, streamed afterwards) and `format=pdf` on `/reports/api-rollups/{day}`; `false` → 404 `pdf_disabled`. Report roll-up and daily usage rows older than the retention days are deleted by the retention job |
+| `DPS_EGRESS_TLS_REQUIRED` / `DPS_CORS_ORIGINS` | `false` / `*` | posture: `true` and explicit origins in staging/prod; origins are a comma list, `""` = same-origin only |
+| `DPS_VERIFY_WARN_ALLOWED` / `DPS_LLM_EGRESS_CHECK` | `true` / `strict` | posture: `false` / `strict` in staging/prod; `strict` or `warn` only |
+
 Declared but not read by the app: `DPS_HOST` (only the worker's ops server binds to it), `DPS_PORT` (the image's `CMD` fixes `0.0.0.0:8400`),
 `DPS_MIN_SCORE` (the policy's `detect.min_score` applies), `DPS_APP_NAME`. The M1 document, OCR and
 schema settings above are validated (and posture-checked) and read by the document pipeline and routes.
@@ -382,7 +410,20 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   `dps_ocr_calls_total{engine,outcome}` (engine `azure-read-v3.2` or `tesseract`),
   `dps_ocr_seconds` and `dps_llm_label_fields_total{outcome}` (T3 labelling: `labelled`,
   `unlabelled`, `skipped` over the per-call cap, `blocked` by the leak guard, `failed`; the call
-  itself is `dps_llm_calls_total{purpose="label"}`).
+  itself is `dps_llm_calls_total{purpose="label"}`). M5 (spec P1, Task 16B) adds the tenant
+  dimension: `dps_llm_calls_by_tenant_total{tenant_id,purpose}`,
+  **`dps_llm_raw_pii_sent_by_tenant_total{tenant_id}` (must stay 0; alert `DpsRawPiiSentToLlm`,
+  critical, on any increase)** and `dps_llm_exposure_blocked_by_tenant_total{tenant_id}` (alert
+  `DpsLlmExposureBlocked`, warning) — tenant `-` for calls outside a request or job. The gateway's
+  **egress verifier** (`dps/llm/egress.py`) checks every prompt before it leaves: a protected original
+  the caller names, or a self-identifying T1 value (checksum-validated id or card, e-mail, phone)
+  outside a `{TYPE_N}` placeholder. `DPS_LLM_EGRESS_CHECK=strict` (staging/prod) blocks the prompt
+  — nothing is sent, the caller falls back to its deterministic path (`fallback: egress_blocked`);
+  `warn` (local diagnosis) sends it and counts it on the raw counters. Each request's audit event
+  carries `counts.llm_calls`, `llm_raw_values`, `llm_blocked` when it reached the gateway; the daily
+  roll-ups sum them per tenant (migration 044) into the Overview tiles `llm_calls`,
+  `raw_pii_sent_to_llm`, `llm_blocked`; a job handler that calls the LLM records the same three in
+  `progress.metrics.llm`.
 - Audit: one `audit` log line per engine request, rejections included (trace id, route, tenant, key
   id, mode, policy label, outcome, counts, methods, verification, duration — never a value or a key).
   Document routes audit mode `document.detect|obfuscate|synthesize`; the outcome is the error code
@@ -395,7 +436,23 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   The policy label is a shipped preset name, `unknown`/`invalid` for any other string, or
   `<preset|custom>+inline:<hash12>` for an inline policy (M1; never the inline body).
   Logs go to stdout through an allow-list of field names; outside `local` they are JSON.
-- `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json`. Probe and metrics routes are not in the schema.
+- **API keys (M5).** With a metadata database, keys come from `DPS_API_KEYS` (static, checked first)
+  **and** from `dps_api_key` (migration 042: sha256 + an 8-character prefix only, never the key).
+  The app serves DB keys from an in-memory snapshot refreshed every `DPS_KEY_CACHE_SECONDS` (30);
+  expiry is checked on every lookup, a disable/rotation on the same replica takes effect at once and
+  on the others within one refresh, and after ten failed refreshes DB keys fail closed (static keys
+  keep working). `/readyz` gains `keys` (`static` or `db+static`, informational);
+  `dps_auth_keys_loaded` is the snapshot size. Keys are never deleted (disabled; the app role has no
+  DELETE on the table); a key is rotated at most once (`grace_hours` 0–`DPS_KEY_ROTATION_MAX_GRACE_HOURS`,
+  0 = disabled now) and never grants more scopes or tenants than its creator holds.
+  **Bootstrap path (staging/prod):** with the metadata DB credentials in the environment run
+  `python -m dps.keys_cli create --name platform-admin --tenants '*' --scopes '*' --expires-in-days 90`
+  (one JSON document on stdout — the raw key, once), store the key in the secret manager, and leave
+  `DPS_BOOTSTRAP_API_KEY` unset. `list`, `rotate ID [--grace-hours H]`, `disable ID` and `enable ID`
+  manage keys the same way (exit 2 with `{"error", "detail"}` on a refusal); every mutating command
+  writes an audit row owned by `_system` (`key_id = route = cli`).
+- `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json` (not served in staging/prod, M5). Probe and
+  metrics routes are not in the schema.
 - **Worker (M2).** `python -m dps.worker` claims `discover`, `run` (prepare/finalize, partitions)
   and `retention` jobs with `DPS_WORKER_CONCURRENCY` tasks; it needs `DPS_PG_HOST` and `DPS_JOB_KEK`
   (refuses to start without either, exit 1, no traceback). It serves `GET /health`, `GET /readyz`
@@ -406,6 +463,11 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   schedules at most one retention job per `DPS_RETENTION_INTERVAL_HOURS` across replicas (owner
   `_system`); retention deletes expired terminal jobs with their artefacts, stale proposed/superseded
   snapshots and expired inline secrets, purges leftover sealed keys, never the audit log or exports.
+  M5 extends the same job (no second scheduler): it also ages out report roll-ups and daily usage rows
+  older than `DPS_ROLLUP_RETENTION_DAYS` (400), refreshes the last three days' roll-ups of tenants
+  with recent jobs, records its counts in `progress.metrics.retention` and writes one `retention.run`
+  audit event owned by `_system`. `POST /api/v1/admin/retention/run {"dry_run": true}` (admin key
+  granted every tenant) queues an on-demand run.
 
 ## 6. Security posture
 
@@ -418,6 +480,42 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   (a literal `DPS_JOB_KEK` env var is refused), `DPS_INLINE_SECRETS_ALLOWED=false`,
   `DPS_RLS_ENABLED=true`, `DPS_MIGRATIONS_MODE=verify`, `DPS_AUDIT_STRICT=true`,
   `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`.
+- **M5 posture** (`dps/posture.py`, same guard): secrets only as mounted files — a literal
+  `DPS_JOB_KEK`, `DPS_JOB_KEK_PREVIOUS`, `DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`/`_SECRET`,
+  `DPS_PG_PASSWORD`, `DPS_PG_WORKER_PASSWORD`, `DPS_PG_MIGRATION_PASSWORD`, `DPS_TOKENIZER_TOKEN`,
+  `DPS_AZURE_VISION_KEY`, `DPS_S3_ACCESS_KEY_ID` or `DPS_S3_SECRET_ACCESS_KEY` environment variable
+  is refused (use `<NAME>_FILE`); with `DPS_PG_HOST` the KEK must be set; `DPS_EGRESS_TLS_REQUIRED=true`,
+  every egress URL (`DPS_STELLAR_BASE_URL`, `DPS_COIN_URL`, `DPS_AZURE_VISION_ENDPOINT`,
+  `DPS_S3_ENDPOINT_URL`, `DPS_TOKENIZER_URL`) `https` and, when any is set, `DPS_SSL_CERT_FILE` (the
+  organisation CA bundle); `DPS_TOKENIZER_TOKEN_FILE` with `DPS_TOKENIZER_PROVIDER=http`;
+  `DPS_CORS_ORIGINS` without `*`; and **strict verification at boot**: `DPS_VERIFY_WARN_ALLOWED=false`,
+  `DPS_LLM_EGRESS_CHECK=strict`, every shipped preset and `DPS_DEFAULT_POLICY` with
+  `verify.leakage_check: strict`. At request time a policy (inline, preset override or stored) with
+  `leakage_check: warn` or a run with `options.verify=warn` is refused with 422
+  `verify_warn_disallowed` while `DPS_VERIFY_WARN_ALLOWED=false`, and publishing such a tenant policy
+  is refused the same way. In staging/prod `/docs` and `/api/v1/openapi.json` are not served.
+- **TLS-only connections** (`DPS_EGRESS_TLS_REQUIRED=true`): postgres needs
+  `options.sslmode=verify-full|verify-ca`, mongo `options.tls=true`, oracle `options.protocol=tcps`
+  (or a `dsn` secret file using tcps), s3 an `https` `endpoint_url` (or none = AWS); pvc is exempt.
+  Refused with 422 `tls_required` at `POST /connections`, at a `PATCH` that changes `params`, and at
+  use (a connection registered before the switch fails its job with `tls_required`, not retried).
+- **Runtime posture** — `GET /api/v1/admin/posture` (admin): eleven checks (`auth_enabled`,
+  `bootstrap_key_absent`, `api_keys_from_file`, `tls_egress`, `audit_strict`, `leakage_strict` incl.
+  every tenant's active policy, `llm_not_stub`, `kek_from_secret`, `keys_rotated` (names and ages of
+  active keys older than `DPS_KEY_ROTATION_MAX_AGE_DAYS` never rotated), `rls_posture`,
+  `migrations_verified`), evaluated as if production in every environment; `enforced` is true in
+  staging/prod. Database checks read "database unavailable" while it is down. The tenant policies
+  of `leakage_strict` and the keys of `keys_rotated` are scoped to the caller's tenants (keys as in
+  `GET /admin/keys`); use a wildcard (`*`) admin key for the platform-wide view.
+- **KEK rotation runbook** (`python -m dps.rekey [--dry-run]`): mount the new KEK as
+  `DPS_JOB_KEK_FILE` and the old one as `DPS_JOB_KEK_PREVIOUS_FILE`; roll the app and worker
+  deployments; run `python -m dps.rekey` once (any pod with the image, the worker's database login
+  and the API login: it re-seals `dps_job.key_enc`/`spec_enc` through the worker pool and
+  `dps_connection.secret_enc` per tenant); confirm the printed JSON line has `"unreadable": 0` (exit
+  code 3 otherwise — those rows are unchanged; exit 2 = no KEK or no database); remove
+  `DPS_JOB_KEK_PREVIOUS_FILE` and roll again. Keep the previous KEK as long as callers may reveal
+  `external_tokenize` tokens bound under it (§8). Until `dps.rekey` has run, jobs sealed under the
+  old KEK cannot be opened by workers that hold only the new one — run it right after the first roll.
 - **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
   default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
@@ -429,9 +527,10 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 - Console API key: kept in `sessionStorage` (gone with the tab); the header's "Remember key on this
   device" moves it to `localStorage` and unticking removes it again. A key left in `localStorage` by
   the M0 console is moved into the tab's session on first load.
-- CORS: any origin, methods `GET POST PATCH DELETE OPTIONS` (M2), headers `Content-Type X-API-KEY
-  X-DPS-Tenant X-Request-ID Idempotency-Key` (keys travel in headers, not cookies; to be narrowed in
-  M5).
+- CORS (M5): only the origins in `DPS_CORS_ORIGINS` (comma list; `""` = same-origin, no CORS
+  headers at all; local default `*`, refused in staging/prod), methods
+  `GET POST PUT PATCH DELETE OPTIONS`, headers `Content-Type X-API-KEY X-DPS-Tenant X-Request-ID
+  Idempotency-Key` (keys travel in headers, not cookies).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a
   500 `internal error` with only the exception class logged.
 
@@ -608,6 +707,66 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
   - Run the integration gates one at a time against a lane's stack: the service tests share one
     metadata database, one source database and one MinIO bucket with fixed keys (two concurrent runs
     collide, e.g. on `tests/big.bin` in `tests/connectors/test_storage_s3.py`).
+  - **M5 `external_tokenize` — the wire contract for the bank's integration team.** DPS calls an
+    adapter in front of the bank's tokenization product (Voltage, Protegrity, Thales, in-house):
+    `POST {DPS_TOKENIZER_URL}/v1/tokenize` `{"profile", "entity_type", "values": [...]}` → 200
+    `{"tokens": [...]}`, `POST …/v1/detokenize` `{"profile", "entity_type", "tokens": [...]}` → 200
+    `{"values": [...]}`, `GET …/health` → 200; `Authorization: Bearer <DPS_TOKENIZER_TOKEN(_FILE)>`,
+    TLS verified with `DPS_TOKENIZER_CA_FILE` (else `DPS_SSL_CERT_FILE`, else system CAs; https is
+    required when `DPS_EGRESS_TLS_REQUIRED=true`). Answers keep order and length, at most
+    `DPS_TOKENIZER_BATCH` items per call, deterministic per (profile, entity type, value); a token
+    equal to its input, a wrong length or a non-string is refused as malformed. 429/5xx and
+    transport errors are retried (`DPS_TOKENIZER_RETRIES`); L1 then answers 502 and L2 retries the
+    batch with code `tokenization_unavailable`. Policy: `treat: {SSN: {method: external_tokenize,
+    profile: ssn-fpe}}` — `profile` is passed through. Reveal through DPS detokenizes in one call
+    per entity type and profile (after the caller's key matched the hints). **SEC-4:** DPS holds
+    the service's credentials, so it detokenizes only tokens it produced under the presented key:
+    each external hint carries a `bind` tag keyed by the caller's DEK and a server key derived from
+    `DPS_JOB_KEK`; an unbound or mismatched tag is refused (403 `external_token_not_bound`) before
+    any call, and every batch is audited first (`action: external.detokenize`, entity type and
+    count). Consequences: `external_tokenize` needs `DPS_JOB_KEK` on the app (else 400, plan
+    reason `|external:unbound`); after a KEK rotation keep `DPS_JOB_KEK_PREVIOUS` for as long as
+    callers may reveal external tokens bound under the old KEK — once it is dropped those tokens
+    can no longer be revealed through DPS (the bank's own detokenize path still works).
+  - **M5 tabular synthesis** (`options.tabular`): the copula model is fitted on a sample of the
+    selection; the same seed reproduces the same target only when the whole selection fits in the
+    sample (`DPS_COPULA_FIT_ROWS + DPS_COPULA_HOLDOUT_ROWS`), because a larger table is sampled at
+    random. A table whose every non-key value combination occurs in the data cannot be synthesized
+    row by row (every draw equals a real row): prepare fails with `leakage` and says so.
+  - **M5 linked generation** (`options.linked`, MOSTLY engine) writes a *new* dataset with new
+    keys (`1..n`, `S00000001…`, `C00000001…`): joins back to production keys are impossible by
+    design, and free-text and other unmodelled, non-sensitive columns are written as null. It needs
+    the `synth-ml` extra (never in the default image).
+  - **M5 synthetic identifiers (D-A).** Synthesize jobs (copula and surrogate) never copy a key or
+    identifier: a key with an entity type, a join column (`CUSTOMER_ID`, `EMPLOYEE_ID`, `CASE_ID`)
+    and any kept MEDIUM+ column become **keyed pseudonyms** under the job's synthesis seed — use one
+    job group (one seed) for tables that must join, and their foreign keys still match. Integer
+    pseudonyms lie in bands no real key reaches: a value below 10⁹ maps into `[10⁹, 2·10⁹)` (ten
+    digits; an `integer` column holds them), a value of 10 to 18 digits into `[10¹⁸, 2·10¹⁸)` (a
+    `bigint`); so a synthetic key is never a real key — unless one column holds keys below 10⁹ *and*
+    keys in `[10⁹, 2·10⁹)`. A `smallint` or `numeric(p ≤ 9, 0)` identifier is refused
+    (`synthesize_pseudonym_unsupported`); a `numeric(p, 0)` too narrow for a 19-digit pseudonym of a
+    long key fails the run closed (`incompatible_method`). Also refused: an `in_place` synthesize
+    of a table whose key has an entity type (`synthesize_in_place_sensitive_key`) and an `offset`
+    append of such a key; use `table`, `files` or `append` + `generate`. A key the owner
+    reviews as *not personal* (entity type cleared) is a technical id and is kept. A column reviewed
+    as not personal is copied as it is — if its written sample shows personal data the pack says
+    `review_required` (not "passed"). A text pseudonym keeps the key's shape, so it may by chance
+    equal another real key of that shape (probability ~n²/|shape|: nil for UUIDs and long mixed
+    keys, not for short digit-only text keys); the permutation guarantees that no value maps to
+    itself. Columns the run pseudonymises (identifiers, written keys, declared foreign keys) are
+    never modelled by the copula. **Government identifiers** (M5 verify r2) are surrogated from
+    ranges their issuers never allocate (`dps/engine/synth/unissued.py`: NINO prefixes HMRC never
+    uses — not `QQ`, which test data uses —, CURP/RFC inconvenient-word prefixes, NHS `999`, EIN
+    unassigned campuses, PAN sequence `0000`, SSN 9xx groups 01–49, ITIN group 89; a generic
+    `NATIONAL_ID` by recognised sub-shape); PASSPORT, DRIVER_LICENSE, VOTER_ID, INE_CLAVE, BN, MRZ
+    and unrecognised national-id shapes have no such range and are reshaped. After a `table`,
+    `append` or `in_place` synthesize the run reads **every** written government/financial
+    identifier value and counts (`post_sample.identifier_check`) those found in the same source
+    column (keyed 64-bit hashes of the normalised value) and those outside a never-issued range;
+    any count above 0, or a check that could not run, makes the pack `review_required`. Files
+    targets record `not_run: files_target`. Tools that need *rule-valid* PANs (the demo seed, the
+    demo documents, the eval corpus) draw them themselves (`evaluation.corpus.rule_valid_pan`).
 
 ## 9. Next milestones
 

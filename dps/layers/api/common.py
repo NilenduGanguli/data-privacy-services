@@ -5,6 +5,8 @@ Error mapping (the engine's messages name rules, never values):
 - payload too large (characters, values) → 413; malformed payload or nesting too deep → 422
 - :class:`~dps.engine.service.VerificationFailed` → 422 ``{"detail", "code": "leakage"}``
   (nothing is returned)
+- :class:`~dps.engine.service.TokenizationUnavailable` → 502 ``{"detail": "tokenization service
+  unavailable"}`` (M5, the bank tokenization service failed; audit outcome ``upstream_error``)
 - :class:`~dps.engine.service.EngineError` → 400 ``{"detail", "code": "bad_request"}``
 - :class:`~dps.errors.CodedError` → its own status and ``{"detail", "code"}`` (M1)
 - anything else → 500 ``internal error``; only the exception's class name is logged
@@ -18,6 +20,8 @@ and the audit event carries the HTTP status the request answers with.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import hashlib
 import inspect
 import json
@@ -35,9 +39,16 @@ from fastapi.responses import StreamingResponse
 from dps.audit import AuditEvent, AuditUnavailable
 from dps.auth import coded_http_exception_handler as coded_http_exception_handler  # one handler
 from dps.engine.policy import preset_names
-from dps.engine.service import EngineError, Payload, VerificationFailed
+from dps.engine.service import EngineError, Payload, TokenizationUnavailable, VerificationFailed
 from dps.errors import IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL, CodedError
-from dps.observability import LATENCY, REQUESTS, get_logger
+from dps.observability import (
+    CURRENT_TENANT,
+    LATENCY,
+    LLM_STATS,
+    REQUESTS,
+    LlmStats,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -187,6 +198,8 @@ def _audit_event(
     status_code: int,
 ) -> AuditEvent:
     principal = getattr(request.state, "principal", None)
+    stats = LLM_STATS.get()  # M5 (spec P1): the call's LLM figures, when it reached the gateway
+    llm = stats.counts() if stats is not None and (stats.calls or stats.blocked) else {}
     return AuditEvent(
         trace_id=tid,
         route=route_template(request),
@@ -197,6 +210,7 @@ def _audit_event(
         duration_ms=round(duration_ms, 2),
         outcome=outcome,
         status=status_code,
+        counts={**counts.pop("counts", {}), **llm},
         **counts,
     )
 
@@ -216,6 +230,66 @@ def _audit(request: Request, **fields: Any) -> None:
         logger.warning("audit_write_failed", error=type(exc).__name__)
 
 
+def detokenize_auditor(request: Request) -> Callable[[str, str | None, int], None]:
+    """SEC-4: the engine hook that audits each detokenization batch of a reveal.
+
+    One value-free event per batch — tenant, API key id, entity type and token count (action
+    ``external.detokenize``, outcome ``requested``, the call's trace id) — written through the
+    app's sink on the event loop **before** the bank tokenization service is called, from the
+    worker thread the engine runs on. A strict sink that refuses it stops the reveal:
+    :class:`~dps.errors.CodedError` 503 ``audit_unavailable``, nothing sent to the service.
+    Call it inside the request's event loop.
+    """
+    loop = asyncio.get_running_loop()
+
+    def write(entity_type: str, profile: str | None, count: int) -> None:
+        principal = getattr(request.state, "principal", None)
+        event = AuditEvent(
+            trace_id=getattr(request.state, "trace_id", None) or "-",
+            route=route_template(request),
+            tenant_id=getattr(request.state, "tenant_id", "default"),
+            key_id=principal.key_id if principal is not None else "anonymous",
+            mode="reveal",
+            policy="-",
+            action="external.detokenize",
+            outcome="requested",
+            methods_used={"external_tokenize": count},
+            findings_by_type={entity_type: count},
+            counts={"tokens": count},
+        )
+        try:
+            _on_loop(loop, request.app.state.audit.write, event)
+        except AuditUnavailable:
+            raise CodedError("audit_unavailable", "audit unavailable", status=503) from None
+
+    return write
+
+
+def _on_loop(
+    loop: asyncio.AbstractEventLoop, fn: Callable[[AuditEvent], None], event: AuditEvent
+) -> None:
+    """Run ``fn(event)`` on ``loop`` and wait for it (the audit sinks are loop-bound)."""
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        fn(event)
+        return
+    done: concurrent.futures.Future[None] = concurrent.futures.Future()
+
+    def run() -> None:
+        try:
+            fn(event)
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the calling thread
+            done.set_exception(exc)
+        else:
+            done.set_result(None)
+
+    loop.call_soon_threadsafe(run)
+    done.result(timeout=30)
+
+
 def begin_call(request: Request) -> str:
     """Start an audited call: the trace id (set on ``request.state``, bound to the log context).
 
@@ -225,6 +299,10 @@ def begin_call(request: Request) -> str:
     tid = getattr(request.state, "replay_trace_id", None) or trace_id(request)
     request.state.trace_id = tid
     structlog.contextvars.bind_contextvars(trace_id=tid, route=route_template(request))
+    # M5 (spec P1): LLM calls made for this request count for its tenant (per-tenant counters)
+    # and land in its audit event. Worker threads the engine runs on copy this context.
+    CURRENT_TENANT.set(str(getattr(request.state, "tenant_id", "") or "") or None)
+    LLM_STATS.set(LlmStats())
     return tid
 
 
@@ -278,6 +356,10 @@ def map_engine_error(exc: Exception) -> tuple[str, HTTPException]:
     """
     if isinstance(exc, VerificationFailed):  # before EngineError, which it subclasses
         return "verification_failed", CodedHTTPException(422, "leakage", str(exc))
+    if isinstance(exc, TokenizationUnavailable):  # M5: the bank tokenization service failed
+        return "upstream_error", HTTPException(
+            status_code=502, detail="tokenization service unavailable"
+        )
     if isinstance(exc, EngineError):
         return "bad_request", CodedHTTPException(400, "bad_request", str(exc))
     if isinstance(exc, CodedError):

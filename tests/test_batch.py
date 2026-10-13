@@ -357,6 +357,36 @@ def test_verify_row_rules() -> None:
     ]
 
 
+def test_a_chance_equal_low_cardinality_surrogate_is_not_a_fixed_point() -> None:
+    """D-A B1: a persona-drawn gender (or nationality) surrogate equals the original by chance
+    (M0 ``_IDENTITY_OK``); every other entity still fails on an unchanged whole value."""
+
+    def low(name: str, entity: str) -> ColumnPlan:
+        return ColumnPlan(
+            path=f"$.{name}",
+            name=name,
+            entity_type=entity,
+            method=MethodSpec(method="surrogate"),
+            text_column=False,
+            reversible=False,
+            kind="text",
+            length=None,
+            precision=None,
+            scale=None,
+        )
+
+    gender, nationality, city = (
+        low("gender", "GENDER"),
+        low("nationality", "NATIONALITY"),
+        low("city", "CITY"),
+    )
+    assert verify_row([(gender, "female", True)], {"$.gender": "Female"}) == []
+    assert verify_row([(nationality, "Indian", True)], {"$.nationality": "Indian"}) == []
+    assert verify_row([(city, "Mumbai", True)], {"$.city": "mumbai"}) == [
+        {"path": "$.city", "entity_type": "CITY", "rule": "fixed_point"}
+    ]
+
+
 def test_row_anchor_matches_the_l1_formula() -> None:
     from dps.engine.findings import hash_value
 

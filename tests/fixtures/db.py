@@ -167,15 +167,33 @@ async def _migrate(settings: Settings) -> None:
         await conn.close()
 
 
+#: M5 tables truncated between tests (when their migration exists).
+M5_TABLES = (
+    "dps_tenant_usage",
+    "dps_report_daily",
+    "dps_report_entity_daily",
+    "dps_report_refresh",
+    "dps_policy_version",
+    "dps_policy",
+)
+
+
 async def _truncate(settings: Settings) -> None:
     conn = await db.open_migration_connection(settings)
     schema = db.schema_ident(settings)
     try:
+        # M5 tenant tables (040+) exist from their migration on; truncated with the rest
+        extra = [
+            f"{schema}.{t}"
+            for t in M5_TABLES
+            if await conn.fetchval("SELECT to_regclass($1)", f"{schema}.{t}") is not None
+        ]
         await conn.execute(
             f"TRUNCATE {schema}.dps_audit_log, {schema}.dps_evidence, {schema}.dps_artefact, "
             f"{schema}.dps_snapshot, {schema}.dps_job_partition, {schema}.dps_job, "
             f"{schema}.dps_job_group, {schema}.dps_connection, {schema}.dps_tenant, "
-            f"{schema}.dps_worker, {schema}.dps_api_key RESTART IDENTITY CASCADE"
+            f"{schema}.dps_worker, {schema}.dps_api_key{''.join(', ' + t for t in extra)} "
+            "RESTART IDENTITY CASCADE"
         )
     finally:
         await conn.close()

@@ -116,6 +116,9 @@ class ColumnInfo(BaseModel):
     is_key: bool = False
     has_default: bool = False
     is_identity: bool = False
+    #: a declared single-column foreign key: the referenced ``owner.table.column`` (D-A: a
+    #: synthesize run pseudonymises it under the referenced key's label so joins hold)
+    references: str | None = None
 
 
 class TableShape(BaseModel):

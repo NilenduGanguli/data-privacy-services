@@ -15,11 +15,12 @@ from dps.engine.batch import reveal_row
 from dps.engine.policy import MethodSpec
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.jobs import JobState
-from dps.jobs_models import ClassificationSnapshot, ObjectRef, RunSpec, SnapshotOverride
+from dps.jobs_models import ClassificationSnapshot, ObjectRef, RunSpec, SnapshotOverride, SpecError
 from dps.layers.connectors.evidence import get_evidence
 from dps.layers.connectors.submit import submit_run
 from dps.worker import HandlerContext
 from tests.connectors.helpers import (
+    KEY_NOT_PERSONAL,
     db_key_enc,
     discover_and_accept,
     drive,
@@ -258,20 +259,34 @@ async def test_append_offset_to_the_same_table(
     rw = await register_source(
         "t1", ref="dps/src/test-pg-rw", roles={"source", "target"}, name="append-rw"
     )
-    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj)
+    # a synthesize run never writes a real key shifted (D-A, G2 review r1 B2): even a key
+    # reviewed as not personal is refused before a job exists — offsets are obfuscate mechanics
+    plain = await discover_and_accept(handler_ctx, "t1", rw.id, obj, overrides=KEY_NOT_PERSONAL)
     target = {
         "write_mode": "append",
         "confirm_write": True,
         "pk_strategy": {"kind": "offset", "offset": 90_000_000},
     }
+    before = len((await jobs.list_jobs("t1", kind=jobs.JobKind.run))[0])
+    with pytest.raises(SpecError) as err:
+        await submit_run(
+            run_spec(rw.id, obj, plain.id, target, mode="synthesize"),
+            tenant_id="t1",
+            principal=LOCAL_PRINCIPAL,
+            settings=handler_ctx.settings,
+            kek=handler_ctx.kek,
+        )
+    assert (err.value.code, err.value.status) == ("pk_strategy_invalid", 422)
+    assert len((await jobs.list_jobs("t1", kind=jobs.JobKind.run))[0]) == before
+    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj, overrides=IN_PLACE_REVIEW)
     sub = await submit_run(
-        run_spec(rw.id, obj, snap.id, target, mode="synthesize"),
+        run_spec(rw.id, obj, snap.id, target),
         tenant_id="t1",
         principal=LOCAL_PRINCIPAL,
         settings=handler_ctx.settings,
         kek=handler_ctx.kek,
     )
-    assert sub.key_material is None and sub.synthesis_seed
+    assert sub.key_material and sub.synthesis_seed is None
     job = await drive(handler_ctx, "t1", sub.job.id)
     assert job.state == JobState.succeeded, job.error_code
     assert job.progress.rows_written == 400
@@ -284,8 +299,8 @@ async def test_append_offset_to_the_same_table(
     assert len(ids) == 800 and ids[400:] == [i + 90_000_000 for i in ids[:400]]
     assert job.progress.evidence_id is not None
     ev = await get_evidence("t1", job.progress.evidence_id)
-    assert ev is not None and ev.pack.label.startswith("synthetic") and ev.pack.reveal_map == []
-    assert ev.pack.consistency["kid"] is None and ev.pack.consistency["seed_fingerprint"]
+    assert ev is not None and not ev.pack.label.startswith("synthetic")
+    assert ev.pack.consistency["kid"] and ev.pack.consistency["seed_fingerprint"] is None
 
 
 async def test_files_parquet_to_a_pvc_path_with_a_manifest(

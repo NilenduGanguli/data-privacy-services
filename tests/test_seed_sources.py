@@ -9,7 +9,7 @@ import pytest
 from stdnum import luhn
 from stdnum.mx import curp
 
-from dps.engine.detect.checksums import verhoeff_check_digit
+from dps.engine.detect.checksums import validate, verhoeff_check_digit
 from dps.engine.synth.surrogates import RFC2606_DOMAINS, TEST_CARD_IIN
 from tools.seed_sources import (
     TABLE_DDL,
@@ -70,6 +70,8 @@ def test_identifiers_are_rule_valid_fakes(data) -> None:  # noqa: ANN001
             assert curp.is_valid(value)
         if c["country_code"] == "IN":
             assert re.fullmatch(r"[A-Z]{3}P[A-Z]\d{4}[A-Z]", str(c["tax_id"]))
+            # rule-valid, so discovery still finds the PAN (surrogate PANs carry 0000: invalid)
+            assert validate("PAN_IN", str(c["tax_id"])) is True
         else:
             assert c["tax_id"] is None
         domain = str(c["email"]).rsplit("@", 1)[1]

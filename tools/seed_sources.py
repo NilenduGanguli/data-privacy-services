@@ -258,6 +258,20 @@ def _curp(persona: Any, dob: date, rng: random.Random) -> str:
     return body + str(curp.calc_check_digit(body))
 
 
+def _pan(persona: Any, key: str) -> str:
+    """A rule-valid individual's PAN (holder type P, the surname's initial) for the *source*,
+    drawn from its own per-customer generator so no other seeded value moves. The surrogate
+    engine's PANs carry the never-issued sequence number 0000 and so no longer validate: the
+    demo's ``tax_id`` would stop being discovered as a PAN."""
+    from dps.engine.synth.personas import ascii_fold
+
+    letters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    rng = random.Random(f"pan|{key}")
+    initial = re.sub(r"[^A-Z]", "", ascii_fold(persona.last_name).upper())[:1] or "K"
+    head = "".join(rng.choice(letters) for _ in range(3))
+    return f"{head}P{initial}{rng.randint(1, 9999):04d}{rng.choice(letters)}"
+
+
 @dataclass
 class _Customer:
     id: int
@@ -321,9 +335,7 @@ def generate_rows(*, rows: int, seed: int) -> dict[str, list[dict[str, Any]]]:
             national_id = f"QQ{rng.randrange(1_000_000):06d}{rng.choice('ABCD')}"
         else:
             national_id = _curp(persona, dob, rng)
-        tax_id = (
-            engine.surrogate("PAN_IN", "ABCPE1234F", locale, anchor) if country == "IN" else None
-        )
+        tax_id = _pan(persona, f"CUSTOMER:{cid}") if country == "IN" else None
         email = engine.surrogate("EMAIL", f"person{i}@example.com", locale, anchor)
         mobile = engine.surrogate("PHONE", PHONE_TEMPLATE[country], locale, anchor)
         c = _Customer(
@@ -511,7 +523,7 @@ def generate_rows(*, rows: int, seed: int) -> dict[str, list[dict[str, Any]]]:
                 dob = date.fromisoformat(
                     engine.surrogate("DATE_OF_BIRTH", "1975-03-10", locale, anchor)
                 )
-                ident = engine.surrogate("PAN_IN", "ABCPE1234F", locale, anchor)
+                ident = _pan(engine.persona(anchor, locale), f"APPLICANT:{aid}")
             out["loan_applicants"].append(
                 {
                     "applicant_id": aid,

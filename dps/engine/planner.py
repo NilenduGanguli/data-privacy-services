@@ -18,8 +18,21 @@ _FPE_METHODS = {"fpe_digits", "fpe_text"}
 _MODES = ("obfuscate", "synthesize")
 
 
-def build_plan(findings: list[Finding], policy: Policy, mode: str, *, fpe_enabled: bool) -> Plan:
+def build_plan(
+    findings: list[Finding],
+    policy: Policy,
+    mode: str,
+    *,
+    fpe_enabled: bool,
+    external_enabled: bool = True,
+    external_bound: bool = True,
+) -> Plan:
     """One :class:`PlanEntry` per finding, in finding order.
+
+    ``external_enabled`` False (no tokenization adapter configured, M5) marks every
+    ``external_tokenize`` entry ``|external:unconfigured``, so a plan preview shows why the
+    request will fail; ``external_bound`` False (an adapter but no KEK to bind its tokens to the
+    caller's key, SEC-4) marks obfuscate-mode entries ``|external:unbound``.
 
     Raises:
         ValueError: ``mode`` is not ``obfuscate`` or ``synthesize``.
@@ -47,6 +60,10 @@ def build_plan(findings: list[Finding], policy: Policy, mode: str, *, fpe_enable
             )
         if method in _FPE_METHODS and not fpe_enabled:
             method, params, reason = "det_token", {}, f"{reason}|fallback:fpe_disabled"
+        if method == "external_tokenize" and not external_enabled:
+            reason = f"{reason}|external:unconfigured"
+        elif method == "external_tokenize" and mode == "obfuscate" and not external_bound:
+            reason = f"{reason}|external:unbound"
         entries.append(
             PlanEntry(
                 finding=finding,

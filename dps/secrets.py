@@ -189,6 +189,11 @@ def load_kek(settings: Settings) -> bytes | None:
     return _b64decode(settings.job_kek) if settings.job_kek else None
 
 
+def kek_ring(settings: Settings) -> tuple[bytes, ...]:
+    """The job KEK, then ``DPS_JOB_KEK_PREVIOUS`` while a rotation keeps it (each set one)."""
+    return tuple(_b64decode(v) for v in (settings.job_kek, settings.job_kek_previous) if v)
+
+
 def seal(kek: bytes, plaintext: bytes, *, aad: str) -> bytes:
     """Encrypt and authenticate ``plaintext`` bound to ``aad`` (AES-256: the KEK is 32 bytes)."""
     if len(kek) != _KEK_BYTES:
