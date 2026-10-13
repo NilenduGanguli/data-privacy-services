@@ -19,8 +19,13 @@ async def _owner(settings):  # noqa: ANN001, ANN202
     return await db.open_migration_connection(settings)
 
 
+#: M5's files (contract §2.2: 040–059); other milestones' ranges are checked by their own lanes.
+M5_FILES = ["042_key_rotation.sql"]
+
+
 async def test_files_are_the_contract_set() -> None:
-    assert FILES == [
+    assert [f for f in FILES if "040" <= f < "060"] == M5_FILES
+    assert [f for f in FILES if f < "020"] == [
         "001_schema_and_roles.sql",
         "002_tenancy_and_keys.sql",
         "003_connections.sql",

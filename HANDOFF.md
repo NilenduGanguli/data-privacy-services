@@ -421,6 +421,21 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
   The policy label is a shipped preset name, `unknown`/`invalid` for any other string, or
   `<preset|custom>+inline:<hash12>` for an inline policy (M1; never the inline body).
   Logs go to stdout through an allow-list of field names; outside `local` they are JSON.
+- **API keys (M5).** With a metadata database, keys come from `DPS_API_KEYS` (static, checked first)
+  **and** from `dps_api_key` (migration 042: sha256 + an 8-character prefix only, never the key).
+  The app serves DB keys from an in-memory snapshot refreshed every `DPS_KEY_CACHE_SECONDS` (30);
+  expiry is checked on every lookup, a disable/rotation on the same replica takes effect at once and
+  on the others within one refresh, and after ten failed refreshes DB keys fail closed (static keys
+  keep working). `/readyz` gains `keys` (`static` or `db+static`, informational);
+  `dps_auth_keys_loaded` is the snapshot size. Keys are never deleted (disabled; the app role has no
+  DELETE on the table); a key is rotated at most once (`grace_hours` 0–`DPS_KEY_ROTATION_MAX_GRACE_HOURS`,
+  0 = disabled now) and never grants more scopes or tenants than its creator holds.
+  **Bootstrap path (staging/prod):** with the metadata DB credentials in the environment run
+  `python -m dps.keys_cli create --name platform-admin --tenants '*' --scopes '*' --expires-in-days 90`
+  (one JSON document on stdout — the raw key, once), store the key in the secret manager, and leave
+  `DPS_BOOTSTRAP_API_KEY` unset. `list`, `rotate ID [--grace-hours H]`, `disable ID` and `enable ID`
+  manage keys the same way (exit 2 with `{"error", "detail"}` on a refusal); every mutating command
+  writes an audit row owned by `_system` (`key_id = route = cli`).
 - `GET /docs` (Swagger UI) and `GET /api/v1/openapi.json`. Probe and metrics routes are not in the schema.
 - **Worker (M2).** `python -m dps.worker` claims `discover`, `run` (prepare/finalize, partitions)
   and `retention` jobs with `DPS_WORKER_CONCURRENCY` tasks; it needs `DPS_PG_HOST` and `DPS_JOB_KEK`

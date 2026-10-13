@@ -546,6 +546,43 @@ real survivors).
   fits (smallint, date, float) refuses the run (`synthesize_pseudonym_unsupported`); a FK can be
   left out of `selection.columns`. (4) Multi-column foreign keys are not named.
 
+## Task 9 — DB-backed API keys: rotation, expiry, disable; operator CLI
+
+- `dps/auth_db.py`:
+  - `_validate` also refuses a tenant id that is not a job-platform id or that starts with `_`
+    (`422 invalid_tenant`): the plan let a wildcard creator mint a key for `_system` or for an id
+    with spaces (harmless at lookup, but never meaningful). New test
+    `test_reserved_and_malformed_tenants_are_refused`.
+  - Listing uses one helper, `covers(actor, tenant_ids)` (same rule as the plan's inline
+    expression: a wildcard key is visible only to a wildcard actor). `rotate_key` runs
+    `check_grant` **before** the rotated/status checks, so a caller who does not cover the key gets
+    403 rather than learning its state. New test `test_a_tenant_admin_cannot_touch_a_wider_key`.
+  - `refresh()` first calls `db.init_pool(self._settings)` (the app's settings, never the process
+    defaults a fresh pool would otherwise read) and puts the `last_used` ids back when the flush
+    fails; `run()` catches any `Exception` (class name logged), not only `PostgresError`/`OSError`
+    (an `asyncpg.InterfaceError` or a pool error would have killed the refresher, leaving the
+    snapshot to go stale).
+  - `_table` uses `db.schema_ident(settings)` (validated, quoted) instead of an f-string of the raw
+    schema name; `GrantError` details never quote a scope, tenant or name the caller sent.
+- `dps/keys_cli.py`: also logs `api_key_disabled`/`api_key_enabled` (key id only); `rotate`'s `old`
+  is an `ApiKeyView` (never a key). `main()` wraps `amain()` so tests and the image entry point share it.
+- `dps/app.py`: the refresher starts **after** the job platform connected and only when it is
+  configured, and is stopped **before** the pools close (else its next refresh would re-create a
+  pool on a closed loop). `_db_key_store()` imports `dps.auth_db` lazily (a Layer 1 install without
+  the `db` extra keeps static keys only). The "no keys" warning now fires only when there are no
+  static keys **and** no database.
+- `tests/test_auth_db.py::test_api_accepts_a_db_key` does not use `migrated_db` (whose pools live
+  on the fixture's loop and would be handed to the app's lifespan on another loop); it truncates the
+  tables itself like `api_client`. `tests/test_keys_cli.py` runs the CLI with `cwd=tmp_path` and
+  without the lane's other `DPS_*` variables (a `.env` in the tree cannot change its settings), and
+  gains `test_refusals_exit_2_value_free_and_mutations_are_audited` (exit 2 + code; one `_system`
+  audit row per mutating command, value-free).
+- `tests/db/test_migrations.py::test_files_are_the_contract_set`: pinned M2's ten files exactly; it
+  now pins M2's files (`< 020`) and M5's (`040–059`) separately, so each lane's migrations are checked
+  by its own range (M3/M4 add theirs at integration).
+- `HANDOFF.md`: the bootstrap path and the key-store behaviour went into §5 (probes and ops), where
+  `/readyz` and the metrics are described.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
