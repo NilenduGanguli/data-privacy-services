@@ -693,3 +693,27 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   scan runs with `scope.shadow_dom=false`, is rendered but never read, so no finding masks it.
   Task 14 should extract with shadow DOM on for captures (or box open shadow hosts when it is off);
   closed shadow roots need CDP (`DOM.getDocument(pierce=true)`) to be seen at all.
+
+## Task 13 — Filling a page and recording its validation
+
+- `dps/layers/scanner/personas_fill.py`: `FillResult` and `fill_page` as planned (Playwright
+  imported inside the function, `TYPE_CHECKING` for annotations), except:
+  - **Checkboxes and radios are ticked without a click**: `el.checked = true` plus an `input`
+    event, then the planned `change` + blur. The plan's `loc.check()` clicks the element, and a
+    click lands on whatever wraps it (a link, a label with a handler). Test: a checkbox inside
+    `<a href>` is ticked and the page does not navigate. A source check
+    (`test_fill_code_never_presses_clicks_or_submits`) pins that the module holds no `.press(`,
+    `.click(`, `.type(`, `keyboard`, `mouse`, `.check(`, `requestSubmit`, `dispatch_event(`.
+  - An action kind with nothing to do (e.g. a select without an option value) is `failed`, not
+    silently `filled`; every evaluate has the action timeout; a non-list `VALIDATION_JS` answer
+    counts as no message.
+  - New `validation_records(results, *, mode, detector) -> {key: [ValidationMessage]}`: sources and
+    codes from a fixed set, text through `redact_text` (≤ 200) — the storable form of the page's
+    verdicts the plan leaves to Task 14 — and `validation_counts(records)` →
+    `{"checked", "accepted", "rejected"}` (the shape the plan's Task 14 runner writes into
+    `PageRecord.validation[mode]`).
+- `tests/scanner/test_fill_browser.py`: the plan's 3 tests, each also asserting the demo site's
+  `/__received` non-GET count is unchanged and the page did not navigate (an aborted navigation
+  leaves Chromium's error page), plus the stored validation records/counts, an auto-submitting
+  select and a checkbox inside a link (no submission, no navigation), and a missing field / frame
+  failing only that field: 5 tests (plan: 3).

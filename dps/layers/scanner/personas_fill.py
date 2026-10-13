@@ -20,15 +20,17 @@ Playwright is imported only inside :func:`fill_page` (the API imports this modul
 
 from __future__ import annotations
 
+import contextlib
 import random
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import phonenumbers
 
+from dps.engine.detect.ensemble import Detector
 from dps.engine.findings import Finding, Locator, Plan, PlanEntry, hash_value
 from dps.engine.planner import build_plan
 from dps.engine.policy import Policy
@@ -43,8 +45,17 @@ from dps.layers.scanner.classify import (
     autocomplete_token,
     compile_html_pattern,
     pattern_accepts,
+    redact_text,
 )
-from dps.layers.scanner.models import FieldClassification, FieldFacts, OptionFacts
+from dps.layers.scanner.models import (
+    FieldClassification,
+    FieldFacts,
+    OptionFacts,
+    ValidationMessage,
+)
+
+if TYPE_CHECKING:
+    from playwright.async_api import Frame, Page
 
 
 class LeakageError(RuntimeError):
@@ -826,3 +837,115 @@ def prepare_fill(
     return PersonaFill(
         actions=actions, shown=shown, methods=methods, formats=formats, needles=needles
     )
+
+
+# --- filling a page in the browser ----------------------------------------------------------------
+@dataclass
+class FillResult:
+    """What happened to one field: filled or failed, and what the page's own validation said
+    (``VALIDATION_JS`` output: page text, redacted by :func:`validation_records` before storage)."""
+
+    status: Literal["filled", "failed"]
+    messages: list[dict[str, Any]] = field(default_factory=list, repr=False)
+
+
+#: Ticks a checkbox or radio without a click (a click can land on a wrapping link or label).
+_CHECK_JS = (
+    "el => { el.checked = true;"
+    " el.dispatchEvent(new Event('input', { bubbles: true })); return el.checked; }"
+)
+#: Lets the page's own client-side validation run: ``change`` then ``blur``.
+_VALIDATE_EVENTS_JS = (
+    "el => { el.dispatchEvent(new Event('change', { bubbles: true })); el.blur(); return true; }"
+)
+
+
+async def fill_page(
+    page: Page,
+    frames: dict[int, Frame],
+    actions: list[FillAction],
+    *,
+    settle_ms: int,
+    timeout_ms: int = 3000,
+) -> dict[str, FillResult]:
+    """Type persona values or tokens into the page. The caller has armed the guard for ``page``
+    (``await guard.arm(page, needles)`` returned ``True``).
+
+    Only ``fill`` / ``select_option`` on the field elements themselves and a property set for
+    checkboxes and radios — never a key press (no implicit submission), never a click (on a
+    button, a link, an image input or anything else). A ``change`` event and a blur are
+    dispatched so the page's own client-side validation runs; its verdicts are read back after
+    ``settle_ms`` as format evidence. A field that cannot be filled is ``failed``; nothing raises
+    for one field.
+    """
+    from playwright.async_api import Error as PlaywrightError
+
+    results: dict[str, FillResult] = {}
+    for a in actions:
+        frame = frames.get(a.frame_index)
+        if frame is None:
+            results[a.key] = FillResult(status="failed")
+            continue
+        loc = frame.locator(f'[data-dps-field="{a.key}"]')
+        try:
+            if a.kind in ("text", "date", "credential", "neutral_text"):
+                await loc.fill(a.value or "", timeout=timeout_ms)
+            elif a.kind == "select" and a.option_value is not None:
+                await loc.select_option(value=a.option_value, timeout=timeout_ms)
+            elif a.kind in ("check", "radio") and a.check:
+                if not await loc.evaluate(_CHECK_JS, timeout=timeout_ms):
+                    raise PlaywrightError("not checked")
+            else:
+                results[a.key] = FillResult(status="failed")
+                continue
+            await loc.evaluate(_VALIDATE_EVENTS_JS, timeout=timeout_ms)
+            results[a.key] = FillResult(status="filled")
+        except PlaywrightError:
+            results[a.key] = FillResult(status="failed")
+    await page.wait_for_timeout(settle_ms)
+    from dps.layers.scanner.dom import VALIDATION_JS
+
+    for a in actions:
+        if results[a.key].status != "filled":
+            continue
+        with contextlib.suppress(PlaywrightError):
+            raw = (
+                await frames[a.frame_index]
+                .locator(f'[data-dps-field="{a.key}"]')
+                .evaluate(VALIDATION_JS, timeout=timeout_ms)
+            )
+            results[a.key].messages = list(raw) if isinstance(raw, list) else []
+    return results
+
+
+_SOURCES = frozenset({"native", "aria", "aria-invalid"})
+_CODE = re.compile(r"^[A-Za-z]{1,32}$")
+
+
+def validation_records(
+    results: dict[str, FillResult],
+    *,
+    mode: Literal["synthesize", "obfuscate"],
+    detector: Detector,
+) -> dict[str, list[ValidationMessage]]:
+    """The page's validation verdicts as storable records: sources and codes from a fixed set,
+    the message text detector-redacted (``<ENTITY>``) and cut to 200 characters."""
+    out: dict[str, list[ValidationMessage]] = {}
+    for key, result in results.items():
+        records: list[ValidationMessage] = []
+        for m in result.messages:
+            source = m.get("source") if isinstance(m, dict) else None
+            if source not in _SOURCES:
+                continue
+            codes = [c for c in m.get("codes") or [] if isinstance(c, str) and _CODE.match(c)]
+            text = redact_text(str(m.get("text") or ""), detector, limit=200) or ""
+            records.append(ValidationMessage(mode=mode, source=source, codes=codes, text=text))
+        out[key] = records
+    return out
+
+
+def validation_counts(records: dict[str, list[ValidationMessage]]) -> dict[str, int]:
+    """``{"checked": n, "accepted": a, "rejected": r}`` for ``PageRecord.validation[mode]`` (the
+    Task 14 runner's shape)."""
+    rejected = sum(1 for msgs in records.values() if msgs)
+    return {"checked": len(records), "accepted": len(records) - rejected, "rejected": rejected}

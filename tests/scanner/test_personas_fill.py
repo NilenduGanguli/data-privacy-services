@@ -359,3 +359,25 @@ def test_prepare_fill_neutral_credentials_radios_and_skips(scan_engine: PrivacyE
     )  # page text never kept
     assert fill.needles == [] and "Dps!" not in repr(fill) and "Dps!" not in repr(acts["0:1"])
     assert all(isinstance(a, FillAction) for a in fill.actions)
+
+
+def test_fill_code_never_presses_clicks_or_submits() -> None:
+    import inspect
+
+    import dps.layers.scanner.personas_fill as pf
+
+    src = inspect.getsource(pf)
+    for banned in (
+        ".press(",
+        ".click(",
+        ".tap(",
+        ".type(",
+        "keyboard",
+        "mouse",
+        "dblclick",
+        ".submit(",
+        "requestSubmit",
+        "dispatch_event(",
+        ".check(",
+    ):
+        assert banned not in src, banned
