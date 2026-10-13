@@ -403,6 +403,26 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   rotation; no KEK; API audit per batch (value-free dump), NDJSON stream refusal, strict sink → 503
   with 0 requests.
 
+## G2 review fix — L2 reveal of `external_tokenize` columns (Task 8 open item)
+
+- L2 stores no reveal hints, so an L2 external token has no `bind` tag and L1 `/reveal` refuses it
+  (SEC-4). The bound path is the key holder's: `tools/reveal_rows.py` gains `--tokenizer-url`,
+  `--tokenizer-token-file`, `--tokenizer-ca-file` (the **key holder's own** credentials; https unless
+  the URL is the local machine, `TokenizerUrlRefused`) and `--chunk-rows` (default 1000). DPS's
+  `PrivacyEngine` in the tool is built with `tokenizer=None`, so no `DPS_TOKENIZER_*` setting is ever
+  read there. The key is checked against the pack's key id **before** any service call (the per-row
+  check of `reveal_row` came after the first row).
+- `dps/engine/batch.py`: `external_reveal_cache(rows, *, reveal_map, shape, tokenizer)` (one detokenize
+  call per entity type and profile per chunk; every answer must tokenize back to its token, else a
+  value-free `MethodError`) and `reveal_row(..., external=None)`; without the cache an external column
+  is refused by path. Rows are revealed per chunk and written after the chunk, so a refusal in a chunk
+  writes none of its rows (before: rows up to the refused line were written).
+- `main` reports `ExternalServiceError` (value-free) as a refusal instead of a traceback.
+- Tests: `tests/test_reveal_rows_external.py` (6) against the counting mock: round trip in 3 chunks
+  (3 detokenize requests), refusal by path without a tokenizer, another key → 0 requests, wrong
+  credentials (HTTP 401) and a tampered token refused without values, the https rule, and a service
+  whose answer does not tokenize back.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -422,8 +442,8 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   without the extra — run `pytest -m ml tests/test_mostly_linked.py` where it is installed. The
   console (Task 21) and PDF (Task 14) must render `tabular.linked`, `tabular.dp` and the
   `{parent, child}` shapes of `tabular.columns` and `fidelity.tables`.
-- Task 8 (open): `reveal_row` (L2 reveal, `tools/reveal_rows.py`) does not detokenize
-  `external_tokenize` columns (it has no tokenizer in its candidate loop); an L2 policy that maps a
-  column to `external_tokenize` on a deployment without an adapter fails at the preflight with an
-  `internal_error` retry (`MethodError`) instead of a coded refusal at submit. The `tokenizer-mock`
+- Task 8 (open): ~~`reveal_row` does not detokenize `external_tokenize` columns~~ (closed in the G2
+  review fix above); an L2 policy that maps a column to `external_tokenize` on a deployment without
+  an adapter (or without `DPS_JOB_KEK` on the worker — always set for jobs) fails at the preflight
+  with an `internal_error` retry (`MethodError`) instead of a coded refusal at submit. The `tokenizer-mock`
   container itself runs once an `m5` image exists (Task 24 smoke).

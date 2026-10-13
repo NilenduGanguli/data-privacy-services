@@ -63,7 +63,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2) |
-| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
+| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
 ## 2. Build
 
@@ -157,7 +157,7 @@ The M2 demo and checks against a running full stack:
 ```bash
 python tools/smoke_test.py                                   # 24 checks (15 Layer 1 + 9 job platform)
 python tools/demo_m2.py                                      # 10 bank tables → bank_uat (one job group), in place, append
-python tools/reveal_rows.py --help                           # local reveal of output rows with the key (no network)
+python tools/reveal_rows.py --help                           # local reveal of output rows with the key (no network but the key holder's own tokenizer for external_tokenize)
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"                      # integration gate
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after_kill.py
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py                # console vs mockups

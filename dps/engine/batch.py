@@ -89,6 +89,7 @@ from dps.observability import FINDINGS, TABULAR_RESAMPLES, TRANSFORMS, VERIFY_FA
 
 if TYPE_CHECKING:  # the constraints module needs the [tabular] extra; M2 jobs run without it
     from dps.engine.synth.constraints import ConstraintSet
+    from dps.engine.transform.external import ExternalTokenizer
 
 #: Methods that need no key material (usable in synthesize mode).
 KEYLESS_METHODS = frozenset(
@@ -719,6 +720,60 @@ def _reproduces(
     return out.output.get(column.name) == token
 
 
+def _external_entries(
+    reveal_map: list[dict[str, Any]], shape: TableShape
+) -> list[tuple[dict[str, Any], ColumnInfo]]:
+    by_path = {c.path: c for c in shape.columns}
+    return [
+        (e, by_path[e["path"]])
+        for e in reveal_map
+        if e.get("reveal")
+        and e.get("method") == "external_tokenize"
+        and not e.get("text_column")
+        and e.get("path") in by_path
+    ]
+
+
+def external_reveal_cache(
+    rows: Sequence[Row],
+    *,
+    reveal_map: list[dict[str, Any]],
+    shape: TableShape,
+    tokenizer: ExternalTokenizer,
+) -> dict[tuple[str, str], str]:
+    """L2 reveal of ``external_tokenize`` columns: ``(entity type, token) → value`` for ``rows``.
+
+    Runs where :func:`reveal_row` runs — on the key holder's side (``tools/reveal_rows.py``),
+    with the **key holder's own** tokenization-service client: DPS's credentials never detokenize
+    an L2 value (SEC-4). One detokenize call per entity type and profile; each answer must
+    tokenize back to its token, so a service (or a profile) that answers with another value is
+    refused instead of revealing it. Check the key against the evidence pack's key id first.
+
+    Raises:
+        MethodError: an answer does not tokenize back (value-free; names the entity type).
+        ExternalServiceError: the service failed or refused (value-free).
+    """
+    groups: dict[tuple[str, str | None], set[str]] = {}
+    for entry, column in _external_entries(reveal_map, shape):
+        profile = (entry.get("params") or {}).get("profile")
+        group = (str(entry["entity_type"]), str(profile) if profile is not None else None)
+        for row in rows:
+            token = to_engine_text(row.get(column.name), column)
+            if token:
+                groups.setdefault(group, set()).add(token)
+    cache: dict[tuple[str, str], str] = {}
+    for (entity, profile), tokens in groups.items():
+        ordered = sorted(tokens)
+        values = tokenizer.detokenize(entity, ordered, profile=profile)
+        if tokenizer.tokenize(entity, values, profile=profile) != ordered:
+            raise MethodError(
+                f"external_tokenize ({entity}): a detokenized value does not tokenize back to its "
+                "token; nothing was revealed"
+            )
+        cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
+    return cache
+
+
 def _reveal_value(
     entry: dict[str, Any],
     value: Any,
@@ -728,10 +783,21 @@ def _reveal_value(
     options: ApplyOptions,
     raw_anchor: str,
     field_scoped: bool,
+    external: Mapping[tuple[str, str], str] | None = None,
 ) -> Any:
     token = to_engine_text(value, column)
     if not token:
         return value
+    if entry.get("method") == "external_tokenize" and not entry.get("text_column"):
+        if external is None:
+            raise MethodError(
+                f"the external_tokenize column {column.path} needs the bank tokenization service "
+                "(pass --tokenizer-url and the key holder's --tokenizer-token-file)"
+            )
+        plain = external.get((str(entry["entity_type"]), token))
+        if plain is None:
+            raise MethodError(f"the value at {column.path} could not be detokenized")
+        return from_engine_text(plain, column)
     if entry.get("text_column"):
         doc = reveal(output={column.name: token}, key=key, hints=[], options=options)
         return from_engine_text(doc[column.name], column)
@@ -770,8 +836,12 @@ def reveal_row(
     policy: Policy,
     anchor: tuple[str, str] | None,
     kid: str | None = None,
+    external: Mapping[tuple[str, str], str] | None = None,
 ) -> Row:
     """Reveal one L2 output row with the caller's key and an evidence pack's ``reveal_map``.
+
+    ``external_tokenize`` columns read ``external`` (:func:`external_reveal_cache` for the rows,
+    built with the key holder's own tokenization-service client); without it they are refused.
 
     The anchor's inputs (the anchor column, else the key columns) are revealed first and the row
     anchor is recomputed from them, as ``date_shift`` needs it (contract §6.2). Entries with
@@ -826,5 +896,6 @@ def reveal_row(
                 options=options,
                 raw_anchor=raw,
                 field_scoped=field_scoped,
+                external=external,
             )
     return out
