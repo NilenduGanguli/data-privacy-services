@@ -41,9 +41,10 @@ for b in $(git for-each-ref --format='%(refname:short)' refs/heads/); do
   if git log --format='%B' "$range" | grep -qiE '^(co-authored-by|signed-off-by):'; then
     echo "$(ts) HOLD $b: a commit in $range carries a trailer"; held=$((held+1)); continue
   fi
-  if ! docker run --rm -v "$REPO":/repo:ro zricethezav/gitleaks:latest git /repo \
-        --log-opts="$range" --redact --no-banner --exit-code 3 >/dev/null 2>&1; then
-    rc=$?
+  docker run --rm -v "$REPO":/repo:ro zricethezav/gitleaks:latest git /repo \
+    --log-opts="$range" --redact --no-banner --exit-code 3 >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     echo "$(ts) HOLD $b: gitleaks exit $rc on $range (3 = possible secret; run it by hand with --verbose)"; held=$((held+1)); continue
   fi
   if git push -q origin "refs/heads/$b:refs/heads/$b"; then
