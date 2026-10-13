@@ -669,4 +669,5 @@ def _include_m2_routers(app: FastAPI) -> bool:
     install_error_handlers(app)
     for module in (connections, jobs, snapshots, groups, evidence, artefacts, admin, reports):
         app.include_router(module.router)
+    app.include_router(reports.evidence_pdf_router)
     return True

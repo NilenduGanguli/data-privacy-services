@@ -720,6 +720,33 @@ real survivors).
   owner connection: the fixture database only has partitions from the current month on.
 - `HANDOFF.md` §5's worker bullet describes the M5 additions and the on-demand route.
 
+## Task 14 — Evidence PDF and API roll-up PDF
+
+- `dps/layers/reports/pdf.py`: every section of the plan's list is rendered, but **defensively**: the
+  plan's `f"{value:.3f}"` formatting raised on a missing or non-numeric field (an older pack, a
+  linked pack, `None`), so numbers go through `_num()` (number → formatted, anything else → text,
+  missing → "—"). New test `test_malformed_numbers_never_break_the_render`.
+- Linked and DP packs (deferred from Task 7B): a `fidelity.tables` map (`parent`/`child`) renders one
+  column table + correlation matrix per table, `tabular.linked` renders as a line, and
+  `privacy.dp`/`tabular.dp` adds a "Differential privacy" row. Test
+  `test_linked_and_dp_packs_render_both_tables`; scan packs: `test_scan_pack_renders_the_ui_scan_section`.
+- The footer is drawn on the canvas (no markup parser), so it uses the Latin-1 fold **without** XML
+  escaping (`pdf_text` would have printed `&amp;`); `pdf_text` = escape(fold) for every `Paragraph`.
+  A few more typographic characters are folded (curly quotes, thin spaces).
+- The regulatory note's wording is fixed text per label family (pseudonymised: still personal data;
+  synthetic: measurements, not a claim of anonymity) after the pack's own `label`.
+- Routes: the evidence PDF route lives in `dps/layers/api/routers/reports.py` as
+  `evidence_pdf_router` (prefix `/api/v1`, the evidence scope rule reused from M2's evidence router's
+  public helpers), included by `create_app` next to M2's routers. The first render links the artefact
+  with `UPDATE … WHERE pdf_artefact_id IS NULL`; a concurrent first request that loses removes its own
+  object and row and serves the winner's bytes, so exactly one `evidence_pdf` artefact exists. The
+  audit event `evidence.pdf` carries `{"bytes"}` and the job id. Both PDF responses are
+  `Cache-Control: no-store`.
+- The route test seeds a complete pack (`reveal_map`, `errors`): M2's `get_evidence` validates packs
+  with `EvidencePack`, so the plan's abbreviated `BASE` would have been a 500 there. Added a route
+  test for the roll-up PDF.
+- `HANDOFF.md`: the `DPS_REPORT_PDF_ENABLED` row is in §4's M5 settings table (the plan said §3).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -738,7 +765,7 @@ real survivors).
   .data()` returning both tables, the context foreign key) and `achieved_epsilon` are unverified
   without the extra — run `pytest -m ml tests/test_mostly_linked.py` where it is installed. The
   console (Task 21) and PDF (Task 14) must render `tabular.linked`, `tabular.dp` and the
-  `{parent, child}` shapes of `tabular.columns` and `fidelity.tables`.
+  `{parent, child}` shapes of `tabular.columns` and `fidelity.tables` (PDF: done in Task 14).
 - Task 8 (open): ~~`reveal_row` does not detokenize `external_tokenize` columns~~ (closed in the G2
   review fix above); an L2 policy that maps a column to `external_tokenize` on a deployment without
   an adapter (or without `DPS_JOB_KEK` on the worker — always set for jobs) fails at the preflight

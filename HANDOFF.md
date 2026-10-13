@@ -362,7 +362,7 @@ the posture rules that tighten them in staging/prod arrive with M5's posture tas
 | `DPS_TOKENIZER_URL` / `DPS_TOKENIZER_TOKEN` (`_FILE`) / `DPS_TOKENIZER_CA_FILE` | — | the bank tokenization service (http(s) with a host; the error never echoes the URL), its bearer token (prefer `DPS_TOKENIZER_TOKEN_FILE`) and CA bundle |
 | `DPS_TOKENIZER_TIMEOUT_SECONDS` / `_BATCH` / `_RETRIES` | 10 / 500 / 2 | |
 | `DPS_KEY_CACHE_SECONDS` / `DPS_KEY_MAX_TTL_DAYS` / `DPS_KEY_ROTATION_MAX_AGE_DAYS` / `DPS_KEY_ROTATION_MAX_GRACE_HOURS` | 30 / 365 / 90 / 168 | DB-backed API keys |
-| `DPS_REPORT_PDF_ENABLED` / `DPS_ROLLUP_RETENTION_DAYS` | `true` / 400 | |
+| `DPS_REPORT_PDF_ENABLED` / `DPS_ROLLUP_RETENTION_DAYS` | `true` / 400 | PDFs: `GET /api/v1/evidence/{id}/pdf` (rendered once with reportlab's built-in Helvetica, stored as an `evidence_pdf` artefact, streamed afterwards) and `format=pdf` on `/reports/api-rollups/{day}`; `false` → 404 `pdf_disabled`. Report roll-up and daily usage rows older than the retention days are deleted by the retention job |
 | `DPS_EGRESS_TLS_REQUIRED` / `DPS_CORS_ORIGINS` | `false` / `*` | posture: `true` and explicit origins in staging/prod; origins are a comma list, `""` = same-origin only |
 | `DPS_VERIFY_WARN_ALLOWED` / `DPS_LLM_EGRESS_CHECK` | `true` / `strict` | posture: `false` / `strict` in staging/prod; `strict` or `warn` only |
 
