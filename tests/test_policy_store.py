@@ -347,3 +347,24 @@ async def test_job_counts_include_runs_on_the_snapshot_policy(migrated_db: Setti
         )
     presets, _ = await list_policies("t1")
     assert {p.name: p.jobs for p in presets}[NAME] == 1
+
+
+def test_run_validate_resolves_policy_references_as_the_run_does(seeded) -> None:  # noqa: ANN001,F811
+    """WP-I (M5 merge): main's ``POST /jobs/run/validate`` (wizard step 5) answers what
+    ``POST /jobs/run`` would, so it resolves ``@name[:vN]`` the same way: a published tenant
+    policy validates, an unknown one is the run's own 404."""
+    c = seeded["c"]
+    _adopt_and_tune(c)
+    table = {
+        "write_mode": "table",
+        "connection_id": seeded["uat"],
+        "object": {"owner": "bank_uat", "name": "customers"},
+    }
+    url = "/api/v1/jobs/run/validate"
+    body = _run(seeded["src"], seeded["snap_src"], table, policy=f"@{NAME}")
+    ok = c.post(url, json=body, headers=JOBS_T1)
+    assert (ok.status_code, ok.json()) == (200, {"ok": True}), ok.text
+    unknown = _run(seeded["src"], seeded["snap_src"], table, policy="@nope")
+    for route in (url, "/api/v1/jobs/run"):
+        r = c.post(route, json=unknown, headers=JOBS_T1)
+        assert (r.status_code, r.json()["code"]) == (404, "policy_not_found"), route

@@ -76,7 +76,7 @@ def test_connections_are_refused_at_create_update_and_use(db_settings, tmp_path)
 
     from dps.app import create_app
     from dps.audit import MemoryAuditSink
-    from tests.api.test_api_connections import JOBS, PG
+    from tests.api.test_api_connections import FULL, JOBS, PG
     from tests.fixtures.db import _truncate, api_settings
 
     body = {
@@ -85,6 +85,7 @@ def test_connections_are_refused_at_create_update_and_use(db_settings, tmp_path)
         "params": PG,
         "secret_ref": "dps/src/test-pg",
     }
+    tls_params = {**PG, "options": {"sslmode": "verify-full"}}
     try:
         with TestClient(
             create_app(api_settings(db_settings, tmp_path), audit_sink=MemoryAuditSink())
@@ -98,6 +99,21 @@ def test_connections_are_refused_at_create_update_and_use(db_settings, tmp_path)
             assert (refused.status_code, refused.json()["code"]) == (422, "tls_required")
             patched = c.patch(f"/api/v1/connections/{conn_id}", json={"params": PG}, headers=JOBS)
             assert (patched.status_code, patched.json()["code"]) == (422, "tls_required")
+            # WP-I (main SEC-3): on a production connection the admin rule answers first
+            prod = c.post(
+                "/api/v1/connections",
+                json={**body, "name": "prod-src", "params": tls_params, "tags": ["production"]},
+                headers=FULL,
+            )
+            assert prod.status_code == 201, prod.text
+            by_jobs = c.patch(
+                f"/api/v1/connections/{prod.json()['id']}", json={"params": PG}, headers=JOBS
+            )
+            assert (by_jobs.status_code, by_jobs.json()["code"]) == (403, "admin_scope_required")
+            by_admin = c.patch(
+                f"/api/v1/connections/{prod.json()['id']}", json={"params": PG}, headers=FULL
+            )
+            assert (by_admin.status_code, by_admin.json()["code"]) == (422, "tls_required")
             used = c.get(f"/api/v1/connections/{conn_id}/objects", headers=JOBS)
             assert (used.status_code, used.json()["code"]) == (422, "tls_required")
             tls = {**PG, "options": {"sslmode": "verify-full"}}
