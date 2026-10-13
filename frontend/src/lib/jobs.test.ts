@@ -329,3 +329,10 @@ describe('bounded columns at discovery (M2 verify r2, issue 2)', () => {
     expect(typeNoteShort('length_overflow')).toBe('output too long for the column');
   });
 });
+
+describe('length_overflow in words', () => {
+  it('explains the refusal on the jobs page and the evidence errors table', async () => {
+    const { errorText } = await import('./jobs');
+    expect(errorText('length_overflow')).toMatch(/longer than the column/);
+  });
+});

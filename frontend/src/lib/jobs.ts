@@ -298,6 +298,7 @@ export function errorText(code: string | null | undefined): string {
     statement_timeout: 'A statement ran longer than the statement timeout.',
     object_not_found: 'The table does not exist or is not visible to the login.',
     incompatible_method: 'A method does not fit the column type, so the batch was refused.',
+    length_overflow: 'A method\'s output is longer than the column it is written into; choose a method that keeps the length, or copy to a new table.',
     max_attempts: 'The job ran out of attempts after repeated failures.',
     lease_lost: 'The worker lost its lease; the reaper re-queued the work from its last checkpoint.',
     key_material_required: 'The job key was purged; load the key file to retry.',
