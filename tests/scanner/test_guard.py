@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import socketserver
+import ssl
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -237,6 +240,10 @@ _WS_WORKER = (
     " else if (e.data === 'post') { fetch('/worker-post', {method: 'POST', body: 'x'}).catch(() => 0); }"
     " else { postMessage('alive'); } };"
 )
+#: the HTTPS proof page: a link with a ping, and a CSP whose violations are reported by POST
+_TLS_PAGE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<a id="ping" href="/pinged-nav" ping="/ping-target">next</a></body></html>"""
+_TLS_CSP = "img-src 'self'; report-uri /csp-report"
 _SERVICE = (
     "self.addEventListener('install', () => self.skipWaiting()); "
     "self.addEventListener('activate', () => fetch('/from-sw', {method: 'POST', body: 'x'}));"
@@ -281,8 +288,9 @@ def _handler(counts: _Counts) -> type[BaseHTTPRequestHandler]:
                 self.send_header("content-length", "0")
                 self.end_headers()
                 return
-            pages = {"/unload": _UNLOAD, "/self-close": _SELF_CLOSE}
+            pages = {"/unload": _UNLOAD, "/self-close": _SELF_CLOSE, "/tls-page": _TLS_PAGE}
             route = self.path.split("?", 1)[0]
+            headers = {"/tls-page": [("content-security-policy", _TLS_CSP)]}.get(route, [])
             if self.path.startswith("/page"):
                 body, ctype = _PAGE.encode(), "text/html; charset=utf-8"
             elif route in pages:
@@ -300,6 +308,8 @@ def _handler(counts: _Counts) -> type[BaseHTTPRequestHandler]:
             else:
                 body, ctype = b"ok", "text/plain"
             self.send_response(200)
+            for name, value in headers:
+                self.send_header(name, value)
             self.send_header("content-type", ctype)
             self.send_header("content-length", str(len(body)))
             self.end_headers()
@@ -972,6 +982,246 @@ async def test_a_tls_tunnel_to_an_allowed_host_carries_its_bytes(
     assert seen.connections == 1 and seen.bytes == 8
 
 
+# --- review G2 round 1: HTTPS, where the scope proxy sees a tunnel and nothing inside it -----
+@pytest.fixture(scope="module")
+def tls_cert(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
+    """A throwaway self-signed certificate for 127.0.0.1 (test-only key, in a temp dir)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    folder = tmp_path_factory.mktemp("tls")
+    crt, pem = folder / "server.crt", folder / "server.key"
+    crt.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    pem.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return str(crt), str(pem)
+
+
+@pytest.fixture
+def https_counting_server(tls_cert: tuple[str, str]) -> Iterator[tuple[str, _Counts]]:
+    """The counting server over TLS: the bank's targets are ``https://``, and there the scope
+    proxy only sees a CONNECT, so the route and ``ISOLATE_JS`` are all that stand in the way."""
+    counts = _Counts()
+    handler = type("TlsHandler", (_handler(counts),), {"timeout": 5})
+    server = _QuietServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(*tls_cert)
+    # the handshake runs in the handler's thread, so a silent client cannot stall the server
+    server.socket = tls.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{server.server_address[1]}", counts
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """Chromium aborts some handshakes with the self-signed certificate before it ignores the
+    error and retries; those aborted connections are not worth a traceback."""
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        return
+
+
+class _TrustingBrowser:
+    """``new_scan_context``'s context exactly, except that it trusts the test certificate."""
+
+    def __init__(self, browser: Any) -> None:
+        self._browser = browser
+        self.version = browser.version
+
+    async def new_context(self, **options: Any) -> Any:
+        return await self._browser.new_context(**{**options, "ignore_https_errors": True})
+
+
+#: what the guard cannot route over HTTPS: a deferred POST and a stream socket
+_UNROUTED_APIS = {
+    "fetch_later": "(() => { try { fetchLater('/fl-timer', {method: 'POST', body: 'draft', "
+    "activateAfter: 200}); fetchLater('/fl-unload', {method: 'POST', body: 'draft'}); "
+    "return 'sent'; } catch (e) { return e.name; } })()",
+    "websocket_stream": "(() => { try { const s = new WebSocketStream('wss://' + location.host "
+    "+ '/wss-stream'); s.opened.then((o) => o.writable.getWriter().write('draft'), () => 0); "
+    "return 'opened'; } catch (e) { return e.name; } })()",
+}
+_UNROUTED_TYPES = (
+    "[typeof fetchLater, typeof WebSocketStream, typeof Window.prototype.fetchLater, "
+    "'fetchLater' in window, 'WebSocketStream' in window]"
+)
+_IN_FRAMES = (
+    "(() => { const out = []; for (const make of [(f) => 0, (f) => { f.srcdoc = '<p>x</p>'; }]) { "
+    "const f = document.createElement('iframe'); make(f); document.body.append(f); "
+    "const w = f.contentWindow; out.push(typeof w.fetchLater, typeof w.WebSocketStream); "
+    "try { w.fetchLater('/fl-frame', {method: 'POST', body: 'draft', activateAfter: 100}); "
+    "out.push('sent'); } catch (e) { out.push('refused'); } } return out; })()"
+)
+
+
+@pytest.mark.browser
+async def test_https_positive_control_an_unguarded_page_delivers_what_the_guard_must_stop(
+    chromium: Any, https_counting_server: tuple[str, _Counts]
+) -> None:
+    """Without the guard, this Chromium sends ``fetchLater`` POSTs and opens ``WebSocketStream``
+    sockets over TLS, and the counting server sees them: the proofs below are not vacuous."""
+    url, counts = https_counting_server
+    ctx = await chromium.new_context(ignore_https_errors=True)
+    try:
+        page = await ctx.new_page()
+        await page.goto(f"{url}/tls-page")
+        assert await page.evaluate("[typeof fetchLater, typeof WebSocketStream]") == [
+            "function",
+            "function",
+        ]
+        sent = {name: await page.evaluate(js) for name, js in _UNROUTED_APIS.items()}
+        await _attempt(page, "new Worker('/wsw.js').postMessage('post')")
+        await _attempt(page, f"new Image().src = '{url.replace('127.0.0.1', 'localhost')}/x.png'")
+        await page.wait_for_timeout(1500)
+        await page.close()  # the unload fetchLater is sent now
+        await asyncio.sleep(1.0)
+    finally:
+        await ctx.close()
+    assert sent == {"fetch_later": "sent", "websocket_stream": "opened"}
+    received = " ".join(counts.non_get)
+    for path in ("POST /fl-timer", "POST /worker-post", "POST /csp-report"):
+        assert path in received, path
+    assert counts.upgrades >= 1
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("filled", [False, True], ids=["unfilled", "filled"])
+async def test_https_fetch_later_and_websocket_stream_are_gone_in_every_realm(
+    chromium: Any,
+    https_counting_server: tuple[str, _Counts],
+    scan_settings: Settings,
+    filled: bool,
+) -> None:
+    """G2-r1 B1/B2: neither API is ever routed, so ``ISOLATE_JS`` deletes both in every document,
+    filled or not: 0 POSTs and 0 upgrades reach the server. A plain ``wss://`` WebSocket is closed
+    by the route (unfilled) or refused and counted ``api_removed`` (filled)."""
+    url, counts = https_counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        _TrustingBrowser(chromium),
+        scan_settings,
+        storage_state=None,
+        locale="en_IN",
+        guard=guard,
+        harden_js=False,
+    )
+    try:
+        page = await ctx.new_page()
+        guard.bind(page, 5)
+        await page.goto(f"{url}/tls-page")
+        if filled:
+            assert await guard.arm(page, ["9173 2206 4418"])
+        types = await page.evaluate(_UNROUTED_TYPES)
+        used = {name: await page.evaluate(js) for name, js in _UNROUTED_APIS.items()}
+        framed = await page.evaluate(_IN_FRAMES)
+        socket = await page.evaluate(
+            "(() => { try { new WebSocket('wss://' + location.host + '/wss-plain'); "
+            "return 'opened'; } catch (e) { return 'refused'; } })()"
+        )
+        await page.wait_for_timeout(1500)
+        counted = guard.drain_counts()
+    finally:
+        await close_scan_context(ctx, guard)
+    await asyncio.sleep(1.0)  # an unload fetchLater would be sent by now
+    assert "/tls-page" in counts.gets  # positive control: the page itself came over TLS
+    assert counts.non_get == [] and counts.upgrades == 0
+    assert not any(p.startswith(("/fl-", "/wss-")) for p in counts.gets)
+    assert types == ["undefined", "undefined", "undefined", False, False]
+    assert used == {"fetch_later": "ReferenceError", "websocket_stream": "ReferenceError"}
+    assert framed == ["undefined", "undefined", "refused"] * 2
+    removed = {
+        (c.page_no, c.method, c.resource_type)
+        for c in counted
+        if (c.decision, c.reason) == ("blocked", "api_removed")
+    }
+    if filled:
+        assert socket == "refused" and (5, "GET", "websocket") in removed
+    else:
+        assert socket == "opened" and guard.websockets_closed >= 1
+
+
+@pytest.mark.browser
+async def test_https_nothing_but_get_leaves_where_the_proxy_is_blind(
+    chromium: Any, https_counting_server: tuple[str, _Counts], scan_settings: Settings
+) -> None:
+    """The plain-HTTP proofs, over TLS: a worker's POST, an XHR PUT, an ``<a ping>``, a CSP
+    report and the unload beacons and keepalive POSTs of unfilled and filled pages closed through
+    ``close_scan_context``. The route (not the proxy) stops every one of them."""
+    url, counts = https_counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        _TrustingBrowser(chromium),
+        scan_settings,
+        storage_state=None,
+        locale="en_IN",
+        guard=guard,
+        harden_js=False,
+    )
+    try:
+        drafts = []
+        for n, fill in ((1, False), (2, True)):
+            draft = await ctx.new_page()
+            guard.bind(draft, n)
+            await draft.goto(f"{url}/unload?n={n}")
+            if fill:
+                assert await guard.arm(draft, ["9173 2206 4418"])
+            drafts.append(draft)
+        page = await ctx.new_page()
+        guard.bind(page, 3)
+        await page.goto(f"{url}/tls-page")
+        for js in (
+            "fetch('/page-post', {method: 'POST', body: 'x'}).catch(() => 0)",
+            "(() => { const x = new XMLHttpRequest(); x.open('PUT', '/xhr-put'); x.send('x'); })()",
+            "new Worker('/wsw.js').postMessage('post')",
+            f"new Image().src = '{url.replace('127.0.0.1', 'localhost')}/x.png'",
+        ):
+            await _attempt(page, js)
+        await page.wait_for_timeout(800)
+        await _attempt(page, "document.getElementById('ping').click()")
+        await page.wait_for_timeout(800)
+    finally:
+        await close_scan_context(ctx, guard)
+    await asyncio.sleep(1.0)
+    counted = guard.drain_counts()
+    assert counts.non_get == [] and counts.upgrades == 0
+    # positive controls: the pages and the ping link's own navigation came over TLS
+    assert {"/tls-page", "/unload?n=1", "/unload?n=2", "/pinged-nav"} <= set(counts.gets)
+    assert not any(p.startswith(("/ping-target", "/csp-report", "/beacon-")) for p in counts.gets)
+    blocked = {(c.method, c.reason) for c in counted if c.decision == "blocked"}
+    assert {("POST", "method"), ("PUT", "method")} <= blocked  # CSP keeps the image itself home
+    assert {r for _, r in blocked} & {"closing", "api_removed"}
+    assert all(c.method in ALLOWED_METHODS for c in counted if c.decision == "allowed")
+
+
 def test_isolate_js_is_always_installed_and_blocks_what_no_route_sees() -> None:
     for needle in (
         "ServiceWorkerContainer",
@@ -986,6 +1236,8 @@ def test_isolate_js_is_always_installed_and_blocks_what_no_route_sees() -> None:
         "terminate",
         "beforeunload",
         "__dpsGuardLock",
+        "'fetchLater'",
+        "'WebSocketStream'",
     ):
         assert needle in ISOLATE_JS, needle
     src = (ROOT / "dps/layers/scanner/guard.py").read_text(encoding="utf-8")

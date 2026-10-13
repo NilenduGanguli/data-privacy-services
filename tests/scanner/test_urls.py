@@ -187,6 +187,20 @@ _ID_URLS = [
     ("http://h/x?501-002-345-678=1&page=2", "http://h/x?<k>=<v>&page=<v>"),
     ("http://h/x?12-05-90", "http://h/x?<k>="),
     ("http://h/x;501-002-345-678=1/y", "http://h/x;<k>=<v>/y"),
+    # G2-r1 B3: a date of birth with a month name, in any order, with or without separators
+    ("http://h/dob/12May90", "http://h/dob/{id}"),
+    ("http://h/dob/12-may-90", "http://h/dob/{id}"),
+    ("http://h/dob/May-12-90", "http://h/dob/{id}"),
+    ("http://h/dob/12%20May%201990", "http://h/dob/{id}"),
+    ("http://h/dob/1990-May-12", "http://h/dob/{id}"),
+    ("http://h/dob/12th-September-1990", "http://h/dob/{id}"),
+    ("http://h/dob/May%2012,%201990", "http://h/dob/{id}"),
+    ("http://h/dob/12mayo90", "http://h/dob/{id}"),  # Spanish
+    ("http://h/dob/2nd-Jan-99", "http://h/dob/{id}"),
+    ("http://h/dob/2ndjan99", "http://h/dob/{id}"),
+    ("http://h/dob/12-%E0%A4%AE%E0%A4%88-90", "http://h/dob/{id}"),  # Hindi: मई
+    ("http://h/x?12May90=1&page=2", "http://h/x?<k>=<v>&page=<v>"),
+    ("http://h/x;dob-12May90=1/y", "http://h/x;<k>=<v>/y"),
 ]
 
 
@@ -217,6 +231,13 @@ def test_redact_url_hides_account_numbers_customer_ids_and_session_tokens(
         "1-5-90",
         "1a2b",
         "34-5",
+        "May",
+        "may",
+        "Sept",
+        "Jan",
+        "jan",
+        "%E0%A4%AE",
+        "मई",
     ):
         assert secret not in out
 
@@ -229,6 +250,9 @@ def test_redact_url_keeps_plain_route_segments() -> None:
     plain = "http://h/docs/v1.2.3/api/v2/faq/1/page/2/x86_64"
     assert redact_url(plain, _none) == plain
     assert template(plain, _none) == "h/docs/v1.2.3/api/v2/faq/{id}/page/{id}/x86_64"
+    # a month name alone, or with a year but no day, is a route, not a date of birth
+    months = "http://h/news/may-24/summary/mayor/march/dec2/sept-update/12-may/julio"
+    assert redact_url(months, _none) == months
 
 
 _TEMPLATE_LEAKS = [
@@ -250,6 +274,13 @@ _TEMPLATE_LEAKS = [
     ("http://h/x?501-002-345-678=1&page=2", ("501",)),
     ("http://h/x;501-002-345-678=1/y", ("501",)),
     ("http://h/app#/acct/501-002-345-678?12-05-90=1", ("501", "12-05")),
+    ("http://h/dob/12May90", ("May",)),
+    ("http://h/dob/12-may-90", ("may",)),
+    ("http://h/dob/May-12-90", ("May",)),
+    ("http://h/dob/12%20May%201990", ("May",)),
+    ("http://h/dob/12-diciembre-1990", ("diciembre",)),
+    ("http://h/x?page=1&12May90=1", ("May",)),
+    ("http://h/app#/dob/May-12-90?12-may-90=1", ("May", "may")),
 ]
 
 
@@ -306,6 +337,17 @@ def test_template_keeps_routes_and_shares_ids() -> None:
         "h/acct/50-1/00-2/34-5",
         "h/app#/acct/501-002-345-678",
         "h/app#!/x?501-002-345-678",
+        "h/dob/12May90",
+        "h/dob/12-may-90",
+        "h/dob/May-12-90",
+        "h/dob/12%20May%201990",
+        "h/dob/1990-May-12",
+        "h/dob/12-dic-1990",
+        "h/dob/2nd-Jan-99",
+        "h/dob/Dec%201,%2099",
+        "h/dob/12-%E0%A4%AE%E0%A4%88-90",
+        "h/x?page&12May90",
+        "h/app#/dob/May-12-90",
     ],
 )
 def test_a_page_record_refuses_a_raw_template(tpl: str) -> None:
@@ -322,6 +364,7 @@ def test_a_page_record_refuses_a_raw_template(tpl: str) -> None:
         )
     assert "ananya" not in str(err.value) and "50100234567812" not in str(err.value)
     assert "501" not in str(err.value) and "12-05" not in str(err.value)
+    assert "May" not in str(err.value) and "may-90" not in str(err.value)
 
 
 def test_value_free_templates_pass_the_record_guard() -> None:

@@ -44,9 +44,11 @@ request of every page, popup and iframe of that context:
 * **WebSockets** of a page are closed before they connect (``connect_to_server`` is never called).
 * **Isolation script** (``ISOLATE_JS``, always installed in every frame before any page script):
   service-worker registration is refused in every realm, ``window.close()`` is a no-op,
-  ``SharedWorker`` and ``RTCPeerConnection`` are gone, ``beforeunload`` listeners are ignored,
-  and the lockable wrappers above are in place (installed at birth, so a page cannot keep a
-  reference to an original).
+  ``SharedWorker``, ``RTCPeerConnection``, ``fetchLater``, ``WebSocketStream`` and
+  ``WebTransport`` are gone on every page, filled or not (no route sees what they send: a
+  ``fetchLater`` POST over HTTPS, a stream socket), ``beforeunload`` listeners are ignored, and
+  the lockable wrappers above are in place (installed at birth, so a page cannot keep a reference
+  to an original).
 * **JavaScript hardening** (``HARDEN_JS``, on by default) turns ``form.submit()`` and
   ``form.requestSubmit()`` into counted no-ops and cancels every submit event in the capture
   phase, so a page whose JS submits on change does not even attempt the request. It is defence in
@@ -64,8 +66,9 @@ Residual risks, outside what a route or the proxy can see. They are not submissi
 cannot carry a form value without page JS built to do it:
 
 * The method and URL of an HTTPS request that is not routed: a redirect hop (only to an allowed
-  host, and a hop of a GET is a GET); a ``wss://`` socket of a dedicated worker of an *unfilled*
-  page (filled pages terminate their workers and refuse new ones); and a speculation-rules
+  host, and a hop of a GET is a GET); a ``wss://`` socket (``WebSocket`` or ``WebSocketStream``,
+  which ``ISOLATE_JS`` cannot reach in a worker) of a dedicated worker of an *unfilled* page
+  (filled pages terminate their workers and refuse new ones); and a speculation-rules
   prefetch, which Chromium fetches itself, unrouted, even for a filled page (a GET to an allowed
   host; over plain HTTP the proxy refuses it by its ``Sec-Purpose`` header, and no launch flag of
   this Chromium turns it off).
@@ -141,7 +144,12 @@ HARDEN_JS = r"""
 #: * ``window.close()`` is a no-op: a window that closes itself runs its unload handlers while its
 #:   target is torn down, where no route sees their requests (``ScanGuard.close`` navigates away
 #:   first instead). ``beforeunload`` listeners are ignored, so no prompt holds that navigation.
-#: * ``SharedWorker`` (also off by ``LAUNCH_ARGS``) and ``RTCPeerConnection`` are deleted.
+#: * Deleted from the window and its prototype chain, filled page or not, because nothing they send
+#:   is routed: ``SharedWorker`` (also off by ``LAUNCH_ARGS``), ``RTCPeerConnection``,
+#:   ``fetchLater`` (a deferred request the browser sends itself, POST and body included, on a timer
+#:   or when the document goes; HTTPS only), ``WebSocketStream`` (a socket ``route_web_socket``
+#:   does not replace) and ``WebTransport`` (QUIC is off by ``LAUNCH_ARGS`` as well). Deleted, a
+#:   use is a ``ReferenceError``: there is nothing to refuse, so nothing is counted.
 #: * ``sendBeacon``, ``fetch`` (``keepalive``), ``WebSocket`` and ``Worker`` are wrapped *now*, so a
 #:   page never holds an original; the wrappers refuse once the document is locked
 #:   (``__dpsGuardLock``, called by ``ScanGuard.arm`` and by ``LOCK_JS``), and locking terminates
@@ -170,8 +178,12 @@ ISOLATE_JS = r"""
     fixed(C.prototype, 'register', function () { return Promise.reject(new DOMException('service workers are blocked in a DPS scan', 'SecurityError')); });
   }
   fixed(W, 'close', function () {});
-  for (const name of ['SharedWorker', 'RTCPeerConnection', 'webkitRTCPeerConnection']) {
-    try { delete W[name]; } catch (e) {}
+  // never routed, filled page or not: gone from the window and its prototype chain
+  for (const name of ['SharedWorker', 'RTCPeerConnection', 'webkitRTCPeerConnection',
+                      'fetchLater', 'WebSocketStream', 'WebTransport']) {
+    for (let o = W; o; o = Object.getPrototypeOf(o)) {
+      try { if (Object.prototype.hasOwnProperty.call(o, name)) { delete o[name]; } } catch (e) {}
+    }
   }
 
   const ET = W.EventTarget && W.EventTarget.prototype;

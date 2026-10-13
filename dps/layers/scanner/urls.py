@@ -8,7 +8,8 @@ crawl template) or :func:`redact_origin`. A segment is value-like when the class
 it or, whatever the classifier says, when it holds a run of 4+ digits, 6+ digits in all (digit
 groups joined by ``-``, ``.``, ``/``, ``+`` or a space are one number: ``501-002-345-678``,
 ``+91-987-654-321``), a date shape (``1-5-90``), an alphanumeric run of 8+ characters with a digit,
-an ``@``, an ``=`` or whitespace, or is an id form (date, UUID, long hex, token). Consecutive
+an ``@``, an ``=`` or whitespace, a date with a month name (``12May90``, ``May-12-90``; English,
+Spanish and Hindi names), or is an id form (date, UUID, long hex, token). Consecutive
 all-numeric path segments holding 6+ digits between them (``/501/002/345/678``) are one value too.
 Errors carry a code only, never the URL.
 
@@ -52,6 +53,46 @@ _VALUE_RUN = re.compile(r"\d{4,}|(?<![A-Za-z0-9])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8
 _MIN_DIGITS = 6
 #: A date with short groups (``1-5-90``, ``01/05/1990`` once decoded) is a value whatever its count.
 _DATE_SHAPE = re.compile(r"(?<!\d)\d{1,2}[-./ ]\d{1,2}[-./ ]\d{2,4}(?!\d)")
+#: A date with a month name (``12May90``, ``12-may-90``, ``May-12-90``, ``12th Sept 1990``): a day
+#: and a year around an English, Spanish or Hindi month name, in any order, with or without
+#: separators. A month name with a day or a year only (``may-24``, ``12-may``) is a route.
+_MONTHS = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r"|ene(?:ro)?|febrero|marzo|abr(?:il)?|mayo|junio|julio|ago(?:sto)?|se(?:p|pt)?tiembre"
+    r"|octubre|noviembre|dic(?:iembre)?"
+    "|\u091c\u0928\u0935\u0930\u0940"  # जनवरी
+    "|(?:\u095e|\u092b\u093c?)\u0930\u0935\u0930\u0940"  # फ़रवरी (precomposed or not)
+    "|\u092e\u093e\u0930\u094d\u091a"  # मार्च
+    "|\u0905\u092a\u094d\u0930\u0948\u0932"  # अप्रैल
+    "|\u092e\u0908"  # मई
+    "|\u091c\u0942\u0928"  # जून
+    "|\u091c\u0941\u0932\u093e\u0908"  # जुलाई
+    "|\u0905\u0917\u0938\u094d\u0924"  # अगस्त
+    "|\u0938\u093f\u0924(?:\u0902\u092c|\u092e\u094d\u092c)\u0930"  # सितंबर / सितम्बर
+    "|\u0905\u0915\u094d(?:\u091f|\u0924)\u0942\u092c\u0930"  # अक्टूबर / अक्तूबर
+    "|\u0928\u0935(?:\u0902\u092c|\u092e\u094d\u092c)\u0930"  # नवंबर / नवम्बर
+    "|\u0926\u093f\u0938(?:\u0902\u092c|\u092e\u094d\u092c)\u0930"  # दिसंबर / दिसम्बर
+)
+_LETTER = "A-Za-z\u0900-\u097f"
+_MONTH = rf"(?:(?<![{_LETTER}])|(?<=\d(?:st|nd|rd|th)))(?:{_MONTHS})(?![{_LETTER}])"
+_DAY = r"(?<!\d)\d{1,2}(?:st|nd|rd|th)?(?![\d])"
+_YEAR = r"(?<!\d)(?:\d{4}|\d{2})(?!\d)"
+_SEP = r"[\s\-./_,']{0,3}"
+_MONTH_DATE = re.compile(
+    "|".join(
+        _SEP.join(order)
+        for order in (
+            (_DAY, _MONTH, _YEAR),
+            (_MONTH, _DAY, _YEAR),
+            (_YEAR, _MONTH, _DAY),
+            (_YEAR, _DAY, _MONTH),
+            (_DAY, _YEAR, _MONTH),
+            (_MONTH, _YEAR, _DAY),
+        )
+    ),
+    re.IGNORECASE,
+)
 #: A path segment made of digits and number separators only (one part of a split number).
 _NUMERIC_SEGMENT = re.compile(r"^[-.+ \d]*\d[-.+ \d]*$")
 _ENTITY_TOKEN = re.compile(r"^<[A-Z][A-Z0-9_]{0,40}>$")
@@ -149,6 +190,7 @@ def _value_like(text: str) -> bool:
         or _ID_SEGMENT.match(text)
         or _digits(text) >= _MIN_DIGITS
         or _DATE_SHAPE.search(text)
+        or _MONTH_DATE.search(text)
     )
 
 
