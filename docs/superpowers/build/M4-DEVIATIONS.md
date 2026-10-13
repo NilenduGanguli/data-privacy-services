@@ -1234,8 +1234,8 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   - **Stronger "no submission" check:** besides `non_get` and `form_get`, the demo site's
     `logout_hits` and `admin_hits` (the scan's deny list) must not move either; the verdict prints
     each counter's delta and `non_get_allowed`/`blocked_requests` (counts only).
-  - **Export check uses every demo-site customer value** (`demo/onboarding/data.json`, all eleven
-    values except the birth date, which a generated persona may share), not the plan's five literals;
+  - **Export check uses every demo-site customer value** (`demo/onboarding/data.json`: the ten
+    values other than the birth date, which a generated persona may share), not the plan's five literals;
     the verdict prints how many were found, never which.
   - **Browser readiness is awaited** (up to 60 s): the app refreshes the `browser` component from
     `dps_worker` heartbeats every 15 s, so right after `up` it reads `unknown` and the plan's
@@ -1258,3 +1258,29 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   ./lane.sh python tools/smoke_test.py` → **all 34 checks passed** (23 Layer 1 + 11 scanner; the two
   OCR checks skip without the `docs` profile); without `DPS_SMOKE_SCANNER` → 23 checks, as before.
   The plan's "M0's checks plus the ten scanner checks" predates M1's document checks.
+
+## Task 25 — Documentation as built
+
+- `docs/technical/api-m4.md` (new): every scans route, the request model, examples taken from a
+  live scan of the demo site on this lane (synthetic persona values and tokens only; key and seed
+  shown as placeholders), the accept-time error table **as built** — the plan's list plus
+  `auth_invalid`, `key_material_invalid`, `wrap_key_invalid`, `idempotency_key_invalid` /
+  `idempotency_key_reused`, `queue_full`; the plan's `db_unconfigured` is `db_unavailable` (M2's
+  name) and its `consistency_invalid` does not exist (split into `key_material_invalid` and
+  `wrap_key_invalid`); plus the worker-side `error_code`s (`secret_unavailable`, `key_unavailable`,
+  `spec_invalid`, `policy_invalid`, `host_not_registered`), the read-side codes (`page_not_found`,
+  `cursor_invalid`, `seed_invalid`, `artefact_not_found`) and `not_cancelable`. Also: the job
+  lifecycle, page/field/request/event/inventory shapes, risk flags with their rules, artefact
+  variants and fail-closed captures, `dps.scan-export.v1`, `dps.capture.v1` with the reveal call,
+  the evidence `scan` block, D4 with the guard's rules and the counting proof, persona preview,
+  readiness and metrics. It states that a scan pack's `verification` block counts stored token
+  fields and filled pages and is not a sweep over page data (open issue 1 of the console merge).
+- `README.md`: status, the API reference row, "Scan a web front end" (compose `scanner` profile,
+  console `/scanner/new`, demo URL and session, the smoke gate) and the host-side test notes
+  (`scanner` extra, `python -m playwright install chromium`, markers).
+- `HANDOFF.md`: the M4 settings table already existed (Task 1) and §12 (Task 20); added the M4
+  status line, §1 rows (browser image, scanner API/console, smoke checks, `scanner` extra), the
+  compose-only/smoke variables (§4), the `browser` readiness component, the browser-worker's ops
+  surface and the `dps_scan_*` metrics (§5), tenant-scoped storage-state refs and the KEK need
+  (§7), §9, and in §12 traps 8–9 plus the smoke gate with this lane's measured run.
+- Contract: no name changed by Tasks 24–25, so no contract edit.
