@@ -540,3 +540,29 @@ enforced below the page. Each item was established by a probe of the pinned Chro
     (both classifiers), 11 in `test_a_page_record_refuses_a_raw_template` (raw and half-templated
     forms), 3 value-free templates in `test_value_free_templates_pass_the_record_guard`; 36 failed
     before the fix. No contract name changed.
+
+## Task 9 — Classification
+
+- `dps/engine/service.py`: **no change.** `PrivacyEngine.detector(policy, locale)` already exists
+  (M2 added it for L2 free-text columns, same body as the plan's). `tests/test_service.py` gains the
+  plan's one assertion.
+- `dps/layers/scanner/classify.py`: the plan's code, plus:
+  - **Safe-subset `pattern` compilation (ReDoS).** The plan refused only a group holding `+`/`*`
+    followed by a quantifier; `((a+))+`, `(?:a{1,9}){1,9}`, `(a|a)*`, `(a|aa)?`×30 and a run of
+    overlapping `\d*` all passed it and backtrack catastrophically on a hostile page.
+    `compile_html_pattern` now parses the pattern (`re._parser`) and refuses look-arounds,
+    back-references, conditionals, atomic groups and possessive repeats, a variable repeat over a
+    body that can itself vary, and more than `MAX_PATTERN_BRANCHING` (4) variable repeats plus
+    alternations in all. New `pattern_accepts(compiled, value)` never tests an input longer than
+    `MAX_PATTERN_INPUT` (64); `pattern_entities` (and Task 11's format/sample checks) go through
+    it. Ordinary patterns (email, phone, dates, `(?:\d{3}-){2}\d{4}`) still compile.
+  - **Labels are page text, not JSON paths.** `classify_key` reads its argument as a path and
+    keeps the last segment, so `Aadhaar No. (e.g. 1234)` classified as nothing. Label, aria,
+    placeholder, title, name, id and rendered label hints go through `_key_candidates`, which
+    turns `.[]'"$` into spaces (and caps the text at 200 characters) first.
+  - `placeholder_shape` replaces letters and digits of any script (the plan only `[A-Za-z0-9]`),
+    so a placeholder in another script cannot carry text into the stored shape.
+  - `CREDENTIAL_ENTITIES` (PASSWORD, API_KEY, JWT, PRIVATE_KEY) is defined here for Tasks 10–11.
+- `tests/scanner/test_classify.py`: the plan's 15 cases plus hostile patterns (8, each refused and
+  answered in < 0.5 s), ordinary patterns (5), a dotted label, offsets-not-text of rendered
+  findings, and more helper cases: 30 tests (plan: 15).

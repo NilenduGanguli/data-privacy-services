@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from dps.config import Settings
+from dps.engine.detect.ensemble import Detector
 from dps.engine.service import (
     EngineError,
     Payload,
@@ -58,6 +59,7 @@ def test_detect_and_plan(engine: PrivacyEngine) -> None:
     assert det.record_sensitivity == "CRITICAL" and det.report.findings_total >= 6
     plan = engine.plan(Payload(data=SAMPLE), "pci-dss", RequestOptions(), mode="obfuscate")
     assert any(r["entity_type"] == "AADHAAR" and r["method"] == "det_token" for r in plan.plan)
+    assert isinstance(engine.detector(engine.policy(None), "en_US"), Detector)
 
 
 def test_obfuscate_reveal_round_trip_and_consistency(engine: PrivacyEngine) -> None:
