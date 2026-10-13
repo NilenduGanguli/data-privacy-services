@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
 import {
-  buildRunSpec, draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel,
+  buildRunSpec, draftForStorage, emptyDraft, engineName, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel,
   type Step, type WizardDraft,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, Connection, RunOut } from '../lib/types';
@@ -37,8 +37,8 @@ function JsonPane({ value }: { value: unknown }): JSX.Element {
 /** The one-line summary a finished step shows in the stepper. */
 function stepSub(step: Step, d: WizardDraft): string {
   switch (step) {
-    case 1: return d.connectionId ? `PostgreSQL · ${d.connectionName}` : 'PostgreSQL';
-    case 2: return d.shape ? `${d.count ? fmtCount(d.count.rows) : `~${fmtCount(d.shape.row_estimate)}`} rows · ${d.columns?.length ?? d.shape.columns.length} columns` : '';
+    case 1: return d.connectionId ? `${engineName(d.engine)} · ${d.connectionName}` : engineName(d.engine);
+    case 2: return d.shape ? `${d.count ? fmtCount(d.count.rows) : `~${fmtCount(d.shape.row_estimate)}`} ${d.engine === 'mongo' ? 'documents' : 'rows'} · ${d.columns?.length ?? new Set(d.shape.columns.map((c) => c.name)).size} ${d.engine === 'mongo' ? 'fields' : 'columns'}` : '';
     case 3: return d.snapshotId ? (d.snapshotAccepted ? 'snapshot accepted' : 'review pending') : '';
     case 4: return d.writeMode ? `${writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)}${isWriteConfirmed(d) ? ' · confirmed' : ''}` : '';
     case 5: return d.ticket ? `${d.mode} · ${d.ticket}` : '';
@@ -111,6 +111,7 @@ export function JobWizard(): JSX.Element {
         if (!live) return;
         const dot = snap.object_ref.indexOf('.');
         dispatch({ type: 'set', patch: {
+          engine: conn.engine === 'oracle' || conn.engine === 'mongo' ? conn.engine : 'postgres', selMode: conn.engine === 'mongo' ? 'mongo' : 'where',
           connMode: 'saved', connectionId: conn.id, connectionName: conn.name, connectionTags: conn.tags, connectionRoles: conn.roles,
           production: conn.tags.includes('production'), test, testedAt: new Date().toISOString(),
           owner: dot > 0 ? snap.object_ref.slice(0, dot) : '', table: dot > 0 ? snap.object_ref.slice(dot + 1) : snap.object_ref,
@@ -216,7 +217,7 @@ export function JobWizard(): JSX.Element {
         <div className="wiz-main">
           {submitted && d.submittedJobId && <RunResult jobId={d.submittedJobId} out={submission?.out ?? null} writeMode={d.writeMode} onNewJob={startOver} />}
           {!submitted && d.step === 1 && <StepConnect d={d} dispatch={dispatch} auth={auth} connections={connections} onConnectionsChanged={loadConnections} onNext={() => go(2)} />}
-          {!submitted && d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} onNext={() => go(3)} onBack={() => go(1)} />}
+          {!submitted && d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} connection={connections.find((c) => c.id === d.connectionId) ?? null} onNext={() => go(3)} onBack={() => go(1)} />}
           {!submitted && d.step === 3 && <StepDiscover d={d} dispatch={dispatch} auth={auth} onNext={() => go(4)} onBack={() => go(2)} />}
           {!submitted && d.step === 4 && <StepTarget d={d} dispatch={dispatch} auth={auth} connections={connections} snapshot={snapshot} onConnectionsChanged={loadConnections} onNext={() => go(5)} onBack={() => go(3)} />}
           {!submitted && d.step === 5 && <StepRun d={d} dispatch={dispatch} auth={auth} snapshot={snapshot} go={go} onBack={() => go(4)} run={run} />}

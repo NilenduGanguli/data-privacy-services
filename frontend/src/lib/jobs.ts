@@ -4,6 +4,7 @@
  * DOM, and nothing here ever formats a customer value: jobs, snapshots and packs hold names,
  * counts, codes and hashes only.
  */
+import { mongoFilterTemplate, parseMongoFilter } from './engines';
 import type {
   ClassificationSnapshot, ColumnClassification, ConnectionTestResult, CountOut, Job, MethodSpec, ObjectRef, PkStrategy, RunSpec, Selection,
   SnapshotOverride, TableShape, TargetSpec, WriteMode,
@@ -360,6 +361,8 @@ export interface WizardDraft {
   host: string;
   port: string;
   database: string;
+  serviceName: string;                    // Oracle (M3)
+  connOptions: Record<string, string>;    // allowed connection options: sslmode, replicaSet, directConnection, authSource, tls
   username: string;
   password: string;                       // transient: dropped from React state after the create
   production: boolean;
@@ -370,9 +373,10 @@ export interface WizardDraft {
   owner: string;
   table: string;
   shape: TableShape | null;
-  selMode: 'where' | 'query';
+  selMode: 'where' | 'query' | 'mongo';
   where: string;                          // transient: never stored
   query: string;                          // transient: never stored
+  mongoFilterText: string;                // transient: never stored (MongoDB filter JSON, M3)
   params: Record<string, string | number | boolean | null>;   // transient: never stored
   count: CountOut | null;
   countedAt: string | null;
@@ -432,9 +436,9 @@ export function emptyDraft(draftId: string = newDraftId()): WizardDraft {
   return {
     draftId, step: 1,
     engine: 'postgres', connMode: 'saved', connectionId: null, connectionName: '', connectionTags: [], connectionRoles: [],
-    newName: '', credMode: 'secret_ref', secretRef: '', host: '', port: '5432', database: '', username: '', password: '',
+    newName: '', credMode: 'secret_ref', secretRef: '', host: '', port: '5432', database: '', serviceName: '', connOptions: {}, username: '', password: '',
     production: false, targetConnectionId: null, test: null, testedAt: null,
-    owner: '', table: '', shape: null, selMode: 'where', where: '', query: '', params: {}, count: null, countedAt: null,
+    owner: '', table: '', shape: null, selMode: 'where', where: '', query: '', mongoFilterText: '', params: {}, count: null, countedAt: null,
     countSeconds: null, rows: null, countedKey: null, columns: null, maxRows: '', sampleRows: '2000', parallelism: 4,
     discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, keyMethods: null,
     writeMode: null, targetOwner: '', targetTable: '', tableLoad: 'truncate_insert', createIfMissing: true,
@@ -458,7 +462,7 @@ export function newDraftId(): string {
  * key methods (always read again from the accepted snapshot on the server).
  */
 const TRANSIENT = [
-  'password', 'keyMaterialJson', 'where', 'query', 'params', 'count', 'countedAt', 'countSeconds', 'rows', 'countedKey',
+  'password', 'keyMaterialJson', 'where', 'query', 'mongoFilterText', 'params', 'count', 'countedAt', 'countSeconds', 'rows', 'countedKey',
   'typed', 'confirmedAt', 'confirmedKey', 'confirmLapsed', 'submittedJobId', 'keyMethods',
 ] as const;
 
@@ -501,8 +505,13 @@ export function selectionOf(d: WizardDraft): Selection {
   const sel: Selection = {};
   if (d.selMode === 'where' && d.where.trim()) sel.where = d.where.trim();
   if (d.selMode === 'query' && d.query.trim()) sel.query = d.query.trim();
+  if (d.selMode === 'mongo') {
+    const { filter } = parseMongoFilter(d.mongoFilterText);
+    if (filter) sel.mongo_filter = filter;
+  }
   if (Object.keys(d.params).length) sel.params = { ...d.params };
-  if (d.columns && d.shape && d.columns.length < d.shape.columns.length) sel.columns = [...d.columns];
+  // a document's paths share their top-level name: compare with the distinct names (M3)
+  if (d.columns && d.shape && d.columns.length < new Set(d.shape.columns.map((c) => c.name)).size) sel.columns = [...d.columns];
   const max = parseCount(d.maxRows);
   if (max) sel.max_rows = max;
   return sel;
@@ -641,6 +650,7 @@ export function specPreview(d: WizardDraft): Record<string, unknown> {
   const spec = buildRunSpec(d) as unknown as Record<string, any>;
   const sel = { ...spec.source.selection };
   if (sel.params) sel.params = Object.fromEntries(Object.keys(sel.params).map((k) => [k, '<bound>']));
+  if (sel.mongo_filter) sel.mongo_filter = mongoFilterTemplate(sel.mongo_filter);
   const consistency: Record<string, unknown> = { scope: spec.consistency.scope };
   if (spec.group_id) consistency.group = spec.group_id;
   if (spec.consistency.key_material) consistency.kid = (spec.consistency.key_material as Record<string, unknown>).kid ?? null;

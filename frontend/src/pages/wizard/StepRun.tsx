@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, type Auth } from '../../lib/api';
 import {
-  fmtCount, fqn, heatTone, inPlaceKeyRewrites, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
+  engineName, fmtCount, fqn, heatTone, inPlaceKeyRewrites, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
   seedFingerprint, sourceObject, writeModeLabel, writtenObject, type Step, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, JobGroup, Preset } from '../../lib/types';
@@ -156,7 +156,7 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack, run }: {
 
       <div className="card">
         <div className="card-head"><div className="card-title">Ready to run</div><span className={`chip ${blocked.length ? 'amber' : 'emerald'}`}>{blocked.length ? `${blocked.length} to resolve` : 'all checks passed'}</span></div>
-        <div className="summ"><span className="k">Source</span><span>PostgreSQL · <span className="mono">{fqn(sourceObject(d))}</span> via <span className="mono">{d.connectionName}</span>{d.production && <span className="chip amber" style={{ marginLeft: 6 }}>production</span>}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(1)}>Edit</button></div>
+        <div className="summ"><span className="k">Source</span><span>{engineName(d.engine)} · <span className="mono">{fqn(sourceObject(d))}</span> via <span className="mono">{d.connectionName}</span>{d.production && <span className="chip amber" style={{ marginLeft: 6 }}>production</span>}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(1)}>Edit</button></div>
         <div className="summ"><span className="k">Rows</span><span>{d.rows !== null ? `${fmtCount(d.rows)} rows` : `about ${fmtCount(d.shape?.row_estimate ?? null)} rows`} · {d.columns?.length ?? d.shape?.columns.length ?? '—'} columns · {d.parallelism} partitions</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(2)}>Edit</button></div>
         <div className="summ"><span className="k">Discovery</span><span>{counts.crit} critical · {counts.sens} sensitive · {counts.decl} declared · {counts.kept} kept · {overrides} {overrides === 1 ? 'override' : 'overrides'}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(3)}>Edit</button></div>
         <div className="summ"><span className="k">Write</span><span>{writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)} · <span className="mono">{d.writeMode === 'files' ? d.filesPrefix : fqn(d.writeMode === 'table' ? { owner: d.targetOwner || null, name: d.targetTable } : writtenObject(d))}</span>{confirmed ? ` · confirmed for ${fmtCount(d.rows)} rows` : ''}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(4)}>Edit</button></div>

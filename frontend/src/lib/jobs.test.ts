@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
 import { evidenceSoFar, methodText, packTargetText, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
 import { confirmationKey, countKey, fqn, keyMethodsOf, runMethodFor, writtenObject, type WizardDraft } from './jobs';
-import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
+import { canLeave, reachable, targetReady, transactionsMissing, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
 
@@ -257,5 +257,65 @@ describe('evidence pack helpers', () => {
     expect(verificationText(false, 1)).toBe('failed · 1 leak caught');
     // a run stopped before its counters held a hit (a preflight leak, a fail-closed check)
     expect(verificationText(false, 0)).toBe('failed closed');
+  });
+});
+
+describe('Oracle and MongoDB drafts (M3 Task 18b)', () => {
+  const mongo = (over: Partial<WizardDraft> = {}): WizardDraft => draft({
+    engine: 'mongo', owner: '', table: 'profiles', selMode: 'mongo', targetOwner: '', targetTable: 'profiles_console', ...over,
+  });
+  it('sends a MongoDB filter as mongo_filter with no owner, WHERE or query', () => {
+    const spec = buildRunSpec(mongo({ mongoFilterText: '{"segment": "premium"}' }));
+    expect(spec.source.object).toEqual({ owner: null, name: 'profiles' });
+    expect(spec.source.selection.mongo_filter).toEqual({ segment: 'premium' });
+    expect(spec.source.selection).not.toHaveProperty('where');
+    expect(spec.source.selection).not.toHaveProperty('query');
+    expect(spec.target.object).toEqual({ owner: null, name: 'profiles_console' });
+    expect(buildRunSpec(mongo({ mongoFilterText: '' })).source.selection).toEqual({});
+  });
+  it('keeps the Oracle owner exactly as listed', () => {
+    const spec = buildRunSpec(draft({ engine: 'oracle', owner: 'CRM', table: 'CUSTOMERS', where: "SEGMENT = 'RETAIL'", targetOwner: 'CRM_MASKED', targetTable: 'CUSTOMERS_CONSOLE' }));
+    expect(spec.source.object).toEqual({ owner: 'CRM', name: 'CUSTOMERS' });
+    expect(spec.source.selection.where).toBe("SEGMENT = 'RETAIL'");
+    expect(spec.target.object).toEqual({ owner: 'CRM_MASKED', name: 'CUSTOMERS_CONSOLE' });
+  });
+  it('never stores the MongoDB filter and shows its literals as <bound>', () => {
+    const d = mongo({ mongoFilterText: '{"email": "a@x.in"}' });
+    expect(JSON.stringify(draftForStorage(d))).not.toContain('a@x.in');
+    const preview = JSON.stringify(specPreview(d));
+    expect(preview).not.toContain('a@x.in');
+    expect((specPreview(d).source as Record<string, any>).selection.mongo_filter).toEqual({ email: '<bound>' });
+  });
+  it('counts a MongoDB filter: a new filter drops the count, a new engine clears the source', () => {
+    const count: CountOut = { rows: 9, checks: [], runs_as: null, binds: 0 };
+    let d = wizardReducer(mongo({ mongoFilterText: '{"a": 1}' }), { type: 'counted', count, at: 'x', seconds: 0.1, key: countKey(mongo({ mongoFilterText: '{"a": 1}' })) });
+    expect(d.count).toEqual(count);
+    expect(canLeave(2, { ...d, shape: { object: { owner: null, name: 'profiles' }, columns: [], key: ['_id'], key_source: 'primary_key', row_estimate: 10 } })).toBe(true);
+    d = wizardReducer(d, { type: 'filter', text: '{"a": 2}' });
+    expect(d).toMatchObject({ mongoFilterText: '{"a": 2}', count: null });
+    d = wizardReducer(d, { type: 'engine', engine: 'oracle' });
+    expect(d).toMatchObject({ engine: 'oracle', connectionId: null, table: '', mongoFilterText: '', selMode: 'where', port: '1521' });
+    expect(wizardReducer(d, { type: 'engine', engine: 'mongo' })).toMatchObject({ selMode: 'mongo', port: '27017' });
+  });
+  it('follows the engine of a saved connection', () => {
+    const conn = { id: 'c_m', tenant_id: 'default', name: 'crm-mongo', engine: 'mongo' as const, params: { database: 'crm' }, secret_ref: 'x', has_secret: true,
+      secret_expires_at: null, roles: ['source' as const], tags: [], capabilities: { transactions: true }, last_test: null, created_by: null,
+      created_at: 'x', updated_at: 'x' };
+    const d = wizardReducer(draft({ engine: 'mongo', connectionId: null }), { type: 'useSaved', connection: conn });
+    expect(d).toMatchObject({ engine: 'mongo', selMode: 'mongo', connectionId: 'c_m' });
+  });
+});
+
+describe('MongoDB write modes need transactions (M3 Task 18b)', () => {
+  it('blocks In place and Append on a MongoDB connection without transactions', () => {
+    const noTx = { ok: true, engine: 'mongo' as const, server_version: '7.0', checks: [], capabilities: { transactions: false }, error_code: null };
+    const tx = { ...noTx, capabilities: { transactions: true } };
+    const base = { engine: 'mongo' as const, owner: '', table: 'profiles', selMode: 'mongo' as const, connectionRoles: ['source', 'target'] as ('source' | 'target')[] };
+    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'in_place' }))).toBe(false);
+    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'append', appendTarget: 'same' }))).toBe(false);
+    expect(targetReady(draft({ ...base, test: tx, writeMode: 'append', appendTarget: 'same' }))).toBe(true);
+    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'table', targetTable: 'profiles_uat' }))).toBe(true);
+    expect(transactionsMissing(draft({ ...base, test: noTx, writeMode: 'in_place' }))).toBe(true);
+    expect(transactionsMissing(draft({ test: noTx, writeMode: 'in_place' }))).toBe(false);   // PostgreSQL: not a MongoDB rule
   });
 });

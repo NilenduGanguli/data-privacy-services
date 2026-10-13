@@ -110,7 +110,8 @@ export interface ConnectionTestResult { ok: boolean; engine: ConnEngine; server_
 export interface ConnectionParams { host?: string | null; port?: number | null; database?: string | null; service_name?: string | null; options?: Record<string, string>; bucket?: string | null; prefix?: string; region?: string | null; endpoint_url?: string | null; base_path?: string | null }
 export interface Connection { id: string; tenant_id: string; name: string; engine: ConnEngine; params: ConnectionParams; secret_ref: string | null; has_secret: boolean; secret_expires_at: string | null; roles: ('source' | 'target')[]; tags: string[]; capabilities: Record<string, boolean>; last_test: ConnectionTestResult | null; created_by: string | null; created_at: string; updated_at: string }
 export interface ConnectionSpec { name: string; engine: ConnEngine; params: ConnectionParams; secret_ref?: string | null; credentials?: { username: string; password: string } | null; roles: ('source' | 'target')[]; tags: string[] }
-export interface Selection { where?: string | null; params?: Record<string, string | number | boolean | null>; query?: string | null; columns?: string[] | null; max_rows?: number | null; sample?: { percent: number; seed?: number | null } | null }
+/** `mongo_filter` (M3): a MongoDB filter document, checked against the server's operator allow-list. */
+export interface Selection { mongo_filter?: Record<string, unknown> | null; where?: string | null; params?: Record<string, string | number | boolean | null>; query?: string | null; columns?: string[] | null; max_rows?: number | null; sample?: { percent: number; seed?: number | null } | null }
 export interface CountOut { rows: number; checks: Check[]; runs_as: string | null; binds: number }
 export interface JobProgress {
   outcome: '' | 'succeeded' | 'failed' | 'canceled' | 'dry_run'; stage: string; rows_estimated: number | null; rows_read: number;

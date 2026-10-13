@@ -1335,3 +1335,50 @@ Open (not fixed here):
 - **New group dialog**: after **Create** the only exit is **Done** (enabled by the "I have stored
   the key and the seed" box), so the once-only material cannot be dismissed by a stray click or
   Escape; the key and seed are dropped from React state on Done.
+
+## Task 18b — console: Oracle and MongoDB in the new-job wizard (mockup 06)
+
+- **Draft fields** (`lib/jobs.ts` `WizardDraft`): besides the plan's `engine` (M2 already had it)
+  and `mongoFilterText` (transient, dropped by `draftForStorage` and `restore`), the draft gains
+  `serviceName` (Oracle) and `connOptions` (the allowed `ConnectionParams.options`: `sslmode`,
+  `replicaSet`, `directConnection`, `authSource`, `tls`) to hold `connectionFields(engine)`'s
+  values; `selMode` gains `'mongo'`. New reducer action `engine` (`pages/wizard/state.ts`): a new
+  engine clears the source, the target connection and the selection and sets the engine's default
+  port and selection mode; `useSaved` and the `?snapshot=` deep link follow the connection's
+  engine. `filterTextOf(d)` names the text of the mode in use.
+- **Extra pure helpers in `lib/engines.ts`** (tested): `connectionParams(engine, values,
+  {secretRef})` builds `ConnectionParams` and the first value-free problem — with a secret
+  reference on Oracle/MongoDB the secret's `dsn`/`uri` may address the server, so host, port and
+  the service name are optional there (the connectors read them that way); `defaultPort`,
+  `versionLabel` ("Oracle Database 23.26.0.0" in the check list), `columnLabel` (a document path
+  without `$.`, `[*]` as `[]`; a SQL column by name) used by the heat-map, the review table, the
+  decision list and the job-detail classification card (`components/HeatMap.tsx`,
+  `pages/wizard/StepDiscover.tsx`, `pages/JobDetail.tsx`), since every MongoDB leaf shares its
+  top-level `name` (`profile`); `parseMongoFilter` also refuses a non-object JSON value
+  ("must be a JSON object").
+- **The client hint refuses `$where`/`$expr`/`$function`/`$accumulator` before any request**
+  (plan: Check → the operator-denied message): the browser check therefore exercises both paths —
+  `{"$where": "1"}` is refused on the page (no request), `{"$jsonSchema": …}` reaches the server
+  and its 422 `selection_operator_denied` is shown with the server's value-free message; neither
+  echoes the filter (a sentinel literal is absent from the page text).
+- **MongoDB `transactions_unsupported` rule** is a reducer-level gate (`transactionsMissing`,
+  `targetReady`) plus the amber callout, so step 5 cannot open for In place / Append on a
+  connection whose test reported `capabilities.transactions: false`.
+- **Step 4 target connections are filtered to the source's engine** (plan: "engine oracle, role
+  target" / "engine mongo, role target"); step 1's optional target select likewise. The Oracle
+  destination schema defaults to `<OWNER>_MASKED`, PostgreSQL's stays `<schema>_uat`, MongoDB has
+  no schema field (append to a named collection too).
+- **Step 2 Fields list for MongoDB** shows one checkbox per top-level field with its nested paths
+  (wrapping, `.colpick .ty.paths` in `styles/wizard.css`), because `Selection.columns` projects
+  top-level fields (Task 11); `selectionOf` compares the chosen names with the distinct names,
+  not with the path count. Step 2's stepper line says "documents · fields" for MongoDB.
+- **Browser check** (`tests/console/test_console_m3_wizard.py`, shared harness
+  `tests/console/m3_console.py`): the four `smoke-*` connections are registered through the API
+  when missing (Task 21's `smoke --m3` does not exist yet), against the compose network hosts and
+  the `demo-secrets` refs. The Oracle filter is `SEGMENT = 'retail'` (the Task 15 seed writes
+  lower-case segments; plan: `'RETAIL'`). Each run test also checks **source vs target, counts
+  only**: Oracle `CRM_MASKED.CUSTOMERS_CONSOLE` holds every retail row and 0 target values of
+  `FULL_NAME`, `EMAIL`, `MOBILE`, `NATIONAL_ID`, `TAX_ID` equal any source value; MongoDB
+  `crm_uat.profiles_console` holds every premium document and 0 same-document survivors of
+  `profile.fullName`, `contact.email`, `contact.mobile`, `customerId`. The plan's "Evidence pack
+  link within 300 s, sections 1–5" is kept.

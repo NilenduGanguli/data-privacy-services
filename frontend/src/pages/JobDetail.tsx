@@ -7,6 +7,7 @@ import { StateChip } from '../components/StateChip';
 import { useAuth } from '../hooks/useAuth';
 import { usePoll } from '../hooks/usePoll';
 import { api, ApiError } from '../lib/api';
+import { columnLabel } from '../lib/engines';
 import { joinsText, targetOf } from '../lib/groups';
 import {
   engineName, errorText, evidenceSoFar, fmtClock, fmtCompact, fmtCount, heatTone, isTerminal, jobTargetText, jobWriteMode,
@@ -77,7 +78,7 @@ function ClassificationCard({ snapshot, mode }: { snapshot: ClassificationSnapsh
       <div className="tbl-scroll"><table className="tbl" id="cls"><thead><tr><th>Column</th><th>Type</th><th>Inferred entity</th><th>Conf.</th><th>Method</th><th>Evidence</th></tr></thead><tbody>
         {shown.map((c) => (
           <tr key={c.path}>
-            <td className="mono">{c.name}</td>
+            <td className="mono">{columnLabel(c)}</td>
             <td className="faint" title={c.data_type}>{shortType(c.data_type)}</td>
             <td><span className={`chip ${TONE_CHIP[heatTone(c)]}`}>{c.entity_type ? `${c.entity_type}${c.is_key ? ' · key' : ''}${c.text_column && c.entity_type !== 'FREE_TEXT' ? ' · free text' : ''}` : 'kept'}</span></td>
             <td className="mono">{c.entity_type ? c.confidence.toFixed(2) : '—'}</td>

@@ -78,6 +78,7 @@
   .colpick input { accent-color: var(--teal); width: 14px; height: 14px; margin: 0; flex: none; }
   .colpick .mono { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .colpick .ty { margin-left: auto; color: var(--ink-3); font-size: 11px; white-space: nowrap; }
+  .colpick .ty.paths { white-space: normal; overflow-wrap: anywhere; text-align: right; min-width: 0; font-family: var(--mono); } /* MongoDB nested paths (M3) */
 
   /* discovery */
   .counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
