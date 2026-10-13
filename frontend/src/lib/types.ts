@@ -144,7 +144,35 @@ export interface RunSpec {
   options: { dry_run: boolean; verify: 'strict' | 'warn'; unclassified?: 'detect' | 'keep' | 'redact' };
 }
 export interface RunOut { job: Job; key_material?: KeyMaterial; synthesis_seed?: { alg: string; seed: string; created_at: string } }
-export interface JobGroup { id: string; tenant_id: string; name: string; kid: string; seed_fingerprint: string; created_by: string | null; created_at: string; closed_at: string | null }
+export interface JobGroup {
+  id: string; tenant_id: string; name: string; kid: string; seed_fingerprint: string; created_by: string | null; created_at: string; closed_at: string | null;
+  /** M3 (migration 020): the latest cross-system consistency check, counts and codes only. */
+  last_check?: ConsistencyCheckResult | null; last_check_at?: string | null;
+}
+/** `GET /job-groups/{id}`: the group and its jobs (newest first). */
+export interface JobGroupOut { group: JobGroup; jobs: Job[] }
+
+// ---- M3: the cross-system consistency check (dps/layers/connectors/consistency.py, field for field).
+// Counts, codes, ids, object names and paths only: never a sampled value, a token or a prefix's text.
+export interface CheckMember { job_id: string; path: string }
+export interface ConsistencyCheckRequest { pairs?: CheckMember[]; sample?: number; min_coverage?: number; attributes?: boolean }
+export type JoinFormKind = 'numeric' | 'prefixed_digits' | 'exact' | 'unknown';
+export interface MemberResult {
+  job_id: string; engine: 'postgres' | 'oracle' | 'mongo' | string; connection_id: string; object: string; path: string;
+  entity_type: string | null; method: string | null; params_hash: string | null; form: JoinFormKind; width: number | null;
+  prefix_len: number | null; found: number; anchor: boolean;
+}
+export interface PairResult { left: number; right: number; checked: number; matched: number; coverage: number; consistent: boolean }
+export interface AttributeResult {
+  entity_type: string; method: string; members: number[]; counts_toward_pass: boolean;
+  compared: number; agreed: number; ambiguous: number; consistent: boolean;
+}
+export interface CheckProblem { code: string; member: number | null; pair: number[] | null }
+export interface ConsistencyCheckResult {
+  group_id: string; checked_at: string; sample_requested: number; sampled: number; anchor: number;
+  members: MemberResult[]; pairs: PairResult[]; all_members_matched: number; attributes: AttributeResult[]; methods_agree: boolean;
+  problems: CheckProblem[]; passed: boolean; consistent_pairs: number; total_pairs: number; min_coverage: number; duration_ms: number;
+}
 export interface EvidencePack {
   pack_version: string; id: string; tenant_id: string; job_id: string; job_kind: string; group_id: string | null;
   outcome: 'succeeded' | 'failed' | 'canceled' | 'dry_run'; mode: string | null; label: string; created_at: string;

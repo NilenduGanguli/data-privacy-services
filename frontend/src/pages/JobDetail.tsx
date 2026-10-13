@@ -7,12 +7,13 @@ import { StateChip } from '../components/StateChip';
 import { useAuth } from '../hooks/useAuth';
 import { usePoll } from '../hooks/usePoll';
 import { api, ApiError } from '../lib/api';
+import { joinsText, targetOf } from '../lib/groups';
 import {
   engineName, errorText, evidenceSoFar, fmtClock, fmtCompact, fmtCount, heatTone, isTerminal, jobTargetText, jobWriteMode,
   methodFor, methodText, needsDecision, parseKeyFile, partitionPct, progressPct, shortId, shortType, stepperState, typeNoteShort,
   writeModeLabel, type DetailStep,
 } from '../lib/jobs';
-import type { ClassificationSnapshot, ColumnClassification, Connection, Job, PartitionView } from '../lib/types';
+import type { ClassificationSnapshot, ColumnClassification, Connection, Job, JobGroupOut, PartitionView } from '../lib/types';
 
 const TONE_CHIP: Record<string, string> = { crit: 'rose', sens: 'amber', decl: 'teal', kept: 'slate' };
 const STEPS: { id: DetailStep; label: string }[] = [
@@ -144,8 +145,8 @@ function PartitionsCard({ job, parts, keyCols }: { job: Job; parts: PartitionVie
   );
 }
 
-/** Evidence so far: six tiles and the output label. */
-function EvidenceCard({ job }: { job: Job }): JSX.Element {
+/** Evidence so far: six tiles (a grouped job shows its cross-system joins in place of partitions) and the output label. */
+function EvidenceCard({ job, joins }: { job: Job; joins: ReturnType<typeof joinsText> | null }): JSX.Element {
   const e = evidenceSoFar(job);
   const leaked = e.hits > 0 || job.error_code === 'leakage';
   return (
@@ -157,7 +158,12 @@ function EvidenceCard({ job }: { job: Job }): JSX.Element {
         <div className="box"><div className="l">Leakage sweep</div><div className={`v ${leaked ? 'bad' : 'ok'}`}>{leaked && !e.hits ? 'failed closed' : `${fmtCount(e.hits)} hits`}</div></div>
         <div className="box"><div className="l">FPE fallbacks</div><div className="v">{fmtCount(e.fallbacks)}{e.dominantFallback && <span className="faint"> ({e.dominantFallback.replace(/_/g, ' ')})</span>}</div></div>
         <div className="box"><div className="l">Raw PII to LLM</div><div className="v ok">0</div></div>
-        <div className="box"><div className="l">Partitions</div><div className="v">{e.done} / {e.total}{e.failed > 0 && <span className="faint" style={{ color: 'var(--rose)' }}> · {e.failed} failed</span>}</div></div>
+        {joins ? (
+          <div className="box" data-testid="joins-box"><div className="l">Cross-system joins</div>
+            <div className={`v${joins.tone === 'bad' ? ' bad' : ''}`}>{joins.tone === 'none' ? <span className="faint">not checked</span> : <>{joins.text.replace(/ consistent$/, '')} <span className="faint">consistent</span></>}</div></div>
+        ) : (
+          <div className="box"><div className="l">Partitions</div><div className="v">{e.done} / {e.total}{e.failed > 0 && <span className="faint" style={{ color: 'var(--rose)' }}> · {e.failed} failed</span>}</div></div>
+        )}
       </div>
       {job.mode === 'synthesize' ? (
         <div className="callout violet" style={{ marginTop: 12, fontSize: 12 }}>Output is <b>synthetic — measured, not claimed anonymous</b>. The seed is held by the requesting team; DPS keeps no copy.</div>
@@ -211,6 +217,7 @@ export function JobDetail(): JSX.Element {
   const [retryOpen, setRetryOpen] = useState(false);
   const [keyFile, setKeyFile] = useState<{ name: string; text: string } | null>(null);
   const loadedSnaps = useRef('');
+  const [group, setGroup] = useState<JobGroupOut | null>(null);
 
   const snapIds = useMemo(() => (j ? (j.kind === 'discover' ? j.progress.snapshot_ids : j.snapshot_id ? [j.snapshot_id] : []) : []), [j]);
   useEffect(() => {
@@ -227,6 +234,16 @@ export function JobDetail(): JSX.Element {
     Promise.all([src, tgt]).then(([source, target]) => setConns({ source, target }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth, j?.connection_id, j?.target_connection_id]);
+
+  // a grouped job: the group (name, last check) and the other members' targets
+  const groupId = j?.group_id ?? null;
+  useEffect(() => {
+    setGroup(null);
+    if (!groupId) return;
+    let live = true;
+    api.groups.get(auth, groupId).then((g) => { if (live) setGroup(g); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [auth, groupId]);
 
   async function control(action: 'pause' | 'resume' | 'cancel'): Promise<void> {
     setBusy(action); setActionError(null);
@@ -270,8 +287,14 @@ export function JobDetail(): JSX.Element {
   const canCancel = !terminal && j.phase !== 'finalize';
   const keyCols = ((j.plan as Record<string, any> | null)?.key as string[] | undefined) ?? snapshot?.shape.key ?? [];
 
+  const grp = group && group.group.id === j.group_id ? group : null;
+  const others = grp ? [...new Set(grp.jobs.filter((m) => m.kind === 'run' && m.id !== j.id).map((m) => targetOf(m).object).filter(Boolean))] : [];
   return (
     <main className="page job-detail-page">
+      <div className="faint sm rowx crumbs">
+        <Link to="/data-sources" style={{ color: 'var(--ink-2)', fontWeight: 600 }}>Data sources &amp; jobs</Link><span>/</span>
+        <span>Job <span className="mono">{shortId(j.id)}</span>{j.group_id && <> · <Link to={`/data-sources?group=${encodeURIComponent(j.group_id)}#group`} style={{ color: 'var(--ink-2)' }}>Job group <span className="mono">{grp?.group.name ?? shortId(j.group_id)}</span></Link></>}</span>
+      </div>
       <div className="page-head">
         <div style={{ minWidth: 0 }}>
           <div className="rowx" style={{ alignItems: 'flex-start' }}><EngineBadge engine={conns.source?.engine} /><h1 style={{ overflowWrap: 'anywhere' }}>{title}</h1></div>
@@ -279,7 +302,9 @@ export function JobDetail(): JSX.Element {
             {j.kind === 'discover' ? <>Discovery · connection <span className="mono">{conns.source?.name ?? shortId(j.connection_id)}</span></>
               : <>Mode <b>{j.mode}</b> · {writeModeLabel(wm, j.spec?.target?.table_load)}{policy ? <> · policy <b>{policy}</b></> : null}</>}
             {j.purpose?.ticket && <> · purpose {j.purpose.ticket}{j.purpose.legal_basis ? ` (${j.purpose.legal_basis})` : ''}</>}
-            {j.group_id && <> · consistency key shared with job group <span className="mono">{shortId(j.group_id)}</span></>}
+            {j.group_id && (others.length
+              ? <> · consistency key shared with {others.map((o, i) => <span key={o}>{i > 0 ? (i === others.length - 1 ? ' and ' : ', ') : ''}<span className="mono">{o}</span></span>)}</>
+              : <> · consistency key of job group <span className="mono">{grp?.group.name ?? shortId(j.group_id)}</span></>)}
           </p>
           <p className="faint" style={{ fontSize: 12 }}>Job <span className="mono">{j.id}</span> · created {fmtClock(j.created_at)}{j.finished_at ? ` · finished ${fmtClock(j.finished_at)}` : ''}</p>
         </div>
@@ -290,8 +315,9 @@ export function JobDetail(): JSX.Element {
           {canCancel && <button className="btn" type="button" disabled={!!busy} onClick={() => setConfirmCancel(true)}>Cancel</button>}
           {failed && j.kind === 'run' && <button className="btn" type="button" disabled={!!busy} onClick={() => setRetryOpen((v) => !v)}>Retry</button>}
           {j.progress.evidence_id
-            ? <Link className="btn btn-primary" to={`/reports/evidence/${j.progress.evidence_id}`}>Evidence pack</Link>
+            ? <Link className={`btn${j.group_id ? '' : ' btn-primary'}`} to={`/reports/evidence/${j.progress.evidence_id}`}>Evidence pack</Link>
             : j.kind === 'run' && <button className="btn" type="button" disabled title="The evidence pack is sealed when the job finishes">Evidence pack (when finished)</button>}
+          {j.group_id && <Link className="btn btn-primary" to={`/data-sources?group=${encodeURIComponent(j.group_id)}#group`}>Open consistency check</Link>}
         </div>
       </div>
 
@@ -303,7 +329,7 @@ export function JobDetail(): JSX.Element {
           <p className="muted" style={{ margin: 0, fontSize: 13 }}>Every partition resumes from its last committed batch. If the job key was purged when the job stopped, load the key file returned at submission (<span className="mono">dps-{j.id}.key.json</span>): it stays in this page's memory and goes to DPS only inside the retry request.</p>
           <div className="rowx">
             <label className="btn btn-sm" style={{ cursor: 'pointer' }}>Load key file
-              <input type="file" accept=".json,application/json" className="sr" onChange={(e) => { const f = e.target.files?.[0]; if (f) void f.text().then((text) => setKeyFile({ name: f.name, text })); e.target.value = ''; }} />
+              <input type="file" accept=".json,.dpskey,.dpsseed,application/json" className="sr" onChange={(e) => { const f = e.target.files?.[0]; if (f) void f.text().then((text) => setKeyFile({ name: f.name, text })); e.target.value = ''; }} />
             </label>
             {keyFile && <span className="chip teal">{keyFile.name} loaded</span>}
             {keyFile && <button type="button" className="linkbtn" onClick={() => setKeyFile(null)}>Forget file</button>}
@@ -330,7 +356,7 @@ export function JobDetail(): JSX.Element {
           <div className="col">{snapshot ? <ClassificationCard snapshot={snapshot} mode={j.mode} /> : <div className="card"><div className="card-title">Column classification</div><div className="skeleton" style={{ marginTop: 12 }} /></div>}</div>
           <div className="col">
             <PartitionsCard job={j} parts={parts.data} keyCols={keyCols} />
-            <EvidenceCard job={j} />
+            <EvidenceCard job={j} joins={j.group_id ? joinsText(grp?.group) : null} />
           </div>
         </div>
       )}

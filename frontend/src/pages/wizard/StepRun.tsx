@@ -134,7 +134,7 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack, run }: {
               {match === 'matched' && <span className="chip emerald">matched</span>}
               {match === 'mismatch' && <span className="chip rose">no match</span>}
               <label className="btn btn-sm" style={{ cursor: 'pointer' }}>{fileName ? 'Use another file' : `Load ${syn ? 'seed' : 'key'} file`}
-                <input type="file" accept=".json,application/json" className="sr" onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadFile(f); e.target.value = ''; }} /></label>
+                <input type="file" accept=".json,.dpskey,.dpsseed,application/json" className="sr" onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadFile(f); e.target.value = ''; }} /></label>
             </div>
           </div>
         )}

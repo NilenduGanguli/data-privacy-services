@@ -62,6 +62,8 @@ export function JobWizard(): JSX.Element {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const deepSnapshot = params.get('snapshot');
+  const deepGroup = params.get('group');   // Jobs → "Add a job to this group"
+  const [groupName, setGroupName] = useState<string | null>(null);
   const restoredFrom = useRef<Partial<WizardDraft> | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
   const [d, dispatch] = useWizard(() => {
@@ -123,6 +125,15 @@ export function JobWizard(): JSX.Element {
     return () => { live = false; };
   }, [auth, deepSnapshot, dispatch]);
 
+  // ?group=<id>: step 5's consistency control starts on that group (the caller still loads its key)
+  useEffect(() => {
+    if (!deepGroup) return;
+    dispatch({ type: 'set', patch: { keyChoice: 'group', groupId: deepGroup } });
+    let live = true;
+    api.groups.get(auth, deepGroup).then((g) => { if (live) setGroupName(g.group.name); }).catch(() => { if (live) setGroupName(null); });
+    return () => { live = false; };
+  }, [auth, deepGroup, dispatch]);
+
   // a restored draft opens on the farthest step it can still show
   useEffect(() => { if (!frozen && d.step > reach) dispatch({ type: 'step', step: reach }); }, [d.step, reach, frozen, dispatch]);
   useEffect(() => { window.scrollTo({ top: 0 }); }, [d.step, submitted]);
@@ -181,6 +192,9 @@ export function JobWizard(): JSX.Element {
         {!submitted && <div className="head-actions"><Link className="btn btn-ghost" to="/data-sources">Cancel</Link><button className="btn" type="button" disabled={busy !== null} onClick={saveDraft}>Save draft</button></div>}
       </div>
       {linkError && <div className="err">Could not open the snapshot: {linkError}</div>}
+      {deepGroup && !submitted && d.keyChoice === 'group' && d.groupId === deepGroup && (
+        <div className="callout" style={{ fontSize: 12.5 }} data-testid="group-preset">Adding a job to job group <span className="mono">{groupName ?? deepGroup}</span>. Step 5 reuses the group's {d.mode === 'synthesize' ? 'seed' : 'key'}: load the <span className="mono">{d.mode === 'synthesize' ? '.dpsseed' : '.dpskey'}</span> file saved when the group was created. DPS keeps no copy.</div>
+      )}
       {restoredFrom.current && !submitted && (
         <div className="callout amber" style={{ fontSize: 12.5 }}>Restored the saved draft <span className="mono">{d.draftId}</span>. Credentials, keys and filters are not saved: re-enter them.{' '}
           <button type="button" className="linkbtn" onClick={() => { restoredFrom.current = null; try { localStorage.removeItem(DRAFT_KEY); } catch { /* private mode */ } dispatch({ type: 'reset' }); }}>Start a new draft</button></div>

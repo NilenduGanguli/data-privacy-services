@@ -1285,3 +1285,53 @@ Open (not fixed here):
     `tests/api/test_groups_consistency_api.py::test_a_rerun_writing_the_same_target_is_refused_and_not_stored`
     (the real check behind the route: 422 `member_duplicate` twice, no target opened, the stored
     `last_check`/`last_check_at` unchanged, audit `failed 200` then `rejected 422` ×2).
+
+## Task 18 — console: job groups and the consistency panel (mockups 07, 03)
+
+- **Free text never counts as a shared entity** (`lib/groups.ts` `mapped`; plan: every column with
+  an entity and a method ≠ `keep`). Mirrors the server's `consistency._joinable` (Task 16
+  deviation): a `FREE_TEXT`/text-pipeline column is span-transformed and differs per system, so it
+  never joins and is never compared — the key chip and the field chips must not promise it. Test:
+  `groups.test.ts` "never counts keep columns or free text".
+- **`api.groups.get` added** (the plan's hook calls it; M2's console client had only `list` and
+  `create`). It mirrors `GET /job-groups/{id}` → `{group, jobs}` (`JobGroupOut`); `JobGroup` gains
+  the optional `last_check`/`last_check_at` (optional so M2 fixtures and list answers stay valid).
+- **Extra pure helpers in `lib/groups.ts`** (tested): `displayPath`, `engineLabel`, `pickGroup`
+  (`?group=`, else the newest group with members, else the newest), `joinsText` (the job-detail
+  box), `checkErrorText` (the route's refusal codes in words; the callout still shows the code) and
+  `groupKeyFiles` (the `.dpskey`/`.dpsseed` JSON: `{group: {id, name, kid}, key_material}` and
+  `{group, synthesis_seed}` — exactly what the wizard's "Load key file" already parses, so a
+  downloaded group key loads in step 5 unchanged). Step 5 and the job-detail retry accept
+  `.dpskey`/`.dpsseed` besides `.json` (`pages/wizard/StepRun.tsx`, `pages/JobDetail.tsx`; one
+  attribute each, committed with this task).
+- **`useJobGroup`** returns `checkError: {message, code}` beside `error` (plan: the check's error
+  folded into `error`), so a refused check does not hide the loaded group. Connections and
+  snapshots are cached per id for the hook's lifetime (`reload()` clears them). Each member carries
+  its source *and* target connection.
+- **The group card shows every run of the group** (newest first), not only three: the mockup's
+  three-column `.sys3` wraps; the wires are drawn only for exactly three members (plan). With fewer
+  than two members **Run consistency check** is disabled (the route would answer 409
+  `member_not_ready`).
+- **Join coverage replaces the mockup's sample of masked rows** (plan, open contract question 3):
+  members table (system badge + object, join column with entity and method, join form, found /
+  sampled) and compared-entities table (entity chip, method, systems, agreed / compared with ✓/✗,
+  "informational", "+N with several values"), plus the prefixed-digits callout naming the
+  prefixed member's engine and prefix length (the plan's fixed "MongoDB … 5-character" text is
+  computed from the result).
+- **Job detail**: the crumb is a row above the page head (the console has no top-bar crumb slot);
+  the "Cross-system joins" tile replaces the "Partitions" tile for grouped jobs (mockup 03 shows six
+  tiles with joins and without partitions; the partitions card above still shows them).
+  "Open consistency check" is the primary header button for grouped jobs and Evidence pack becomes
+  secondary (mockup 03).
+- **Wizard `?group=<id>`** sets step 5's key choice to that group (`keyChoice: 'group'`, `groupId`)
+  and shows a callout naming the group; it cannot open on step 5 as the plan says, because steps 1–4
+  (source, selection, accepted snapshot, target) of a new draft are not done yet — the stepper
+  opens the farthest reachable step as before.
+- **Styles** live in `styles/jobs.css` (nested under `.jobs-page`, where M2 left the note "the
+  job-group rules … arrive with M3"), the dialog in `styles/components.css` and the crumb in
+  `styles/job-detail.css` (plan: `styles.css`); Vault tokens only. Added beyond the mockup:
+  `.verdict.failed` and `.muted-verdict`, `.pair .ok.bad`, `.yes.no`, `.gbar` (selector row), the
+  `.grp` link hover.
+- **New group dialog**: after **Create** the only exit is **Done** (enabled by the "I have stored
+  the key and the seed" box), so the once-only material cannot be dismissed by a stray click or
+  Escape; the key and seed are dropped from React state on Done.
