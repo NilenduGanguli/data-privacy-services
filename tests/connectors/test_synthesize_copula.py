@@ -10,6 +10,7 @@ columns, and the evidence pack holds no source value.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -19,15 +20,16 @@ pytest.importorskip("scipy")
 
 from dps.auth import LOCAL_PRINCIPAL  # noqa: E402
 from dps.connections import Connection  # noqa: E402
+from dps.engine.batch import PlanConflict  # noqa: E402
 from dps.engine.synth.keys import KeyPseudonyms  # noqa: E402
 from dps.engine.synth.surrogates import seed_bytes, seed_from_caller  # noqa: E402
-from dps.jobs import JobState  # noqa: E402
+from dps.jobs import JobState, load_job_internal  # noqa: E402
 from dps.jobs_models import ObjectRef, RunSpec  # noqa: E402
 from dps.layers.connectors.evidence import LABEL_SYNTHESIZE, get_evidence  # noqa: E402
 from dps.layers.connectors.submit import submit_run  # noqa: E402
 from dps.worker import HandlerContext  # noqa: E402
 from tests.connectors.helpers import db_key_enc, discover_and_accept, drive  # noqa: E402
-from tests.fixtures.sources import SourcePg  # noqa: E402
+from tests.fixtures.sources import CUSTOMERS_DDL, SourcePg, customers_records  # noqa: E402
 
 pytestmark = [pytest.mark.db, pytest.mark.integration, pytest.mark.pg_source]
 PURPOSE = {"ticket": "CHG-51770", "legal_basis": "legitimate interest — synthetic UAT data"}
@@ -224,3 +226,167 @@ async def test_a_privacy_gate_fails_prepare_before_any_write(
     assert ev is not None and ev.pack.outcome == "failed"
     assert ev.pack.errors == [{"code": "privacy_gate", "where": "prepare"}]
     assert await db_key_enc(job.id) is None
+
+
+# -- M5 lane verification r1: a declared foreign key, and no real key in the target -------------
+
+EMPLOYEES = 40
+
+
+def _label(job: Any, column: str) -> str:
+    """The label the job keyed ``column``'s pseudonym by (its plan, value-free)."""
+    assert job.plan is not None
+    entry = next(p for p in job.plan["pseudonyms"] if p["name"] == column)
+    return str(entry.get("label") or entry["entity_type"])
+
+
+async def _ints(source_pg: SourcePg, fqn: str, column: str) -> list[int]:
+    rows = await source_pg.admin.fetch(f"SELECT {column} AS v FROM {fqn}")
+    return [int(r["v"]) for r in rows if r["v"] is not None]
+
+
+async def _assert_no_real_key(
+    source_pg: SourcePg,
+    job: Any,
+    sub: Any,
+    *,
+    source: str,
+    employees: str,
+    target: str,
+) -> None:
+    """Source vs target, counts only: no real customer or employee key in the target; the
+    pseudonymised foreign key is the referenced key's pseudonym (joins hold in the group)."""
+    real_customers = set(await _ints(source_pg, source, "customer_id"))
+    real_employees = set(await _ints(source_pg, employees, "employee_id"))
+    real_fk = await _ints(source_pg, source, "relationship_manager_id")
+    tgt_customers = await _ints(source_pg, target, "customer_id")
+    tgt_fk = await _ints(source_pg, target, "relationship_manager_id")
+    survivors = {
+        "customer_id": len(set(tgt_customers) & (real_customers | real_employees)),
+        "relationship_manager_id": len(set(tgt_fk) & (real_customers | real_employees)),
+    }
+    assert survivors == {"customer_id": 0, "relationship_manager_id": 0}, survivors
+    assert len(set(tgt_customers)) == len(real_customers)  # still a key, one row per source row
+    assert len(tgt_fk) == len(real_fk) > 0
+    label = _label(job, "relationship_manager_id")
+    keys = KeyPseudonyms(seed_bytes(seed_from_caller(sub.synthesis_seed)))
+    assert sorted(tgt_fk) == sorted(keys.integer(label, v) for v in real_fk)
+    assert set(tgt_fk) <= {keys.integer(label, e) for e in real_employees}  # the FK still joins
+
+
+async def test_copula_job_on_a_table_with_a_declared_foreign_key(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """The demo ``customers`` declares ``relationship_manager_id`` a foreign key to
+    ``employees``: the run pseudonymises it (D-A B2), so the copula must not model it too (it
+    did, and the job died in ``prepare`` as ``internal_error``). Keys are 9 digits, as in the
+    demo, where the old in-tier pseudonyms landed on other real keys."""
+    schema = source_pg.schema
+    await source_pg.table(
+        "employees",
+        "employee_id bigint PRIMARY KEY, branch_code varchar(11) NOT NULL",
+        [(50_000_001 + i, f"BR{i % 5:03d}") for i in range(EMPLOYEES)],
+    )
+    ddl = CUSTOMERS_DDL.replace(
+        "relationship_manager_id bigint,",
+        f'relationship_manager_id bigint REFERENCES "{schema}".employees,',
+    )
+    assert ddl != CUSTOMERS_DDL
+    records = [
+        (100_000_000 + (i * 7919) % 900_000_000, *r[1:12], 50_000_001 + i % EMPLOYEES, *r[13:])
+        for i, r in enumerate(customers_records(ROWS))
+    ]
+    obj = await source_pg.table("customers", ddl, records)
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    rm = next(c for c in snap.columns if c.name == "relationship_manager_id")
+    assert rm.entity_type is None and rm.kind == "int"  # as discovered on the demo table
+    sub, job = await _run(handler_ctx, src, uat, source_pg, obj, snap.id, "customers_synth")
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    assert job.progress.rows_written == ROWS
+    ev = await get_evidence("t1", job.progress.evidence_id)
+    assert ev is not None and ev.pack.privacy is not None
+    assert ev.pack.privacy["exact_row_matches"] == 0
+    assert ev.pack.tabular is not None
+    assert "$.relationship_manager_id" not in ev.pack.tabular["columns"]
+    methods = {c["path"]: c["method"] for c in ev.pack.columns}
+    assert methods["$.relationship_manager_id"] == "key_pseudonym", methods
+    assert _label(job, "relationship_manager_id") == f"KEY|{schema}.employees.employee_id"
+    overlap = await source_pg.admin.fetchval(
+        f'SELECT count(*) FROM (SELECT {NON_KEY} FROM "{schema}".customers '
+        f'INTERSECT SELECT {NON_KEY} FROM "{schema}".customers_synth) q'
+    )
+    assert overlap == 0
+    await _assert_no_real_key(
+        source_pg,
+        job,
+        sub,
+        source=f'"{schema}".customers',
+        employees=f'"{schema}".employees',
+        target=f'"{schema}".customers_synth',
+    )
+
+
+async def test_copula_job_on_the_seeded_demo_customers(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """The lane verification's reproduction: copula ``bank.customers`` (the seeded demo table,
+    declared foreign key to ``bank.employees``) succeeds, with 0 exact-row matches and no real
+    key in the target."""
+    rows = int(await source_pg.admin.fetchval("SELECT count(*) FROM bank.customers"))
+    if rows < 1000:
+        message = "the demo bank is not seeded (docker compose --profile sources up seed-sources)"
+        if os.environ.get("DPS_TEST_REQUIRE_SERVICES") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    obj = ObjectRef(owner="bank", name="customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    sub, job = await _run(handler_ctx, src, uat, source_pg, obj, snap.id, "demo_customers_synth")
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    assert job.progress.rows_written == rows
+    ev = await get_evidence("t1", job.progress.evidence_id)
+    assert ev is not None and ev.pack.privacy is not None and ev.pack.tabular is not None
+    assert ev.pack.privacy["exact_row_matches"] == 0
+    assert "$.relationship_manager_id" not in ev.pack.tabular["columns"]
+    target = f'"{source_pg.schema}".demo_customers_synth'
+    overlap = await source_pg.admin.fetchval(
+        f"SELECT count(*) FROM (SELECT {NON_KEY} FROM bank.customers "
+        f"INTERSECT SELECT {NON_KEY} FROM {target}) q"
+    )
+    assert overlap == 0
+    await _assert_no_real_key(
+        source_pg,
+        job,
+        sub,
+        source="bank.customers",
+        employees="bank.employees",
+        target=target,
+    )
+
+
+async def test_a_plan_conflict_fails_prepare_without_retrying(
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: RegisterSource,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contradictory plan is a defect, not a transient error: ``prepare`` fails the job with
+    the value-free ``plan_conflict`` at once instead of retrying ``internal_error`` until dead."""
+    import dps.layers.connectors.jobs_run as jobs_run
+
+    def conflict(*args: Any, **kwargs: Any) -> Any:
+        raise PlanConflict("a pseudonym column is also planned or sampled")
+
+    monkeypatch.setattr(jobs_run, "_transformer", conflict)
+    obj = await source_pg.customers_table(rows=300)
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    _, job = await _run(handler_ctx, src, uat, source_pg, obj, snap.id, "never_written")
+    assert job.state == JobState.failed, job.state
+    assert job.error_code == "plan_conflict", job.error_code
+    internal = await load_job_internal(job.id)
+    assert internal is not None and internal.attempts == 1, "retried"

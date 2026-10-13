@@ -8,7 +8,8 @@ rows the job writes for those sources), measure fidelity and privacy on it, and 
 anything is written. The fitted model is returned base64-encoded for the caller to seal into
 ``JobSecret.tabular_model``; it is never stored unsealed, never logged and purged with the job key.
 
-Which columns are modelled (:func:`tabular_columns`): top-level, non-key columns the accepted
+Which columns are modelled (:func:`tabular_columns`): top-level, non-key, non-pseudonymised
+(identifiers and declared foreign keys get keyed pseudonyms, D-A) columns the accepted
 snapshot classifies non-sensitive (no entity type, not free text) and — for a single-table run
 (``personal=True``, D-A B1) — classified attributes the policy keeps
 (:func:`~dps.layers.connectors.targets.kept_attribute`: city, gender, age …), whose kind the
@@ -27,7 +28,7 @@ import asyncio
 import base64
 import hashlib
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -136,21 +137,27 @@ def tabular_columns(
     max_distinct_ratio: float = 0.5,
     projection: Sequence[str] | None = None,
     personal: bool = False,
+    pseudonyms: Collection[str] = (),
 ) -> tuple[list[TabularColumn], list[dict[str, str]]]:
     """Modellable columns and the columns the engine leaves (with reasons).
 
     ``projection`` (the run's projected column names) leaves every other column out entirely.
+    ``pseudonyms`` (D-A): the columns the run replaces by keyed pseudonyms
+    (:func:`~dps.layers.connectors.targets.pseudonym_columns`: identifiers, every written key and
+    every declared foreign key) are never modelled — a modelled foreign key would draw real
+    parent keys, and a column cannot be both drawn and pseudonymised.
     ``personal`` (single-table runs, D-A B1) also models classified attributes the policy keeps
     (:func:`~dps.layers.connectors.targets.kept_attribute`); one it cannot model is listed in
     ``excluded`` and keeps its surrogate plan. Linked generation leaves them out entirely.
     """
     info = {c.path: c for c in shape.columns}
     keys = set(shape.key)
+    skipped = set(pseudonyms)
     wanted = set(projection) if projection is not None else None
     out: list[TabularColumn] = []
     excluded: list[dict[str, str]] = []
     for cc in sorted(snapshot.columns, key=lambda c: c.path):
-        if cc.is_key or cc.name in keys or cc.text_column:
+        if cc.is_key or cc.name in keys or cc.name in skipped or cc.text_column:
             continue
         if cc.entity_type is not None and not (personal and kept_attribute(cc, keys)):
             continue
@@ -526,7 +533,9 @@ async def prepare_tabular(
         raise TabularGateError(
             "tabular_invalid", f"tabular engine {engine_name} is not enabled on this deployment"
         )
-    columns, excluded = tabular_columns(shape, snapshot, projection=projection, personal=True)
+    columns, excluded = tabular_columns(
+        shape, snapshot, projection=projection, personal=True, pseudonyms=pseudonyms
+    )
     if not columns:
         raise TabularGateError("tabular_invalid", "no column qualifies for tabular synthesis")
     sampled = await connector.sample(

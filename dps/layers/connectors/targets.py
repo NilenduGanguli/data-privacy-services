@@ -45,7 +45,7 @@ from dps.config import Settings
 from dps.connections import Connection
 from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
 from dps.engine.policy import MethodSpec, resolve_policy
-from dps.engine.synth.keys import INT_DIGITS, LINK_ENTITIES, MIN_PSEUDONYM_DIGITS
+from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSEUDONYM_LIMIT
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.methods import METHODS
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
@@ -238,10 +238,14 @@ def _pseudonym_of(
     entity = str(c.entity_type) if c.entity_type is not None else "KEY"
     common: dict[str, Any] = {"path": c.path, "name": c.name, "entity_type": entity, "label": label}
     if kind in ("int", "decimal") and (kind == "int" or not (info and info.scale)):
-        digits = (info.precision if info is not None else None) or INT_DIGITS.get(data_type)
-        if digits is not None and digits < MIN_PSEUDONYM_DIGITS:
+        precision = info.precision if info is not None else None
+        digits = precision or INT_DIGITS.get(data_type)
+        # D-A: a pseudonym of a key below 10⁹ lies in [10⁹, 2·10⁹) (never a real key there):
+        # the column must hold it — integer, bigint, numeric(p ≥ 10, 0)
+        limit = 10**precision - 1 if precision else INT_LIMITS.get(data_type)
+        if limit is not None and limit < MIN_PSEUDONYM_LIMIT:
             return None
-        return PseudonymColumn(**common, kind="int", digits=digits)
+        return PseudonymColumn(**common, kind="int", digits=digits, limit=limit)
     if kind in _TEXTUAL:
         return PseudonymColumn(**common, kind="text")
     if kind == "uuid":
@@ -310,7 +314,8 @@ def _check_identifiers(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
                 "synthesize_pseudonym_unsupported",
                 422,
                 f"{c.path}: an identifier or key that synthetic rows must not copy, and no keyed "
-                "pseudonym fits its type (integers of at least 9 digits, text, uuid)",
+                "pseudonym fits its type (integer, bigint or numeric of at least 10 digits; "
+                "text; uuid)",
             )
 
 

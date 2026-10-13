@@ -9,13 +9,19 @@ job group must still join. So a sensitive key (and every join identifier) is rep
   the same pseudonym in ``customers.customer_id`` and ``accounts.customer_id`` of one job group,
   and nothing links it back without the seed;
 * **injective** — a keyed permutation of the value's domain, so keys stay unique;
-* **fixed-point free** — the map is ``p⁻¹(p(v) + 1 mod N)`` for a keyed permutation ``p``: one
-  cycle through the whole domain, so no value ever maps to itself;
-* **shape-keeping** — integers stay integers in a tier that does not depend on the column type
-  (``[0, 10⁹)`` for values below 10⁹, so an ``integer`` column still holds them; otherwise the
-  value's own digit count, up to 18 digits); text keeps its length and every character's class
-  (digit, upper-case and lower-case ASCII letters are permuted, everything else is kept); a UUID
-  stays a UUID.
+* **never a real key** (M5 lane verification r1) — an integer pseudonym lies in a band no accepted
+  source value reaches: a value below 10⁹ maps into ``[10⁹, 2·10⁹)`` (an ``integer`` column still
+  holds it: 2·10⁹ − 1 < 2³¹), a value of 10 to 18 digits into ``[10¹⁸, 2·10¹⁸)`` (a ``bigint``
+  holds it; longer values are refused). So no pseudonym equals its own value or another source
+  key — except a key in ``[10⁹, 2·10⁹)`` of a column that *also* holds keys below 10⁹ (one
+  ``integer`` column must take both tiers: the residual is documented, not hidden). A text or
+  UUID pseudonym is a keyed cycle through the value's own shape (no fixed point; another key of
+  the same shape is hit with probability ~n²/|shape|, negligible for UUIDs and long mixed keys);
+* **shape-keeping** — integers stay integers with their sign (the band is the shape: 10 digits
+  for values below 10⁹, 19 for longer ones), in a band that does not depend on the column type
+  (so a key and its foreign keys map alike whatever their integer types); text keeps its length
+  and every character's class (digit, upper-case and lower-case ASCII letters are permuted,
+  everything else is kept); a UUID stays a UUID.
 
 Pure Python (no extra), value-free errors. The permutation is a balanced Feistel network with an
 HMAC-SHA256 round function (four rounds, counter-mode output for wide halves), cycle-walked into
@@ -43,11 +49,24 @@ INT_DIGITS: dict[str, int] = {
     "bigint": 18,
     "int8": 18,
 }
-#: An integer pseudonym of a value below 10⁹ is below 10⁹: the narrowest column that takes it.
-MIN_PSEUDONYM_DIGITS = 9
+#: Largest magnitude an integer column type holds (``numeric(p, 0)`` holds ``10**p - 1``).
+INT_LIMITS: dict[str, int] = {
+    "smallint": 2**15 - 1,
+    "int2": 2**15 - 1,
+    "integer": 2**31 - 1,
+    "int": 2**31 - 1,
+    "int4": 2**31 - 1,
+    "bigint": 2**63 - 1,
+    "int8": 2**63 - 1,
+}
+#: Values below 10⁹ map into ``[10⁹, 2·10⁹)``; values of 10 to 18 digits into ``[10¹⁸, 2·10¹⁸)``.
+SMALL_TIER = 10**9
+BIG_TIER = 10**18
+#: The largest pseudonym of a value below 10⁹: what an integer key column must hold (``integer``,
+#: ``bigint``, ``numeric(p ≥ 10, 0)``); narrower columns are refused at submit.
+MIN_PSEUDONYM_LIMIT = 2 * SMALL_TIER - 1
 MAX_PSEUDONYM_DIGITS = 18
 _ROUNDS = 4
-_SMALL_TIER = 10**MIN_PSEUDONYM_DIGITS
 _CLASSES = (string.digits, string.ascii_uppercase, string.ascii_lowercase)
 
 
@@ -128,23 +147,23 @@ class KeyPseudonyms:
         return feistel_invert((feistel_permute(x, domain, keys) + 1) % domain, domain, keys)
 
     def integer(self, entity_type: str, value: int) -> int:
-        """The pseudonym of an integer identifier: values below 10⁹ stay below 10⁹, longer ones
-        keep their digit count (at most 18 digits); the sign is kept.
+        """The pseudonym of an integer identifier, in a band no accepted source value reaches:
+        ``|value| < 10⁹`` → ``[10⁹, 2·10⁹)``, 10 to 18 digits → ``[10¹⁸, 2·10¹⁸)``; the sign is
+        kept. Injective (a keyed permutation per tier onto disjoint bands), never the value
+        itself and never another source key below 10¹⁸ outside ``[10⁹, 2·10⁹)``.
 
         Raises:
             PseudonymError: more than 18 digits.
         """
         sign, magnitude = (-1, -value) if value < 0 else (1, value)
-        if magnitude < _SMALL_TIER:
-            low, digits = 0, MIN_PSEUDONYM_DIGITS
+        if magnitude < SMALL_TIER:
+            tier, low, band, domain = "small", 0, SMALL_TIER, SMALL_TIER
+        elif magnitude < BIG_TIER:
+            tier, low, band, domain = "big", SMALL_TIER, BIG_TIER, BIG_TIER - SMALL_TIER
         else:
-            digits = len(str(magnitude))
-            if digits > MAX_PSEUDONYM_DIGITS:
-                raise PseudonymError("an integer identifier has more than 18 digits")
-            low = 10 ** (digits - 1)
-        domain = 10**digits - low
-        label = f"{entity_type}|int|{digits}|{'-' if sign < 0 else '+'}"
-        return sign * (low + self._cycle(magnitude - low, domain, label))
+            raise PseudonymError("an integer identifier has more than 18 digits")
+        label = f"{entity_type}|int-band|{tier}|{'-' if sign < 0 else '+'}"
+        return sign * (band + feistel_permute(magnitude - low, domain, self._round_keys(label)))
 
     def text(self, entity_type: str, value: str, *, kind: str = "text") -> str:
         """The pseudonym of a text identifier: same length, same character class at every

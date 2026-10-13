@@ -19,7 +19,7 @@ import pytest
 pytest.importorskip("scipy")
 
 from dps.config import Settings  # noqa: E402
-from dps.engine.batch import BatchTransformer, ColumnPlan  # noqa: E402
+from dps.engine.batch import BatchTransformer, ColumnPlan, PseudonymColumn  # noqa: E402
 from dps.engine.findings import hash_value  # noqa: E402
 from dps.engine.policy import MethodSpec, Policy, TabularConstraint, load_preset  # noqa: E402
 from dps.engine.service import PrivacyEngine  # noqa: E402
@@ -250,6 +250,100 @@ def test_integer_columns_get_the_digits_their_type_holds() -> None:
     snap = _snapshot(shape, [_cc(n, "int", None) for n in ("ID", "S", "I", "B", "N")])
     cols = {c.name: c for c in tabular_columns(shape, snap)[0]}
     assert {n: c.precision for n, c in cols.items()} == {"B": 18, "I": 9, "N": 7, "S": 4}
+
+
+FK_SHAPE = TableShape(
+    object=ObjectRef(owner="bank", name="customers"),
+    key=["ID"],
+    key_source="primary_key",
+    columns=[
+        *SHAPE.columns,
+        ColumnInfo(
+            path="$.RM_ID",
+            name="RM_ID",
+            data_type="bigint",
+            kind="int",
+            references="bank.employees.employee_id",
+        ),
+    ],
+)
+FK_SNAPSHOT = _snapshot(FK_SHAPE, [*SNAPSHOT.columns, _cc("RM_ID", "int", None, 0.25)])
+FK_PSEUDONYMS = [
+    PseudonymColumn(
+        path=f"$.{name}", name=name, entity_type="KEY", kind="int", digits=18, label=label
+    )
+    for name, label in (
+        ("ID", "KEY|bank.customers.ID"),
+        ("RM_ID", "KEY|bank.employees.employee_id"),
+    )
+]
+
+
+def test_pseudonymised_columns_are_never_modelled() -> None:
+    """M5 lane verification r1: a declared foreign key (``customers.relationship_manager_id``)
+    is pseudonymised under D-A B2, so the engine must not model it too."""
+    cols, excluded = tabular_columns(FK_SHAPE, FK_SNAPSHOT)
+    assert "$.RM_ID" in [c.path for c in cols]  # an unclassified int, modellable on its own
+    cols, excluded = tabular_columns(FK_SHAPE, FK_SNAPSHOT, pseudonyms=["ID", "RM_ID"])
+    assert [c.path for c in cols] == ["$.BALANCE", "$.SEGMENT"]
+    assert "$.RM_ID" not in {e["path"] for e in excluded}  # pseudonymised, not kept
+
+
+async def test_a_table_with_a_pseudonymised_foreign_key_prepares() -> None:
+    """The seeded ``bank.customers`` died in ``prepare`` (``internal_error`` until dead): the
+    copula modelled the foreign key that the run also pseudonymises, and the transformer refused
+    the overlap. Now the foreign key is only pseudonymised, and the preview carries no real one."""
+    rows = [{**r, "RM_ID": 50_000_000 + i % 40} for i, r in enumerate(_rows(600))]
+    settings = _settings()
+    seed = generate_synthesis_seed()
+    policy = load_preset("synthetic-realistic")
+    previews: list[list[dict[str, Any]]] = []
+
+    def make(sampler: Any, constraints: Any) -> BatchTransformer:
+        transformer = BatchTransformer(
+            PrivacyEngine(settings),
+            policy=policy,
+            mode="synthesize",
+            columns=PLANS,
+            shape=FK_SHAPE,
+            key=None,
+            seed=seed,
+            locale="en_US",
+            tabular=sampler,
+            constraints=constraints,
+            pseudonyms=FK_PSEUDONYMS,
+        )
+        transform = transformer.transform
+
+        def spy(batch: list[dict[str, Any]]) -> Any:
+            result = transform(batch)
+            previews.append(result.rows)
+            return result
+
+        transformer.transform = spy  # type: ignore[method-assign]
+        return transformer
+
+    prepared = await prepare_tabular(
+        settings=settings,
+        engine_name="copula",
+        connector=FakeConnector(rows),  # type: ignore[arg-type]
+        shape=FK_SHAPE,
+        selection=None,
+        params={},
+        snapshot=FK_SNAPSHOT,
+        policy=policy,
+        seed=seed_bytes(seed),
+        object_fqn="bank.customers",
+        make_transformer=make,
+        anchor_of=_anchor,
+        pseudonyms=[p.name for p in FK_PSEUDONYMS],
+    )
+    assert prepared.metrics["tabular"]["columns"] == ["$.BALANCE", "$.SEGMENT"]
+    assert prepared.metrics["privacy"]["exact_row_matches"] == 0
+    real = {r["RM_ID"] for r in rows} | {r["ID"] for r in rows}
+    assert previews and all(
+        r["RM_ID"] not in real and r["ID"] not in real for batch in previews for r in batch
+    )
 
 
 def test_holdout_split_is_deterministic_and_bounded() -> None:

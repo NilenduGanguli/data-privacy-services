@@ -704,15 +704,21 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     identifier: a key with an entity type, a join column (`CUSTOMER_ID`, `EMPLOYEE_ID`, `CASE_ID`)
     and any kept MEDIUM+ column become **keyed pseudonyms** under the job's synthesis seed — use one
     job group (one seed) for tables that must join, and their foreign keys still match. Integer
-    pseudonyms of values below 10⁹ are below 10⁹ (an `integer` column holds them); a `smallint` or
-    `numeric(p<9)` identifier is refused (`synthesize_pseudonym_unsupported`), so is an `in_place`
-    synthesize of a table whose key has an entity type (`synthesize_in_place_sensitive_key`) and an
-    `offset` append of such a key; use `table`, `files` or `append` + `generate`. A key the owner
+    pseudonyms lie in bands no real key reaches: a value below 10⁹ maps into `[10⁹, 2·10⁹)` (ten
+    digits; an `integer` column holds them), a value of 10 to 18 digits into `[10¹⁸, 2·10¹⁸)` (a
+    `bigint`); so a synthetic key is never a real key — unless one column holds keys below 10⁹ *and*
+    keys in `[10⁹, 2·10⁹)`. A `smallint` or `numeric(p ≤ 9, 0)` identifier is refused
+    (`synthesize_pseudonym_unsupported`); a `numeric(p, 0)` too narrow for a 19-digit pseudonym of a
+    long key fails the run closed (`incompatible_method`). Also refused: an `in_place` synthesize
+    of a table whose key has an entity type (`synthesize_in_place_sensitive_key`) and an `offset`
+    append of such a key; use `table`, `files` or `append` + `generate`. A key the owner
     reviews as *not personal* (entity type cleared) is a technical id and is kept. A column reviewed
     as not personal is copied as it is — if its written sample shows personal data the pack says
-    `review_required` (not "passed"). A pseudonym may by chance equal another real key in a small
-    domain (text keys of few characters); the permutation guarantees only that no value maps to
-    itself.
+    `review_required` (not "passed"). A text pseudonym keeps the key's shape, so it may by chance
+    equal another real key of that shape (probability ~n²/|shape|: nil for UUIDs and long mixed
+    keys, not for short digit-only text keys); the permutation guarantees that no value maps to
+    itself. Columns the run pseudonymises (identifiers, written keys, declared foreign keys) are
+    never modelled by the copula.
 
 ## 9. Next milestones
 

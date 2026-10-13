@@ -201,7 +201,8 @@ class PseudonymColumn(BaseModel):
     (:class:`~dps.engine.synth.keys.KeyPseudonyms`) instead of copying them (value-free).
 
     ``kind`` is ``int`` (integers, ``numeric(p, 0)``), ``text`` (text, char) or ``uuid``;
-    ``digits`` the decimal digits an integer column holds (a longer pseudonym fails the batch).
+    ``digits`` the decimal digits an integer column holds; ``limit`` the largest magnitude it
+    holds (a larger pseudonym fails the batch; without ``limit``, ``10**digits - 1``).
     ``label`` keys the pseudonym when it is not the entity type: an unclassified key or foreign
     key (``entity_type`` ``KEY``) is keyed by the referenced key, ``KEY|owner.table.column``.
     """
@@ -212,7 +213,14 @@ class PseudonymColumn(BaseModel):
     entity_type: str
     kind: Literal["int", "text", "uuid"]
     digits: int | None = None
+    limit: int | None = None
     label: str | None = None
+
+    def max_magnitude(self) -> int | None:
+        """The largest integer pseudonym the column holds (``None``: unbounded)."""
+        if self.limit is not None:
+            return self.limit
+        return 10**self.digits - 1 if self.digits is not None else None
 
 
 class BatchResult(BaseModel):
@@ -238,6 +246,12 @@ class LeakageError(Exception):
         message = f"leakage: {hits} original value(s) found in the transformed batch; "
         super().__init__(rule if rule is not None else message + "nothing was written")
         self.hits, self.rule = hits, rule
+
+
+class PlanConflict(ValueError):
+    """The column plans, the tabular sampler and the key pseudonyms of a run contradict each
+    other (a column planned twice, a pseudonym the table lacks …): a defect of the plan, not of
+    the data — deterministic, so a job fails instead of retrying it. Value-free."""
 
 
 class IncompatibleMethod(Exception):
@@ -357,7 +371,8 @@ class BatchTransformer:
                 a tabular sampler outside synthesize mode, on a table without a key, or writing
                 a key column, a planned column or a column the table does not have; pseudonyms
                 outside synthesize mode, on a planned or sampled column or a column the table
-                does not have.
+                does not have. The plan contradictions are :class:`PlanConflict` (a
+                ``ValueError``).
             IncompatibleMethod: ``incompatible_method`` for a synthesize-mode method that needs
                 key material, or ``fpe_digits`` without ``leading_zero: preserve`` on a numeric
                 column.
@@ -390,15 +405,15 @@ class BatchTransformer:
             raise IncompatibleMethod(lossy[0], "incompatible_method")
         known = {c.name for c in shape.columns}
         if any(c.name not in known for c in columns) or (anchor and anchor[0] not in known):
-            raise ValueError("a column plan names a column the table does not have")
+            raise PlanConflict("a column plan names a column the table does not have")
         if tabular is not None:
             if mode != "synthesize":
                 raise ValueError("tabular sampling runs in synthesize mode only")
             if not shape.key:
-                raise ValueError("tabular sampling needs a table key")
+                raise PlanConflict("tabular sampling needs a table key")
             writable = known - set(shape.key) - {c.name for c in columns}
             if any(name not in writable for name in tabular.columns):
-                raise ValueError(
+                raise PlanConflict(
                     "the tabular sampler writes a key column, a planned column or a column "
                     "the table does not have"
                 )
@@ -407,10 +422,10 @@ class BatchTransformer:
                 raise ValueError("key pseudonyms run in synthesize mode only")
             names = {p.name for p in pseudonyms}
             if any(n not in known for n in names):
-                raise ValueError("a pseudonym column names a column the table does not have")
+                raise PlanConflict("a pseudonym column names a column the table does not have")
             sampled = set(tabular.columns) if tabular is not None else set()
             if names & ({c.name for c in columns} | sampled):
-                raise ValueError("a pseudonym column is also planned or sampled")
+                raise PlanConflict("a pseudonym column is also planned or sampled")
         if max_resample < 0:
             raise ValueError("max_resample must not be negative")
         self.engine, self.policy, self.mode = engine, policy, mode
@@ -633,7 +648,8 @@ class BatchTransformer:
             try:
                 if p.kind == "int":
                     number = self._keys.integer(label, int(source))
-                    if p.digits is not None and len(str(abs(number))) > p.digits:
+                    largest = p.max_magnitude()
+                    if largest is not None and abs(number) > largest:
                         raise IncompatibleMethod(p.path, "incompatible_method")
                     text = str(number)
                 else:

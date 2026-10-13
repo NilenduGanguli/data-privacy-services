@@ -36,22 +36,49 @@ def test_the_feistel_permutation_is_a_keyed_bijection_and_inverts() -> None:
     assert sorted(feistel_permute(x, 1000, keys) for x in range(1000)) == list(range(1000))
 
 
-def test_integer_pseudonyms_are_injective_fixed_point_free_and_in_tier() -> None:
+def test_integer_pseudonyms_are_injective_fixed_point_free_and_in_their_band() -> None:
     p = KeyPseudonyms(SEED)
     sources = list(range(10_000_001, 10_005_001)) + list(range(0, 2000))
     out = [p.integer("CUSTOMER_ID", v) for v in sources]
     assert len(set(out)) == len(sources)  # unique keys stay unique
     assert all(a != b for a, b in zip(sources, out, strict=True))  # never the value itself
-    assert all(0 <= o < 10**9 for o in out)  # an int4 column still holds them
-    assert not set(out) & set(sources)  # no pseudonym is another source key here
+    # below 10^9 -> [10^9, 2*10^9): never a key of that tier, and an int4 column still holds it
+    assert all(10**9 <= o < 2 * 10**9 <= 2**31 - 1 for o in out)
+    assert not set(out) & set(sources)
     assert out == [KeyPseudonyms(SEED).integer("CUSTOMER_ID", v) for v in sources]
     assert p.integer("EMPLOYEE_ID", 10_000_001) != out[0]  # entity-scoped
     assert KeyPseudonyms(b"\x08" * 32).integer("CUSTOMER_ID", 10_000_001) != out[0]
-    big = 4_123_456_789_012
-    assert len(str(p.integer("CUSTOMER_ID", big))) == len(str(big))  # 13 digits stay 13
+    # 10 to 18 digits -> [10^18, 2*10^18): above every accepted value, still a bigint
+    for big in (10**9, 4_123_456_789_012, 10**18 - 1):
+        mapped = p.integer("CUSTOMER_ID", big)
+        assert 10**18 <= mapped < 2 * 10**18 <= 2**63 - 1
     assert p.integer("CUSTOMER_ID", -42) < 0 and p.integer("CUSTOMER_ID", -42) != -42
+    assert -2 * 10**9 < p.integer("CUSTOMER_ID", -42) <= -(10**9)
     with pytest.raises(PseudonymError):
         p.integer("CUSTOMER_ID", 10**18)
+
+
+def test_integer_pseudonyms_never_land_on_a_real_key_at_realistic_n() -> None:
+    """M5 lane verification r1 (D-A "no real key in synthetic targets"): the old in-tier map sent
+    keys below 10^9 into all of [0, 10^9) and so onto other real keys (~n^2/10^9 of them: 1 in
+    20,000 demo rows, ~90 here). The banded map lands on none, whatever the key layout."""
+    import random
+
+    rng = random.Random(20261013)
+    layouts = {
+        "random 9-digit ids (the demo's)": rng.sample(range(10**8, 10**9), 300_000),
+        "a sequence from 1": list(range(1, 150_001)),
+        "random 12-digit ids": rng.sample(range(10**11, 10**12), 50_000),
+        "random ids of 10 to 18 digits": [rng.randrange(10**9, 10**18) for _ in range(20_000)],
+    }
+    union = {v for keys in layouts.values() for v in keys}
+    for seed in (SEED, b"\x09" * 32):
+        p = KeyPseudonyms(seed)
+        for layout, keys in layouts.items():
+            out = [p.integer("KEY|bank.customers.customer_id", v) for v in keys]
+            assert len(set(out)) == len(keys), layout  # still a key
+            assert not set(out) & set(keys), layout  # no real key of the column
+            assert not set(out) & union, layout  # nor of any other layout
 
 
 def test_text_pseudonyms_keep_the_shape_and_never_collide() -> None:
@@ -192,3 +219,22 @@ def test_a_pseudonym_the_column_cannot_hold_fails_the_batch_closed() -> None:
     with pytest.raises(IncompatibleMethod) as err:
         t.transform([{"account_id": 1, "customer_id": 4_000_000_000, "holder": "A", "branch": "B"}])
     assert err.value.code == "incompatible_method" and "4000000000" not in str(err.value)
+
+
+def test_an_int4_key_holds_its_banded_pseudonym() -> None:
+    """A key below 10^9 maps into [10^9, 2*10^9): ten digits, which an ``integer`` column holds
+    (its limit, not its nine whole digits, is what counts); a ``numeric(9, 0)`` would not."""
+    int4 = [
+        PseudonymColumn(
+            path="$.customer_id",
+            name="customer_id",
+            entity_type="CUSTOMER_ID",
+            kind="int",
+            digits=9,
+            limit=2**31 - 1,
+        )
+    ]
+    row = {"account_id": 1, "customer_id": 999_999_999, "holder": "A", "branch": "B"}
+    out = _transformer(generate_synthesis_seed(), pseudonyms=int4).transform([dict(row)]).rows
+    assert 10**9 <= out[0]["customer_id"] < 2 * 10**9
+    assert PseudonymColumn(**{**int4[0].model_dump(), "limit": None}).max_magnitude() == 10**9 - 1

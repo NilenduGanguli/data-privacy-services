@@ -64,6 +64,7 @@ from dps.engine.batch import (
     BatchTransformer,
     IncompatibleMethod,
     LeakageError,
+    PlanConflict,
     TabularSampler,
     row_anchor,
 )
@@ -363,8 +364,8 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
 
     Every refusal moves the job to a failed finalize with a code (``snapshot_stale``,
     ``no_key``, ``row_count_mismatch``, ``target_invalid``, ``length_overflow``,
-    ``incompatible_method``, ``leakage``, ``pk_collision``, ``secret_unavailable``, a selection or
-    connector code); a retryable connector failure is retried with backoff; anything unexpected
+    ``incompatible_method``, ``leakage``, ``pk_collision``, ``secret_unavailable``,
+    ``plan_conflict``, a selection or connector code); a retryable connector failure is retried with backoff; anything unexpected
     is retried as ``internal_error`` (class name only).
     """
     try:
@@ -381,6 +382,8 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _fail_to_finalize(ctx, job, "incompatible_method", str(exc))
     except LeakageError as exc:
         await _fail_to_finalize(ctx, job, "leakage", str(exc))
+    except PlanConflict as exc:  # deterministic: a retry would refuse it again (value-free)
+        await _fail_to_finalize(ctx, job, "plan_conflict", str(exc))
     except (SealError, SecretUnavailable):
         await _fail_to_finalize(
             ctx, job, "secret_unavailable", "the job's sealed material could not be opened"

@@ -966,6 +966,61 @@ real survivors).
   §9 (posture scope) updated. The reviewer's probes p1/p3/p5 now show no t2 names and
   `leakage_strict` failing on the warn version.
 
+## Lane verification r1 fix — copula on a declared foreign key; no real key in synthetic targets (D-A)
+
+Findings (`~/.cache/dps-build/reports/M5-verify-r1.md`, blocking 1 and 2):
+
+1. **Copula `bank.customers` died in `prepare`.** `customers.relationship_manager_id` is a declared
+   foreign key (unclassified `int`): `targets.pseudonym_columns` pseudonymises it (G2 r1 B2), and
+   `tabular.tabular_columns` modelled it too, so `BatchTransformer` refused the overlap with a
+   `ValueError` that `jobs_run.prepare` retried as `internal_error` until the job was dead.
+   - `tabular_columns(..., pseudonyms=())`: columns the run pseudonymises are never modelled;
+     `prepare_tabular` passes the run's pseudonym columns. They are not listed in `tabular.excluded`
+     (that list is for columns that keep their source values).
+   - `batch.PlanConflict(ValueError)` for the plan contradictions `BatchTransformer` refuses (a plan or
+     pseudonym naming a missing column, a sampler writing a key/planned column, a pseudonym also
+     planned or sampled, tabular without a key); `jobs_run.prepare` fails such a job once with the
+     value-free `plan_conflict` (new code) instead of retrying `internal_error`.
+2. **A real key in synthetic targets.** The integer pseudonym was a keyed cycle through `[0, 10⁹)` for
+   values below 10⁹, which contains the source's own keys: another row's real key came out with
+   probability ~n²/10⁹ (observed: 1 `customer_id` in 20,000 rows, 1 `account_id` in 30,000; a
+   300,000-key probe hit 85 and 92 under two seeds).
+   - `KeyPseudonyms.integer` now maps into bands no accepted source value reaches: `|v| < 10⁹` →
+     `[10⁹, 2·10⁹)` (fits `integer`: 2·10⁹ − 1 < 2³¹), 10 to 18 digits → `[10¹⁸, 2·10¹⁸)` (fits
+     `bigint`); sign kept; > 18 digits refused as before. Each tier is a plain keyed Feistel
+     permutation onto its band (injective, deterministic per seed and label, type-independent so a key
+     and its foreign keys agree); no fixed point is possible since the bands are disjoint from the
+     inputs. Labels changed (`<entity>|int-band|<tier>|<sign>`), so pseudonyms differ from earlier
+     runs of the same seed — re-run every table of a job group under this build.
+   - **Residual (documented, not hidden):** a column holding keys below 10⁹ *and* keys in
+     `[10⁹, 2·10⁹)` can still see a small-tier pseudonym equal a real key of the second range — the
+     `integer` type forces the small band there. A cycle-walk past the group's source key set was
+     considered and rejected: walking forward to the next non-source value is not injective (two
+     source keys on one run of the cycle reach the same value), and the group has no shared state
+     at which the key set could be known consistently for every table.
+   - Text and UUID pseudonyms are unchanged (shape-keeping cycles): a collision with another real key
+     of the same shape has probability ~n²/|shape| — nil for UUIDs and long mixed keys, not for short
+     digit-only text keys at very large n (open owner decision; the demo's `account_number`/`iban`
+     showed 0).
+   - `PseudonymColumn.limit` (largest magnitude the column holds; `max_magnitude()` falls back to
+     `10**digits − 1`); `targets._pseudonym_of` refuses an integer identifier whose column cannot hold
+     2·10⁹ − 1 (`smallint`, **`numeric(p ≤ 9, 0)` — newly refused**, was accepted at p = 9) with
+     `synthesize_pseudonym_unsupported`; a `numeric(10..18, 0)` key with values ≥ 10⁹ now fails closed
+     at the write (`incompatible_method`, the 19-digit band does not fit) where it used to keep its
+     digit count.
+- Tests: `tests/test_key_pseudonyms.py` (banded tiers; `test_integer_pseudonyms_never_land_on_a_real_key_at_realistic_n`:
+  300,000 random 9-digit ids, a 1..150,000 sequence, 50,000 random 12-digit and 20,000 random
+  10–18-digit ids, two seeds — 0 overlap; an `int4` key holds its pseudonym), `tests/connectors/test_targets.py`
+  (`integer`/`numeric(10,0)` accepted, `numeric(9,0)` refused), `tests/test_tabular_prepare.py`
+  (a pseudonymised FK is not modelled; `prepare_tabular` on a table with one succeeds and its preview
+  holds no real key — `PlanConflict` before the fix), `tests/connectors/test_synthesize_copula.py`
+  (`test_copula_job_on_a_table_with_a_declared_foreign_key`: 9-digit keys + FK to `employees`;
+  `test_copula_job_on_the_seeded_demo_customers`: the verifier's reproduction on the seeded
+  `bank.customers` — fails with `plan_conflict` with the exclusion reverted; both assert success,
+  `exact_row_matches` 0, 0 real customer/employee keys in the target and FK pseudonyms equal to the
+  referenced key's; `test_a_plan_conflict_fails_prepare_without_retrying`). Contract §5.3 D-A
+  paragraph and HANDOFF §8 updated.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

@@ -694,6 +694,49 @@ def test_synthesize_refuses_to_copy_or_shift_a_sensitive_key(settings: Settings)
         "synthesize_pseudonym_unsupported",
         422,
     )
+    # D-A: a pseudonym of a key below 10^9 lies in [10^9, 2*10^9) — an integer or a numeric of
+    # at least 10 digits holds it, a numeric(9, 0) does not
+    for data_type, precision, fits in (
+        ("integer", None, True),
+        ("numeric(10,0)", 10, True),
+        ("numeric(9,0)", 9, False),
+    ):
+        typed = snap.model_copy(
+            update={
+                "shape": snap.shape.model_copy(
+                    update={
+                        "columns": [
+                            c.model_copy(
+                                update={
+                                    "data_type": data_type,
+                                    "kind": "decimal" if precision else "int",
+                                    "precision": precision,
+                                    "scale": 0 if precision else None,
+                                }
+                            )
+                            if c.name == "customer_id"
+                            else c
+                            for c in snap.shape.columns
+                        ]
+                    }
+                )
+            }
+        )
+        if fits:
+            _check(spec(**UAT_TABLE, mode="synthesize"), typed, settings=settings)
+            got = pseudonym_columns(
+                typed,
+                mode="synthesize",
+                write_mode="table",
+                pk_strategy=None,
+                projection=[c.name for c in typed.columns],
+            )
+            assert got[0].max_magnitude() == (2**31 - 1 if precision is None else 10**10 - 1)
+        else:
+            assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, typed) == (
+                "synthesize_pseudonym_unsupported",
+                422,
+            )
     dated = _with(snap, "dob", synthesize_method=MethodSpec(method="keep"))
     assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, dated) == (
         "synthesize_pseudonym_unsupported",
