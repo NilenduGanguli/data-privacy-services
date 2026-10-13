@@ -3,19 +3,34 @@ against a local server that counts everything it receives."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import socketserver
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
 
 pytest.importorskip("playwright")
+from playwright.async_api import Error as PlaywrightError  # noqa: E402
+
+from dps.config import Settings  # noqa: E402
+from dps.layers.scanner.browser import (  # noqa: E402
+    LAUNCH_ARGS,
+    close_scan_context,
+    new_scan_context,
+)
 from dps.layers.scanner.guard import (  # noqa: E402
     ALLOWED_METHODS,
     HARDEN_JS,
+    ISOLATE_JS,
+    LOCK_JS,
+    UNROUTED,
     BlockedRequest,
     ScanGuard,
     decide,
@@ -196,6 +211,37 @@ _WORKER = (
     "onmessage = () => { fetch('/from-worker', {method: 'POST', body: 'x'}).catch(() => 0); };"
 )
 
+#: a page that flushes a "draft" whenever it goes away, the way real onboarding apps do
+_UNLOAD = """<!doctype html><html><body onbeforeunload="return 'stay'"><p>draft</p><script>
+const send = (tag) => {
+  navigator.sendBeacon('/beacon-' + tag, 'draft');
+  fetch('/ka-' + tag, {method: 'POST', body: 'draft', keepalive: true}).catch(() => 0);
+};
+addEventListener('pagehide', () => send('pagehide'));
+addEventListener('beforeunload', (e) => { send('beforeunload'); e.preventDefault(); e.returnValue = ''; });
+addEventListener('unload', () => send('unload'));
+document.addEventListener('visibilitychange', () => send('visibility'));
+</script></body></html>"""
+
+#: a popup that flushes on the way out and then closes itself
+_SELF_CLOSE = _UNLOAD.replace("</script>", "setTimeout(() => window.close(), 150);</script>")
+
+_SHARED = (
+    "onconnect = () => { fetch('/from-shared', {method: 'PUT', body: 'x'}).catch(() => 0); "
+    "try { new WebSocket('ws://' + location.host + '/shared-ws'); } catch (e) {} };"
+)
+#: a dedicated worker: opens a plain ws:// socket, POSTs, or reports it is alive, on request
+_WS_WORKER = (
+    "onmessage = (e) => { if (e.data === 'ws') { const w = new WebSocket('ws://' + location.host"
+    " + '/worker-ws'); w.onopen = () => postMessage('open'); w.onerror = () => postMessage('error'); }"
+    " else if (e.data === 'post') { fetch('/worker-post', {method: 'POST', body: 'x'}).catch(() => 0); }"
+    " else { postMessage('alive'); } };"
+)
+_SERVICE = (
+    "self.addEventListener('install', () => self.skipWaiting()); "
+    "self.addEventListener('activate', () => fetch('/from-sw', {method: 'POST', body: 'x'}));"
+)
+
 
 def _handler(counts: _Counts) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
@@ -213,10 +259,42 @@ def _handler(counts: _Counts) -> type[BaseHTTPRequestHandler]:
                     counts.upgrades += 1
                 if self.path != "/__counts":
                     counts.gets.append(self.path)
+            port = self.server.server_address[1]
+            if self.path.startswith("/redir-other"):  # an open redirect to a host out of scope
+                self.send_response(302)
+                self.send_header("location", f"http://localhost:{port}/landed-other")
+                self.send_header("content-length", "0")
+                self.end_headers()
+                return
+            if self.path.startswith("/redir-foreign"):  # to the out-of-scope listener
+                query = dict(parse_qsl(self.path.partition("?")[2]))
+                self.send_response(302)
+                self.send_header(
+                    "location", f"{query['scheme']}://localhost:{query['port']}/landed-foreign"
+                )
+                self.send_header("content-length", "0")
+                self.end_headers()
+                return
+            if self.path.startswith("/redir-ok"):  # positive control: a redirect within scope
+                self.send_response(302)
+                self.send_header("location", "/landed-ok")
+                self.send_header("content-length", "0")
+                self.end_headers()
+                return
+            pages = {"/unload": _UNLOAD, "/self-close": _SELF_CLOSE}
+            route = self.path.split("?", 1)[0]
             if self.path.startswith("/page"):
                 body, ctype = _PAGE.encode(), "text/html; charset=utf-8"
+            elif route in pages:
+                body, ctype = pages[route].encode(), "text/html; charset=utf-8"
             elif self.path == "/worker.js":
                 body, ctype = _WORKER.encode(), "text/javascript"
+            elif self.path == "/wsw.js":
+                body, ctype = _WS_WORKER.encode(), "text/javascript"
+            elif self.path == "/shw.js":
+                body, ctype = _SHARED.encode(), "text/javascript"
+            elif self.path.startswith("/sw"):
+                body, ctype = _SERVICE.encode(), "text/javascript"
             elif self.path == "/s.css":
                 body, ctype = b"body{font:14px sans-serif}", "text/css"
             else:
@@ -315,7 +393,7 @@ async def test_a_filled_page_and_its_popups_send_nothing(
     page = await ctx.new_page()
     guard.bind(page, 2)
     await page.goto(f"{url}/page")
-    guard.arm(page, ["9173 2206 4418", "Meera Venkatesan", "ab"])
+    assert await guard.arm(page, ["9173 2206 4418", "Meera Venkatesan", "ab"])
     for js in (
         "document.getElementById('get').submit()",  # neutralised by HARDEN_JS (counted)
         "document.getElementById('get').requestSubmit()",
@@ -346,3 +424,583 @@ async def test_a_filled_page_and_its_popups_send_nothing(
         assert leaked not in sent, leaked
     assert counts.non_get == []
     assert {"filled_navigation", "filled_request", "filled_value"} <= reasons
+
+
+# --- review round 1 (M4-G2, design D-C): closing pages, workers, sockets, redirect hops ----
+class _Accepted:
+    """What a raw listener received: connections accepted and bytes read."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.connections = 0
+        self.bytes = 0
+
+
+@pytest.fixture
+def foreign_listener() -> Iterator[tuple[int, _Accepted]]:
+    """A host the scope does NOT allow (reached as ``localhost:<port>``): a raw TCP listener that
+    counts every connection it accepts, so "nothing arrived" includes a TLS ClientHello."""
+    seen = _Accepted()
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            with seen.lock:
+                seen.connections += 1
+            self.request.settimeout(0.5)
+            with contextlib.suppress(OSError):
+                while data := self.request.recv(65536):  # until the peer pauses or closes
+                    with seen.lock:
+                        seen.bytes += len(data)
+            with contextlib.suppress(OSError):
+                self.request.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1], seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def _plain_close_sends_unload_posts(chromium: Any, url: str, counts: _Counts) -> None:
+    """Positive control: an unguarded page closed with ``page.close()`` does send its draft."""
+    ctx = await chromium.new_context()
+    page = await ctx.new_page()
+    await page.goto(f"{url}/unload?control=1")
+    await page.close()
+    await asyncio.sleep(0.8)
+    await ctx.close()
+    with counts.lock:
+        sent, counts.non_get[:] = list(counts.non_get), []
+    assert any(p.startswith("POST /beacon-") or p.startswith("POST /ka-") for p in sent), sent
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("filled", [False, True])
+async def test_closing_a_page_through_the_guard_lets_no_unload_request_out(
+    chromium: Any, counting_server: tuple[str, _Counts], filled: bool
+) -> None:
+    """The route alone (no scope proxy: over plain HTTP the proxy would refuse these POSTs on its
+    own, and over HTTPS it cannot see a method): every request a page sends while it goes is
+    aborted, beforeunload dialogs included."""
+    url, counts = counting_server
+    await _plain_close_sends_unload_posts(chromium, url, counts)
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await chromium.new_context(service_workers="block")
+    await guard.install(ctx, harden_js=False)
+    pages = []
+    for n in range(3):
+        page = await ctx.new_page()
+        guard.bind(page, n + 1)
+        await page.goto(f"{url}/unload?n={n}")
+        await page.mouse.click(5, 5)  # user activation: beforeunload may now ask to stay
+        if filled:
+            assert await guard.arm(page, ["9173 2206 4418"])
+        pages.append(page)
+    error_page = await ctx.new_page()  # an error page (a blocked navigation) is closed alike
+    await _attempt(error_page, f"location.href = '{url.replace('127.0.0.1', 'localhost')}/x'")
+    for page in [*pages, error_page]:
+        assert await guard.close(page) is True and page.is_closed()
+    await asyncio.sleep(0.8)
+    counted = guard.drain_counts()
+    await ctx.close()
+    assert counts.non_get == []
+    assert guard.pages_left_open == 0
+    blocked = {(c.method, c.reason) for c in counted if c.decision == "blocked"}
+    assert ("POST", "closing") in blocked  # the route saw the draft flush and aborted it
+
+
+class _StuckPage:
+    """A page whose navigation away fails (a renderer that hangs)."""
+
+    url = "http://127.0.0.1/filled"
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.frames: list[Any] = []
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def once(self, event: str, handler: Any) -> None:
+        return None
+
+    def on(self, event: str, handler: Any) -> None:
+        return None
+
+    def remove_listener(self, event: str, handler: Any) -> None:
+        return None
+
+    async def goto(self, url: str, **kw: Any) -> None:
+        raise PlaywrightError("navigation cancelled")
+
+    async def close(self, **kw: Any) -> None:
+        self.closed = True
+
+
+async def test_a_page_that_cannot_navigate_away_is_left_open_and_aborted() -> None:
+    """Closing it would run its unload handlers where no route sees them; closing the context
+    later runs none. Until then everything it sends is aborted (``closing``)."""
+    guard = ScanGuard(host_allowed=lambda h: True)
+    page: Any = _StuckPage()
+    assert await guard.arm(page, ["9173 2206 4418"])
+    assert await guard.close(page) is False
+    assert page.closed is False and guard.pages_left_open == 1
+    assert guard.is_closing(page) and await guard._is_filled(page)
+
+
+@pytest.mark.browser
+async def test_a_window_cannot_close_itself_out_of_the_routes_sight(
+    chromium: Any, counting_server: tuple[str, _Counts], scan_settings: Settings
+) -> None:
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard, harden_js=False
+    )
+    try:
+        opener = await ctx.new_page()
+        await opener.goto(f"{url}/page")
+        async with ctx.expect_page() as info:
+            await opener.evaluate("window.open('/self-close')")
+        popup = await info.value
+        await asyncio.sleep(0.8)
+        assert not popup.is_closed()  # ISOLATE_JS: window.close() is a no-op
+    finally:
+        await close_scan_context(ctx, guard)
+    assert counts.non_get == [] and guard.pages_left_open == 0
+
+
+@pytest.mark.browser
+async def test_close_scan_context_closes_every_page_through_the_guard(
+    chromium: Any, counting_server: tuple[str, _Counts], scan_settings: Settings
+) -> None:
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard
+    )
+    for n in range(2):
+        page = await ctx.new_page()
+        await page.goto(f"{url}/unload?ctx={n}")
+    await close_scan_context(ctx, guard)
+    await close_scan_context(ctx, guard)  # idempotent
+    await asyncio.sleep(0.5)
+    assert counts.non_get == [] and not guard.proxy_running
+    assert any(c.reason == "closing" for c in guard.drain_counts())
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("harden_js", [False, True])
+async def test_no_shared_or_service_worker_runs_in_a_scan_context(
+    chromium: Any, counting_server: tuple[str, _Counts], scan_settings: Settings, harden_js: bool
+) -> None:
+    assert "--disable-shared-workers" in LAUNCH_ARGS
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium,
+        scan_settings,
+        storage_state=None,
+        locale="en_IN",
+        guard=guard,
+        harden_js=harden_js,
+    )
+    try:
+        page = await ctx.new_page()
+        await page.goto(f"{url}/page")
+        if harden_js:
+            assert await guard.arm(page, ["9173 2206 4418"])
+        assert await page.evaluate("typeof SharedWorker") == "undefined"
+        await _attempt(page, "new SharedWorker('/shw.js').port.start()")
+        registered = await page.evaluate(
+            "ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, '/sw1.js')"
+            ".then(() => 'registered', () => 'refused')"
+        )
+        framed = await page.evaluate(
+            "(() => { const f = document.createElement('iframe'); document.body.append(f); "
+            "return f.contentWindow.ServiceWorkerContainer.prototype.register"
+            ".call(navigator.serviceWorker, '/sw2.js').then(() => 'registered', () => 'refused'); })()"
+        )
+        await asyncio.sleep(1.0)
+        controlled = await page.evaluate("!!navigator.serviceWorker.controller")
+    finally:
+        await close_scan_context(ctx, guard)
+    assert registered == framed == "refused" and controlled is False
+    assert not any(p.startswith(("/shw.js", "/from-shared", "/sw")) for p in counts.gets)
+    assert counts.non_get == [] and counts.upgrades == 0
+
+
+async def test_a_service_worker_is_refused_even_by_the_proxy(
+    counting_server: tuple[str, _Counts],
+) -> None:
+    """Defence in depth: over plain HTTP the scope proxy refuses a service worker's script."""
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    status, _ = await _through_proxy(
+        guard, f"GET {url}/sw.js HTTP/1.1\r\nService-Worker: script\r\n"
+    )
+    await guard.stop_proxy()
+    assert status == 403 and "/sw.js" not in counts.gets
+
+
+# --- the D-C proof: a counting server receives nothing; the guard counts each attempt ------
+_LOCKED_ATTEMPTS = {
+    "beacon": "navigator.sendBeacon('/beacon-armed', 'draft')",
+    "keepalive_post": "fetch('/ka-armed', {method: 'POST', body: 'draft', keepalive: true})"
+    ".then(() => 'sent', () => 'failed')",
+    "keepalive_get": "fetch(new Request('/ka-get-armed', {keepalive: true}))"
+    ".then(() => 'sent', () => 'failed')",
+    "keepalive_getter": "(() => { let n = 0; const init = {get keepalive() { return n++ > 0; }}; "
+    "return fetch('/ka-getter-armed', init).then(() => 'sent', () => 'failed'); })()",
+    "websocket": "(() => { try { new WebSocket('ws://' + location.host + '/ws-armed'); "
+    "return 'opened'; } catch (e) { return 'refused'; } })()",
+    "worker": "(() => { try { new Worker('/wsw.js'); return 'started'; } "
+    "catch (e) { return 'refused'; } })()",
+    "worker_via_prototype": "(() => { try { new Worker.prototype.constructor('/wsw.js'); "
+    "return 'started'; } catch (e) { return 'refused'; } })()",
+    "shared_worker": "typeof SharedWorker",
+    "rtc": "typeof RTCPeerConnection",
+}
+
+
+@pytest.mark.browser
+async def test_a_filled_page_can_beacon_keepalive_socket_or_start_workers_nowhere(
+    chromium: Any, counting_server: tuple[str, _Counts], scan_settings: Settings
+) -> None:
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard, harden_js=False
+    )
+    try:
+        page = await ctx.new_page()
+        guard.bind(page, 4)
+        await page.goto(f"{url}/page")
+        # a worker started before the fill, ready to carry values out on a socket
+        alive = await page.evaluate(
+            "new Promise((done) => { window.__w = new Worker('/wsw.js'); "
+            "__w.onmessage = (e) => done(e.data); __w.postMessage('ping'); "
+            "setTimeout(() => done('timeout'), 3000); })"
+        )
+        assert alive == "alive"
+        assert await guard.arm(page, ["9173 2206 4418"])
+        results = {name: await page.evaluate(js) for name, js in _LOCKED_ATTEMPTS.items()}
+        stale = await page.evaluate(
+            "new Promise((done) => { __w.onmessage = (e) => done(e.data); "
+            "__w.postMessage('ws'); __w.postMessage('post'); setTimeout(() => done('silent'), 1500); })"
+        )
+        framed = await page.evaluate(  # a fresh frame of the filled page is locked at birth
+            "(() => { const f = document.createElement('iframe'); document.body.append(f); "
+            "return f.contentWindow.navigator.sendBeacon('/beacon-frame', 'draft'); })()"
+        )
+        await asyncio.sleep(0.5)
+        counted = guard.drain_counts()
+    finally:
+        await close_scan_context(ctx, guard)
+    await asyncio.sleep(0.5)
+    assert results == {
+        "beacon": False,
+        "keepalive_post": "failed",  # the route aborts it; keepalive was stripped first
+        "keepalive_get": "failed",
+        "keepalive_getter": "failed",
+        "websocket": "refused",
+        "worker": "refused",
+        "worker_via_prototype": "refused",
+        "shared_worker": "undefined",
+        "rtc": "undefined",
+    }
+    assert stale == "silent" and framed is False  # the old worker was terminated at arm
+    assert counts.non_get == [] and counts.upgrades == 0
+    assert not any("armed" in p or "worker-" in p or "frame" in p for p in counts.gets)
+    removed = {
+        (c.page_no, c.method, c.resource_type)
+        for c in counted
+        if (c.decision, c.reason) == ("blocked", "api_removed")
+    }
+    assert {(4, "POST", "beacon"), (4, "POST", "keepalive"), (4, "GET", "keepalive")} <= removed
+    assert {(4, "GET", "websocket"), (4, "GET", "worker")} <= removed
+    keepalive = [c for c in counted if (c.resource_type, c.reason) == ("keepalive", "api_removed")]
+    # the getter's first read (false) is the only one: the Request is built once, so the flag the
+    # wrapper checked is the flag the browser uses, and nothing is reported for it
+    assert sum(c.count for c in keepalive) == 2
+    assert all(c.host in ("127.0.0.1", "-") for c in counted)
+
+
+@pytest.mark.browser
+async def test_documents_after_the_first_fill_are_locked_at_birth(
+    chromium: Any, counting_server: tuple[str, _Counts], scan_settings: Settings
+) -> None:
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard
+    )
+    try:
+        first = await ctx.new_page()
+        await first.goto(f"{url}/page")
+        before = await first.evaluate("typeof WebSocket")
+        assert await guard.arm(first, ["9173 2206 4418"])
+        later = await ctx.new_page()
+        await later.goto(f"{url}/page?later=1")
+        after = await later.evaluate(_LOCKED_ATTEMPTS["websocket"])
+        beacon = await later.evaluate(_LOCKED_ATTEMPTS["beacon"])
+    finally:
+        await close_scan_context(ctx, guard)
+    assert before == "function" and after == "refused" and beacon is False
+    assert counts.non_get == [] and counts.upgrades == 0
+    assert "LOCK_JS" in Path(ROOT / "dps/layers/scanner/guard.py").read_text(encoding="utf-8")
+    assert "__dpsGuardLock" in LOCK_JS
+
+
+@pytest.mark.browser
+async def test_a_workers_websocket_never_reaches_the_server(
+    chromium: Any, counting_server: tuple[str, _Counts], scan_settings: Settings
+) -> None:
+    """Playwright's ``route_web_socket`` does not see a dedicated worker's socket; the scope proxy
+    refuses the plaintext upgrade inside the tunnel Chromium opens for it."""
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard
+    )
+    try:
+        page = await ctx.new_page()
+        await page.goto(f"{url}/page")
+        answer = await page.evaluate(
+            "new Promise((done) => { const w = new Worker('/wsw.js'); "
+            "w.onmessage = (e) => done(e.data); w.postMessage('ws'); "
+            "setTimeout(() => done('timeout'), 4000); })"
+        )
+        counted = guard.drain_counts()
+    finally:
+        await close_scan_context(ctx, guard)
+    assert answer == "error" and counts.upgrades == 0
+    assert "/worker-ws" not in counts.gets
+    hops = {(c.method, c.resource_type, c.decision, c.reason) for c in counted}
+    assert ("GET", UNROUTED, "blocked", "method") in hops
+
+
+@pytest.mark.browser
+async def test_a_speculative_prefetch_is_refused_by_the_proxy(
+    chromium: Any, counting_server: tuple[str, _Counts], scan_settings: Settings
+) -> None:
+    """Chromium fetches speculation-rules prefetches itself, where no route sees them (not even on
+    a filled page). Over plain HTTP the scope proxy refuses them by their ``Sec-Purpose`` header;
+    over HTTPS they stay a residual risk (a GET to an allowed host, see guard.py)."""
+    url, counts = counting_server
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard
+    )
+    try:
+        page = await ctx.new_page()
+        await page.goto(f"{url}/page")
+        assert await guard.arm(page, ["9173 2206 4418"])
+        await page.evaluate(
+            "() => { const s = document.createElement('script'); s.type = 'speculationrules'; "
+            "s.textContent = JSON.stringify({prefetch: [{source: 'list', "
+            "urls: ['/spec-prefetch?v=9173-2206', '/spec-plain']}]}); document.head.append(s); }"
+        )
+        await asyncio.sleep(1.5)
+        counted = guard.drain_counts()
+    finally:
+        await close_scan_context(ctx, guard)
+    assert not any(p.startswith("/spec-") for p in counts.gets)
+    reasons = {(c.resource_type, c.reason) for c in counted if c.decision == "blocked"}
+    assert (UNROUTED, "speculative") in reasons
+
+
+@pytest.mark.browser
+async def test_redirect_hops_never_leave_the_scope(
+    chromium: Any,
+    counting_server: tuple[str, _Counts],
+    foreign_listener: tuple[int, _Accepted],
+    scan_settings: Settings,
+) -> None:
+    url, counts = counting_server
+    port, foreign = foreign_listener
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard
+    )
+    try:
+        for n, scheme in enumerate(("http", "https")):
+            page = await ctx.new_page()
+            guard.bind(page, n + 1)
+            await page.goto(f"{url}/page")
+            target = f"/redir-foreign?scheme={scheme}&port={port}"
+            for js in (
+                f"new Image().src = '{target}&via=img'",
+                f"fetch('{target}&via=fetch').catch(() => 0)",
+                "new Image().src = '/redir-ok'",
+            ):
+                await _attempt(page, js)
+            with contextlib.suppress(PlaywrightError):
+                await page.goto(f"{url}{target}&via=nav")
+            await page.wait_for_timeout(300)
+            assert await guard.close(page)
+        counted = guard.drain_counts()
+    finally:
+        await close_scan_context(ctx, guard)
+    assert foreign.connections == 0 and foreign.bytes == 0  # nothing reached the foreign host
+    assert "localhost" not in counts.hosts
+    assert "/landed-ok" in counts.gets  # positive control: an in-scope redirect is followed
+    hops = [c for c in counted if c.resource_type == UNROUTED]
+    assert sum(c.count for c in hops) >= 6
+    assert {(c.page_no, c.method, c.decision, c.reason) for c in hops} == {
+        (None, "GET", "blocked", "host"),  # plain HTTP: the hop itself
+        (None, "CONNECT", "blocked", "host"),  # HTTPS: the tunnel
+    }
+    assert {c.host for c in hops} == {"{host}"}  # a one-label page-chosen host is not kept
+
+
+async def test_the_foreign_listener_counts_what_reaches_it(
+    foreign_listener: tuple[int, _Accepted],
+) -> None:
+    """Positive control for the redirect proof."""
+    port, seen = foreign_listener
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(b"\x16\x03\x01hello")
+    await writer.drain()
+    await asyncio.wait_for(reader.read(), 5)
+    writer.close()
+    assert seen.connections == 1 and seen.bytes == 8
+
+
+async def _through_proxy(guard: ScanGuard, head: str, extra: bytes = b"") -> tuple[int, bytes]:
+    """Send one raw request to ``guard``'s scope proxy; the status code and the whole answer."""
+    proxy = await guard.start_proxy()
+    host, port = proxy["server"].removeprefix("http://").split(":")
+    reader, writer = await asyncio.open_connection(host, int(port))
+    writer.write(head.encode("latin-1") + b"\r\n" + extra)
+    await writer.drain()
+    data = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    status = int(data.split(b" ", 2)[1]) if data.startswith(b"HTTP/1.") else 0
+    return status, data
+
+
+async def _tunnel(guard: ScanGuard, authority: str) -> tuple[Any, Any]:
+    proxy = await guard.start_proxy()
+    host, port = proxy["server"].removeprefix("http://").split(":")
+    reader, writer = await asyncio.open_connection(host, int(port))
+    writer.write(f"CONNECT {authority} HTTP/1.1\r\n\r\n".encode())
+    assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+    return reader, writer
+
+
+async def test_the_scope_proxy_enforces_the_guard_on_every_hop(
+    counting_server: tuple[str, _Counts],
+) -> None:
+    url, counts = counting_server
+    other = url.replace("127.0.0.1", "localhost")
+    authority = url.removeprefix("http://")
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    await guard.arm(_StuckPage(), ["9173 2206 4418"])  # needles of an earlier filled page
+    try:
+        ok, body = await _through_proxy(guard, f"GET {url}/via-proxy HTTP/1.1\r\nHost: x\r\n")
+        assert ok == 200 and body.endswith(b"ok") and b"onnection: close" in body
+        refused = {
+            "post": await _through_proxy(
+                guard, f"POST {url}/p HTTP/1.1\r\nContent-Length: 1\r\n", b"x"
+            ),
+            "body": await _through_proxy(
+                guard, f"GET {url}/b HTTP/1.1\r\nContent-Length: 1\r\n", b"x"
+            ),
+            "override": await _through_proxy(
+                guard, f"GET {url}/o HTTP/1.1\r\nX-HTTP-Method-Override: PUT\r\n"
+            ),
+            "query": await _through_proxy(guard, f"GET {url}/q?_method=DELETE HTTP/1.1\r\n"),
+            "upgrade": await _through_proxy(
+                guard, f"GET {url}/u HTTP/1.1\r\nUpgrade: websocket\r\n"
+            ),
+            "host": await _through_proxy(guard, f"GET {other}/h HTTP/1.1\r\n"),
+            "value": await _through_proxy(guard, f"GET {url}/v?a=9173%202206%204418 HTTP/1.1\r\n"),
+            "scheme": await _through_proxy(guard, "GET ftp://127.0.0.1/f HTTP/1.1\r\n"),
+            "connect": await _through_proxy(
+                guard, f"CONNECT {other.removeprefix('http://')} HTTP/1.1\r\n"
+            ),
+            "junk": await _through_proxy(guard, "NOT A REQUEST\r\n"),
+        }
+        for name, (status, _) in refused.items():
+            assert status in (400, 403), name
+        # an allowed tunnel: a plaintext GET inside it gets the plain-HTTP rules and one answer
+        reader, writer = await _tunnel(guard, authority)
+        writer.write(b"GET /through-tunnel HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert (await asyncio.wait_for(reader.read(), 10)).endswith(b"ok")
+        writer.close()
+        # ... and a plaintext upgrade (a ws:// socket, which Chromium tunnels) or POST is refused
+        for inner in (
+            b"GET /tunnel-ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            b"POST /tunnel-post HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
+        ):
+            reader, writer = await _tunnel(guard, authority)
+            writer.write(inner)
+            assert (await asyncio.wait_for(reader.read(), 10)).startswith(b"HTTP/1.1 403")
+            writer.close()
+    finally:
+        await guard.stop_proxy()
+        await guard.stop_proxy()  # idempotent
+    assert counts.non_get == [] and "localhost" not in counts.hosts and counts.upgrades == 0
+    assert sorted(counts.gets) == ["/through-tunnel", "/via-proxy"]  # nothing refused arrived
+    rows = guard.drain_counts()
+    assert all(r.resource_type == UNROUTED and r.decision == "blocked" for r in rows)
+    reasons = {r.reason for r in rows}
+    assert {"method", "host", "filled_value", "scheme"} <= reasons
+    assert all("9173" not in r.host for r in rows)
+
+
+async def test_a_tls_tunnel_to_an_allowed_host_carries_its_bytes(
+    foreign_listener: tuple[int, _Accepted],
+) -> None:
+    """Positive control: what starts like a TLS record is tunnelled untouched (method rules for
+    HTTPS stay with the route)."""
+    port, seen = foreign_listener
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    try:
+        reader, writer = await _tunnel(guard, f"127.0.0.1:{port}")
+        writer.write(b"\x16\x03\x01hello")
+        await writer.drain()
+        assert (await asyncio.wait_for(reader.read(), 10)).endswith(b"ok")
+        writer.close()
+    finally:
+        await guard.stop_proxy()
+    assert seen.connections == 1 and seen.bytes == 8
+
+
+def test_isolate_js_is_always_installed_and_blocks_what_no_route_sees() -> None:
+    for needle in (
+        "ServiceWorkerContainer",
+        "'register'",
+        "'close'",
+        "SharedWorker",
+        "RTCPeerConnection",
+        "sendBeacon",
+        "keepalive",
+        "WebSocket",
+        "Worker",
+        "terminate",
+        "beforeunload",
+        "__dpsGuardLock",
+    ):
+        assert needle in ISOLATE_JS, needle
+    src = (ROOT / "dps/layers/scanner/guard.py").read_text(encoding="utf-8")
+    install = src[src.index("    async def install(") : src.index("    def bind(")]
+    isolate = install.index("script=ISOLATE_JS")
+    assert isolate < install.index("if harden_js")
+    # the report binding exists, and Playwright's WebSocket replacement is wrapped, not wrapping
+    assert install.index("expose_binding") < isolate
+    assert install.index("route_web_socket") < isolate
+
+
+def test_the_launch_flags_keep_every_connection_on_the_proxy() -> None:
+    for flag in (
+        "--disable-shared-workers",
+        "--disable-quic",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    ):
+        assert flag in LAUNCH_ARGS, flag

@@ -3314,7 +3314,7 @@ async def obfuscated_capture(page: Page, frames: dict[int, Frame], snapshot: Pag
                              settings: Settings, page_no: int) -> CaptureResult
 ```
 
-Rules: an unmasked image of a page that renders personal data (or arrived with sensitive values pre-filled) never leaves memory — `capture_screen` paints a solid box (labelled with the entity type) over every rendered finding and every sensitive pre-filled input *before* PNG encoding, and returns `None` when any of them cannot be located (fail closed). `unmasked=True` is used only for the `original` variant when `scan_store_unmasked_originals` is set (local; posture refuses it in staging/prod). The obfuscated capture replaces rendered values and pre-filled input values **in the DOM** (tokens with a reversible map in `obfuscate` mode, persona surrogates in `synthesize` mode), re-reads what the page now renders, boxes any original that survived (values split across nodes), withholds the capture if one cannot be boxed, and arms the guard first (a modified page must not navigate).
+Rules: an unmasked image of a page that renders personal data (or arrived with sensitive values pre-filled) never leaves memory — `capture_screen` paints a solid box (labelled with the entity type) over every rendered finding and every sensitive pre-filled input *before* PNG encoding, and returns `None` when any of them cannot be located (fail closed). `unmasked=True` is used only for the `original` variant when `scan_store_unmasked_originals` is set (local; posture refuses it in staging/prod). The obfuscated capture replaces rendered values and pre-filled input values **in the DOM** (tokens with a reversible map in `obfuscate` mode, persona surrogates in `synthesize` mode), re-reads what the page now renders, boxes any original that survived (values split across nodes), withholds the capture if one cannot be boxed, and arms the guard first (a modified page must not navigate). Frames (M4-G2 fix, D-C): every capture paints `dom.unread_frame_boxes(snapshot)` (child frames never read: cross-origin, or iframes off) and is **withheld** when it returns `None` (a frame failed while it was read — `PageSnapshot.frames_failed` — or an unread frame cannot be located).
 
 `tests/scanner/helpers.py` additions (complete):
 
@@ -3323,7 +3323,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from dps.config import Settings
-from dps.layers.scanner.browser import new_scan_context
+from dps.layers.scanner.browser import close_scan_context, new_scan_context
 from dps.layers.scanner.guard import ScanGuard
 from dps.layers.scanner.urls import CrawlScope, Origin
 
@@ -3341,14 +3341,13 @@ async def guarded_context(browser: Any, settings: Settings, base_url: str, *, ha
     """A scan-like context: same browser options and the real guard, installed before any page."""
     origin = Origin.of(base_url)
     scope = CrawlScope(start=origin, same_origin=True, registered_hosts=frozenset(settings.scan_registered_hosts_list))
-    ctx = await new_scan_context(browser, settings, storage_state=demo_cookie_state(origin.host) if cookies else None,
-                                 locale="en_IN")
     guard = ScanGuard(host_allowed=scope.network_host_allowed)
-    await guard.install(ctx, harden_js=harden_js)
+    ctx = await new_scan_context(browser, settings, storage_state=demo_cookie_state(origin.host) if cookies else None,
+                                 locale="en_IN", guard=guard, harden_js=harden_js)   # M4-G2 fix: proxy + guard
     try:
         yield ctx, guard
     finally:
-        await ctx.close()
+        await close_scan_context(ctx, guard)       # every page through guard.close, then the proxy
 ```
 
 Non-obvious code (complete):
@@ -3482,7 +3481,8 @@ async def obfuscated_capture(page: Page, frames: dict[int, Frame], snapshot: Pag
     originals = collect_originals(findings, data=doc)
     if not verify_output(originals, applied.output, kept=kept).passed:
         return CaptureResult(status="withheld", reason="leakage")
-    guard.arm(page, ())                                  # a modified page must never navigate
+    if not await guard.arm(page, ()):                    # a modified page must never navigate
+        return CaptureResult(status="withheld", reason="guard_lock")
     out_t, out_v = applied.output["t"], applied.output["v"]
     text_pairs: dict[int, list[list[Any]]] = defaultdict(list)
     for g, t in enumerate(texts):
@@ -3721,7 +3721,7 @@ async def test_identity_form_takes_the_persona_and_the_page_accepts_it(chromium,
         snap, frames, classes, fill = await _prepare(page, scan_engine, "synthesize")
         assert [classes[f.key].entity_type for f in snap.fields] == [
             "PERSON_NAME", "DATE_OF_BIRTH", "AADHAAR", "PAN_IN", "PHONE", "EMAIL", "STREET_ADDRESS", "GENDER", "NATIONALITY"]
-        guard.arm(page, fill.needles)
+        assert await guard.arm(page, fill.needles)
         results = await fill_page(page, frames, fill.actions, settle_ms=400)
         assert len(results) == 9 and all(r.status == "filled" for r in results.values())
         assert all(r.messages == [] for r in results.values())             # the page's own rules accept every value
@@ -3739,7 +3739,7 @@ async def test_det_tokens_break_the_aadhaar_pattern_and_that_is_recorded(chromiu
         page = await ctx.new_page()
         await page.goto(f"{demo_site_url}/apply/identity")
         snap, frames, classes, fill = await _prepare(page, det_engine, "obfuscate", key=generate_key_material("key"))
-        guard.arm(page, fill.needles)
+        assert await guard.arm(page, fill.needles)
         results = await fill_page(page, frames, fill.actions, settle_ms=400)
         aadhaar = next(f for f in snap.fields if f.name == "aadhaar")
         native = [m for m in results[aadhaar.key].messages if m["source"] == "native"]
@@ -3757,13 +3757,13 @@ async def test_file_hidden_and_buttons_are_never_touched(chromium, scan_settings
             for f in snap.fields:
                 if f.input_type in ("file", "hidden"):
                     assert f.key not in touched
-            guard.arm(page, fill.needles)
+            assert await guard.arm(page, fill.needles)
             await fill_page(page, frames, fill.actions, settle_ms=150)
             if path == "/fixtures/labels":
                 assert await page.evaluate("document.querySelector('[name=csrf]').value") == "tok-123"
             else:
                 assert await page.evaluate("document.querySelector('[type=file]').files.length") == 0
-            await page.close()
+            assert await guard.close(page)
 ```
 
 - [ ] **Step 2: Run to confirm failure** — `pytest -q tests/scanner/test_fill_browser.py` → FAIL (`ImportError: cannot import name 'fill_page'`).
@@ -3878,7 +3878,7 @@ from dps.engine.service import PrivacyEngine
 from dps.engine.synth.surrogates import SynthesisSeed, seed_bytes
 from dps.engine.transform.crypto import KeyMaterial
 from dps.jobs_models import ScanSpec
-from dps.layers.scanner.browser import new_scan_context
+from dps.layers.scanner.browser import close_scan_context, new_scan_context
 from dps.layers.scanner.capture import capture_screen, draw_overlays, field_boxes, obfuscated_capture
 from dps.layers.scanner.classify import classify_field, classify_rendered, redact_text, value_classifier
 from dps.layers.scanner.dom import CLICKABLES_JS, SUBMIT_ATTEMPTS_JS, extract_page, frame_map
@@ -3947,10 +3947,9 @@ class ScanRunner:
 
     # -- lifecycle -----------------------------------------------------------------------------
     async def run(self) -> RunOutcome:
-        self.context = await new_scan_context(self.browser, self.s, storage_state=self.rt.storage_state,
-                                              locale=self.rt.locale)
         self.guard = ScanGuard(host_allowed=self.rt.scope.network_host_allowed)
-        await self.guard.install(self.context, harden_js=self.harden_js)
+        self.context = await new_scan_context(self.browser, self.s, storage_state=self.rt.storage_state,
+                                              locale=self.rt.locale, guard=self.guard, harden_js=self.harden_js)
         self.context.on("page", self._on_page)
         start = Target(page_no=self._alloc(), url=self.rt.start_url, depth=0, parent_page_no=None, via="start")
         self._seen.add(start.url)
@@ -3973,9 +3972,8 @@ class ScanRunner:
             for target in self.frontier:
                 self._mark_budget(target)
         finally:
+            await close_scan_context(self.context, self.guard)   # never context.close() alone (M4-G2 fix)
             self.outcome.websockets_closed = self.guard.websockets_closed
-            with contextlib.suppress(PlaywrightError):
-                await self.context.close()
         if self._pending or self._events:
             await self.sink.save_batch(pages=self._take_pending(), fields={}, requests=self.guard.drain_counts(),
                                        events=self._take_events())
@@ -3998,10 +3996,11 @@ class ScanRunner:
         if await page.opener() is not None:            # a popup: the scanner never follows one
             self.outcome.popups_closed += 1
             self._event("popup", "closed", note="popup")
-            with contextlib.suppress(PlaywrightError):
-                await page.close()
+            await self.guard.close(page)
 
     async def _on_dialog(self, dialog: Dialog) -> None:
+        if dialog.type == "beforeunload" and self.guard.is_closing(dialog.page):
+            return                                       # guard.close answers it ("leave")
         self.outcome.dialogs_dismissed += 1
         self._event("dialog", "dismissed", note=dialog.type)
         with contextlib.suppress(PlaywrightError):
@@ -4043,8 +4042,7 @@ class ScanRunner:
 
     async def _close(self, page: Page) -> None:
         self.guard.release(page)
-        with contextlib.suppress(PlaywrightError):
-            await page.close()
+        await self.guard.close(page)                     # unload traffic aborted; never page.close()
 
     # -- one page ------------------------------------------------------------------------------
     async def _process(self, t: Target) -> None:
@@ -4168,7 +4166,9 @@ class ScanRunner:
                 record.validation[mode] = {"failed": 1}
                 self._event("fill", "failed", page_no=t.page_no, target=record.url_redacted, note="leakage")
                 return None
-            self.guard.arm(page, fill.needles)
+            if not await self.guard.arm(page, fill.needles):    # a frame could not be locked: no fill
+                self._event("fill", "failed", page_no=t.page_no, target=record.url_redacted, note="guard_lock")
+                return None
             results = await fill_page(page, frames, fill.actions, settle_ms=self.s.scan_settle_ms)
             with contextlib.suppress(PlaywrightError):
                 self.outcome.submit_attempts_neutralised += int(await page.evaluate(SUBMIT_ATTEMPTS_JS))
@@ -4533,7 +4533,7 @@ async def test_adversarial_submission_attempts_on_filled_pages_all_fail(chromium
             page = await ctx.new_page()
             await page.goto(f"{demo_site_url}{path}")
             await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
-            guard.arm(page, ["Meera Venkatesan", "meera.v@example.com"])
+            assert await guard.arm(page, ["Meera Venkatesan", "meera.v@example.com"])
             await page.locator(f"[name={field}]").fill("meera.v@example.com")
             attempts = [
                 "document.forms[0].requestSubmit()",
@@ -4555,7 +4555,7 @@ async def test_adversarial_submission_attempts_on_filled_pages_all_fail(chromium
                 except Exception:  # noqa: BLE001
                     pass
                 await page.wait_for_timeout(300)
-            await page.close()
+            await guard.close(page)                       # the demo flushes a draft on pagehide
         reasons = {c.reason for c in guard.drain_counts() if c.decision == "blocked"}
     after = received(demo_site_url)
     assert after["non_get"] == before["non_get"] and after["form_get"] == before["form_get"]

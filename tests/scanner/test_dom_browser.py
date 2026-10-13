@@ -9,11 +9,14 @@ from typing import Any
 import pytest
 
 pytest.importorskip("playwright")
+from playwright.async_api import Error as PlaywrightError  # noqa: E402
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError  # noqa: E402
 
 from dps.config import Settings  # noqa: E402
+from dps.layers.scanner import dom  # noqa: E402
 from dps.layers.scanner.browser import (  # noqa: E402
     close_browser,
+    close_scan_context,
     get_browser,
     new_scan_context,
 )
@@ -24,9 +27,11 @@ from dps.layers.scanner.dom import (  # noqa: E402
     extract_page,
     frame_map,
     text_rects,
+    unread_frame_boxes,
     utf16_offset,
 )
-from dps.layers.scanner.models import PageSnapshot  # noqa: E402
+from dps.layers.scanner.guard import ScanGuard  # noqa: E402
+from dps.layers.scanner.models import FrameFacts, PageSnapshot, Rect  # noqa: E402
 from tests.scanner.helpers import received  # noqa: E402
 
 pytestmark = pytest.mark.browser
@@ -51,15 +56,29 @@ def _session(url: str) -> dict[str, Any]:
     }
 
 
+_GUARDS: dict[Any, ScanGuard] = {}
+
+
 async def _open(chromium: Any, url: str, settings: Settings, *, cookies: bool = False) -> Any:
+    """A real scan context (guard and scope proxy installed) on ``url``; close it with ``_shut``."""
+    guard = ScanGuard(host_allowed=lambda h: h in settings.scan_registered_hosts_list)
     ctx = await new_scan_context(
-        chromium, settings, storage_state=_session(url) if cookies else None, locale="en_IN"
+        chromium,
+        settings,
+        storage_state=_session(url) if cookies else None,
+        locale="en_IN",
+        guard=guard,
     )
+    _GUARDS[ctx] = guard
     page = await ctx.new_page()
     await page.goto(url)
     with contextlib.suppress(PlaywrightTimeoutError):
         await page.wait_for_load_state("networkidle", timeout=3000)
     return ctx, page
+
+
+async def _shut(ctx: Any) -> None:
+    await close_scan_context(ctx, _GUARDS.pop(ctx))
 
 
 async def _snap(
@@ -70,7 +89,7 @@ async def _snap(
         opts = {"iframes": True, "shadow_dom": True, "max_fields": 400, **kw}
         return await extract_page(page, **opts)
     finally:
-        await ctx.close()
+        await _shut(ctx)
 
 
 async def test_label_sources_and_non_fields(chromium, demo_site_url, scan_settings) -> None:  # noqa: ANN001
@@ -156,7 +175,7 @@ async def test_a_password_value_is_never_read(chromium, demo_site_url, scan_sett
         await page.locator("#username").fill("someone")
         snap = await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
     finally:
-        await ctx.close()
+        await _shut(ctx)
     by_name = {f.name: f for f in snap.fields}
     assert by_name["password"].value is None and by_name["username"].value == "someone"
 
@@ -196,7 +215,7 @@ async def test_clickables_are_restamped_with_the_same_ordinals(  # noqa: ANN001
             "Array.from(document.querySelectorAll('[data-dps-click]')).map(e => e.dataset.dpsClick)"
         )
     finally:
-        await ctx.close()
+        await _shut(ctx)
     assert stamped == again == [f"0:{c.ordinal}" for c in snap.clickables]
 
 
@@ -218,7 +237,7 @@ async def test_text_rects_and_in_page_helpers(  # noqa: ANN001
         body = await page.evaluate("document.body.innerText")
         assert demo_data["aadhaar"] not in body and "XXXX XXXX 0000" in body
     finally:
-        await ctx.close()
+        await _shut(ctx)
 
 
 async def test_set_values_fires_no_events(chromium, demo_site_url, scan_settings) -> None:  # noqa: ANN001
@@ -239,7 +258,7 @@ async def test_set_values_fires_no_events(chromium, demo_site_url, scan_settings
         await page.wait_for_timeout(400)  # the demo's autosave debounce is 150 ms
         events = await page.evaluate("window.__events")
     finally:
-        await ctx.close()
+        await _shut(ctx)
     assert pin.key in {k for k, _ in pairs} and shown == "Sample" and events == 0
     assert received(demo_site_url)["non_get"] == before["non_get"]
 
@@ -249,8 +268,13 @@ def test_text_rects_convert_code_points_to_utf16() -> None:  # pure helper, no b
     assert utf16_offset("a\ud83d", 2) == 2  # a lone surrogate (text cut by the page) never raises
 
 
-async def test_new_scan_context_is_isolated_and_names_dps(chromium, scan_settings) -> None:  # noqa: ANN001
-    ctx = await new_scan_context(chromium, scan_settings, storage_state=None, locale="en_IN")
+async def test_new_scan_context_is_isolated_and_names_dps(  # noqa: ANN001
+    chromium, scan_settings, demo_site_url
+) -> None:
+    guard = ScanGuard(host_allowed=lambda h: h in scan_settings.scan_registered_hosts_list)
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard
+    )
     page = await ctx.new_page()
     ua = await page.evaluate("navigator.userAgent")
     assert "DPS-Scanner/" in ua
@@ -258,7 +282,15 @@ async def test_new_scan_context_is_isolated_and_names_dps(chromium, scan_setting
     assert await page.evaluate("navigator.language") == "en-IN"
     size = await page.evaluate("[window.innerWidth, window.innerHeight]")
     assert size == [scan_settings.scan_viewport_width, scan_settings.scan_viewport_height]
-    await ctx.close()
+    await page.goto(f"{demo_site_url}/help")
+    refused = await page.evaluate(
+        "ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, "
+        "'/static/forms.js').then(() => 'registered', () => 'refused')"
+    )
+    assert refused == "refused" and await page.evaluate("typeof SharedWorker") == "undefined"
+    assert await page.evaluate("typeof RTCPeerConnection") == "undefined"  # no WebRTC
+    await close_scan_context(ctx, guard)
+    assert ctx.pages == [] and not guard.proxy_running
 
 
 async def test_one_browser_per_process_relaunched_after_close(scan_settings) -> None:  # noqa: ANN001
@@ -270,3 +302,85 @@ async def test_one_browser_per_process_relaunched_after_close(scan_settings) -> 
         assert second is not first and second.is_connected()
     finally:
         await close_browser()
+
+
+# --- review round 1 (M4-G2, B4): frames that were rendered but not read --------------------
+async def test_a_child_frame_that_fails_is_recorded_unread(  # noqa: ANN001
+    chromium, demo_site_url, scan_settings, monkeypatch
+) -> None:
+    real = dom._frame_offset
+
+    async def failing(frame: Any, scroll: tuple[float, float]) -> Rect:
+        if frame.parent_frame is not None:
+            raise PlaywrightError("frame navigated while it was read")
+        return await real(frame, scroll)
+
+    monkeypatch.setattr(dom, "_frame_offset", failing)
+    snap = await _snap(chromium, f"{demo_site_url}/apply/card", scan_settings)
+    assert {f.frame_index for f in snap.fields} == {0}  # its fields are not numbered
+    (unread,) = snap.unread_frames
+    assert unread.frame_index == 1 and unread.same_origin and unread.read is False
+    assert unread.offset is not None and unread.offset.w > 50 and unread.offset.h > 50
+    assert snap.frames_failed == [1]
+    assert unread_frame_boxes(snap) is None  # fail closed: no masked capture of this page
+
+
+async def test_a_child_frame_that_fails_and_detaches_still_withholds(  # noqa: ANN001
+    chromium, demo_site_url, scan_settings, monkeypatch
+) -> None:
+    real = dom._frame_offset
+
+    async def failing(frame: Any, scroll: tuple[float, float]) -> Rect:
+        if frame.parent_frame is not None:
+            await frame.page.evaluate("document.querySelector('iframe').remove()")
+            raise PlaywrightError("frame detached while it was read")
+        return await real(frame, scroll)
+
+    monkeypatch.setattr(dom, "_frame_offset", failing)
+    snap = await _snap(chromium, f"{demo_site_url}/apply/card", scan_settings)
+    assert snap.frames_failed == [1] and unread_frame_boxes(snap) is None
+
+
+async def test_frames_not_read_are_listed_with_their_boxes(  # noqa: ANN001
+    chromium, demo_site_url, scan_settings
+) -> None:
+    no_frames = await _snap(chromium, f"{demo_site_url}/apply/card", scan_settings, iframes=False)
+    assert [(f.frame_index, f.read) for f in no_frames.frames] == [(0, True), (1, False)]
+    assert no_frames.frames[1].same_origin and unread_frame_boxes(no_frames)
+    read = await _snap(chromium, f"{demo_site_url}/apply/card", scan_settings)
+    assert read.unread_frames == [] and unread_frame_boxes(read) == []
+    # a frame of another origin (an allowed host on another origin) is never read, only boxed
+    ctx, page = await _open(chromium, f"{demo_site_url}/apply/card", scan_settings)
+    try:
+        other = demo_site_url.replace("127.0.0.1", "localhost")
+        await page.evaluate(
+            "(src) => new Promise((done) => { const f = document.createElement('iframe'); "
+            "f.src = src; f.width = 300; f.height = 120; f.onload = () => done(); "
+            "document.body.append(f); })",
+            f"{other}/help",
+        )
+        snap = await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
+    finally:
+        await _shut(ctx)
+    foreign = [f for f in snap.frames if not f.same_origin]
+    assert len(foreign) == 1 and foreign[0].read is False and foreign[0].frame_index == 2
+    assert foreign[0].offset is not None and foreign[0].offset.w == 300
+    assert {f.frame_index for f in snap.fields} == {0, 1}
+
+
+def test_unread_frame_boxes_withhold_when_a_frame_cannot_be_located() -> None:
+    def frame(index: int, offset: Rect | None, *, read: bool) -> FrameFacts:
+        return FrameFacts(frame_index=index, same_origin=False, offset=offset, path="f", read=read)
+
+    box = Rect(x=0, y=10, w=300, h=100)
+    base: dict[str, Any] = dict(
+        url="http://x/", title="", forms=[], fields=[], texts=[], links=[], clickables=[]
+    )
+    main = frame(0, Rect(x=0, y=0, w=0, h=0), read=True)
+    hidden = frame(2, Rect(x=0, y=0, w=0, h=0), read=False)
+    ok = PageSnapshot(**base, frames=[main, frame(1, box, read=False), hidden])
+    assert unread_frame_boxes(ok) == [box]  # a zero-size (unrendered) frame needs no box
+    lost = PageSnapshot(**base, frames=[main, frame(1, None, read=False)])
+    assert unread_frame_boxes(lost) is None  # cannot be located: withhold the capture
+    failed = PageSnapshot(**base, frames=[main, frame(1, box, read=False)], frames_failed=[1])
+    assert unread_frame_boxes(failed) is None  # a frame that failed while read: withhold

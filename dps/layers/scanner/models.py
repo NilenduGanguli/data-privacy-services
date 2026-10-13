@@ -146,13 +146,22 @@ class ClickableFacts(BaseModel):
 
 
 class FrameFacts(BaseModel):
-    """A frame of the page (only same-origin frames are read)."""
+    """A frame of the page. Only same-origin frames are read (``read``); every other rendered child
+    frame is listed too, with ``read=False``, because its content is in a screenshot but in no
+    finding.
+
+    ``offset`` is the frame's box in document coordinates of the top page (zero-size: not
+    rendered). It is ``None`` only for an unread frame whose box could not be determined. A capture
+    must black out every unread frame's box, and is withheld when one is ``None`` or a frame
+    failed while it was read (``PageSnapshot.frames_failed``; ``dom.unread_frame_boxes``).
+    """
 
     model_config = _HIDDEN
     frame_index: int
     same_origin: bool
-    offset: Rect
+    offset: Rect | None
     path: str = _page()
+    read: bool = True
 
 
 class PageSnapshot(BaseModel):
@@ -168,6 +177,14 @@ class PageSnapshot(BaseModel):
     clickables: list[ClickableFacts]
     frames: list[FrameFacts]
     truncated: bool = False
+    #: same-origin child frames that failed while they were read (detached or navigated): what
+    #: they rendered is in no finding, so no masked capture of this page may be emitted
+    frames_failed: list[int] = Field(default_factory=list)
+
+    @property
+    def unread_frames(self) -> list[FrameFacts]:
+        """Rendered child frames whose content was not read (cross-origin, iframes off, or failed)."""
+        return [f for f in self.frames if not f.read]
 
 
 # --- classification -----------------------------------------------------------------------

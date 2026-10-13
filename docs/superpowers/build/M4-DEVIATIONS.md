@@ -370,3 +370,89 @@ fails on `032b076`.
   sets values (also inside the shadow root) without firing `input`/`change` and so without an
   autosave reaching the demo site, the context's locale and viewport, and the one-browser-per-
   process relaunch: 12 tests (plan: 6).
+
+## Review round 1 fixes (G2: Tasks 6–8) — design D-C, findings M4-G2-B1..B4
+
+Programme plan `2026-10-13-remaining-work-plan.md` §1.3, §2.3, §3 D-C. The network policy is now
+enforced below the page. Each item was established by a probe of the pinned Chromium (Playwright
+1.55.0, headless shell 1187) before it was coded:
+
+| Probe (route-only context unless noted) | Result |
+|---|---|
+| `page.close()` of a page with `pagehide`/`unload` handlers | beacon, keepalive **and plain** fetch POSTs arrive |
+| route switched to "abort everything", then `page.close(run_before_unload=False)` | they **still** arrive (the target is torn down, nothing is routed) |
+| abort everything, navigate to `about:blank`, then close | **0** arrive |
+| `context.close()` with such a page open | 0 arrive (no unload handlers run) |
+| a dedicated worker's `new WebSocket('ws://…')` | `route_web_socket` never sees it; it reaches the server (through the proxy: a plaintext `CONNECT` tunnel) |
+| `--disable-shared-workers` | `typeof SharedWorker === 'undefined'` |
+| speculation-rules prefetch from a filled page | fetched by the browser, **never routed**; no `--disable-features` / `--disable-blink-features` value or CDP `Network.setBlockedURLs` stops it |
+| `goto('about:blank')` on a page with a `beforeunload` prompt after a user gesture | hangs until timeout unless the dialog is answered |
+
+- **B3 (redirect hops / SSRF) — `dps/layers/scanner/proxy.py` (new, `ScopeProxy`).** Every scan
+  context is created with `proxy=` an in-process forward proxy on 127.0.0.1 (bypass
+  `<-loopback>`, so loopback goes through it too). `CONNECT` is tunnelled only to a host the guard
+  allows (every hop, so redirects are covered); plain HTTP only GET/HEAD with no body, method
+  override, upgrade, `Service-Worker` or `Sec-Purpose` header, an allowed host and no fill value;
+  one request per connection, `Connection: close` both ways. **Beyond the WIP:** a tunnel whose
+  first byte is not a TLS handshake record is plaintext — Chromium does that only for `ws://` — and
+  gets the plain-HTTP rules, so a worker's `ws://` socket is refused inside the tunnel. Refused hops
+  are counted (`resource_type="unrouted"`, `page_no=None`, value-free host).
+- **B1 (unload traffic) — `ScanGuard.close(page)`.** The design text said "abort-all routing, then
+  close with `run_before_unload=False`"; the probe shows that alone still leaks, so (as the
+  previous attempt found) the page is navigated to `about:blank` **while** the route aborts
+  everything it sends (new reason `closing`; unattributable requests too while a close is in
+  flight), a `beforeunload` prompt is answered "leave", and only then is it closed with
+  `run_before_unload=False`. A page that cannot be navigated away stays open with every request
+  aborted (`is_closing`, `pages_left_open`) and goes with the context. New
+  `browser.close_scan_context(context, guard)` closes every page that way, then the context, then
+  the proxy (idempotent); `new_scan_context` takes `guard=` (and `harden_js=`), starts the proxy and
+  installs the guard before any page, and stops the proxy if either step fails.
+- **B1/B2 (APIs no route sees) — `ISOLATE_JS` + lock.** Always, in every frame before any page
+  script: SW registration refused in every realm, `window.close()` a no-op, `SharedWorker`,
+  `RTCPeerConnection`, `webkitRTCPeerConnection` deleted, `beforeunload` listeners on `window`
+  ignored, and **lockable wrappers installed at birth** (so a page never holds an original) for
+  `navigator.sendBeacon` (→ `false`), `fetch` keepalive (the Request is built once, then rebuilt
+  without keepalive), `WebSocket` and `Worker` (refused; the wrapper sits on top of Playwright's
+  own WebSocket replacement, hence `route_web_socket` is registered before `ISOLATE_JS`).
+  `__dpsGuardLock` (non-replaceable) locks a document and terminates the workers it started.
+  **`ScanGuard.arm` is now `async` and returns `bool`**: it applies the route rules, locks every
+  frame of the page and, at the first call, adds `LOCK_JS` so every later document of the scan is
+  locked at birth; `False` (a live frame could not be locked, `locks_failed`) means "do not fill".
+  Why the lock covers workers and all later documents (beyond "filled pages"): a dedicated worker
+  started before the fill could carry values out on a socket no route sees. Each refused use is
+  counted through the page binding `__dpsGuardReport` (reason `api_removed`, resource type
+  `beacon`/`keepalive`/`websocket`/`worker`; kinds allow-listed, method/host value-free, URL in
+  memory only). `LAUNCH_ARGS` add `--disable-shared-workers`, `--disable-quic`,
+  `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, `--dns-prefetch-disable`.
+- **B4 (frames) — `dom.py`, `models.py`.** `FrameFacts.offset` may be `None` and gains `read`;
+  every rendered child frame not read (cross-origin, iframes off, failed) is listed with
+  `read=False` and its box; **`PageSnapshot.frames_failed`** lists same-origin frames that failed
+  while read (also when they then detached). `dom.unread_frame_boxes(snapshot)` returns the boxes a
+  capture must paint, or `None` — withhold, fail closed — when a frame failed or an unread frame
+  cannot be located. Task 12's rule text now says captures use it.
+- **Speculative prefetch (found here, not in the review).** Not stoppable in this Chromium; the
+  proxy refuses it over plain HTTP by its `Sec-Purpose` header (reason `speculative`). Over HTTPS it
+  stays a documented residual (a GET to an allowed host, URL unseen) in the `guard.py` docstring,
+  with a `wss://` socket of a worker of an *unfilled* page and an HTTPS redirect hop's URL.
+- **Plan text amended (later tasks; code as built wins):** Task 12 `guarded_context` (guard first,
+  `close_scan_context`), the capture's `await guard.arm` (withheld `guard_lock` on `False`), Task 13
+  tests (`assert await guard.arm`, `guard.close`), Task 14 runner (guard before context,
+  `close_scan_context` in `finally`, popups and `_close` through `guard.close`, a fill skipped with
+  note `guard_lock` when `arm` is `False`, `_on_dialog` leaves `beforeunload` to `guard.close`),
+  Task 15 proof (`await guard.arm`, `guard.close`: the demo now flushes a draft on `pagehide`).
+  Task 8's `new_scan_context(…, locale)` signature in the plan is superseded by
+  `new_scan_context(…, locale, guard, harden_js=True)`.
+- `demo/onboarding/static/forms.js`: autosave forms flush a draft on `pagehide`/hidden with a
+  beacon and a keepalive fetch, as real onboarding apps do (positive control: a plain
+  `page.close()` delivers it; `ScanGuard.close` of a filled page does not).
+- Tests (counting server; every proof has a positive control and was mutation-checked — removing
+  the tunnel inspection, the `about:blank` step, the lock or the proxy makes it fail):
+  `test_guard.py` +16 functions (unload traffic filled/unfilled incl. a `beforeunload` prompt, stuck page,
+  self-closing popup, `close_scan_context`, SharedWorker/SW, SW refused by the proxy, a filled page's
+  beacon / keepalive POST+GET / WebSocket / new Worker / `Worker.prototype.constructor` / pre-fill
+  worker terminated / fresh iframe locked → server 0 and counted `api_removed`, documents locked at
+  birth after the first fill, a worker's `ws://` refused in the tunnel, speculative prefetch, redirect
+  hops to a foreign raw listener over http and https → 0 connections, proxy rules incl. tunnel
+  plaintext, a TLS tunnel carries its bytes, source/flag checks); `test_dom_browser.py` +4 (a failed
+  frame → `frames_failed` and capture withheld, failed-then-detached, unread frames with boxes incl.
+  another origin, `unread_frame_boxes` rules); `test_demo_site.py` +1 (draft flush).

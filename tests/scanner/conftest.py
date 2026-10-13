@@ -93,11 +93,14 @@ def demo_data() -> dict[str, str]:
 
 @pytest.fixture
 async def chromium() -> AsyncIterator[Any]:
-    """A headless Chromium for one test."""
+    """A headless Chromium for one test, launched with the scanner's ``LAUNCH_ARGS`` (the request
+    guard depends on them: no SharedWorker, WebRTC kept off unproxied UDP)."""
     pw = pytest.importorskip("playwright.async_api")
+    from dps.layers.scanner.browser import LAUNCH_ARGS
+
     async with pw.async_playwright() as p:
         try:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=True, args=list(LAUNCH_ARGS))
         except pw.Error:
             skip_or_fail("run: python -m playwright install chromium (playwright==1.55.0 → 1187)")
         try:

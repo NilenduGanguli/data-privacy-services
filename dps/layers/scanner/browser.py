@@ -4,18 +4,30 @@ The browser is launched lazily and relaunched when it has disconnected (a crashe
 when it belongs to another event loop (a Playwright connection is bound to the loop that started
 it; the old objects are dropped, not used). Each scan gets its own ``BrowserContext`` — cookies,
 storage and cache never cross scans — created with the options the request guard relies on
-(``service_workers="block"``: Playwright cannot route what a service worker intercepts).
+(``service_workers="block"``: Playwright cannot route what a service worker intercepts; the
+guard's scope proxy: Playwright routes only the first hop of a request) and with the guard
+installed before the first page exists.
+
+``LAUNCH_ARGS`` is part of the guard (``guard.py``): ``--disable-shared-workers`` removes the
+``SharedWorker`` API, whose requests and WebSockets no route ever sees; ``--disable-quic`` and
+``--force-webrtc-ip-handling-policy=disable_non_proxied_udp`` keep every connection on TCP through
+the scope proxy (no UDP around it). A scan context is closed with ``close_scan_context``, never
+with ``context.close()`` alone after closing pages with ``page.close()``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Playwright, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 from dps import __version__
 from dps.config import Settings
+from dps.layers.scanner.guard import ScanGuard
+from dps.layers.scanner.proxy import ProxySettings
 
 LAUNCH_ARGS = (
     "--disable-dev-shm-usage",
@@ -23,6 +35,11 @@ LAUNCH_ARGS = (
     "--disable-sync",
     "--disable-component-update",
     "--no-first-run",
+    # the request guard depends on these (see guard.py)
+    "--disable-shared-workers",
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--dns-prefetch-disable",
 )
 
 _playwright: Playwright | None = None
@@ -74,13 +91,58 @@ async def new_scan_context(
     *,
     storage_state: dict[str, Any] | None,
     locale: str,
+    guard: ScanGuard,
+    harden_js: bool = True,
 ) -> BrowserContext:
     """Isolated context: no service workers (Playwright cannot route their requests), no downloads,
-    no permissions, UTC, a user agent that names DPS so the target's logs show who visited."""
+    no permissions, UTC, a user agent that names DPS so the target's logs show who visited, every
+    connection through ``guard``'s scope proxy, and ``guard`` installed before any page.
+
+    Close it with ``close_scan_context(context, guard)``.
+    """
     ua = (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
         f"Chrome/{browser.version} Safari/537.36 DPS-Scanner/{__version__}"
     )
+    proxy = await guard.start_proxy()
+    try:
+        context = await _new_context(browser, settings, storage_state, locale, ua, proxy)
+    except BaseException:
+        await guard.stop_proxy()
+        raise
+    try:
+        await guard.install(context, harden_js=harden_js)
+    except BaseException:
+        await context.close()
+        await guard.stop_proxy()
+        raise
+    return context
+
+
+async def close_scan_context(context: BrowserContext, guard: ScanGuard) -> None:
+    """Close a scan context so that nothing leaves while it goes (idempotent).
+
+    Every page is closed with ``guard.close`` (its unload handlers run while the route aborts
+    everything); a page that could not be navigated away goes with the context, and closing a
+    context runs no unload handlers. Then the guard's scope proxy stops.
+    """
+    try:
+        for page in list(context.pages):
+            await guard.close(page)
+        with contextlib.suppress(PlaywrightError):
+            await context.close()
+    finally:
+        await guard.stop_proxy()
+
+
+async def _new_context(
+    browser: Browser,
+    settings: Settings,
+    storage_state: dict[str, Any] | None,
+    locale: str,
+    ua: str,
+    proxy: ProxySettings,
+) -> BrowserContext:
     return await browser.new_context(
         viewport={"width": settings.scan_viewport_width, "height": settings.scan_viewport_height},
         device_scale_factor=1,
@@ -93,4 +155,5 @@ async def new_scan_context(
         permissions=[],
         java_script_enabled=True,
         ignore_https_errors=False,
+        proxy={"server": proxy["server"], "bypass": proxy["bypass"]},
     )

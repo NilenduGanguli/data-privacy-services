@@ -5,7 +5,12 @@ what classification and redaction derive from it (the facts models hide it from 
 
 Ordering contract: frames are numbered ``0`` (main) then every same-origin child frame in
 ``page.frames`` order; fields are numbered ``1..n`` across frames in that order and in tree order
-inside each frame, descending into open shadow roots at their host. ``EXTRACT_JS`` stamps each
+inside each frame, descending into open shadow roots at their host. A snapshot also lists every
+rendered child frame it did not read (``FrameFacts.read=False``): a same-origin frame that failed
+while it was read keeps its number (and is listed in ``PageSnapshot.frames_failed``), and every
+other child frame (cross-origin, or any child frame when ``iframes`` is off) is numbered after the
+last ``frame_map`` index. Their content is in the screenshot but in no finding, so captures black
+out the boxes of frames never read and are withheld when a frame failed (``unread_frame_boxes``). ``EXTRACT_JS`` stamps each
 field with ``data-dps-field="<frame>:<n>"`` and each clickable with ``data-dps-click="<frame>:<k>"``;
 a fresh load of the same page re-runs the same script and gets the same numbers.
 ``CLICKABLES_JS`` re-stamps the clickables alone with the same predicate and order.
@@ -317,13 +322,28 @@ async def _frame_offset(frame: Frame, scroll: tuple[float, float]) -> Rect:
     return Rect(x=box["x"] + scroll[0], y=box["y"] + scroll[1], w=box["width"], h=box["height"])
 
 
+async def _unread_box(frame: Frame, scroll: tuple[float, float]) -> Rect | None:
+    """An unread frame's box in document coordinates (zero-size: not rendered; ``None``: unknown)."""
+    try:
+        element = await frame.frame_element()
+        box = await element.bounding_box()
+    except PlaywrightError:
+        return None
+    if box is None:  # not rendered (display:none, detached)
+        return _NO_OFFSET
+    return Rect(x=box["x"] + scroll[0], y=box["y"] + scroll[1], w=box["width"], h=box["height"])
+
+
 async def extract_page(
     page: Page, *, iframes: bool, shadow_dom: bool, max_fields: int
 ) -> PageSnapshot:
     """Fields, forms, rendered text, links and clickables of ``page`` (memory only).
 
-    A child frame that detaches or navigates while it is read is left out (its fields are not
-    numbered); the main frame's errors propagate.
+    A child frame that fails while it is read (it detached or navigated) contributes nothing; it
+    is recorded in ``frames_failed`` (fail closed: no masked capture of the page) and listed with
+    ``read=False`` and its box while it is still on the page, like every rendered child frame that
+    is not read at all (cross-origin, or any child frame when ``iframes`` is off), whose box a
+    capture must black out. The main frame's errors propagate.
     """
     frames = await frame_map(page, iframes=iframes)
     sx, sy, _ = await page.evaluate(SCROLL_JS)
@@ -333,6 +353,8 @@ async def extract_page(
     links: list[LinkFacts] = []
     clicks: list[ClickableFacts] = []
     frame_facts: list[FrameFacts] = []
+    unread: list[tuple[int, Frame]] = []
+    failed: list[int] = []
     truncated, title = False, ""
     for index, frame in frames.items():
         args = {
@@ -348,6 +370,8 @@ async def extract_page(
         except PlaywrightError:
             if index == 0:
                 raise
+            failed.append(index)
+            unread.append((index, frame))
             continue
         frame_facts.append(
             FrameFacts(
@@ -372,6 +396,27 @@ async def extract_page(
         links += [LinkFacts.model_validate(link) for link in raw["links"]]
         clicks += [ClickableFacts.model_validate(c) for c in raw["clickables"]]
         truncated = truncated or bool(raw["truncated"])
+    listed = set(frames.values())
+    next_index = max(frames) + 1
+    for frame in page.frames:
+        if frame is page.main_frame or frame in listed:
+            continue
+        unread.append((next_index, frame))
+        next_index += 1
+    main = _origin(page.main_frame.url)
+    for index, frame in unread:
+        box = await _unread_box(frame, (sx, sy))
+        if box is None and frame.is_detached():
+            continue  # gone from the page: nothing of it is rendered
+        frame_facts.append(
+            FrameFacts(
+                frame_index=index,
+                same_origin=frame in listed or (main is not None and _origin(frame.url) == main),
+                offset=box,
+                path=frame.name or f"frame{index}",
+                read=False,
+            )
+        )
     return PageSnapshot(
         url=page.url,
         title=title,
@@ -382,7 +427,24 @@ async def extract_page(
         clickables=clicks,
         frames=frame_facts,
         truncated=truncated,
+        frames_failed=failed,
     )
+
+
+def unread_frame_boxes(snapshot: PageSnapshot) -> list[Rect] | None:
+    """The boxes a capture of ``snapshot``'s page must black out: every rendered child frame that
+    was not read (its content is in the screenshot but in no finding). ``None`` — the capture must
+    be withheld (fail closed) — when a frame failed while it was read (``frames_failed``) or an
+    unread frame cannot be located."""
+    if snapshot.frames_failed:
+        return None
+    boxes: list[Rect] = []
+    for frame in snapshot.unread_frames:
+        if frame.offset is None:
+            return None
+        if frame.offset.w > 0 and frame.offset.h > 0:
+            boxes.append(frame.offset)
+    return boxes
 
 
 async def text_rects(
@@ -395,7 +457,7 @@ async def text_rects(
     spans, in the order given; ``start``/``end`` are code-point offsets into the node text the
     detector saw. A span whose node or frame is gone gets ``[]``. One evaluation per frame."""
     by_key = {(t.frame_index, t.i): t.text for t in snapshot.texts}
-    offsets = {f.frame_index: f.offset for f in snapshot.frames}
+    offsets = {f.frame_index: f.offset for f in snapshot.frames if f.read and f.offset}
     out: list[list[Rect]] = [[] for _ in spans]
     per_frame: dict[int, list[tuple[int, list[int]]]] = {}
     for n, (frame_index, i, start, end) in enumerate(spans):

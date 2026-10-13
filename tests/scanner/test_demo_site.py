@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 import pytest
 
+from dps.config import Settings
 from tests.scanner.helpers import received
 
 pytestmark = pytest.mark.browser
@@ -103,3 +106,42 @@ def test_static_files_and_traversal_guard(demo_site_url: str) -> None:
 
 def test_health(demo_site_url: str) -> None:
     assert httpx.get(f"{demo_site_url}/health").json() == {"status": "ok"}
+
+
+async def test_a_draft_is_flushed_when_a_page_goes_and_the_guard_holds_it(
+    chromium: Any, demo_site_url: str, scan_settings: Settings
+) -> None:
+    """The demo flushes a draft (beacon + keepalive fetch) on pagehide. A plain ``page.close()``
+    lets it out (positive control); ``ScanGuard.close`` of a filled page does not."""
+    from dps.layers.scanner.browser import close_scan_context, new_scan_context
+    from dps.layers.scanner.guard import ScanGuard
+
+    def drafts() -> int:
+        return int(received(demo_site_url)["by_path"].get("POST /api/draft", 0))
+
+    before = drafts()
+    plain = await chromium.new_context()
+    page = await plain.new_page()
+    await page.goto(f"{demo_site_url}/apply/identity")
+    await page.locator("#fullName").fill("Sample Person")
+    await page.close()
+    await asyncio.sleep(0.8)
+    await plain.close()
+    assert drafts() >= before + 1
+    guard = ScanGuard(host_allowed=lambda h: h in scan_settings.scan_registered_hosts_list)
+    ctx = await new_scan_context(
+        chromium, scan_settings, storage_state=None, locale="en_IN", guard=guard, harden_js=False
+    )
+    try:
+        page = await ctx.new_page()
+        await page.goto(f"{demo_site_url}/apply/identity")
+        assert await guard.arm(page, ["Sample Person"])
+        sent = received(demo_site_url)["non_get"]
+        await page.locator("#fullName").fill("Sample Person")
+        assert await guard.close(page)
+        await asyncio.sleep(0.8)
+    finally:
+        await close_scan_context(ctx, guard)
+    assert received(demo_site_url)["non_get"] == sent
+    blocked = {(c.method, c.reason) for c in guard.drain_counts() if c.decision == "blocked"}
+    assert ("POST", "api_removed") in blocked  # the beacon and the keepalive of the flush
