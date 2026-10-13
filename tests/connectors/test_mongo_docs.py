@@ -217,3 +217,12 @@ def test_make_bson_safe_is_recursive() -> None:
     }
     bson.encode(v)  # encodes without InvalidDocument
     assert value["a"][0] == decimal.Decimal("1.2")  # the input is not changed
+
+
+def test_field_names_with_brackets_keep_their_name() -> None:
+    """Review G3 r3 B2: a field called ``iban[1]`` is one column named ``iban[1]``."""
+    assert md.top_level("$['iban[1]']") == "iban[1]"
+    assert md.top_level("$['a[0]x'].b") == "a[0]x"
+    docs = [{"_id": i, "iban[1]": f"GB{i}", "acct": {"no[2]": f"N{i}"}} for i in range(5)]
+    by = {c.path: c for c in md.infer_shape(OBJ, docs, row_estimate=5).columns}
+    assert by["$['iban[1]']"].name == "iban[1]" and by["$.acct['no[2]']"].name == "acct"

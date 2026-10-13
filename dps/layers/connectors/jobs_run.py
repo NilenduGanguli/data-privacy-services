@@ -96,6 +96,7 @@ from dps.layers.connectors.targets import (
     apply_pk_strategy,
     build_column_plans,
     check_projected_methods,
+    column_at,
     resolve_target,
 )
 from dps.observability import LEASES_LOST, ROWS_WRITTEN, get_logger
@@ -368,13 +369,13 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
 
 
 def _check_snapshot(snapshot: ClassificationSnapshot, shape: TableShape) -> None:
+    """Every reviewed column is still there with its kind — matched by **path**: a document's
+    columns share their top-level name (``$.profile.fullName`` and ``$.profile.dob`` are both
+    ``profile``), a SQL column's path is its name's."""
     for col in snapshot.columns:
-        try:
-            live = shape.column(col.name)
-        except KeyError:
-            raise PrepareFailure(
-                "snapshot_stale", f"column {col.path} is no longer in the table"
-            ) from None
+        live = column_at(shape, col.path, col.name)
+        if live is None:
+            raise PrepareFailure("snapshot_stale", f"column {col.path} is no longer in the table")
         if live.kind != col.kind:
             raise PrepareFailure("snapshot_stale", f"column {col.path} changed type since review")
 

@@ -59,6 +59,20 @@ def test_sessions_are_tagged_and_binary_collated(owner_pool: ora.OraclePool) -> 
         assert conn.call_timeout == 30000
 
 
+def test_a_pool_without_a_job_id_opens_sessions(oracle_schema: OracleTestSchema) -> None:
+    """M3 Task 19: a connection test (``POST /connections/{id}/test``) opens a connector without a
+    job id; setting an empty ``client_identifier`` made thin mode drop the session (DPY-4011), so
+    every Oracle connection test through the API failed."""
+    pool = _pool(oracle_schema, client_identifier=None)
+    try:
+        for _ in range(2):  # a fresh session, then a pooled one
+            with pool.acquire(action="test") as conn, conn.cursor() as cur:
+                cur.execute("SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') FROM dual")
+                assert cur.fetchone() == (None,)
+    finally:
+        pool.close()
+
+
 def test_release_rolls_back_what_the_block_left_open(
     owner_pool: ora.OraclePool, oracle_conn: Any
 ) -> None:

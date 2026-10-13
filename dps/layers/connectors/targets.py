@@ -45,6 +45,7 @@ from dps.engine.batch import KEYLESS_METHODS, ColumnPlan
 from dps.engine.policy import MethodSpec
 from dps.engine.transform.methods import METHODS
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
+from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
     PIPELINE_ENGINES,
     ColumnInfo,
@@ -111,6 +112,29 @@ class RunPlan(BaseModel):
     batch_rows: int
     same_table_append: bool = False
     prepare: dict[str, Any] = Field(default_factory=dict)
+
+
+def column_at(shape: TableShape, path: str, name: str) -> ColumnInfo | None:
+    """The column of ``shape`` at ``path`` (a document's columns share their top-level ``name``:
+    ``$.profile.fullName`` and ``$.profile.dob`` are both ``profile``); a SQL shape falls back to
+    the name when the path is spelt otherwise. ``None`` when neither matches."""
+    for column in shape.columns:
+        if column.path == path:
+            return column
+    try:
+        column = shape.column(name)
+    except KeyError:
+        return None
+    # a flat column found by name is the same column; a document leaf of the same top-level
+    # field (``$.profile.dob`` for ``$.profile.fullName``) is another column
+    return column if docpaths.top_level(column) else None
+
+
+def _at(shape: TableShape, path: str, name: str) -> ColumnInfo:
+    column = column_at(shape, path, name)
+    if column is None:
+        raise PrepareFailure("snapshot_stale", f"column {path} is no longer in the table")
+    return column
 
 
 def _fail(code: str, status: int, detail: str) -> SpecError:
@@ -267,7 +291,12 @@ def _check_append(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
             isinstance(strategy, PkOffset) and strategy.prefix is not None
         ):
             raise _fail(invalid, 422, "a same-table append takes generate or a numeric offset only")
-        if len(key_info) != 1 or key_info[0].kind != "int":
+        # MongoDB: ``generate`` assigns ObjectIds above the collection's newest one (the writer
+        # bounds the read with ``append_upper_key``), so an ObjectId key is a same-table key too
+        generated_oid = isinstance(strategy, PkGenerate) and [c.kind for c in key_info] == [
+            "object_id"
+        ]
+        if not generated_oid and (len(key_info) != 1 or key_info[0].kind != "int"):
             raise _fail(invalid, 422, "a same-table append needs a single integer key column")
 
 
@@ -409,7 +438,7 @@ def build_column_plans(
             continue
         if not col.text_column and (col.entity_type is None or method.method == "keep"):
             continue
-        info = snapshot.shape.column(col.name)
+        info = _at(snapshot.shape, col.path, col.name)
         plans.append(
             ColumnPlan(
                 path=col.path,
@@ -516,7 +545,7 @@ def _check_existing(
 def _target_plans(plans: list[ColumnPlan], target_shape: TableShape) -> list[ColumnPlan]:
     out = []
     for p in plans:
-        t = target_shape.column(p.name)
+        t = _at(target_shape, p.path, p.name)
         out.append(
             p.model_copy(
                 update={
@@ -532,7 +561,7 @@ def _target_plans(plans: list[ColumnPlan], target_shape: TableShape) -> list[Col
 
 def _check_lengths(plans: list[ColumnPlan], source_shape: TableShape) -> None:
     for p in plans:
-        worst = worst_case_length(p, source_shape.column(p.name))
+        worst = worst_case_length(p, _at(source_shape, p.path, p.name))
         if worst is not None and p.length is not None and worst > p.length:
             raise PrepareFailure(
                 "length_overflow",
@@ -544,7 +573,7 @@ def _unbounded_plans(plans: list[ColumnPlan], source_shape: TableShape) -> list[
     """Planned text-like columns become unbounded ``text`` (created tables, file targets)."""
     out = []
     for p in plans:
-        if source_shape.column(p.name).kind in _TEXT_OUTPUT_KINDS:
+        if _at(source_shape, p.path, p.name).kind in _TEXT_OUTPUT_KINDS:
             p = p.model_copy(
                 update={"kind": "text", "length": None, "precision": None, "scale": None}
             )
@@ -606,10 +635,15 @@ def resolve_target(
             if not t.create_if_missing:
                 raise PrepareFailure("target_invalid", "the target table does not exist")
             by_name = {p.name: p for p in plans}
-            types = {
-                n: created_column_type(source_shape.column(n), by_name.get(n), engine=conn.engine)
-                for n in projection
-            }
+            if conn.engine == "mongo":  # a collection has no column DDL: labels for the record
+                types = {n: source_shape.column(n).data_type for n in projection}
+            else:
+                types = {
+                    n: created_column_type(
+                        source_shape.column(n), by_name.get(n), engine=conn.engine
+                    )
+                    for n in projection
+                }
             resolved = ResolvedTarget(
                 **common,
                 object=t.object,

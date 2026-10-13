@@ -19,9 +19,9 @@ from typing import Any, Final, Literal
 
 from bson import Binary, Decimal128, Int64, ObjectId
 
-from dps.engine.jsonpath import flatten, parse_path
+from dps.engine.jsonpath import flatten
 from dps.layers.connectors.base import ColumnInfo, ColumnKind, ObjectRef, TableShape
-from dps.layers.connectors.docpaths import generalise
+from dps.layers.connectors.docpaths import generalise, path_parts
 
 #: BSON label → ``ColumnInfo.kind``.
 KIND_OF: Final[dict[str, ColumnKind]] = {
@@ -80,7 +80,7 @@ def bson_type(value: Any) -> str:
 
 def top_level(path: str) -> str:
     """The top-level field of a path: ``$.contact.addresses[*].line1`` → ``contact``."""
-    return str(parse_path(path.replace("[*]", "[0]"))[0])
+    return str(path_parts(path)[0])
 
 
 def id_label(value: Any) -> str:

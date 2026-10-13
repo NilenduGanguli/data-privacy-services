@@ -10,40 +10,108 @@ M2 did. Nothing here logs or raises a value.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any, Final
 
-from dps.engine.jsonpath import flatten, get_path, parse_path
+from dps.engine.jsonpath import child_path, flatten, get_path
 from dps.layers.connectors.base import NEVER_TRANSFORMED_KINDS, ColumnInfo, Row
 
 _INDEX: Final = re.compile(r"\[\d+\]")
 _WILDCARD: Final = "[*]"
 _ABSENT: Final = (KeyError, IndexError, TypeError, ValueError)
 _ROW_LOCATOR_TYPES: Final = frozenset({"ROWID", "UROWID"})
+#: One path segment: ``.name``, ``[3]``, ``[*]`` or ``['quoted key']`` (``[*]`` / ``[3]`` inside a
+#: quoted key are part of the key — a MongoDB field may be called ``iban[1]``).
+_SEGMENT: Final = re.compile(
+    r"\.([A-Za-z_][A-Za-z0-9_]*)|\[([0-9]+)\]|\[(\*)\]|\['((?:[^'\\]|\\.)*)'\]"
+)
+#: A ``[*]`` segment in :func:`path_parts`.
+WILDCARD = None
+Part = str | int | None
+
+
+def path_parts(path: str) -> list[Part]:
+    """``$.a[*]['b[2]'][0]`` → ``["a", None, "b[2]", 0]`` (``None`` = a ``[*]`` segment).
+
+    Raises:
+        ValueError: a malformed path (the message names the offset only).
+    """
+    if not path.startswith("$"):
+        raise ValueError("a path starts with '$'")
+    out: list[Part] = []
+    pos, rest = 0, path[1:]
+    while pos < len(rest):
+        match = _SEGMENT.match(rest, pos)
+        if not match:
+            raise ValueError(f"malformed path at offset {pos + 1}")
+        ident, index, star, quoted = match.groups()
+        if ident is not None:
+            out.append(ident)
+        elif index is not None:
+            out.append(int(index))
+        elif star is not None:
+            out.append(WILDCARD)
+        else:
+            out.append(quoted.replace("\\'", "'").replace("\\\\", "\\"))
+        pos = match.end()
+    return out
+
+
+def render(parts: list[Part]) -> str:
+    """The canonical path of ``parts`` (keys as :func:`~dps.engine.jsonpath.flatten` spells them)."""
+    path = "$"
+    for part in parts:
+        if part is WILDCARD:
+            path += _WILDCARD
+        elif isinstance(part, int):
+            path += f"[{part}]"
+        else:
+            path = child_path(path, part)
+    return path
 
 
 def generalise(path: str) -> str:
-    """Replace every array index with ``[*]`` (``$.a[3].b`` → ``$.a[*].b``)."""
-    return _INDEX.sub(_WILDCARD, path)
+    """Replace every array index **segment** with ``[*]`` (``$.a[3].b`` → ``$.a[*].b``); text inside
+    a quoted key is never an index (``$['iban[1]']`` stays)."""
+    try:
+        parts = path_parts(path)
+    except ValueError:
+        return _INDEX.sub(_WILDCARD, path)
+    if not any(isinstance(p, int) for p in parts):
+        return path
+    return render([WILDCARD if isinstance(p, int) else p for p in parts])
 
 
 def expand_wildcards(doc: Any, path: str) -> list[str]:
     """The concrete paths ``path`` addresses in ``doc`` (missing branches yield nothing)."""
-    head, sep, tail = path.partition(_WILDCARD)
-    if not sep:
+    try:
+        parts = path_parts(path)
+    except ValueError:
+        return []
+    if WILDCARD not in parts:
         try:
             get_path(doc, path)
         except _ABSENT:
             return []
         return [path]
-    try:
-        node = get_path(doc, head)
-    except _ABSENT:
-        return []
-    if not isinstance(node, list):
-        return []
     out: list[str] = []
-    for i in range(len(node)):
-        out.extend(expand_wildcards(doc, f"{head}[{i}]{tail}"))
+
+    def walk(node: Any, i: int, at: str) -> None:
+        if i == len(parts):
+            out.append(at)
+            return
+        part = parts[i]
+        if part is WILDCARD or isinstance(part, int):
+            if not isinstance(node, list):
+                return
+            indexes = range(len(node)) if part is WILDCARD else [part]
+            for k in indexes:
+                if k < len(node):
+                    walk(node[k], i + 1, f"{at}[{k}]")
+        elif isinstance(node, Mapping) and part in node:
+            walk(node[part], i + 1, child_path(at, part))
+
+    walk(doc, 0, "$")
     return out
 
 
@@ -92,11 +160,13 @@ def dotted(path: str) -> str | None:
     or the path is the root.
     """
     try:
-        parts = parse_path(path.replace(_WILDCARD, ""))
+        parts = path_parts(path)
     except ValueError:
         return None
     out: list[str] = []
     for part in parts:
+        if part is WILDCARD:
+            continue
         if isinstance(part, int):
             out.append(str(part))
         elif not part or "." in part or part.startswith("$"):

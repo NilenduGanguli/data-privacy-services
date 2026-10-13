@@ -225,8 +225,9 @@ def test_kek_snapshot_key_and_text_rules(settings: Settings) -> None:
 
 
 def test_engine_roles_and_in_place_key_rules(settings: Settings) -> None:
-    mongo = make_connection("c_src", engine="mongo", roles=["source"], params={})
-    assert _code(spec(**UAT_TABLE), settings, source_conn=mongo) == ("engine_unavailable", 422)
+    # M3 Task 19: every database engine runs; a file store is never a run source
+    store = make_connection("c_src", engine="s3", roles=["source"], params={"bucket": "dps-in"})
+    assert _code(spec(**UAT_TABLE), settings, source_conn=store) == ("engine_unavailable", 422)
     target_only = make_connection("c_src", roles=["target"])
     assert _code(spec(**UAT_TABLE), settings, source_conn=target_only) == ("connection_role", 422)
     reader = make_connection("c_uat", roles=["source"])

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2] / "dps" / "layers" / "connectors"
 
@@ -32,14 +35,14 @@ def test_finalize_clears_the_write_ledger() -> None:
     assert _calls("jobs_run.py", "clear_ledger")
 
 
-def test_oracle_sources_pass_the_pipeline_engine_gates() -> None:
+def test_oracle_and_mongo_sources_pass_the_pipeline_engine_gates() -> None:
     """Discovery (``submit_discover``) and runs (``validate_run``) admit exactly the engines whose
     connector is wired in the registry *and* whose rows the run pipeline has been proven on.
-    MongoDB's connector is in the registry (Task 12) but joins the gates with the pipeline's
-    document-path work and its end-to-end test (Tasks 15 and 19)."""
+    MongoDB joined with the run handler's path-based planning and checks (Task 19,
+    ``test_mongo_pipeline.py`` and the end-to-end tests)."""
     from dps.layers.connectors.base import PIPELINE_ENGINES
 
-    assert {"postgres", "oracle"} <= PIPELINE_ENGINES and "mongo" not in PIPELINE_ENGINES
+    assert PIPELINE_ENGINES == {"postgres", "oracle", "mongo"}
     for module in ("submit.py", "targets.py"):
         text = (ROOT / module).read_text(encoding="utf-8")
         assert "PIPELINE_ENGINES" in text and '.engine != "postgres"' not in text, module
@@ -112,3 +115,106 @@ def test_the_run_transformer_restores_leaf_types_by_source_engine() -> None:
     except ImportError:  # the mongo extra is not installed: nothing to restore with
         return
     assert leaf_restorer("mongo") is restore_leaf
+
+
+def _document_snapshot() -> Any:
+    """An accepted snapshot of a MongoDB collection whose columns share top-level names."""
+    from datetime import UTC, datetime
+
+    from dps.engine.policy import MethodSpec
+    from dps.jobs_models import ClassificationSnapshot, ColumnClassification
+    from dps.layers.connectors.base import ColumnInfo, ObjectRef, TableShape
+
+    def info(path: str, name: str, kind: str, data_type: str, key: bool = False) -> ColumnInfo:
+        return ColumnInfo(path=path, name=name, data_type=data_type, kind=kind, is_key=key)  # type: ignore[arg-type]
+
+    shape = TableShape(
+        object=ObjectRef(name="profiles"),
+        columns=[
+            info("$._id", "_id", "object_id", "objectId", key=True),
+            info("$.profile.fullName", "profile", "text", "string"),
+            info("$.profile.dob", "profile", "timestamp", "date"),
+        ],
+        key=["_id"],
+        key_source="primary_key",
+    )
+    methods = {"$.profile.fullName": "fpe_text", "$.profile.dob": "date_shift"}
+    entities = {"$.profile.fullName": "PERSON_NAME", "$.profile.dob": "DATE_OF_BIRTH"}
+    now = datetime.now(UTC)
+    columns = [
+        ColumnClassification(
+            path=c.path, name=c.name, data_type=c.data_type, kind=c.kind, is_key=c.is_key,
+            entity_type=entities.get(c.path), confidence=0.9, sensitivity=None, detectors=[],
+            value_hit_rate=1.0, null_rate=0.0, distinct_ratio=1.0, shapes=[], text_column=False,
+            anchor=False, suggested=MethodSpec(method=methods.get(c.path, "keep")),
+            method=MethodSpec(method=methods.get(c.path, "keep")),
+        )
+        for c in shape.columns
+    ]  # fmt: skip
+    return ClassificationSnapshot(
+        id="snap_d", tenant_id="t1", job_id=None, connection_id="c_m", engine="mongo",
+        object_ref="profiles", status="accepted", policy_name="p", policy_hash="h", shape=shape,
+        columns=columns, sample_rows=10, overrides=[], content_hash="x", created_at=now,
+        accepted_at=now, accepted_by="k",
+    )  # fmt: skip
+
+
+def test_document_columns_are_planned_and_checked_by_path() -> None:
+    """Task 19: ``$.profile.fullName`` and ``$.profile.dob`` are both called ``profile``; the run
+    handler plans and checks each by its path (by name, the date took the text column's kind and
+    the live check called the snapshot stale)."""
+    from dps.layers.connectors.jobs_run import _check_snapshot
+    from dps.layers.connectors.targets import PrepareFailure, build_column_plans, column_at
+
+    snap = _document_snapshot()
+    plans = build_column_plans(
+        snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=["_id", "profile"]
+    )
+    assert {p.path: p.kind for p in plans} == {
+        "$.profile.fullName": "text",
+        "$.profile.dob": "timestamp",
+    }
+    _check_snapshot(snap, snap.shape)  # no false "changed type"
+    shape = snap.shape
+    assert column_at(shape, "$.profile.dob", "profile") is shape.columns[2]
+    assert column_at(shape, "$.profile.nick", "profile") is None  # a sibling is not the column
+    gone = shape.model_copy(update={"columns": shape.columns[:2]})
+    with pytest.raises(PrepareFailure) as stale:
+        _check_snapshot(snap, gone)
+    assert stale.value.code == "snapshot_stale"
+
+
+def test_a_same_collection_append_generates_object_ids() -> None:
+    """Task 19: ``generate`` on a same-collection MongoDB append (an ObjectId key) is admitted;
+    an ``offset`` on an ObjectId key is still refused."""
+    from dps.auth import LOCAL_PRINCIPAL
+    from dps.config import Settings
+    from dps.jobs_models import RunSpec, SpecError
+    from dps.layers.connectors.targets import validate_run
+    from tests.connectors.factories import make_connection
+
+    snap = _document_snapshot()
+    conn = make_connection("c_m", engine="mongo", roles=["source", "target"], params={})
+
+    def spec(pk: dict[str, Any]) -> RunSpec:
+        return RunSpec.model_validate(
+            {
+                "mode": "obfuscate",
+                "snapshot_id": "snap_d",
+                "purpose": {"ticket": "CHG-1", "legal_basis": "test"},
+                "source": {"connection_id": "c_m", "object": {"name": "profiles"}},
+                "target": {"write_mode": "append", "confirm_write": True, "pk_strategy": pk},
+                "consistency": {"key_material": {"kid": "k"}},
+            }
+        )
+
+    def run(pk: dict[str, Any]) -> None:
+        validate_run(
+            spec(pk), principal=LOCAL_PRINCIPAL, source_conn=conn, target_conn=None,
+            snapshot=snap, settings=Settings(_env_file=None), kek=b"k" * 32,
+        )  # fmt: skip
+
+    run({"kind": "generate"})
+    with pytest.raises(SpecError) as offset:
+        run({"kind": "offset", "offset": 1000})
+    assert offset.value.code == "pk_strategy_invalid"

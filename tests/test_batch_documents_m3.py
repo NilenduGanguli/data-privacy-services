@@ -268,3 +268,52 @@ def test_leaf_restore_sees_only_written_leaves_and_text_leaves_stay_text() -> No
     assert first["score"] == 7  # untouched: no hook call
     assert isinstance(second["acct"], str) and second["acct"] != "00412345"
     assert second["score"] == 8
+
+
+def test_a_scalar_sampled_field_holding_documents_is_searched() -> None:
+    """Review G3 r3 B1: ``$.notes`` was sampled as text; a drift document holding a
+    sub-document or an array there must not pass its nested values in clear."""
+    rows = [
+        _doc(
+            1, notes={"text": "mail sentinel.a@example.com now", "iban": "GB82WEST12345698765432"}
+        ),
+        _doc(2, notes=["mail sentinel.b@example.com now"]),
+        _doc(3),
+    ]
+    for mode in ("detect", "redact"):
+        out = _run([], rows, unclassified=mode).rows
+        text = repr(out)
+        assert "sentinel.a@example.com" not in text and "sentinel.b@example.com" not in text, mode
+        assert out[2] == rows[2], mode  # a scalar under the reviewed name stays the review's
+    redacted = _run([], rows, unclassified="redact").rows
+    assert "GB82WEST12345698765432" not in repr(redacted)
+
+
+def test_a_planned_field_name_with_brackets_is_transformed() -> None:
+    """Review G3 r3 B2: plans on ``$['iban[1]']`` and ``$.acct['no[2]']`` reach their values."""
+    from dps.layers.connectors.mongo_docs import infer_shape
+
+    rows = [
+        {"_id": i, "iban[1]": f"GB82WEST1234569876{i:04d}", "acct": {"no[2]": f"ACCT-{i:06d}"}}
+        for i in range(20)
+    ]
+    shape = infer_shape(ObjectRef(name="forms"), rows, row_estimate=20)  # as discovery sees it
+    assert [c.path for c in shape.columns] == ["$._id", "$.acct['no[2]']", "$['iban[1]']"]
+    plans = [
+        ColumnPlan(
+            path=c.path, name=c.name, entity_type="IBAN", method=MethodSpec(method="det_token"),
+            text_column=False, reversible=True, kind="text", length=None,
+        )
+        for c in shape.columns[1:]
+    ]  # fmt: skip
+    out = BatchTransformer(
+        ENGINE, policy=load_preset("gdpr-pseudonymise"), mode="obfuscate", columns=plans,
+        shape=shape, key=KEY, seed=None, locale="en_IN", unclassified="detect",
+    ).transform(rows)  # fmt: skip
+    unchanged = sum(
+        1
+        for old, new in zip(rows, out.rows, strict=True)
+        for a, b in ((old["iban[1]"], new["iban[1]"]), (old["acct"]["no[2]"], new["acct"]["no[2]"]))
+        if a == b
+    )
+    assert unchanged == 0 and out.values_by_column == {"iban[1]": 20, "$.acct['no[2]']": 20}

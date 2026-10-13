@@ -252,7 +252,8 @@ class OraclePool:
             conn.call_timeout = call_timeout_ms or self._call_timeout_ms
             conn.module = self._module
             conn.action = action[:_IDENTIFIER_MAX]
-            conn.client_identifier = self._client_identifier
+            if self._client_identifier:  # an empty identifier makes thin mode drop the session
+                conn.client_identifier = self._client_identifier  # (DPY-4011, measured on 23ai)
             yield conn
         finally:
             try:

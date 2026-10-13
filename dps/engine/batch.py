@@ -406,9 +406,15 @@ class BatchTransformer:
         self.by_path = {c.path: c for c in shape.columns}
         if any(not top_level(c.output_column()) and c.path not in self.by_path for c in columns):
             raise ValueError("a column plan names a document path the table does not have")
-        # top-level keys that are columns of their own (every SQL column, flat Mongo fields):
-        # never searched for unclassified leaves
+        # top-level keys that are columns of their own (every SQL column, flat Mongo fields).
+        # SQL rows: never searched for unclassified leaves (a jsonb value is its column's). Document
+        # rows (a leaf-restoring source, or a shape with nested paths): a flat field is searched
+        # unless a plan covers it whole, so a field the sample saw as a scalar but a later
+        # document holds as a sub-document or an array never passes its nested values in clear
+        # (review G3 r3 B1); a scalar under that name is the shape's own path and stays skipped.
         self.flat_names = {c.name for c in shape.columns if top_level(c)}
+        self.documents = leaf_restore is not None or not all(top_level(c) for c in shape.columns)
+        self.planned_flat = {c.name for c in columns if top_level(c.output_column())}
         self.engine, self.policy, self.mode = engine, policy, mode
         self.shape, self.key, self.seed, self.locale = shape, key, seed, locale
         self.anchor, self.verify_mode = anchor, verify
@@ -509,7 +515,7 @@ class BatchTransformer:
         """
         out: list[tuple[_Unit, str, list[Finding]]] = []
         for name, value in row.items():
-            if name in self.flat_names:
+            if name in self.flat_names and (not self.documents or name in self.planned_flat):
                 continue
             for path, leaf in flatten(value, child_path("$", str(name))):
                 if generalise(path) in self.by_path or leaf is None or isinstance(leaf, bool):

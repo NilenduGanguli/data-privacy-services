@@ -79,3 +79,20 @@ def test_dotted_and_leaf_updates() -> None:
     assert upd["tags.0"] == "vip" and "accounts" not in upd
     assert docpaths.leaf_updates({"_id": 1, "a.b": 1}) is None
     assert docpaths.leaf_updates({"_id": {"k": 1}, "a": 2}) == {"a": 2}
+
+
+def test_bracket_text_inside_a_quoted_key_is_part_of_the_key() -> None:
+    """Review G3 r3 B2: ``iban[1]`` is a legal field name; only an index segment is an index."""
+    doc = {"iban[1]": "x", "a[0]x": 1, "acct": [{"no[2]": "p"}, {"no[2]": "q"}]}
+    assert docpaths.generalise("$['iban[1]']") == "$['iban[1]']"
+    assert docpaths.generalise("$.acct[1]['no[2]']") == "$.acct[*]['no[2]']"
+    assert docpaths.generalise("$['a[0]x']") == "$['a[0]x']"
+    assert docpaths.expand_wildcards(doc, "$['iban[1]']") == ["$['iban[1]']"]
+    assert docpaths.expand_wildcards(doc, "$.acct[*]['no[2]']") == [
+        "$.acct[0]['no[2]']",
+        "$.acct[1]['no[2]']",
+    ]
+    assert docpaths.values_at(doc, "$.acct[*]['no[2]']") == ["p", "q"]
+    assert docpaths.dotted("$['iban[1]']") == "iban[1]"
+    assert docpaths.dotted("$.acct[*]['no[2]']") == "acct.no[2]"
+    assert docpaths.dotted("$['a[*]b']") == "a[*]b"
