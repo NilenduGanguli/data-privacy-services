@@ -10,6 +10,7 @@ import { Policies } from './pages/Policies';
 import { PlaygroundDocuments } from './pages/PlaygroundDocuments';
 import { Reports } from './pages/Reports';
 
+/** Placeholder for the UI scanner (built by the M4 console lane) and unknown routes. */
 function Soon({ title }: { title: string }): JSX.Element {
   return (
     <main className="page">

@@ -45,7 +45,7 @@ export function Layout(): JSX.Element {
             </div>
           ))}
         </div>
-        <div className="sidebar-foot"><span>v0.2.0 · M2</span><span className="mono">/api/v1</span></div>
+        <div className="sidebar-foot"><span>v{__APP_VERSION__}</span><span className="mono">/api/v1</span></div>
       </nav>
       <div className="main">
         <header className="topbar">
