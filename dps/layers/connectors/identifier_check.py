@@ -162,16 +162,61 @@ class IdentifierTally:
 
 
 async def _stream(
-    connector: Connector, shape: TableShape, names: list[str]
+    connector: Connector,
+    shape: TableShape,
+    names: list[str],
+    after_key: tuple[Any, ...] | None = None,
 ) -> AsyncIterator[list[Row]]:
     present = [n for n in names if any(c.name == n for c in shape.columns)]
     if not present:
         return
     pages = connector.read_partition(
-        shape, Selection(columns=present), {}, KeyRange(), after_key=None, batch=CHECK_BATCH
+        shape, Selection(columns=present), {}, KeyRange(), after_key=after_key, batch=CHECK_BATCH
     )
     async for rows in pages:
         yield rows
+
+
+async def key_floor(connector: Connector, shape: TableShape) -> tuple[int] | None:
+    """The largest key of ``shape`` before an append writes (``None``: no row, or not one
+    integer key column). Rows the target generates after it carry larger keys, so
+    :func:`check_identifiers` can read only what the run appended. Reads the key column only."""
+    if len(shape.key) != 1:
+        return None
+    column = next((c for c in shape.columns if c.name == shape.key[0]), None)
+    if column is None or column.kind != "int":
+        return None
+    largest: int | None = None
+    pages = connector.read_partition(
+        shape, Selection(columns=[column.name]), {}, KeyRange(), after_key=None, batch=CHECK_BATCH
+    )
+    async for rows in pages:
+        for row in rows:
+            value = row.get(column.name)
+            if isinstance(value, int) and (largest is None or value > largest):
+                largest = value
+        rows.clear()
+    return (largest,) if largest is not None else None
+
+
+async def _tally_target(
+    tally: IdentifierTally,
+    names: list[str],
+    target: Connector,
+    target_shape: TableShape,
+    after_key: tuple[Any, ...] | None,
+) -> int:
+    by_name = {c.name: c for c in target_shape.columns}
+    read = 0
+    async for rows in _stream(target, target_shape, names, after_key):
+        read += len(rows)
+        for row in rows:
+            for name in names:
+                column = by_name.get(name)
+                if column is not None:
+                    tally.add_target(name, to_engine_text(row.get(name), column))
+        rows.clear()
+    return read
 
 
 async def check_identifiers(
@@ -181,22 +226,36 @@ async def check_identifiers(
     target_shape: TableShape,
     source: Connector | None,
     source_shape: TableShape | None,
+    after_key: tuple[Any, ...] | None = None,
+    expected_rows: int | None = None,
 ) -> dict[str, Any]:
     """Read every target row's identifier columns, then (unless ``source`` is None: in place, the
-    target *is* the source) every source row's, and count (see the module docstring)."""
-    tally = IdentifierTally(columns)
+    target *is* the source) every source row's, and count (see the module docstring).
+
+    ``after_key`` (WP-I, an append into a table that already held rows): read only the target
+    rows after the pre-run key (:func:`key_floor`), the rows the run appended; the target's own
+    rows are not the run's output. Fail closed: when fewer rows follow the floor than the run
+    wrote (``expected_rows``), some written rows sit below it and every row is checked again.
+    ``scope`` says which: ``written_rows`` or ``whole_table``.
+    """
     names = list(columns)
-    by_name = {c.name: c for c in target_shape.columns}
-    async for rows in _stream(target, target_shape, names):
-        for row in rows:
-            for name in names:
-                column = by_name.get(name)
-                if column is not None:
-                    tally.add_target(name, to_engine_text(row.get(name), column))
-        rows.clear()
+    tally = IdentifierTally(columns)
+    scope, reason = "whole_table", None
+    if after_key is not None:
+        read = await _tally_target(tally, names, target, target_shape, after_key)
+        if expected_rows is not None and read >= expected_rows:
+            scope = "written_rows"
+        else:
+            tally = IdentifierTally(columns)
+            reason = "rows_below_floor" if expected_rows is not None else "written_rows_unknown"
+    if scope == "whole_table":
+        await _tally_target(tally, names, target, target_shape, None)
     tally.seal()
+    out: dict[str, Any] = {"scope": scope}
+    if reason:
+        out["scope_reason"] = reason
     if source is None or source_shape is None:
-        return tally.result(source_compared=False)
+        return {**tally.result(source_compared=False), **out}
     src_cols = {c.name: c for c in source_shape.columns}
     async for rows in _stream(source, source_shape, names):
         for name in names:
@@ -204,4 +263,4 @@ async def check_identifiers(
             if column is not None:
                 tally.add_source(name, (to_engine_text(r.get(name), column) for r in rows))
         rows.clear()
-    return tally.result(source_compared=True)
+    return {**tally.result(source_compared=True), **out}

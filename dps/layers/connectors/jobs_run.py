@@ -119,7 +119,11 @@ from dps.layers.connectors.files import (
     manifest_bytes,
     write_manifest,
 )
-from dps.layers.connectors.identifier_check import check_identifiers, identifier_columns
+from dps.layers.connectors.identifier_check import (
+    check_identifiers,
+    identifier_columns,
+    key_floor,
+)
 from dps.layers.connectors.partitions import partition_count, plan_partitions
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.registry import open_connector, open_target_store
@@ -625,6 +629,20 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         }
         if kept_prewrite is not None:
             plan.prepare["kept_review"] = kept_prewrite
+        if (
+            spec.mode == "synthesize"
+            and mode == "append"
+            and not plan.same_table_append
+            and not spec.options.dry_run
+            and target is not None
+            and target_shape is not None
+            and _written_identifiers(plan, snapshot)
+        ):
+            # WP-I: the identifier check reads only the rows this run appends (fails closed);
+            # existing_rows is the planner's estimate (0 before ANALYZE), so the keys are read
+            floor = await key_floor(target, target_shape)
+            if floor is not None:
+                plan.prepare["identifier_floor"] = list(floor)
         base: dict[str, Any] = {"rows_estimated": rows, "stage": ""}
         if metrics:
             base["metrics"] = metrics
@@ -1789,11 +1807,14 @@ async def _identifier_check(
     source_conn: Connection,
     target_conn: Connection | None,
     snapshot: ClassificationSnapshot | None,
+    written_rows: int | None = None,
 ) -> dict[str, Any]:
     """D-A (M5 verify r2): every written identifier value, against every source value and the
     issuers' never-issued ranges (``identifier_check.py``; counts only). In place, the table
     holds only synthetic rows now: the ranges are checked, the source cannot be. An append to
-    the source table itself mixes both, so it is not run."""
+    the source table itself mixes both, so it is not run. An append into a table that already
+    held rows reads only the rows after its pre-run key (``identifier_floor``, WP-I), falling
+    back to every row when fewer than ``written_rows`` follow it."""
     columns = _written_identifiers(plan, snapshot)
     if not columns:
         return {}
@@ -1813,12 +1834,20 @@ async def _identifier_check(
             )
         source = target if same else await _open(ctx, job, source_conn, "finalize")
         source_shape = await source.describe(spec.source.object)
+        floor = plan.prepare.get("identifier_floor")
+        after_key = (
+            tuple(floor)
+            if plan.target.write_mode == "append" and isinstance(floor, list) and floor
+            else None
+        )
         return await check_identifiers(
             columns,
             target=target,
             target_shape=target_shape,
             source=source,
             source_shape=source_shape,
+            after_key=after_key,
+            expected_rows=written_rows if after_key is not None else None,
         )
     finally:
         if source is not None and source is not target:
@@ -1983,7 +2012,16 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
                 {"not_run": "files_target"}
                 if mode == "files"
                 else await _best_effort(
-                    _identifier_check(ctx, job, spec, plan, source_conn, target_conn, snapshot)
+                    _identifier_check(
+                        ctx,
+                        job,
+                        spec,
+                        plan,
+                        source_conn,
+                        target_conn,
+                        snapshot,
+                        written_rows=sum(p.rows_written for p in parts),
+                    )
                 )
             )
             if ids and _written_identifiers(plan, snapshot):

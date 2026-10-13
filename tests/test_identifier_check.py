@@ -98,12 +98,13 @@ class _Fake:
         after_key: Any,
         batch: int,
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        assert selection.columns and key_range == KeyRange() and after_key is None
-        for i in range(0, len(self.rows), 2):
+        assert selection.columns and key_range == KeyRange()
+        rows = [r for r in self.rows if after_key is None or r["id"] > after_key[0]]
+        for i in range(0, len(rows), 2):
             self.pages += 1
             yield [
                 {k: v for k, v in r.items() if k in {*selection.columns, "id"}}
-                for r in self.rows[i : i + 2]
+                for r in rows[i : i + 2]
             ]
 
 
@@ -145,3 +146,67 @@ def test_check_identifiers_reads_every_row_of_both_sides() -> None:
     assert in_place["source_compared"] is False
     assert in_place["columns"]["national_id"]["in_source"] is None
     assert in_place["review_columns"] == []
+
+
+# -- WP-I (M5 merge): an append checks the rows the run wrote, not the target's own rows ------
+
+
+def _append_target() -> _Fake:
+    """Ids 0-4: the target's own rows (they hold source values); 5-9: what the run appended."""
+    own = [{"id": i, "national_id": f"DF{i:06d}A"} for i in range(5)]
+    return _Fake(own + [{"id": i, "national_id": f"FU{i:06d}B"} for i in range(5, 10)])
+
+
+def _source() -> _Fake:
+    return _Fake([{"id": i, "national_id": f"DF{i:06d}A"} for i in range(5)])
+
+
+def _check(target: _Fake, **kw: Any) -> dict[str, Any]:
+    return asyncio.run(
+        check_identifiers(
+            {"national_id": "NATIONAL_ID"},
+            target=target,  # type: ignore[arg-type]
+            target_shape=_shape("t"),
+            source=_source(),  # type: ignore[arg-type]
+            source_shape=_shape("s"),
+            **kw,
+        )
+    )
+
+
+def test_an_append_reads_only_the_rows_after_the_pre_run_key() -> None:
+    out = _check(_append_target(), after_key=(4,), expected_rows=5)
+    assert out["scope"] == "written_rows"
+    assert out["columns"]["national_id"]["checked"] == 5
+    assert out["columns"]["national_id"]["in_source"] == 0
+    # whole table (no floor): the target's own rows are counted, as before
+    whole = _check(_append_target())
+    assert whole["scope"] == "whole_table" and whole["columns"]["national_id"]["in_source"] == 5
+
+
+def test_fewer_rows_after_the_floor_than_written_fails_closed_to_the_whole_table() -> None:
+    """A run whose keys landed below the floor (a sequence behind the table's maximum) cannot be
+    told apart from the target's own rows: every row is checked again."""
+    out = _check(_append_target(), after_key=(7,), expected_rows=5)
+    assert out["scope"] == "whole_table" and out["scope_reason"] == "rows_below_floor"
+    assert out["columns"]["national_id"]["checked"] == 10
+    assert out["columns"]["national_id"]["in_source"] == 5
+    assert out["review_columns"] == ["national_id"]
+
+
+def test_key_floor_is_the_largest_single_integer_key() -> None:
+    from dps.layers.connectors.identifier_check import key_floor
+
+    assert asyncio.run(key_floor(_append_target(), _shape("t"))) == (9,)  # type: ignore[arg-type]
+    assert asyncio.run(key_floor(_Fake([]), _shape("t"))) is None  # type: ignore[arg-type]
+    text_key = _shape("t").model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"kind": "text"}) if c.is_key else c
+                for c in _shape("t").columns
+            ]
+        }
+    )
+    assert asyncio.run(key_floor(_append_target(), text_key)) is None  # type: ignore[arg-type]
+    composite = _shape("t").model_copy(update={"key": ["id", "national_id"]})
+    assert asyncio.run(key_floor(_append_target(), composite)) is None  # type: ignore[arg-type]
