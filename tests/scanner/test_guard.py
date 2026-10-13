@@ -4,6 +4,7 @@ against a local server that counts everything it receives."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import ipaddress
 import socketserver
@@ -244,6 +245,28 @@ _WS_WORKER = (
 _TLS_PAGE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <a id="ping" href="/pinged-nav" ping="/ping-target">next</a></body></html>"""
 _TLS_CSP = "img-src 'self'; report-uri /csp-report"
+#: G2-r2 B1: a page that opens a popup at load (before any fill) and later relays a value to it
+_RELAY_PAGE = """<!doctype html><html><body><input id="name"><script>
+window.pop = window.open('/relay-popup', 'relay');
+window.leak = () => { const v = document.getElementById('name').value;
+  try { pop.postMessage(v, '*'); } catch (e) {}
+  try { new BroadcastChannel('dps-relay').postMessage(v); } catch (e) {} };
+</script></body></html>"""
+#: the popup: a dedicated worker started at load sends whatever it is handed on a wss:// socket;
+#: the popup's own realm tries a socket and a new worker too
+_RELAY_POPUP = """<!doctype html><html><body><p>popup</p><script>
+const w = new Worker(URL.createObjectURL(new Blob([`onmessage = (e) => {
+  const s = new WebSocket('wss://' + new URL(self.origin).host + '/leak-worker?d=' + btoa(e.data));
+  s.onopen = () => s.send(e.data); }`], {type: 'text/javascript'})));
+const relay = (tag, v) => {
+  try { w.postMessage(v); } catch (e) {}
+  try { new WebSocket('wss://' + location.host + '/leak-' + tag + '?d=' + btoa(v)); } catch (e) {}
+  try { new Worker('/wsw.js'); } catch (e) {}
+};
+addEventListener('message', (e) => relay('pm', e.data));
+new BroadcastChannel('dps-relay').onmessage = (e) => relay('bc', e.data);
+window.ready = true;
+</script></body></html>"""
 _SERVICE = (
     "self.addEventListener('install', () => self.skipWaiting()); "
     "self.addEventListener('activate', () => fetch('/from-sw', {method: 'POST', body: 'x'}));"
@@ -288,7 +311,13 @@ def _handler(counts: _Counts) -> type[BaseHTTPRequestHandler]:
                 self.send_header("content-length", "0")
                 self.end_headers()
                 return
-            pages = {"/unload": _UNLOAD, "/self-close": _SELF_CLOSE, "/tls-page": _TLS_PAGE}
+            pages = {
+                "/unload": _UNLOAD,
+                "/self-close": _SELF_CLOSE,
+                "/tls-page": _TLS_PAGE,
+                "/relay": _RELAY_PAGE,
+                "/relay-popup": _RELAY_POPUP,
+            }
             route = self.path.split("?", 1)[0]
             headers = {"/tls-page": [("content-security-policy", _TLS_CSP)]}.get(route, [])
             if self.path.startswith("/page"):
@@ -1220,6 +1249,76 @@ async def test_https_nothing_but_get_leaves_where_the_proxy_is_blind(
     assert {("POST", "method"), ("PUT", "method")} <= blocked  # CSP keeps the image itself home
     assert {r for _, r in blocked} & {"closing", "api_removed"}
     assert all(c.method in ALLOWED_METHODS for c in counted if c.decision == "allowed")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("guarded", [False, True], ids=["unguarded", "guarded"])
+async def test_https_a_popup_opened_before_the_fill_relays_nothing(
+    chromium: Any,
+    https_counting_server: tuple[str, _Counts],
+    scan_settings: Settings,
+    guarded: bool,
+) -> None:
+    """G2-r2 B1: a popup the page opened at load, before the fill, with a dedicated worker of its
+    own. The filled page hands it the value by ``postMessage`` and ``BroadcastChannel``; the
+    worker would send it on a ``wss://`` socket, which no route and no proxy rule can see over
+    HTTPS. ``arm`` locks every open page of the context, so the worker is gone and the popup's
+    later socket and worker are refused and counted. Unguarded, the value arrives."""
+    url, counts = https_counting_server
+    value = "Meera Venkatesan"
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    if guarded:
+        ctx = await new_scan_context(
+            _TrustingBrowser(chromium),
+            scan_settings,
+            storage_state=None,
+            locale="en_IN",
+            guard=guard,
+        )
+    else:
+        ctx = await chromium.new_context(ignore_https_errors=True)
+    try:
+        page = await ctx.new_page()
+        guard.bind(page, 6)
+        async with ctx.expect_page() as opened:
+            await page.goto(f"{url}/relay")
+        popup = await opened.value
+        await popup.wait_for_function("window.ready === true", timeout=5000)
+        other = await ctx.new_page()  # an unrelated tab, open at the fill
+        await other.goto(f"{url}/tls-page")
+        assert len(ctx.pages) == 3
+        if guarded:
+            assert await guard.arm(page, [value])
+        await page.evaluate("(v) => { document.getElementById('name').value = v; }", value)
+        await page.evaluate("() => leak()")
+        await _attempt(other, "fetch('/other-fetch', {headers: {'x-v': 'v'}}).catch(() => 0)")
+        await page.wait_for_timeout(2000)
+        counted = guard.drain_counts()
+    finally:
+        if guarded:
+            await close_scan_context(ctx, guard)
+        else:
+            await ctx.close()
+    with counts.lock:
+        leaked = [p for p in counts.gets if p.startswith("/leak-")]
+        upgrades = counts.upgrades
+    assert "/relay" in counts.gets and "/relay-popup" in counts.gets  # both pages came over TLS
+    encoded = base64.b64encode(value.encode()).decode().rstrip("=")
+    if not guarded:  # positive control: the relay works, and the worker's socket carries the value
+        assert "/other-fetch" in counts.gets
+        assert upgrades >= 2
+        assert any(p.startswith("/leak-worker") and encoded in p for p in leaked)
+        return
+    assert upgrades == 0 and leaked == [] and counts.non_get == []
+    assert "/other-fetch" not in counts.gets  # every page open at the fill is a filled page
+    assert ("GET", "filled_request") in {(c.method, c.reason) for c in counted}
+    removed = {
+        (c.method, c.resource_type)
+        for c in counted
+        if (c.decision, c.reason) == ("blocked", "api_removed")
+    }
+    assert {("GET", "websocket"), ("GET", "worker")} <= removed
+    assert guard.locks_failed == 0
 
 
 def test_isolate_js_is_always_installed_and_blocks_what_no_route_sees() -> None:

@@ -198,6 +198,15 @@ _ID_URLS = [
     ("http://h/dob/12mayo90", "http://h/dob/{id}"),  # Spanish
     ("http://h/dob/2nd-Jan-99", "http://h/dob/{id}"),
     ("http://h/dob/2ndjan99", "http://h/dob/{id}"),
+    # G2-r2 B2: a date split over path segments, or written with connector words
+    ("http://h/dob/1/5/90", "http://h/dob/{id}/{id}/{id}"),
+    ("http://h/dob/12/may/90", "http://h/dob/{id}/{id}/{id}"),
+    ("http://h/dob/may/12/90", "http://h/dob/{id}/{id}/{id}"),
+    ("http://h/dob/12/May/1990", "http://h/dob/{id}/{id}/{id}"),
+    ("http://h/dob/12-de-mayo-de-90", "http://h/dob/{id}"),
+    ("http://h/dob/the-12th-of-may-90", "http://h/dob/{id}"),
+    ("http://h/dob/12/de/mayo/de/90/x", "http://h/dob/{id}/{id}/{id}/{id}/{id}/x"),
+    ("http://h/dob/12th/of/May/1990", "http://h/dob/{id}/{id}/{id}/{id}"),
     ("http://h/dob/12-%E0%A4%AE%E0%A4%88-90", "http://h/dob/{id}"),  # Hindi: मई
     ("http://h/x?12May90=1&page=2", "http://h/x?<k>=<v>&page=<v>"),
     ("http://h/x;dob-12May90=1/y", "http://h/x;<k>=<v>/y"),
@@ -281,6 +290,14 @@ _TEMPLATE_LEAKS = [
     ("http://h/dob/12-diciembre-1990", ("diciembre",)),
     ("http://h/x?page=1&12May90=1", ("May",)),
     ("http://h/app#/dob/May-12-90?12-may-90=1", ("May", "may")),
+    # G2-r2 B2
+    ("http://h/dob/1/5/90", ("/1/5", "/90")),
+    ("http://h/dob/12/may/90", ("may", "/12", "/90")),
+    ("http://h/dob/may/12/90", ("may", "/12", "/90")),
+    ("http://h/dob/12/May/1990", ("May", "/12", "1990")),
+    ("http://h/dob/12-de-mayo-de-90", ("mayo", "12-de")),
+    ("http://h/dob/the-12th-of-may-90", ("may", "12th")),
+    ("http://h/app#/dob/12/may/90", ("may", "/12", "/90")),
 ]
 
 
@@ -348,6 +365,18 @@ def test_template_keeps_routes_and_shares_ids() -> None:
         "h/dob/12-%E0%A4%AE%E0%A4%88-90",
         "h/x?page&12May90",
         "h/app#/dob/May-12-90",
+        # G2-r2 B2: dates split over segments or with connector words, raw or half-templated
+        "h/dob/1/5/90",
+        "h/dob/12/may/90",
+        "h/dob/may/12/90",
+        "h/dob/12/May/1990",
+        "h/dob/12-de-mayo-de-90",
+        "h/dob/the-12th-of-may-90",
+        "h/dob/{id}/may/{id}",
+        "h/dob/may/{id}/{id}",
+        "h/dob/{id}/May/{id}",
+        "h/dob/{id}/de/mayo/de/{id}",
+        "h/app#/dob/{id}/may/{id}",
     ],
 )
 def test_a_page_record_refuses_a_raw_template(tpl: str) -> None:
@@ -376,6 +405,9 @@ def test_value_free_templates_pass_the_record_guard() -> None:
         "h/app#!/acct/{id}?a&b",
         "127.0.0.1:8410/",
         "h/docs/v1.2.3/api/v2/faq/{id}/x86_64",
+        "h/calendar/{id}/{id}/{id}",
+        "h/news/may/{id}",
+        "h/archive/{id}/may",
     ):
         assert template_is_value_free(tpl), tpl
 

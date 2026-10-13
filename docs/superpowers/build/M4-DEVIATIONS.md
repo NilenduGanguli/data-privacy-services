@@ -493,3 +493,50 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   `test_the_persisted_template_is_value_free`, 11 in `test_a_page_record_refuses_a_raw_template`,
   and a negative case in `test_redact_url_keeps_plain_route_segments`; 28 of them failed before
   the fix.
+
+## G2 review round 2 — fix (M4-G2-review-r2 B1, B2)
+
+- **B1 (a popup opened before the fill relays a value to its worker's `wss://` socket) —
+  `ScanGuard.arm`.** `arm` used to lock only `page.frames`, and `LOCK_JS` locks only documents
+  born after the first `arm`, so a popup the page opened at load kept its dedicated worker; the
+  filled page handed it the value by `postMessage` / `BroadcastChannel` and the worker sent it on
+  a `wss://` socket that no route and (over HTTPS) no proxy rule sees. Now `arm` locks every frame
+  of **every open page of the context** (`context.pages`): their workers are terminated and new
+  sockets, workers, beacons and keepalive requests are refused and counted `api_removed`. `arm`
+  returns `False` when any live frame of any open page cannot be locked. A frame that throws while
+  it navigates (a popup on its way to `about:blank` through `guard.close`) is retried up to three
+  times, 100 ms apart, because its next document is locked at birth; a detached frame counts as
+  done (as before). **Stricter than the review asked:** every page open at `arm` is also *marked
+  filled* (route rules: no navigation, no script request, only passive resources), not only
+  locked, so an unrelated open page handed a value over `BroadcastChannel` cannot send it in a
+  header of a GET `fetch` to an allowed host either (this closes round-1 §5.2 for pages open at
+  the fill). This does not affect the Task 14 crawler, which fills one page at a time and closes
+  popups through the guard. Test: `test_https_a_popup_opened_before_the_fill_relays_nothing`
+  (TLS counting server; unguarded positive control: ≥2 upgrades and the worker's socket URL
+  carries the base64 value; guarded: 0 upgrades, 0 `/leak-*` requests, 0 non-GET, the popup's
+  later `new WebSocket` and `new Worker` counted `api_removed`, `locks_failed == 0`; an unrelated
+  tab open at the fill sends no GET `fetch` with a header, counted `filled_request`, while the
+  unguarded control delivers it). It failed before the fix (2 upgrades); the unrelated-tab
+  assertion fails when only the armed page is marked filled (checked by mutation). Module docstring (filled pages, locked documents, residuals)
+  updated: the dedicated-worker `wss://` residual now holds only while no page of the scan is
+  filled.
+- **B2 (dates split over path segments, or written with connector words) — `urls.py`.**
+  - `_split_date`: in `_path` (so in `redact_url` and `template`), every window of up to
+    `_DATE_WINDOW = 5` consecutive non-empty decoded segments is joined with `-` and searched with
+    `_DATE_SHAPE` and `_MONTH_DATE`; every segment a match that spans two segments or more touches
+    becomes `{id}` (`/dob/1/5/90`, `/12/may/90`, `/may/12/90`, `/12/May/1990`,
+    `/12/de/mayo/de/90`, `/12th/of/May/1990`). **Deviation:** windows of up to 5 segments, not
+    2–3, so a date with connector words split over segments is covered too.
+  - `_SEP` (between two date parts) allows up to two whole connector words `de`/`del`/`of`/`the`
+    around the separators (`12-de-mayo-de-90`, `the-12th-of-may-90`, `12 de mayo de 1990`);
+    `dec`/`december` are not read as `de` (whole words only).
+  - `template_is_value_free` mirrors both: `_MONTH_DATE` is shared, and the window check runs on
+    the template's segments with every `{id}` / `<ENTITY>` placeholder read as a number, refusing
+    a date match that touches a readable segment (`{id}/may/{id}`, `may/{id}/{id}`,
+    `{id}/de/mayo/de/{id}`), while `{id}/{id}/{id}` (`/calendar/2026/5/1`) still passes.
+    Over-redaction of a real route shaped like a date (`/page/1/2/10`) is the accepted failure
+    mode.
+  - Tests: 8 cases in `test_redact_url_hides_…` and 7 in `test_the_persisted_template_is_value_free`
+    (both classifiers), 11 in `test_a_page_record_refuses_a_raw_template` (raw and half-templated
+    forms), 3 value-free templates in `test_value_free_templates_pass_the_record_guard`; 36 failed
+    before the fix. No contract name changed.

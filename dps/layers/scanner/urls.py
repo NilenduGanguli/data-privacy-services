@@ -8,10 +8,13 @@ crawl template) or :func:`redact_origin`. A segment is value-like when the class
 it or, whatever the classifier says, when it holds a run of 4+ digits, 6+ digits in all (digit
 groups joined by ``-``, ``.``, ``/``, ``+`` or a space are one number: ``501-002-345-678``,
 ``+91-987-654-321``), a date shape (``1-5-90``), an alphanumeric run of 8+ characters with a digit,
-an ``@``, an ``=`` or whitespace, a date with a month name (``12May90``, ``May-12-90``; English,
-Spanish and Hindi names), or is an id form (date, UUID, long hex, token). Consecutive
-all-numeric path segments holding 6+ digits between them (``/501/002/345/678``) are one value too.
-Errors carry a code only, never the URL.
+an ``@``, an ``=`` or whitespace, a date with a month name (``12May90``, ``May-12-90``,
+``12-de-mayo-de-90``, ``the-12th-of-may-90``; English, Spanish and Hindi names, the connector
+words ``de``/``del``/``of``/``the`` allowed between the parts), or is an id form (date, UUID, long
+hex, token). Consecutive all-numeric path segments holding 6+ digits between them
+(``/501/002/345/678``) are one value too, and so are 2 to 5 consecutive segments that read as a date
+once joined with ``-`` (``/1/5/90``, ``/12/may/90``, ``/12/de/mayo/de/90``): every segment of such a
+window is ``{id}``. Errors carry a code only, never the URL.
 
 Scope globs are matched against :func:`normalise_path` (matrix parameters stripped, unreserved
 escapes decoded, ``%2F``/``%5C``/backslash as separators, dot segments resolved, ``//`` collapsed)
@@ -78,7 +81,10 @@ _LETTER = "A-Za-z\u0900-\u097f"
 _MONTH = rf"(?:(?<![{_LETTER}])|(?<=\d(?:st|nd|rd|th)))(?:{_MONTHS})(?![{_LETTER}])"
 _DAY = r"(?<!\d)\d{1,2}(?:st|nd|rd|th)?(?![\d])"
 _YEAR = r"(?<!\d)(?:\d{4}|\d{2})(?!\d)"
-_SEP = r"[\s\-./_,']{0,3}"
+_PUNCT = r"[\s\-./_,']{0,3}"
+#: Between two date parts: up to three separators, optionally around up to two whole connector
+#: words (``12 de mayo de 90``, ``12th of the May 1990``).
+_SEP = rf"{_PUNCT}(?:(?<![A-Za-z])(?:de|del|of|the)(?![A-Za-z]){_PUNCT}){{0,2}}"
 _MONTH_DATE = re.compile(
     "|".join(
         _SEP.join(order)
@@ -93,6 +99,8 @@ _MONTH_DATE = re.compile(
     ),
     re.IGNORECASE,
 )
+#: A date split over path segments spans at most this many of them (``/12/de/mayo/de/90``).
+_DATE_WINDOW = 5
 #: A path segment made of digits and number separators only (one part of a split number).
 _NUMERIC_SEGMENT = re.compile(r"^[-.+ \d]*\d[-.+ \d]*$")
 _ENTITY_TOKEN = re.compile(r"^<[A-Z][A-Z0-9_]{0,40}>$")
@@ -210,6 +218,29 @@ def _split_number(bases: Sequence[str]) -> set[int]:
     return out
 
 
+def _split_date(texts: Sequence[str]) -> set[int]:
+    """Indexes of the (decoded) path segments that are parts of a date split over 2 to
+    ``_DATE_WINDOW`` consecutive non-empty segments: the window joined with ``-`` holds a date
+    shape or a month-name date that spans two of them or more (``/dob/1/5/90``, ``/12/may/90``,
+    ``/may/12/90``, ``/12/de/mayo/de/90``). Every segment the date touches is in the result."""
+    idx = [i for i, text in enumerate(texts) if text]
+    out: set[int] = set()
+    for a in range(len(idx) - 1):
+        window = idx[a : a + _DATE_WINDOW]
+        bounds: list[tuple[int, int, int]] = []
+        pos = 0
+        for i in window:
+            bounds.append((pos, pos + len(texts[i]), i))
+            pos += len(texts[i]) + 1
+        joined = "-".join(texts[i] for i in window)
+        for rx in (_DATE_SHAPE, _MONTH_DATE):
+            for m in rx.finditer(joined):
+                hit = {i for start, end, i in bounds if start < m.end() and m.start() < end}
+                if len(hit) >= 2:
+                    out |= hit
+    return out
+
+
 def _safe_key(key: str, classify: ValueClassifier) -> str:
     """``key`` itself when it is a plain name, else ``<k>`` (a key can be a value too)."""
     return key if _SAFE_KEY.match(key) and not _value_like(key) and not classify(key) else "<k>"
@@ -245,7 +276,8 @@ def _matrix(params: str, classify: ValueClassifier) -> str:
 
 def _path(path: str, classify: ValueClassifier, ids: re.Pattern[str], *, matrix: bool) -> str:
     parts = [s.partition(";") for s in (path or "/").split("/")]
-    split = _split_number([base for base, _, _ in parts])
+    bases = [base for base, _, _ in parts]
+    split = _split_number(bases) | _split_date([unquote(base) for base in bases])
     segs: list[str] = []
     for i, (base, semi, params) in enumerate(parts):
         out = "{id}" if i in split else _segment(base, classify, ids)
@@ -295,8 +327,14 @@ def template_is_value_free(tpl: str) -> bool:
     for part in (path, route.removeprefix("!")):
         segs, _, keys = part.partition("?")
         path_segs = segs.split("/")
-        # template() makes every all-digit segment and every split number {id}
+        # template() makes every all-digit segment, every split number and every split date {id}
         if _split_number(path_segs) or any(_TEMPLATE_SEGMENT.match(unquote(s)) for s in path_segs):
+            return False
+        # a date split over segments, a placeholder standing in for a number (``{id}/may/{id}``):
+        # template() would have made the readable parts of it {id} as well
+        placeholders = {i for i, s in enumerate(path_segs) if s == "{id}" or _ENTITY_TOKEN.match(s)}
+        texts = ["11" if i in placeholders else unquote(s) for i, s in enumerate(path_segs)]
+        if _split_date(texts) - placeholders:
             return False
         for seg in [*path_segs, *(keys.split("&") if keys else [])]:
             if seg in ("{id}", "<k>") or _ENTITY_TOKEN.match(seg):

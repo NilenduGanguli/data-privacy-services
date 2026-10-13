@@ -21,12 +21,16 @@ request of every page, popup and iframe of that context:
   fetch, EventSource, beacons and any other non-passive type) is aborted: such a request could
   carry a fill value in a header or encoded beyond recognition. Only passive resources
   (stylesheets, images, fonts, scripts, media) still load. A popup opened by a filled page is a
-  filled page. ``release`` never un-fills a page that is still open.
-* **Locked documents.** ``arm`` also *locks* every frame of the page (``ISOLATE_JS`` lock): the
-  workers it started are terminated, and ``navigator.sendBeacon`` (returns ``false``), the
-  ``keepalive`` flag of ``fetch`` (dropped), ``new WebSocket`` and ``new Worker`` (refused) stop
-  working. From the first ``arm`` on, every new document of the scan is locked at birth
-  (``LOCK_JS``). These are the channels a route cannot see: a dedicated worker's socket, and
+  filled page, and so is every page of the context that is open when ``arm`` is called (a popup
+  the page opened before the fill, an unrelated tab): the filled page can hand any of them a value
+  (``postMessage``, ``BroadcastChannel``, storage). ``release`` never un-fills a page that is
+  still open.
+* **Locked documents.** ``arm`` also *locks* every frame of every open page of the context
+  (``ISOLATE_JS`` lock), not only the armed page's: the workers they started are terminated, and
+  ``navigator.sendBeacon`` (returns ``false``), the ``keepalive`` flag of ``fetch`` (dropped),
+  ``new WebSocket`` and ``new Worker`` (refused) stop working. From the first ``arm`` on, every
+  new document of the scan is locked at birth (``LOCK_JS``). ``arm`` returns ``False`` when any
+  live frame of any open page could not be locked. These are the channels a route cannot see: a dedicated worker's socket, and
   requests that outlive their page. Each refused use is counted (reason ``api_removed``, resource
   type ``beacon``/``keepalive``/``websocket``/``worker``) through a page binding.
 * **Fill values.** Once a page has been armed, any request on any page of the scan whose URL
@@ -67,8 +71,10 @@ cannot carry a form value without page JS built to do it:
 
 * The method and URL of an HTTPS request that is not routed: a redirect hop (only to an allowed
   host, and a hop of a GET is a GET); a ``wss://`` socket (``WebSocket`` or ``WebSocketStream``,
-  which ``ISOLATE_JS`` cannot reach in a worker) of a dedicated worker of an *unfilled* page
-  (filled pages terminate their workers and refuse new ones); and a speculation-rules
+  which ``ISOLATE_JS`` cannot reach in a worker) of a dedicated worker of a page while no page of
+  the scan is filled (``arm`` locks every open page of the context, terminating the workers of a
+  popup opened before the fill too, and every later document is locked at birth, so no worker
+  exists from the first fill on that could be handed a value); and a speculation-rules
   prefetch, which Chromium fetches itself, unrouted, even for a filled page (a GET to an allowed
   host; over plain HTTP the proxy refuses it by its ``Sec-Purpose`` header, and no launch flag of
   this Chromium turns it off).
@@ -85,6 +91,7 @@ worker memory for the crawler to redact, and is excluded from ``repr``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 from collections import Counter
@@ -93,7 +100,15 @@ from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
-from playwright.async_api import BrowserContext, Dialog, Page, Request, Route, WebSocketRoute
+from playwright.async_api import (
+    BrowserContext,
+    Dialog,
+    Frame,
+    Page,
+    Request,
+    Route,
+    WebSocketRoute,
+)
 from playwright.async_api import Error as PlaywrightError
 
 from dps.engine.verify import normalise
@@ -255,6 +270,8 @@ ISOLATE_JS = r"""
 #: Added to the context at the first ``arm``: every later document is locked at birth.
 LOCK_JS = "window.__dpsGuardLock && window.__dpsGuardLock();"
 _LOCK_CALL = "() => typeof window.__dpsGuardLock === 'function' && window.__dpsGuardLock() === true"
+_LOCK_ATTEMPTS = 3  # a frame mid-navigation is retried (its next document is locked at birth)
+_LOCK_RETRY_S = 0.1
 #: the page binding ``ISOLATE_JS`` reports refused uses through, and what it may report
 REPORT_BINDING = "__dpsGuardReport"
 REPORTED_KINDS: frozenset[str] = frozenset({"beacon", "keepalive", "websocket", "worker"})
@@ -427,11 +444,13 @@ class ScanGuard:
         self._page_no[page] = page_no
 
     async def arm(self, page: Page, fill_values: Iterable[str]) -> bool:
-        """Mark ``page`` filled and lock its documents; call it before any value is set.
+        """Mark ``page`` filled and lock the scan's documents; call it before any value is set.
 
         Needles stay for the rest of the scan and are checked on every page: a later page that
         would carry an earlier persona's value in a URL is caught too. The route rules apply at
-        once. Then every frame of the page is locked (its workers terminated; beacons, keepalive,
+        once, to ``page`` and to every other page of the context that is open now (a popup opened
+        before the fill can be handed a value by ``postMessage`` or ``BroadcastChannel``). Then
+        every frame of every open page is locked (their workers terminated; beacons, keepalive,
         sockets and new workers refused) and, from the first call on, every new document of the
         scan is locked at birth. Returns ``False`` when a live frame could not be locked
         (``locks_failed``): the caller must not fill that page.
@@ -440,10 +459,17 @@ class ScanGuard:
             needle = normalise(value)
             if len(needle) >= MIN_NEEDLE:
                 self._needles.add(needle)
-        self._mark_filled(page)
-        return await self._lock(page)
+        pages = self._open_pages(page)
+        for each in pages:
+            self._mark_filled(each)
+        return await self._lock(pages)
 
-    async def _lock(self, page: Page) -> bool:
+    def _open_pages(self, page: Page) -> list[Page]:
+        """``page`` first, then every other open page of the context."""
+        others = list(self._context.pages) if self._context is not None else []
+        return [page, *(p for p in others if p is not page and not p.is_closed())]
+
+    async def _lock(self, pages: list[Page]) -> bool:
         ok = True
         if self._context is not None and not self._locked_at_birth:
             try:
@@ -451,16 +477,30 @@ class ScanGuard:
                 self._locked_at_birth = True
             except PlaywrightError:
                 ok = False
-        for frame in list(page.frames):
-            try:
-                done = bool(await frame.evaluate(_LOCK_CALL))
-            except PlaywrightError:
-                done = False
-            if not done and not frame.is_detached():
-                ok = False
+        for page in pages:
+            for frame in list(page.frames):
+                if not await self._lock_frame(frame):
+                    ok = False
         if not ok:
             self.locks_failed += 1
         return ok
+
+    @staticmethod
+    async def _lock_frame(frame: Frame) -> bool:
+        """Lock one frame's document; a frame that is navigating (a popup on its way to
+        ``about:blank``) is retried, since its next document is locked at birth. ``True`` when it
+        is locked or gone (detached)."""
+        for attempt in range(_LOCK_ATTEMPTS):
+            try:
+                if await frame.evaluate(_LOCK_CALL):
+                    return True
+            except PlaywrightError:
+                pass
+            if frame.is_detached():
+                return True
+            if attempt + 1 < _LOCK_ATTEMPTS:
+                await asyncio.sleep(_LOCK_RETRY_S)
+        return False
 
     def release(self, page: Page) -> None:
         """Forget ``page``'s attribution. A filled page stays filled until it is closed."""
