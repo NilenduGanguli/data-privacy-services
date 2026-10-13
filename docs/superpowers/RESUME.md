@@ -4,7 +4,7 @@
 > programme exactly where it stopped, without the original chat. It complements, and points into, the
 > binding documents listed in §2. **Do not trust the snapshot in §4 blindly — run §3 first.**
 
-**Last updated:** 2026-10-13 22:00 IST by the orchestrating session (chat `d1f0660d…`, workflow `wf_c77f2c08-9ae`).
+**Last updated:** 2026-10-13 23:59 IST by the orchestrating session (chat `d1f0660d…`, workflow `wf_c77f2c08-9ae`, running ~9 h, ~75 agents finished, none lost).
 **Goal:** tag `v1.0.0` on `main` with every Definition-of-Done gate green (M0–M5 shipped).
 
 ---
@@ -82,31 +82,31 @@ Interpretation rules:
   ships as `v1.0.0`).
 - If `docker compose ls` fails: `open -a Docker` and wait for `docker info`.
 
-## 4. Snapshot as of 2026-10-13 22:00 IST (re-check with §3)
+## 4. Snapshot as of 2026-10-13 23:59 IST (re-check with §3)
 
-| Stream | Done | In progress / next | Remaining after that |
+| Stream | Done (branch head) | In progress now | Still to do |
 |---|---|---|---|
-| main | M0, M1, M2 tagged; hardening (SEC-2 `e25209f`, SEC-3 `34f4aa3`, N3, wizard step-5 server check, length-safe methods, fallback label, `length_overflow` text `4615e3d`) **verified PASS**; programme plan; this guide | idle until the first lane merges | merges, finish, release |
-| **M3** `m3` | T1–T17 (Oracle connector + writer + pitfalls, pipeline wiring, MongoDB rules/filters/connector/writer, engine bridge, conformance on Oracle+Mongo, three-engine customer space, consistency check + API, migration 020) | G4 review/fix (T15, T16, T17, T19 — T19 = three-way join e2e + resume-after-kill on Oracle/Mongo) | T18, T18b (console), T20, T21, lane verification |
-| **M4** `m4` (+`m4ui`) | T1–T18 (URL toolkit, scan tables 030–031, models, store, request guard + scope proxy, demo site, browser runtime, classification, risk flags, personas, captures, fill, crawler, no-submission proof, scan handlers + evidence, browser worker, scans API); console T21–T23 done on `m4ui` (review PASS) | G4 fix round (finalize fencing, deny/allow on scanner-caused navigations) | T19, T20, merge `m4ui` into `m4` + wire to API, T24, T25, lane verification |
-| **M5** `m5` (+`m5ui`) | T1–T8 + SEC-4 (D-B) + D-A + L2 reveal for `external_tokenize`; T9–T16B (DB keys, tenants/quotas, admin API, roll-ups/reports, retention, evidence PDF, policy store, posture tightening, per-tenant LLM exposure); console T18–T23 merged into `m5` (`c238390`) | wiring the console to the real API | lane verification |
-| Integration | — | — | merge order = lane completion order (expected M5 → M3 → M4) |
-| Finish / release | — | — | F1 security ∥ (F2 deploy → F3 demo + deck) → merge + F4 polish + F5 docs → F6 release + final verification |
+| main (`3dc0540`) | M0, M1, M2 tagged; hardening verified PASS; programme plan; this guide | idle — waits for the first lane to finish | merges (§7), finish + release (§8) |
+| **M5** `m5` (`0d43420`) | T1–T16B, SEC-4, D-A, console T18–T23 merged (`c238390`) and wired to the API (`5694280`); lane verification r1 FAIL → fixed `ad886e8` (no pseudonymised FK modelled; integer pseudonyms from bands no real key reaches); r2 FAIL → fixed `0d43420` (government-id surrogates from never-issued ranges + post-write check of every written identifier against the source) | **lane verification round 3** (screenshots being written to `docs/screenshots/m5/`) | if PASS: first merge onto main |
+| **M3** `m3` (`529b1da`) | T1–T17, T19 (three-way join e2e, resume-after-kill on Oracle/Mongo `b725cc8`), MongoDB end to end (`30e0595`), G4 fixes (`188914f`, `ac710bf`); console **T18** (`529b1da` job groups + consistency verdict on Jobs/Job detail) | **T18b** (Oracle and MongoDB in the new-job wizard; `frontend/src/lib/engines.ts` being written) | G5 review, G6 (T20 log scan, T21 smoke/bench/docs), lane verification, merge, tag `v0.4.0-m3` |
+| **M4** `m4` (`87a80af`) | T1–T20: everything through the scans API, G4 fixes (`6eac062` fenced idempotent finalize + guard enforces deny/allow on every hop; `0cf0140` discovery never clicks a denied target), T19 log scan (`21bd69c`), T20 browser-worker image + compose scanner profile (`87a80af`); console T21–T23 done on `m4ui` (`e7a5188`, review PASS) | G5 review (T19, T20) | merge `m4ui` + wire, G7 (T24 smoke, T25 docs), lane verification, merge, tag `v0.5.0-m4` |
+| Finish / release | — | — | F1 security ∥ (F2 deploy → F3 demo + deck) → merge + F4 polish + F5 docs → F6 release + final verification → `v1.0.0` |
 
-**Open findings carried into lane verification (must be fixed before merge; each needs a failing test first):**
+**Open findings carried into lane verification** (each must be fixed — failing test first — before its lane merges;
+"status" is what is known at the snapshot; the lane verifier re-checks every row):
 
-| Id | Lane | Finding | Fix direction |
-|---|---|---|---|
-| M3-B6 | M3 | `selection.py` `_check_query_outputs` bypassed by FROM-clause column re-mapping: a PostgreSQL alias column list (`FROM contacts AS c(a, b, c)`) or an Oracle `UNPIVOT` puts e-mails under a kept column name; run passes with a "verified" pack | in `_query_sources` a table counts as the object only when it is referenced without a column alias list / UNPIVOT / PIVOT; otherwise refuse the query (`selection_column_remap`) or treat every output column as unknown → `needs a decision`; tests for both dialects + e2e source-vs-target |
-| M3-G3-B1 | M3 | `engine/batch.py` `_unclassified`: a top-level Mongo field sampled as a scalar but holding a sub-document/array in other documents is never searched → nested PII passes | run the detector over every string leaf of such fields (by actual runtime type, not sampled shape); test with mixed-shape documents |
-| M3-G3-B2 | M3 | a field name containing `[digits]` breaks the path machinery → a planned column silently untransformed | escape such names in `docpaths.py` (bracket-quoted segments) or refuse the collection at discovery with a clear code; test |
-| M4-G2-B1 | M4 | popups opened while the first `arm` runs are neither snapshotted nor locked; their worker sends the fill value over `wss://` (D4) | register `LOCK_JS` before taking the page snapshot on the first `arm`; HTTPS counting-server test (continuous `about:blank` popups each with a worker) expecting 0 upgrades / 0 `/leak-*`, with an unguarded positive control |
-| M4-G2-B2 | M4 | short dates with separators other than `- . / space` survive `redact_url` and the persisted `template` | let any single non-alphanumeric character separate date parts; add rows to `test_redact_url_hides_…`, `test_the_persisted_template_is_value_free`, `test_a_page_record_refuses_a_raw_template` with both classifiers |
-| M4-G3-B4 | M4 | text under a `display: contents` parent is neither classified nor in the capture census → shows in "masked" captures | fix `visible`/`textOk` in `dom.py` `_TEXT_HELPERS_JS` and `CENSUS_JS`; OCR probe on masked PNGs → 0 source values |
-| M4-G3-B5 | M4 | strings the browser draws from attributes (placeholder, value, alt/title tooltips rendered, `::before` content via `attr()`) are not in the census | add them to `CENSUS_JS` and to classification; OCR probe |
-| M4-G4-B1 | M4 | `finalize_scan` neither fenced nor idempotent → two contradictory evidence packs after cancel/crash during finalize | move the job into the finalize phase through the fence (`advance_job(phase=finalize, state=running)`; stop on False; `cancel` answers `job_finalizing`), make artefacts/evidence idempotent per job; crash/cancel tests |
-| M4-G4-B2 | M4 | deny/allow lists not enforced on navigations the scanner itself causes (SPA discovery clicks on `href="#"`/`javascript:`/`role=link`, redirect hops); records claim "skipped / deny" while `/logout` was hit | enforce the path verdict in the guard/proxy for every request a scan causes (not only in `ScanRunner._consider`); never click elements whose resolved navigation is denied; counting-server test with `deny=("/logout","/admin")` → 0 hits |
-| SEC-5 | M4 merge | scanner resolves storage-state secrets with its own copy of tenant scoping | at the M4 merge use main's `resolve_secret_ref(tenant_id, ref, settings)`; validate `storage_state_ref` at ScanSpec accept; cross-tenant test |
+| Id | Lane | Status | Finding | Fix direction |
+|---|---|---|---|---|
+| M5-V2 | M5 | fix committed `0d43420`, re-verifying (r3) | synthesize jobs wrote 0–3 real national ids (NINO etc.) per run: government ids without a generator fell back to a keyed derangement of the issued space | never-issued ranges per id type; post-write identifier check → review required on any hit |
+| M3-B6 | M3 | open | `selection.py` `_check_query_outputs` bypassed by FROM-clause column re-mapping (PostgreSQL alias column list `FROM contacts AS c(a,b,c)`, Oracle `UNPIVOT`): e-mails land under a kept column; run passes "verified" | a table counts as the object only without a column alias list / UNPIVOT / PIVOT, else refuse (`selection_column_remap`) or treat outputs as unknown; tests both dialects + e2e source-vs-target |
+| M3-B3r3 | M3 | open | `consistency.py` `target_key`: one PostgreSQL table spelled `t` and `public.t` counts as two distinct targets | resolve the default owner (`public`) before building the key, as `targets._owner` does; test |
+| M3-B4r3 | M3 | open | pymongo DEBUG command logging (`pymongo.command`, `.connection`, `.serverSelection`, `.topology`) writes customer values when `DPS_LOG_LEVEL=DEBUG`; the M2 log gate is flaky | cap pymongo (and oracledb) loggers in `observability._THIRD_PARTY_LEVELS` at WARNING regardless of `DPS_LOG_LEVEL`; deterministic log-scan test at DEBUG |
+| M3-G3-B1/B2 | M3 | probably fixed in `30e0595` (segment-aware paths, nested drift searched) — confirm | nested PII under a field sampled as scalar; `[digits]` in a field name breaking paths | — |
+| M4-R3-B1 | M4 | open | a discovery click whose handler routes to a denied path (in-document `location.hash`, `history.pushState`) runs that route while the records say "skipped / deny" | record such pages as visited-then-denied (`denied_after_click`) and stop interacting with them, or block in-document navigation to denied routes via the init script; counting/route test |
+| M4-G2-B1 | M4 | confirm | popups opened while the first `arm` runs escape the lock; their worker can send the fill value over `wss://` | register `LOCK_JS` before the page snapshot; HTTPS counting-server test → 0 upgrades |
+| M4-G2-B2 | M4 | confirm | short dates with unusual separators survive `redact_url`/`template` | any single non-alphanumeric separator; tests with both classifiers |
+| M4-G3-B4/B5 | M4 | open | text under `display: contents` parents and attribute-drawn strings (placeholder, value, alt/title, `attr()` content) missing from the capture census → visible in "masked" captures | fix `_TEXT_HELPERS_JS` / `CENSUS_JS`; OCR masked PNGs → 0 source values |
+| SEC-5 | M4 merge | open | scanner resolves storage-state secrets with its own copy of tenant scoping | use main's `resolve_secret_ref(tenant_id, ref, settings)`; validate at ScanSpec accept; cross-tenant test |
 
 ## 5. How to continue
 
@@ -139,36 +139,29 @@ Workflow runs cannot be resumed across sessions. When the old chat ends, its run
 ## 6. Remaining work in detail
 
 Execute plan tasks exactly as their milestone plan writes them (TDD: failing test first; gates; the plan's commit
-message; deviation log entry). Below: what is left and what proves it.
+message; deviation log entry). Status markers: ✅ done · ⏳ in progress at the snapshot · ⬜ not started.
 
 ### 6.1 M3 — Oracle + MongoDB (`dps-wt-m3`, plan `…-m3-oracle-and-mongodb.md`)
-- **G4 (T15, T16, T17, T19)** — review/fix. Acceptance: one customer space across PG/Oracle/Mongo; consistency check
-  returns overlap > 0 for every pair with counts only; T19 three-way join through API + worker; resume-after-kill on
-  Oracle and Mongo for every write mode.
-- **G5 (T18, T18b)** — console: job groups + consistency panel on Jobs (mockup 07) and Job detail (mockup 03); Oracle
-  and MongoDB in the new-job wizard (mockup 06): connection forms, owner listing, JSON filter step; the D3 typed
-  confirmation can never be bypassed. Browser check vs mockups.
-- **G6 (T20, T21)** — M3 log-scan test; smoke extension, benchmark, HANDOFF, README, API reference, final gates.
-- **Lane verification** — M3 DoD + programme plan §2.2: per-column source≠target check on every sensitive column of
-  every Oracle/Mongo target (0 survivors); fix M3-B6, M3-G3-B1, M3-G3-B2 first.
+- ✅ G4 (T15, T16, T17, T19): one customer space across PG/Oracle/Mongo; consistency check (counts only) + API +
+  migration 020; three-way join e2e; resume-after-kill on Oracle and Mongo. Review r3 FAIL items carried (M3-B3r3, M3-B4r3).
+- ✅ T18 console job groups + consistency panel (mockups 07, 03). ⏳ **T18b** Oracle and MongoDB in the new-job wizard
+  (mockup 06): connection forms, owner listing, JSON filter step; the D3 typed confirmation never bypassed.
+- ⬜ G6 (T20 M3 log-scan test; T21 smoke extension, benchmark, HANDOFF, README, API reference, final gates).
+- ⬜ Lane verification — M3 DoD + programme plan §2.2; first fix M3-B6, M3-B3r3, M3-B4r3; per-column source≠target
+  check on every sensitive column of every Oracle/Mongo target (0 survivors).
 
 ### 6.2 M4 — UI scanner (`dps-wt-m4`, plan `…-m4-ui-scanner.md`)
-- **G4 fix** — M4-G4-B1 (finalize fencing/idempotency), M4-G4-B2 (deny/allow on scanner-caused navigations), then re-review.
-- **G5 (T19, T20)** — M4 log scan; browser-worker image (`mcr.microsoft.com/playwright:v1.55.0-noble` base) and compose services.
-- **Merge `m4ui`** (T21–T23 done) into `m4`, wire to the real scans API, browser check vs mockups 12 and 04.
-- **G7 (T24, T25)** — smoke extension + compose-level scanner gate; documentation as built.
-- **Lane verification** — live scan of the demo onboarding site; parallel view in synthetic and obfuscated mode;
-  captures OCR-checked (masked values unreadable); demo site `/__received` POST count **0**; fix M4-G2-B1/B2,
-  M4-G3-B4/B5 first.
+- ✅ T1–T20 (incl. G4 fixes: fenced idempotent finalize, deny/allow enforced by the guard on every hop). ⏳ G5 review.
+- ⬜ Merge `m4ui` (T21–T23, review PASS) into `m4`, wire to the real scans API, browser check vs mockups 12 and 04.
+- ⬜ G7 (T24 smoke extension + compose-level scanner gate; T25 documentation as built).
+- ⬜ Lane verification — live scan of the demo onboarding site; parallel view in both modes; captures OCR-checked;
+  demo site `/__received` non-GET count **0**; first fix M4-R3-B1, M4-G3-B4/B5 and confirm M4-G2-B1/B2.
 
 ### 6.3 M5 — hardening + showcase (`dps-wt-m5`, plan `…-m5-hardening-and-showcase.md`)
-- **Wire the merged console** (T18–T23) to the real API; Vitest + build; browser walk.
-- **Lane verification** — in-scope DoD; Overview, Reports & audit (roll-ups, audit filters, CSV), Evidence pack
-  (synthetic section, PDF), Admin (key shown once, rotate/disable, tenants/quotas, posture), Policies (versions);
-  one L2 synthesize job: exact-row matches 0, no sensitive source value or real key in the target (D-A).
-- **Deferred to the finish stage:** T0 (contract-surface test), T8B (T3 labelling in L2 + L3), T17 (security review),
-  T24 (images, compose `full`, smoke M5 block, `flow_report.py`, `demo_client.py`), T25 (OpenShift), T26 (demo seed +
-  e2e demo + script), T26B (deck), T27 (docs), T28 (release).
+- ✅ T1–T16B, SEC-4, D-A, console T18–T23 merged and wired. ⏳ Lane verification round 3 (after the national-id fix).
+- **Deferred to the finish stage (§8):** T0 (contract-surface test), T8B (T3 labelling in L2 + L3), T17 (security
+  review), T24 (images, compose `full`, smoke M5 block, `flow_report.py`, `demo_client.py`), T25 (OpenShift), T26
+  (demo seed + e2e demo + script), T26B (deck), T27 (docs), T28 (release).
 
 ## 7. Integration onto main (WP-I) — one lane at a time
 
