@@ -147,6 +147,8 @@ export const api = {
     discardDraft: (a: Auth, name: string) => json<TenantPolicyDetail>(`/api/v1/policies/${enc(name)}/draft`, a, { method: 'DELETE' }),
     publish: (a: Auth, name: string, ticket: string, note: string) =>
       post<PolicyVersionView>(`/api/v1/policies/${enc(name)}/publish`, a, { change_ticket: ticket.trim() || null, note: note.trim() || null }),
+    /** One immutable version's body (JSON). */
+    version: (a: Auth, name: string, version: number) => json<Record<string, any>>(`/api/v1/policies/${enc(name)}/versions/${version}`, a),
     versionYaml: (a: Auth, name: string, version: number) =>
       download(`/api/v1/policies/${enc(name)}/versions/${version}${qs({ format: 'yaml' })}`, a, `${name}-v${version}.yaml`),
     diff: (a: Auth, name: string, from: number, to: number | 'draft') =>
