@@ -1258,7 +1258,9 @@ async def reap(*, backoff_base: float, backoff_cap: float) -> ReapResult:
 
 
 async def cancel(tenant_id: str, job_id: str) -> Job | None:
-    """Cancel (contract §3.1): run jobs get a cancel-finalize; other kinds become ``canceled`` now.
+    """Cancel (contract §3.1): run jobs, and scans that have started, get a cancel-finalize
+    (``phase='finalize', state='queued'``, outcome ``canceled``: evidence, exports, key purge);
+    other kinds, and a scan still queued for its first attempt, become ``canceled`` now.
 
     ``None`` when the tenant has no such job; :class:`JobStateError` (``job_terminal``,
     ``job_finalizing``) when it can no longer be canceled.
@@ -1267,7 +1269,8 @@ async def cancel(tenant_id: str, job_id: str) -> Job | None:
     s = db.schema_ident()
     async with db.acquire(tenant_id) as conn, conn.transaction():
         row = await conn.fetchrow(
-            f"SELECT kind, state, phase FROM {s}.dps_job WHERE id = $1 FOR UPDATE", job_id
+            f"SELECT kind, state, phase, started_at FROM {s}.dps_job WHERE id = $1 FOR UPDATE",
+            job_id,
         )
         if row is None:
             return None
@@ -1284,7 +1287,8 @@ async def cancel(tenant_id: str, job_id: str) -> Job | None:
             "updated_at = now() WHERE job_id = $1 AND state IN ('queued', 'running')",
             job_id,
         )
-        if row["kind"] == JobKind.run.value:
+        started_scan = row["kind"] == JobKind.scan.value and row["started_at"] is not None
+        if row["kind"] == JobKind.run.value or started_scan:
             await conn.execute(
                 f"UPDATE {s}.dps_job SET phase = 'finalize', state = 'queued', run_after = now(), "
                 "attempts = 0, locked_by = NULL, lease_expires_at = NULL, "

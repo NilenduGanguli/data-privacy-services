@@ -920,3 +920,58 @@ enforced below the page. Each item was established by a probe of the pinned Chro
 - Result: 5 passed (control, 2 full scans with the hardening off and on, adversarial, static).
   With the hardening off the auto-submitting select on `/apply/card` fired a real form POST,
   which the request log shows as blocked; the demo site's `/__received` counters did not move.
+
+## Task 16 — Scan job handlers, finalize, inventory and exports, scan evidence
+
+- `dps/layers/scanner/__init__.py`: `ScanSetupError`, `open_runtime`, `DbScanSink`, `scan_job`,
+  `scan_finalize_job`, `finalize_scan` as planned, plus:
+  - **Tenant-scoped storage state (SEC-2 layout, Task 4 note N7).** A `storage_state_ref` is read
+    from `DPS_SECRET_DIR/<tenant_id>/<ref>/storage_state.json` only (tenant folder name checked
+    against SEC-2's `^[a-z0-9][a-z0-9_-]{0,62}$`, a ref starting with `/` or `_` refused), never
+    from the global namespace. On this branch that is `resolve_secret_ref(f"{tenant}/{ref}")`;
+    integration onto main swaps in SEC-2's `resolve_secret_ref(tenant_id, ref, settings)`.
+  - `open_runtime` also refuses a sealed secret without start URL, key or seed
+    (`secret_unavailable`), a stored spec that no longer validates (`spec_invalid`), drops the
+    consistency flags DPS adds (`key_wrapped`, `wrapped`, `caller_key`, `caller_seed`) before
+    `ScanSpec.model_validate`, and caps `max_pages` at `scan_max_pages` again.
+  - `DbScanSink.progress` writes only `pages`/`fields`/`blocked_requests` into the progress
+    (`progress || $5` merges, so a full `JobProgress` dump would reset other keys);
+    `audit_navigation` carries `counts={"page_no": n}` (value-free) so an auditor can match the
+    row to the page; the policy name is the spec's preset name or `""` for an inline policy.
+  - A setup failure also records `progress.outcome = "failed"` and logs `scan_setup_failed`
+    with the code.
+  - `finalize_scan` with no runtime (key purged) still names the policy in the evidence when the
+    spec's policy resolves; progress written is the five scan keys only.
+- `dps/layers/scanner/store.py`: new `ScanStore.all_pages(conn, job_id)` (keyset walk over
+  `list_pages`, whose `limit` is capped at 1000): the plan's `list_pages(limit=100_000)` in
+  `finalize_scan` was silently capped, so a scan with more than 1000 page rows would have lost
+  pages from its evidence and exports. `inventory.validation_totals` (per-mode sums) is public.
+- **M2 touch point — `dps/jobs.py::cancel`.** M2 canceled every non-run kind at once (key purged,
+  no evidence), so the plan's cancel test (`phase=finalize, state=queued` after cancel) could not
+  hold. Now a scan that has started gets the contract §3.1 cancel finalize; a scan still queued
+  for its first attempt is canceled at once (the plan's Task 18 `test_cancel_queued_scan` expects
+  `canceled`). Contract §3.2 gains an amendment paragraph. M2's queue/partition/API tests
+  unchanged and green.
+- `dps/layers/scanner/inventory.py`: `inventory_rows`, `write_csv`, `build_export`,
+  `build_scan_evidence` as planned, plus `inventory_csv` (the CSV the API serves; lists joined with
+  `;`), `seed_fingerprint(runtime)`, `EXPORT_CSV_HEADER`, `CREDENTIAL_NOTE`. Details:
+  - `build_export` computes tokens with `tokens_for` **per page and persona** (the crawler's
+    batching), for fields whose stored `obfuscate_method` is a transform (not `keep`, `surrogate`,
+    `neutral`, `credential`); other fields' obfuscate value is the synthesize value (method
+    `keep`). Neutral fields carry the display persona's stored value for every persona (the
+    neutral sample is seeded on page text that is not stored). A persona whose tokens fail the
+    leakage verification gets `obfuscate: null`.
+  - `build_scan_evidence` takes an optional `policy={"name","hash"}` (finalize without a runtime)
+    and builds every source field from the job's **stored, redacted** spec (never the runtime's
+    raw URL); `scan` also carries `fills_skipped`; `config_hash = sha256(policy hash +
+    sha256(canonical spec))`.
+- `dps/layers/connectors/evidence.py`: a `UI scan` section (KPIs incl. "Submissions" and
+  "Non-GET requests allowed", the "Submissions: 0 · Non-GET requests allowed: N · Blocked: …"
+  line, by-entity table, numbered risk flags, validation per fill) between sections 6 and 7,
+  rendered only when `pack.scan` is set, through the same `_cell` escaping.
+- Tests: `test_inventory_export.py` (4, as planned, plus a CSV inventory with no fill value and
+  the credential never exported); `test_evidence_html_scan.py` (2, plus escaping); 
+  `test_scan_job_e2e.py` (the plan's 3, with the demo `/__received` counters unchanged, the
+  evidence HTML, a positive control for the leak haystack, the obfuscate token of the display
+  persona equal to the export's, plus `test_a_queued_scan_is_canceled_at_once` and
+  `test_storage_state_ref_resolves_under_the_tenant_folder_only`): 5.

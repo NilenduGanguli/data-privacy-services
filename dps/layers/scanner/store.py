@@ -349,6 +349,18 @@ class ScanStore:
         )
         return [ScanPageOut.model_validate(dict(r)) for r in rows]
 
+    async def all_pages(self, conn: asyncpg.Connection, job_id: str) -> list[ScanPageOut]:
+        """Every page of the job in ``page_no`` order (``list_pages`` pages are capped at
+        ``_MAX_LIMIT``; this walks them all)."""
+        out: list[ScanPageOut] = []
+        after = 0
+        while True:
+            batch = await self.list_pages(conn, job_id, after_page_no=after, limit=_MAX_LIMIT)
+            out += batch
+            if len(batch) < _MAX_LIMIT:
+                return out
+            after = batch[-1].page_no
+
     async def get_page(
         self, conn: asyncpg.Connection, job_id: str, page_no: int
     ) -> ScanPageOut | None:
