@@ -664,7 +664,9 @@ def _include_m2_routers(app: FastAPI) -> bool:
     except ModuleNotFoundError as exc:
         logger.warning("m2_routes_disabled", reason=f"missing module {exc.name}")
         return False
+    from dps.layers.api.routers import admin  # M5: keys, tenants, audit, queue
+
     install_error_handlers(app)
-    for module in (connections, jobs, snapshots, groups, evidence, artefacts):
+    for module in (connections, jobs, snapshots, groups, evidence, artefacts, admin):
         app.include_router(module.router)
     return True

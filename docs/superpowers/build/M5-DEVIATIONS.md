@@ -623,6 +623,39 @@ real survivors).
   `tests/fixtures/db.py::_truncate` truncates the M5 tables when they exist; `tests/db/test_rls.py`
   seeds one row per M5 tenant table (`M5_SEEDS`) so the per-table isolation test covers them.
 
+## Task 11 — Admin API: keys, tenants, audit (with CSV), queue
+
+- `dps/layers/api/routers/admin.py`:
+  - Audit events go through M2's `deps.audit_action` (route template, `action`, outcome, status,
+    integer counts) instead of a second helper (`audit_admin` in the plan): one audit code path,
+    the same strict-sink 503 behaviour. Counts: `{tenants, scopes}` for key create, `{grace_hours}`
+    for rotate, `{hosts}` for tenant create, `{fields}` for tenant update — never an id or a name.
+  - `POST /admin/keys` and `/enable` refresh this replica's key snapshot after the change (the plan
+    refreshed only on rotate/disable/enable): a key created through the console works at once on
+    the replica that answered; other replicas follow within `DPS_KEY_CACHE_SECONDS`.
+  - Rotation `grace_hours` above `DPS_KEY_ROTATION_MAX_GRACE_HOURS` is refused with 422
+    `invalid_grace` (the plan's body allowed 0–168 and `rotate_key` silently clamped).
+  - `GET /admin/queue` does **not** call M2's `queue_stats()`: that runs on the worker pool (a
+    cross-tenant `worker_claim` read) which the API process must not open. The route aggregates
+    per-tenant counts under each tenant's GUC for the tenants the caller covers (directory +
+    explicit grants; `_system` for wildcard keys) and reads the global worker registry; the shape is
+    `queue_stats()`'s rows (`table, state, n, oldest_s`) plus the workers.
+  - Audit `tenants=*` is the tenant **directory** (tenants with a record, a job or a connection) plus
+    the caller's explicit grants, filtered by grants — a tenant that only ever called Layer 1 has
+    audit rows but no directory entry; name it explicitly or create its record
+    (`POST /admin/tenants`). Reading `_system` audit rows (CLI and retention events) is allowed for
+    wildcard keys only (explicitly or through `*`); contract §8.1 forbids *acting as* `_system`,
+    not reading its value-free audit rows.
+  - Bad cursors are 422 `invalid_cursor`; a window longer than 400 days, inverted, or naive is 422
+    `invalid_window`; `action` is matched as `action = x OR action LIKE x.% ` with `x` LIKE-escaped.
+- `dps/audit_query.py`: `query_audit` takes the tenant per query as its own parameter; the CSV is
+  produced by `stream_audit_csv` in pages of 1000 through `query_audit` (as planned), `methods`
+  rendered sorted (`email=1;fpe_digits=3`).
+- Tests (`tests/test_admin_api.py`): the fixture mints DB keys on the app's loop (portal) and
+  truncates afterwards (no `migrated_db`, see Task 9); added `test_a_tenant_admin_cannot_escalate_
+  over_http`, window/cursor refusals, the CSV `methods` cell and a 422 for a host with credentials
+  that never echoes them. The audit fixture creates tenant records for `a` and `b` (see `tenants=*`).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
