@@ -140,6 +140,13 @@ _THIRD_PARTY_LEVELS = (
     ("faker", logging.ERROR),
     ("httpx", logging.WARNING),
     ("httpcore", logging.WARNING),
+    # Driver debug logs quote whole commands: pymongo's command log carries every document of a
+    # write (and E11000 replies quote the duplicate key); botocore logs request bodies.
+    ("pymongo", logging.WARNING),
+    ("botocore", logging.WARNING),
+    ("boto3", logging.WARNING),
+    ("s3transfer", logging.WARNING),
+    ("urllib3", logging.WARNING),
 )
 
 

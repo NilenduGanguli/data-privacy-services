@@ -1426,3 +1426,45 @@ Open (not fixed here):
   `{"segment":"?"}` and "1 bound literal", not "all rows"/"all documents", not the literal
   `premium`; the summary says "documents from MongoDB"). Run against the pre-fix image it failed
   with `Selection all rows · 0 bound parameters`; after `up --build` it passes.
+
+## Task 20 — no values in logs: the M3 log scan (`tests/test_no_values_in_logs_m3.py`)
+
+- **Finding fixed (M0 touch point, `dps/observability.py`):** the dynamic sentinel run caught
+  pymongo's own command logger (`pymongo.command`, DEBUG) writing every document of an
+  insert/update and the server's E11000 reply (`dup key: { customerId: "…" }`) through the stdlib
+  root logger — so `DPS_LOG_LEVEL=DEBUG` on the app or worker would have logged customer values.
+  `_THIRD_PARTY_LEVELS` now caps `pymongo`, `botocore`, `boto3`, `s3transfer` and `urllib3` at
+  WARNING (botocore logs request bodies at DEBUG — the same class of leak for `files` exports).
+  Test-first: `test_third_party_loggers_are_capped` gained the five names and failed before the
+  change; the sentinel test fails with "a sentinel value reached the logs" when the pymongo cap
+  is removed and passes with it.
+- **Static exception-text check is AST-based, not the plan's regex.** The plan's
+  `re.search(r"\b(str|repr)\(\s*exc\b", src)` matches `mongo.py`'s docstring ("never
+  ``str(exc)``"). The test now flags `str`/`repr`/`format` calls and f-string fields of an
+  exception name (`exc`, `err`, `error`, `e`, `ex` and every `except … as <name>` of the module),
+  and `.message`/`.errmsg` reads of it; `.details` is allowed only in `mongo.py` (`mongo_code`
+  reads the integer write-error code). A self-test proves the scanner flags each form.
+- **`ConnectorError` codes:** a literal string or the `code` parameter of the two
+  `connector_error(code, exc)` helpers (whose callers pass literals) — the plan accepted any
+  `ast.Name`; the test pins the one name in use.
+- **Scope:** the plan's eight files plus `tools/seed_model.py` (M3's shared customer space). M2's
+  log scan already globs every `dps/layers/connectors/*.py`, so the M3 connector modules are
+  scanned by both.
+- **Dynamic test:** one test (`integration`, `oracle`, `mongo`) runs (a) an Oracle login with the
+  sentinel password (refused, `connection_failed`), (b) a `CHAR(16)`-keyed table of sentinel keys,
+  holders and astral-plane CLOB notes — count, sample, keyset pages of 7, an in-place write of 15
+  rows, then a replayed ledger mark (`ledger_conflict`; the replay wrote nothing — counted), (c) a
+  MongoDB duplicate-key table write of `customerId = "SENTINEL-DUP"` (`pk_collision`), (d) three
+  consistency checks over the Task 16 fakes holding `SENTINEL-TOKEN-*` names and prefixed ids
+  (passed 3/3; 10 % token drift → failed; a failing lookup → `RuntimeError`). Captured text =
+  structlog stdout + stderr + a stdlib root handler; no `SENTINEL` in it nor in any raised
+  error's `str`/`repr`/`args`/cause; every JSON line holds allow-listed fields only. The plan's
+  "an Oracle/Mongo call-failed event is logged" is not asserted: both refused paths are mapped
+  without a log line (the login refusal is wrapped inside the pool; E11000 becomes
+  `pk_collision` silently); the run asserts the check's `consistency_checked` line instead, and
+  `test_the_capture_sees_a_planted_sentinel` proves the capture sees structlog and stdlib lines.
+- **Gates:** `ruff format` (302 files unchanged) · `ruff check` · `mypy dps` (109 files) ·
+  `pytest -q` 1881 passed, 205 skipped (lane Oracle + Mongo up, the rest of the stack down) ·
+  `pytest -q tests/test_no_values_in_logs_m3.py` 22 passed ·
+  `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle and mongo" tests/test_no_values_in_logs_m3.py`
+  1 passed.

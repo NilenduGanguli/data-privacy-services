@@ -201,6 +201,12 @@ def test_third_party_loggers_are_capped() -> None:
     configure_logging("DEBUG", json_output=True)
     assert logging.getLogger("pdfminer").level == logging.ERROR
     assert logging.getLogger("httpx").level == logging.WARNING
+    # Driver debug loggers quote whole commands and bodies: pymongo's command log carries every
+    # document of an insert/update (and E11000 replies quote the duplicate key), botocore logs
+    # request bodies. Capped so DPS_LOG_LEVEL=DEBUG never turns them on (M3 log scan, Task 20).
+    for name in ("pymongo", "botocore", "boto3", "s3transfer", "urllib3"):
+        assert logging.getLogger(name).level == logging.WARNING, name
+        assert not logging.getLogger(f"{name}.command").isEnabledFor(logging.INFO), name
 
 
 def test_m3_connector_fields_are_allow_listed() -> None:
