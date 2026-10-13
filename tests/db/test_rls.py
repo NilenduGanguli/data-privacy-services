@@ -71,6 +71,12 @@ async def _seed(conn: asyncpg.Connection, tenant: str) -> None:
 #: M5 tenant tables (040+): one minimal row each.
 M5_SEEDS = {
     "dps_tenant_usage": "INSERT INTO dps.dps_tenant_usage (tenant_id, day) VALUES ($1, current_date)",
+    "dps_report_daily": "INSERT INTO dps.dps_report_daily (tenant_id, day, layer, action, outcome) "
+    "VALUES ($1, current_date, 'api', 'detect', 'ok')",
+    "dps_report_entity_daily": "INSERT INTO dps.dps_report_entity_daily "
+    "(tenant_id, day, layer, entity_type) VALUES ($1, current_date, 'api', 'EMAIL')",
+    "dps_report_refresh": "INSERT INTO dps.dps_report_refresh (tenant_id, day) "
+    "VALUES ($1, current_date)",
 }
 
 

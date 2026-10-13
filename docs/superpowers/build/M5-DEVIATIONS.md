@@ -656,6 +656,42 @@ real survivors).
   over_http`, window/cursor refusals, the CSV `methods` cell and a 422 for a host with credentials
   that never echoes them. The audit fixture creates tenant records for `a` and `b` (see `tenants=*`).
 
+## Task 12 — Report roll-ups and the reports API
+
+- `dps/migrations/041_report_rollups.sql`: no `CREATE INDEX dps_audit_tenant_ts` — 007 already
+  creates an index of that name on `(tenant_id, ts DESC)`; the plan's `IF NOT EXISTS` would have been
+  a silent no-op.
+- `dps/reports.py` roll-up statements:
+  - The job statement also skips `values_by_method` keys containing `:` (`col:<name>`,
+    `fallback:<method>`, `verify:hits` — M2's per-column/fallback/verification counters, see
+    `evidence._split_counters`); the plan summed them as transformed values and would have counted
+    every value two or three times.
+  - JSON numbers are cast `::numeric::bigint` (a `3.0` in a pack or progress map would make the
+    plan's `::bigint` cast fail the whole refresh); evidence `columns` elements must be objects.
+  - `rollup_lock_key(tenant)` includes the schema (`dps.rollup.<schema>.<tenant>`), so two schemas
+    on one server never share a lock.
+- `summary`:
+  - `trend` splits by mode from the row's action or mode (`obfuscate`, `document.obfuscate`, a
+    `job.run` row whose mode is `synthesize` …).
+  - `posture.policies_latest_pct` is 100 until the policy store exists (Task 15 replaces it), as is
+    `key_held_by_caller_pct` by design; `snapshots_reviewed_pct` counts accepted **or superseded**
+    snapshots (a superseded snapshot was accepted when the job ran).
+  - `layers.ui.risk_flags` reads M4's `dps_scan_page` only when the table exists (this lane has no
+    030); 0 otherwise. `last_scan.personas` is the scan spec's `fill.personas`.
+  - The LLM tiles are constant 0 as planned (Task 16B adds migration 044).
+- `jobs_report`: every day × layer (`api`, `conn`, `ui`) is present (zeros filled) so the chart needs
+  no gap handling; failed sweeps are capped at 100 per kind; the API ones are one per (day, route).
+- `evidence_list`: `q` matches the job id, ticket or policy name exactly (case-insensitive) and the
+  source object as a substring (LIKE-escaped); `layer=conn|ui` only (admin/api layers have no packs).
+  The summary also carries `policy_version` (the pack's `policy.version`, M5 Task 6).
+- Routes: `/reports/evidence` and `/reports/api-rollups/{day}` refresh their window first like the
+  others; the `{day}` document's `sha256` is over the canonical JSON of the document **without**
+  `generated_at` (so the hash attests the numbers, not the time of download); the document's
+  `entities` are the day's API-layer entity counts (entity counts are not kept per action).
+- Tests: the HTTP tests seed through the app's portal (no `migrated_db`, see Task 9); the summary
+  test also checks the trend split, the layer numbers and that no fixture sentinel (a job `error`,
+  an audit `trace_id`, a `reveal_map` entry) reaches any answer.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
