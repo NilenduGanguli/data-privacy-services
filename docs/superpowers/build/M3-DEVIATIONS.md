@@ -1049,3 +1049,66 @@ Red as the plan foresaw for documents, plus one Oracle gap; each fix landed with
   `--reset` (dropped afterwards) instead of the demo `bank` schema, so the test neither depends on
   nor changes the stack's demo data; a second PostgreSQL run prints M2's "already seeded" (M2's
   output, not `unchanged`). Oracle and MongoDB use their demo tables.
+
+## Task 16 — the cross-system consistency check (`consistency.py`, `lookup_values`)
+
+- **Typed instead of `Any`**: `run_consistency_check`, `derive_members` and the members take M2's
+  `Job`, `JobGroup`, `ClassificationSnapshot`, `Connection` (imported under `TYPE_CHECKING`); names
+  and behaviour are the plan's. The log event is `consistency_checked` (plan: `consistency.checked`;
+  contract §0.1 wants literal snake_case events, Task 20 scans for it).
+- **Free-text columns never join and are never compared** (`_joinable`: plan mapped every column
+  with an entity and a method ≠ `keep`). A `FREE_TEXT`/text-pipeline column (Oracle `NOTES`, Mongo
+  `notes`, PG `notes`) is span-transformed and holds different text per system, so the plan's rule
+  would have counted it (method `det_token` is value-deterministic) and failed every real three-way
+  check. Row locators (`ROWID`) are refused as a join path (`path_unknown`).
+- **Members are validated before any connector is opened** (`_validate`; plan: validated inside the
+  open loop), so a bad later member never opens earlier targets; `derive_members` takes only
+  *eligible* jobs (ready, wrote rows, not dry-run, not `files`) and needs two of them (`409
+  member_not_ready`; plan: every ready job, a `files` or 0-row member then failed the derived
+  request). A member whose snapshot or target connection is gone → `409 member_not_ready`; a job
+  spec without a target/source object → `422 member_unsupported`.
+- `attribute_text` also canonicalises `date` values (Mongo dates, PG `date`), not only `datetime`;
+  `_integral` refuses non-finite decimals. An attribute the join column itself names is skipped.
+- `lookup_values` (all three): **Oracle** chunks internally to `IN_LIST_MAX` (500) binds per statement
+  and dedupes the column list by name (`lookup_sql` refuses `n` outside 1..500); **MongoDB** projects
+  the **top-level fields** of the join and attribute paths (plan: dotted paths) for the reason the
+  G3 r2 B1 fix gave (a dotted projection drops non-document array elements), reads with `majority`
+  and `maxTimeMS` like every other read; **PostgreSQL** reads with `= ANY($1)` inside M2's read-only,
+  time-limited transaction (`fetch_internal`); an empty value list returns `[]` without a query.
+- Tests (`tests/connectors/test_consistency.py`, 15): the plan's 14 plus "a counted attribute that
+  disagrees fails the check" (added after a mutation — dropping the attribute term from `passed` —
+  survived the plan's set). Mutation checks: no zero-padding in `candidates` → 7 fail; no chunking →
+  1 fails. `tests/connectors/test_lookup_values_m3.py` (4, per-test markers): Oracle CHAR(12) join
+  found by unpadded candidates across two `IN` chunks (600 of 601), NUMBER join with a CLOB
+  attribute; Mongo dotted `$.kyc.taxId` join with `$.profile.fullName` (top-level projection);
+  PostgreSQL `bigint` join returning three rows per value.
+- The implementation was written before its unit tests in this task (the plan gives both in full);
+  the mutation checks above stand in for the red step.
+
+## Task 17 — the consistency-check API and migration 020
+
+- **`save_last_check` lives in the group repository** (`dps/groups.py`, next to `get_group`; plan:
+  in the router) and takes the result as JSON (`result.model_dump(mode="json")`), so `dps.groups`
+  does not import the connectors package; it updates by `tenant_id` *and* `id` under
+  `db.acquire(tenant_id)` (RLS) and returns whether a row changed. `JobGroup` gains `last_check`
+  and `last_check_at` (plan); the group `SELECT` list carries them, so `GET /job-groups` and
+  `GET /job-groups/{id}` return both.
+- **Every refusal is audited too** (plan: only the success event): errors go through M2's
+  `rejected()` (`group.consistency_check`, outcome `rejected`/`error`, the status) like every other
+  jobs-API action; a success is audited with outcome `passed`/`failed` and the four counts (plan).
+  The mapping (`_check_error`): `ConsistencyError` → its status and code; `ConnectorError` →
+  503 for `connection_failed|secret_unavailable|engine_unavailable`, else 502; M2's
+  `SecretUnavailable` (credentials that do not resolve) → 503 `secret_unavailable`;
+  `TimeoutError` → 504 `check_timeout`; every detail is a fixed sentence (the connector's detail is
+  never forwarded). The check runs under `asyncio.wait_for(…, connector_statement_timeout_seconds)`;
+  the result is stored only after it completed.
+- Snapshots and connections are loaded per distinct id (plan: per job). The KEK comes from M2's
+  `kek_of(request)` (the app's loaded KEK; plan: `load_kek(settings)` per call).
+- **M2 touch point** `tests/db/test_migrations.py::test_files_are_the_contract_set` lists
+  `020_job_group_last_check.sql`. Contract: §2.2 row 020–029 names the file; §6.5 gains the
+  as-built request/response/error amendment; §9's M3 row points at it and at `last_check`.
+- Tests (`tests/api/test_groups_consistency_api.py`, marker `db`, 6): the plan's six. The app runs
+  with a 1-second `connector_statement_timeout_seconds`; the error cases also check that a sentinel
+  in a connector's detail never reaches the body and that a failed check stores no `last_check`;
+  the foreign-group case checks the two `rejected` 404 audit events. `python -m dps.migrate` then
+  `--verify` on a scratch database of the lane's `dps-db`: 11 applied (020 last), `verified`.

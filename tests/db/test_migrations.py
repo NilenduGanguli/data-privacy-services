@@ -31,6 +31,7 @@ async def test_files_are_the_contract_set() -> None:
         "008_rls_policies.sql",
         "009_grants.sql",
         "010_job_idempotency_fp.sql",
+        "020_job_group_last_check.sql",  # M3: the group's latest consistency check
     ]
 
 
