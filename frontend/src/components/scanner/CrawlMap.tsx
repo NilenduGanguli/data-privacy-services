@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { crawlTree, type CrawlNode } from '../../lib/scans';
 import type { NumberedRiskFlag, ScanEvent, ScanPage } from '../../lib/types';
+import { Refused } from './Refused';
 import { flagSentence, flagTone, pathOf, plural, skipLabel, statusIcon } from './format';
 
 const rendersPii = (p: ScanPage): boolean =>
@@ -36,8 +37,12 @@ function Meta({ p, codes, posts }: { p: ScanPage; codes: NumberedRiskFlag[]; pos
  * Crawl map (mockup 12): the tree of discovered pages by `parent_page_no` with status, depth, form and
  * field counts, PII chips, risk codes and the POSTs blocked on each page (from the event feed).
  */
-export function CrawlMap({ scanId, pages, events, flags, origin }: {
+export function CrawlMap({ scanId, pages, events, flags, origin, loaded = true, error }: {
   scanId: string; pages: ScanPage[]; events: ScanEvent[]; flags: NumberedRiskFlag[]; origin: string;
+  /** false while the pages list has not loaded yet: a skeleton, never "No pages discovered yet". */
+  loaded?: boolean;
+  /** the last refusal of the pages list (usePoll retries): shown above the pages already known. */
+  error?: Error;
 }): JSX.Element {
   const [closed, setClosed] = useState<ReadonlySet<number>>(new Set());
   const posts = new Map<number, number>();
@@ -73,7 +78,11 @@ export function CrawlMap({ scanId, pages, events, flags, origin }: {
         <div className="legend"><span><i style={{ background: 'var(--emerald)' }} />visited</span><span><i style={{ background: 'var(--teal)' }} />in progress</span>
           <span><i style={{ background: 'transparent', border: '1.5px dashed var(--border-strong)' }} />queued</span>
           <span><i style={{ background: 'var(--surface-3)', border: '1px solid var(--border-strong)' }} />skipped</span></div></div>
-      <div className="tree">{pages.length ? crawlTree(pages).map(node) : <div className="empty-live">No pages discovered yet.</div>}</div>
+      {error && <Refused what="pages" error={error} />}
+      <div className="tree">{pages.length ? crawlTree(pages).map(node)
+        : error ? null
+          : !loaded ? <div className="skeleton" style={{ height: 120 }} aria-hidden="true" />
+            : <div className="empty-live">No pages discovered yet.</div>}</div>
       <div className="tree-foot"><span>Paths with forms open in the parallel view; pages that render personal data open their masked capture.</span>
         {flags.length > 0 && <span>Risk flags: {flags.map((r, i) => (
           <span key={r.code}>{i > 0 && ' · '}<b style={{ color: `var(--${flagTone(r)})` }}>{r.code}</b> {flagSentence(r)}</span>))}</span>}

@@ -3,6 +3,7 @@ import { saveText } from '../../lib/download';
 import { fmtClock } from '../../lib/jobs';
 import { eventsJsonl } from '../../lib/scans';
 import type { ScanEvent, ScanPage } from '../../lib/types';
+import { Refused } from './Refused';
 import { eventNote, eventResultTone, eventVerb, pathOf } from './format';
 
 const SHOWN = 13;
@@ -12,7 +13,13 @@ const SHOWN = 13;
  * counts). New rows flash once unless the user prefers reduced motion (CSS). "Download log as JSONL"
  * writes the events already fetched; nothing is re-requested.
  */
-export function NavLog({ scanId, events, pages, origin }: { scanId: string; events: ScanEvent[]; pages: ScanPage[]; origin: string }): JSX.Element {
+export function NavLog({ scanId, events, pages, origin, loaded = true, error }: {
+  scanId: string; events: ScanEvent[]; pages: ScanPage[]; origin: string;
+  /** false while the event feed has not loaded yet: a skeleton, never "No navigation yet". */
+  loaded?: boolean;
+  /** the last refusal of the event feed (usePoll retries): shown above the entries already known. */
+  error?: Error;
+}): JSX.Element {
   const byNo = useMemo(() => new Map(pages.map((p) => [p.page_no, p])), [pages]);
   const seen = useRef(0);
   const before = seen.current;
@@ -23,9 +30,12 @@ export function NavLog({ scanId, events, pages, origin }: { scanId: string; even
     <section className="card" aria-labelledby="logT">
       <div className="card-head"><div className="card-title" id="logT">Navigation log</div>
         <span className="faint" style={{ fontSize: 12 }}>newest first · local time · query values masked · every navigation is audited</span></div>
+      {error && <Refused what="navigation log" error={error} />}
       <div className="log" aria-live="polite">
         <div className="lr head"><span>Time</span><span>Event</span><span className="stc">Result</span><span>Target</span><span>Note</span></div>
-        {rows.length === 0 && <div className="empty-live">No navigation yet.</div>}
+        {rows.length === 0 && !error && (loaded
+          ? <div className="empty-live">No navigation yet.</div>
+          : <div className="skeleton" style={{ height: 80 }} aria-hidden="true" />)}
         {rows.map((e) => {
           const tone = eventResultTone(e.result);
           const target = e.target ? pathOf(e.target, origin) : e.page_no !== null ? pathOf(byNo.get(e.page_no)?.url_redacted, origin) : '';
@@ -42,7 +52,7 @@ export function NavLog({ scanId, events, pages, origin }: { scanId: string; even
         })}
       </div>
       <div className="log-foot">
-        <span className="faint" style={{ fontSize: 12 }}>Showing {rows.length} of {events.length} entries</span>
+        <span className="faint" style={{ fontSize: 12 }}>{events.length || (loaded && !error) ? `Showing ${rows.length} of ${events.length} entries` : 'No entries loaded yet'}</span>
         <button className="btn btn-sm" type="button" disabled={!events.length}
           onClick={() => saveText(eventsJsonl(events), `dps-scan-${scanId}-navigation.jsonl`, 'application/x-ndjson')}>Download log as JSONL</button>
       </div>

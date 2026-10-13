@@ -5,6 +5,7 @@ import { FieldInventory, ScanInventory } from '../components/scanner/FieldInvent
 import { flagTone, hostOf, pathOf, plural } from '../components/scanner/format';
 import { NoSubmitIcon } from '../components/scanner/NoSubmitBanner';
 import { ParallelView, type DetailView } from '../components/scanner/ParallelView';
+import { Refused } from '../components/scanner/Refused';
 import { RiskFlags } from '../components/scanner/RiskFlags';
 import { ScanCrumb, scanLabel, ScanStepper } from '../components/scanner/ScanChrome';
 import { useAuth } from '../hooks/useAuth';
@@ -23,10 +24,6 @@ export interface DetailState {
   error?: Error; pagesError?: Error; pageError?: Error; inventoryError?: Error;
 }
 
-/** A refusal in words (status, code, the server's value-free message), with the retry it implies. */
-function Refused({ what, error }: { what: string; error: Error }): JSX.Element {
-  return <div className="callout amber" role="alert">The {what} could not be loaded: {errorText(error)}. Retrying.</div>;
-}
 
 const TABS: [DetailTab, string][] = [['parallel', 'Parallel view'], ['inventory', 'Inventory'], ['captures', 'Captures']];
 const parseTab = (v: string | null): DetailTab => (v === 'inventory' || v === 'captures' ? v : 'parallel');
@@ -82,7 +79,7 @@ function PagesCard({ s, pages, flags }: { s: DetailState; pages: ScanPage[]; fla
             <span className={`chip ${p.capture_status === 'withheld' ? 'amber' : 'slate'}`}>{p.capture_status === 'withheld' ? 'withheld' : 'capture'}</span></span>
         </Link>
       ))}
-      {!rendered.length && <div className="more">None so far.</div>}
+      {!rendered.length && s.pages && <div className="more">{isTerminal(s.detail?.scan) ? 'None.' : 'None so far.'}</div>}
       <div className="card-head sub-head"><div className="card-title">Risk flags</div><span className={`chip ${flags.length ? 'rose' : 'slate'}`}>{flags.length}</span></div>
       <RiskFlags flags={flags} />
     </div>
@@ -167,7 +164,8 @@ export function ScanDetailBody({ s, onTab, onSide, onView, onExport }: {
       {s.tab === 'inventory' && (s.inventory
         ? <ScanInventory rows={s.inventory.items} flags={s.inventory.risk_flags} onDownload={(f) => onExport('inventory', f)} />
         : s.inventoryError ? null : <section className="card"><div className="card-title">Inventory · whole scan</div><div className="skeleton" style={{ height: 200, marginTop: 12 }} aria-hidden="true" /></section>)}
-      {s.tab === 'captures' && <CapturesTab scanId={s.scanId} pages={pages} selected={s.pageNo} mode={sum.mode} origin={crumbOrigin} />}
+      {s.tab === 'captures' && <CapturesTab scanId={s.scanId} pages={pages} selected={s.pageNo} mode={sum.mode} origin={crumbOrigin}
+        loaded={!!s.pages} error={s.pagesError} final={!running} />}
     </main>
   );
 }

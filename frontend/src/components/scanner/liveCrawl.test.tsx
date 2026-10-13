@@ -1,6 +1,9 @@
 // The live-crawl components of mockup 12, rendered from typed fixtures.
 import { describe, expect, it } from 'vitest';
+import { ApiError } from '../../lib/api';
 import { demoScan, event, page, scanJob, summary } from '../../lib/scanFixtures';
+import type { ScanEvent, ScanPage } from '../../lib/types';
+import { LiveCrawl } from '../../pages/ScanNew';
 import { render, text } from '../../test/render';
 import { CrawlMap } from './CrawlMap';
 import { CrawlProgress } from './CrawlProgress';
@@ -97,6 +100,53 @@ describe('NavLog', () => {
   });
   it('says so when nothing has happened yet', () => {
     expect(text(render(<NavLog scanId="s_1" events={[]} pages={[]} origin="" />))).toContain('No navigation yet');
+  });
+});
+
+describe('refused or loading lists on the live crawl page', () => {
+  const refused = new ApiError(500, 'internal error', 'internal');
+  it('a refused pages list shows the refusal in the crawl map, not "No pages discovered yet"', () => {
+    const html = render(<CrawlMap scanId="s_1" pages={[]} events={[]} flags={[]} origin="" error={refused} />);
+    expect(text(html)).toContain('The pages could not be loaded: 500 internal: internal error. Retrying.');
+    expect(html).toMatch(/class="callout amber" role="alert"[^>]*>The pages could not be loaded/);
+    expect(text(html)).not.toContain('No pages discovered yet');
+  });
+  it('the crawl map shows a skeleton while the pages list is loading', () => {
+    const html = render(<CrawlMap scanId="s_1" pages={[]} events={[]} flags={[]} origin="" loaded={false} />);
+    expect(html).toContain('class="skeleton"');
+    expect(text(html)).not.toContain('No pages discovered yet');
+  });
+  it('a crawl map with stale pages keeps them under the refusal', () => {
+    const t = text(render(<CrawlMap scanId="s_1" pages={[page({ page_no: 1 })]} events={[]} flags={[]} origin="http://demo-site:8410" error={refused} />));
+    expect(t).toContain('The pages could not be loaded');
+    expect(t).toContain('/apply start');
+  });
+  it('a refused event feed shows the refusal in the navigation log, not "No navigation yet"', () => {
+    const html = render(<NavLog scanId="s_1" events={[]} pages={[]} origin="" error={refused} />);
+    expect(text(html)).toContain('The navigation log could not be loaded: 500 internal: internal error. Retrying.');
+    expect(text(html)).not.toContain('No navigation yet');
+    expect(text(html)).not.toContain('Showing 0 of 0 entries');
+  });
+  it('the navigation log shows a skeleton while the event feed is loading', () => {
+    const html = render(<NavLog scanId="s_1" events={[]} pages={[]} origin="" loaded={false} />);
+    expect(html).toContain('class="skeleton"');
+    expect(text(html)).not.toContain('No navigation yet');
+  });
+  it('the live crawl column passes pages and events refusals through (ScanNew wiring)', () => {
+    const live = (pages: { data?: ScanPage[]; error?: Error }, events: { data?: ScanEvent[]; error?: Error }): string =>
+      text(render(<LiveCrawl scanId="s_1" scan={d.job} summary={d.summary} pages={pages} events={events} origin="http://demo-site:8410" />));
+    const p500 = live({ error: refused }, { data: d.events });
+    expect(p500).toContain('The pages could not be loaded: 500 internal: internal error. Retrying.');
+    expect(p500).not.toContain('No pages discovered yet');
+    const e500 = live({ data: d.pages }, { error: refused });
+    expect(e500).toContain('The navigation log could not be loaded: 500 internal: internal error. Retrying.');
+    expect(e500).not.toContain('No navigation yet');
+    const loading = live({}, {});
+    expect(loading).not.toContain('No pages discovered yet');
+    expect(loading).not.toContain('No navigation yet');
+    const empty = live({ data: [] }, { data: [] });
+    expect(empty).toContain('No pages discovered yet');
+    expect(empty).toContain('No navigation yet');
   });
 });
 

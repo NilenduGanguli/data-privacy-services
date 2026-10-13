@@ -186,6 +186,30 @@ describe('refusals of the pages, page and inventory routes', () => {
     const t = text(body({ pages: undefined, pageNo: null, pageDetail: undefined, pagesError: new ApiError(403, 'scope missing', 'forbidden') }));
     expect(t).toContain('The pages could not be loaded: 403 forbidden: scope missing. Retrying.');
   });
+  it('a refused pages list on the captures tab shows the refusal, never "no page rendered personal data"', () => {
+    const h = body({ tab: 'captures', pages: undefined, pageNo: null, pageDetail: undefined, pagesError: refused });
+    const t = text(h);
+    expect(t).toContain('The pages could not be loaded: 500 internal: internal error. Retrying.');
+    expect(h).toMatch(/class="callout amber" role="alert"[^>]*>The pages could not be loaded/);
+    expect(t).not.toContain('No page of this scan rendered personal data');
+  });
+  it('the captures tab shows a skeleton while the pages list is loading', () => {
+    const h = body({ tab: 'captures', pages: undefined, pageNo: null, pageDetail: undefined });
+    expect(h).toContain('class="skeleton"');
+    expect(text(h)).not.toContain('No page of this scan rendered personal data');
+  });
+  it('the empty captures sentence is kept for a loaded empty list, without "so far" once the scan is terminal', () => {
+    const empty = d.pages.filter((p) => p.capture_status !== 'captured' && p.capture_status !== 'withheld');
+    const done = text(body({ tab: 'captures', pages: empty, pageNo: null, pageDetail: undefined }));
+    expect(done).toContain('No page of this scan rendered personal data that needed a masked capture.');
+    const running = { scan: scanJob({ state: 'running' }), summary: summary({ pages_visited: 4, pages_discovered: 9 }) };
+    expect(text(body({ detail: running, tab: 'captures', pages: empty, pageNo: null, pageDetail: undefined })))
+      .toContain('No page of this scan rendered personal data that needed a masked capture so far.');
+  });
+  it('the pages card does not say "None so far" for rendered personal data before the pages list loads', () => {
+    const t = text(body({ pages: undefined, pageNo: null, pageDetail: undefined, pagesError: refused }));
+    expect(t).not.toContain('None so far');
+  });
   it('a refused inventory is shown in the inventory tab', () => {
     const h = body({ tab: 'inventory', inventory: undefined, inventoryError: new ApiError(403, 'scope missing', 'forbidden') });
     expect(text(h)).toContain('The inventory could not be loaded: 403 forbidden: scope missing. Retrying.');

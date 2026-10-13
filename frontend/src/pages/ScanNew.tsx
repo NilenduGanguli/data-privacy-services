@@ -17,7 +17,7 @@ import {
   buildSpec, checkSession, configError, configFromSpec, createErrorText, DEFAULT_CONFIG, DEMO_SESSION, denyPathError, fetchAllPages,
   fetchNewEvents, LOCALES, MAX_DEPTH, MAX_PAGES, MAX_PERSONAS, mergeEvents, requestJson, type ScanConfig, type SessionVerdict,
 } from '../lib/scans';
-import type { ScanCreated, ScanEvent, SynthesisSeed } from '../lib/types';
+import type { ScanCreated, ScanDetail, ScanEvent, ScanPage, SynthesisSeed } from '../lib/types';
 
 function newIdempotencyKey(): string {
   const c = globalThis.crypto as Crypto | undefined;
@@ -48,6 +48,25 @@ function JsonView({ text }: { text: string }): JSX.Element {
   }
   if (last < text.length) parts.push(<span key={i++} className="s">{text.slice(last)}</span>);
   return <>{parts}</>;
+}
+
+/**
+ * The live crawl column (mockup 12): progress, crawl map and navigation log of a scan, pure. A refused
+ * pages list or event feed is shown as the value-free refusal in its card, a list still loading as a
+ * skeleton; the empty sentences are kept for a list that loaded empty.
+ */
+export function LiveCrawl({ scanId, scan, summary, pages, events, origin }: {
+  scanId: string; scan: ScanDetail['scan']; summary: ScanDetail['summary'];
+  pages: { data?: ScanPage[]; error?: Error }; events: { data?: ScanEvent[]; error?: Error }; origin: string;
+}): JSX.Element {
+  return (
+    <>
+      <CrawlProgress scan={scan} summary={summary} />
+      <CrawlMap scanId={scanId} pages={pages.data ?? []} events={events.data ?? []} flags={summary.risk_flags} origin={origin}
+        loaded={!!pages.data} error={pages.error} />
+      <NavLog scanId={scanId} events={events.data ?? []} pages={pages.data ?? []} origin={origin} loaded={!!events.data} error={events.error} />
+    </>
+  );
 }
 
 /** The once-only key material and seed of a created scan: React state only, gone on reload (contract §14). */
@@ -350,11 +369,7 @@ export function ScanNew(): JSX.Element {
               <div className="skeleton" style={{ height: 120 }} aria-hidden="true" /></section>
           )}
           {scan && summary && (
-            <>
-              <CrawlProgress scan={scan} summary={summary} />
-              <CrawlMap scanId={scanId} pages={pages.data ?? []} events={events.data ?? []} flags={summary.risk_flags} origin={origin} />
-              <NavLog scanId={scanId} events={events.data ?? []} pages={pages.data ?? []} origin={origin} />
-            </>
+            <LiveCrawl scanId={scanId} scan={scan} summary={summary} pages={pages} events={events} origin={origin} />
           )}
         </div>
       </div>
