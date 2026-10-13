@@ -22,7 +22,7 @@
 .m5-page .btn-ghost.danger { color: var(--rose); }
 .m5-page .search { width: 220px; padding: 6px 10px; font-size: 12.5px; }
 .m5-page .tbl-wrap { overflow-x: auto; margin: 0 -6px; padding: 0 6px; }
-.m5-page .dl { display: flex; gap: 6px; flex-wrap: wrap; }
+.m5-page .dl { display: flex; gap: 6px; flex-wrap: nowrap; }
 .m5-page .dlb { display: inline-flex; flex-direction: column; gap: 4px; }
 .m5-page .dlb .err { font-size: 11.5px; padding: 4px 6px; }
 
@@ -95,7 +95,8 @@ dialog.cdlg .seg button { padding: 6px 12px; }
 .reports-page .scope-seg { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .reports-page #audit .tbl td { padding: 8px 6px; font-size: 12px; vertical-align: top; }
 .reports-page #audit .tbl th { padding: 8px 6px; }
-.reports-page #audit .rt { font-size: 11px; color: var(--ink); min-width: 140px; }
+.reports-page #audit .rt { font-size: 11px; color: var(--ink); min-width: 140px; max-width: 260px; white-space: normal; overflow-wrap: anywhere; }
+.reports-page #audit .tbl-scroll > table.tbl { min-width: 900px; }
 .reports-page #audit .mono.nw { font-size: 11px; }
 .reports-page #audit .tbl td:last-child { min-width: 150px; }
 .reports-page #packs td.mono { white-space: nowrap; }

@@ -34,3 +34,14 @@ wins over older plan text; each row says file, change and why.
 | same | Layer 3 card's big number is the scan count (`ui.scans`) with pages, fields and risk flags in the line under it; the last scan id links to `/scanner/scans/:id`. Recent jobs link scans to `/scanner/scans/:id` (M4) and runs/discovers to `/data-sources/jobs/:id`. | The mockup's "forms so far" has no field in `SummaryOut`. |
 | same | Days are labelled UTC (mockup: IST) and the chart's y axis is compact (45M). | Roll-ups are by UTC day (Task 12). |
 | `frontend/src/components/BarChart.tsx` | `yFormat` prop (default `compact`). | Axis labels such as 43,800,000 crowd the chart. |
+
+## Task 20 — Reports & audit (mockup 09)
+
+| File | Change | Why |
+|---|---|---|
+| `frontend/src/lib/reports.ts` (new) | Pure helpers for the page: URL filters (`days`, `layer`, `outcome`, `q`, `scope`), sweep series, failed-sweep wording, the merged evidence list, verification/outcome chips, `policyLabel` ("name@vN" → "name vN"), `fromSummary`. Plus `lib/reports.test.ts`. | Testable logic; the plan names only the two components. |
+| `frontend/src/pages/Reports.tsx` | Pure `ReportsView` + loader. The audit scope ("This tenant \| All tenants I can read") is kept in the URL too (`scope=all` → `tenants=*`). The search box is debounced 300 ms before it reaches the API. | Shareable views; one request per pause, not per keystroke. |
+| same | A daily API roll-up row is dated 00:05 UTC the next day and fails when its `verify_failed > 0`; roll-ups follow the Layer (All/API), Outcome (OK/Failed; none for Blocked) and search filters client-side. The Policy cell of a roll-up is "—". | `ApiRollup` has no policy and no outcome field. |
+| same | When `/reports/evidence` answers 404 (a backend before M5) the packs come from M2's `GET /evidence` (`fromSummary`). | The page keeps working against the integrated M2 backend until the M5 routes merge. |
+| same | The CSV export label carries the window's `totals.audit_rows` ("Export 24.6M audit rows as CSV"); hidden when `/admin/audit` answers 401/403 (the audit log then shows the callout). The failed-sweep card links the job and says "failed closed" instead of the mockup's hand-written fix (a drafted policy fix is not data DPS has). | Mockup wording where the data exists; nothing invented where it does not. |
+| `frontend/src/components/EvidenceTable.tsx` | The empty-state row and "Show older packs" follow the mockup; the "Showing N of M packs" total is omitted (the API returns no total). | `Page<T>` has no count. |
