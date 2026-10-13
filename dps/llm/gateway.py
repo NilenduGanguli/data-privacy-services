@@ -306,7 +306,9 @@ class LlmGateway:
         from google.genai import types
 
         system = "\n".join(m["content"] for m in messages if m.get("role") == "system") or None
-        contents = [m["content"] for m in messages if m.get("role") != "system"]
+        contents: list[types.PartUnionDict] = [
+            m["content"] for m in messages if m.get("role") != "system"
+        ]
         try:
             client = genai.Client(
                 vertexai=True,
