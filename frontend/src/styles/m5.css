@@ -249,3 +249,5 @@ dialog.cdlg .seg button { padding: 6px 12px; }
   .evidence-page .cmx .c { aspect-ratio: 2.6 / 1; }
   .evidence-page .cmx .hc { height: 56pt; }
 }
+.admin-page td.who { min-width: 240px; }
+.admin-page td.secref { max-width: 260px; overflow-wrap: anywhere; white-space: normal; }

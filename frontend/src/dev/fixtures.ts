@@ -178,7 +178,7 @@ export function apiKeys(now: Date): ApiKeyView[] {
     k('k_qascan', 'qa-onboarding-scanner', 'dps_c2Rv', [FIXTURE_TENANT], ['scan', 'synthesize'], 13, DAY + 3_600_000, 78),
     k('k_cardsdd', 'cards-dispute-desk', 'dps_pW8n', ['cards-in'], ['detect', 'obfuscate', 'reveal'], 53, 7_200_000, 39),
     k('k_collvr', 'collections-voice-redaction', 'dps_Tz5s', ['collections-in'], ['detect', 'obfuscate'], 0, null, 90),
-    k('k_wealth', 'wealth-nri-analytics', 'dps_e3Lk', ['wealth-nri'], ['detect', 'synthesize', 'jobs'], 100, 3 * DAY, 84),
+    k('k_wealth', 'wealth-nri-analytics', 'dps_e3Lk', ['wealth-nri'], ['detect', 'synthesize', 'jobs'], 64, 3 * DAY, 84),
     k('k_ledger', 'ledger-recon-batch', 'dps_Q0vb', [FIXTURE_TENANT, 'cards-in'], ['detect', 'obfuscate', 'jobs'], 113, 7_200_000, null),
     k('k_hrattr', 'hr-attrition-model', 'dps_m6Yd', ['hr-people-analytics'], ['synthesize'], 25, 6 * DAY, 66),
     k('k_legacy', 'legacy-etl-poc', 'dps_a1Nn', [FIXTURE_TENANT], ['detect', 'obfuscate'], 215, 41 * DAY, 150, { status: 'disabled', disabled_at: ago(now, 41 * DAY) }),
