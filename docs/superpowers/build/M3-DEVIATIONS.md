@@ -637,3 +637,21 @@ test-first below.
     login's schema and synonyms. A query reading a same-named table of another schema would be read under
     the object's reviewed methods. Qualifying the table (as every test and the console do) avoids it;
     refusing unqualified names would break plain queries. Logged as an open issue.
+
+## Task 9 — MongoDB document rules (`mongo_docs.py`)
+
+- `infer_shape`: `_id` is the range key only when every sampled `_id` has one label the key codec
+  turns back into the same BSON value — `int`/`long` (one family), `string`, `objectId`, `date`,
+  `uuid` (plan: any one scalar label). A `double`, `Decimal128`, `bool` or `binData` `_id` now reads
+  as one partition (`key_source = "none"`): `encode_key` refuses `float`/`bool` kinds, a
+  `Decimal128` is not a `decimal.Decimal`, and binary keys decode as subtype-0 `bytes`, which would
+  not match a stored `Binary` of another subtype in a range predicate. An empty sample has no key.
+- `ColumnInfo.is_key` is set on `$._id` only when the shape is keyed (plan: always), so a key-less
+  shape has no column that claims to be a key.
+- `coerce_bson` leaves `binData` paths alone (added to the skip labels): a binary leaf is never
+  transformed (contract §4.1) and has no text form to restore from.
+- `make_bson_safe` returns a converted copy (tuples become lists) and never changes its input; the
+  plan's version already did for dicts and lists.
+- Tests (`tests/connectors/test_mongo_docs.py`, 9): the plan's 5 plus `top_level` (quoted
+  segments), int/long and mixed labels, the unpageable `_id` labels (and that every keyed label
+  encodes), and restoration of numeric text in every array element.
