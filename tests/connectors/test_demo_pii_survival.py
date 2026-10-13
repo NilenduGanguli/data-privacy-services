@@ -201,3 +201,110 @@ async def test_a_personal_column_kept_as_not_personal_requires_review(
     assert v["hits"] == 0 and v["post_sample"]["kept_columns"] == ["value"]
     items, _ = await list_evidence("t1", job_id=job.id)
     assert items and items[0].passed is False and items[0].review_required
+
+
+# -- WP-I (M5 merge): the discovery fix holds for synthesize runs (D-A) -------------------------
+
+
+def synth_spec(conn_id: str, obj: ObjectRef, snap_id: str, target: dict[str, Any]) -> RunSpec:
+    spec = run_spec(conn_id, obj, snap_id, target).model_dump(mode="json", exclude_none=True)
+    return RunSpec.model_validate({**spec, "mode": "synthesize"})
+
+
+@pytest.mark.parametrize("table", sorted(PII))
+async def test_no_source_pii_value_survives_a_synthetic_copy(
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: RegisterSource,
+    table: str,
+) -> None:
+    """A mixed-PII column is never kept by synthesize either: it is planned (surrogate), and the
+    synthetic table holds no source value of any personal column (counts only)."""
+    obj, rows = await load(source_pg, table)
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    cols = {c.name: c for c in snap.columns}
+    for name in PII[table]:
+        assert cols[name].entity_type is not None, f"{table}.{name} kept as not personal"
+        assert cols[name].synthesize_method.method != "keep", f"{table}.{name}"
+    if table == "contacts":
+        assert cols["value"].entity_type == MIXED_PII
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": f"{table}_synth"},
+    }
+    sub = await submit_run(
+        synth_spec(src.id, obj, snap.id, target),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    job = await drive(handler_ctx, "t1", sub.job.id)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    out = [
+        dict(r)
+        for r in await source_pg.admin.fetch(f'SELECT * FROM "{source_pg.schema}".{table}_synth')
+    ]
+    assert len(out) == len(rows)
+    for name in PII[table]:
+        source_values = {str(r[name]) for r in rows if r[name] is not None}
+        assert len(source_values) > 0
+        found = survivors(out, source_values)  # a count; the values are never printed
+        if cols[name].entity_type == "PERSON_NAME":
+            # surrogate names come from a finite name pool (the demo source was drawn from the
+            # same pool): a few unrelated rows share a name by chance (M5 verify N1)
+            assert found <= len(rows) // 20, f"{table}.{name}: {found} names survive"
+        else:
+            assert found == 0, f"{table}.{name}: {found} raw values in synthetic"
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None
+    v = ev.pack.verification
+    # whatever the verdict, it is never "passed" while a kept column held personal data
+    if v["passed"]:
+        assert v["status"] == "passed" and not v["review_required"], v["status"]
+        assert v["post_sample"]["kept_column_hits"] == 0 and not v["review_columns"]
+
+
+async def test_a_synthetic_copy_that_keeps_a_personal_column_requires_review(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """Main's post-write gate and M5's D-A review agree on a synthesize run: ``value`` reviewed
+    as not personal is copied as it is, so the pack says review required with the column named
+    by both checks, and the evidence list carries the flag."""
+    obj, _ = await load(source_pg, "contacts")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    snap = await discover_and_accept(
+        handler_ctx,
+        "t1",
+        src.id,
+        obj,
+        overrides=[SnapshotOverride(path="$.value", entity_type=None)],
+    )
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "contacts_synth_kept"},
+    }
+    sub = await submit_run(
+        synth_spec(src.id, obj, snap.id, target),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    job = await drive(handler_ctx, "t1", sub.job.id)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None
+    v = ev.pack.verification
+    assert v["passed"] is False and v["review_required"] is True
+    assert v["status"] == "review_required" and v["hits"] == 0
+    assert "value" in v["review_columns"]
+    assert v["post_sample"]["kept_columns"] == ["value"]
+    assert v["post_sample"]["synthetic_kept"]["kept_columns"] == ["value"]
+    items, _ = await list_evidence("t1", job_id=job.id)
+    assert items and items[0].passed is False and items[0].review_required

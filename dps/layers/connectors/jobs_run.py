@@ -1594,6 +1594,22 @@ def verification_outcome(
     return True, "passed", False
 
 
+def apply_synthetic_review(verification: dict[str, Any], flagged: list[str]) -> None:
+    """D-A: a synthesize run's review columns (``flagged``) join main's post-write verdict.
+
+    Any flagged column makes the verification ``review_required`` and not passed; a ``failed``
+    or ``incomplete`` status is never downgraded to a review, and an empty list never clears a
+    review the post-write sample already required (:func:`verification_outcome`).
+    """
+    verification["review_columns"] = flagged
+    if not flagged:
+        return
+    verification["review_required"] = True
+    verification["passed"] = False
+    if verification.get("status") == "passed":
+        verification["status"] = "review_required"
+
+
 def copied_personal_columns(
     plan: RunPlan, snapshot: ClassificationSnapshot, sampled: set[str]
 ) -> list[str]:
@@ -2115,13 +2131,7 @@ async def _store_evidence(
         review_cols |= set(ids.get("review_columns") or [])
         if "error" in ids:
             review_cols |= set(_written_identifiers(plan, snapshot))
-        flagged = sorted(review_cols)
-        verification["review_columns"] = flagged
-        if flagged:  # never downgrades a failed or incomplete verification
-            verification["review_required"] = True
-            verification["passed"] = False
-            if verification["status"] == "passed":
-                verification["status"] = "review_required"
+        apply_synthetic_review(verification, sorted(review_cols))
     errors: list[dict[str, str]] = []
     if job.error_code:
         errors.append({"code": job.error_code, "where": "prepare"})

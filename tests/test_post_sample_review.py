@@ -201,3 +201,41 @@ def test_a_job_that_did_not_finish_is_never_verified(outcome: str) -> None:
 @pytest.mark.parametrize("outcome", ["succeeded", "dry_run"])
 def test_finished_runs_keep_their_verdict(outcome: str) -> None:
     assert verification_outcome(0, False, None, outcome=outcome) == (True, "passed", False)
+
+
+# -- WP-I (M5 merge): synthesize's D-A review and main's post-write gate agree ------------------
+
+
+def _verification(passed: bool, status: str, review: bool) -> dict[str, Any]:
+    return {"hits": 0, "passed": passed, "status": status, "review_required": review}
+
+
+def test_synthetic_review_turns_a_pass_into_review_required() -> None:
+    from dps.layers.connectors.jobs_run import apply_synthetic_review
+
+    v = _verification(True, "passed", False)
+    apply_synthetic_review(v, ["contact"])
+    assert (v["passed"], v["status"], v["review_required"]) == (False, "review_required", True)
+    assert v["review_columns"] == ["contact"]
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete"])
+def test_synthetic_review_never_downgrades_a_failure(status: str) -> None:
+    from dps.layers.connectors.jobs_run import apply_synthetic_review
+
+    v = _verification(False, status, False)
+    apply_synthetic_review(v, ["national_id"])
+    assert (v["passed"], v["status"], v["review_required"]) == (False, status, True)
+
+
+def test_no_synthetic_review_keeps_mains_post_write_verdict() -> None:
+    """An empty D-A review must not clear a review the post-write sample already required."""
+    from dps.layers.connectors.jobs_run import apply_synthetic_review
+
+    v = _verification(False, "review_required", True)
+    apply_synthetic_review(v, [])
+    assert (v["passed"], v["status"], v["review_required"]) == (False, "review_required", True)
+    assert v["review_columns"] == []
+    clean = _verification(True, "passed", False)
+    apply_synthetic_review(clean, [])
+    assert (clean["passed"], clean["status"], clean["review_required"]) == (True, "passed", False)
