@@ -151,8 +151,122 @@ export interface EvidencePack {
   engine_version: string; image_digest: string | null; purpose: { ticket: string; legal_basis: string } | null; requested_by: string | null;
   source: Record<string, any>; target: Record<string, any>; policy: Record<string, string>; snapshot: Record<string, any>;
   consistency: Record<string, any>; columns: Record<string, any>[]; reveal_map: Record<string, any>[]; counts: Record<string, number>;
-  verification: Record<string, any>; fidelity: Record<string, any> | null; privacy: Record<string, any> | null; utility: Record<string, any> | null;
+  verification: Record<string, any>; fidelity?: FidelityBlock | null; privacy?: PrivacyBlock | null; utility?: UtilityBlock | null; tabular?: TabularBlock | null;
   scan: Record<string, any> | null; timings: Record<string, any>; partitions: Record<string, any>[]; errors: { code: string; where: string }[]; config_hash: string;
 }
 export interface EvidenceOut { id: string; job_id: string; created_at: string; pack: EvidencePack; pack_sha256: string; artefacts: { id: string; kind: string; bytes: number; content_type: string }[] }
 export interface EvidenceSummary { id: string; job_id: string; created_at: string; outcome: string; mode: string | null; label: string; source_object: string | null; target: string | null; write_mode: string | null; policy: string | null; ticket: string | null; passed: boolean; hits: number; rows_written: number; html_artefact_id: string | null }
+
+// ---- M5: admin (keys, tenants, audit, queue, posture), reports, the policy store and the
+// synthetic sections of an evidence pack (contract §9 M5 rows; field for field with dps/auth_db.py,
+// dps/tenants.py, dps/audit_query.py, dps/posture.py, dps/reports.py, dps/policy_store.py and
+// dps/engine/metrics.py + dps/layers/connectors/tabular.py). A raw key (`CreatedKey.key`) lives
+// only in React state and is dropped once the operator confirms it is stored.
+export type KeyScope = 'detect' | 'obfuscate' | 'synthesize' | 'reveal' | 'jobs' | 'scan' | 'admin';
+export interface ApiKeyView {
+  id: string; name: string; key_prefix: string; tenant_ids: string[]; scopes: string[]; source: 'db' | 'static';
+  status: 'active' | 'expired' | 'disabled'; created_by: string | null; created_at: string | null; expires_at: string | null;
+  last_used_at: string | null; disabled_at: string | null; rotated_from: string | null; rotated_at: string | null; age_days: number | null;
+}
+export interface CreatedKey { key: string; record: ApiKeyView }
+export interface RotateResult { new: CreatedKey; old: ApiKeyView }
+export interface CreateKeyBody { name: string; tenant_ids: string[]; scopes: string[]; expires_in_days: number }
+export interface EffectiveTenant {
+  tenant_id: string; retention_days: number; max_running: number; max_queued: number; daily_row_quota: number | null; registered_hosts: string[];
+}
+export interface TenantUsage { running: number; queued: number; rows_today: number }
+export interface TenantView {
+  tenant_id: string; display_name: string | null; note: string | null; overrides: Record<string, number | null>; effective: EffectiveTenant;
+  usage: TenantUsage; keys: Record<string, number>; exists: boolean; created_at: string | null; updated_at: string | null;
+}
+export interface TenantSpec {
+  tenant_id: string; display_name?: string | null; retention_days?: number | null; max_running?: number | null; max_queued?: number | null;
+  daily_row_quota?: number | null; registered_hosts?: string[]; note?: string | null;
+}
+export type TenantPatch = Partial<Omit<TenantSpec, 'tenant_id'>>;
+export type AuditLayer = 'api' | 'conn' | 'ui' | 'admin';
+export type AuditOutcome = 'ok' | 'failed' | 'blocked';
+export interface AuditRow {
+  id: number; ts: string; tenant_id: string; key_id: string | null; key_name: string | null; trace_id: string | null; route: string;
+  action: string; layer: string; mode: string | null; policy: string | null; outcome: string; status: number | null; job_id: string | null;
+  findings: number | null; methods: Record<string, number>;
+}
+export interface AuditFilters {
+  from?: string; to?: string; action?: string; layer?: AuditLayer; outcome?: AuditOutcome; q?: string; tenants?: string; limit?: number; cursor?: string;
+}
+export interface PostureCheck { id: string; name: string; ok: boolean; detail: string; enforced_at_boot: boolean }
+export interface PostureReport { env: string; enforced: boolean; passed: number; total: number; checked_at: string; checks: PostureCheck[] }
+export interface WorkerRow { worker_id: string; role: string; version: string; online: boolean; busy: boolean; draining: boolean; last_seen: string | null }
+export interface QueueOut { queues: Record<string, unknown>[]; workers: WorkerRow[] }
+export interface TrendPoint { day: string; obfuscated: number; synthesized: number }
+export interface EntityCount { entity_type: string; findings: number; sensitivity: string }
+export interface JobBrief {
+  id: string; kind: string; mode: string | null; state: string; source: string | null; target: string | null; progress_pct: number | null; note: string | null;
+}
+/** `SummaryOut.layers` (pydantic `dict[str, dict[str, Any]]`), with the keys dps/reports.py writes. */
+export interface SummaryLayers {
+  api?: { requests?: number; by_mode?: Record<string, number> };
+  conn?: { rows?: number; by_engine?: Record<string, number>; groups?: number };
+  ui?: { scans?: number; pages?: number; fields?: number; risk_flags?: number; submissions?: number; last_scan?: { id?: string; pages?: number; fields?: number; personas?: number } | null };
+}
+export interface SummaryOut {
+  tenant_id: string; days: number; generated_at: string; tiles: Record<string, number>; trend: TrendPoint[]; findings_by_type: EntityCount[];
+  layers: SummaryLayers; posture: Record<string, number>; recent_jobs: JobBrief[];
+}
+export interface SweepDay { day: string; layer: string; passed: number; failed: number }
+export interface FailedSweep {
+  where: 'job' | 'api'; day: string; job_id: string | null; partitions: number[]; route: string | null; error_code: string; paths: string[];
+}
+export interface ReportsJobsOut { days: number; sweeps: SweepDay[]; totals: Record<string, number>; failed_sweeps: FailedSweep[] }
+/** `EvidenceItem.summary`: only these value-free keys (dps/reports.py::evidence_list). */
+export interface EvidenceItemSummary {
+  mode?: string | null; policy?: string | null; policy_version?: string | number | null; ticket?: string | null; source?: string | null;
+  target?: string | null; write_mode?: string | null; rows_written?: number | null; verification_passed?: boolean | null; hits?: number | null;
+  fidelity_score?: number | null; exact_row_matches?: number | null; pages?: number | null; submissions?: number | null;
+}
+export interface EvidenceItem {
+  id: string; job_id: string; job_kind: string; outcome: string; created_at: string; pack_sha256: string; layer: string; summary: EvidenceItemSummary;
+}
+export interface ApiRollup { day: string; action: string; calls: number; findings: number; values: number; verify_failed: number }
+export interface PresetView { name: string; version: number; hash: string; description: string; mode: 'obfuscate' | 'synthesize'; reversible: boolean; jobs: number }
+export interface PolicyVersionView {
+  version: number; hash: string; change_ticket: string | null; note: string | null; published_by: string | null; published_at: string; jobs_pinned: number;
+}
+export interface TenantPolicyView {
+  name: string; base_preset: string | null; active_version: number | null; active_hash: string | null; draft: boolean; draft_changes: number;
+  published_at: string | null; published_by: string | null; jobs: number;
+}
+export interface TenantPolicyDetail extends TenantPolicyView {
+  active_body: Record<string, any> | null; draft_body: Record<string, any> | null; draft_by: string | null; draft_updated_at: string | null;
+  versions: PolicyVersionView[];
+}
+export interface PolicyList { presets: PresetView[]; tenant: TenantPolicyView[] }
+export interface PolicyChange { op: 'add' | 'remove' | 'change'; path: string; before?: unknown; after?: unknown }
+export interface PolicyDiff { from: number; to: number | 'draft'; changes: PolicyChange[] }
+/** One column of `fidelity.columns` (dps/engine/metrics.py::fidelity_report). */
+export interface FidelityColumn { path: string; kind: string; metric: 'ks' | 'tvd'; distance: number; null_rate_delta: number; within_limit: boolean }
+export interface FidelityBlock {
+  ks: Record<string, number>; tvd: Record<string, number>; null_rate_delta: Record<string, number>; columns: FidelityColumn[];
+  corr_delta: number; corr_max: number; corr_within_limit: boolean; corr_matrix: { columns: string[]; delta: number[][] };
+  limits: { column: number; corr: number }; score: number; engine?: string;
+  measured_on?: { real_rows: number; synthetic_rows: number; holdout_rows: number; basis: string };
+}
+export interface NndrBlock {
+  ratio: number; synth_to_real_median: number; real_to_real_median: number; synth_rows: number; real_rows: number; holdout: number;
+  zero_distance_share: number; measured: number; target?: number; passed?: boolean;
+}
+export interface MiaBlock { run: boolean; reason?: string; method?: string; auc?: number; members?: number; non_members?: number; target?: number; passed?: boolean }
+/** `privacy`: measured (copula/MOSTLY) or `{engine: "none", measured: false, reason}`. */
+export interface PrivacyBlock {
+  engine: string; measured: boolean; reason?: string; enforced?: boolean; exact_row_matches?: number; exact_row_resamples?: number;
+  exact_row_resamples_run?: number; exact_row_rejections?: number; nndr?: NndrBlock; nndr_enforced?: boolean;
+  qi_uniqueness?: { columns: string[]; source: number; synthetic: number; unique_overlap: number }; membership_inference?: MiaBlock;
+}
+export interface UtilityBlock {
+  run: boolean; reason?: string; model?: string; metric?: string; train_on_real?: number; train_on_synthetic?: number; ratio?: number;
+  test_rows?: number; label?: string; task?: string;
+}
+export interface TabularBlock {
+  engine: string; columns: string[]; excluded: { path: string; reason: string }[]; constraints: unknown[]; constraints_skipped?: unknown[];
+  fit_rows: number; holdout_rows: number; preview_rows: number; pool_rows?: number;
+}

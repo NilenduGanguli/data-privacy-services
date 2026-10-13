@@ -1,5 +1,6 @@
 import { Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import { Admin } from './pages/Admin';
 import { EvidencePack } from './pages/EvidencePack';
 import { JobDetail } from './pages/JobDetail';
 import { Jobs } from './pages/Jobs';
@@ -10,6 +11,7 @@ import { Policies } from './pages/Policies';
 import { PlaygroundDocuments } from './pages/PlaygroundDocuments';
 import { Reports } from './pages/Reports';
 
+/** Placeholder for the UI scanner (built by the M4 console lane) and unknown routes. */
 function Soon({ title }: { title: string }): JSX.Element {
   return (
     <main className="page">
@@ -37,7 +39,7 @@ export function App(): JSX.Element {
         <Route path="/scanner" element={<Soon title="UI scanner (M4)" />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/reports/evidence/:evidenceId" element={<EvidencePack />} />
-        <Route path="/admin" element={<Soon title="Admin (M5)" />} />
+        <Route path="/admin" element={<Admin />} />
         <Route path="*" element={<Soon title="Page not found" />} />
       </Route>
     </Routes>
