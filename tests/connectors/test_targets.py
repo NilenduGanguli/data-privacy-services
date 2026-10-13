@@ -740,3 +740,39 @@ def test_a_keyless_upsert_is_refused_at_submit(settings: Settings) -> None:
     assert _code(upsert, settings, keyless, source_conn=ORA_SRC) == ("no_key", 422)
     _check(_ora_spec({}), keyless, settings=settings, source_conn=ORA_SRC)
     _check(upsert, snap, settings=settings, source_conn=ORA_SRC)  # keyed: upsert allowed
+
+
+def test_column_plans_carry_the_timestamp_precision() -> None:
+    """M3: an Oracle TIMESTAMP(9) output keeps its nine fractional digits (FF9 text), so a
+    date shift is written and revealed exactly instead of failing ``incompatible_method``."""
+    snap = accepted_snapshot("c_src", "bank.customers")
+    every = [c.name for c in snap.shape.columns]
+    planned = {
+        p.name
+        for p in build_column_plans(
+            snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=every
+        )
+    }
+    name = next(
+        c.name for c in snap.shape.columns if c.name in planned and c.kind in ("date", "timestamp")
+    )
+    shape = snap.shape.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"kind": "timestamp", "ts_precision": 9})
+                if c.name == name
+                else c
+                for c in snap.shape.columns
+            ]
+        }
+    )
+    plans = build_column_plans(
+        snap.model_copy(update={"shape": shape}),
+        mode="obfuscate",
+        write_mode="table",
+        pk_strategy=None,
+        projection=every,
+    )
+    plan = next(p for p in plans if p.name == name)
+    assert plan.ts_precision == 9 and plan.output_column().ts_precision == 9
+    assert all(p.ts_precision is None for p in plans if p.name != name)

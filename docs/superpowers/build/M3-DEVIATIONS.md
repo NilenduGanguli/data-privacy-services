@@ -773,7 +773,7 @@ test-first below.
   `table_load: upsert`; a projected read therefore writes projected documents. PostgreSQL's
   "upsert leaves the other columns of matched rows untouched" is not mirrored: a leaf `$set` upsert
   would turn an array path (`accounts.0.iban`) into an object with a `"0"` field on insert. Open
-  question for Task 19 (the console offers `truncate_insert` for Mongo table targets).
+  question for Tasks 18b/19 (whether the wizard offers `upsert` for Mongo table targets).
 - **Write concerns**: `table` loads write with `majority` on a replica set; transactions commit with
   `majority` (`with_transaction(write_concern=…)`); operations inside a transaction use the default
   handle (a transaction carries its own concern). Every write carries the `dps:` comment.
@@ -804,3 +804,50 @@ test-first below.
   expects `PkCollision`; the commit-together case swaps the target handle instead of patching the
   driver class) plus the concurrent holder, and "targets must exist / dry runs change nothing";
   writes of changed values assert 0 surviving source values (`$in` counts).
+
+## Task 13 — engine bridge on real Oracle and MongoDB rows (`dps/engine/batch.py`)
+
+Red as the plan foresaw for documents, plus one Oracle gap; each fix landed with M2's batch tests
+(`tests/test_batch.py`) and the whole suite green.
+
+- **Behaviour 1/2 (documents) were red**: M2's `transform` read and wrote values by column *name*
+  (`row.get(col.name)`, `out[col.name] = …`). A Mongo plan `$.profile.fullName` (name `profile`)
+  serialised the whole `profile` sub-document to JSON, transformed it, and wrote a *string* over it,
+  and `[*]` paths were not expanded. Now a plan whose path is not one key of a flat row
+  (`docpaths.top_level`) is read and written at every concrete path `expand_wildcards` finds; the
+  engine sees those leaves at their concrete paths (the paths L1 uses for the same document); the
+  output row is the input row with each container on a written path shallow-copied once
+  (`_set_copied`), so the input is never changed and untouched values leave **by reference** (plan:
+  "copied by reference") — `Int64`, `Decimal128`, `ObjectId`, `datetime` and sub-documents keep their
+  identity. Flat rows (PostgreSQL, Oracle) take exactly the old path (`doc[name]`, `out[name]`).
+  Verification and `values_by_column` key document values by concrete path (the column *path* for
+  the counters), so two elements of one array are checked as two values. A plan naming a document
+  path the shape does not have is a `ValueError` (like a plan naming an unknown column).
+- **Behaviour 3 was red** (`unclassified` was stored but unused). Now, for leaves whose generalised
+  path the shape does not list (top-level keys that are flat shape columns are never searched, so SQL
+  rows are untouched): `detect` runs the detector over string leaves and plans the spans with
+  `det_token` (obfuscate) or `build_plan` (synthesize), like a free-text column; `redact` replaces
+  every such scalar (not booleans, ObjectIds or binary) with the `redact` label (`[REDACTED]`) as a
+  whole-value entry of entity `UNCLASSIFIED`; `keep` leaves them. Leaves the shape lists are the
+  reviewed snapshot's decision and are never re-detected (a kept `notes` stays). The detector is
+  created lazily when the first unclassified leaf needs it.
+- **Oracle gap (new): `ColumnPlan.ts_precision`.** `ColumnPlan.output_column()` had no fractional
+  precision, so the codec took a TIMESTAMP(9) output for microseconds: a `date_shift` on an Oracle
+  `TIMESTAMP(9)` column failed every batch with `incompatible_method` (the reversible round-trip
+  check saw the nanoseconds go). `ColumnPlan` gains `ts_precision: int | None = None` (contract §6.4,
+  additive), `output_column()` passes it, and **M2 touch point** `targets.build_column_plans` copies
+  it from the shape (`test_targets.py::test_column_plans_carry_the_timestamp_precision`;
+  `tests/test_batch_documents_m3.py::test_a_timestamp9_date_shift_keeps_its_nanoseconds` shows the
+  refusal without it). Task 7 had pinned the method and the codec, not the bridge.
+- `tests/connectors/test_engine_bridge_m3.py` (6): per-test markers (`oracle`, `mongo`, both for the
+  cross-engine case) instead of all three on the module, so each runs with its own container. The
+  untouched-values cases also transform one column and check every *other* column/leaf keeps value and
+  type (the plan's empty-plan case passed trivially); the CHAR case uses letter values (`fpe_text`
+  falls back to `det_token` on digit runs too short for FF1 — `fpe_domain_too_small` — which a
+  `CHAR(10)` cannot hold) and checks 0 surviving values after the in-place write; FF9 values survive
+  the write. The cross-engine case: `fpe_digits` digits equal as integers (Oracle `NUMBER` vs Mongo
+  `"CUST-…"`), `fpe_text` names and `email` (`domain: keep`) byte-identical, a second key differs.
+- `tests/test_batch_documents_m3.py` (8, offline): nested leaf only, identity of untouched values,
+  `[*]` over 3/0/absent arrays, a flat document field, unclassified detect/keep/redact (and an unknown
+  field inside an array element), unknown plan paths refused, leakage in an array element fails
+  closed, and the TIMESTAMP(9) case.

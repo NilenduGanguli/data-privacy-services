@@ -422,6 +422,7 @@ def build_column_plans(
                 length=info.length,
                 precision=info.precision,
                 scale=info.scale,
+                ts_precision=info.ts_precision,
             )
         )
     return plans
