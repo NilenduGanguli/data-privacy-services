@@ -764,8 +764,12 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
     `append` or `in_place` synthesize the run reads **every** written government/financial
     identifier value and counts (`post_sample.identifier_check`) those found in the same source
     column (keyed 64-bit hashes of the normalised value) and those outside a never-issued range;
-    any count above 0, or a check that could not run, makes the pack `review_required`. Files
-    targets record `not_run: files_target`. Tools that need *rule-valid* PANs (the demo seed, the
+    any count above 0, or a check that could not run, makes the pack `review_required`. An
+    `append` into a table that already held rows reads only the rows after the table's pre-run
+    integer key (`plan.prepare.identifier_floor`, `scope: written_rows`): the target's own rows
+    are not the run's output (`bank_perf.transactions` holds 1 000 seed rows with the source's
+    IBAN). Fewer rows after that key than the run wrote → every row (`scope: whole_table`,
+    `scope_reason: rows_below_floor`). Files targets record `not_run: files_target`. Tools that need *rule-valid* PANs (the demo seed, the
     demo documents, the eval corpus) draw them themselves (`evaluation.corpus.rule_valid_pan`).
 
 ## 9. Next milestones
@@ -998,4 +1002,31 @@ corpus regenerate byte-identically · compose logs: 0 demo or source values, 0 k
    this fix keeps its old classification; run discovery again to get the new one.
 6. Synthetic names come from a finite pool: an appended synthesized table can hold a name that also
    exists in the source (0 rows keep their own original); compare row for row, not by set.
+
+## 12. M5 integrated on `main` (2026-10-14, WP-I)
+
+`git merge --no-ff m5` (`8378da7`): 11 files conflicted (HANDOFF, contract, corpus, connections and
+jobs routers, `jobs_run.py`, `targets.py`, `types.ts`, `Reports.tsx`, two test files); both sides kept.
+Migrations: M2 001–010, M5 040–045 (no collision; M3 020–029 and M4 030–039 stay free). Compose adds
+`tokenizer-mock` (profiles `tokenizer`, `full`); every host port stays a defaulted variable.
+
+**Adaptations on main** (each test-first, commits `fix(integrate): …`):
+
+- `jobs_run` keeps main's `scan_written`/`verification_outcome` and M5's D-A checks together: in a
+  synthesize run, keyed pseudonyms count as written by DPS and tabular-sampled columns as synthetic;
+  `apply_synthetic_review` adds D-A review columns without ever downgrading `failed`/`incomplete`
+  or clearing main's post-write review. Mixed-PII columns are planned (never kept) by synthesize;
+  a column reviewed as not personal that holds personal data gives `review_required` in both checks.
+- `POST /jobs/run/validate` resolves `@name[:vN]` policies as `POST /jobs/run` does.
+- PATCH of a production connection: the admin rule answers (403) before the TLS rule (422).
+- SEC-3: Oracle's `options.protocol` (tcp/tcps) is endpoint-defining.
+- `GET /reports/evidence` summaries carry `review_required`/`verification_status`; Reports shows
+  "review required" (amber).
+- The identifier check of a synthesize append reads only the rows it wrote (see §8 above).
+- `dps/llm/gateway.py`: the Vertex `contents` list is typed (mypy with every extra installed).
+
+**Traps.** `tokenizer-mock` publishes `${DPS_TOKENIZER_MOCK_PORT:-8420}`, the M4 lane's demo-site
+port; on a machine running that lane start main with `DPS_TOKENIZER_MOCK_PORT=8430`. `tools/demo_m2.py`
+keeps the group's key in `var/demo/<group>.json`; after `down -v` pass a new `--group` (A-N1).
+Gates and results: `~/.cache/dps-build/reports/I-m5.md`.
 
