@@ -130,7 +130,8 @@ export function finishedPack(item: EvidenceItem): boolean {
 
 /** The verification chip of an evidence row (mockup 09). Passed only for a finished pack whose
  *  `verification_passed` is exactly true; hits read as caught; an unfinished run without a hit is
- *  "not verified · job <outcome>" (slate when canceled, rose otherwise — main's verificationTone). */
+ *  "not verified · job <outcome>" (slate when canceled, rose otherwise — main's verificationTone);
+ *  a finished run without a hit that needs a reviewer is "review required" (amber). */
 export function verificationChip(row: EvidenceRow): Chip {
   if (row.kind === 'rollup') {
     const n = row.rollup.verify_failed;
@@ -147,6 +148,8 @@ export function verificationChip(row: EvidenceRow): Chip {
   }
   if (hits > 0) return { tone: 'rose', text: `failed · ${hits} ${hits === 1 ? 'leak' : 'leaks'} caught` };
   if (!finished) return { tone: item.outcome === 'canceled' ? 'slate' : 'rose', text: `not verified · ${item.layer === 'ui' ? 'scan' : 'job'} ${item.outcome}` };
+  // main's post-write gate (B1) and M5's D-A review: personal data in a column kept as is
+  if (s.review_required === true) return { tone: 'amber', text: 'review required' };
   if (s.verification_passed === false) return { tone: 'rose', text: 'failed closed' };
   return { tone: 'slate', text: 'not verified · no verification recorded' };
 }
@@ -185,6 +188,7 @@ export function fromSummary(s: EvidenceSummary): EvidenceItem {
     summary: {
       mode: s.mode, policy: policy || null, policy_version: version ?? null, ticket: s.ticket, source: s.source_object, target: s.target,
       write_mode: s.write_mode, rows_written: s.rows_written, verification_passed: s.passed, hits: s.hits,
+      review_required: s.review_required ?? false,
     },
   };
 }

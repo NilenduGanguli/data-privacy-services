@@ -224,6 +224,7 @@ export interface ReportsJobsOut { days: number; sweeps: SweepDay[]; totals: Reco
 export interface EvidenceItemSummary {
   mode?: string | null; policy?: string | null; policy_version?: string | number | null; ticket?: string | null; source?: string | null;
   target?: string | null; write_mode?: string | null; rows_written?: number | null; verification_passed?: boolean | null; hits?: number | null;
+  review_required?: boolean | null; verification_status?: string | null;
   fidelity_score?: number | null; exact_row_matches?: number | null; pages?: number | null; submissions?: number | null;
 }
 export interface EvidenceItem {

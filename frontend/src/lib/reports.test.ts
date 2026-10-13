@@ -118,6 +118,13 @@ describe('verification of runs that did not finish (r1 B2, main N3)', () => {
     // a finished run whose verification failed before a hit was counted (a preflight leak)
     expect(verificationChip(pack('succeeded', { verification_passed: false, hits: 0 }))).toEqual({ tone: 'rose', text: 'failed closed' });
   });
+  it('a finished run that needs a reviewer reads as review required (main B1, M5 D-A)', () => {
+    expect(verificationChip(pack('succeeded', { mode: 'synthesize', verification_passed: false, review_required: true, hits: 0 }))).toEqual({ tone: 'amber', text: 'review required' });
+    expect(verificationChip(pack('dry_run', { verification_passed: false, review_required: true, hits: 0 }))).toEqual({ tone: 'amber', text: 'review required' });
+    // a hit or an unfinished run outranks the review
+    expect(verificationChip(pack('succeeded', { verification_passed: false, review_required: true, hits: 2 }))).toEqual({ tone: 'rose', text: 'failed · 2 leaks caught' });
+    expect(verificationChip(pack('failed', { verification_passed: false, review_required: true, hits: 0 })).text).toBe('not verified · job failed');
+  });
   it('a scan passes only when it succeeded (no dry run for scans)', () => {
     expect(verificationChip(pack('succeeded', { verification_passed: true, submissions: 0 }, 'ui', 'scan'))).toEqual({ tone: 'emerald', text: 'passed · 0 POSTs left' });
     expect(verificationChip(pack('dry_run', { verification_passed: true, submissions: 0 }, 'ui', 'scan')).tone).not.toBe('emerald');
@@ -149,5 +156,11 @@ describe('M2 fallback', () => {
     const item = fromSummary({ id: 'ev_1', job_id: 'j_1', created_at: '2026-10-12T00:00:00Z', outcome: 'succeeded', mode: 'obfuscate', label: 'x', source_object: 'bank.customers',
       target: 'bank_uat.customers', write_mode: 'table', policy: 'gdpr-pseudonymise', ticket: 'CHG-1', passed: true, hits: 0, rows_written: 10, html_artefact_id: null });
     expect(item).toMatchObject({ layer: 'conn', summary: { policy: 'gdpr-pseudonymise', policy_version: null, rows_written: 10, verification_passed: true } });
+  });
+  it('carries main\'s review_required into the evidence item', () => {
+    const item = fromSummary({ id: 'ev_2', job_id: 'j_2', created_at: '2026-10-12T00:00:00Z', outcome: 'succeeded', mode: 'obfuscate', label: 'x', source_object: 'bank.contacts',
+      target: 'bank_uat.contacts', write_mode: 'table', policy: 'gdpr-pseudonymise', ticket: null, passed: false, review_required: true, hits: 0, rows_written: 10, html_artefact_id: null });
+    expect(item.summary.review_required).toBe(true);
+    expect(verificationChip({ kind: 'pack', item, created_at: '' })).toEqual({ tone: 'amber', text: 'review required' });
   });
 });

@@ -703,6 +703,9 @@ def _evidence_summary(pack: dict[str, Any]) -> dict[str, Any]:
         "write_mode": target.get("write_mode"),
         "rows_written": counts.get("rows_written"),
         "verification_passed": verification.get("passed"),
+        # main's post-write gate and M5's D-A review (WP-I): a run that needs a reviewer
+        "review_required": verification.get("review_required") is True,
+        "verification_status": verification.get("status"),
         "hits": verification.get("hits"),
         "fidelity_score": sub("fidelity").get("score"),
         "exact_row_matches": sub("privacy").get("exact_row_matches"),
