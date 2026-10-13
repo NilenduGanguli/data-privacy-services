@@ -591,3 +591,52 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   (hidden, select, checkbox, named token; `on` and textarea included), a POST form / LOW field /
   no-form case, value-free merged query flags, a hash-route query, LOW and empty values, a HIGH-only
   rendered finding (`medium`, `text`): 10 tests (plan: 5).
+
+## Task 11 — Persona values, field formatting and tokens of persona values
+
+- `dps/engine/synth/surrogates.py`: **no change.** Since the plan was written M0 made the IFSC
+  surrogate keep the bank code and the reserved `0` (`keep=range(0, 5)`) and reshape the branch
+  code; that output is already `[A-Z]{4}0[A-Z0-9]{6}` for every rule-shaped original, and
+  `tests/test_surrogates.py` pins the kept bank code (`ifsc[:5] == "ABCD0"`), which the plan's
+  random bank code would break. The persona's exemplar IFSC is seeded, so the bank code still varies
+  per persona. `tests/test_surrogates.py` gains the plan's `test_ifsc_surrogate_is_rule_shaped`
+  (three originals) against the code as built.
+- `dps/layers/scanner/personas_fill.py`: the plan's code and tables, plus:
+  - `AttrSpec.exemplar` takes `(rng, locale)`: the phone exemplar is `+<country> <national
+    digits>` of the locale (`+91 9…`, `+1 415…`, `+44 7700 900…`, `+1 416…`, `+52 55…`). The plan's
+    `+<12 random digits>` makes M0's phone surrogate keep a random country (it keeps the original's
+    country), so an en_IN persona could get a foreign number. Exemplars are seeded for every
+    identifier (the plan's table), the nationality exemplar is a neutral `Exemplarian` (the persona
+    decides).
+  - `ATTR_ENTITY` (every attribute, derived ones included → entity) is new: it gives the tier of a
+    field mapped by its autocomplete token alone and the token entity in obfuscate mode.
+    `ENTITY_ATTR` also maps `LOCATION → region`, `AGE → age`, `PASSWORD → credential`.
+  - **`tokens_for(engine, items, *, key, policy, locale, persona_no)`**: `items` is positional
+    too. The plan's keyword-only `items` cannot be called as `tokens(items)` through the
+    `functools.partial` the plan itself builds (TypeError). Keyword calls still work.
+  - **Nothing page-derived is stored as a fill value.** `shown` (→ `FieldRecord.fill_*`) for a
+    select or radio is the persona's value when an option matched it, else `option:<n>` / `selected`
+    — an option's own text is page data (a select can list the customer's accounts). A credential
+    shows `None`. `FillAction.value`/`option_value` and `PersonaFill.shown`/`needles` are
+    `repr=False` (the credential is never shown).
+  - `choose_option` also skips options whose text reads as a placeholder (`Choose…`, `Select`,
+    `--`) and returns `None` when no real option is left. Radios are grouped by
+    `(frame, form, name)`: the radio whose label matches the persona value is checked, else one
+    seeded pick per group.
+  - Neutral values: `sample_for_pattern` first, then a per-type value (`number` 1, `email`, `url`,
+    `tel`, `date`, `month`, `week`, `time`, `datetime-local`), `Sample text` for a textarea,
+    `Sample` otherwise, cut to `maxlength`. `sample_for_pattern` refuses negated classes, reversed or
+    > 256-character ranges and repeats over 64 and samples only patterns `compile_html_pattern`
+    accepts; `choose_format` checks patterns with `classify.pattern_accepts` (Task 9 ReDoS rules).
+  - `apply_format("expiry:…")` refuses a month outside 1–12 (the plan's `date()` raised).
+  - Obfuscate mode without a token function raises `ValueError` (value-free).
+  - Task 13's `fill_page` is not in this commit.
+- `tests/scanner/test_personas_fill.py`: the plan's 8 tests with two changes — Aadhaar: M0 draws
+  numbers UIDAI never issues (leading `1`) with a valid Verhoeff digit, so `validate("AADHAAR", …)`
+  (which also checks the issuable range) is `False` by design; the test checks 12 digits + Verhoeff
+  instead. The select case expects the persona's gender (it varies per persona), not `"Female"`.
+  Plus: seeds and locales differ, every mapped attribute exists in all five locales, preview
+  entities, more formats, a hostile pattern never decides a format, more pattern samples, an
+  options list with no real option, more `plan_field` cases, a leaking transform raises
+  `LeakageError("leakage")`, and neutral/credential/radio/checkbox/file/number/select-without-match
+  fills: 14 tests (plan: 8).

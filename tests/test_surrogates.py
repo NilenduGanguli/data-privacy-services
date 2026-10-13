@@ -739,3 +739,11 @@ def test_a_value_held_by_construction_keeps_the_first_draw() -> None:
     eng = SurrogateEngine(SEED)
     eng.declare_record("r1", [("PIN", "4111"), ("CARD_PAN", original)])
     assert eng.surrogate("CARD_PAN", original, "en_US", "r1") == bare and luhn_valid(bare)
+
+
+def test_ifsc_surrogate_is_rule_shaped() -> None:
+    # M4 Task 11: scanner personas type the IFSC into fields with pattern [A-Z]{4}0[A-Z0-9]{6}
+    eng = SurrogateEngine(SEED, default_locale="en_IN")
+    for original in ("HDFC0001234", "SBIN0AB1234", "ABCD0EFGHIJ"):
+        fake = eng.surrogate("IFSC", original, "en_IN", "r1")
+        assert re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", fake) and fake != original
