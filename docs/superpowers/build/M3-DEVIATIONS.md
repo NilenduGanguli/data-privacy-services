@@ -1000,3 +1000,52 @@ Red as the plan foresaw for documents, plus one Oracle gap; each fix landed with
   upsert, documented), R2-N3 (`InvalidBSON` for out-of-range dates not mapped to `source_error`), R2-N4
   (engine date span), R2-N5 (fail-closed `fpe_digits` fallback) stay open for T15/T19 and the engine
   owners.
+
+## Task 15 — one customer space for PostgreSQL, Oracle and MongoDB
+
+- **`tools/seed_model.py` keeps the M2 demo bank's customer model instead of the plan's
+  India-only one** (plan: every customer an Aadhaar-shaped national id with spaces and a PAN,
+  locales incl. `en_CA`, names from `PersonaFactory`, per-customer `random.Random`). Why: the plan
+  also makes M2's PostgreSQL customers take id, names, e-mail, phone, birth date, national id and
+  tax id from the same generator, and M2's demo (and `tests/test_seed_sources.py`) is a four-country
+  bank: AADHAAR/SSN/NINO/CURP national ids by country, a PAN for Indian customers only, CA absent
+  from every M2 country table. One model that serves both: the M2 country mix (IN 60 / US 20 / GB 10 /
+  MX 10), M2's anchors (`CUSTOMER_ID:<hash_value(id)>`), M2's surrogate seed
+  (`sha256("dps-demo-<seed>")`) and M2's per-country id rules — but with **per-customer template
+  originals** (plan) so phones, national ids, e-mails and names are distinct per customer (M2's
+  generator drew them from one template per country: 300 customers had 4 distinct mobiles and 62
+  distinct national ids), and **per-customer randomness** (`sha256(seed | id)`), so customer `i`
+  depends only on `(i, seed)` — `--rows 200` is a prefix of `--rows 2400`. Aadhaar numbers are
+  stored unspaced (M2's rule: 12 digits, leading `1`, Verhoeff). `SeedCustomer` gains `id_type` and
+  the `anchor` property; `tax_id` is `str | None`. The plan's three unit tests are kept with the
+  per-type rules (Aadhaar Verhoeff, SSN 9xx, NINO `QQ`, CURP check digit, PAN for IN only) and two
+  are added (prefix property; ≥ 95 % distinct e-mails, phones, national ids and names).
+- **`docker/oracle/initdb/01_crm.sql`: `CRM.CUSTOMERS.NATIONAL_ID` is `VARCHAR2(18)`** (was 16). A
+  CURP is 18 characters; PostgreSQL's `national_id` is `varchar(18)` too. The lane's Oracle
+  container was recreated (`docker compose rm -sfv oracle`; it has no volume) — any other stack
+  that ran the old init must do the same.
+- **M2 touch point `tools/seed_sources.py`**: the customers' personal fields come from
+  `seed_customers(rows, seed)` (the rest of M2's generator unchanged: employees, notes, addresses,
+  accounts, cards, transactions, loans, KYC); `COUNTRIES`, `ID_TYPE`, `demo_seed_bytes` and the CURP
+  builder moved to `seed_model` (`demo_seed_bytes` is re-imported, `generate_rows` keeps its
+  signature). The demo values in `bank.*` therefore change for a fresh seed; a schema already seeded
+  with the same `(seed, rows)` keeps its old rows (the marker says "already seeded") — reseed with
+  `--reset` before a three-way demo. The tool gains `--target oracle|mongo|all`, `--oracle-dsn`
+  and `--mongo-uri` (defaults from `DPS_TEST_ORACLE_DSN` / `DPS_ORACLE_PORT` and
+  `DPS_TEST_MONGO_URI` / `DPS_MONGO_PORT`, not the plan's literal ports, contract §0 amendment) and
+  imports `tools.*` through a `sys.path` line like `tools/demo_m2.py`. `tests/test_seed_sources.py`
+  (M2): the "oracle arrives with M3 → exit 2" assertion became "`--target all` parses; an
+  unreachable Oracle exits 1 naming the exception class, not the endpoint".
+- `seed_oracle` / `seed_mongo` return `dict[str, int | str]` (`"unchanged"` for a no-op; plan:
+  `dict[str, int]` that held `"unchanged"`). Oracle tables are emptied with `TRUNCATE` by their
+  owner (plan: `DELETE`); `INTERACTIONS.EVENT_TS` of the second row is the first ± 1 ns inside the
+  same microsecond; `KYC_DOCUMENTS.DOC_TYPE` is the id type in lower case (plan: always `aadhaar`);
+  `LOANS.APPLICANTS.PAN` is NULL for non-Indian applicants. Mongo profiles carry `kyc.taxId` only
+  for Indian customers and an IBAN from the M0 surrogate engine (per-customer template).
+- **Notes rule kept from M2**: GB customers' notes carry their e-mail only (M2-DEVIATIONS Task 27:
+  the free-text detector does not see a phone in Ofcom's drama range, so the per-row sweep would
+  refuse the batch as leakage); every other customer's notes carry e-mail and phone (plan).
+- `tests/e2e/test_seed_shared_ids.py` seeds PostgreSQL into its own schema `m3_seed_ids` with
+  `--reset` (dropped afterwards) instead of the demo `bank` schema, so the test neither depends on
+  nor changes the stack's demo data; a second PostgreSQL run prints M2's "already seeded" (M2's
+  output, not `unchanged`). Oracle and MongoDB use their demo tables.

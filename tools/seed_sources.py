@@ -2,6 +2,13 @@
 
     python tools/seed_sources.py --target postgres [--dsn postgresql://…/bank] [--schema bank]
                                  [--rows 20000] [--seed 7] [--restore-copy] [--reset]
+    python tools/seed_sources.py --target oracle|mongo|all [--oracle-dsn …] [--mongo-uri …]
+
+The customers' personal fields (id, name, e-mail, phone, birth date, national id, tax id) come
+from the one customer space shared with the Oracle and MongoDB demo data
+(:mod:`tools.seed_model`, M3 Task 15), so the same customer id carries the same person in every
+target; ``--target oracle`` / ``mongo`` seed those (:mod:`tools.seed_oracle`,
+:mod:`tools.seed_mongo`) and print ``<table>: <n> rows`` or ``<table>: unchanged`` only.
 
 Every personal value comes from the M0 surrogate engine (seeded with ``sha256("dps-demo-<seed>")``)
 applied to synthetic shape templates, anchored on the customer (``CUSTOMER_ID:<hash>``) so a
@@ -26,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import os
 import random
 import re
@@ -36,7 +42,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # `python tools/seed_sources.py`
+
+from tools.seed_model import demo_seed_bytes, seed_customers  # noqa: E402
 
 #: The ten demo tables, parents before children (contract §11).
 TABLES: tuple[str, ...] = (
@@ -181,9 +192,7 @@ def columns_of(table: str) -> list[str]:
 
 # -- generation (pure) ----------------------------------------------------------------------------
 
-COUNTRIES = (("IN", "en_IN", 60), ("US", "en_US", 20), ("GB", "en_GB", 10), ("MX", "es_MX", 10))
 CURRENCY = {"IN": "INR", "US": "USD", "GB": "GBP", "MX": "MXN"}
-ID_TYPE = {"IN": "AADHAAR", "US": "SSN", "GB": "NINO", "MX": "CURP"}
 PHONE_TEMPLATE = {
     "IN": "+91 98765 43210",
     "US": "+1 202 555 0143",
@@ -196,7 +205,6 @@ STATES = {
     "GB": ("ENG", "SCT", "WLS"),
     "MX": ("CDMX", "JAL", "NL"),
 }
-CURP_STATES = ("DF", "JC", "NL", "PL", "MC")
 SEGMENTS = ("retail", "premium", "private", "sme")
 PRODUCTS = ("savings", "current", "salary", "fixed_deposit")
 LOAN_PRODUCTS = ("home", "auto", "personal", "education")
@@ -223,39 +231,6 @@ CONTACT_BASE = 70_000_001
 APPLICANT_BASE = 80_000_001
 ACCOUNT_BASE = 100_000_001
 TXN_BASE = 100_000_000_001
-
-
-def demo_seed_bytes(seed: int) -> bytes:
-    """The surrogate engine's seed for ``--seed``: ``sha256("dps-demo-<seed>")``."""
-    return hashlib.sha256(b"dps-demo-%d" % seed).digest()
-
-
-def _country(rng: random.Random) -> tuple[str, str]:
-    roll = rng.randrange(100)
-    for code, locale, weight in COUNTRIES:
-        if roll < weight:
-            return code, locale
-        roll -= weight
-    return COUNTRIES[0][0], COUNTRIES[0][1]  # pragma: no cover - weights sum to 100
-
-
-def _curp(persona: Any, dob: date, rng: random.Random) -> str:
-    """A rule-valid CURP for the persona (stdnum check digit)."""
-    from stdnum.mx import curp
-
-    from dps.engine.synth.personas import ascii_fold
-
-    def letters(text: str) -> str:
-        return re.sub(r"[^A-Z]", "", ascii_fold(text).upper()) or "X"
-
-    last, first = letters(persona.last_name), letters(persona.first_name)
-    vowel = next((c for c in last[1:] if c in "AEIOU"), "X")
-    inner = (next((c for c in s[1:] if c not in "AEIOU"), "X") for s in (last, "X", first))
-    body = (
-        f"{last[0]}{vowel}X{first[0]}{dob:%y%m%d}{'M' if persona.gender == 'female' else 'H'}"
-        f"{rng.choice(CURP_STATES)}{''.join(inner)}{'0' if dob.year < 2000 else 'A'}"
-    )
-    return body + str(curp.calc_check_digit(body))
 
 
 @dataclass
@@ -302,30 +277,15 @@ def generate_rows(*, rows: int, seed: int) -> dict[str, list[dict[str, Any]]]:
         )
 
     customers: list[_Customer] = []
-    for i in range(rows):
-        cid = CUSTOMER_BASE + i
-        country, locale = _country(rng)
-        anchor = f"CUSTOMER_ID:{hash_value(str(cid))}"
-        name_template = f"Person {i}"
-        engine.declare_record(anchor, [("PERSON_NAME", name_template)])
-        full_name = engine.surrogate("PERSON_NAME", name_template, locale, anchor)
-        dob = date.fromisoformat(
-            engine.surrogate("DATE_OF_BIRTH", f"{1950 + i % 50}-06-15", locale, anchor)
-        )
+    # the customers' personal fields come from the one customer space shared with the Oracle
+    # and MongoDB demo data (tools/seed_model.py, M3 Task 15): same id → same person everywhere
+    for model in seed_customers(rows, seed):
+        i, cid, country, locale = model.index, model.customer_id, model.country, model.locale
+        anchor = model.anchor
+        engine.declare_record(anchor, [("PERSON_NAME", f"Person {i}")])
+        full_name, dob, national_id = model.full_name, model.dob, model.national_id
+        tax_id, email, mobile = model.tax_id, model.email, model.mobile
         persona = engine.persona(anchor, locale)
-        if country == "IN":
-            national_id = engine.surrogate("AADHAAR", "234567890123", locale, anchor)
-        elif country == "US":
-            national_id = engine.surrogate("SSN", "123-45-6789", locale, anchor)
-        elif country == "GB":  # HMRC's example prefix QQ is never issued
-            national_id = f"QQ{rng.randrange(1_000_000):06d}{rng.choice('ABCD')}"
-        else:
-            national_id = _curp(persona, dob, rng)
-        tax_id = (
-            engine.surrogate("PAN_IN", "ABCPE1234F", locale, anchor) if country == "IN" else None
-        )
-        email = engine.surrogate("EMAIL", f"person{i}@example.com", locale, anchor)
-        mobile = engine.surrogate("PHONE", PHONE_TEMPLATE[country], locale, anchor)
         c = _Customer(
             id=cid,
             country=country,
@@ -357,7 +317,7 @@ def generate_rows(*, rows: int, seed: int) -> dict[str, list[dict[str, Any]]]:
                 "full_name": full_name,
                 "date_of_birth": dob,
                 "national_id": national_id,
-                "id_type": ID_TYPE[country],
+                "id_type": model.id_type,
                 "tax_id": tax_id,
                 "email": email,
                 "mobile": mobile,
@@ -706,15 +666,36 @@ def default_dsn() -> str:
     return f"postgresql://postgres:postgres@127.0.0.1:{port}/bank"  # local demo literal
 
 
+def default_oracle_dsn() -> str:
+    """``DPS_TEST_ORACLE_DSN``, else the lane's ``DPS_ORACLE_PORT`` (contract §12.2)."""
+    explicit = os.environ.get("DPS_TEST_ORACLE_DSN")
+    if explicit:
+        return explicit
+    return f"127.0.0.1:{os.environ.get('DPS_ORACLE_PORT') or '1522'}/FREEPDB1"
+
+
+def default_mongo_uri() -> str:
+    """``DPS_TEST_MONGO_URI``, else the lane's ``DPS_MONGO_PORT`` (contract §12.2)."""
+    explicit = os.environ.get("DPS_TEST_MONGO_URI")
+    if explicit:
+        return explicit
+    port = os.environ.get("DPS_MONGO_PORT") or "27018"
+    return f"mongodb://127.0.0.1:{port}/?directConnection=true"
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """The CLI (module docstring)."""
     p = argparse.ArgumentParser(
         prog="python tools/seed_sources.py", description=__doc__.split("\n\n")[0]
     )
-    p.add_argument("--target", choices=("postgres", "oracle", "mongo"), required=True)
+    p.add_argument("--target", choices=("postgres", "oracle", "mongo", "all"), required=True)
     p.add_argument(
         "--dsn", default=None, help="default: DPS_TEST_SOURCE_PG_DSN / DPS_SOURCE_PG_PORT"
     )
+    p.add_argument(
+        "--oracle-dsn", default=None, help="default: DPS_TEST_ORACLE_DSN / DPS_ORACLE_PORT"
+    )
+    p.add_argument("--mongo-uri", default=None, help="default: DPS_TEST_MONGO_URI / DPS_MONGO_PORT")
     p.add_argument("--schema", default="bank")
     p.add_argument("--rows", type=int, default=20_000)
     p.add_argument("--seed", type=int, default=7)
@@ -728,13 +709,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI; returns the exit code (0 ok/already seeded, 2 not yet supported, 3 conflict,
-    1 a database failure reported by class name)."""
-    args = parse_args(argv)
-    if args.target != "postgres":
-        print(f"--target {args.target} arrives with M3", file=sys.stderr)
-        return 2
+def _print_counts(counts: dict[str, int | str]) -> None:
+    for table, n in counts.items():
+        print(f"{table}: {n}" if isinstance(n, str) else f"{table}: {n} rows")
+
+
+def _main_postgres(args: argparse.Namespace) -> int:
     try:
         result = asyncio.run(
             seed(
@@ -760,6 +740,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"restore copy: {'refreshed' if result.restored else 'up to date'}")
     print(f"done in {result.elapsed_s:.1f}s")
     return 0
+
+
+def _main_document(args: argparse.Namespace, target: str) -> int:
+    started = time.monotonic()
+    try:
+        if target == "oracle":
+            from tools.seed_oracle import seed_oracle
+
+            counts = seed_oracle(args.oracle_dsn or default_oracle_dsn(), args.rows, args.seed)
+        else:
+            from tools.seed_mongo import seed_mongo
+
+            counts = seed_mongo(args.mongo_uri or default_mongo_uri(), args.rows, args.seed)
+    except Exception as exc:  # noqa: BLE001 - a driver message could quote the DSN or URI
+        print(f"seeding {target} failed ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    _print_counts(counts)
+    print(f"{target} done in {time.monotonic() - started:.1f}s")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI; returns the exit code (0 ok/already seeded, 3 conflict, 1 a database failure
+    reported by class name). ``--target all`` seeds PostgreSQL, Oracle and MongoDB from the one
+    customer space (:mod:`tools.seed_model`) and returns the first non-zero code."""
+    args = parse_args(argv)
+    targets = ("postgres", "oracle", "mongo") if args.target == "all" else (args.target,)
+    code = 0
+    for target in targets:
+        rc = _main_postgres(args) if target == "postgres" else _main_document(args, target)
+        code = code or rc
+    return code
 
 
 if __name__ == "__main__":
