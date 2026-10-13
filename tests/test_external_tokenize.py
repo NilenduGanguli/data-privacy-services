@@ -47,9 +47,13 @@ def mock_url() -> Iterator[str]:
     server.shutdown()
 
 
+#: SEC-4: external tokens are bound under a key derived from the job KEK (test literal).
+KEK = "ERERERERERERERERERERERERERERERERERERERERERE="
+
+
 def _settings(**kw: object) -> Settings:
     base: dict[str, object] = dict(
-        _env_file=None, llm_provider="stub", ner_enabled=False, fpe_enabled=False
+        _env_file=None, llm_provider="stub", ner_enabled=False, fpe_enabled=False, job_kek=KEK
     )
     base.update(kw)
     return Settings(**base)  # type: ignore[arg-type]

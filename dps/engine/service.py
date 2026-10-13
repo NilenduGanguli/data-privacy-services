@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -58,8 +58,13 @@ from dps.engine.transform.crypto import (
     key_material_from_caller,
     wrap_key_material,
 )
-from dps.engine.transform.external import ExternalServiceError, ExternalTokenizer, build_tokenizer
-from dps.engine.transform.methods import CipherFactory, MethodError
+from dps.engine.transform.external import (
+    ExternalServiceError,
+    ExternalTokenizer,
+    binding_keys,
+    build_tokenizer,
+)
+from dps.engine.transform.methods import CipherFactory, MethodError, TokenNotBound
 from dps.engine.verify import (
     NerState,
     Verification,
@@ -67,6 +72,7 @@ from dps.engine.verify import (
     collect_originals,
     verify_output,
 )
+from dps.errors import CodedError
 from dps.llm.gateway import LlmGateway
 from dps.observability import FINDINGS, TRANSFORMS, VERIFY_FAIL, get_logger
 
@@ -229,6 +235,8 @@ class PrivacyEngine:
         self.tokenizer: ExternalTokenizer | None = (
             build_tokenizer(settings) if tokenizer == "auto" else tokenizer
         )
+        #: SEC-4: the server-held keys binding external tokens to caller keys (from the KEK)
+        self.token_binding: tuple[bytes, ...] = binding_keys(settings)
         self.ner = build_ner(tuple(settings.ner_languages_list), settings.ner_enabled)
         self.fpe_enabled = settings.fpe_enabled and (
             cipher_factory is not None or fpe.fpe_available()
@@ -416,6 +424,7 @@ class PrivacyEngine:
                 mode,
                 fpe_enabled=self.fpe_enabled,
                 external_enabled=self.tokenizer is not None,
+                external_bound=bool(self.token_binding),
             )
         except ValueError as exc:
             raise EngineError(str(exc)) from None
@@ -437,6 +446,7 @@ class PrivacyEngine:
             token_style=options.token_style or policy.output.token_style,
             locale=locale,
             tokenizer=self.tokenizer,
+            binding_keys=self.token_binding,
         )
 
     @staticmethod
@@ -733,10 +743,17 @@ class PrivacyEngine:
         payload: Payload,
         key_material: dict[str, Any],
         hints: list[dict[str, Any]],
+        *,
+        on_detokenize: Callable[[str, str | None, int], None] | None = None,
     ) -> RevealResponse:
         """Undo an obfuscation with the caller's key material and (optionally) reveal hints.
 
+        ``on_detokenize`` (SEC-4) is called once per detokenization batch — ``(entity type,
+        profile, count)`` — before the bank tokenization service is called; the API audits it.
+
         Raises:
+            CodedError: 403 ``external_token_not_bound`` — an external token's hint does not
+                prove DPS produced it under this key (SEC-4); nothing was sent to the service.
             EngineError: invalid key material or hints, a key that does not match the hints, or a
                 token that does not decrypt. The message names the rule or the error type only.
         """
@@ -755,12 +772,16 @@ class PrivacyEngine:
             cipher_factory=self.cipher_factory,
             locale=self.settings.default_locale,
             tokenizer=self.tokenizer,
+            binding_keys=self.token_binding,
+            on_detokenize=on_detokenize,
         )
         output: Any = payload.data if payload.data is not None else payload.text
         try:
             result = reveal(output=output, key=key, hints=parsed, options=options)
         except ExternalServiceError:
             raise TokenizationUnavailable("tokenization service unavailable") from None
+        except TokenNotBound as exc:
+            raise CodedError(exc.code, str(exc), status=403) from None
         except MethodError as exc:  # value-free by contract: names the rule
             raise EngineError(f"reveal failed: {exc}") from None
         except (KeyError, IndexError, ValueError) as exc:

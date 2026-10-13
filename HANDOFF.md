@@ -611,7 +611,15 @@ the references the deployment's tenants may use (open issue, see the M2 build re
     transport errors are retried (`DPS_TOKENIZER_RETRIES`); L1 then answers 502 and L2 retries the
     batch with code `tokenization_unavailable`. Policy: `treat: {SSN: {method: external_tokenize,
     profile: ssn-fpe}}` — `profile` is passed through. Reveal through DPS detokenizes in one call
-    per entity type and profile (after the caller's key matched the hints).
+    per entity type and profile (after the caller's key matched the hints). **SEC-4:** DPS holds
+    the service's credentials, so it detokenizes only tokens it produced under the presented key:
+    each external hint carries a `bind` tag keyed by the caller's DEK and a server key derived from
+    `DPS_JOB_KEK`; an unbound or mismatched tag is refused (403 `external_token_not_bound`) before
+    any call, and every batch is audited first (`action: external.detokenize`, entity type and
+    count). Consequences: `external_tokenize` needs `DPS_JOB_KEK` on the app (else 400, plan
+    reason `|external:unbound`); after a KEK rotation keep `DPS_JOB_KEK_PREVIOUS` for as long as
+    callers may reveal external tokens bound under the old KEK — once it is dropped those tokens
+    can no longer be revealed through DPS (the bank's own detokenize path still works).
   - **M5 tabular synthesis** (`options.tabular`): the copula model is fitted on a sample of the
     selection; the same seed reproduces the same target only when the whole selection fits in the
     sample (`DPS_COPULA_FIT_ROWS + DPS_COPULA_HOLDOUT_ROWS`), because a larger table is sampled at

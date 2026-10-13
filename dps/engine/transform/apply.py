@@ -23,10 +23,11 @@ from __future__ import annotations
 import copy
 import dataclasses
 import hashlib
+import hmac
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -41,8 +42,10 @@ from dps.engine.transform.methods import (
     CipherFactory,
     MethodError,
     SurrogateProvider,
+    TokenNotBound,
     TransformContext,
     declare_record,
+    external_tag,
     reverse_method,
     run_method,
 )
@@ -134,6 +137,11 @@ class ApplyOptions:
     #: tokens the caller already fetched for this batch (``(entity_type, value) → token``).
     tokenizer: ExternalTokenizer | None = None
     external_cache: dict[tuple[str, str], str] | None = None
+    #: SEC-4: the server-held binding keys (current first; :func:`~dps.engine.transform.
+    #: external.binding_keys`) and the audit hook called once per detokenization batch,
+    #: ``(entity_type, profile, count)``, **before** the service is called (it may raise).
+    binding_keys: tuple[bytes, ...] = ()
+    on_detokenize: Callable[[str, str | None, int], None] | None = None
 
 
 def anchor_for(document: Any, plan: Plan) -> str:
@@ -180,6 +188,7 @@ def _ctx(
         synth=options.surrogates,
         cipher_factory=options.cipher_factory,
         external=external,
+        binding=options.binding_keys[0] if options.binding_keys else None,
     )
 
 
@@ -265,27 +274,53 @@ def _tokenize_prepass(
     return cache
 
 
+def _is_bound(h: RevealHint, token: str, options: ApplyOptions) -> bool:
+    """SEC-4: the hint's ``bind`` tag equals the tag of ``token`` under the presented key and one
+    of the server's binding keys (constant-time comparison)."""
+    tag = h.reverse_params.get("bind")
+    if not isinstance(tag, str) or not tag.isascii():
+        return False
+    ctx = _reveal_ctx(h, options)
+    return any(
+        hmac.compare_digest(external_tag(ctx, token, binding).encode(), tag.encode())
+        for binding in options.binding_keys
+    )
+
+
 def _detokenize_prepass(
     output: Any, hints: list[RevealHint], options: ApplyOptions
 ) -> dict[tuple[str, str], str] | None:
-    """One detokenization call per (entity type, profile) for the hints' external tokens."""
-    if options.tokenizer is None:
+    """One detokenization call per (entity type, profile) for the hints' external tokens.
+
+    Every external hint's ``bind`` tag is checked first (SEC-4): one token that DPS did not
+    produce under this key refuses the whole request before the service is called. Each batch is
+    handed to ``options.on_detokenize`` (the audit hook) before its call.
+
+    Raises:
+        TokenNotBound: a hint lacks a valid ``bind`` tag for its token (value-free).
+    """
+    external = [h for h in hints if h.method == "external_tokenize"]
+    if not external:
         return None
     groups: dict[tuple[str, str | None], set[str]] = {}
-    for h in hints:
-        if h.method != "external_tokenize":
-            continue
+    for h in external:
         try:
             current = str(_read(output, h.path))
         except MethodError:
             continue  # the reveal loop reports a hint that does not fit
         token = current if h.start is None else current[h.start : h.end]
+        if not _is_bound(h, token, options):
+            raise TokenNotBound()
         profile = h.params.get("profile")
         key = (h.entity_type, str(profile) if profile is not None else None)
         groups.setdefault(key, set()).add(token)
+    if options.tokenizer is None:
+        return None
     cache: dict[tuple[str, str], str] = {}
     for (entity, profile), tokens in groups.items():
         ordered = sorted(tokens)
+        if options.on_detokenize is not None:
+            options.on_detokenize(entity, profile, len(ordered))
         values = options.tokenizer.detokenize(entity, ordered, profile=profile)
         cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
     return cache
@@ -467,6 +502,7 @@ def _reveal_ctx(
         fpe_enabled=options.fpe_enabled,
         cipher_factory=options.cipher_factory,
         external=external,
+        binding=options.binding_keys[0] if options.binding_keys else None,
     )
 
 

@@ -363,6 +363,46 @@ paths are the worktree, not `data-privacy-services` (the plan's "Conventions" li
   batch, and the compose service. `ColumnPlan` needs M2's `name`. The M0 suites (`test_methods`,
   `test_apply`, `test_service`, `test_api`, `test_planner`, `test_batch`) pass unchanged.
 
+## G2 review fix — SEC-4: external tokens bound to the caller's key (programme plan D-B)
+
+- **Formula changed from the plan's.** D-B's tag `HMAC(subkey(key, "external_tokenize|<entity>|
+  <profile>"), token)` is keyed by the caller's DEK alone — and the caller holds its DEK (L1 returns
+  it, or the caller brings its own), so anyone could forge a tag for any token and the confused deputy
+  stayed open. The tag is `base32(HMAC(HMAC(B, subkey(...)), token))[:26]` with `B` a server-held key
+  (`crypto.binding_key_from_kek`: HKDF of the job KEK, label `dps.v1|xtb`). No new setting: the
+  binding keys are the KEK ring (`secrets.kek_ring`: `DPS_JOB_KEK`, then `DPS_JOB_KEK_PREVIOUS`), so a
+  KEK rotation keeps old tags verifiable while the previous KEK is kept (HANDOFF §8 trap). The tag
+  travels as `reverse_params.bind` of the hint (value-free: computed under keys).
+- `dps/engine/transform/methods.py`: `TokenNotBound(MethodError)` (`code external_token_not_bound`),
+  `TransformContext.binding`, `external_tag(ctx, token, binding=None)`; `_external` returns an
+  `Outcome` with the tag in obfuscate mode. Without a KEK, obfuscation with `external_tokenize` fails
+  closed (`MethodError` → 400) and `build_plan(..., external_bound=False)` marks the entry
+  `|external:unbound` (planner).
+- `dps/engine/transform/apply.py`: `ApplyOptions.binding_keys` and `on_detokenize`;
+  `_detokenize_prepass` checks **every** external hint's tag (constant time, against each binding
+  key) before the first call — one unbound token refuses the whole request — then calls the audit hook
+  once per (entity type, profile) batch before that batch's call. The check runs even without an
+  adapter.
+- `dps/engine/service.py`: `PrivacyEngine.token_binding`; `reveal(..., on_detokenize=None)`; a
+  `TokenNotBound` becomes `CodedError("external_token_not_bound", status=403)` (both the JSON route's
+  `map_engine_error` and NDJSON's `_failure` already render a `CodedError` with its status and code).
+- `dps/layers/api/common.py` `detokenize_auditor(request)`: the hook writes one `AuditEvent`
+  (`action external.detokenize`, `outcome requested`, tenant, API key id, `findings_by_type {entity:
+  n}`, `counts {tokens: n}`, the call's trace id) through the app's sink **on the event loop** (the
+  engine runs on a worker thread and `DbAuditSink`'s queue is loop-bound), waiting for it; a strict
+  refusal is `CodedError` 503 `audit_unavailable` and nothing is sent. Wired into `/reveal` (JSON),
+  the JSON-array stream and the NDJSON-body stream. "Key id" in D-B is read as the API key id (the
+  accountable caller); the DEK's kid is not audited (it is in the hints, not a secret, but not needed).
+- The tag binds caller key, entity type and profile — not the tenant or the path: a tenant holding
+  another tenant's key material and hints can reveal everything else of that output anyway.
+- `tests/test_external_tokenize.py`: `_settings` sets a test `job_kek` (obfuscation now needs it);
+  `tests/test_api.py`'s `_BrokenEngine.reveal` double takes the new keyword (same assertions).
+- Tests: `tests/test_external_binding.py` (7) against the mock with a server-side request counter:
+  forged hints (no tag, the plan's DEK-only tag, made-up, replayed, non-string, another profile, one
+  forged among legit ones, a tag of another deployment) → 403 and **0** detokenize requests received;
+  rotation; no KEK; API audit per batch (value-free dump), NDJSON stream refusal, strict sink → 503
+  with 0 requests.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

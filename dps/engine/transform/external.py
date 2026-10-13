@@ -18,6 +18,12 @@ transport errors with a short exponential backoff, and their responses validated
 strings only, and never a token equal to its input (a service that echoes values would otherwise
 "tokenize" by copying). Nothing about a value — request or response body — reaches a log or an
 error message; the bearer token is held by the HTTP client only.
+
+**Binding (SEC-4, decision D-B).** DPS holds this service's credentials, so ``/reveal`` must never
+detokenize a token a caller merely names. Each external token's reveal hint carries a ``bind`` tag
+(:func:`~dps.engine.transform.crypto.external_binding_tag`) keyed by the caller's DEK **and** a
+server-held key from :func:`binding_keys`; reveal checks every tag in constant time before the
+first detokenize call and refuses the request (``external_token_not_bound``) otherwise.
 """
 
 from __future__ import annotations
@@ -30,7 +36,9 @@ from typing import Any, Literal, Protocol
 import httpx
 
 from dps.config import Settings
+from dps.engine.transform.crypto import binding_key_from_kek
 from dps.observability import EXTERNAL_CALLS, get_logger
+from dps.secrets import kek_ring
 
 logger = get_logger(__name__)
 MAX_TOKEN_CHARS = 512
@@ -209,3 +217,11 @@ def build_tokenizer(settings: Settings) -> ExternalTokenizer | None:
         batch=settings.tokenizer_batch,
         retries=settings.tokenizer_retries,
     )
+
+
+def binding_keys(settings: Settings) -> tuple[bytes, ...]:
+    """The server-held keys that bind external tokens to caller keys (SEC-4, decision D-B):
+    one per job KEK in the ring (current first, then ``DPS_JOB_KEK_PREVIOUS`` during a
+    rotation). Empty when no KEK is configured: ``external_tokenize`` then fails closed.
+    """
+    return tuple(binding_key_from_kek(kek) for kek in kek_ring(settings))

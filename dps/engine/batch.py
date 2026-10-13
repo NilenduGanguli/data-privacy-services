@@ -445,6 +445,7 @@ class BatchTransformer:
             locale=self.locale,
             tokenizer=self.engine.tokenizer,
             external_cache=self._pretokenize(rows),
+            binding_keys=self.engine.token_binding,
         )
         out_rows: list[Row] = []
         methods: Counter[str] = Counter()

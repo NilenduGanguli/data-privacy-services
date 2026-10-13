@@ -8,7 +8,13 @@ from starlette.concurrency import run_in_threadpool
 
 from dps.auth import require_scope
 from dps.engine.service import PrivacyEngine, RevealResponse, TransformResponse
-from dps.layers.api.common import payload_from, policy_label, run_engine, with_idempotency
+from dps.layers.api.common import (
+    detokenize_auditor,
+    payload_from,
+    policy_label,
+    run_engine,
+    with_idempotency,
+)
 from dps.layers.api.ndjson import (
     OPENAPI_NDJSON,
     NdjsonEnvelope,
@@ -124,7 +130,11 @@ async def reveal(body: RevealRequest, request: Request) -> RevealOut | Streaming
         async def call() -> RevealResponse:
             payload = payload_from(request, body.data, body.text)
             return await run_in_threadpool(
-                engine.reveal, payload, body.key_material, body.reveal_hints
+                engine.reveal,
+                payload,
+                body.key_material,
+                body.reveal_hints,
+                on_detokenize=detokenize_auditor(request),
             )
 
         result, tid = await run_engine(request, mode="reveal", policy_name="-", call=call)
