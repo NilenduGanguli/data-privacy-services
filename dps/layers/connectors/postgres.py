@@ -804,6 +804,19 @@ class PostgresConnector:
             },
         )
 
+    async def lookup_values(
+        self, shape: TableShape, join: ColumnInfo, values: list[Any], attributes: list[ColumnInfo]
+    ) -> list[Row]:
+        """Rows whose ``join`` value is in ``values`` (``= ANY($1)``; consistency check), with
+        ``join`` and the ``attributes`` read, inside the read-only, time-limited transaction."""
+        cols = list({c.name: c for c in [join, *attributes]}.values())
+        select = ", ".join(f"t.{_q(c.name)}" for c in cols)
+        table = f"{_q(shape.object.owner or 'public')}.{_q(shape.object.name)}"
+        sql = f"SELECT {select} FROM {table} AS t WHERE t.{_q(join.name)} = ANY($1)"  # noqa: S608
+        if not values:
+            return []
+        return [dict(r) for r in await self.fetch_internal(sql, [list(values)])]
+
     # -- write side ----------------------------------------------------------------------------
     async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> BatchWriter:
         """A :class:`PostgresWriter` for an ``in_place``, ``append`` or ``table`` target.

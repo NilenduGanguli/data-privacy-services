@@ -85,7 +85,7 @@ from dps.layers.connectors.base import (
     decode_key,
     encode_key,
 )
-from dps.layers.connectors.docpaths import leaf_updates
+from dps.layers.connectors.docpaths import dotted, leaf_updates
 from dps.layers.connectors.mongo_docs import id_label, infer_shape, make_bson_safe, upsert_update
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.selection import compile_mongo_filter, validate_selection
@@ -684,6 +684,39 @@ class MongoConnector:
                     return
         finally:
             await cursor.close()
+
+    async def lookup_values(
+        self, shape: TableShape, join: ColumnInfo, values: list[Any], attributes: list[ColumnInfo]
+    ) -> list[Row]:
+        """Documents whose ``join`` path holds one of ``values`` (``$in``; consistency check),
+        projected to the top-level fields of ``join`` and ``attributes`` (whole fields, as a read
+        projects them: array positions stay exact).
+
+        Raises:
+            ConnectorError: ``path_unsupported`` when a path cannot be dot-addressed.
+        """
+        field_ = dotted(join.path)
+        paths = [dotted(a.path) for a in attributes]
+        if field_ is None or any(p is None for p in paths):
+            raise ConnectorError("path_unsupported", "a path cannot be dot-addressed")
+        tops = {p.split(".", 1)[0] for p in [field_, *[p for p in paths if p]]}
+        projection = {**{t: 1 for t in sorted(tops) if t != "_id"}, "_id": 1}
+        await self.open()
+        coll = self.read_collection(collection_name(shape.object))
+
+        async def run() -> list[dict[str, Any]]:
+            cursor = coll.find(
+                {field_: {"$in": list(values)}},
+                projection=projection,
+                comment=self.comment,
+                max_time_ms=self.max_time_ms,
+            )
+            try:
+                return list(await cursor.to_list(length=None))
+            finally:
+                await cursor.close()
+
+        return await self._guard("lookup", run())
 
     async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> MongoWriter:
         """A :class:`MongoWriter` for an ``in_place``, ``append`` or ``table`` target in the

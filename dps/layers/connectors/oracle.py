@@ -807,6 +807,30 @@ class OracleConnector:
                 return
             after = tuple(rows[-1][k.name] for k in keys)
 
+    async def lookup_values(
+        self, shape: TableShape, join: ColumnInfo, values: list[Any], attributes: list[ColumnInfo]
+    ) -> list[Row]:
+        """Rows whose ``join`` value is in ``values`` (consistency check), with ``join`` and the
+        ``attributes`` read; ``IN`` lists of at most ``IN_LIST_MAX`` typed binds, never locking."""
+        cols = [join, *[a for a in attributes if a.name != join.name]]
+        cols = list({c.name: c for c in cols}.values())
+        out: list[Row] = []
+        for start in range(0, len(values), osql.IN_LIST_MAX):
+            chunk = values[start : start + osql.IN_LIST_MAX]
+            plan = osql.lookup_sql(shape, join, cols, len(chunk))
+            binds = {f"v{i}": _bind_key(join, v) for i, v in enumerate(chunk)}
+            rows = await self._call(
+                "lookup",
+                self._rows,
+                plan.sql,
+                binds,
+                action="lookup",
+                timeout_ms=self._long_ms,
+                sizes=_sizes(plan.bind_types),
+            )
+            out.extend(self._row(plan.columns, r) for r in rows)
+        return out
+
     # -- write side -------------------------------------------------------------------------------
     async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> OracleWriter:
         """An :class:`OracleWriter` for an ``in_place``, ``append`` or ``table`` target.

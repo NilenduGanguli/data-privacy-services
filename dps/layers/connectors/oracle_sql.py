@@ -470,6 +470,28 @@ def sample_sql(
     return ReadPlan(sql=sql, columns=list(cols), bind_types=bind_types)
 
 
+def lookup_sql(shape: TableShape, join: ColumnInfo, columns: list[ColumnInfo], n: int) -> ReadPlan:
+    """Rows whose ``join`` value is one of ``:v0 … :v<n-1>`` (consistency check; no locks).
+
+    The predicate compares the index-matching column side with typed binds (CHAR binds are
+    blank-padded by the caller), at most :data:`IN_LIST_MAX` values per statement.
+
+    Raises:
+        ValueError: ``n`` is outside ``1 … IN_LIST_MAX``.
+    """
+    if not 1 <= n <= IN_LIST_MAX:
+        raise ValueError("a lookup binds 1 to IN_LIST_MAX values")
+    items = ", ".join(key_value_expr(join, f"v{i}") for i in range(n))
+    sql = (
+        f"SELECT /* dps:lookup */ {', '.join(select_expr(c) for c in columns)} "  # noqa: S608
+        f"FROM {qualified(shape.object)} t WHERE {sort_expr(join)} IN ({items})"
+    )
+    t = input_type(join)
+    return ReadPlan(
+        sql=sql, columns=list(columns), bind_types={f"v{i}": t for i in range(n)} if t else {}
+    )
+
+
 def merge_sql(target: ObjectRef, cols: list[ColumnInfo], keys: list[str]) -> str:
     """Upsert one row per bind set (positional ``:v0..``) on the key — idempotent table loads."""
     src = ", ".join(f"{value_expr(c, f'v{i}')} AS {qcol(c.name)}" for i, c in enumerate(cols))
