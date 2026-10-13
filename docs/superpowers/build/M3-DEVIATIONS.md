@@ -1382,3 +1382,23 @@ Open (not fixed here):
   `crm_uat.profiles_console` holds every premium document and 0 same-document survivors of
   `profile.fullName`, `contact.email`, `contact.mobile`, `customerId`. The plan's "Evidence pack
   link within 300 s, sections 1–5" is kept.
+
+### Task 18 browser check (`tests/console/test_console_m3_groups.py`)
+
+- **Step 8 is a test, not a manual pass** (plan: a manual check "with the stack and demo data
+  from Task 19"; Task 19's e2e runs in process against its own app, so the lane's stack has no
+  group). The module fixture builds the demo on the lane's stack through the API: Oracle and
+  MongoDB seeded with 2,400 customers (Task 15, seed 7; PostgreSQL's `bank` holds the same ids as
+  a prefix — reseed it with `--reset` when it was seeded by M2's older generator, as on this
+  lane), one group, three `table` runs under its key (PostgreSQL first, Oracle last, so the
+  2,400-row Oracle target anchors the check and every lookup finds its id) into
+  `bank_uat.customers_grp_<hex>`, `crm_uat.profiles_grp_<hex>`, `CRM_MASKED.CUSTOMERS_GRP_<HEX>`
+  (a fresh suffix per run; earlier suffixes stay in the lane's stack). The browser then clicks
+  **Run consistency check** and asserts the mockup 07 structure (three `.sys` cards, wires, key
+  chip, verdict "passed · 3 / 3" with three pairs, coverage rows, the prefixed-digits callout,
+  the stored verdict after a reload, `.grp` badges, "Add a job to this group" → the wizard's
+  group callout) and mockup 03's (crumb, subtitle naming the other two targets, **Open
+  consistency check** → `#group`, the "Cross-system joins" tile "3 / 3 consistent"); plus the New
+  job group dialog (downloads hold `{group, key_material}` / `{group, synthesis_seed}` with the
+  shown kid, Done waits for the box, no key material in local/session storage). No seeded value
+  on any page (counts only); no horizontal scroll at 390 px.
