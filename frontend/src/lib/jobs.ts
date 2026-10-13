@@ -909,6 +909,37 @@ export function verificationText(passed: boolean, hits: number): string {
   return 'failed closed';
 }
 
+/** The unit one source record is counted in: documents for MongoDB, rows for the SQL engines. */
+export function recordNoun(engine: string | null | undefined, n: number): string {
+  return engine === 'mongo' ? (n === 1 ? 'document' : 'documents') : n === 1 ? 'row' : 'rows';
+}
+
+/** Every '?' leaf of a value-free MongoDB filter template: one per bound literal. */
+function templateLiterals(t: unknown): number {
+  if (Array.isArray(t)) return t.reduce((a: number, x) => a + templateLiterals(x), 0);
+  if (t !== null && typeof t === 'object') return Object.values(t as Record<string, unknown>).reduce((a: number, x) => a + templateLiterals(x), 0);
+  return t === '?' ? 1 : 0;
+}
+
+/**
+ * What a pack's run read, value-free: `scope` is the SQL where/query template or the MongoDB filter
+ * template (compact JSON, literals shown as '?'), `detail` the bound-value count and the limits.
+ */
+export function packSelection(sel: Record<string, any>, engine: string | null | undefined): { scope: string; detail: string } {
+  const mongo = engine === 'mongo';
+  const flt = sel.mongo_filter_template as Record<string, unknown> | null | undefined;
+  const hasFilter = mongo && flt !== null && typeof flt === 'object' && Object.keys(flt).length > 0;
+  const scope = mongo
+    ? (hasFilter ? JSON.stringify(flt) : 'all documents')
+    : String(sel.where_template || sel.query_template || 'all rows');
+  const binds = mongo ? (hasFilter ? templateLiterals(flt) : 0) : Number(sel.binds ?? 0);
+  const bound = mongo ? (binds === 1 ? 'literal' : 'literals') : binds === 1 ? 'parameter' : 'parameters';
+  const max = sel.max_rows ? ` · at most ${fmtCount(Number(sel.max_rows))} ${recordNoun(engine, Number(sel.max_rows))}` : '';
+  const n = Array.isArray(sel.columns) ? sel.columns.length : null;
+  const cols = n === null ? '' : ` · ${n} ${mongo ? (n === 1 ? 'field' : 'fields') : n === 1 ? 'column' : 'columns'}`;
+  return { scope, detail: ` · ${fmtCount(binds)} bound ${bound}${max}${cols}` };
+}
+
 /** Where a pack's run wrote, as its title shows it. */
 export function packTargetText(target: Record<string, any>, source: Record<string, any>): string {
   if (target.write_mode === 'files') {

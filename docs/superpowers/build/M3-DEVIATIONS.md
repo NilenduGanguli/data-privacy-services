@@ -1402,3 +1402,27 @@ Open (not fixed here):
   job group dialog (downloads hold `{group, key_material}` / `{group, synthesis_seed}` with the
   shown kid, Done waits for the box, no key material in local/session storage). No seeded value
   on any page (counts only); no horizontal scroll at 390 px.
+
+## M3 G5 fix round 1 (review `M3-G5-review-r1.md`, finding B1)
+
+- **B1 · the evidence pack page now states a MongoDB job's filter.** `EvidencePack.tsx` rendered
+  `where_template || query_template || 'all rows'` and never read `selection.mongo_filter_template`
+  (written by `dps/layers/connectors/evidence.py`), so a filtered MongoDB run read "Selection all
+  rows · 0 bound parameters". The selection line now comes from a new tested helper
+  `packSelection(sel, engine)` in `frontend/src/lib/jobs.ts`: for MongoDB it shows the template
+  as compact JSON with its `?` placeholders (`{"segment":"?"}`), the number of bound literals
+  (the `?` leaves), "at most N documents" and "N fields"; without a filter, "all documents". SQL
+  engines keep the old text (template or "all rows", `binds` bound parameters, rows, columns).
+  `recordNoun(engine, n)` makes the summary sentence say "documents" for MongoDB.
+- **Deviation:** the bound-literal count for MongoDB is derived on the page from the template
+  (each `?` leaf), not from the pack's `selection.binds`. The server writes `binds` as
+  `len(params)`, which is 0 for a Mongo filter whose literals are inline; changing the server
+  would change the sealed pack content and its hash, so the server and the contract are
+  unchanged (no renamed or added field). Only the summary sentence and the selection line use
+  "documents"; the stat tiles and check rows keep the mockup's "rows" labels.
+- **Tests:** Vitest `states the selection a pack read …` (jobs.test.ts; fails before the fix:
+  `recordNoun`/`packSelection` missing) and a browser assertion in
+  `test_mongo_wizard_filters_discovers_and_runs` (the evidence page's selection line holds
+  `{"segment":"?"}` and "1 bound literal", not "all rows"/"all documents", not the literal
+  `premium`; the summary says "documents from MongoDB"). Run against the pre-fix image it failed
+  with `Selection all rows · 0 bound parameters`; after `up --build` it passes.

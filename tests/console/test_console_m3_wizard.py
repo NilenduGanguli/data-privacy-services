@@ -273,6 +273,12 @@ def test_mongo_wizard_filters_discovers_and_runs(page: Any, app_url: str) -> Non
     page.get_by_label("Destination collection").fill("profiles_console")
     shoot(page, "06-wizard-mongo-4-target")
     _run_to_evidence(page, "CHG-30302", "06-wizard-mongo", values)
+    # the pack states the filter that ran, as its value-free template, never "all rows"
+    selection = page.locator(".kv .s2", has_text="Selection").first.inner_text()
+    assert '{"segment":"?"}' in selection and "1 bound literal" in selection, selection
+    assert "all rows" not in selection and "all documents" not in selection, selection
+    assert "premium" not in selection
+    page.get_by_text(re.compile(r"DPS read [\d,]+ documents from MongoDB")).wait_for()
     # source vs target, counts only: every premium document written, no protected leaf survives
     source, target, survivors = _mongo_survivors()
     print("M3_WIZARD_MONGO", source, target, survivors)  # counts only (pytest -s)

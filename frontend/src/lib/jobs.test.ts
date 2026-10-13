@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
-import { evidenceSoFar, methodText, packTargetText, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
+import { evidenceSoFar, methodText, packSelection, packTargetText, recordNoun, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
 import { confirmationKey, countKey, fqn, keyMethodsOf, runMethodFor, writtenObject, type WizardDraft } from './jobs';
 import { canLeave, reachable, targetReady, transactionsMissing, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
@@ -250,6 +250,25 @@ describe('evidence pack helpers', () => {
     expect(packTargetText({ write_mode: 'table', object: 'bank_uat.customers' }, { object: 'bank.customers' })).toBe('bank_uat.customers');
     expect(packTargetText({ write_mode: 'in_place', object: 'bank_restore.contacts' }, { object: 'bank_restore.contacts' })).toBe('bank_restore.contacts (in place)');
     expect(packTargetText({ write_mode: 'files', object: null, files: { format: 'parquet', prefix: 'exports/x' } }, {})).toBe('Parquet files · exports/x');
+  });
+  it('states the selection a pack read: SQL template and binds, or the MongoDB filter template and its literals', () => {
+    expect(recordNoun('mongo', 2)).toBe('documents');
+    expect(recordNoun('mongo', 1)).toBe('document');
+    expect(recordNoun('oracle', 2)).toBe('rows');
+    expect(recordNoun('postgres', 1)).toBe('row');
+    expect(packSelection({ where_template: 'region = :r', binds: 1, max_rows: 1000, columns: ['a', 'b'] }, 'postgres'))
+      .toEqual({ scope: 'region = :r', detail: ' · 1 bound parameter · at most 1,000 rows · 2 columns' });
+    expect(packSelection({ query_template: 'select * from t where x = :x', binds: 2 }, 'oracle'))
+      .toEqual({ scope: 'select * from t where x = :x', detail: ' · 2 bound parameters' });
+    expect(packSelection({ binds: 0 }, 'postgres')).toEqual({ scope: 'all rows', detail: ' · 0 bound parameters' });
+    // MongoDB: the '?' template, never "all rows", and every '?' counted as a bound literal
+    const one = packSelection({ where_template: null, query_template: null, mongo_filter_template: { segment: '?' }, binds: 0 }, 'mongo');
+    expect(one).toEqual({ scope: '{"segment":"?"}', detail: ' · 1 bound literal' });
+    expect(one.scope).not.toContain('all rows');
+    expect(packSelection({ mongo_filter_template: { $or: [{ 'profile.tier': { $in: ['?', '?'] } }, { age: { $gte: '?' } }] }, binds: 0, max_rows: 50, columns: ['profile.tier'] }, 'mongo'))
+      .toEqual({ scope: '{"$or":[{"profile.tier":{"$in":["?","?"]}},{"age":{"$gte":"?"}}]}', detail: ' · 3 bound literals · at most 50 documents · 1 field' });
+    expect(packSelection({ mongo_filter_template: null, binds: 0 }, 'mongo')).toEqual({ scope: 'all documents', detail: ' · 0 bound literals' });
+    expect(packSelection({ mongo_filter_template: {}, binds: 0 }, 'mongo')).toEqual({ scope: 'all documents', detail: ' · 0 bound literals' });
   });
   it('words the verification outcome without claiming leaks it did not count', () => {
     expect(verificationText(true, 0)).toBe('passed · 0 leaks');
