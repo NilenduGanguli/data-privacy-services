@@ -3,7 +3,9 @@
 For every column, each sampled non-null value is run through the M0 detector as a one-field
 document ``{name: text}`` (structural T0 on the column name, T1 patterns and checksums, T2 NER when
 enabled, T4 declared fields / custom recognizers). Per candidate entity ``E``:
-``score(E) = noisy_or(name_score(E), whole_rate(E) × mean_score(E))``; the best ``E`` at or above
+``score(E) = noisy_or(name_score(E), whole_rate(E) × mean_score(E))``, where ``name_score`` comes
+from the column path (``classify_path``: a document leaf is also scored through its parent
+segments, so ``$.contact.addresses[*].pin`` is a postal code); the best ``E`` at or above
 ``policy.detect.min_score`` is the column's entity. Otherwise a ``text``/``lob_text`` column whose
 values carry span findings in at least 5 % of the sampled rows is free text (``FREE_TEXT``, spans
 planned per row at run time). Binary, LOB-binary and ObjectId columns are classified by name only
@@ -28,7 +30,7 @@ from dps import db, jobs
 from dps.connections import ConnectionStoreError, get_connection, load_credentials
 from dps.engine.batch import KEYLESS_METHODS
 from dps.engine.detect.ensemble import Detector
-from dps.engine.detect.structural import classify_key
+from dps.engine.detect.structural import classify_path
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import EngineError
 from dps.engine.taxonomy import Sensitivity, entity_info
@@ -220,7 +222,7 @@ def classify_columns(
         names = (
             {}
             if docpaths.row_locator(column)
-            else {k.entity_type: k.score for k in classify_key(column.path)}
+            else {k.entity_type: k.score for k in classify_path(column.path)}
         )
         scores: dict[str, float] = {}
         for candidate in set(whole) | set(names):

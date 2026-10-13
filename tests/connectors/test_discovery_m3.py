@@ -78,3 +78,38 @@ def test_wildcard_document_paths_are_classified_by_their_values() -> None:
     assert col.entity_type == "EMAIL" and col.value_hit_rate > 0.9  # type: ignore[attr-defined]
     assert col.shapes and all("@" in s and not s.startswith("{") for s in col.shapes)  # type: ignore[attr-defined]
     assert 0.0 < col.null_rate < 0.1  # type: ignore[attr-defined]  # one document of 31 has none
+
+
+def test_document_leaves_are_classified_by_their_parent_path() -> None:
+    """``crm.profiles`` (``tools/seed_mongo.py``): ``addresses[*].line1`` / ``pin`` say nothing on
+    their own and hold no value a detector knows without NER; the parent ``addresses`` makes them
+    a street address and a postal code (M3 G4 review B1)."""
+    from tests.connectors.mongo_fixtures import profile
+
+    paths = {
+        "$.contact.addresses[*].line1": "text",
+        "$.contact.addresses[*].pin": "text",
+        "$.contact.addresses[*].type": "text",
+        "$.segment": "text",
+    }
+    shape = TableShape(
+        object=ObjectRef(name="profiles"),
+        columns=[
+            ColumnInfo(path=p, name=p.split(".")[1], data_type="string", kind=k)  # type: ignore[arg-type]
+            for p, k in paths.items()
+        ],
+        key=["_id"],
+        key_source="primary_key",
+    )
+    rows: list[dict[str, object]] = [profile(i, oid=False) for i in range(40)]
+    cols = {
+        c.path: c
+        for c in classify_columns(shape, rows, policy=POLICY, detector=DETECTOR, fpe_enabled=False)
+    }
+    line1, pin = cols["$.contact.addresses[*].line1"], cols["$.contact.addresses[*].pin"]
+    assert (line1.entity_type, pin.entity_type) == ("STREET_ADDRESS", "POSTAL_CODE")
+    assert line1.method.method != "keep" and pin.method.method != "keep"
+    assert "structural" in line1.detectors and "structural" in pin.detectors
+    # a non-address leaf under the same parent, and a top-level field, stay unclassified
+    assert cols["$.contact.addresses[*].type"].entity_type is None
+    assert cols["$.segment"].entity_type is None

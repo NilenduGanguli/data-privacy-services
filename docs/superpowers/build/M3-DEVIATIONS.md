@@ -1171,14 +1171,20 @@ out until "Tasks 15/19 adapt the pipeline"). What that took, each change test-fi
     test's `postgres` ref;
   - targets an earlier run left are dropped first (Oracle `CRM_MASKED.CUSTOMERS_E2E`, Mongo
     `crm_uat.profiles_e2e`/`profiles_drift`);
-  - **per-column source ≠ target** for every column each accepted snapshot transforms, in all three
-    targets (programme verification rule): rows are lined up through the masked key (the test
-    recomputes the run's `fpe_digits` of each source id with the group key — Oracle and
-    PostgreSQL; MongoDB keeps `_id`), counting rows whose target value equals the same customer's
-    source value, and, for text columns, target values equal to *any* source value. Result: 0 / 0
-    for 10 Oracle, 8 PostgreSQL and 8 MongoDB columns (2,400 rows each). A set-only comparison is
-    wrong for dates (a shifted birth date equals some other customer's: 282 / 2,400), hence the
-    row alignment;
+  - **per-column source ≠ target for every sensitive column** (programme §2.2 Verify / §5 rule 6),
+    in all three targets. *Corrected in G4 fix r1:* the first version compared only the columns
+    each accepted snapshot transforms (it used discovery's own list to verify discovery, and so
+    missed MongoDB's unmasked `addresses[*].line1` / `pin`, review B1); the test now checks an
+    independent list `SENSITIVE` taken from the seed model — name, e-mail, mobile, national id,
+    tax id, date of birth, address line, PIN, IBAN, notes and the customer id, wherever the member
+    table has them (10 Oracle columns, 8 PostgreSQL columns, 10 MongoDB leaf paths) — and asserts
+    each is present. Rows are lined up through the masked key (the test recomputes the run's
+    `fpe_digits` of each source id with the group key — Oracle and PostgreSQL; MongoDB keeps
+    `_id`), counting rows whose target value equals the same customer's source value, and, for
+    text fields, target values equal to *any* source value. Result: 0 / 0 for all 28 (2,400 rows
+    each; `kyc.taxId` 1,447). A set-only comparison is wrong for dates (a shifted birth date equals
+    some other customer's: 282 / 2,400) and numeric ids, hence the row alignment and per-row only
+    for those;
   - **drift member is MongoDB** (plan: a second Oracle run with `det_token` on `CUSTOMER_ID`,
     assuming "M2 widens the created target"). By the code, `targets.created_column_type` widens
     only text-like planned columns, so a `det_token` on Oracle's `NUMBER(12)` key would be created
@@ -1202,9 +1208,44 @@ out until "Tasks 15/19 adapt the pipeline"). What that took, each change test-fi
   identical), same-collection `append` with `generate`; per-leaf-path survivors 0, evidence verified.
 
 Open (not fixed here):
-- Without NER, discovery does not classify MongoDB `contact.addresses[*].line1` / `pin` (no column
-  name to go by; Oracle's `ADDR_LINE1`/`PIN_CODE` are found by name): the three-way demo copies them
-  unmasked unless the reviewer maps them (the pipeline test does). A discovery accuracy item.
+- ~~Without NER, discovery does not classify MongoDB `contact.addresses[*].line1` / `pin`~~ — this
+  was a leak, not an accuracy item (review B1): **fixed in G4 fix r1**, see below.
 - A snapshot override to `surrogate` in **obfuscate** mode passes submit and fails every prepare with
   `internal_error` (`MethodError`: no surrogate engine without a seed) until the job is dead; it
   should be refused at submit (`check_projected_methods`) — M2 behaviour, not changed here.
+
+## M3 G4 fix round 1 (review `M3-G4-review-r1.md`, findings B1 and B2)
+
+- **B1 — MongoDB address lines and PIN codes copied unmasked by the three-way demo.** Discovery
+  scored a column only by its leaf name (`classify_key(column.path)` looks at the last segment), so
+  `$.contact.addresses[*].line1` / `pin` got no entity and the run kept them (2,400 / 2,400
+  survivors, same row and any row). New `dps.engine.detect.structural.classify_path`: the leaf's
+  candidates, plus its **nearest classifying parent segment** (plural folded: `addresses` →
+  `address`, `phones` → `phone`) as context — under a parent whose best candidate is
+  `STREET_ADDRESS` (so not `emailAddress` / `ipAddress`) a street-line leaf (`line1`, `line_2`,
+  `street`, `house no`, …) is `STREET_ADDRESS` 0.85 and `pin`/`zip`/`postcode`/`postal` is
+  `POSTAL_CODE` 0.85 (evidence `path:address line|postcode`); a generic leaf (`number`, `no`,
+  `value`) that classifies to nothing itself inherits the parent's best entity at 0.9 × its score
+  (`$.phones[*].number` → `PHONE`, `$.passport.number` → `PASSPORT`). A path without parents (a
+  SQL column, a top-level field) gets exactly `classify_key`'s candidates (tested), so SQL
+  discovery is unchanged. `discovery.classify_columns` uses `classify_path`. Not changed: the M0
+  detector's T0 tier (`ensemble.py`) and `schema_profile.py` still call `classify_key` (they see
+  top-level field names); a follow-up can route them through `classify_path` if JSON payload
+  detection needs it.
+  Tests (fail before): `tests/test_structural.py::test_classify_path_*` (address/postcode/generic
+  inheritance, unrelated leaves left alone, no-parent identity) and
+  `tests/connectors/test_discovery_m3.py::test_document_leaves_are_classified_by_their_parent_path`
+  (the `crm.profiles` shape: `line1` → `STREET_ADDRESS`, `pin` → `POSTAL_CODE`, both not `keep`,
+  `type` and `segment` unclassified). The three-way e2e now checks the independent `SENSITIVE`
+  list (above); with the old wiring it fails on `$.contact.addresses[*].line1` (2,400 / 2,400),
+  with the fix all 28 fields are 0 / 0. The pipeline and resume tests keep their explicit
+  `ADDRESS_REVIEW` overrides (a reviewer may still pick the method).
+- **B2 — a repeated member made the check pass and was stored as the group's verdict.**
+  `consistency._validate` now refuses a repeated `(job_id, path)` with **`422 member_duplicate`**
+  before any target is opened (so with `pairs`' `min_length=2` there are always ≥ 2 distinct
+  members); one job with two different paths (a self-join, `CUSTOMER_ID` ↔ `REFERRER_ID`) stays
+  allowed. Contract §6.5 amendment updated (body rule and error list). Tests (fail before):
+  `tests/connectors/test_consistency.py::test_a_repeated_member_is_refused` (drifted Mongo
+  member: derived check fails; `[m, m]` and `[a, m, a]` → 422 `member_duplicate`, nothing opened;
+  self-join runs) and `tests/api/test_groups_consistency_api.py::test_a_repeated_member_is_refused_and_not_stored`
+  (real check: 422 `member_duplicate`, audited `rejected`, `last_check` stays unset).

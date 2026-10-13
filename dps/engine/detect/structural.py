@@ -239,3 +239,84 @@ def classify_key(key: str) -> list[KeyCandidate]:
             if current is None or score > current.score:
                 best[entity] = KeyCandidate(entity, score, f"key:{phrase}")
     return sorted(best.values(), key=lambda c: -c.score)
+
+
+# -- document paths: the parent segments say what a generic leaf holds ----------------------------
+
+#: Leaves that, under an address, are a street line (``line1``, ``line_2``, ``street``, ``house no``).
+_STREET_LEAF = re.compile(
+    r"^(?:line|street|building|house|flat|apartment|apt|road|locality|landmark|premises?)"
+    r"(?: ?\d+)?(?: (?:no|number|name))?$"
+)
+#: Leaves that, under an address, are a postal code (``pin``, ``zip``, ``postcode``, ``postal``).
+_POSTAL_LEAF = re.compile(r"^(?:pin|zip|zipcode|postcode|postal|post code|pin code|pincode)$")
+#: Leaves that say nothing beyond "the value of the parent": ``phones[*].number``.
+_GENERIC_LEAF = frozenset({"number", "no", "num", "nr", "value", "val"})
+#: Score of a context rule: an address parent plus an address-part leaf is as strong as ``zip``.
+_CONTEXT_SCORE = 0.85
+#: A generic leaf inherits its parent's entity at this fraction of the parent's score.
+_INHERIT = 0.9
+
+
+def _named_segments(path: str) -> list[str]:
+    """Named segments of ``path`` (array indices and ``[*]`` skipped); ``[]`` when unparsable."""
+    rooted = path if path.startswith("$") else f"$.{path}"
+    try:  # a column path's ``[*]`` (any element) parses as an index: only the names matter here
+        return [p for p in parse_path(rooted.replace("[*]", "[0]")) if isinstance(p, str)]
+    except ValueError:
+        return []
+
+
+def _segment_candidates(segment: str) -> list[KeyCandidate]:
+    """Candidates of one parent segment, its plural folded (``addresses`` → ``address``,
+    ``phones`` → ``phone``): best per entity, best first."""
+    words = normalize_key(segment).split()
+    variants = {
+        " ".join(words),
+        " ".join(w[:-2] if w.endswith("es") and len(w) > 4 else w for w in words),
+        " ".join(w[:-1] if w.endswith("s") and len(w) > 3 else w for w in words),
+    }
+    best: dict[str, KeyCandidate] = {}
+    for variant in variants:
+        for c in classify_key(variant):
+            if c.entity_type not in best or c.score > best[c.entity_type].score:
+                best[c.entity_type] = c
+    return sorted(best.values(), key=lambda c: -c.score)
+
+
+def classify_path(path: str) -> list[KeyCandidate]:
+    """:func:`classify_key` for a document leaf path, also scoring its parent segments.
+
+    The nearest parent that classifies is the leaf's context: under an address (its best candidate
+    is ``STREET_ADDRESS``, so not ``emailAddress`` or ``ipAddress``) a street-line leaf
+    (``line1``, ``street``) is a ``STREET_ADDRESS`` and ``pin``/``zip``/``postcode`` a
+    ``POSTAL_CODE``; a generic leaf (``number``, ``value``) that classifies to nothing itself
+    inherits the parent's best entity at a lower score. A path without parents (a SQL column, a
+    top-level field) gets exactly :func:`classify_key`'s candidates.
+    """
+    leaf = classify_key(path)
+    segments = _named_segments(path)
+    if len(segments) < 2:
+        return leaf
+    leaf_norm = normalize_key(path)
+    best = {c.entity_type: c for c in leaf}
+
+    def offer(entity: str, score: float, evidence: str) -> None:
+        current = best.get(entity)
+        if current is None or score > current.score:
+            best[entity] = KeyCandidate(entity, score, evidence)
+
+    for segment in reversed(segments[:-1]):
+        context = _segment_candidates(segment)
+        if not context:
+            continue
+        top = context[0]
+        if top.entity_type == "STREET_ADDRESS":
+            if _STREET_LEAF.match(leaf_norm):
+                offer("STREET_ADDRESS", _CONTEXT_SCORE, "path:address line")
+            elif _POSTAL_LEAF.match(leaf_norm):
+                offer("POSTAL_CODE", _CONTEXT_SCORE, "path:address postcode")
+        if not leaf and leaf_norm in _GENERIC_LEAF:
+            offer(top.entity_type, round(top.score * _INHERIT, 3), f"path:{top.evidence}")
+        break  # only the nearest classifying parent is the leaf's context
+    return sorted(best.values(), key=lambda c: -c.score)

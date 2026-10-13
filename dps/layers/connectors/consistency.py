@@ -86,7 +86,11 @@ class CheckMember(BaseModel):
 
 
 class ConsistencyCheckRequest(BaseModel):
-    """Body of ``POST /job-groups/{id}/consistency-check`` (contract §9)."""
+    """Body of ``POST /job-groups/{id}/consistency-check`` (contract §9).
+
+    ``pairs``: at least two **distinct** ``(job_id, path)`` members (a repeat is refused by the
+    check as ``422 member_duplicate``); omitted, the members are derived from the group's runs.
+    """
 
     model_config = ConfigDict(hide_input_in_errors=True)
     pairs: list[CheckMember] | None = Field(default=None, min_length=2, max_length=8)
@@ -389,6 +393,10 @@ def _validate(
     connections: Mapping[str, Connection],
     problems: list[CheckProblem],
 ) -> list[tuple[CheckMember, Job, str, ObjectRef]]:
+    # the same (job, path) twice would join a target with itself and pass for any data; one job
+    # with two different paths is a self-join and stays allowed
+    if len({(m.job_id, m.path) for m in wanted}) != len(wanted):
+        raise ConsistencyError(422, "member_duplicate")
     out = []
     for i, m in enumerate(wanted):
         job = in_group.get(m.job_id)
@@ -424,8 +432,8 @@ async def run_consistency_check(
     """Run the n-way join over the members' masked targets; counts only.
 
     Raises:
-        ConsistencyError: ``member_not_in_group`` / ``member_unsupported`` / ``path_unknown`` /
-            ``no_shared_entity`` (422), ``member_not_ready`` (409).
+        ConsistencyError: ``member_duplicate`` / ``member_not_in_group`` / ``member_unsupported``
+            / ``path_unknown`` / ``no_shared_entity`` (422), ``member_not_ready`` (409).
         ConnectorError: a member target could not be opened or read (the connector's code).
     """
     t0 = time.perf_counter()

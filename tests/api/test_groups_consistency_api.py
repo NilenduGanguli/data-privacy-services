@@ -207,3 +207,21 @@ def test_request_validation(client: tuple[Any, Any]) -> None:
     one = [{"job_id": "job_1", "path": "$.CUSTOMER_ID"}]
     for body in ({"sample": 5}, {"pairs": one}, {"min_coverage": 0}, {"min_coverage": 1.5}):
         assert _check(c, gid, body).status_code == 422, body
+
+
+def test_a_repeated_member_is_refused_and_not_stored(client: tuple[Any, Any]) -> None:
+    """The real check (not the canned one): the same ``(job_id, path)`` twice is ``422
+    member_duplicate``, audited as a refusal, and leaves the group's ``last_check`` unset."""
+    c, sink = client
+    gid = _group(c)
+    member = {"job_id": "job_1", "path": "$.customerId"}
+    r = _check(c, gid, {"pairs": [member, dict(member)]})
+    assert (r.status_code, r.json()["code"]) == (422, "member_duplicate")
+    shown = c.get(f"/api/v1/job-groups/{gid}", headers=JOBS).json()["group"]
+    assert shown["last_check"] is None and shown["last_check_at"] is None
+    refused = [e for e in sink.events if e.action == "group.consistency_check"]
+    assert [(e.outcome, e.status) for e in refused] == [("rejected", 422)]
+    # one job with two different paths is a legitimate self-join: not a duplicate (the job is
+    # simply not in this group)
+    self_join = [member, {"job_id": "job_1", "path": "$.referrerId"}]
+    assert _check(c, gid, {"pairs": self_join}).json()["code"] == "member_not_in_group"

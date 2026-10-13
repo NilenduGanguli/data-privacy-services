@@ -7,8 +7,10 @@ one job group (one caller-held key) mask them into ``CRM_MASKED.CUSTOMERS_E2E``,
 and the group's consistency check joins the three masked targets: 3/3 pairs at coverage 1.0, the
 masked names and e-mails agreeing for every joined customer. A fourth member that protects the
 join column differently fails the check (``method_mismatch``). Every masking claim is a
-source-vs-target comparison per sensitive column (counts only), and the worker logs hold no seeded
-value.
+source-vs-target comparison (counts only) over an **independent** list of the sensitive fields the
+seed model writes (``SENSITIVE``: name, e-mail, mobile, national id, tax id, date of birth, address
+line, PIN, IBAN, notes and the customer id, wherever the member table has them), not over the
+columns the accepted snapshots chose to transform; the worker logs hold no seeded value.
 """
 
 from __future__ import annotations
@@ -69,13 +71,28 @@ def _discover_override_accept(
     return dict(a.json())
 
 
-def _sensitive(snapshot: dict[str, Any]) -> list[str]:
-    """Paths the accepted snapshot transforms (an entity and a method other than keep)."""
-    return [
-        col["path"]
-        for col in snapshot["columns"]
-        if col["text_column"] or (col["entity_type"] and col["method"]["method"] != "keep")
-    ]
+#: Every field holding personal data that the seed model (``tools/seed_model.py`` via
+#: ``seed_oracle`` / ``seed_mongo`` / ``seed_sources``) writes into each member table, with whether
+#: it is text (then also checked against *every* source value). Independent of discovery: a
+#: field discovery misses still fails here. Dates are compared per row only (a shifted birth date
+#: may equal another customer's); numeric ids per row only (a token may equal another id).
+SENSITIVE: dict[str, dict[str, bool]] = {
+    "oracle": {
+        "CUSTOMER_ID": False, "FULL_NAME": True, "NATIONAL_ID": True, "TAX_ID": True,
+        "EMAIL": True, "MOBILE": True, "DOB": False, "ADDR_LINE1": True, "PIN_CODE": True,
+        "NOTES": True,
+    },
+    "postgres": {
+        "customer_id": False, "full_name": True, "date_of_birth": False, "national_id": True,
+        "tax_id": True, "email": True, "mobile": True, "notes": True,
+    },
+    "mongo": {
+        "$.customerId": True, "$.profile.fullName": True, "$.profile.dob": False,
+        "$.contact.email": True, "$.contact.mobile": True,
+        "$.contact.addresses[*].line1": True, "$.contact.addresses[*].pin": True,
+        "$.kyc.taxId": True, "$.accounts[*].iban": True, "$.notes": True,
+    },
+}  # fmt: skip
 
 
 # -- seeding and source-vs-target reads (counts only) ---------------------------------------------
@@ -124,8 +141,9 @@ def _oracle_rows(side: str) -> list[dict[str, Any]]:
             return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
 
 
-def _check_documents(snapshot: dict[str, Any]) -> dict[str, tuple[int, int, int]]:
-    """MongoDB: a ``table`` load keeps ``_id``, so documents line up by it."""
+def _check_documents() -> dict[str, tuple[int, int, int]]:
+    """MongoDB, per ``SENSITIVE`` path: (values compared, same-document survivors, any-document
+    survivors for text). A ``table`` load keeps ``_id``, so documents line up by it."""
     import pymongo
 
     from dps.layers.connectors.docpaths import values_at
@@ -136,11 +154,9 @@ def _check_documents(snapshot: dict[str, Any]) -> dict[str, tuple[int, int, int]
         target = {d["_id"]: d for d in client["crm_uat"]["profiles_e2e"].find({})}
     finally:
         client.close()
+    assert len(target) == len(source) == ROWS
     report: dict[str, tuple[int, int, int]] = {}
-    for col in snapshot["columns"]:
-        if not (col["text_column"] or (col["entity_type"] and col["method"]["method"] != "keep")):
-            continue
-        path = col["path"]
+    for path, textual in SENSITIVE["mongo"].items():
         pairs = [
             (a, b)
             for s in source
@@ -148,12 +164,12 @@ def _check_documents(snapshot: dict[str, Any]) -> dict[str, tuple[int, int, int]
             for a, b in zip(values_at(s, path), values_at(target[s["_id"]], path), strict=False)
         ]
         anywhere = 0
-        if col["kind"] == "text":
+        if textual:
             anywhere = _survivors(
                 [v for d in source for v in values_at(d, path)],
                 [v for d in target.values() for v in values_at(d, path)],
             )
-        report[path] = (len(target), _same_row(pairs), anywhere)
+        report[path] = (len(pairs), _same_row(pairs), anywhere)
     return report
 
 
@@ -206,24 +222,23 @@ def _check_table(
     read: Any,
     *,
     join: str,
+    engine: str,
 ) -> dict[str, tuple[int, int, int]]:
-    """Per sensitive column: (rows, same-row survivors, any-row survivors for text) — counts."""
+    """Per ``SENSITIVE`` column of ``engine``: (rows compared, same-row survivors, any-row
+    survivors for text) — counts. The snapshot only supplies the join method to line rows up."""
     source, target = read("source"), read("target")
     mapping = masked_ids(snapshot, key, [r[join] for r in source])
     by_masked = {_norm(t[join]): t for t in target}
     aligned = [(s, by_masked.get(_norm(mapping[s[join]]))) for s in source]
     found = sum(1 for _, t in aligned if t is not None)
     report: dict[str, tuple[int, int, int]] = {}
-    for col in snapshot["columns"]:
-        if not (col["text_column"] or (col["entity_type"] and col["method"]["method"] != "keep")):
-            continue
-        name = col["name"]
+    for name, textual in SENSITIVE[engine].items():
+        assert name in source[0] and name in target[0], (engine, name)  # the field is there
         pairs = [(s[name], t[name]) for s, t in aligned if t is not None]
-        textual = col["kind"] in ("text", "char", "lob_text")
         anywhere = (
             _survivors([s[name] for s in source], [t[name] for t in target]) if textual else 0
         )
-        report[col["path"]] = (found, _same_row(pairs), anywhere)
+        report[name] = (found, _same_row(pairs), anywhere)
     return report
 
 
@@ -310,20 +325,25 @@ def test_three_way_consistency_join(m3_app: Any, m3_workers: Workers) -> None:
         job = wait_job(c, jid)
         assert job["progress"]["rows_written"] == ROWS and job["progress"]["partitions_total"] >= 2
 
-    # source vs target, per sensitive column of every target (counts only): 0 survivors — rows
-    # lined up through the masked key; text columns also checked against every source value
-    ora_snap, mdb_snap, pg_snap = snaps
+    # source vs target for every sensitive field of the seed model (SENSITIVE, independent of
+    # what discovery found; counts only): 0 same-row survivors — rows lined up through the masked
+    # key — and, for text fields, 0 target values equal to any source value of the field
+    ora_snap, _mdb_snap, pg_snap = snaps
     reports = {
-        "oracle": _check_table(ora_snap, key, lambda side: _oracle_rows(side), join="CUSTOMER_ID"),
-        "postgres": _check_table(
-            pg_snap, key, lambda side: _pg_rows(pg_dsn, side), join="customer_id"
+        "oracle": _check_table(
+            ora_snap, key, lambda side: _oracle_rows(side), join="CUSTOMER_ID", engine="oracle"
         ),
-        "mongo": _check_documents(mdb_snap),
+        "postgres": _check_table(
+            pg_snap, key, lambda side: _pg_rows(pg_dsn, side), join="customer_id", engine="postgres"
+        ),
+        "mongo": _check_documents(),
     }
     for engine_name, report in reports.items():
-        assert report, engine_name
+        assert set(report) == set(SENSITIVE[engine_name]), engine_name
         for path, (rows, same_row, anywhere) in report.items():
-            assert (engine_name, path, rows, same_row, anywhere) == (engine_name, path, ROWS, 0, 0)
+            assert rows > 0 and (engine_name, path, same_row, anywhere) == (engine_name, path, 0, 0)
+        if engine_name != "mongo":  # every table row was lined up with its source row
+            assert {rows for rows, _, _ in report.values()} == {ROWS}, engine_name
 
     res = c.post(
         f"/api/v1/job-groups/{group['id']}/consistency-check", json={"sample": 500}, headers=JOBS

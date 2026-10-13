@@ -441,3 +441,26 @@ async def test_a_counted_attribute_that_disagrees_fails_the_check() -> None:
     assert names.counts_toward_pass and names.compared == 100 and names.agreed == 75
     assert names.consistent is False and result.passed is False
     assert all(p.consistent for p in result.pairs)  # the join itself still lines up
+
+
+async def test_a_repeated_member_is_refused() -> None:
+    """The same ``(job_id, path)`` twice would join a target with itself: 1/1 pairs at coverage
+    1.0 and ``passed`` for systems that do not join (M3 G4 review B2). Refused before any
+    connector opens; one job with two different paths (a self-join) stays allowed."""
+    w = World(100)
+    for k in range(100):  # the Mongo member drifted on every row: the real check fails
+        w.mongo_tokens[k] = w.tokens[k] + 1 if w.tokens[k] + 1 not in w.tokens else w.tokens[k] - 1
+    derived, _ = await w.run()
+    assert derived.passed is False
+    mdb = CheckMember(job_id="j_mdb", path="$.customerId")
+    ora = CheckMember(job_id="j_ora", path="$.CUSTOMER_ID")
+    fakes = w.connectors()
+
+    for pairs in ([mdb, mdb], [ora, mdb, ora.model_copy()]):
+        with pytest.raises(ConsistencyError) as exc:
+            await w.run(ConsistencyCheckRequest(pairs=pairs), fakes=fakes)
+        assert (exc.value.status, exc.value.code) == (422, "member_duplicate")
+    assert not any(f.closed for f in fakes.values())  # no connector was opened (or closed)
+    self_join = [ora, CheckMember(job_id="j_ora", path="$.REFERRER_ID")]
+    result, _ = await w.run(ConsistencyCheckRequest(pairs=self_join))
+    assert [m.path for m in result.members] == ["$.CUSTOMER_ID", "$.REFERRER_ID"]
