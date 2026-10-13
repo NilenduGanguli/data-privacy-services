@@ -45,6 +45,8 @@ TENANT_TABLES: tuple[str, ...] = (
     "dps_report_daily",  # M5 (041)
     "dps_report_entity_daily",
     "dps_report_refresh",
+    "dps_policy",  # M5 (043)
+    "dps_policy_version",
 )
 GLOBAL_TABLES: tuple[str, ...] = ("dps_tenant", "dps_api_key", "dps_worker", "dps_migration_ledger")
 #: Policies besides tenant_isolation that the posture check accepts, per table. A set per table so

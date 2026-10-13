@@ -173,6 +173,8 @@ M5_TABLES = (
     "dps_report_daily",
     "dps_report_entity_daily",
     "dps_report_refresh",
+    "dps_policy_version",
+    "dps_policy",
 )
 
 

@@ -83,10 +83,10 @@ from dps.layers.api.common import (
     end_call,
     map_engine_error,
     payload_from,
-    policy_label,
     route_template,
     with_idempotency,
 )
+from dps.layers.api.policy_refs import policy_label, resolve
 from dps.observability import get_logger
 from dps.ratelimit import enforce_rate_limit
 
@@ -715,7 +715,7 @@ async def _start(
 def _label(request: Request, mode: str, envelope: NdjsonEnvelope) -> str:
     if mode == "reveal":
         return "-"
-    return policy_label(envelope.policy, request.app.state.settings.default_policy)
+    return policy_label(envelope.policy, request.app.state.settings.default_policy)  # M5: name@vN
 
 
 async def stream_lines(
@@ -739,6 +739,8 @@ async def stream_request(request: Request, *, mode: StreamMode) -> StreamingResp
 
     async def prepare(tid: str, audit: _Audit) -> _Stream:
         envelope, items = await read_ndjson(request, request.app.state.settings)
+        if mode != "reveal":  # M5: an @name[:vN] reference resolves to the stored version
+            envelope.policy = await resolve(request, envelope.policy)
         audit.policy = _label(request, mode, envelope)
         return await _prepare(request, mode, tid, envelope, items)
 

@@ -773,6 +773,64 @@ real survivors).
   Before the fix, the 58, 80 and 120 cases raised `ValueError`. The reviewer's probes
   `p8_isolate.py` and `p8b_threshold.py` now report every count as ok and no failing threshold.
 
+## Task 15 — Policy store: tenant policies, drafts, immutable versions, `@name` references
+
+- `dps/layers/api/policy_refs.py`:
+  - Errors are `CodedHTTPException` (M1's coded HTTP error, the same `{"detail", "code"}` wire shape)
+    instead of M2's `DpsHttpError`: the L1 routes map exceptions through `run_engine`/
+    `map_engine_error`, which knows coded HTTP errors but would turn a `DpsHttpError` into a 500, and
+    importing `dps.layers.api.errors` would pull asyncpg into a Layer 1 install. The store itself is
+    imported only when a reference (`@…`) is used.
+  - A resolved body is a `StoredPolicy` (a `dict` subclass made only from a stored row), which
+    `policy_label` names `<name>@v<N>`. A caller's inline dict carrying `name`/`version` is never one,
+    so it cannot pass itself off as a stored version in the audit trail.
+  - Two helpers: `resolve(request, ref)` (no audit — for code paths whose error is audited by their
+    caller: `run_engine` streams, jobs' `rejected()`, documents' refusal) and
+    `resolved_policy(request, ref, *, mode=)` (audits a refusal as one event of `mode` with the code
+    as its outcome — the plan's signature plus `mode`). Configured-but-down database → 503
+    `db_unavailable` (the plan named only the unconfigured case, 400 `policy_store_unavailable`).
+  - The NDJSON paths resolve too: a JSON array streamed as NDJSON (the envelope keeps the resolved
+    object: assigned after construction so pydantic does not copy it into a plain dict) and an
+    NDJSON request body (resolved after the envelope line is read, before the policy is used).
+- `dps/policy_store.py`:
+  - `publish(..., settings=None)`: the `verify_warn_allowed` check needs the app's settings; the
+    route passes `request.app.state.settings` (default `db.active_settings()`).
+  - Version 1 of an adopted preset is the preset with `name` set to the tenant policy's name and
+    `version` 1 (every body carries the policy's own name), so `active_hash` equals the preset's hash
+    when the policy keeps the preset's name (the plan's test) and differs otherwise.
+  - `save_draft` stores the **validated, resolved** body (a draft sent as `{"preset", ...overrides}`
+    is stored as the full policy), so `publish` and the diffs never see the override form.
+  - Additional value-free codes: 409 `policy_exists` (create on an existing name), 422
+    `invalid_preset` (base preset not shipped), 404 `version_not_found` (versions route), 422
+    `invalid_change_ticket` / `invalid_note` (043's length CHECKs, checked before the transaction).
+  - `diff_versions()` and `active_versions()` added for the diff route and the reports.
+  - `PresetView.jobs` counts the tenant's run jobs whose `spec.policy` is that preset name (a string);
+    a tenant policy's `jobs` and each version's `jobs_pinned` count `spec.policy` objects by
+    name/version.
+- `dps/layers/api/routers/policy_store.py`: `DELETE /draft` is audited `admin.policy.discard`; the
+  diff route's `to` is `draft` or a positive integer (422 otherwise). `dps/app.py` registers it last in
+  `_include_m2_routers` (after M0's policies router) and CORS allows `PUT` (the draft route).
+- Router call sites: M0 `detect`/`obfuscate`/`synthesize` (JSON + NDJSON), `policies/validate`
+  (now async; a `CodedError` such as `verify_warn_disallowed` is answered with its code instead of a
+  500) and `policies/plan`; M1 `documents/*` (a refused reference is audited like any refusal);
+  M2 `jobs/discover` and `jobs/run` (inside the audited try block, before `validate_run`). M1
+  `schema/*` takes no `policy` (nothing to change). M4 `scans` is not on this lane — **integration
+  note (WP-I):** `POST /scans` must call `body.policy = await resolve(request, body.policy)` like
+  `jobs/run` when the lanes merge.
+- `dps/reports.py`: `posture.policies_latest_pct` is now computed (Task 12 left it at 100 "until the
+  policy store"): run jobs in the window whose `spec.policy` is a tenant policy at its active
+  version, over all run jobs; presets, inline policies and unknown names count as latest.
+- Tests: `tests/test_policy_diff.py` has 4 tests (plus `if_` → `if` in YAML); `tests/test_policy_store.py`
+  has 10 (plus `test_resolve_ref_grammar_and_states`; the HTTP test also covers `/detect`, both
+  NDJSON paths and the audit labels; the run test also checks the job's stored spec through the
+  owner connection and `policies_latest_pct` before/after a newer version; the isolation test also
+  checks the admin scope and that `/policies/presets` keeps its meaning). The immutability test runs
+  the owner's UPDATE/DELETE with the tenant GUC bound (FORCE RLS would otherwise match no rows and
+  the trigger would never fire) and also asserts the app role has no UPDATE privilege.
+  `tests/db/test_rls.py` seeds both tables (both are append-only for the API: no DELETE grant);
+  `tests/db/test_migrations.py` pins `043_policies.sql`; `tests/fixtures/db.py` truncates both.
+- Contract: §2.2 (043), new §5.5 "Policy references", §9 rows for the eight routes.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

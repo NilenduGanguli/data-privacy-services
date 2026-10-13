@@ -8,7 +8,8 @@ import pytest
 from dps import db
 
 pytestmark = pytest.mark.db
-APPEND_ONLY_FOR_THE_API = ("dps_audit_log", "dps_evidence")  # no DELETE grant (009)
+#: no DELETE grant: 009 (audit, evidence) and 043 (policies and versions are a governance record)
+APPEND_ONLY_FOR_THE_API = ("dps_audit_log", "dps_evidence", "dps_policy", "dps_policy_version")
 
 
 # Minimal valid row per tenant table, keyed by tenant (dps_audit_log and dps_job_partition need parents).
@@ -77,6 +78,9 @@ M5_SEEDS = {
     "(tenant_id, day, layer, entity_type) VALUES ($1, current_date, 'api', 'EMAIL')",
     "dps_report_refresh": "INSERT INTO dps.dps_report_refresh (tenant_id, day) "
     "VALUES ($1, current_date)",
+    "dps_policy": "INSERT INTO dps.dps_policy (tenant_id, name) VALUES ($1, 'retail-kyc')",
+    "dps_policy_version": "INSERT INTO dps.dps_policy_version (tenant_id, name, version, body, "
+    "policy_hash) VALUES ($1, 'retail-kyc', 1, '{}', repeat('a', 64))",
 }
 
 

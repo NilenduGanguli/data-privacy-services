@@ -624,7 +624,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Content-Type",
             API_KEY_HEADER,
@@ -664,10 +664,12 @@ def _include_m2_routers(app: FastAPI) -> bool:
     except ModuleNotFoundError as exc:
         logger.warning("m2_routes_disabled", reason=f"missing module {exc.name}")
         return False
-    from dps.layers.api.routers import admin, reports  # M5
+    from dps.layers.api.routers import admin, policy_store, reports  # M5
 
     install_error_handlers(app)
     for module in (connections, jobs, snapshots, groups, evidence, artefacts, admin, reports):
         app.include_router(module.router)
+    # after M0's policies router (create_app): /policies/presets etc. keep their meaning
+    app.include_router(policy_store.router)
     app.include_router(reports.evidence_pdf_router)
     return True

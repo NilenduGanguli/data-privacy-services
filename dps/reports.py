@@ -435,6 +435,17 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
             tenant_id,
             start,
         )
+        # M5 Task 15: run jobs that ran a tenant policy's active version (presets, inline
+        # policies and policies the store does not know count as latest)
+        latest = await conn.fetchrow(
+            "SELECT count(*) FILTER (WHERE p.name IS NULL OR p.active_version IS NULL "
+            "OR j.spec->'policy'->>'version' = p.active_version::text) AS ok, count(*) AS n "
+            f"FROM {s}.dps_job j LEFT JOIN {s}.dps_policy p ON p.tenant_id = j.tenant_id "
+            "AND jsonb_typeof(j.spec->'policy') = 'object' AND p.name = j.spec->'policy'->>'name' "
+            "WHERE j.tenant_id = $1 AND j.kind = 'run' AND j.created_at >= $2",
+            tenant_id,
+            start,
+        )
         risk_flags = 0
         if await _has_table(conn, "dps_scan_page"):  # M4's table (absent before the M4 merge)
             risk_flags = int(
@@ -488,7 +499,7 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
         "sweeps_passed_pct": _pct(passed, passed + failed),
         "key_held_by_caller_pct": 100.0,  # D2: DPS never stores a caller's key material
         "snapshots_reviewed_pct": _pct(int(reviewed["ok"]), int(reviewed["n"])),
-        "policies_latest_pct": 100.0,  # presets count as latest until the policy store (Task 15)
+        "policies_latest_pct": _pct(int(latest["ok"]), int(latest["n"])),
     }
     posture["score"] = round(sum(posture.values()) / len(posture), 1)
     findings = [
