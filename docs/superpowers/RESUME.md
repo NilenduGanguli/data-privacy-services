@@ -15,6 +15,7 @@
   (detect → plan → transform → verify → report), three entry points (L1 stateless API + documents, L2 database
   connectors PostgreSQL/Oracle/MongoDB, L3 UI scanner), a React "Privacy Console", hard rules: no LLM ever sees a raw
   value; keys are returned to the caller and never stored; the scanner never submits anything.
+- **Merged since the snapshot below:** M5 is merged into main (`8378da7`) with integration fixes.
 - **Done and tagged on main:** `v0.1.0-m0` (engine, L1 API, Playground), `v0.2.0-m1` (documents, true PDF redaction,
   schema synthesis), `v0.3.0-m2` (metadata DB, job queue, PG connector, four write modes, evidence, wizard), plus
   verified hardening (SEC-2, SEC-3 and four fixes).
@@ -28,7 +29,7 @@
 | What | Where |
 |---|---|
 | Main repo (branch `main`) | `/Users/neelu/document_intelligence/data-privacy-services` — its own git repo, nested inside `/Users/neelu/document_intelligence` (a **different** repo; never run git against the parent) |
-| Remote | `origin` = `https://github.com/NilenduGanguli/data-privacy-services` (private). `origin/main` = `48d9425` (M0 only). **Push only when the owner explicitly asks.** |
+| Remote | `origin` = `https://github.com/NilenduGanguli/data-privacy-services` (private). **Owner instruction (2026-10-14): keep everything committed and pushed** — `main`, every lane branch and every tag. See §1.1. |
 | Lane worktrees | `/Users/neelu/document_intelligence/dps-wt-{m3,m4,m4ui,m5,m5ui}` on branches `m3`, `m4`, `m4ui`, `m5`, `m5ui`; finish stage adds `dps-wt-fsec` (`fsec`) and `dps-wt-fdeploy` (`fdeploy`) |
 | Per-worktree local files (git-ignored via `info/exclude`) | `.venv/` (Python 3.12), `.env` (compose image tag + host ports), `.env.lane` (exports `DPS_TEST_*` endpoints), `lane.sh` (wrapper: activates `.venv`, exports `.env.lane`, execs args) |
 | Build reports (durable) | `~/.cache/dps-build/reports/` — `<LANE>-<GROUP>-{impl,review-rN,fix-rN}.md`, `<LANE>-verify-rN.md`, `I-<lane>*.md`, `F-*.md`, `release.md`, `final-verify-rN.md`, probe folders. (`/private/tmp` was wiped once — never rely on it.) |
@@ -36,6 +37,24 @@
 | Workflow journal of the running orchestration (same Mac) | `~/.claude/projects/-Users-neelu-document-intelligence/d1f0660d-411d-4447-9d4e-0331e8df3a77/subagents/workflows/wf_c77f2c08-9ae/journal.jsonl` (one `result` line per finished agent; earlier runs: `wf_8168f882-c04` M0, `wf_b5f84136-a43` M1+M2, `wf_7d9b2cbe-385` lanes interrupted by an outage, `wf_6bca69a3-f4c` hardening) |
 | Claude memory for this project | `~/.claude/projects/-Users-neelu-document-intelligence/memory/data-privacy-services.md` |
 | Status script | `tools/dev/resume_status.sh` (read-only) |
+
+### 1.1 Pushing to GitHub (owner instruction 2026-10-14: keep everything committed and pushed)
+
+- `tools/dev/autopush.sh` pushes every local branch and every tag to `origin`, fast-forward only, after checking the
+  new commits: author `nilendu.ganguli@gmail.com`, no `Co-Authored-By`/`Signed-off-by` trailer, and a **gitleaks**
+  scan (Docker image `zricethezav/gitleaks`) with no finding. Reviewed false positives (test fixtures, doc examples)
+  are listed by fingerprint in `.gitleaksignore`; anything new holds that branch. A diverged branch is never
+  force-pushed. A tag is pushed only when its commit is already on a pushed branch. Log: `~/.cache/dps-build/autopush.log`.
+- **Running now:** inside the orchestrating chat as a background loop (every 10 min). It stops when that chat ends.
+- **To keep pushing without any chat**, the owner can install the LaunchAgent (agents may not install persistent
+  jobs themselves): `cp tools/dev/com.nilendu.dps-autopush.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nilendu.dps-autopush.plist`
+  (remove: `launchctl bootout gui/$(id -u)/com.nilendu.dps-autopush`). A new session can also simply run the loop:
+  `while true; do tools/dev/autopush.sh; sleep 600; done` in a background shell.
+- Commits: agents commit their own finished work continuously; uncommitted files in a worktree mean an agent is
+  mid-task (never commit another agent's in-progress files). Remote branches of merged lanes stay on GitHub after the
+  local worktrees are removed at release.
+- First full push: 2026-10-14 01:04 — `main` `f7bc7eb`, `m3`, `m4`, `m4ui`, `m5`, `m5ui`, tags `v0.2.0-m1`, `v0.3.0-m2`
+  (237 commits audited: all authored by the owner, no trailers, gitleaks clean after review).
 
 Host ports per stack (from each worktree's `.env`; compose host ports are variables with the contract defaults):
 
