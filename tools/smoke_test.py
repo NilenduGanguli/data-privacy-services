@@ -30,20 +30,39 @@ When ``/readyz`` reports the metadata database (M2), nine job-platform checks fo
 dry-run in-place job on ``bank_restore.contacts`` and the worker count. They are rerunnable; the
 key material a run returns is never printed or kept. ``DPS_SMOKE_JOB_TIMEOUT`` (default 180 s)
 bounds each run.
+
+``--m3`` adds seven Oracle + MongoDB checks after the M2 ones; they need the ``oracle`` and
+``sources`` profiles and the three-engine demo seed (``python tools/seed_sources.py --target all``):
+``m3 connections`` (the four demo connections of ``tools/m2_api.M3_CONNECTIONS`` created or reused,
+and with M2's ``bank-pg-ro``/``bank-uat`` every ``/test`` ok), ``m3 discover`` (PostgreSQL
+``bank.customers``, MongoDB ``crm.profiles``, Oracle ``CRM.CUSTOMERS`` discovered and accepted),
+``m3 group`` (a new job group; its key is in the create answer only), ``m3 runs`` (three ``table``
+runs under the group's key into ``bank_uat.customers_smoke``, ``crm_uat.profiles_smoke`` and
+``CRM_MASKED.CUSTOMERS_SMOKE``; ``DPS_SMOKE_M3_TIMEOUT``, default 600 s, bounds them together),
+``m3 consistency 3/3`` (the group's check passes with three consistent pairs), ``m3 evidence``
+(each pack verified, under the group's key id) and ``m3 raw pii to llm`` (the counter is 0). The
+key is held in memory for the three submissions and dropped; nothing of it is printed.
 """
 
 from __future__ import annotations
 
+import argparse
 import base64
 import io
 import json
 import os
 import sys
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # `python tools/smoke_test.py`
+
+from tools.m2_api import M3_CONNECTIONS  # noqa: E402
 
 BASE = (
     os.environ.get("DPS_BASE_URL")
@@ -306,8 +325,16 @@ def wait_for_health(c: httpx.Client, seconds: float) -> None:
         time.sleep(1.0)
 
 
-def main() -> None:
-    """Run the Layer 1 checks in order."""
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """``--m3``: also run the Oracle + MongoDB checks (module docstring)."""
+    p = argparse.ArgumentParser(prog="python tools/smoke_test.py")
+    p.add_argument("--m3", action="store_true", help="add the M3 Oracle + MongoDB checks")
+    return p.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Run the Layer 1 checks in order (then M1, M2 and, with ``--m3``, M3)."""
+    args = parse_args(argv)
     with httpx.Client(base_url=BASE, timeout=30.0) as c:
         wait_for_health(c, WAIT_SECONDS)
         check("health", c.get("/health").json().get("status") == "ok")
@@ -460,6 +487,10 @@ def main() -> None:
             m2_checks(c)
         else:
             print(note)
+        if args.m3:
+            if not run_m2:
+                check("m3 needs the job platform", False, "the M2 checks did not run")
+            m3_checks(c)
     tail = f", {len(skipped)} skipped (OCR not ready)" if skipped else ""
     print(f"\nall {len(results)} checks passed against {BASE}{tail}")
 
@@ -533,7 +564,12 @@ def poll(c: httpx.Client, job_id: str, timeout: float) -> dict[str, object]:
 
 
 def discover_and_accept(
-    c: httpx.Client, conn_id: str, owner: str, name: str, overrides: list[dict[str, object]]
+    c: httpx.Client,
+    conn_id: str,
+    owner: str | None,
+    name: str,
+    overrides: list[dict[str, object]],
+    timeout: float = 60.0,
 ) -> tuple[str | None, str]:
     """Discover one table, apply review overrides, accept; ``(snapshot id, detail)``."""
     obj = {"owner": owner, "name": name}
@@ -542,7 +578,7 @@ def discover_and_accept(
     )
     if r.status_code != 202:
         return None, f"HTTP {r.status_code} {r.json().get('code')}"
-    job = poll(c, r.json()["job"]["id"], 60)
+    job = poll(c, r.json()["job"]["id"], timeout)
     progress = job.get("progress") or {}
     snaps = progress.get("snapshot_ids") if isinstance(progress, dict) else None
     if job.get("state") != "succeeded" or not snaps:
@@ -704,6 +740,218 @@ def m2_checks(c: httpx.Client) -> None:
         "m2 workers online",
         stats.get("workers_online", 0) >= 1,
         f"{stats.get('workers_online')} online",
+    )
+
+
+# -- M3: Oracle and MongoDB under one job group (profiles `oracle` + `sources`) -------------------
+
+M3_TIMEOUT = float(os.environ.get("DPS_SMOKE_M3_TIMEOUT") or "600")
+
+
+@dataclass(frozen=True)
+class M3Member:
+    """One system of the three-engine demo: source connection/object → target connection/object."""
+
+    engine: str
+    source: str
+    obj: dict[str, str | None]
+    target: str
+    target_obj: dict[str, str | None]
+
+
+#: Submitted in this order: the newest run (Oracle) anchors the consistency check's sample.
+M3_MEMBERS: tuple[M3Member, ...] = (
+    M3Member(
+        "postgres",
+        "bank-pg-ro",
+        {"owner": "bank", "name": "customers"},
+        "bank-uat",
+        {"owner": "bank_uat", "name": "customers_smoke"},
+    ),
+    M3Member(
+        "mongo",
+        "smoke-mdb-src",
+        {"owner": None, "name": "profiles"},
+        "smoke-mdb-tgt",
+        {"owner": None, "name": "profiles_smoke"},
+    ),
+    M3Member(
+        "oracle",
+        "smoke-ora-src",
+        {"owner": "CRM", "name": "CUSTOMERS"},
+        "smoke-ora-tgt",
+        {"owner": "CRM_MASKED", "name": "CUSTOMERS_SMOKE"},
+    ),
+)
+
+
+def m3_run_spec(
+    member: M3Member, ids: dict[str, str], snap_id: str, group_id: str, key: dict[str, Any]
+) -> dict[str, Any]:
+    """A ``table`` run of ``member`` under the group's key (truncate-insert, target created)."""
+    return {
+        "mode": "obfuscate",
+        "snapshot_id": snap_id,
+        "group_id": group_id,
+        "purpose": PURPOSE,
+        "source": {"connection_id": ids[member.source], "object": member.obj, "parallelism": 2},
+        "target": {
+            "write_mode": "table",
+            "connection_id": ids[member.target],
+            "object": member.target_obj,
+            "create_if_missing": True,
+            "table_load": "truncate_insert",
+        },
+        "consistency": {"scope": "key", "key_material": key},
+    }
+
+
+def consistency_verdict(body: dict[str, Any]) -> tuple[bool, str]:
+    """Passed with 3 of 3 pairs consistent; the detail is counts, coverage and problem codes."""
+    consistent = int(body.get("consistent_pairs") or 0)
+    total = int(body.get("total_pairs") or 0)
+    ok = bool(body.get("passed")) and consistent == total == 3
+    detail = f"{consistent}/{total} pairs consistent, {int(body.get('sampled') or 0)} sampled"
+    pairs = body.get("pairs") or []
+    if pairs:
+        detail += f", min coverage {min(float(p.get('coverage') or 0.0) for p in pairs):g}"
+    codes = sorted({str(p.get("code")) for p in body.get("problems") or []})
+    if codes:
+        detail += ", problems " + ", ".join(codes)
+    return ok, detail
+
+
+def ensure_m3_connections(c: httpx.Client) -> tuple[dict[str, str], int]:
+    """``({name: id}, created)`` for M3's four demo connections, created when missing."""
+    found: dict[str, str] = {}
+    cursor: str | None = None
+    while True:
+        page = c.get("/api/v1/connections", params={"limit": 200, "cursor": cursor}, headers=H)
+        page.raise_for_status()
+        body = page.json()
+        found.update({item["name"]: item["id"] for item in body["items"]})
+        cursor = body["next_cursor"]
+        if not cursor:
+            break
+    created = 0
+    for name, spec in M3_CONNECTIONS.items():
+        if name not in found:
+            made = c.post("/api/v1/connections", json={"name": name, **spec}, headers=H)
+            made.raise_for_status()
+            found[name] = made.json()["id"]
+            created += 1
+    return {name: found[name] for name in M3_CONNECTIONS}, created
+
+
+def _rows_written(job: dict[str, object]) -> str:
+    progress = job.get("progress")
+    return str(progress.get("rows_written")) if isinstance(progress, dict) else "-"
+
+
+def m3_checks(c: httpx.Client) -> None:
+    """The seven Oracle + MongoDB checks (module docstring)."""
+    m2_ids, _ = ensure_connections(c)
+    m3_ids, created = ensure_m3_connections(c)
+    ids = {**m3_ids, "bank-pg-ro": m2_ids["bank-pg-ro"], "bank-uat": m2_ids["bank-uat"]}
+    roles = {
+        **{n: spec["roles"][-1] for n, spec in M3_CONNECTIONS.items()},
+        "bank-pg-ro": "source",
+        "bank-uat": "target",
+    }
+    tested = [
+        name
+        for name, role in roles.items()
+        if c.post(f"/api/v1/connections/{ids[name]}/test", json={"role": role}, headers=H)
+        .json()
+        .get("ok")
+    ]
+    check(
+        "m3 connections",
+        len(tested) == len(roles),
+        f"{created} created, {len(M3_CONNECTIONS) - created} reused, "
+        f"{len(tested)}/{len(roles)} tested ok",
+    )
+
+    snaps: list[str] = []
+    details: list[str] = []
+    for m in M3_MEMBERS:
+        snap, detail = discover_and_accept(
+            c, ids[m.source], m.obj["owner"], str(m.obj["name"]), [], timeout=300.0
+        )
+        if snap:
+            snaps.append(snap)
+        else:
+            details.append(f"{m.engine}: {detail}")
+    check(
+        "m3 discover",
+        len(snaps) == len(M3_MEMBERS),
+        f"{len(snaps)}/{len(M3_MEMBERS)} snapshots accepted" + "".join(f"; {d}" for d in details),
+    )
+
+    made = c.post("/api/v1/job-groups", json={"name": f"smoke-m3-{int(time.time())}"}, headers=H)
+    made_body = made.json() if made.status_code == 201 else {}
+    group = made_body.get("group") or {}
+    key: dict[str, Any] = made_body.get("key_material") or {}
+    kid = key.get("kid")
+    stored = c.get(f"/api/v1/job-groups/{group.get('id')}", headers=H) if group else None
+    check(
+        "m3 group",
+        made.status_code == 201
+        and bool(kid)
+        and stored is not None
+        and stored.status_code == 200
+        and "key_material" not in stored.text
+        and str(key.get("dek") or "-") not in stored.text,
+        f"HTTP {made.status_code}; the key is in the create answer only",
+    )
+
+    jobs: list[str] = []
+    refused: list[str] = []
+    for m, snap in zip(M3_MEMBERS, snaps, strict=True):
+        r = c.post("/api/v1/jobs/run", json=m3_run_spec(m, ids, snap, group["id"], key), headers=H)
+        if r.status_code == 202:
+            jobs.append(r.json()["job"]["id"])
+        else:
+            refused.append(f"{m.engine}: HTTP {r.status_code} {r.json().get('code')}")
+    del key, made_body  # the group's key material: never kept beyond the submissions
+    deadline = time.monotonic() + M3_TIMEOUT
+    done = [poll(c, jid, max(1.0, deadline - time.monotonic())) for jid in jobs]
+    states = [str(j.get("state")) for j in done]
+    rows = [_rows_written(j) for j in done]
+    errors = [str(j.get("error_code")) for j in done if j.get("state") != "succeeded"]
+    check(
+        "m3 runs",
+        not refused and states == ["succeeded"] * len(M3_MEMBERS),
+        f"{states.count('succeeded')}/{len(M3_MEMBERS)} succeeded, rows "
+        + "/".join(rows)
+        + " (pg/mongo/oracle)"
+        + "".join(f"; {e}" for e in refused + errors),
+    )
+
+    res = c.post(
+        f"/api/v1/job-groups/{group['id']}/consistency-check", json={"sample": 500}, headers=H
+    )
+    ok, detail = consistency_verdict(res.json() if res.status_code == 200 else {})
+    check("m3 consistency 3/3", res.status_code == 200 and ok, f"HTTP {res.status_code}, {detail}")
+
+    verified = 0
+    for job in done:
+        pack = evidence_of(c, job).get("pack") or {}
+        if (
+            isinstance(pack, dict)
+            and (pack.get("verification") or {}).get("passed")
+            and (pack.get("consistency") or {}).get("kid") == kid
+        ):
+            verified += 1
+    check(
+        "m3 evidence",
+        verified == len(M3_MEMBERS),
+        f"{verified}/{len(M3_MEMBERS)} packs verified under the group's key id",
+    )
+    check(
+        "m3 raw pii to llm",
+        b"dps_llm_raw_pii_sent_total 0.0" in c.get("/metrics").content,
+        "dps_llm_raw_pii_sent_total 0",
     )
 
 

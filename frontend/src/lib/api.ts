@@ -1,7 +1,8 @@
 import type {
-  ApiKeyView, ApiRollup, AuditFilters, AuditRow, ClassificationSnapshot, Connection, ConnectionSpec, ConnectionTestResult,
-  CountOut, CreatedKey, CreateKeyBody, DetectOut, DocumentDetectOut, DocumentOptions, DocumentTransformOut, EntitiesOut,
-  EvidenceItem, EvidenceOut, EvidenceSummary, Job, JobGroup, JobKind, JobState, JobStats, KeyMaterial, ObjectRef, Page,
+  ApiKeyView, ApiRollup, AuditFilters, AuditRow, ClassificationSnapshot, Connection, ConnectionSpec,
+  ConnectionTestResult, ConsistencyCheckRequest, ConsistencyCheckResult, CountOut, CreateKeyBody, CreatedKey,
+  DetectOut, DocumentDetectOut, DocumentOptions, DocumentTransformOut, EntitiesOut, EvidenceItem, EvidenceOut,
+  EvidenceSummary, Job, JobGroup, JobGroupOut, JobKind, JobState, JobStats, KeyMaterial, ObjectRef, Page,
   PartitionView, PlanOut, PolicyDiff, PolicyDoc, PolicyList, PolicyVersionView, PostureReport, Preset, PresetSummary,
   QueueOut, Readiness, RecognizerSpec, RecognizerTestOut, ReportsJobsOut, RevealOut, RotateResult, RunOut, RunSpec,
   Selection, SnapshotOverride, SummaryOut, TableShape, TenantPatch, TenantPolicyDetail, TenantSpec, TenantView,
@@ -199,6 +200,11 @@ export const api = {
     list: (a: Auth) => json<Page<JobGroup>>('/api/v1/job-groups', a),
     create: (a: Auth, name: string) =>
       post<{ group: JobGroup; key_material: KeyMaterial; synthesis_seed: Record<string, unknown> }>('/api/v1/job-groups', a, { name }),
+    /** M3: the group (with `last_check`) and its jobs, newest first. */
+    get: (a: Auth, id: string) => json<JobGroupOut>(`/api/v1/job-groups/${enc(id)}`, a),
+    /** M3: the n-way join over the members' masked targets (counts only; stored as `last_check`). */
+    consistencyCheck: (a: Auth, groupId: string, body: ConsistencyCheckRequest) =>
+      post<ConsistencyCheckResult>(`/api/v1/job-groups/${enc(groupId)}/consistency-check`, a, body),
   },
   evidence: {
     list: (a: Auth, p: { job_id?: string; limit?: number; cursor?: string } = {}) => json<Page<EvidenceSummary>>(`/api/v1/evidence${qs(p)}`, a),

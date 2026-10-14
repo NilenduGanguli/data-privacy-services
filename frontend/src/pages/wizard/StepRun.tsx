@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, ApiError, type Auth } from '../../lib/api';
 import {
-  buildRunSpec, fmtCount, fqn, heatTone, inPlaceKeyRewrites, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
+  buildRunSpec, engineName, fmtCount, fqn, heatTone, inPlaceKeyRewrites, isWriteConfirmed, LEGAL_BASES, legalBasisText, needsConfirmation, parseKeyFile, planGroups,
   seedFingerprint, sourceObject, writeModeLabel, writtenObject, type Step, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, JobGroup, Preset, RunSpec } from '../../lib/types';
@@ -156,7 +156,7 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack, run }: {
               {match === 'matched' && <span className="chip emerald">matched</span>}
               {match === 'mismatch' && <span className="chip rose">no match</span>}
               <label className="btn btn-sm" style={{ cursor: 'pointer' }}>{fileName ? 'Use another file' : `Load ${syn ? 'seed' : 'key'} file`}
-                <input type="file" accept=".json,application/json" className="sr" onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadFile(f); e.target.value = ''; }} /></label>
+                <input type="file" accept=".json,.dpskey,.dpsseed,application/json" className="sr" onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadFile(f); e.target.value = ''; }} /></label>
             </div>
           </div>
         )}
@@ -178,7 +178,7 @@ export function StepRun({ d, dispatch, auth, snapshot, go, onBack, run }: {
 
       <div className="card">
         <div className="card-head"><div className="card-title">Ready to run</div><span className={`chip ${ready.tone}`} data-testid="run-readiness">{ready.chip}</span></div>
-        <div className="summ"><span className="k">Source</span><span>PostgreSQL · <span className="mono">{fqn(sourceObject(d))}</span> via <span className="mono">{d.connectionName}</span>{d.production && <span className="chip amber" style={{ marginLeft: 6 }}>production</span>}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(1)}>Edit</button></div>
+        <div className="summ"><span className="k">Source</span><span>{engineName(d.engine)} · <span className="mono">{fqn(sourceObject(d))}</span> via <span className="mono">{d.connectionName}</span>{d.production && <span className="chip amber" style={{ marginLeft: 6 }}>production</span>}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(1)}>Edit</button></div>
         <div className="summ"><span className="k">Rows</span><span>{d.rows !== null ? `${fmtCount(d.rows)} rows` : `about ${fmtCount(d.shape?.row_estimate ?? null)} rows`} · {d.columns?.length ?? d.shape?.columns.length ?? '—'} columns · {d.parallelism} partitions</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(2)}>Edit</button></div>
         <div className="summ"><span className="k">Discovery</span><span>{counts.crit} critical · {counts.sens} sensitive · {counts.decl} declared · {counts.kept} kept · {overrides} {overrides === 1 ? 'override' : 'overrides'}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(3)}>Edit</button></div>
         <div className="summ"><span className="k">Write</span><span>{writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)} · <span className="mono">{d.writeMode === 'files' ? d.filesPrefix : fqn(d.writeMode === 'table' ? { owner: d.targetOwner || null, name: d.targetTable } : writtenObject(d))}</span>{confirmed ? ` · confirmed for ${fmtCount(d.rows)} rows` : ''}</span><button className="linkbtn" type="button" disabled={!!busy} onClick={() => go(4)}>Edit</button></div>

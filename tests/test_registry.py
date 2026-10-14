@@ -38,8 +38,7 @@ def _conn(engine: str, **params) -> Connection:  # noqa: ANN003
 @pytest.mark.parametrize(
     "engine,code",
     [
-        ("oracle", "engine_unavailable"),
-        ("mongo", "engine_unavailable"),
+        # oracle, mongo: tests/connectors/test_registry_m3.py (M3 wires their connectors)
         ("s3", "engine_not_tabular"),
         ("pvc", "engine_not_tabular"),
     ],

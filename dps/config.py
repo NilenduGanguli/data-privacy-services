@@ -29,6 +29,7 @@ ARTEFACT_STORES = ("local", "s3")
 TABULAR_ENGINES = ("copula", "mostly")
 _SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _KEK_MESSAGE = "job KEK must be base64 of exactly 32 bytes"
+_ORACLE_MODULE = re.compile(r"[A-Za-z0-9_.-]{1,48}")
 
 
 class _FileSecretSource(PydanticBaseSettingsSource):
@@ -229,6 +230,13 @@ class Settings(BaseSettings):
     inline_secrets_allowed: bool = True
     inline_secret_ttl_hours: int = 24
 
+    # --- M3 connectors: Oracle and MongoDB (contract §10). Their credentials never come from
+    # env vars: they come from the connection's secret_ref files (username, password, dsn, uri).
+    oracle_pool_max: int = 4  # sessions per Oracle connection pool
+    oracle_call_timeout_ms: int = 30000  # per round trip (the Wega rule)
+    oracle_module: str = "dps"  # v$session.module of every DPS session
+    mongo_server_selection_timeout_ms: int = 5000
+
     # --- retention and audit ---
     retention_days: int = 30
     retention_interval_hours: int = 6
@@ -421,6 +429,35 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         """``cors_origins`` split on commas, trimmed, empties dropped (``[]`` = same-origin)."""
         return [p.strip() for p in self.cors_origins.split(",") if p.strip()]
+
+    @field_validator("oracle_pool_max")
+    @classmethod
+    def _oracle_pool_max(cls, v: int) -> int:
+        if not 1 <= v <= 64:
+            raise ValueError("oracle_pool_max must be between 1 and 64")
+        return v
+
+    @field_validator("oracle_call_timeout_ms")
+    @classmethod
+    def _oracle_call_timeout(cls, v: int) -> int:
+        if not 1_000 <= v <= 3_600_000:
+            raise ValueError("oracle_call_timeout_ms must be between 1000 and 3600000")
+        return v
+
+    @field_validator("oracle_module")
+    @classmethod
+    def _oracle_module(cls, v: str) -> str:
+        # v$session.module holds 64 bytes; the DBA's audit filters on it, so keep a plain token.
+        if not _ORACLE_MODULE.fullmatch(v):
+            raise ValueError("oracle_module must be 1-48 characters of [A-Za-z0-9_.-]")
+        return v
+
+    @field_validator("mongo_server_selection_timeout_ms")
+    @classmethod
+    def _mongo_selection_timeout(cls, v: int) -> int:
+        if not 500 <= v <= 120_000:
+            raise ValueError("mongo_server_selection_timeout_ms must be between 500 and 120000")
+        return v
 
     @property
     def pg_worker_login(self) -> tuple[str, str]:

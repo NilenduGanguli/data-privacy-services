@@ -51,6 +51,10 @@ Key = tuple[Any, ...]
 EncodedKey = list[dict[str, str]]
 
 NEVER_TRANSFORMED_KINDS = frozenset({"binary", "lob_binary", "object_id"})
+#: Source engines whose connector the registry opens, so discovery and runs may read them (M2:
+#: PostgreSQL; M3 Task 8: Oracle; M3 Task 19: MongoDB, once the run handler planned, checked and
+#: wrote document columns by path).
+PIPELINE_ENGINES: frozenset[str] = frozenset({"postgres", "oracle", "mongo"})
 KEYABLE_KINDS = frozenset(
     {"int", "decimal", "text", "char", "date", "timestamp", "uuid", "binary", "object_id"}
 )
@@ -101,7 +105,11 @@ class ObjectRef(BaseModel):
 
 
 class ColumnInfo(BaseModel):
-    """One column (SQL) or field path (Mongo) as the connector describes it (contract §4.1)."""
+    """One column (SQL) or field path (Mongo) as the connector describes it (contract §4.1).
+
+    ``pseudo`` marks a read-only key column that is not table data, e.g. Oracle ``ROWID`` of a
+    key-less table (M3): never classified, never written.
+    """
 
     model_config = _HIDDEN
     path: str
@@ -119,6 +127,7 @@ class ColumnInfo(BaseModel):
     #: a declared single-column foreign key: the referenced ``owner.table.column`` (D-A: a
     #: synthesize run pseudonymises it under the referenced key's label so joins hold)
     references: str | None = None
+    pseudo: bool = False
 
 
 class TableShape(BaseModel):
@@ -256,6 +265,9 @@ class PrepareReport(BaseModel):
     existing_rows: int | None = None
     checks: list[dict[str, Any]] = Field(default_factory=list)
     append_upper: int | None = None  # same-table append: exclusive upper bound = max(key) + 1
+    #: same-table append whose key is not an integer (Mongo ObjectId / prefixed text): the
+    #: exclusive read bound, encoded; every existing key sorts below it, every appended one above
+    append_upper_key: EncodedKey | None = None
 
 
 class LedgerMark(BaseModel):
@@ -414,9 +426,11 @@ def from_engine_text(text: str | None, column: ColumnInfo) -> Any:
             raise IncompatibleValue(kind) from None
     if kind == "timestamp":
         try:
-            return datetime.fromisoformat(text)
+            parsed = datetime.fromisoformat(text)
         except ValueError:
             raise IncompatibleValue(kind) from None
+        # Oracle TIMESTAMP(7-9) travels as FF9 text (contract §4.2): a datetime keeps microseconds
+        return text if (column.ts_precision or 6) > 6 else parsed
     if kind == "uuid":
         try:
             return uuid.UUID(text)

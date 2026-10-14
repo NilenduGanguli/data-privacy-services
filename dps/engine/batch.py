@@ -25,6 +25,21 @@ A whole-batch sweep would flag a short original inside another row's realistic s
 output and fail healthy jobs at L2 volumes. Under ``strict`` any hit raises :class:`LeakageError`
 and the batch is not written. Errors and hits carry paths, entity types and counts — never values.
 
+**Document rows** (M3, MongoDB). A column whose path is not one key of a flat row
+(``$.profile.fullName``, ``$.accounts[*].iban``) is read and written at every concrete path it
+addresses in the row (``[*]`` expanded per document); the engine sees those leaves at their
+concrete paths (the paths L1 uses for the same JSON document). Values no plan covers are never
+converted: they leave as the driver's objects (``Int64``, ``Decimal128``, ``ObjectId``,
+``datetime``), by reference, and the input rows are never changed (each container on a written
+path is shallow-copied once). A leaf a plan *wrote* keeps its original leaf's type when the caller
+passes ``leaf_restore`` (MongoDB: ``mongo_docs.restore_leaf``, so an ``Int64`` stays an ``Int64``
+and an int32 stays an int32); a leaf that held text keeps the engine's text (a value the discovery
+sample saw in a numeric field but which is a string here is not turned into a number).
+Leaves whose generalised path the shape does not know (fields the discovery sample never saw) follow
+``unclassified``: ``detect`` runs the detector over string leaves and replaces the spans
+(``det_token`` envelopes in obfuscate mode), ``redact`` replaces every such scalar with the
+``redact`` method's label, ``keep`` leaves them. Flat rows (PostgreSQL, Oracle) are unchanged.
+
 **Reversible outputs survive the column** (contract §6.5, amendment 2026-10-12). ``fpe_digits``
 plans default to ``leading_zero: preserve`` (:class:`ColumnPlan`, like every plan entry), and an
 integer, decimal or float column refuses any other setting (``incompatible_method``): a token
@@ -44,12 +59,13 @@ holdout or the batch's own sources — is redrawn (the stream salted by ``attemp
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -61,6 +77,7 @@ from dps.engine.findings import (
     hash_value,
     with_plan_defaults,
 )
+from dps.engine.jsonpath import child_path, flatten, get_path, parse_path
 from dps.engine.planner import build_plan
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import PrivacyEngine
@@ -86,6 +103,7 @@ from dps.layers.connectors.base import (
     from_engine_text,
     to_engine_text,
 )
+from dps.layers.connectors.docpaths import expand_wildcards, generalise, top_level
 from dps.observability import FINDINGS, TABULAR_RESAMPLES, TRANSFORMS, VERIFY_FAIL
 
 if TYPE_CHECKING:  # the constraints module needs the [tabular] extra; M2 jobs run without it
@@ -130,6 +148,62 @@ _MAX_HITS = 50
 _HIDDEN = ConfigDict(hide_input_in_errors=True)
 
 
+class _Unit(NamedTuple):
+    """One planned value of a row: the plan, the concrete path, the output codec column."""
+
+    plan: ColumnPlan
+    path: str
+    out: ColumnInfo
+
+
+#: Plan entries of unclassified document leaves use these (contract §5.3 ``unclassified``).
+UNCLASSIFIED_ENTITY = "UNCLASSIFIED"
+_UNCLASSIFIED_TEXT = ColumnInfo(path="$", name="", data_type="", kind="text")
+
+
+def _put(doc: dict[str, Any], path: str, value: Any) -> None:
+    """Set ``path`` in ``doc``, creating containers on the way (array slots padded with None)."""
+    parts = parse_path(path)
+    node: Any = doc
+    for part, nxt in zip(parts, parts[1:], strict=False):
+        empty: Any = [] if isinstance(nxt, int) else {}
+        if isinstance(part, int):
+            while len(node) <= part:
+                node.append(None)
+            if node[part] is None:
+                node[part] = empty
+        elif part not in node:
+            node[part] = empty
+        node = node[part]
+    last = parts[-1]
+    if isinstance(last, int):
+        while len(node) <= last:
+            node.append(None)
+    node[last] = value
+
+
+def _set_copied(root: dict[str, Any], path: str, value: Any, fresh: set[int]) -> None:
+    """Set ``path`` in ``root``, shallow-copying each container on the way the first time it is
+    written: the input row is never changed, untouched values keep their identity."""
+    parts = parse_path(path)
+    node: Any = root
+    for part in parts[:-1]:
+        child = node[part]
+        if id(child) not in fresh:
+            child = copy.copy(child)
+            node[part] = child
+            fresh.add(id(child))
+        node = child
+    node[parts[-1]] = value
+
+
+def _never_transformed(value: Any) -> bool:
+    """ObjectIds and binary values are never transformed (contract §4.1), even unclassified."""
+    if isinstance(value, bytes | bytearray | memoryview):
+        return True
+    return type(value).__name__ in ("ObjectId", "Binary", "Regex", "Code", "MinKey", "MaxKey")
+
+
 class TabularSampler(Protocol):
     """M5's per-row tabular sampler (contract §6.6): ``GaussianCopula``, or the MOSTLY pool.
 
@@ -160,7 +234,8 @@ class TabularSampler(Protocol):
 class ColumnPlan(BaseModel):
     """One planned column, built once per job from the accepted snapshot + resolved policy.
 
-    ``kind``, ``length``, ``precision`` and ``scale`` describe the **output** (target) column.
+    ``kind``, ``length``, ``precision``, ``scale`` and ``ts_precision`` describe the **output**
+    (target) column.
     """
 
     model_config = _HIDDEN
@@ -174,6 +249,9 @@ class ColumnPlan(BaseModel):
     length: int | None
     precision: int | None = None
     scale: int | None = None
+    #: fractional-second digits of a timestamp output (M3: Oracle TIMESTAMP(7-9) travels as FF9
+    #: text, so a date shift keeps its nanoseconds and its reveal stays exact)
+    ts_precision: int | None = None
 
     @model_validator(mode="after")
     def _plan_defaults(self) -> ColumnPlan:
@@ -193,6 +271,7 @@ class ColumnPlan(BaseModel):
             length=self.length,
             precision=self.precision,
             scale=self.scale,
+            ts_precision=self.ts_precision,
         )
 
 
@@ -358,11 +437,14 @@ class BatchTransformer:
         constraints: ConstraintSet | None = None,
         max_resample: int = 8,
         pseudonyms: Sequence[PseudonymColumn] = (),
+        leaf_restore: Callable[[Any, Any], Any] | None = None,
     ) -> None:
         """Validate the mode's prerequisites and the plans against ``shape``.
 
         ``pseudonyms`` (synthesize mode, D-A): identifier columns replaced by keyed pseudonyms
         under the synthesis seed after the row is transformed (never planned, never sampled).
+        ``leaf_restore(original, written)`` (document sources) returns a written value in its
+        original leaf's driver type; it is called only for values a plan wrote.
 
         Raises:
             ValueError: obfuscate without key material, synthesize without a seed, a plan (or
@@ -428,6 +510,18 @@ class BatchTransformer:
                 raise PlanConflict("a pseudonym column is also planned or sampled")
         if max_resample < 0:
             raise ValueError("max_resample must not be negative")
+        self.by_path = {c.path: c for c in shape.columns}
+        if any(not top_level(c.output_column()) and c.path not in self.by_path for c in columns):
+            raise PlanConflict("a column plan names a document path the table does not have")
+        # top-level keys that are columns of their own (every SQL column, flat Mongo fields).
+        # SQL rows: never searched for unclassified leaves (a jsonb value is its column's). Document
+        # rows (a leaf-restoring source, or a shape with nested paths): a flat field is searched
+        # unless a plan covers it whole, so a field the sample saw as a scalar but a later
+        # document holds as a sub-document or an array never passes its nested values in clear
+        # (review G3 r3 B1); a scalar under that name is the shape's own path and stays skipped.
+        self.flat_names = {c.name for c in shape.columns if top_level(c)}
+        self.documents = leaf_restore is not None or not all(top_level(c) for c in shape.columns)
+        self.planned_flat = {c.name for c in columns if top_level(c.output_column())}
         self.engine, self.policy, self.mode = engine, policy, mode
         self.shape, self.key, self.seed, self.locale = shape, key, seed, locale
         self.anchor, self.verify_mode = anchor, verify
@@ -442,7 +536,8 @@ class BatchTransformer:
         self.whole = [c for c in columns if not c.text_column]
         self.text = [c for c in columns if c.text_column]
         self.detector = engine.detector(policy, locale) if self.text else None
-        self.out_cols = {c.name: c.output_column() for c in columns}
+        self.out_cols = {c.name: c.output_column() for c in columns if top_level(c.output_column())}
+        self.leaf_restore = leaf_restore
         self.pseudonyms = list(pseudonyms)
         self._keys = KeyPseudonyms(seed_bytes(seed)) if pseudonyms and seed is not None else None
 
@@ -483,6 +578,119 @@ class BatchTransformer:
                 findings_seen[(f.entity_type, d.split(":")[0])] += 1
         return found
 
+    @staticmethod
+    def _column_key(col: ColumnPlan) -> str:
+        """``values_by_column`` key: the column name (flat rows), the path (document paths)."""
+        return col.name if top_level(col.output_column()) else col.path
+
+    def _values(self, row: Row, col: ColumnPlan) -> list[tuple[_Unit, str]]:
+        """The non-null values ``col`` addresses in ``row`` as engine text, with their paths."""
+        out_col = col.output_column()
+        if top_level(out_col):
+            text = to_engine_text(row.get(col.name), self.shape.column(col.name))
+            return [(_Unit(col, col.path, self.out_cols[col.name]), text)] if text else []
+        source = self.by_path[col.path]
+        found: list[tuple[_Unit, str]] = []
+        for path in expand_wildcards(row, col.path):
+            text = to_engine_text(get_path(row, path), source)
+            if text:
+                found.append((_Unit(col, path, out_col), text))
+        return found
+
+    def _plan_spans(
+        self,
+        col: ColumnPlan,
+        text: str,
+        found: list[Finding],
+        originals: list[tuple[ColumnPlan, str, bool]],
+    ) -> list[PlanEntry]:
+        """Plan entries for the spans found in one text value (``col.path`` = where it is)."""
+        if self.mode == "obfuscate":
+            planned = [self._entry(f, col.method) for f in found]
+        else:
+            planned = build_plan(
+                found, self.policy, "synthesize", fpe_enabled=self.engine.fpe_enabled
+            ).entries
+        for entry in planned:
+            if entry.method == "keep":
+                continue  # kept on purpose: neither transformed nor searched for
+            loc = entry.finding.locator
+            span = text[loc.start or 0 : loc.end]
+            as_span = col.model_copy(update={"entity_type": entry.finding.entity_type})
+            originals.append((as_span, span, False))
+        return planned
+
+    def _unclassified(
+        self, row: Row, findings_seen: Counter[tuple[str, str]]
+    ) -> list[tuple[_Unit, str, list[Finding]]]:
+        """Document leaves outside the shape (``unclassified`` = ``detect`` or ``redact``).
+
+        ``detect``: string leaves with their detector spans (leaves without a finding are
+        skipped). ``redact``: every scalar leaf except booleans, ObjectIds and binary, with no
+        spans (a whole-value ``redact``).
+        """
+        out: list[tuple[_Unit, str, list[Finding]]] = []
+        for name, value in row.items():
+            if name in self.flat_names and (not self.documents or name in self.planned_flat):
+                continue
+            for path, leaf in flatten(value, child_path("$", str(name))):
+                if generalise(path) in self.by_path or leaf is None or isinstance(leaf, bool):
+                    continue
+                if self.unclassified == "detect":
+                    if not isinstance(leaf, str) or not leaf:
+                        continue
+                    if self.detector is None:
+                        self.detector = self.engine.detector(self.policy, self.locale)
+                    plan = self._unclassified_plan(path, "det_token")
+                    found = self._spans(plan, leaf, findings_seen)
+                    if found:
+                        out.append((_Unit(plan, path, self._text_out(path)), leaf, found))
+                elif self.unclassified == "redact":
+                    if _never_transformed(leaf):
+                        continue
+                    text = to_engine_text(leaf, _UNCLASSIFIED_TEXT)
+                    if text:
+                        plan = self._unclassified_plan(path, "redact")
+                        out.append((_Unit(plan, path, self._text_out(path)), text, []))
+        return out
+
+    @staticmethod
+    def _text_out(path: str) -> ColumnInfo:
+        return _UNCLASSIFIED_TEXT.model_copy(update={"path": path})
+
+    @staticmethod
+    def _unclassified_plan(path: str, method: str) -> ColumnPlan:
+        return ColumnPlan(
+            path=path,
+            name=str(parse_path(path)[0]),
+            entity_type=UNCLASSIFIED_ENTITY,
+            method=MethodSpec(method=method),
+            text_column=method != "redact",
+            reversible=method != "redact",
+            kind="text",
+            length=None,
+        )
+
+    def _stored(self, row: Row, unit: _Unit, result: str | None) -> Any:
+        """The value written at ``unit.path``: the output column's codec, then (document rows) the
+        original leaf's type — a leaf that held text keeps the engine's text."""
+        column = unit.out
+        original: Any = None
+        if self.leaf_restore is not None and result is not None:
+            try:
+                original = get_path(row, unit.path)
+            except (KeyError, IndexError, TypeError, ValueError):
+                original = None
+            if isinstance(original, str):
+                return result
+        try:
+            stored = from_engine_text(result, column)
+        except IncompatibleValue as exc:
+            raise IncompatibleMethod(column.path, exc.code) from None
+        if self.leaf_restore is not None and original is not None:
+            stored = self.leaf_restore(original, stored)
+        return stored
+
     def transform(self, rows: list[Row]) -> BatchResult:
         """Transform ``rows`` (not mutated); raises :class:`LeakageError` under ``strict``.
 
@@ -520,50 +728,58 @@ class BatchTransformer:
                 # keyed by the row key: rows sharing an entity anchor still get their own draws
                 tabular_anchors.append(row_anchor(row, self.shape, None))
                 key_ints.append(self._key_int(row))
-            doc: dict[str, str] = {}
+            doc: dict[str, Any] = {}
+            units: list[tuple[_Unit, str]] = []  # (unit, input text) of every non-null value
             for col in self.whole + self.text:
-                text = to_engine_text(row.get(col.name), self.shape.column(col.name))
-                if text:
-                    doc[col.name] = text
+                for unit, text in self._values(row, col):
+                    _put(doc, unit.path, text)
+                    units.append((unit, text))
             entries: list[PlanEntry] = []
             originals: list[tuple[ColumnPlan, str, bool]] = []
-            searched: set[str] = set()
-            for col in self.whole:
-                if col.name not in doc or col.method.method == "keep":
+            searched: list[tuple[_Unit, str]] = []
+            for unit, text in units:
+                col = unit.plan
+                at = col if unit.path == col.path else col.model_copy(update={"path": unit.path})
+                if not col.text_column:
+                    if col.method.method == "keep":
+                        continue
+                    finding = Finding(
+                        locator=Locator(path=unit.path),
+                        entity_type=col.entity_type,
+                        score=1.0,
+                        detectors=["snapshot"],
+                        sensitivity=entity_info(col.entity_type).sensitivity,
+                        value_hash=hash_value(text),
+                    )
+                    entries.append(self._entry(finding, col.method))
+                    originals.append((at, text, True))
+                    searched.append((unit, text))
+                    per_column[self._column_key(col)] += 1
                     continue
-                finding = Finding(
-                    locator=Locator(path=col.path),
-                    entity_type=col.entity_type,
-                    score=1.0,
-                    detectors=["snapshot"],
-                    sensitivity=entity_info(col.entity_type).sensitivity,
-                    value_hash=hash_value(doc[col.name]),
-                )
-                entries.append(self._entry(finding, col.method))
-                originals.append((col, doc[col.name], True))
-                searched.add(col.name)
-                per_column[col.name] += 1
-            for col in self.text:
-                if col.name not in doc:
-                    continue
-                searched.add(col.name)  # free text is always searched, findings or not
-                found = self._spans(col, doc[col.name], findings_seen)
-                per_column[col.name] += len(found)
-                if self.mode == "obfuscate":
-                    planned = [self._entry(f, col.method) for f in found]
-                else:
-                    planned = build_plan(
-                        found, self.policy, "synthesize", fpe_enabled=self.engine.fpe_enabled
-                    ).entries
-                for entry in planned:
-                    if entry.method == "keep":
-                        continue  # kept on purpose: neither transformed nor searched for
-                    loc = entry.finding.locator
-                    span = doc[col.name][loc.start or 0 : loc.end]
-                    as_span = col.model_copy(update={"entity_type": entry.finding.entity_type})
-                    originals.append((as_span, span, False))
-                entries += planned
+                searched.append((unit, text))  # free text is always searched, findings or not
+                found = self._spans(at, text, findings_seen)
+                per_column[self._column_key(col)] += len(found)
+                entries += self._plan_spans(at, text, found, originals)
+            if self.unclassified != "keep":
+                for unit, text, found in self._unclassified(row, findings_seen):
+                    _put(doc, unit.path, text)
+                    searched.append((unit, text))
+                    per_column[generalise(unit.path)] += max(1, len(found)) if found else 1
+                    if found:
+                        entries += self._plan_spans(unit.plan, text, found, originals)
+                    else:
+                        finding = Finding(
+                            locator=Locator(path=unit.path),
+                            entity_type=UNCLASSIFIED_ENTITY,
+                            score=1.0,
+                            detectors=["unclassified"],
+                            sensitivity=entity_info(UNCLASSIFIED_ENTITY).sensitivity,
+                            value_hash=hash_value(text),
+                        )
+                        entries.append(self._entry(finding, unit.plan.method))
+                        originals.append((unit.plan, text, True))
             out = dict(row)
+            fresh: set[int] = {id(out)}  # containers of ``out`` copied from the row (written to)
             if entries:
                 plan = Plan(
                     mode=self.mode,
@@ -578,21 +794,24 @@ class BatchTransformer:
                 notes.update(applied.notes)
                 outputs: dict[str, str | None] = {}
                 reversible = {h.path for h in applied.reveal_hints}
-                for name in searched:
-                    value = applied.output.get(name)
-                    text = None if value is None else str(value)
-                    column = self.out_cols[name]
-                    outputs[column.path] = text
+                for unit, _ in searched:
                     try:
-                        stored = from_engine_text(text, column)
-                    except IncompatibleValue as exc:
-                        raise IncompatibleMethod(column.path, exc.code) from None
-                    if column.path in reversible and to_engine_text(stored, column) != text:
+                        value = get_path(applied.output, unit.path)
+                    except (KeyError, IndexError, TypeError):
+                        value = None
+                    result = None if value is None else str(value)
+                    column = unit.out
+                    outputs[unit.path] = result
+                    stored = self._stored(row, unit, result)
+                    if unit.path in reversible and to_engine_text(stored, column) != result:
                         # the column would change a token reveal must read back exactly
                         raise IncompatibleMethod(column.path, "incompatible_method")
-                    out[name] = stored
+                    if top_level(column) and unit.path == column.path:
+                        out[column.name] = stored
+                    else:
+                        _set_copied(out, unit.path, stored, fresh)
                 checked += _checked(originals)
-                inputs = {self.out_cols[name].path: doc[name] for name in searched}
+                inputs = {unit.path: text for unit, text in searched}
                 hits += verify_row(originals, outputs, inputs=inputs)
             out_rows.append(out)
         if self.pseudonyms:
@@ -675,12 +894,11 @@ class BatchTransformer:
             return None
         groups: dict[tuple[str, str | None], set[str]] = {}
         for col in columns:
-            info = self.shape.column(col.name)
             profile = col.method.params.get("profile")
             key = (col.entity_type, str(profile) if profile is not None else None)
             for row in rows:
-                text = to_engine_text(row.get(col.name), info)
-                if text:
+                # every value the plan addresses (M3: a document path can match several leaves)
+                for _unit, text in self._values(row, col):
                     groups.setdefault(key, set()).add(text)
         cache: dict[tuple[str, str], str] = {}
         for (entity, profile), values in groups.items():

@@ -72,3 +72,50 @@ def test_acronyms_and_accents_reach_the_rules() -> None:
 def test_evidence_names_the_rule_never_the_key_value() -> None:
     for cand in classify_key("$.customer.cc_number"):
         assert cand.evidence == "key:cc number"
+
+
+@pytest.mark.parametrize(
+    "path,entity",
+    [
+        ("$.contact.addresses[*].line1", "STREET_ADDRESS"),
+        ("$.contact.addresses[*].line_2", "STREET_ADDRESS"),
+        ("$.billingAddress.street", "STREET_ADDRESS"),
+        ("$.contact.addresses[*].pin", "POSTAL_CODE"),
+        ("$.address.zip", "POSTAL_CODE"),
+        ("$.addr.postcode", "POSTAL_CODE"),
+        ("$.phones[*].number", "PHONE"),
+        ("$.passport.number", "PASSPORT"),
+        ("$.contact.email", "EMAIL"),
+        ("ADDR_LINE1", "STREET_ADDRESS"),
+    ],
+)
+def test_classify_path_scores_parent_segments(path: str, entity: str) -> None:
+    from dps.engine.detect.structural import classify_path
+
+    top = classify_path(path)[0]
+    assert top.entity_type == entity and top.score >= 0.6, (path, top)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "$.contact.addresses[*].type",
+        "$.contact.addresses[*].country",
+        "$.emailAddress.line1",  # an e-mail parent is not an address context
+        "$.ipAddress.pin",
+        "$.order.number",  # a generic leaf inherits only from a classified parent
+        "$.accounts[*].balance",
+        "$.kyc.verifiedAt",
+    ],
+)
+def test_classify_path_leaves_unrelated_leaves_alone(path: str) -> None:
+    from dps.engine.detect.structural import classify_path
+
+    assert [c for c in classify_path(path) if c.score >= 0.6] == [], path
+
+
+def test_classify_path_equals_classify_key_without_parents() -> None:
+    from dps.engine.detect.structural import classify_path
+
+    for key in ("ADDR_LINE1", "PIN_CODE", "$.notes", "$.customerId", "line1", "pin"):
+        assert classify_path(key) == classify_key(key), key

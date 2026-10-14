@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { EngineBadge } from '../components/EngineBadge';
+import { JobGroupsSection } from '../components/groups/JobGroupsSection';
 import { Sparkline } from '../components/Sparkline';
 import { StateChip } from '../components/StateChip';
 import { usePoll } from '../hooks/usePoll';
@@ -11,7 +12,7 @@ import {
   jobWriteMode, needsDecision, NO_FILTERS, ownerOf, progressPct, pushSample, shortId, statusBucket, writeModeLabel,
   writeModeTone, type JobFilters, type StatusBucket,
 } from '../lib/jobs';
-import type { ClassificationSnapshot, Connection, Job, JobStats } from '../lib/types';
+import type { ClassificationSnapshot, Connection, Job, JobGroup, JobStats } from '../lib/types';
 
 const ALERT_WAIT_S = 300;
 const STATUS_LABELS: Record<StatusBucket, string> = { running: 'Running', review: 'Awaiting review', completed: 'Completed', failed: 'Failed', canceled: 'Canceled' };
@@ -83,8 +84,8 @@ function HealthStrip({ stats, error, queue, tput, updated }: {
 }
 
 /** One job row (and its error row when expanded). */
-function JobRow({ job, auth, engine, proposed, snapshot, open, onToggle, onRetried }: {
-  job: Job; auth: Auth; engine: string | undefined; proposed: Set<string>; snapshot: ClassificationSnapshot | undefined;
+function JobRow({ job, auth, engine, proposed, snapshot, groupName, open, onToggle, onRetried }: {
+  job: Job; auth: Auth; engine: string | undefined; proposed: Set<string>; snapshot: ClassificationSnapshot | undefined; groupName: string | undefined;
   open: boolean; onToggle: () => void; onRetried: () => void;
 }): JSX.Element {
   const [retry, setRetry] = useState<string | null>(null);
@@ -132,7 +133,11 @@ function JobRow({ job, auth, engine, proposed, snapshot, open, onToggle, onRetri
             {job.kind === 'discover' ? <div className="faint sm">discovery · classification snapshot</div>
               : wm === 'table' || (wm === 'files') ? <div className="to">{'→\u00a0'}{target}</div>
                 : <div className="faint sm">{target}</div>}
-            {job.group_id && <div className="grp">group {shortId(job.group_id)}</div>}
+            {job.group_id && (
+              <Link className="grp" to={`/data-sources?group=${encodeURIComponent(job.group_id)}#group`} title="Job group: one consistency key across systems">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} aria-hidden="true"><circle cx="8" cy="15" r="4" /><path d="M11 12l9-9M17 6l3 3" /></svg>{groupName ?? shortId(job.group_id)}
+              </Link>
+            )}
           </div></div>
         </td>
         <td data-l="Mode · write">
@@ -179,7 +184,7 @@ function JobRow({ job, auth, engine, proposed, snapshot, open, onToggle, onRetri
   );
 }
 
-/** Jobs (mockup 07): queue health, filters and the jobs table. Job groups arrive with M3. */
+/** Jobs (mockup 07): queue health, filters, the jobs table and the job groups (M3). */
 export function Jobs(): JSX.Element {
   const auth = useAuth();
   const [filters, setFilters] = useState<JobFilters>(NO_FILTERS);
@@ -194,6 +199,9 @@ export function Jobs(): JSX.Element {
   const stats = usePoll(() => api.jobs.stats(auth), 10000, () => true, [auth]);
   const [updated, setUpdated] = useState<string | null>(null);
 
+  const [groups, setGroups] = useState<JobGroup[] | null>(null);
+  const loadGroups = useCallback(() => { api.groups.list(auth).then((p) => setGroups(p.items)).catch(() => setGroups([])); }, [auth]);
+  useEffect(() => { loadGroups(); }, [loadGroups]);
   useEffect(() => { api.connections.list(auth, 200).then((p) => setConnections(p.items)).catch(() => setConnections([])); }, [auth]);
   useEffect(() => { setAnyActive(!!list.data?.items.some((j) => !isTerminal(j))); }, [list.data]);
   useEffect(() => {
@@ -208,6 +216,7 @@ export function Jobs(): JSX.Element {
   const proposedSnaps = snaps.data?.items ?? [];
   const proposed = useMemo(() => new Set(proposedSnaps.map((s) => s.id)), [proposedSnaps]);
   const snapById = useMemo(() => new Map(proposedSnaps.map((s) => [s.id, s])), [proposedSnaps]);
+  const groupNames = useMemo(() => new Map((groups ?? []).map((g) => [g.id, g.name])), [groups]);
   const engines = useMemo(() => Object.fromEntries(connections.map((c) => [c.id, c.engine])) as Record<string, string>, [connections]);
   const shown = useMemo(() => filterJobs(jobs, filters, { proposed, engines }), [jobs, filters, proposed, engines]);
   const anyFilter = JSON.stringify(filters) !== JSON.stringify(NO_FILTERS);
@@ -226,7 +235,7 @@ export function Jobs(): JSX.Element {
   return (
     <main className="page jobs-page">
       <div className="page-head">
-        <div><h1>Jobs</h1><p>Batch jobs over PostgreSQL in the last 7 days. Keys go back to the requester when a job is submitted; DPS keeps none.</p></div>
+        <div><h1>Jobs</h1><p>Batch jobs over PostgreSQL, Oracle and MongoDB in the last 7 days. Keys go back to the requester when a job is submitted; DPS keeps none.</p></div>
         <div className="head-actions">
           <button className="btn" type="button" onClick={exportCsv} disabled={!shown.length}>Export list (CSV)</button>
           <Link className="btn btn-primary" to="/data-sources/jobs/new">New job</Link>
@@ -279,14 +288,14 @@ export function Jobs(): JSX.Element {
           <tbody>
             {shown.map((j) => (
               <JobRow key={j.id} job={j} auth={auth} engine={engines[j.connection_id ?? '']} proposed={proposed}
-                      snapshot={snapById.get(j.progress.snapshot_ids[0] ?? '')} open={openErr.has(j.id)}
+                      snapshot={snapById.get(j.progress.snapshot_ids[0] ?? '')} groupName={j.group_id ? groupNames.get(j.group_id) : undefined} open={openErr.has(j.id)}
                       onToggle={() => setOpenErr((s) => { const n = new Set(s); if (n.has(j.id)) n.delete(j.id); else n.add(j.id); return n; })}
                       onRetried={list.refresh} />
             ))}
             {!shown.length && list.data && (
               <tr className="emptyrow"><td colSpan={7} className="empty">
                 {jobs.length ? <><div className="t">No jobs match these filters</div><p>Try a different status or owner, or start a job for the data you are looking for.</p></>
-                  : <><div className="t">No jobs yet</div><p>Connect a PostgreSQL source and protect a table in five steps.</p></>}
+                  : <><div className="t">No jobs yet</div><p>Connect a PostgreSQL, Oracle or MongoDB source and protect a table in five steps.</p></>}
                 <div className="rowx" style={{ justifyContent: 'center' }}>
                   {jobs.length > 0 && <button className="btn btn-sm" type="button" onClick={clear}>Clear filters</button>}
                   <Link className="btn btn-sm btn-primary" to="/data-sources/jobs/new">New job</Link>
@@ -298,6 +307,8 @@ export function Jobs(): JSX.Element {
         </table></div>
         <div className="tfoot"><span>Times are in your browser&apos;s time zone. Jobs and their evidence are kept for 30 days.</span><span>Paused jobs resume from their last checkpoint.</span></div>
       </section>
+
+      <JobGroupsSection auth={auth} groups={groups} jobs={jobs} onGroupsChanged={loadGroups} />
     </main>
   );
 }

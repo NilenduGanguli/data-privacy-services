@@ -5,8 +5,8 @@ import { FidelityPanel } from '../components/FidelityPanel';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError, type Download } from '../lib/api';
 import {
-  engineName, errorText, finishedOutcome, fmtCount, fmtDuration, fmtUtc, methodText, packTargetText, shortId, shortSha, shortType, typeNoteShort,
-  writeModeLabel, verificationText, verificationTone,
+  engineName, errorText, finishedOutcome, fmtCount, fmtDuration, fmtUtc, methodText, packSelection, packTargetText, recordNoun, shortId, shortSha, shortType,
+  typeNoteShort, writeModeLabel, verificationText, verificationTone,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, EvidenceOut, Job } from '../lib/types';
 
@@ -79,6 +79,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
   const tgt = p.target ?? {};
   const files = (tgt.files ?? null) as Record<string, any> | null;
   const sel = (src.selection ?? {}) as Record<string, any>;
+  const selection = packSelection(sel, src.engine);
   const cons = p.consistency ?? {};
   const custody = (cons.key_custody ?? {}) as Record<string, any>;
   const synth = p.mode === 'synthesize';
@@ -144,7 +145,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
 
         <Sec n={1} title="Summary">
           <p className="lead">
-            On {day} DPS read {fmtCount(counts.rows_read ?? 0)} rows from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} rows to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
+            On {day} DPS read {fmtCount(counts.rows_read ?? 0)} {recordNoun(src.engine, Number(counts.rows_read ?? 0))} from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} {recordNoun(src.engine, Number(counts.rows_written ?? 0))} to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
             {passed ? 'The leakage sweep found no source value in the output.' : unfinished ? `The job ended ${p.outcome}${firstError ? ` (${errorText(firstError)})` : ''} before it finished, so its output is incomplete and is not verified: the leakage sweep checked ${fmtCount(Number(v.values_checked ?? 0))} values written before it stopped.` : hits > 0 ? `The leakage sweep caught ${fmtCount(hits)} source ${hits === 1 ? 'value' : 'values'}; the affected batches were not written.` : review ? `Review required: the output was written, and the post-write sample found personal data in ${flagged.length ? flagged.join(', ') : 'columns'} that the snapshot kept as not personal. Reclassify ${flagged.length === 1 ? 'it' : 'them'} and run again before using the output.` : 'The run failed closed before its verification counters held a hit; nothing of the failed unit was written.'}{' '}
             {synth ? 'The synthetic output has no key; DPS kept no seed.' : custody.returned ? 'The key that reverses the output was returned to the requesting team; DPS kept no copy.' : 'The run used the caller\'s key; DPS kept no copy.'}{outcomeWords}
           </p>
@@ -168,7 +169,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
               <span className="s2">{custody.returned ? 'Data key returned at job creation' : 'Key supplied by the caller'}{custody.wrapped ? ', wrapped with the caller\'s public key' : ''}; DPS stored no key. This pack holds the key id only.</span></dd>
             <dt>Key custody</dt><dd>{synth ? 'Synthesis seed' : 'Data key'} {custody.returned ? 'returned to the requesting team at job creation' : 'supplied by the caller'}{custody.wrapped ? ", wrapped with the caller's public key" : ''}; DPS stored no key<span className="s2">This pack holds the {synth ? 'seed fingerprint' : 'key id'} only.</span></dd>
             <dt>Source</dt><dd>{engineName(src.engine)} · connection <span className="mono">{text(src.connection_name)}</span> · <span className="mono">{text(src.object)}</span>
-              <span className="s2">Selection <span className="mono">{sel.where_template || sel.query_template || 'all rows'}</span> · {fmtCount(Number(sel.binds ?? 0))} bound {Number(sel.binds ?? 0) === 1 ? 'parameter' : 'parameters'}{sel.max_rows ? ` · at most ${fmtCount(sel.max_rows)} rows` : ''}{Array.isArray(sel.columns) ? ` · ${sel.columns.length} columns` : ''}</span></dd>
+              <span className="s2">Selection <span className="mono">{selection.scope}</span>{selection.detail}</span></dd>
             <dt>Target</dt><dd>{engineName(tgt.engine)} · connection <span className="mono">{text(tgt.connection_name)}</span> · <span className="mono">{targetText}</span>
               <span className="s2">write_mode {text(tgt.write_mode)}{tgt.table_load ? ` · ${tgt.table_load}` : ''}{tgt.created ? ' · created from the source definition' : ''}{tgt.truncated ? ' · truncated before loading' : ''}{tgt.pk_strategy ? ` · keys ${text((tgt.pk_strategy as Record<string, unknown>).kind)}` : ''}{tgt.confirm_write ? ` · write confirmed for ${fmtCount(tgt.expected_rows)} rows` : ''}{files ? ` · ${fmtCount(files.objects)} objects, manifest ${text(files.manifest_artefact_id)}` : ''}</span></dd>
           </dl>

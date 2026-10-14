@@ -128,6 +128,11 @@ def test_cli_arguments_and_unsupported_targets(capsys: pytest.CaptureFixture[str
         False,
         False,
     )
-    assert main(["--target", "oracle"]) == 2 and "arrives with M3" in capsys.readouterr().err
+    assert parse_args(["--target", "all"]).target == "all"
+    # M3: oracle/mongo targets exist; a failure names the exception class, never the endpoint
+    bad = ["--target", "oracle", "--oracle-dsn", "127.0.0.1:1/NOPE", "--rows", "1"]
+    assert main(bad) == 1
+    err = capsys.readouterr().err
+    assert "seeding oracle failed" in err and "127.0.0.1" not in err
     with pytest.raises(SystemExit):
         parse_args(["--target", "postgres", "--schema", "Bad-Name"])

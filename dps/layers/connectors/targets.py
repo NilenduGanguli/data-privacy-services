@@ -10,8 +10,9 @@ detail): ``kek_unconfigured`` · ``engine_unavailable`` · ``snapshot_not_accept
 ``in_place_invalid`` · ``pk_transform_in_place`` · ``pk_strategy_required`` ·
 ``pk_strategy_invalid`` (token key not reversible, synthesize token, same-table token/prefix or a
 key that is not one integer column, an offset on a non-integer key or a prefix on a non-text key)
-· ``target_invalid`` (table, files) · ``key_method_not_injective`` · ``method_needs_key`` ·
-``text_method_invalid`` · ``length_overflow`` (in place and same-table append write each value
+· ``target_invalid`` (table, files) · ``no_key`` (a ``table`` upsert from a key-less source) ·
+``key_method_not_injective`` · ``method_needs_key`` · ``text_method_invalid`` (both over the
+projection the run reads) · ``length_overflow`` (in place and same-table append write each value
 back into its own column: a method whose output cannot fit it is refused here, every such column
 named, instead of failing the job at prepare) · ``group_not_found`` / ``group_key_mismatch`` ·
 ``tabular_invalid`` (M5: tabular synthesis outside synthesize mode, into an ``in_place``/``append``
@@ -38,7 +39,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,8 +53,11 @@ from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSE
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.methods import METHODS
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
+from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
+    PIPELINE_ENGINES,
     ColumnInfo,
+    Engine,
     ObjectRef,
     PkGenerate,
     PkOffset,
@@ -63,10 +68,15 @@ from dps.layers.connectors.base import (
     TableShape,
     WriteMode,
 )
+from dps.layers.connectors.selection import SelectionError, read_projection
 from dps.secrets import seed_fingerprint
 
 #: Catalogue type strings (``format_type``) allowed in created-table DDL and SQL casts.
 TYPE_RE = re.compile(r'^[a-z][a-z0-9 _(),\[\]".]*$')
+#: An Oracle catalogue type as the M3 connector formats it (``NUMBER(12)``, ``VARCHAR2(120 CHAR)``,
+#: ``TIMESTAMP(6) WITH TIME ZONE``); the Oracle writer builds DDL from its closed type table.
+ORACLE_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9 _(),]*$")
+_CREATED_TYPE_RE = {"postgres": TYPE_RE, "oracle": ORACLE_TYPE_RE}
 #: ``(kid, seed_fingerprint)`` of a job group.
 GroupKeys = tuple[str, str]
 FREE_TEXT_METHOD = "det_token"
@@ -112,6 +122,29 @@ class RunPlan(BaseModel):
     prepare: dict[str, Any] = Field(default_factory=dict)
     #: D-A (synthesize): identifier columns replaced by keyed pseudonyms, never copied
     pseudonyms: list[PseudonymColumn] = Field(default_factory=list)
+
+
+def column_at(shape: TableShape, path: str, name: str) -> ColumnInfo | None:
+    """The column of ``shape`` at ``path`` (a document's columns share their top-level ``name``:
+    ``$.profile.fullName`` and ``$.profile.dob`` are both ``profile``); a SQL shape falls back to
+    the name when the path is spelt otherwise. ``None`` when neither matches."""
+    for column in shape.columns:
+        if column.path == path:
+            return column
+    try:
+        column = shape.column(name)
+    except KeyError:
+        return None
+    # a flat column found by name is the same column; a document leaf of the same top-level
+    # field (``$.profile.dob`` for ``$.profile.fullName``) is another column
+    return column if docpaths.top_level(column) else None
+
+
+def _at(shape: TableShape, path: str, name: str) -> ColumnInfo:
+    column = column_at(shape, path, name)
+    if column is None:
+        raise PrepareFailure("snapshot_stale", f"column {path} is no longer in the table")
+    return column
 
 
 def _fail(code: str, status: int, detail: str) -> SpecError:
@@ -287,7 +320,7 @@ def pseudonym_columns(
     return out
 
 
-def _check_identifiers(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
+def _check_identifiers(spec: RunSpec, snapshot: ClassificationSnapshot, engine: str) -> None:
     """D-A at submit: a synthesize run never copies a sensitive key or identifier."""
     target = spec.target
     sensitive_key = any(c.entity_type for c in _key_columns(snapshot))
@@ -309,7 +342,7 @@ def _check_identifiers(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
         snapshot,
         write_mode=target.write_mode,
         pk_strategy=target.pk_strategy,
-        projection=_projection(spec, snapshot),
+        projection=_projection(spec, snapshot, engine),
     ):
         if _pseudonym_of(c, snapshot.shape, label) is None:
             raise _fail(
@@ -333,11 +366,46 @@ def _reversible(method: MethodSpec) -> bool:
     return bool(spec and spec.reversible)
 
 
-def _projection(spec: RunSpec, snapshot: ClassificationSnapshot) -> set[str]:
-    columns = spec.source.selection.columns
-    if not columns:
-        return {c.name for c in snapshot.columns}
-    return set(columns) | set(snapshot.shape.key)
+def _projection(spec: RunSpec, snapshot: ClassificationSnapshot, engine: str) -> set[str]:
+    """The columns the run reads and writes, computed exactly as ``prepare`` computes them
+    (:func:`~dps.layers.connectors.selection.read_projection`: the query's own select list,
+    ``columns`` folded per engine, keys always), so no column the run writes escapes the method
+    checks (M3 G2 B4: a lower-case Oracle ``columns`` entry did). A selection that does not parse
+    yields every reviewed column, the strictest set; the selection itself is refused after."""
+    try:
+        read = read_projection(snapshot.shape, spec.source.selection, cast(Engine, engine))
+    except SelectionError:
+        return {c.name for c in snapshot.columns} | {c.name for c in snapshot.shape.columns}
+    return {c.name for c in read}
+
+
+def check_projected_methods(
+    snapshot: ClassificationSnapshot, mode: str, projection: Iterable[str]
+) -> None:
+    """Refuse a projected column whose method ``mode`` cannot run (value-free detail).
+
+    ``method_needs_key``: synthesize mode has no key material, so only key-less methods apply to
+    structured columns. ``text_method_invalid``: obfuscate mode tokenizes free text. Called by
+    :func:`validate_run` at submit and again by ``prepare`` over the run's final projection.
+
+    Raises:
+        SpecError: ``method_needs_key`` or ``text_method_invalid`` (422).
+    """
+    projected = set(projection)
+    for c in snapshot.columns:
+        if c.name not in projected:
+            continue
+        method = method_for_column(c, mode)
+        if mode == "synthesize" and not c.text_column and method.method not in KEYLESS_METHODS:
+            raise _fail(
+                "method_needs_key",
+                422,
+                f"{c.path}: {method.method} needs key material, which synthesize mode has none of",
+            )
+        if mode == "obfuscate" and c.text_column and method.method != FREE_TEXT_METHOD:
+            raise _fail(
+                "text_method_invalid", 422, f"{c.path}: free-text columns are tokenized (det_token)"
+            )
 
 
 def _key_columns(snapshot: ClassificationSnapshot) -> list[ColumnClassification]:
@@ -408,7 +476,12 @@ def _check_append(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
             isinstance(strategy, PkOffset) and strategy.prefix is not None
         ):
             raise _fail(invalid, 422, "a same-table append takes generate or a numeric offset only")
-        if len(key_info) != 1 or key_info[0].kind != "int":
+        # MongoDB: ``generate`` assigns ObjectIds above the collection's newest one (the writer
+        # bounds the read with ``append_upper_key``), so an ObjectId key is a same-table key too
+        generated_oid = isinstance(strategy, PkGenerate) and [c.kind for c in key_info] == [
+            "object_id"
+        ]
+        if not generated_oid and (len(key_info) != 1 or key_info[0].kind != "int"):
             raise _fail(invalid, 422, "a same-table append needs a single integer key column")
 
 
@@ -540,8 +613,8 @@ def validate_run(
             "verify=warn (or a policy with verify.leakage_check=warn) is not allowed on this "
             "deployment",
         )
-    if source_conn.engine != "postgres":
-        raise _fail("engine_unavailable", 422, "M2 runs read PostgreSQL sources only")
+    if source_conn.engine not in PIPELINE_ENGINES:
+        raise _fail("engine_unavailable", 422, "runs cannot read this engine's sources yet")
     if (
         snapshot is None
         or snapshot.status != "accepted"
@@ -569,7 +642,7 @@ def validate_run(
             )
     keys = _key_columns(snapshot)
     if spec.mode == "synthesize":
-        _check_identifiers(spec, snapshot)
+        _check_identifiers(spec, snapshot, source_conn.engine)
     if mode == "in_place":
         if (
             target.connection_id not in (None, source_conn.id)
@@ -589,7 +662,15 @@ def validate_run(
         _check_append(spec, snapshot)
     _check_target(spec, source_conn, target_conn)
     if mode == "in_place" or (mode == "append" and is_same_table(spec)):
-        _check_written_lengths(spec, snapshot)
+        _check_written_lengths(spec, snapshot, source_conn.engine)
+    if (
+        mode == "table"
+        and target.table_load == "upsert"
+        and snapshot.shape.key_source in ("rowid", "none")
+    ):
+        raise _fail(
+            "no_key", 422, "upsert needs a key: a key-less table loads with truncate_insert"
+        )
     token_keys = mode == "append" and isinstance(target.pk_strategy, PkToken)
     if mode in ("table", "files") or token_keys:
         for c in keys:
@@ -600,21 +681,7 @@ def validate_run(
                     422,
                     f"key column {c.path}: the method must be keep or reversible",
                 )
-    projected = _projection(spec, snapshot)
-    for c in snapshot.columns:
-        if c.name not in projected:
-            continue
-        method = method_for_column(c, spec.mode)
-        if spec.mode == "synthesize" and not c.text_column and method.method not in KEYLESS_METHODS:
-            raise _fail(
-                "method_needs_key",
-                422,
-                f"{c.path}: {method.method} needs key material, which synthesize mode has none of",
-            )
-        if spec.mode == "obfuscate" and c.text_column and method.method != FREE_TEXT_METHOD:
-            raise _fail(
-                "text_method_invalid", 422, f"{c.path}: free-text columns are tokenized (det_token)"
-            )
+    check_projected_methods(snapshot, spec.mode, _projection(spec, snapshot, source_conn.engine))
     _check_group(spec, group)
     options = spec.options
     if options.tabular != "none" or options.tabular_dp or options.linked is not None:
@@ -653,7 +720,7 @@ def build_column_plans(
             method = MethodSpec(method="surrogate")
         elif not col.text_column and (col.entity_type is None or method.method == "keep"):
             continue
-        info = snapshot.shape.column(col.name)
+        info = _at(snapshot.shape, col.path, col.name)
         plans.append(
             ColumnPlan(
                 path=col.path,
@@ -666,20 +733,28 @@ def build_column_plans(
                 length=info.length,
                 precision=info.precision,
                 scale=info.scale,
+                ts_precision=info.ts_precision,
             )
         )
     return plans
 
 
-def created_column_type(column: ColumnInfo, plan: ColumnPlan | None) -> str:
-    """DDL type of ``column`` in a created table (``plan`` None = kept).
+def created_column_type(
+    column: ColumnInfo, plan: ColumnPlan | None, *, engine: str = "postgres"
+) -> str:
+    """DDL type of ``column`` in a created table of ``engine`` (``plan`` None = kept).
+
+    A planned text-like column is ``text`` (the writer widens it); otherwise the catalogue type,
+    checked against the target engine's pattern (contract open question 14: the types are the
+    target engine's; the Oracle writer reads only the ``text`` marker).
 
     Raises:
         PrepareFailure: ``target_invalid`` when the catalogue type cannot be used in SQL.
     """
     if plan is not None and column.kind in _TEXT_OUTPUT_KINDS:
         return "text"
-    if not TYPE_RE.fullmatch(column.data_type):
+    pattern = _CREATED_TYPE_RE.get(engine)
+    if pattern is None or not pattern.fullmatch(column.data_type):
         raise PrepareFailure("target_invalid", f"{column.path}: the column type cannot be copied")
     return column.data_type
 
@@ -716,7 +791,7 @@ def worst_case_length(plan: ColumnPlan, source: ColumnInfo) -> int | None:
     return method_worst_case(plan.method, source.length)
 
 
-def _check_written_lengths(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
+def _check_written_lengths(spec: RunSpec, snapshot: ClassificationSnapshot, engine: str) -> None:
     """In place and same-table append write each value back into its own column: refuse every
     planned column whose output cannot fit it (value-free detail naming each one)."""
     plans = build_column_plans(
@@ -724,7 +799,7 @@ def _check_written_lengths(spec: RunSpec, snapshot: ClassificationSnapshot) -> N
         mode=spec.mode,
         write_mode=spec.target.write_mode,
         pk_strategy=spec.target.pk_strategy,
-        projection=sorted(_projection(spec, snapshot)),
+        projection=sorted(_projection(spec, snapshot, engine)),
     )
     by_name = {c.name: c for c in snapshot.columns}
     problems: list[str] = []
@@ -815,7 +890,7 @@ def _check_existing(
 def _target_plans(plans: list[ColumnPlan], target_shape: TableShape) -> list[ColumnPlan]:
     out = []
     for p in plans:
-        t = target_shape.column(p.name)
+        t = _at(target_shape, p.path, p.name)
         out.append(
             p.model_copy(
                 update={
@@ -832,7 +907,7 @@ def _target_plans(plans: list[ColumnPlan], target_shape: TableShape) -> list[Col
 def _check_lengths(plans: list[ColumnPlan], source_shape: TableShape) -> None:
     problems = []
     for p in plans:
-        worst = worst_case_length(p, source_shape.column(p.name))
+        worst = worst_case_length(p, _at(source_shape, p.path, p.name))
         if worst is not None and p.length is not None and worst > p.length:
             problems.append(
                 f"{p.path} ({p.method.method}: up to {worst} characters, the column takes "
@@ -849,7 +924,7 @@ def _unbounded_plans(plans: list[ColumnPlan], source_shape: TableShape) -> list[
     """Planned text-like columns become unbounded ``text`` (created tables, file targets)."""
     out = []
     for p in plans:
-        if source_shape.column(p.name).kind in _TEXT_OUTPUT_KINDS:
+        if _at(source_shape, p.path, p.name).kind in _TEXT_OUTPUT_KINDS:
             p = p.model_copy(
                 update={"kind": "text", "length": None, "precision": None, "scale": None}
             )
@@ -913,9 +988,15 @@ def resolve_target(
             if not t.create_if_missing:
                 raise PrepareFailure("target_invalid", "the target table does not exist")
             by_name = {p.name: p for p in plans}
-            types = {
-                n: created_column_type(source_shape.column(n), by_name.get(n)) for n in projection
-            }
+            if conn.engine == "mongo":  # a collection has no column DDL: labels for the record
+                types = {n: source_shape.column(n).data_type for n in projection}
+            else:
+                types = {
+                    n: created_column_type(
+                        source_shape.column(n), by_name.get(n), engine=conn.engine
+                    )
+                    for n in projection
+                }
             resolved = ResolvedTarget(
                 **common,
                 object=t.object,

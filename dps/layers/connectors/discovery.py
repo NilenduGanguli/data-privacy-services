@@ -3,7 +3,9 @@
 For every column, each sampled non-null value is run through the M0 detector as a one-field
 document ``{name: text}`` (structural T0 on the column name, T1 patterns and checksums, T2 NER when
 enabled, T4 declared fields / custom recognizers). Per candidate entity ``E``:
-``score(E) = noisy_or(name_score(E), whole_rate(E) × mean_score(E))``; the best ``E`` at or above
+``score(E) = noisy_or(name_score(E), whole_rate(E) × mean_score(E))``, where ``name_score`` comes
+from the column path (``classify_path``: a document leaf is also scored through its parent
+segments, so ``$.contact.addresses[*].pin`` is a postal code); the best ``E`` at or above
 ``policy.detect.min_score`` is the column's entity. Otherwise a ``text``/``lob_text`` column whose
 values carry span findings in at least 5 % of the sampled rows is free text (``FREE_TEXT``, spans
 planned per row at run time). Binary, LOB-binary and ObjectId columns are classified by name only
@@ -52,7 +54,7 @@ from dps import db, jobs
 from dps.connections import ConnectionStoreError, get_connection, load_credentials
 from dps.engine.batch import KEYLESS_METHODS
 from dps.engine.detect.ensemble import Detector
-from dps.engine.detect.structural import classify_key, normalize_key
+from dps.engine.detect.structural import classify_path, normalize_key
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.keys import LINK_ENTITIES
@@ -68,6 +70,7 @@ from dps.jobs_models import (
     SealedSelection,
     Selection,
 )
+from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
     NEVER_TRANSFORMED_KINDS,
     ColumnInfo,
@@ -327,12 +330,22 @@ def classify_columns(
     """One :class:`ColumnClassification` per column of ``shape`` (no values retained)."""
     out: list[ColumnClassification] = []
     for column in shape.columns:
-        by_name_only = column.kind in NEVER_TRANSFORMED_KINDS
-        texts = [] if by_name_only else [to_engine_text(r.get(column.name), column) for r in rows]
+        # M3: pseudo keys (Oracle ROWID), binary data and ObjectIds skip value detectors; values
+        # are read by column name (SQL rows) or by wildcard path (documents)
+        by_name_only = docpaths.forced_keep(column)
+        cells = [] if by_name_only else docpaths.column_values(rows, column)
+        texts = [to_engine_text(v, column) for v in cells]
         values = [t for t in texts if t]
-        present = (
-            sum(1 for r in rows if r.get(column.name) is not None) if by_name_only else len(values)
-        )
+        if by_name_only:
+            present = sum(1 for r in rows if r.get(column.name) is not None)
+        elif docpaths.top_level(column):
+            present = len(values)
+        else:  # a document counts once however many array elements the path matched
+            present = sum(
+                1
+                for r in rows
+                if any(to_engine_text(v, column) for v in docpaths.column_values([r], column))
+            )
         whole: dict[str, list[float]] = defaultdict(list)
         detectors: dict[str, set[str]] = defaultdict(set)
         span_rows = 0
@@ -361,7 +374,13 @@ def classify_columns(
             best_whole = [f.score for f in sensitive if f.locator.whole]
             if best_whole:
                 any_whole.append(max(best_whole))
-        names = {k.entity_type: k.score for k in classify_key(column.path)}
+        # a row locator is not table data: never classified, not even by its name (binary
+        # columns and ObjectIds keep M2's name-only classification, then keep: binary_kept)
+        names = (
+            {}
+            if docpaths.row_locator(column)
+            else {k.entity_type: k.score for k in classify_path(column.path)}
+        )
         scores: dict[str, float] = {}
         for candidate in set(whole) | set(names):
             hits = whole.get(candidate, [])

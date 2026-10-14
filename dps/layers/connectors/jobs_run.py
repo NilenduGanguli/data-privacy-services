@@ -8,9 +8,10 @@ into partitions, storing the value-free :class:`~dps.layers.connectors.targets.R
 
 ``run_partition`` (one fenced partition) reads keyset pages, transforms them in a thread, writes
 each batch with its ledger mark in ONE target transaction and checkpoints after the commit. A
-resumed ``in_place``/``append`` partition takes the target ledger as authoritative (it can be one
-batch ahead of the checkpoint after a crash), so no batch is ever applied twice; ``table`` resumes
-after its checkpoint (idempotent upserts) and ``files`` restarts from its lower bound.
+resumed ledgered partition (``in_place``/``append``, and a ``table`` load whose prepare reported a
+ledger: Oracle key-less sources) takes the target ledger as authoritative (it can be one batch
+ahead of the checkpoint after a crash), so no batch is ever applied twice; other ``table`` loads
+resume after their checkpoint (idempotent upserts) and ``files`` restarts from its lower bound.
 
 **Tabular synthesis** (M5, contract §6.6): a synthesize run with ``options.tabular`` fits the
 engine in ``prepare`` on a bounded sample, previews it through the real transformer, measures and
@@ -50,7 +51,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter, defaultdict
-from collections.abc import AsyncIterator, Awaitable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,6 +93,7 @@ from dps.jobs_models import (
     Selection,
     SpecError,
 )
+from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
     BatchWriter,
     ColumnInfo,
@@ -127,12 +129,18 @@ from dps.layers.connectors.identifier_check import (
 from dps.layers.connectors.partitions import partition_count, plan_partitions
 from dps.layers.connectors.postgres import PkCollision
 from dps.layers.connectors.registry import open_connector, open_target_store
-from dps.layers.connectors.selection import SelectionError, validate_selection
+from dps.layers.connectors.selection import (
+    SelectionError,
+    read_projection,
+    validate_selection,
+)
 from dps.layers.connectors.targets import (
     PrepareFailure,
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    check_projected_methods,
+    column_at,
     kept_attribute,
     pseudonym_columns,
     resolve_target,
@@ -267,6 +275,17 @@ def _policy(ctx: HandlerContext, spec: RunSpec, name: str) -> Policy:
         raise PrepareFailure("policy_invalid", "the run policy is not valid") from None
 
 
+def leaf_restorer(engine: str) -> Callable[[Any, Any], Any] | None:
+    """How a source engine's written leaves get their original driver type back (contract §6.4):
+    MongoDB documents keep each transformed leaf's BSON type (``mongo_docs.restore_leaf``); SQL
+    rows are written through the target column's codec alone (``None``)."""
+    if engine != "mongo":
+        return None
+    from dps.layers.connectors.mongo_docs import restore_leaf
+
+    return restore_leaf
+
+
 def _transformer(
     ctx: HandlerContext,
     spec: RunSpec,
@@ -275,6 +294,7 @@ def _transformer(
     policy: Policy,
     shape: TableShape,
     *,
+    engine: str,
     tabular: TabularSampler | None = None,
     constraints: ConstraintSet | None = None,
 ) -> BatchTransformer:
@@ -301,6 +321,7 @@ def _transformer(
         constraints=constraints,
         max_resample=ctx.settings.copula_max_resample,
         pseudonyms=plan.pseudonyms if spec.mode == "synthesize" else (),
+        leaf_restore=leaf_restorer(engine),
     )
 
 
@@ -437,13 +458,13 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
 
 
 def _check_snapshot(snapshot: ClassificationSnapshot, shape: TableShape) -> None:
+    """Every reviewed column is still there with its kind — matched by **path**: a document's
+    columns share their top-level name (``$.profile.fullName`` and ``$.profile.dob`` are both
+    ``profile``), a SQL column's path is its name's."""
     for col in snapshot.columns:
-        try:
-            live = shape.column(col.name)
-        except KeyError:
-            raise PrepareFailure(
-                "snapshot_stale", f"column {col.path} is no longer in the table"
-            ) from None
+        live = column_at(shape, col.path, col.name)
+        if live is None:
+            raise PrepareFailure("snapshot_stale", f"column {col.path} is no longer in the table")
         if live.kind != col.kind:
             raise PrepareFailure("snapshot_stale", f"column {col.path} changed type since review")
 
@@ -467,17 +488,21 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         if not shape.key:
             raise PrepareFailure("no_key", "the table has no primary key or unique not-null index")
         selection = spec.source.selection
-        validate_selection(selection, cast(Engine, source.engine), shape)
+        engine = cast(Engine, source.engine)
+        validate_selection(selection, engine, shape)
         if spec.options.linked is not None:
             await _prepare_linked(
                 ctx, job, spec, secret, snapshot, policy, source, shape, source_conn, target_conn
             )
             return
-        projection = [
-            c.name
-            for c in shape.columns
-            if not selection.columns or c.name in set(selection.columns) | set(shape.key)
-        ]
+        # what the connector reads (a query's own select list, ``columns``, keys always) is what
+        # is planned, created and written: no column outside it is ever NULL-filled (one name
+        # per top-level field: a MongoDB field has a column per leaf path)
+        projection = list(dict.fromkeys(c.name for c in read_projection(shape, selection, engine)))
+        try:  # submit checked the same projection; re-checked over what is actually read
+            check_projected_methods(snapshot, spec.mode, projection)
+        except SpecError as exc:
+            raise PrepareFailure(exc.code, exc.detail) from None
         reviewed = {c.name for c in snapshot.columns}
         unreviewed = [n for n in projection if n not in reviewed]
         if unreviewed and mode != "in_place" and spec.options.unclassified != "keep":
@@ -566,7 +591,15 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
                 ctx, job, spec, secret, plan, policy, shape, snapshot, source
             )
         transformer = _transformer(
-            ctx, spec, secret, plan, policy, shape, tabular=tabular, constraints=constraints
+            ctx,
+            spec,
+            secret,
+            plan,
+            policy,
+            shape,
+            engine=source.engine,
+            tabular=tabular,
+            constraints=constraints,
         )
         if spec.mode == "synthesize":
             copied = copied_personal_columns(
@@ -593,7 +626,7 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
                 kept=synthetic_kept_columns(
                     plan,
                     snapshot,
-                    [c.name for c in shape.columns],
+                    shape,
                     set(tabular.columns) if tabular is not None else set(),
                 ),
                 detector=ctx.engine.detector(policy, plan.locale),
@@ -626,6 +659,8 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             "truncated": report.truncated,
             "collisions": collisions,
             "existing_rows": report.existing_rows,
+            # a writer may ledger a table load too (Oracle: a key-less source paged on ROWID)
+            "ledger": report.ledger,
         }
         if kept_prewrite is not None:
             plan.prepare["kept_review"] = kept_prewrite
@@ -683,9 +718,8 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             if max_rows
             else None
         )
-        if plan.same_table_append and report.append_upper is not None:
-            bound = report.append_upper
-            upper = (bound,) if upper is None else (min(int(upper[0]), bound),)
+        if plan.same_table_append:
+            upper = append_read_bound(upper, report, shape.key_columns())
         count = partition_count(
             total,
             partition_rows=spec.source.partition_rows or settings.partition_rows,
@@ -740,7 +774,15 @@ async def _prepare_tabular(
         drawn = set(sampler.columns)
         plan.columns = [p for p in plan.columns if p.name not in drawn or p.name not in personal]
         return _transformer(
-            ctx, spec, secret, plan, policy, shape, tabular=sampler, constraints=constraints
+            ctx,
+            spec,
+            secret,
+            plan,
+            policy,
+            shape,
+            engine=source.engine,
+            tabular=sampler,
+            constraints=constraints,
         )
 
     personal = {c.name for c in snapshot.columns if kept_attribute(c, set(shape.key))}
@@ -1006,6 +1048,33 @@ async def _runtime_tabular(
         raise PrepareFailure("incompatible_method", str(exc)) from None
 
 
+def _sort_value(value: Any, column: ColumnInfo) -> Any:
+    """A key value in a form that compares like the database orders it (an ObjectId as its hex
+    text, which the key codec also decodes to)."""
+    return str(value) if column.kind == "object_id" else value
+
+
+def append_read_bound(
+    upper: tuple[Any, ...] | None, report: PrepareReport, columns: list[ColumnInfo]
+) -> tuple[Any, ...] | None:
+    """The read bound of a same-table append: the writer's ``append_upper`` (integer keys) or
+    ``append_upper_key`` (M3: an ObjectId or a text prefix), clipped with the ``max_rows`` bound
+    ``upper``; every key the run appends sorts at or above it, so none is read back."""
+    if report.append_upper is not None:
+        bound: tuple[Any, ...] = (report.append_upper,)
+    elif report.append_upper_key is not None:
+        bound = decode_key(report.append_upper_key, columns)
+    else:
+        return upper
+    if upper is None:
+        return bound
+    first, second = (
+        tuple(_sort_value(v, c) for v, c in zip(key, columns, strict=True))
+        for key in (bound, upper)
+    )
+    return bound if first < second else upper
+
+
 async def _check_same_table_offset(
     source: Connector,
     shape: TableShape,
@@ -1112,7 +1181,15 @@ class RuntimeCache:
                     job, spec, secret, plan, policy, shape
                 )
             transformer = _transformer(
-                ctx, spec, secret, plan, policy, shape, tabular=tabular, constraints=constraints
+                ctx,
+                spec,
+                secret,
+                plan,
+                policy,
+                shape,
+                engine=source.engine,
+                tabular=tabular,
+                constraints=constraints,
             )
         except BaseException:
             if target is not None and target is not source:
@@ -1332,6 +1409,14 @@ async def _fail_partition(
         LEASES_LOST.labels("partition").inc()
 
 
+def _ledgered(plan: RunPlan) -> bool:
+    """Whether the run's writer keeps a write ledger (contract §4.2): ``in_place`` and
+    ``append`` always, and any load whose prepare reported one (Oracle: a key-less ``table``
+    load paged on ROWID). Resume and finalize both follow it, so a ledgered batch whose
+    checkpoint was lost is taken from the ledger, never replayed (M3 G2 B2)."""
+    return plan.target.write_mode in ("in_place", "append") or bool(plan.prepare.get("ledger"))
+
+
 async def _run_partition(
     ctx: HandlerContext, job: JobInternal, rt: RunRuntime, part: ClaimedPartition
 ) -> None:
@@ -1339,7 +1424,7 @@ async def _run_partition(
     cols = rt.shape.key_columns()
     after = decode_key(part.last_key, cols) if part.last_key else None
     batch_no, read_total = part.batch_no, part.rows_written
-    if mode in ("in_place", "append"):
+    if _ledgered(rt.plan):
         mark = await rt.writer.read_ledger(job.id, part.partition_no)
         if (mark.batch_no if mark is not None else 0) < part.batch_no:
             # the ledger commits before the checkpoint, so it is never behind it unless its rows
@@ -1512,6 +1597,13 @@ async def finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _retry(ctx, job, code, type(exc).__name__)
 
 
+def column_key(path: str, name: str) -> str:
+    """A column's key in the post-write checks: its name for a column of a flat row (every SQL
+    column, a top-level MongoDB field), its (wildcard) path for a nested document leaf — so one
+    classified leaf of a MongoDB field never vouches for its unclassified siblings."""
+    return name if path in (f"$.{name}", f"$['{name}']") else path
+
+
 def scan_written(
     rows: list[dict[str, Any]],
     shape: TableShape,
@@ -1524,10 +1616,16 @@ def scan_written(
 ) -> dict[str, Any]:
     """Counts of the post-write sample (value-free): cells with findings per column group.
 
+    ``written`` holds row-level names (SQL columns, top-level MongoDB fields); ``planned`` and
+    ``unclassified`` hold :func:`column_key` keys. A cell is one row and one column; a wildcard
+    document path counts once per document whatever the number of elements it matches (M3).
+    Columns discovery keeps without detection (row locators such as Oracle's ROWID pseudo key,
+    binary data, ObjectIds) are skipped, as discovery skips them.
+
     ``detector_hits``: cells of transformed columns with a finding (expected: format-preserving
     tokens still look like their type). ``kept_column_hits``: cells with a MEDIUM+ finding in
     ``unclassified`` kept columns (the snapshot said *not personal*), and ``kept_columns`` their
-    names — what makes the verification ``review_required``. A numeric column counts only when its
+    keys — what makes the verification ``review_required``. A numeric column counts only when its
     sampled values reach discovery's own bar (one type's ``rate × mean score``, or all types'
     together, at or above ``min_score``): a column of 12-digit ids holds a Verhoeff-valid
     "Aadhaar" one time in ten by chance, which is ``numeric_noise_hits``, not personal data.
@@ -1538,33 +1636,40 @@ def scan_written(
     present: Counter[str] = Counter()
     whole: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     best: dict[str, list[float]] = defaultdict(list)
+    columns = [c for c in shape.columns if c.name in written and not docpaths.forced_keep(c)]
+    kinds = {column_key(c.path, c.name): c.kind for c in columns}
     for row in rows:
-        for column in shape.columns:
-            if column.name not in written:
+        for column in columns:
+            key = column_key(column.path, column.name)
+            texts = [
+                t
+                for t in (to_engine_text(v, column) for v in docpaths.column_values([row], column))
+                if t
+            ]
+            if not texts:
                 continue
-            text = to_engine_text(row.get(column.name), column)
-            if not text:
-                continue
-            present[column.name] += 1
-            findings = detector.detect(data={column.name: text}).findings
+            present[key] += 1
+            findings = [f for t in texts for f in detector.detect(data={column.name: t}).findings]
             if not findings:
                 continue
-            if column.name in planned:
+            if key in planned or column.name in planned:
                 transformed += 1
                 continue
             sensitive = [f for f in findings if f.sensitivity.rank >= Sensitivity.MEDIUM.rank]
             if not sensitive:
                 continue
-            if column.name not in unclassified:
+            if key not in unclassified:
                 declared += 1
                 continue
-            cells[column.name] += 1
-            scores = [f.score for f in sensitive if f.locator.whole]
+            cells[key] += 1
+            per_type: dict[str, float] = {}
             for f in sensitive:
                 if f.locator.whole:
-                    whole[column.name][f.entity_type].append(f.score)
-            if scores:
-                best[column.name].append(max(scores))
+                    per_type[f.entity_type] = max(per_type.get(f.entity_type, 0.0), f.score)
+            for entity, score in per_type.items():
+                whole[key][entity].append(score)
+            if per_type:
+                best[key].append(max(per_type.values()))
 
     def bar(name: str) -> float:
         n = present[name]
@@ -1573,9 +1678,7 @@ def scan_written(
         return max([*rates, mixed])
 
     flagged = {
-        name
-        for name in cells
-        if shape.column(name).kind not in _NUMERIC_KINDS or bar(name) >= min_score
+        name for name in cells if kinds[name] not in _NUMERIC_KINDS or bar(name) >= min_score
     }
     return {
         "rows": len(rows),
@@ -1648,22 +1751,29 @@ def copied_personal_columns(
 def synthetic_kept_columns(
     plan: RunPlan,
     snapshot: ClassificationSnapshot | None,
-    table_columns: Sequence[str],
+    shape: TableShape,
     sampled: set[str],
 ) -> set[str]:
     """D-A: what a synthesize run writes as **source values** although nothing modelled them —
-    written columns that are unclassified (no entity type, not free text), not a key, not
-    planned, not pseudonymised and not drawn by the tabular sampler (``sampled``). In place, every
-    column of the table is output."""
+    written columns of ``shape`` that are unclassified (no entity type, not free text), not a
+    key, not planned, not pseudonymised and not drawn by the tabular sampler (``sampled``). In
+    place, every column of the table is output. Returns :func:`column_key` keys (names of flat
+    columns, paths of nested document leaves: a classified MongoDB leaf never vouches for an
+    unclassified sibling under the same field)."""
     classified = {
-        c.name for c in (snapshot.columns if snapshot else []) if c.entity_type or c.text_column
+        column_key(c.path, c.name)
+        for c in (snapshot.columns if snapshot else [])
+        if c.entity_type or c.text_column
     }
-    written = (
-        set(table_columns)
+    names = (
+        {c.name for c in shape.columns}
         if plan.target.write_mode == "in_place"
         else set(plan.target.write_columns) | set(plan.key)
     )
-    replaced = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms}
+    written = {column_key(c.path, c.name) for c in shape.columns if c.name in names}
+    replaced = {column_key(p.path, p.name) for p in plan.columns} | {
+        column_key(p.path, p.name) for p in plan.pseudonyms
+    }
     return written - classified - set(plan.key) - replaced - sampled
 
 
@@ -1676,7 +1786,9 @@ def kept_review(
     min_score: float,
 ) -> dict[str, Any]:
     """D-A: MEDIUM+ detector findings in synthetic rows' source-kept columns (counts and column
-    names only; the rows are not kept).
+    keys only; the rows are not kept). ``kept`` holds :func:`column_key` keys; a wildcard
+    document path counts once per document, and row locators, binary data and ObjectIds are
+    skipped (discovery never classifies them).
 
     A numeric column counts only when its hits reach discovery's bar (hit rate × mean score at
     or above ``min_score``): a column of 12-digit ids holds a checksum-valid "Aadhaar" by chance.
@@ -1684,26 +1796,35 @@ def kept_review(
     cells: Counter[str] = Counter()
     present: Counter[str] = Counter()
     scores: dict[str, list[float]] = defaultdict(list)
-    columns = {c.name: c for c in shape.columns if c.name in kept}
+    columns = {
+        column_key(c.path, c.name): c
+        for c in shape.columns
+        if column_key(c.path, c.name) in kept and not docpaths.forced_keep(c)
+    }
     for row in rows:
-        for name, column in columns.items():
-            text = to_engine_text(row.get(name), column)
-            if not text:
+        for key, column in columns.items():
+            texts = [
+                t
+                for t in (to_engine_text(v, column) for v in docpaths.column_values([row], column))
+                if t
+            ]
+            if not texts:
                 continue
-            present[name] += 1
+            present[key] += 1
             found = [
                 f
-                for f in detector.detect(data={name: text}).findings
+                for t in texts
+                for f in detector.detect(data={column.name: t}).findings
                 if f.sensitivity.rank >= Sensitivity.MEDIUM.rank
             ]
             if found:
-                cells[name] += 1
-                scores[name].append(max(f.score for f in found))
+                cells[key] += 1
+                scores[key].append(max(f.score for f in found))
     flagged = sorted(
-        name
-        for name in cells
-        if columns[name].kind not in NUMERIC_KINDS
-        or cells[name] / present[name] * (sum(scores[name]) / len(scores[name])) >= min_score
+        key
+        for key in cells
+        if columns[key].kind not in NUMERIC_KINDS
+        or cells[key] / present[key] * (sum(scores[key]) / len(scores[key])) >= min_score
     )
     return {
         "rows": len(rows),
@@ -1741,8 +1862,11 @@ async def _post_sample(
         rows = await connector.sample(shape, Selection(), {}, POST_SAMPLE_ROWS)
     finally:
         await connector.close()
-    # DPS wrote these: planned columns and (synthesize, D-A) keyed pseudonyms
-    planned = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms}
+    # DPS wrote these: planned columns and (synthesize, D-A) keyed pseudonyms (column keys:
+    # names of flat columns, paths of nested document leaves)
+    planned = {column_key(p.path, p.name) for p in plan.columns} | {
+        column_key(p.path, p.name) for p in plan.pseudonyms
+    }
     # in place, every column of the table is output (kept columns too); else what was written
     written = (
         {c.name for c in shape.columns}
@@ -1754,9 +1878,11 @@ async def _post_sample(
     # columns the snapshot calls not personal; a column it does not know (a target-only column)
     # counts as one too
     classified = {
-        c.name for c in (snapshot.columns if snapshot else []) if c.entity_type or c.text_column
+        column_key(c.path, c.name)
+        for c in (snapshot.columns if snapshot else [])
+        if c.entity_type or c.text_column
     }
-    unclassified = {c.name for c in shape.columns} - classified - planned
+    unclassified = {column_key(c.path, c.name) for c in shape.columns} - classified - planned
     # synthesize: columns the tabular sampler drew are synthetic, not source values
     sampled = _sampled_columns(job) if spec.mode == "synthesize" else set()
     unclassified -= sampled
@@ -1778,9 +1904,7 @@ async def _post_sample(
                 kept_review,
                 rows,
                 shape,
-                kept=synthetic_kept_columns(
-                    plan, snapshot, [c.name for c in shape.columns], sampled
-                ),
+                kept=synthetic_kept_columns(plan, snapshot, shape, sampled),
                 detector=detector,
                 min_score=policy.detect.min_score,
             )
@@ -2026,7 +2150,7 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             )
             if ids and _written_identifiers(plan, snapshot):
                 post_sample = {**(post_sample or {}), "identifier_check": ids}
-    if plan is not None and mode in ("in_place", "append") and outcome in ("succeeded", "canceled"):
+    if plan is not None and _ledgered(plan) and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
         cleared = await _best_effort(_clear_ledger(ctx, job, spec, plan, source_conn, target_conn))
         ledger_cleared = "error" not in cleared

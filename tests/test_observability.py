@@ -201,6 +201,36 @@ def test_third_party_loggers_are_capped() -> None:
     configure_logging("DEBUG", json_output=True)
     assert logging.getLogger("pdfminer").level == logging.ERROR
     assert logging.getLogger("httpx").level == logging.WARNING
+    # Driver debug loggers quote whole commands and bodies: pymongo's command log carries every
+    # document of an insert/update (and E11000 replies quote the duplicate key), botocore logs
+    # request bodies. Capped so DPS_LOG_LEVEL=DEBUG never turns them on (M3 log scan, Task 20).
+    for name in ("pymongo", "botocore", "boto3", "s3transfer", "urllib3"):
+        assert logging.getLogger(name).level == logging.WARNING, name
+        assert not logging.getLogger(f"{name}.command").isEnabledFor(logging.INFO), name
+    # sqlglot's parser logs the statement it cannot fully parse ("EXPLAIN PLAN FOR … WHERE n = '…'")
+    # at WARNING and its parse errors at ERROR, literal included: silenced (M3 review r1).
+    assert logging.getLogger("sqlglot").level == logging.CRITICAL
+    assert not logging.getLogger("sqlglot").isEnabledFor(logging.ERROR)
+
+
+def test_m3_connector_fields_are_allow_listed() -> None:
+    event = {
+        "event": "oracle.read",
+        "engine": "oracle",
+        "op": "read",
+        "job_id": "j_1",
+        "partition_no": 3,
+        "batch_no": 4,
+        "rows": 1000,
+        "driver_code": "ORA-00942",
+        "group_id": "g_1",
+        "value": "secret",
+        "dsn": "u/p@h",
+        "uri": "mongodb://u:p@h",
+    }
+    out = _drop_value_fields(None, "info", dict(event))
+    assert "value" not in out and "dsn" not in out and "uri" not in out
+    assert out["driver_code"] == "ORA-00942" and out["rows"] == 1000 and out["engine"] == "oracle"
 
 
 def test_m5_log_fields_are_allowed() -> None:

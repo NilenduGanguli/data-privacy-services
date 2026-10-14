@@ -12,13 +12,14 @@ from dps.engine.policy import MethodSpec
 from dps.engine.synth.surrogates import generate_synthesis_seed
 from dps.engine.transform.crypto import generate_key_material
 from dps.jobs_models import RunSpec, SpecError
-from dps.layers.connectors.base import ColumnInfo, PkGenerate, PkOffset
+from dps.layers.connectors.base import ColumnInfo, ObjectRef, PkGenerate, PkOffset
 from dps.layers.connectors.targets import (
     TYPE_RE,
     PrepareFailure,
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    check_projected_methods,
     created_column_type,
     is_same_table,
     method_for_column,
@@ -225,8 +226,9 @@ def test_kek_snapshot_key_and_text_rules(settings: Settings) -> None:
 
 
 def test_engine_roles_and_in_place_key_rules(settings: Settings) -> None:
-    mongo = make_connection("c_src", engine="mongo", roles=["source"], params={})
-    assert _code(spec(**UAT_TABLE), settings, source_conn=mongo) == ("engine_unavailable", 422)
+    # M3 Task 19: every database engine runs; a file store is never a run source
+    store = make_connection("c_src", engine="s3", roles=["source"], params={"bucket": "dps-in"})
+    assert _code(spec(**UAT_TABLE), settings, source_conn=store) == ("engine_unavailable", 422)
     target_only = make_connection("c_src", roles=["target"])
     assert _code(spec(**UAT_TABLE), settings, source_conn=target_only) == ("connection_role", 422)
     reader = make_connection("c_uat", roles=["source"])
@@ -620,6 +622,83 @@ def _with(snap: Any, name: str, **update: Any) -> Any:
     )
 
 
+def test_an_oracle_source_passes_the_engine_gate(settings: Settings) -> None:
+    """M3 wires the Oracle connector into runs (the M2 gate admitted PostgreSQL only)."""
+    ora = make_connection(
+        "c_src",
+        engine="oracle",
+        roles=["source", "target"],
+        params={"host": "oracle", "port": 1521, "service_name": "FREEPDB1"},
+    )
+    _check(spec(**UAT_TABLE), settings=settings, source_conn=ora)  # raises nothing
+
+
+def test_created_column_types_follow_the_target_engine() -> None:
+    """M2 validated every created type with PostgreSQL's catalogue pattern, so an Oracle target
+    (``NUMBER(12)``) failed ``target_invalid``; the Oracle writer derives its DDL from the closed
+    type table and reads only the ``text`` marker (open question 14)."""
+    num = ColumnInfo(path="$.CUSTOMER_ID", name="CUSTOMER_ID", data_type="NUMBER(12)", kind="int")
+    name = ColumnInfo(
+        path="$.FULL_NAME",
+        name="FULL_NAME",
+        data_type="VARCHAR2(120 CHAR)",
+        kind="text",
+        length=120,
+    )
+    zoned = ColumnInfo(
+        path="$.AT", name="AT", data_type="TIMESTAMP(6) WITH TIME ZONE", kind="timestamp"
+    )
+    snap = accepted_snapshot("c_src", "bank.customers")
+    plan = next(
+        p
+        for p in build_column_plans(
+            snap,
+            mode="obfuscate",
+            write_mode="table",
+            pk_strategy=None,
+            projection=[c.name for c in snap.shape.columns],
+        )
+        if p.name == "full_name"
+    )
+    assert created_column_type(num, None, engine="oracle") == "NUMBER(12)"
+    assert created_column_type(zoned, None, engine="oracle") == "TIMESTAMP(6) WITH TIME ZONE"
+    assert created_column_type(name, plan, engine="oracle") == "text"
+    for bad in ('NUMBER(12); DROP TABLE "X"', "number(12)", "VARCHAR2(10) -- x"):
+        with pytest.raises(PrepareFailure) as err:
+            created_column_type(num.model_copy(update={"data_type": bad}), None, engine="oracle")
+        assert err.value.code == "target_invalid"
+    with pytest.raises(PrepareFailure):  # PostgreSQL keeps its own (lower-case) pattern
+        created_column_type(num, None)
+
+
+def _oracle(snap: Any) -> Any:
+    """``snap`` as discovery stores an Oracle table: upper-case owner, table and column names."""
+    shape = snap.shape
+    columns = [
+        c.model_copy(update={"name": c.name.upper(), "path": f"$.{c.name.upper()}"})
+        for c in shape.columns
+    ]
+    upper_shape = shape.model_copy(
+        update={
+            "object": ObjectRef(owner="BANK", name="CUSTOMERS"),
+            "columns": columns,
+            "key": [k.upper() for k in shape.key],
+        }
+    )
+    classified = [
+        c.model_copy(update={"name": c.name.upper(), "path": f"$.{c.name.upper()}"})
+        for c in snap.columns
+    ]
+    return snap.model_copy(
+        update={
+            "engine": "oracle",
+            "object_ref": "BANK.CUSTOMERS",
+            "shape": upper_shape,
+            "columns": classified,
+        }
+    )
+
+
 def test_in_place_and_same_table_append_refuse_outputs_that_cannot_fit(
     settings: Settings,
 ) -> None:
@@ -992,3 +1071,122 @@ def test_synthesize_never_keeps_a_classified_attribute() -> None:
         unclassified, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
     )
     assert "country_code" not in {p.name for p in plans}
+
+
+ORA_SRC = make_connection(
+    "c_src",
+    engine="oracle",
+    roles=["source", "target"],
+    params={"host": "oracle", "port": 1521, "service_name": "FREEPDB1"},
+)
+
+
+def _ora_spec(selection: dict[str, Any], **target: Any) -> RunSpec:
+    run = spec(**(target or UAT_TABLE), selection=selection)
+    source = run.source.model_copy(update={"object": ObjectRef(owner="BANK", name="CUSTOMERS")})
+    return run.model_copy(update={"source": source})
+
+
+def test_submit_method_checks_cover_what_the_run_reads(settings: Settings) -> None:
+    """M3 G2 B4: the submit-time method checks run over the projection the run itself reads
+    (``read_projection``): an Oracle ``columns`` entry in lower case folds to the same column,
+    so a kept free-text column cannot pass unchecked."""
+    kept_notes = _oracle(
+        accepted_snapshot("c_src", "BANK.CUSTOMERS", notes_method=MethodSpec(method="keep"))
+    )
+    for columns in (["NOTES"], ["notes"], ["Notes"]):
+        run = _ora_spec({"columns": columns})
+        assert _code(run, settings, kept_notes, source_conn=ORA_SRC) == (
+            "text_method_invalid",
+            422,
+        ), columns
+    # a column outside the projection is not checked (it is neither read nor written)
+    _check(_ora_spec({"columns": ["email"]}), kept_notes, settings=settings, source_conn=ORA_SRC)
+    # synthesize mode: a key-needing method on a lower-case Oracle column is refused too
+    det = _oracle(accepted_snapshot("c_src", "BANK.CUSTOMERS"))
+    needs_key = det.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"synthesize_method": MethodSpec(method="det_token")})
+                if c.name == "FULL_NAME"
+                else c
+                for c in det.columns
+            ]
+        }
+    )
+    for columns in (["FULL_NAME"], ["full_name"]):
+        run = _ora_spec({"columns": columns}, **UAT_TABLE, mode="synthesize")
+        assert _code(run, settings, needs_key, source_conn=ORA_SRC) == (
+            "method_needs_key",
+            422,
+        ), columns
+    # a query's own select list is the projection too (PostgreSQL and Oracle alike)
+    pg_notes = accepted_snapshot("c_src", "bank.customers", notes_method=MethodSpec(method="keep"))
+    with_notes = spec(
+        **UAT_TABLE, selection={"query": "SELECT customer_id, notes FROM bank.customers"}
+    )
+    assert _code(with_notes, settings, pg_notes) == ("text_method_invalid", 422)
+    without = spec(
+        **UAT_TABLE, selection={"query": "SELECT customer_id, email FROM bank.customers"}
+    )
+    _check(without, pg_notes, settings=settings)
+
+
+def test_projected_method_checks_are_shared_with_prepare() -> None:
+    """The same rules ``prepare`` re-applies to its final projection (defence in depth)."""
+    kept_notes = accepted_snapshot(
+        "c_src", "bank.customers", notes_method=MethodSpec(method="keep")
+    )
+    with pytest.raises(SpecError) as err:
+        check_projected_methods(kept_notes, "obfuscate", ["customer_id", "notes"])
+    assert err.value.code == "text_method_invalid"
+    check_projected_methods(kept_notes, "obfuscate", ["customer_id", "email"])
+
+
+def test_a_keyless_upsert_is_refused_at_submit(settings: Settings) -> None:
+    """M3 G2 B3: an upsert needs a key to be idempotent; a key-less (ROWID-paged) source would
+    append on every run. Refused at submit; ``truncate_insert`` stays allowed."""
+    snap = _oracle(accepted_snapshot("c_src", "BANK.CUSTOMERS"))
+    keyless = snap.model_copy(
+        update={"shape": snap.shape.model_copy(update={"key_source": "rowid"})}
+    )
+    upsert = _ora_spec({}, **UAT_TABLE, table_load="upsert")
+    assert _code(upsert, settings, keyless, source_conn=ORA_SRC) == ("no_key", 422)
+    _check(_ora_spec({}), keyless, settings=settings, source_conn=ORA_SRC)
+    _check(upsert, snap, settings=settings, source_conn=ORA_SRC)  # keyed: upsert allowed
+
+
+def test_column_plans_carry_the_timestamp_precision() -> None:
+    """M3: an Oracle TIMESTAMP(9) output keeps its nine fractional digits (FF9 text), so a
+    date shift is written and revealed exactly instead of failing ``incompatible_method``."""
+    snap = accepted_snapshot("c_src", "bank.customers")
+    every = [c.name for c in snap.shape.columns]
+    planned = {
+        p.name
+        for p in build_column_plans(
+            snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=every
+        )
+    }
+    name = next(
+        c.name for c in snap.shape.columns if c.name in planned and c.kind in ("date", "timestamp")
+    )
+    shape = snap.shape.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"kind": "timestamp", "ts_precision": 9})
+                if c.name == name
+                else c
+                for c in snap.shape.columns
+            ]
+        }
+    )
+    plans = build_column_plans(
+        snap.model_copy(update={"shape": shape}),
+        mode="obfuscate",
+        write_mode="table",
+        pk_strategy=None,
+        projection=every,
+    )
+    plan = next(p for p in plans if p.name == name)
+    assert plan.ts_precision == 9 and plan.output_column().ts_precision == 9
+    assert all(p.ts_precision is None for p in plans if p.name != name)

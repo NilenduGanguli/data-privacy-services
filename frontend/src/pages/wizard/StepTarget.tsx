@@ -7,7 +7,7 @@ import {
   selectionOf, sourceObject, writtenObject, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, Connection, ConnectionSpec, ConnectionTestResult, WriteMode } from '../../lib/types';
-import { canLeave, targetReady, type WizardAction } from './state';
+import { canLeave, targetReady, transactionsMissing, type WizardAction } from './state';
 
 const BATCHES = [1000, 5000, 20000];
 const STORE_NAME_RE = /^[a-z0-9][a-z0-9-]{1,62}$/;
@@ -94,7 +94,10 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
   const rows = d.rows ?? d.shape?.row_estimate ?? null;
   const key = snapshot?.shape.key ?? d.shape?.key ?? [];
   const keyInfo = key.map((k) => d.shape?.columns.find((c) => c.name === k));
-  const dbTargets = connections.filter((c) => c.roles.includes('target') && ['postgres', 'oracle', 'mongo'].includes(c.engine));
+  // Copy to a table writes through a connection of the source's engine (types are copied from the source)
+  const dbTargets = connections.filter((c) => c.roles.includes('target') && c.engine === d.engine);
+  const mongo = d.engine === 'mongo';
+  const noTx = transactionsMissing({ engine: d.engine, writeMode: d.writeMode, test: d.test });
   const stores = connections.filter((c) => c.roles.includes('target') && (c.engine === 's3' || c.engine === 'pvc'));
   const writable = d.connectionRoles.includes('target');
   const sameTable = d.writeMode === 'append' && d.appendTarget === 'same';
@@ -130,7 +133,7 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
     setChecks(null); setError(null);
     if (mode === 'table') {
       const patch: Partial<WizardDraft> = {};
-      if (!d.targetOwner) patch.targetOwner = d.owner ? `${d.owner}_uat` : '';
+      if (!d.targetOwner && !mongo) patch.targetOwner = d.owner ? `${d.owner}${d.engine === 'oracle' ? '_MASKED' : '_uat'}` : '';
       if (!d.targetTable) patch.targetTable = d.table;
       if (Object.keys(patch).length) set(patch);
     }
@@ -143,7 +146,7 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
     try {
       let id: string | null = null;
       let body: { role: 'target'; object?: string; write_mode?: WriteMode } = { role: 'target' };
-      if (d.writeMode === 'table') { id = d.targetConnectionId; body = { role: 'target', object: `${d.targetOwner.trim()}.${d.targetTable.trim()}`, write_mode: 'table' }; }
+      if (d.writeMode === 'table') { id = d.targetConnectionId; body = { role: 'target', object: fqn({ owner: d.targetOwner.trim() || null, name: d.targetTable.trim() }), write_mode: 'table' }; }
       if (d.writeMode === 'files') { id = d.filesConnectionId; body = { role: 'target' }; }
       if (d.writeMode === 'in_place') { id = d.connectionId; body = { role: 'target', object: src, write_mode: 'in_place' }; }
       if (d.writeMode === 'append') { id = d.connectionId; body = { role: 'target', object: written, write_mode: 'append' }; }
@@ -175,17 +178,29 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
         ))}
       </div>
 
+      {noTx && (
+        <div className="callout amber" style={{ fontSize: 12.5 }} role="alert" data-testid="transactions-unsupported"><b>{d.writeMode === 'in_place' ? 'In place' : 'Append'} needs a MongoDB replica set.</b> {d.connectionName} reported no transactions when it was tested, and DPS writes these modes together with its write ledger in one transaction. Use Copy to a table, or connect to a replica-set member. <span className="mono faint">transactions_unsupported</span></div>
+      )}
+
       {d.writeMode === 'table' && (
         <div className="opts">
           <div className="card-head"><div className="card-title">Copy to a table</div></div>
           <div className="fgrid">
             <div className="full"><label className="lbl" htmlFor="tg-conn">Target connection</label>
               <select className="input" id="tg-conn" value={d.targetConnectionId ?? ''} onChange={(e) => { set({ targetConnectionId: e.target.value || null }); setChecks(null); }}>
-                <option value="">Choose a target connection…</option>
+                <option value="">{dbTargets.length ? 'Choose a target connection…' : `No ${d.engine === 'mongo' ? 'MongoDB' : d.engine === 'oracle' ? 'Oracle' : 'PostgreSQL'} target connection is registered`}</option>
                 {dbTargets.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select></div>
-            <div><label className="lbl" htmlFor="tg-schema">Destination schema</label><input className="input mono" id="tg-schema" value={d.targetOwner} onChange={(e) => set({ targetOwner: e.target.value })} spellCheck={false} /></div>
-            <div><label className="lbl" htmlFor="tg-table">Destination table</label><input className="input mono" id="tg-table" value={d.targetTable} onChange={(e) => set({ targetTable: e.target.value })} spellCheck={false} /></div>
+            {mongo ? (
+              <div><label className="lbl" htmlFor="tg-table">Destination collection</label><input className="input mono" id="tg-table" value={d.targetTable} onChange={(e) => set({ targetTable: e.target.value })} spellCheck={false} />
+                <div className="help">In the target connection&apos;s database.</div></div>
+            ) : (
+              <>
+                <div><label className="lbl" htmlFor="tg-schema">Destination schema</label><input className="input mono" id="tg-schema" value={d.targetOwner} onChange={(e) => set({ targetOwner: e.target.value })} spellCheck={false} />
+                  {d.engine === 'oracle' && <div className="help">The Oracle owner (user) that holds the table.</div>}</div>
+                <div><label className="lbl" htmlFor="tg-table">Destination table</label><input className="input mono" id="tg-table" value={d.targetTable} onChange={(e) => set({ targetTable: e.target.value })} spellCheck={false} /></div>
+              </>
+            )}
             <div><span className="lbl">Load</span><div className="seg" role="group" aria-label="Load method">
               <button type="button" className={d.tableLoad === 'truncate_insert' ? 'on' : ''} aria-pressed={d.tableLoad === 'truncate_insert'} onClick={() => set({ tableLoad: 'truncate_insert' })}>Truncate and insert</button>
               <button type="button" className={d.tableLoad === 'upsert' ? 'on' : ''} aria-pressed={d.tableLoad === 'upsert'} onClick={() => set({ tableLoad: 'upsert' })}>Upsert on {key.join(', ') || 'the key'}</button></div></div>
@@ -259,11 +274,11 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
           <div className="fgrid">
             <div><span className="lbl">Insert into</span><div className="seg" role="group" aria-label="Append destination">
               <button type="button" className={d.appendTarget === 'same' ? 'on' : ''} aria-pressed={d.appendTarget === 'same'} onClick={() => { set({ appendTarget: 'same', ...(d.pkKind === 'token' ? { pkKind: 'offset' as const } : {}) }); dispatch({ type: 'unconfirm' }); }}>Same table · {src}</button>
-              <button type="button" className={d.appendTarget === 'named' ? 'on' : ''} aria-pressed={d.appendTarget === 'named'} onClick={() => { set({ appendTarget: 'named', targetOwner: d.targetOwner || d.owner }); dispatch({ type: 'unconfirm' }); }}>Named table</button></div></div>
+              <button type="button" className={d.appendTarget === 'named' ? 'on' : ''} aria-pressed={d.appendTarget === 'named'} onClick={() => { set({ appendTarget: 'named', targetOwner: mongo ? '' : d.targetOwner || d.owner }); dispatch({ type: 'unconfirm' }); }}>{mongo ? 'Named collection' : 'Named table'}</button></div></div>
             {d.appendTarget === 'named' && (
               <div className="fgrid" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
-                <div><label className="lbl" htmlFor="ap-schema">Destination schema</label><input className="input mono" id="ap-schema" value={d.targetOwner} onChange={(e) => { set({ targetOwner: e.target.value }); dispatch({ type: 'unconfirm' }); }} spellCheck={false} /></div>
-                <div><label className="lbl" htmlFor="ap-table">Destination table</label><input className="input mono" id="ap-table" value={d.targetTable} onChange={(e) => { set({ targetTable: e.target.value }); dispatch({ type: 'unconfirm' }); }} spellCheck={false} /></div>
+                {!mongo && <div><label className="lbl" htmlFor="ap-schema">Destination schema</label><input className="input mono" id="ap-schema" value={d.targetOwner} onChange={(e) => { set({ targetOwner: e.target.value }); dispatch({ type: 'unconfirm' }); }} spellCheck={false} /></div>}
+                <div><label className="lbl" htmlFor="ap-table">{mongo ? 'Destination collection' : 'Destination table'}</label><input className="input mono" id="ap-table" value={d.targetTable} onChange={(e) => { set({ targetTable: e.target.value }); dispatch({ type: 'unconfirm' }); }} spellCheck={false} /></div>
               </div>
             )}
           </div>

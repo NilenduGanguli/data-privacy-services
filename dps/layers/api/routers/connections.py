@@ -60,6 +60,7 @@ from dps.layers.connectors.selection import (
     SelectionError,
     failed_checks,
     parameterize_literals,
+    read_projection,
     selection_checks,
     validate_selection,
 )
@@ -312,10 +313,7 @@ async def describe(
 
 
 def _projection(shape: TableShape, sel: Selection) -> list[ColumnInfo]:
-    if not sel.columns:
-        return shape.columns
-    wanted = set(sel.columns) | set(shape.key)
-    return [c for c in shape.columns if c.name in wanted]
+    return read_projection(shape, sel, "postgres")
 
 
 def runs_as(engine: Engine, shape: TableShape, bound: Selection) -> str | None:
@@ -334,6 +332,8 @@ def runs_as(engine: Engine, shape: TableShape, bound: Selection) -> str | None:
 
 def _bind(sel: Selection, engine: Engine, shape: TableShape | None) -> Selection:
     try:
+        # the text as written first (B6): rendering the bound form cannot hide a refused shape
+        validate_selection(sel, engine, shape)
         bound = parameterize_literals(sel, engine)
         validate_selection(bound, engine, shape)
     except SelectionError as exc:

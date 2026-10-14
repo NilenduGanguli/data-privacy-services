@@ -15,9 +15,16 @@ from dps.engine.batch import reveal_row
 from dps.engine.policy import MethodSpec
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.jobs import JobState
-from dps.jobs_models import ClassificationSnapshot, ObjectRef, RunSpec, SnapshotOverride, SpecError
+from dps.jobs_models import (
+    ClassificationSnapshot,
+    DiscoverSpec,
+    ObjectRef,
+    RunSpec,
+    SnapshotOverride,
+    SpecError,
+)
 from dps.layers.connectors.evidence import get_evidence
-from dps.layers.connectors.submit import submit_run
+from dps.layers.connectors.submit import submit_discover, submit_run
 from dps.worker import HandlerContext
 from tests.connectors.helpers import (
     KEY_NOT_PERSONAL,
@@ -145,6 +152,167 @@ async def test_table_mode_obfuscate_into_a_created_uat_table(
     for entry in ev.pack.reveal_map:
         name = entry["path"][2:]
         assert entry["reveal"] and restored[name] == original[name], name
+
+
+async def test_table_mode_query_subset_writes_only_the_projected_columns(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """M3 G2 B1: a query that names a subset of the columns reads, creates and writes exactly
+    those columns (keys always); no other column exists in the target to be NULL-filled."""
+    obj = await source_pg.customers_table(rows=300, name="q_customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat-q")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "q_customers_uat"},
+    }
+    sel = {"query": f'SELECT customer_id, email, segment FROM "{source_pg.schema}".q_customers'}
+    sub = await submit_run(
+        run_spec(src.id, obj, snap.id, target, source={"selection": sel}),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    job = await drive(handler_ctx, "t1", sub.job.id)
+    assert job.state == JobState.succeeded, job.error_code
+    assert job.progress.rows_written == 300
+    cols = await source_pg.admin.fetch(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = $1 AND table_name = 'q_customers_uat' ORDER BY ordinal_position",
+        source_pg.schema,
+    )
+    assert [r["column_name"] for r in cols] == ["customer_id", "email", "segment"]
+    out = f'"{source_pg.schema}".q_customers_uat'
+    src_t = f'"{source_pg.schema}".q_customers'
+    count = source_pg.admin.fetchval
+    assert await count(f"SELECT count(*) FROM {out}") == 300
+    assert await count(f"SELECT count(*) FROM {out} WHERE email IS NULL") == 0
+    # source vs target (counts only): no source e-mail survived; segment kept as a multiset
+    assert await count(f"SELECT count(*) FROM {out} o JOIN {src_t} s ON o.email = s.email") == 0
+    assert (
+        await count(
+            f"SELECT count(*) FROM (SELECT segment, count(*) FROM {src_t} GROUP BY segment "
+            f"EXCEPT SELECT segment, count(*) FROM {out} GROUP BY segment) d"
+        )
+        == 0
+    )
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None and ev.pack.verification["passed"]
+
+
+async def test_a_query_alias_cannot_put_a_column_under_a_kept_columns_name(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """M3 G2 B5: ``SELECT customer_id, email AS segment`` would give e-mail addresses
+    SEGMENT's reviewed method (``keep``); it is refused at submit (nothing queued or written)
+    and by a discovery job. The plain subset query still runs (the test above)."""
+    obj = await source_pg.customers_table(rows=200, name="a_customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat-a")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    methods = {c.name: c.method.method for c in snap.columns}
+    assert methods["segment"] == "keep" and methods["email"] != "keep"
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "a_customers_uat"},
+    }
+    table = f'"{source_pg.schema}".a_customers'
+    for query in (
+        f"SELECT customer_id, email AS segment FROM {table}",
+        f"SELECT c.customer_id, lower(c.email) AS segment FROM {table} c",
+        f"SELECT * FROM (SELECT customer_id, email AS segment FROM {table}) x",
+    ):
+        with pytest.raises(SpecError) as err:
+            await submit_run(
+                run_spec(src.id, obj, snap.id, target, source={"selection": {"query": query}}),
+                tenant_id="t1",
+                principal=LOCAL_PRINCIPAL,
+                settings=handler_ctx.settings,
+                kek=handler_ctx.kek,
+            )
+        assert (err.value.code, err.value.status) == ("selection_query_alias", 422), query
+    created = await source_pg.admin.fetchval(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = $1 AND table_name = 'a_customers_uat'",
+        source_pg.schema,
+    )
+    assert created == 0
+    disc = await submit_discover(
+        DiscoverSpec(
+            connection_id=src.id,
+            objects=[obj],
+            selection={"query": f"SELECT customer_id, email AS segment FROM {table}"},
+        ),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    failed = await drive(handler_ctx, "t1", disc.id)
+    assert (failed.state, failed.error_code) == (JobState.failed, "selection_query_alias")
+
+
+async def test_a_column_list_alias_or_pivot_cannot_remap_a_column(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """M3 verify r1 B6: ``FROM t AS c(…, segment, …, email)`` renames columns by position, so
+    ``c.segment`` would be the e-mail column under SEGMENT's reviewed method (``keep``) — the
+    verifier wrote 4000/4000 such values on the lane. Column-list aliases and PIVOT/UNPIVOT are
+    refused at submit (422, nothing created) and by a discovery job."""
+    obj = await source_pg.customers_table(rows=200, name="r_customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat-r")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    methods = {c.name: c.method.method for c in snap.columns}
+    assert methods["segment"] == "keep" and methods["email"] != "keep"
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "r_customers_uat"},
+    }
+    table = f'"{source_pg.schema}".r_customers'
+    swapped = (
+        "c(customer_id, full_name, date_of_birth, national_id, id_type, tax_id, segment, "
+        "mobile, country_code, email)"
+    )
+    for query in (
+        f"SELECT c.customer_id, c.segment FROM {table} AS {swapped}",
+        f"SELECT * FROM {table} AS {swapped}",
+        f"SELECT customer_id, segment FROM {table} {swapped}",
+        f"SELECT customer_id, segment FROM {table} UNPIVOT (segment FOR src IN (email, segment))",
+    ):
+        with pytest.raises(SpecError) as err:
+            await submit_run(
+                run_spec(src.id, obj, snap.id, target, source={"selection": {"query": query}}),
+                tenant_id="t1",
+                principal=LOCAL_PRINCIPAL,
+                settings=handler_ctx.settings,
+                kek=handler_ctx.kek,
+            )
+        assert (err.value.code, err.value.status) == ("selection_query_alias", 422), query
+    created = await source_pg.admin.fetchval(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = $1 AND table_name = 'r_customers_uat'",
+        source_pg.schema,
+    )
+    assert created == 0
+    disc = await submit_discover(
+        DiscoverSpec(
+            connection_id=src.id,
+            objects=[obj],
+            selection={"query": f"SELECT c.customer_id, c.segment FROM {table} AS {swapped}"},
+        ),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    failed = await drive(handler_ctx, "t1", disc.id)
+    assert (failed.state, failed.error_code) == (JobState.failed, "selection_query_alias")
 
 
 async def test_in_place_round_trips_with_the_returned_key(

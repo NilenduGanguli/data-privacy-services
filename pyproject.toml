@@ -33,7 +33,13 @@ docs = [
     "pillow>=10.4",
 ]
 db = ["asyncpg>=0.29"]                                     # metadata DB + PostgreSQL connector
-connectors = ["sqlglot>=26", "pyarrow>=16", "boto3>=1.34"]  # M3 appends oracledb, pymongo>=4.13
+connectors = [
+    "sqlglot>=26",
+    "pyarrow>=16",
+    "boto3>=1.34",
+    "oracledb==26.0.0",   # M3: thin mode; the version Wega measured the Oracle pitfalls on
+    "pymongo>=4.13,<5",   # M3: AsyncMongoClient (Motor is deprecated); bson ships with it
+]
 uitest = ["playwright==1.55.0"]  # console check only; matches mcr.microsoft.com/playwright:v1.55.0-noble (M4 pins the same)
 e2e = ["playwright==1.55.0"]                               # console browser check; same pin as M4's [scanner]
 tabular = ["numpy>=2.0", "scipy>=1.13"]                     # M5: Gaussian-copula engine + metrics
@@ -84,6 +90,8 @@ markers = [
     "slow: takes more than 30 s (benchmarks, resume-after-kill)",
     "deploy: needs the kustomize binary (renders deploy/openshift)",
     "ml: needs the optional [synth-ml] extra (MOSTLY AI SDK)",
+    "oracle: needs Oracle Free (DPS_TEST_ORACLE_DSN, default 127.0.0.1:${DPS_ORACLE_PORT:-1522}/FREEPDB1; docker compose --profile oracle up -d oracle)",
+    "mongo: needs the MongoDB replica set (DPS_TEST_MONGO_URI, default 127.0.0.1:${DPS_MONGO_PORT:-27018}; docker compose --profile sources up -d mongo)",
 ]
 
 [tool.mypy]

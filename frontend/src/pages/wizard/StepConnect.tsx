@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { CheckList } from '../../components/CheckList';
 import { api, ApiError, type Auth } from '../../lib/api';
-import { fmtClock, type WizardDraft } from '../../lib/jobs';
+import { connectionFields, connectionParams, secretRefHelp, versionLabel, type FieldDef, type SourceEngine } from '../../lib/engines';
+import { engineName, fmtClock, type WizardDraft } from '../../lib/jobs';
 import type { Connection, ConnectionSpec } from '../../lib/types';
 import type { WizardAction } from './state';
 
@@ -13,16 +14,42 @@ function DbIcon(): JSX.Element {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M3 14h18M9 9v11" /></svg>;
 }
 
+/** The form value of a connection field (M3: Oracle's service name and the engines' options). */
+function fieldValue(d: WizardDraft, key: FieldDef['key']): string {
+  if (key === 'host') return d.host;
+  if (key === 'port') return d.port;
+  if (key === 'database') return d.database;
+  if (key === 'service_name') return d.serviceName;
+  return d.connOptions[key.slice('options.'.length)] ?? '';
+}
+
+function fieldPatch(d: WizardDraft, key: FieldDef['key'], value: string): Partial<WizardDraft> {
+  if (key === 'host') return { host: value };
+  if (key === 'port') return { port: value };
+  if (key === 'database') return { database: value };
+  if (key === 'service_name') return { serviceName: value };
+  return { connOptions: { ...d.connOptions, [key.slice('options.'.length)]: value } };
+}
+
+function fieldValues(d: WizardDraft): Record<string, string> {
+  return Object.fromEntries(connectionFields(d.engine).map((f) => [f.key, fieldValue(d, f.key)]));
+}
+
 /** Validation of a new connection's fields (value-free messages). */
 function newConnectionProblem(d: WizardDraft): string | null {
   if (!NAME_RE.test(d.newName)) return 'Name: lower-case letters, digits and hyphens, 2 to 63 characters.';
-  if (!d.host.trim() || !d.database.trim()) return 'Host and database are required.';
-  const port = Number(d.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return 'Port must be a number from 1 to 65535.';
+  const { problem } = connectionParams(d.engine, fieldValues(d), { secretRef: d.credMode === 'secret_ref' });
+  if (problem) return problem;
   if (d.credMode === 'secret_ref' && !SECRET_RE.test(d.secretRef)) return 'Secret name: lower-case letters, digits and / _ . - only, relative to this tenant\'s secret folder (or under _shared/).';
   if (d.credMode === 'inline' && (!d.username.trim() || !d.password)) return 'Username and password are required.';
   return null;
 }
+
+const ENGINES: { engine: SourceEngine; title: string; text: string; meta: string }[] = [
+  { engine: 'postgres', title: 'PostgreSQL', text: '14 to 16. Reads in read-only transactions with a statement timeout; loads with COPY.', meta: 'Schemas and tables · keyset on the primary key' },
+  { engine: 'oracle', title: 'Oracle Database', text: '19c and 23ai, thin-mode driver. Reads never lock; writes MERGE by key in committed batches.', meta: 'Owners and tables · key-range or ROWID partitions' },
+  { engine: 'mongo', title: 'MongoDB', text: '6 and 7, documents through the JSON engine. In place and Append need a replica set.', meta: 'Databases and collections · keyset on _id' },
+];
 
 /** Step 1 · Connect to the source: engine, saved or new connection, target connection, test. */
 export function StepConnect({ d, dispatch, auth, connections, onConnectionsChanged, onNext }: {
@@ -32,8 +59,10 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [writable, setWritable] = useState(false);
-  const sources = connections.filter((c) => c.engine === 'postgres' && c.roles.includes('source'));
-  const targets = connections.filter((c) => c.roles.includes('target') && ['postgres', 'oracle', 'mongo'].includes(c.engine));
+  const sources = connections.filter((c) => c.engine === d.engine && c.roles.includes('source'));
+  const fields = connectionFields(d.engine);
+  const transactions = d.test?.capabilities?.transactions;
+  const targets = connections.filter((c) => c.roles.includes('target') && c.engine === d.engine);
   const created = d.connMode === 'new' && !!d.connectionId;
   const set = (patch: Partial<WizardDraft>) => dispatch({ type: 'set', patch });
 
@@ -44,8 +73,9 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
       if (d.connMode === 'new' && !id) {
         const problem = newConnectionProblem(d);
         if (problem) { setError(problem); return; }
+        const { params } = connectionParams(d.engine, fieldValues(d), { secretRef: d.credMode === 'secret_ref' });
         const spec: ConnectionSpec = {
-          name: d.newName, engine: 'postgres', params: { host: d.host.trim(), port: Number(d.port), database: d.database.trim() },
+          name: d.newName, engine: d.engine, params,
           ...(d.credMode === 'secret_ref' ? { secret_ref: d.secretRef.trim() } : { credentials: { username: d.username.trim(), password: d.password } }),
           roles: writable ? ['source', 'target'] : ['source'], tags: d.production ? ['production'] : [],
         };
@@ -70,18 +100,13 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
       <div className="card">
         <div className="card-head"><div className="card-title">Engine</div></div>
         <div className="choices c3" role="radiogroup" aria-label="Database engine">
-          <label className="choice"><input type="radio" name="engine" value="postgres" checked={d.engine === 'postgres'} onChange={() => set({ engine: 'postgres' })} /><span className="radio" />
-            <span className="ct"><span className="eng"><DbIcon /></span>PostgreSQL</span>
-            <span className="cd">14 to 16. Reads in read-only transactions with a statement timeout; loads with COPY.</span>
-            <span className="cm">Schemas and tables · keyset on the primary key</span></label>
-          <label className="choice"><input type="radio" name="engine" value="oracle" disabled checked={false} onChange={() => undefined} /><span className="radio" />
-            <span className="ct"><span className="eng"><DbIcon /></span>Oracle Database <span className="chip slate">M3</span></span>
-            <span className="cd">19c and 23ai, thin-mode driver. Arrives with milestone M3.</span>
-            <span className="cm">Owners and tables · key-range or ROWID partitions</span></label>
-          <label className="choice"><input type="radio" name="engine" value="mongo" disabled checked={false} onChange={() => undefined} /><span className="radio" />
-            <span className="ct"><span className="eng"><DbIcon /></span>MongoDB <span className="chip slate">M3</span></span>
-            <span className="cd">6 and 7, documents through the JSON engine. Arrives with milestone M3.</span>
-            <span className="cm">Databases and collections · keyset on _id</span></label>
+          {ENGINES.map((e) => (
+            <label key={e.engine} className="choice"><input type="radio" name="engine" value={e.engine} aria-label={e.engine === 'oracle' ? 'Oracle' : e.title}
+                checked={d.engine === e.engine} onChange={() => dispatch({ type: 'engine', engine: e.engine })} /><span className="radio" />
+              <span className="ct"><span className="eng"><DbIcon /></span>{e.title}</span>
+              <span className="cd">{e.text}</span>
+              <span className="cm">{e.meta}</span></label>
+          ))}
         </div>
       </div>
 
@@ -95,10 +120,10 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
           <div>
             <label className="lbl" htmlFor="saved-conn">Saved connection</label>
             <select className="input" id="saved-conn" value={d.connectionId ?? ''} onChange={(e) => dispatch({ type: 'useSaved', connection: sources.find((c) => c.id === e.target.value) ?? null })}>
-              <option value="">Choose a PostgreSQL source…</option>
+              <option value="">Choose a{d.engine === 'oracle' ? 'n' : ''} {engineName(d.engine)} source…</option>
               {sources.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-            <div className="help">{sources.length ? 'Connections registered for this tenant with the source role. The job stores the connection id; its secret stays in the registry.' : 'No PostgreSQL source is registered yet: choose New connection.'}</div>
+            <div className="help">{sources.length ? 'Connections registered for this tenant with the source role. The job stores the connection id; its secret stays in the registry.' : `No ${engineName(d.engine)} source is registered yet: choose New connection.`}</div>
             {d.connectionId && (
               <div className="rowx" style={{ marginTop: 10 }}>
                 {d.production && <span className="chip amber">production · writes need the admin scope</span>}
@@ -120,16 +145,22 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
               </div>
             </div>
             <div className="fgrid">
-              <div><label className="lbl" htmlFor="nc-name">Connection name</label><input className="input mono" id="nc-name" value={d.newName} onChange={(e) => set({ newName: e.target.value })} placeholder="bank-dev-ro" spellCheck={false} /></div>
-              <div><label className="lbl" htmlFor="nc-db">Database</label><input className="input mono" id="nc-db" value={d.database} onChange={(e) => set({ database: e.target.value })} spellCheck={false} /></div>
-              <div><label className="lbl" htmlFor="nc-host">Host</label><input className="input mono" id="nc-host" value={d.host} onChange={(e) => set({ host: e.target.value })} spellCheck={false} /></div>
-              <div><label className="lbl" htmlFor="nc-port">Port</label><input className="input mono" id="nc-port" value={d.port} onChange={(e) => set({ port: e.target.value })} inputMode="numeric" /></div>
+              <div><label className="lbl" htmlFor="nc-name">Connection name</label><input className="input mono" id="nc-name" value={d.newName} onChange={(e) => set({ newName: e.target.value })} placeholder={d.engine === 'oracle' ? 'crm-ora-ro' : d.engine === 'mongo' ? 'crm-mongo-ro' : 'bank-dev-ro'} spellCheck={false} /></div>
+              {fields.map((f) => {
+                const id = `nc-${f.key.replace('options.', 'opt-').replace('_', '-')}`;
+                return (
+                  <div key={f.key}><label className="lbl" htmlFor={id}>{f.label}{!f.required && <span className="faint"> (optional)</span>}</label>
+                    <input className="input mono" id={id} value={fieldValue(d, f.key)} onChange={(e) => set(fieldPatch(d, f.key, e.target.value))}
+                           placeholder={f.placeholder ?? (f.defaultValue !== undefined ? String(f.defaultValue) : undefined)} inputMode={f.key === 'port' ? 'numeric' : undefined} spellCheck={false} />
+                    {f.help && <div className="help">{f.help}</div>}</div>
+                );
+              })}
             </div>
             {d.credMode === 'secret_ref' ? (
               <div>
                 <label className="lbl" htmlFor="nc-secret">Secret name</label>
                 <input className="input mono" id="nc-secret" value={d.secretRef} onChange={(e) => set({ secretRef: e.target.value })} placeholder="dps/src/bank-dev-ro" spellCheck={false} />
-                <div className="help">The job stores only this name. It is read from this tenant&apos;s own secret folder (<span className="mono">&lt;secret dir&gt;/&lt;tenant&gt;/{d.secretRef.trim() || 'dps/src/bank-dev-ro'}</span>), or from <span className="mono">_shared/…</span> when that secret lists this tenant; another tenant&apos;s secrets cannot be named. Workers read the secret when they start; it never appears in the console, the logs or the evidence pack.</div>
+                <div className="help">{secretRefHelp(d.engine)} It is read from this tenant&apos;s own secret folder (<span className="mono">&lt;secret dir&gt;/&lt;tenant&gt;/{d.secretRef.trim() || 'dps/src/bank-dev-ro'}</span>), or from <span className="mono">_shared/…</span> when that secret lists this tenant; another tenant&apos;s secrets cannot be named.</div>
               </div>
             ) : (
               <div>
@@ -167,7 +198,11 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
         {busy && <div className="skeleton" />}
         {d.test && !busy && (
           <>
-            <CheckList checks={d.test.checks} title="Source" aside={<><span className="mono">{d.connectionName}</span>{d.test.server_version && <span className="faint sm">PostgreSQL {d.test.server_version}</span>}</>} />
+            <CheckList checks={d.test.checks} title="Source" aside={<><span className="mono">{d.connectionName}</span>{d.test.server_version && <span className="faint sm">{versionLabel(d.test.engine, d.test.server_version)}</span>}</>} />
+            {d.engine === 'mongo' && transactions !== undefined && (
+              <div className="rowx" style={{ marginTop: 8 }}><span className={`chip ${transactions ? 'emerald' : 'amber'}`}>transactions: {transactions ? 'yes' : 'no'}</span>
+                <span className="faint sm">In place and append need a replica set.</span></div>
+            )}
             {!d.test.ok && <div className="err" style={{ marginTop: 8 }}>The connection test failed{d.test.error_code ? ` (${d.test.error_code})` : ''}. Fix the connection or its secret and test again.</div>}
             <div className="faint sm" style={{ marginTop: 8 }}>Tested at {fmtClock(d.testedAt)} · no rows were read</div>
           </>

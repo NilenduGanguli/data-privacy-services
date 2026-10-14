@@ -1,6 +1,7 @@
 """Measure the job platform's throughput (spec §7 "Throughput", §11 M2 exit criterion).
 
-    python tools/bench_connector.py --rows 200000 [--mode obfuscate|synthesize]
+    python tools/bench_connector.py --rows 200000 [--engine postgres|oracle|mongo]
+        [--mode obfuscate|synthesize]
         [--write-mode table|in_place|files] [--parallelism 4] [--batch 1000]
         [--partition-rows 50000] [--base-url http://127.0.0.1:8400] [--api-key …]
         [--source-dsn postgresql://…/bank] [--label 1-worker] [--out docs/technical/bench]
@@ -14,6 +15,15 @@ the job and polls ``GET /jobs/{id}`` every second; (5) reads its partitions and 
 /jobs/stats``; (6) prints one line and writes
 ``<out>/m2-<date>-<mode>-<write_mode>-<label>.json``. The measured number is the result: nothing
 is promised. Never prints a value, a key or a DSN; the run's key material is discarded unread.
+
+M3 (``--engine oracle|mongo``, profiles ``oracle`` and ``sources``; ``table`` writes only): the source
+is the demo customer space — Oracle ``CRM.CUSTOMERS`` or MongoDB ``crm.profiles`` — seeded on the
+host to exactly ``--rows`` customers (seed 7, ``tools/seed_oracle.py`` / ``tools/seed_mongo.py``; a
+no-op when it already holds them, so the smoke test's data stays the same); discovery suggests
+methods from the ``gdpr-pseudonymise`` preset; the run writes a scratch target
+(``CRM_MASKED.CUSTOMERS_BENCH`` / ``crm_uat.profiles_bench``, truncate-insert) through the demo
+connections of ``tools/m2_api.M3_CONNECTIONS``; the result is
+``<out>/m3-<date>-<engine>-<mode>-<write_mode>-<label>.json``.
 """
 
 from __future__ import annotations
@@ -34,18 +44,43 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # `python tools/bench_connector.py`
 
 from tools.m2_api import IN_PLACE_REVIEW, ApiError, Client, base_url, source_dsn  # noqa: E402
-from tools.seed_sources import TABLE_DDL, columns_of, generate_rows  # noqa: E402
+from tools.seed_sources import (  # noqa: E402
+    TABLE_DDL,
+    columns_of,
+    default_mongo_uri,
+    default_oracle_dsn,
+    generate_rows,
+)
 
 BENCH_SCHEMA, RESTORE_SCHEMA, TABLE = "bench", "bench_restore", "customers_bench"
 POOL = 5000
 PURPOSE = {"ticket": "BENCH-0001", "legal_basis": "legitimate interest - capacity measurement"}
 DEFAULT_OUT = Path(__file__).resolve().parents[1] / "docs" / "technical" / "bench"
+#: M3 benchmarks: discovery's preset, the seed of the demo customer space, and per engine the
+#: (source connection, source object, target connection, scratch target object).
+M3_POLICY = "gdpr-pseudonymise"
+M3_SEED = 7
+M3_ENGINES: dict[str, tuple[str, dict[str, Any], str, dict[str, Any]]] = {
+    "oracle": (
+        "smoke-ora-src",
+        {"owner": "CRM", "name": "CUSTOMERS"},
+        "smoke-ora-tgt",
+        {"owner": "CRM_MASKED", "name": "CUSTOMERS_BENCH"},
+    ),
+    "mongo": (
+        "smoke-mdb-src",
+        {"owner": None, "name": "profiles"},
+        "smoke-mdb-tgt",
+        {"owner": None, "name": "profiles_bench"},
+    ),
+}
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """The CLI (module docstring)."""
     p = argparse.ArgumentParser(prog="python tools/bench_connector.py")
     p.add_argument("--rows", type=int, default=200_000)
+    p.add_argument("--engine", choices=("postgres", "oracle", "mongo"), default="postgres")
     p.add_argument("--mode", choices=("obfuscate", "synthesize"), default="obfuscate")
     p.add_argument("--write-mode", choices=("table", "in_place", "files"), default="table")
     p.add_argument("--parallelism", type=int, default=4)
@@ -62,6 +97,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         p.error("--rows ≥ 1, --parallelism ≥ 1 and --batch ≥ 10 are required")
     if args.write_mode == "in_place" and args.mode == "synthesize":
         p.error("in-place writes obfuscate (synthetic rows replace nothing in place)")
+    if args.engine != "postgres" and args.write_mode != "table":
+        p.error("--engine oracle|mongo measures table writes only")
     return args
 
 
@@ -110,9 +147,14 @@ def summarise(
     }
 
 
-def result_path(out: Path, mode: str, write_mode: str, label: str, when: datetime) -> Path:
-    """``<out>/m2-<YYYY-MM-DD>-<mode>-<write_mode>-<label>.json``."""
-    return out / f"m2-{when:%Y-%m-%d}-{mode}-{write_mode}-{label}.json"
+def result_path(
+    out: Path, mode: str, write_mode: str, label: str, when: datetime, *, engine: str = "postgres"
+) -> Path:
+    """``<out>/m2-<YYYY-MM-DD>-<mode>-<write_mode>-<label>.json`` (PostgreSQL) or
+    ``<out>/m3-<YYYY-MM-DD>-<engine>-<mode>-<write_mode>-<label>.json``."""
+    if engine == "postgres":
+        return out / f"m2-{when:%Y-%m-%d}-{mode}-{write_mode}-{label}.json"
+    return out / f"m3-{when:%Y-%m-%d}-{engine}-{mode}-{write_mode}-{label}.json"
 
 
 # -- source preparation (host-side, superuser DSN) ------------------------------------------------
@@ -166,7 +208,45 @@ async def _prepare_source(dsn: str, rows: int, *, in_place: bool) -> None:
 # -- the run --------------------------------------------------------------------------------------
 
 
+def _prepare_m3_source(engine: str, rows: int) -> None:
+    """Seed the demo customer space to exactly ``rows`` customers (a no-op when it holds them)."""
+    if engine == "oracle":
+        from tools.seed_oracle import seed_oracle
+
+        seed_oracle(default_oracle_dsn(), rows, M3_SEED)
+    else:
+        from tools.seed_mongo import seed_mongo
+
+        seed_mongo(default_mongo_uri(), rows, M3_SEED)
+
+
+def _m3_spec(args: argparse.Namespace, ids: dict[str, str], snap_id: str) -> dict[str, Any]:
+    src, obj, tgt, tobj = M3_ENGINES[args.engine]
+    return {
+        "mode": args.mode,
+        "snapshot_id": snap_id,
+        "policy": M3_POLICY,
+        "purpose": PURPOSE,
+        "source": {
+            "connection_id": ids[src],
+            "object": obj,
+            "parallelism": args.parallelism,
+            "batch_rows": args.batch,
+            "partition_rows": args.partition_rows,
+        },
+        "target": {
+            "write_mode": "table",
+            "connection_id": ids[tgt],
+            "object": tobj,
+            "table_load": "truncate_insert",
+            "create_if_missing": True,
+        },
+    }
+
+
 def _spec(args: argparse.Namespace, ids: dict[str, str], snap_id: str) -> dict[str, Any]:
+    if args.engine != "postgres":
+        return _m3_spec(args, ids, snap_id)
     in_place = args.write_mode == "in_place"
     source_conn = ids["bank-restore-rw"] if in_place else ids["bank-pg-ro"]
     owner = RESTORE_SCHEMA if in_place else BENCH_SCHEMA
@@ -204,15 +284,23 @@ def _spec(args: argparse.Namespace, ids: dict[str, str], snap_id: str) -> dict[s
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Prepare, discover, run and summarise one benchmark (module docstring)."""
     in_place = args.write_mode == "in_place"
-    asyncio.run(_prepare_source(args.source_dsn or source_dsn(), args.rows, in_place=in_place))
     client = Client(args.base_url or base_url(), args.api_key)
-    ids = client.ensure_connections()
-    snap_id = client.discover_and_accept(
-        ids["bank-restore-rw"] if in_place else ids["bank-pg-ro"],
-        RESTORE_SCHEMA if in_place else BENCH_SCHEMA,
-        TABLE,
-        overrides=IN_PLACE_REVIEW if in_place else None,
-    )
+    if args.engine != "postgres":
+        _prepare_m3_source(args.engine, args.rows)
+        src, obj, tgt, _ = M3_ENGINES[args.engine]
+        ids = client.ensure_connections((src, tgt))
+        snap_id = client.discover_and_accept(
+            ids[src], obj["owner"], obj["name"], policy=M3_POLICY, timeout=600.0
+        )
+    else:
+        asyncio.run(_prepare_source(args.source_dsn or source_dsn(), args.rows, in_place=in_place))
+        ids = client.ensure_connections()
+        snap_id = client.discover_and_accept(
+            ids["bank-restore-rw"] if in_place else ids["bank-pg-ro"],
+            RESTORE_SCHEMA if in_place else BENCH_SCHEMA,
+            TABLE,
+            overrides=IN_PLACE_REVIEW if in_place else None,
+        )
     started = time.monotonic()
     submitted = client.submit_run(_spec(args, ids, snap_id))
     job_id = submitted["job"]["id"]
@@ -228,6 +316,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         partitions,
         started,
         finished,
+        engine=args.engine,
         mode=args.mode,
         write_mode=args.write_mode,
         parallelism=args.parallelism,
@@ -255,11 +344,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - class name only (a message could quote a DSN)
         print(f"benchmark failed ({type(exc).__name__})")
         return 1
-    path = result_path(args.out, args.mode, args.write_mode, args.label, when)
+    path = result_path(args.out, args.mode, args.write_mode, args.label, when, engine=args.engine)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
-        f"{args.mode}/{args.write_mode} {args.label}: {result['rows']} rows in "
+        f"{args.engine} {args.mode}/{args.write_mode} {args.label}: {result['rows']} rows in "
         f"{result['wall_seconds']}s = {result['rows_per_second']} rows/s "
         f"({result['partitions']} partitions, {result['workers_online']} workers, "
         f"p50 {result['partition_rows_per_second']['p50']} rows/s per partition) "

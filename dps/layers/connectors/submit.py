@@ -48,7 +48,7 @@ from dps.jobs_models import (
     SpecError,
     redact_spec,
 )
-from dps.layers.connectors.base import Engine
+from dps.layers.connectors.base import PIPELINE_ENGINES, Engine
 from dps.layers.connectors.selection import (
     SelectionError,
     parameterize_literals,
@@ -77,6 +77,8 @@ def _has_selection(sel: Selection) -> bool:
 
 def _bind(sel: Selection, engine: Engine, shape: Any) -> Selection:
     try:
+        # the text as written first (B6): rendering the bound form cannot hide a refused shape
+        validate_selection(sel, engine, shape)
         bound = parameterize_literals(sel, engine)
         validate_selection(bound, engine, shape)
     except SelectionError as exc:
@@ -116,8 +118,8 @@ async def submit_discover(
     source = await _connection(tenant_id, spec.connection_id, "source")
     if "source" not in source.roles or source.engine not in _TABULAR_ENGINES:
         raise SpecError("connection_role", 422, "discovery reads a source database connection")
-    if source.engine != "postgres":
-        raise SpecError("engine_unavailable", 422, "M2 discovers PostgreSQL sources only")
+    if source.engine not in PIPELINE_ENGINES:
+        raise SpecError("engine_unavailable", 422, "discovery cannot read this engine yet")
     engine = cast(Engine, source.engine)
     selection = _bind(spec.selection, engine, None)
     job_id = new_id(PREFIX_JOB)
