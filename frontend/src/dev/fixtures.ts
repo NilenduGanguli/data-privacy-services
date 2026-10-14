@@ -70,7 +70,7 @@ export function summary(now: Date, days = 14): SummaryOut {
     layers: {
       api: { requests: 1_920_000, by_mode: { obfuscate: 1_363_200, synthesize: 460_800, detect: 96_000 } },
       conn: { rows: 5_470_000, by_engine: { oracle: 3_446_100, postgres: 875_200, mongo: 1_148_700 }, groups: 1 },
-      ui: { scans: 3, pages: 38, fields: 81, risk_flags: 3, submissions: 0, last_scan: { id: 's_01K7ZRB2M4XQ', pages: 38, fields: 81, personas: 20 } },
+      ui: { scans: 3, pages: 38, fields: 104, personal_fields: 81, risk_flags: 3, submissions: 0, last_scan: { id: 's_01K7ZRB2M4XQ', pages: 38, fields: 104, personas: 20 } },
     },
     posture: { sweeps_passed_pct: 100, key_held_by_caller_pct: 100, snapshots_reviewed_pct: 94, policies_latest_pct: 81, score: 93.75 },
     recent_jobs: [

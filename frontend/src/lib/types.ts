@@ -238,7 +238,7 @@ export interface JobBrief {
 export interface SummaryLayers {
   api?: { requests?: number; by_mode?: Record<string, number> };
   conn?: { rows?: number; by_engine?: Record<string, number>; groups?: number };
-  ui?: { scans?: number; pages?: number; fields?: number; risk_flags?: number; submissions?: number; last_scan?: { id?: string; pages?: number; fields?: number; personas?: number } | null };
+  ui?: { scans?: number; pages?: number; fields?: number; personal_fields?: number; risk_flags?: number; submissions?: number; last_scan?: { id?: string; pages?: number; fields?: number; personas?: number } | null };
 }
 export interface SummaryOut {
   tenant_id: string; days: number; generated_at: string; tiles: Record<string, number>; trend: TrendPoint[]; findings_by_type: EntityCount[];

@@ -472,16 +472,16 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
             tenant_id,
             start,
         )
-        risk_flags = 0
+        risk_flags = personal_fields = 0
         if await _has_table(conn, "dps_scan_page"):  # M4's table (absent before the M4 merge)
-            risk_flags = int(
-                await conn.fetchval(
-                    "SELECT coalesce(sum(jsonb_array_length(risk_flags)), 0) "
-                    f"FROM {s}.dps_scan_page WHERE tenant_id = $1 AND created_at >= $2",
-                    tenant_id,
-                    start,
-                )
+            pages_row = await conn.fetchrow(
+                "SELECT coalesce(sum(jsonb_array_length(risk_flags)), 0) AS flags, "
+                "coalesce(sum(personal_field_count), 0) AS personal "
+                f"FROM {s}.dps_scan_page WHERE tenant_id = $1 AND created_at >= $2",
+                tenant_id,
+                start,
             )
+            risk_flags, personal_fields = int(pages_row["flags"]), int(pages_row["personal"])
         scan = await conn.fetchrow(
             f"SELECT id, progress, spec FROM {s}.dps_job WHERE tenant_id = $1 AND kind = 'scan' "
             "ORDER BY created_at DESC LIMIT 1",
@@ -568,6 +568,7 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
                 "scans": sum(int(r["calls"]) for r in scans),
                 "pages": sum(int(r["pages"]) for r in scans),
                 "fields": sum(int(r["fields"]) for r in scans),
+                "personal_fields": personal_fields,  # the scans' pages' personal fields (M4)
                 "risk_flags": risk_flags,
                 "submissions": 0,  # every scan's evidence asserts it (M4, D4)
                 "last_scan": last_scan,

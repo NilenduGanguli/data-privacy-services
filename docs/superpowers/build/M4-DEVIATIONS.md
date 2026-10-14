@@ -1570,3 +1570,11 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   `tests/scanner/test_scope_rail.py::test_the_crawler_never_presents_mixed_pii_fields_as_not_personal`
   (live crawl of a contact-preferences page: `MIXED_PII` + `FREE_TEXT`, neutral fills, no stored
   value, 0 submissions).
+- **M5's Overview counted every inventoried field as a "personal data field"** (`dps/reports.py`
+  `summary`, `frontend/src/pages/Overview.tsx`): M5 built the "Layer 3 · UI scanner" card against
+  M4's contract before M4's tables existed and showed `layers.ui.fields` (every field a scan
+  inventoried: 126 for two demo scans) under the label "personal data fields" (102). The summary now
+  adds `layers.ui.personal_fields` — the window's scan pages' `personal_field_count`, read with the
+  risk flags in one query — and the card shows it (falling back to `fields` for an older server).
+  Tests: `tests/scanner/test_scans_api.py::test_the_overview_counts_the_personal_fields_scans_found`
+  (`KeyError` before), `frontend/src/pages/Overview.test.tsx` (the card printed 140, not 81).

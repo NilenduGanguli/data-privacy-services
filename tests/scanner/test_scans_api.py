@@ -490,6 +490,46 @@ def test_persona_preview_is_reproducible_and_matches_the_scan_persona(api_client
         assert c.post("/api/v1/scans/personas/preview", json=bad, headers=FULL).status_code == 422
 
 
+@pytest.mark.db
+def test_the_overview_counts_the_personal_fields_scans_found(api_client: Any) -> None:
+    """M5's Overview card "Layer 3 · UI scanner" says "N personal data fields": the summary's
+    ``layers.ui.personal_fields`` sums the scans' pages' personal fields in the window, beside
+    ``fields`` (every field inventoried) and ``risk_flags``."""
+    from dps.layers.scanner.models import PageRecord
+    from dps.layers.scanner.store import ScanStore
+
+    c = _client(api_client)
+    scan_id = _create(c).json()["scan"]["id"]
+    settings = c.app.state.settings
+
+    async def seed() -> None:
+        conn = await _connect(settings, "t1")
+        try:
+            store = ScanStore(settings.pg_schema)
+            for n, fields, personal in ((1, 5, 3), (2, 4, 1)):
+                page = PageRecord(
+                    page_no=n,
+                    url_redacted=f"http://127.0.0.1:8410/p{n}",
+                    depth=n - 1,
+                    parent_page_no=None if n == 1 else 1,
+                    status="done",
+                    discovered_via="start" if n == 1 else "link",
+                    template=f"127.0.0.1:8410/p{n}",
+                    form_count=1,
+                    field_count=fields,
+                    personal_field_count=personal,
+                )
+                await store.upsert_page(conn, "t1", scan_id, page)
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+    summary = c.get("/api/v1/reports/summary", params={"days": 7}, headers=FULL)
+    assert summary.status_code == 200, summary.text
+    ui = summary.json()["layers"]["ui"]
+    assert ui["personal_fields"] == 4 and ui["risk_flags"] == 0
+
+
 def _db_key(c: Any, name: str, tenants: list[str], scopes: list[str]) -> dict[str, Any]:
     """Mint an M5 database key through the admin API (the raw key is in this answer only)."""
     r = c.post(

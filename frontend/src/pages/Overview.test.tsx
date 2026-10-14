@@ -51,6 +51,14 @@ describe('OverviewView', () => {
     expect(t).toContain('Last scan: 38 pages, 20 personas, 0 submitted');
   });
 
+  it('counts the personal data fields the scans found, not every field inventoried', () => {
+    const summary = fx.summary(NOW);
+    const ui = { ...summary.layers.ui, fields: 140, personal_fields: 81 };
+    const t2 = text(html(<OverviewView tenant="t" ready={fx.readiness()} summary={{ ...summary, layers: { ...summary.layers, ui } }} degraded={null} policyLabel={null} />));
+    expect(t2).toContain('38 pages · 81 personal data fields · 3 risk flags');
+    expect(t2).not.toContain('140 personal data fields');
+  });
+
   it('lists findings by entity type and the recent jobs with links', () => {
     expect(t).toContain('Findings by entity type');
     expect(out).toContain('<span class="chip rose">PAN_IN</span>');
