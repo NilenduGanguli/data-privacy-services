@@ -144,6 +144,20 @@ Order: WP-H first, then lanes in completion order (expected m3 → m4 → m5). F
 3. Gates: fresh venv, ruff/mypy/pytest, every milestone integration marker on one stack, frontend
    test/build, smoke. Tag the lane's milestone after its verification on main: `v0.4.0-m3`, `v0.5.0-m4`.
 
+#### 2.5.1 M4 pre-merge gate (added 2026-10-14 16:30 — binding for the integrator of lane m4)
+
+Since 2026-10-14 16:25 a separate workflow (`wf_4dc1989c-3ce`, "dps-premerge-m4") is merging **main into `m4`** inside
+`/Users/neelu/document_intelligence/dps-wt-m4` and adapting the scanner (SEC-5, SEC-2, M5 keys/posture/policy refs,
+discovery semantics), with its own review loop. **Before running `git merge --no-ff m4` on main, wait until that work
+is finished**, i.e. until ANY of these is true:
+- the file `/Users/neelu/.cache/dps-build/PRE-m4.done` exists (written when the pre-merge workflow ends), or
+- `/Users/neelu/.cache/dps-build/reports/PRE-m4-review-r*.md` contains `Verdict: PASS` **and** `git -C ../dps-wt-m4 status --short`
+  is empty **and** `../dps-wt-m4/.git` shows no merge in progress.
+Poll with a bounded loop (e.g. `for i in $(seq 1 10); do <check> && break; sleep 55; done`, repeated in successive
+calls). If neither condition holds after 6 hours, proceed as originally planned and say so in the report. After the
+gate opens, the merge of `m4` into main is expected to be small (only main commits made after the pre-merge);
+still run every adaptation check and gate of §2.5.
+
 ### 2.6 WP-F — finish (parallel worktrees branched from integrated main, then merged)
 
 | Stream | Worktree | Content | Acceptance |

@@ -109,7 +109,7 @@ Interpretation rules:
 |---|---|
 | **M5** | lane verification PASS (r3, after fixing real national ids in synthetic targets); **merged into main** `8378da7`; post-merge verification r1 FAIL → fixed → **r2 PASS** (no milestone tag by design; ships as v1.0.0) |
 | **M3** | all tasks done; lane verification r1 FAIL → fixed (incl. M3-B6 alias/UNPIVOT, B3r3, B4r3) → **r2 PASS** (`13875fd`); **merging into main now** (integration adapting MongoDB/Oracle paths to main's D-A and synthesize gates: ObjectId pseudonyms, identifier check by document path, tabular synthesis refused for Mongo) → then post-merge verification → tag `v0.4.0-m3` |
-| **M4** | all tasks done, `m4ui` merged and wired; lane verification r1, r2 FAIL → fixed → **r3 PASS** (`bdbdc0a`); waits for the main lock → merge (incl. SEC-5) → verification → tag `v0.5.0-m4` |
+| **M4** | **pre-merge running** (workflow `wf_4dc1989c-3ce`: main merged into `m4` in its worktree + scanner adapted + reviewed; the main workflow's M4 merge waits for `~/.cache/dps-build/PRE-m4.done`, programme plan §2.5.1); all tasks done, `m4ui` merged and wired; lane verification r1, r2 FAIL → fixed → **r3 PASS** (`bdbdc0a`); waits for the main lock → merge (incl. SEC-5) → verification → tag `v0.5.0-m4` |
 | Finish / release | not started; begins after the M4 merge is verified |
 | GitHub | everything pushed (`tools/dev/autopush.sh`); one held push on 2026-10-14 was a reviewed false positive (`DPS_FPE_ENABLED=true` in HANDOFF), now in `.gitleaksignore` |
 
