@@ -1293,6 +1293,33 @@ async def reap(*, backoff_base: float, backoff_cap: float) -> ReapResult:
     return result
 
 
+async def discard_unannounced(tenant_id: str, job_id: str) -> bool:
+    """Remove a job whose creation answer never reached the caller (S3 review F-14).
+
+    A run job's DPS-generated key is returned once; if the answer fails after the row was
+    committed (a strict audit sink refusing the creation event), nobody holds the key. A job that
+    no worker has claimed yet is deleted — its sealed key and its ``Idempotency-Key`` go with it, so
+    a retry starts a fresh job and gets a key. A job a worker already claimed is canceled instead
+    (the cancel-finalize purges the key). Returns True when the row was deleted.
+    """
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn:
+        tag = await conn.execute(
+            f"DELETE FROM {s}.dps_job WHERE tenant_id = $1 AND id = $2 AND state = 'queued' "
+            "AND locked_by IS NULL AND attempts = 0 AND NOT EXISTS (SELECT 1 FROM "
+            f"{s}.dps_job_partition p WHERE p.job_id = $2)",
+            tenant_id,
+            job_id,
+        )
+    if db.rowcount(tag) > 0:
+        return True
+    try:
+        await cancel(tenant_id, job_id)
+    except JobStateError:
+        pass  # already terminal or finalizing: its key is purged at the terminal state
+    return False
+
+
 async def cancel(tenant_id: str, job_id: str) -> Job | None:
     """Cancel (contract §3.1): run jobs get a cancel-finalize; other kinds become ``canceled`` now.
 

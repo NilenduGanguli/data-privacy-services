@@ -13,6 +13,7 @@ says "all checks passed".
 
 from __future__ import annotations
 
+import contextlib
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Request, Response
@@ -159,7 +160,17 @@ async def run(body: RunSpec, request: Request, response: Response) -> dict[str, 
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "job.create", exc) from None
-    audit_action(request, action="job.create", status=200 if sub.replay else 202, job_id=sub.job.id)
+    try:
+        audit_action(
+            request, action="job.create", status=200 if sub.replay else 202, job_id=sub.job.id
+        )
+    except DpsHttpError as exc:
+        # F-14: the key is returned once; a job whose answer fails is never left holding it
+        if not sub.replay:
+            await jobs.discard_unannounced(tenant_of(request), sub.job.id)
+        with contextlib.suppress(DpsHttpError):  # best effort: the sink may still be full
+            rejected(request, "job.create", exc, job_id=sub.job.id)
+        raise
     if sub.replay:
         return _replayed(response, sub.job)
     out: dict[str, Any] = {"job": _job(sub.job)}

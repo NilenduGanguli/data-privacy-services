@@ -95,6 +95,21 @@ async def create_group(
     return _row(row), key, seed
 
 
+async def discard_group(tenant_id: str, group_id: str) -> bool:
+    """Delete a group whose creation answer never reached the caller (S3 review F-14): its key and
+    seed were returned nowhere else, so the row would only name a key nobody holds. Only a group no
+    job references is deleted."""
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn:
+        tag = await conn.execute(
+            f"DELETE FROM {s}.dps_job_group g WHERE g.tenant_id = $1 AND g.id = $2 "
+            f"AND NOT EXISTS (SELECT 1 FROM {s}.dps_job j WHERE j.group_id = $2)",
+            tenant_id,
+            group_id,
+        )
+    return db.rowcount(tag) > 0
+
+
 async def get_group(tenant_id: str, group_id: str) -> JobGroup | None:
     """The tenant's group (RLS-scoped), or None."""
     async with db.acquire(tenant_id) as conn:

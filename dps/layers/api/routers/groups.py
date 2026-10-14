@@ -8,6 +8,7 @@ no-store``); DPS stores only the key id and the seed's fingerprint.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -16,12 +17,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from dps import jobs
 from dps.auth import require_scope
 from dps.connections import Connection, get_connection
-from dps.groups import GROUP_NAME_RE, create_group, get_group, list_groups, save_last_check
+from dps.groups import (
+    GROUP_NAME_RE,
+    create_group,
+    discard_group,
+    get_group,
+    list_groups,
+    save_last_check,
+)
 from dps.jobs import JobKind
 from dps.jobs_models import ClassificationSnapshot
 from dps.layers.api.deps import (
     audit_action,
-    audited,
     guarded,
     kek_of,
     page_args,
@@ -60,19 +67,27 @@ class GroupRequest(BaseModel):
 async def create(body: GroupRequest, request: Request, response: Response) -> dict[str, Any]:
     """Create a group; the key material and seed are in this answer and nowhere else."""
 
-    async def run() -> dict[str, Any]:
+    tenant = tenant_of(request)
+    try:
         group, key, seed = await create_group(
-            tenant_of(request), body.name, created_by=principal_of(request).key_id
+            tenant, body.name, created_by=principal_of(request).key_id
         )
-        return {
-            "group": group.model_dump(mode="json"),
-            "key_material": key.model_dump(mode="json"),
-            "synthesis_seed": seed.model_dump(mode="json"),
-        }
-
-    out = await audited(request, "group.create", run(), status=201)
+    except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
+        raise rejected(request, "group.create", exc) from None
+    try:
+        audit_action(request, action="group.create", status=201)
+    except DpsHttpError as exc:
+        # F-14: the key and seed are returned once; a group whose answer fails is removed
+        await discard_group(tenant, group.id)
+        with contextlib.suppress(DpsHttpError):  # best effort: the sink may still be full
+            rejected(request, "group.create", exc)
+        raise
     response.headers["Cache-Control"] = "no-store"
-    return out
+    return {
+        "group": group.model_dump(mode="json"),
+        "key_material": key.model_dump(mode="json"),
+        "synthesis_seed": seed.model_dump(mode="json"),
+    }
 
 
 @router.get("/job-groups", dependencies=_JOBS)

@@ -56,7 +56,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-11 | MED | Tokenization oracle under DPS's bank credentials (any profile string, any caller with `obfuscate`) | see §3.11 | `tests/security/test_tokenizer_profiles.py` | fixed + test |
 | F-12 | MED | Synthesize mode emitted the bank's real tokens as "synthetic" values | see §3.12 | `tests/security/test_synthesize_keyless.py` | fixed + test |
 | F-13 | MED | Retry and job-group admission bound only the public `kid`, not the DEK | see §3.13 | `tests/security/test_key_binding.py` | fixed + test |
-| F-14 | MED | The once-only job/group key was lost when the answer failed after commit (strict audit refusal) | see §3.14 | — | pending |
+| F-14 | MED | The once-only job/group key was lost when the answer failed after commit (strict audit refusal) | see §3.14 | `tests/api/test_once_only_key_custody.py` | fixed + test |
 | F-15 | LOW | S13 log-scan test missing | S13 | `tests/test_no_values_in_logs_m5.py` | fixed |
 | F-16 | LOW | S2 secret reprs | S2 | `tests/security/test_secrets_hygiene.py` | fixed |
 | F-17 | LOW | S1 residual echo in 422/400 bodies | S1 | `tests/security/test_validation_errors.py` | fixed |
@@ -163,6 +163,17 @@ spec (`consistency.kcv`); `seal_retry_secret` refuses key material whose DEK doe
 `create_group` stores the group key's kcv (migration 046) and `_check_group` compares it in constant
 time (409 `group_key_mismatch`). Jobs and groups created before keep the kid-only rule. With F-01, a
 retry of a production `in_place`/`append` job also needs `admin` again.
+
+### 3.14 F-14 — a failed creation answer leaves no keyed row behind
+
+If the creation audit of `POST /jobs/run` or `POST /job-groups` is refused after the row was committed
+(strict sink: 503 `audit_unavailable`), the route removes the row before answering:
+`jobs.discard_unannounced` deletes an unclaimed queued job (sealed key and `Idempotency-Key` with
+it — a retry with the same key creates a fresh job and returns its key) or cancels a claimed one
+(the cancel-finalize purges the key); `groups.discard_group` deletes the new group. A best-effort
+`error` audit records the rollback when the sink takes it. Residual: a response lost in transit is
+invisible to the server — callers who cannot afford a lost key pass their own key material or seed
+(documented in the contract); a two-phase start was not added.
 
 ### 3.19 F-19 — token caches keyed by profile
 

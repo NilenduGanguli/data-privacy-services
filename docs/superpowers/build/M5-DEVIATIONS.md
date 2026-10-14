@@ -1203,3 +1203,7 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   the engine (`tools/reveal_rows.py`) pass the cache through unchanged.
 - **F-13 (kcv binding):** `targets.GroupKeys` became `(kid, seed fingerprint, kcv | None)`;
   migration `046_job_group_kcv.sql` (M5 range). `tests/db/test_groups.py` lists the new column.
+- **F-14 (once-only key):** compensation after commit (delete the unclaimed job or the group, else
+  cancel) rather than auditing inside the committing transaction — the audit sink is a batched
+  background writer, so its refusal is only known when `write` is called. The group create route no
+  longer uses `deps.audited` (it needs the group id to roll back).
