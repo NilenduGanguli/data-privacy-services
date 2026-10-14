@@ -95,14 +95,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def ensure_group(client: Client, name: str) -> dict[str, Any]:
     """The demo job group with its key and seed: from ``var/demo/<name>.json`` when present (the
-    key is returned once), else created; a name taken without its file gets a numbered suffix."""
+    key is returned once), else created; a name taken without its file gets a numbered suffix.
+
+    A saved file whose group the server no longer has (404: the metadata database was reset, e.g.
+    ``docker compose down -v``) is left as it is — it holds the only copy of that group's key — and
+    the next numbered name is tried (A-N1). Any other error stops the demo."""
     DEMO_DIR.mkdir(parents=True, exist_ok=True)
     for n in range(0, 100):
         candidate = name if n == 0 else f"{name}-{n}"
         path = DEMO_DIR / f"{candidate}.json"
         if path.is_file():
             saved: dict[str, Any] = json.loads(path.read_text("utf-8"))
-            client.call("GET", f"/api/v1/job-groups/{saved['group']['id']}", "job group")
+            try:
+                client.call("GET", f"/api/v1/job-groups/{saved['group']['id']}", "job group")
+            except ApiError as exc:
+                if exc.status != 404:
+                    raise
+                print(
+                    f"note: var/demo/{path.name} names a job group this stack no longer has "
+                    "(kept as it is); trying the next name",
+                    file=sys.stderr,
+                )
+                continue
             return saved
         try:
             made = client.call(
