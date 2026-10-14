@@ -4,7 +4,7 @@
 > programme exactly where it stopped, without the original chat. It complements, and points into, the
 > binding documents listed in §2. **Do not trust the snapshot in §4 blindly — run §3 first.**
 
-**Last updated:** 2026-10-13 23:59 IST by the orchestrating session (chat `d1f0660d…`, workflow `wf_c77f2c08-9ae`, running ~9 h, ~75 agents finished, none lost).
+**Last updated:** 2026-10-14 16:05 IST by the orchestrating session (workflow `wf_c77f2c08-9ae`, running 25 h, 93 agents finished, none lost).
 **Goal:** tag `v1.0.0` on `main` with every Definition-of-Done gate green (M0–M5 shipped).
 
 ---
@@ -101,7 +101,23 @@ Interpretation rules:
   ships as `v1.0.0`).
 - If `docker compose ls` fails: `open -a Docker` and wait for `docker info`.
 
-## 4. Snapshot as of 2026-10-13 23:59 IST (re-check with §3)
+## 4. Snapshot (re-check with §3)
+
+### 4.0 Latest progress — 2026-10-14 16:05 IST (newest first; the table in 4.1 is the older detailed snapshot)
+
+| Stream | State |
+|---|---|
+| **M5** | lane verification PASS (r3, after fixing real national ids in synthetic targets); **merged into main** `8378da7`; post-merge verification r1 FAIL → fixed → **r2 PASS** (no milestone tag by design; ships as v1.0.0) |
+| **M3** | all tasks done; lane verification r1 FAIL → fixed (incl. M3-B6 alias/UNPIVOT, B3r3, B4r3) → **r2 PASS** (`13875fd`); **merging into main now** (integration adapting MongoDB/Oracle paths to main's D-A and synthesize gates: ObjectId pseudonyms, identifier check by document path, tabular synthesis refused for Mongo) → then post-merge verification → tag `v0.4.0-m3` |
+| **M4** | all tasks done, `m4ui` merged and wired; lane verification r1, r2 FAIL → fixed → **r3 PASS** (`bdbdc0a`); waits for the main lock → merge (incl. SEC-5) → verification → tag `v0.5.0-m4` |
+| Finish / release | not started; begins after the M4 merge is verified |
+| GitHub | everything pushed (`tools/dev/autopush.sh`); one held push on 2026-10-14 was a reviewed false positive (`DPS_FPE_ENABLED=true` in HANDOFF), now in `.gitleaksignore` |
+
+Measured durations so far (for planning): a lane verification round 1–2 h; the M5 merge took ~10 h end to end
+(its post-merge fix round alone ~7.5 h). Expect the M3 and M4 merges to take 3–10 h each, the finish stage 8–14 h,
+release + final verification 3–8 h.
+
+### 4.1 Detailed snapshot as of 2026-10-13 23:59 IST
 
 | Stream | Done (branch head) | In progress now | Still to do |
 |---|---|---|---|
