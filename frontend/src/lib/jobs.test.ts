@@ -408,8 +408,9 @@ describe('MongoDB write modes need transactions (M3 Task 18b)', () => {
     const tx = { ...noTx, capabilities: { transactions: true } };
     const base = { engine: 'mongo' as const, owner: '', table: 'profiles', selMode: 'mongo' as const, connectionRoles: ['source', 'target'] as ('source' | 'target')[] };
     expect(targetReady(draft({ ...base, test: noTx, writeMode: 'in_place' }))).toBe(false);
-    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'append', appendTarget: 'same' }))).toBe(false);
-    expect(targetReady(draft({ ...base, test: tx, writeMode: 'append', appendTarget: 'same' }))).toBe(true);
+    // an append needs a complete key strategy as well (offsetProblem); `generate` isolates the transactions rule
+    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'append', appendTarget: 'same', pkKind: 'generate' }))).toBe(false);
+    expect(targetReady(draft({ ...base, test: tx, writeMode: 'append', appendTarget: 'same', pkKind: 'generate' }))).toBe(true);
     expect(targetReady(draft({ ...base, test: noTx, writeMode: 'table', targetTable: 'profiles_uat' }))).toBe(true);
     expect(transactionsMissing(draft({ ...base, test: noTx, writeMode: 'in_place' }))).toBe(true);
     expect(transactionsMissing(draft({ test: noTx, writeMode: 'in_place' }))).toBe(false);   // PostgreSQL: not a MongoDB rule
