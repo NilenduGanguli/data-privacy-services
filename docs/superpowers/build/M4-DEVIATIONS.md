@@ -1533,3 +1533,17 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   routes authenticate through `require_scope("scan")`, which M5's `ChainKeyStore` (static, then
   database keys) already serves, and `jobs.create_job` already applies M5's per-tenant `max_queued`
   to scans — no code change was needed.
+- **M5 posture rules for the browser-worker role** (`dps/posture.py`, `dps/browser_worker.py`): the
+  browser-worker already ran `assert_production_posture`, so every M5 rule (secrets as files, KEK,
+  TLS-only egress, strict verification) applied to it — but so did the app's: with the configuration
+  the app and the worker share (OCR on Azure, the tokenizer enabled, explicit CORS) a browser-worker
+  without the API keys, the OCR key and the tokenizer token (it runs none of them; M5's OpenShift
+  layout gives it no such mounts) refused to boot in staging/prod. `posture_problems` /
+  `assert_production_posture` take `role` (`app` default, `worker`, `browser-worker`); the
+  browser-worker passes `role="browser-worker"`, which skips `DPS_API_KEYS`, the two OCR rules,
+  `DPS_TOKENIZER_TOKEN_FILE` and `DPS_CORS_ORIGINS` and keeps every other M2/M4/M5 rule. The app's and
+  the worker's checks are unchanged (`role` defaults to `app`; `posture_report` is unchanged).
+  Test: `tests/scanner/test_browser_worker_posture.py` (good production without the app's secrets
+  passes the role and still fails the app's rules; 15 single-rule violations refused by name and
+  value-free; a literal secret env var refused; `amain` checks the role before the database) —
+  every case failed before (`role` unknown; `amain` refused for the OCR key).

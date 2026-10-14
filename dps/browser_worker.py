@@ -25,7 +25,7 @@ from dps.jobs import JobKind, JobPhase
 from dps.layers.scanner import scan_finalize_job, scan_job
 from dps.layers.scanner.browser import close_browser, get_browser
 from dps.observability import READINESS, configure_logging, get_logger, metrics_payload
-from dps.posture import assert_production_posture
+from dps.posture import BROWSER_WORKER, assert_production_posture
 from dps.secrets import load_kek
 from dps.worker import Consumer, HandlerContext, build_context
 
@@ -96,7 +96,7 @@ async def amain(settings: Settings | None = None) -> None:
     """Posture, database and KEK checks, Chromium, then claim scans until SIGTERM."""
     settings = settings or get_settings()
     configure_logging(settings.log_level, json_output=settings.env != "local")
-    assert_production_posture(settings)
+    assert_production_posture(settings, role=BROWSER_WORKER)  # M4 + M5 rules of this role
     if not db_configured(settings):
         raise SystemExit("browser-worker needs the metadata database (DPS_PG_HOST)")
     if load_kek(settings) is None:

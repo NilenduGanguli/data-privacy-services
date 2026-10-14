@@ -561,7 +561,13 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   (a literal `DPS_JOB_KEK` env var is refused), `DPS_INLINE_SECRETS_ALLOWED=false`,
   `DPS_RLS_ENABLED=true`, `DPS_MIGRATIONS_MODE=verify`, `DPS_AUDIT_STRICT=true`,
   `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`. M4 adds (always, database or not): `DPS_SCAN_STORE_UNMASKED_ORIGINALS=false`
-  and `DPS_BROWSER_HEADLESS=true`.
+  and `DPS_BROWSER_HEADLESS=true`. Each process checks its own role
+  (`assert_production_posture(settings, role=…)`): the **browser-worker** (`role="browser-worker"`)
+  gets every rule here and in the M5 list below except those of components it never runs and whose
+  secrets it does not mount — `DPS_API_KEYS`, `DPS_CORS_ORIGINS`, the OCR provider/key and
+  `DPS_TOKENIZER_TOKEN_FILE` — so its deployment can share the app's ConfigMap without those mounts.
+  The app and the worker keep every rule (the worker is checked as `app`: it still needs
+  `DPS_API_KEYS_FILE` mounted in staging/prod).
 - **M5 posture** (`dps/posture.py`, same guard): secrets only as mounted files — a literal
   `DPS_JOB_KEK`, `DPS_JOB_KEK_PREVIOUS`, `DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`/`_SECRET`,
   `DPS_PG_PASSWORD`, `DPS_PG_WORKER_PASSWORD`, `DPS_PG_MIGRATION_PASSWORD`, `DPS_TOKENIZER_TOKEN`,
