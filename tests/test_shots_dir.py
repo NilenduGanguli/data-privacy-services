@@ -56,3 +56,9 @@ def test_every_console_harness_takes_its_folder_from_shots_dir() -> None:
         source = (ROOT / rel).read_text(encoding="utf-8")
         assert "shots_dir(" in source, rel
         assert not tracked_dir.search(source), f"{rel} still writes under docs/superpowers/build"
+
+
+def test_the_ignore_rule_hides_no_tracked_source() -> None:
+    # `reports/` unanchored would also hide dps/layers/reports/ (the evidence PDF code).
+    assert _git("ls-files", "-i", "-c", "--exclude-standard").stdout == ""
+    assert _git("check-ignore", "-q", "dps/layers/reports/pdf.py").returncode == 1

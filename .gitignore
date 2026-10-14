@@ -36,4 +36,4 @@ tests/eval/private/
 # Local runtime data (artefacts, exports)
 var/
 # Build output of local runs: console screenshots (tools/shots.py), flow and demo reports
-reports/
+/reports/
