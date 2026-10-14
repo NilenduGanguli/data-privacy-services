@@ -80,13 +80,18 @@ function Privacy({ p, rowsWritten }: { p: PrivacyBlock; rowsWritten: number }): 
   const qi = p.qi_uniqueness;
   const mia = p.membership_inference;
   const redraws = p.exact_row_resamples_run ?? p.exact_row_resamples ?? 0;
+  const matches = p.exact_row_matches ?? 0;
   const qiOk = qi ? qi.synthetic <= qi.source && qi.unique_overlap === 0 : false;
   return (
     <div className="pm">
       <div>
-        <div className="top"><span className="l">Exact-row matches</span><span className={`chip ${p.enforced ? 'emerald' : 'amber'}`}>{p.enforced ? 'enforced' : 'measured'}</span></div>
-        <div className="v">{count(p.exact_row_matches ?? 0)} of {count(rowsWritten)}</div>
-        <p>No synthetic row equals a source row on all modelled columns. The engine rejected and redrew {count(redraws)} {redraws === 1 ? 'row' : 'rows'} before writing.</p>
+        <div className="top"><span className="l">Exact-row matches</span>{matches > 0
+          ? <span className="chip rose">{count(matches)} found</span>
+          : <span className={`chip ${p.enforced ? 'emerald' : 'amber'}`}>{p.enforced ? 'enforced' : 'measured'}</span>}</div>
+        <div className="v">{count(matches)} of {count(rowsWritten)}</div>
+        <p>{matches > 0
+          ? `${count(matches)} synthetic ${matches === 1 ? 'row equals' : 'rows equal'} a source row on all modelled columns.`
+          : 'No synthetic row equals a source row on all modelled columns.'} The engine rejected and redrew {count(redraws)} {redraws === 1 ? 'row' : 'rows'} before writing.</p>
       </div>
       <div>
         <div className="top"><span className="l">Nearest-neighbour distance ratio</span>
