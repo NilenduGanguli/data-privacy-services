@@ -1469,6 +1469,30 @@ Open (not fixed here):
   `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle and mongo" tests/test_no_values_in_logs_m3.py`
   1 passed.
 
+- **Review G6 round 1 fix (`M3-G6-review-r1.md`): the `sqlglot` logger is capped at CRITICAL.**
+  `selection._parse` hands a refused statement to sqlglot; for `EXPLAIN PLAN FOR SELECT … WHERE
+  n = '<lit>'` sqlglot's `parser._warn_unsupported` logs the whole SQL text, literal included, at
+  WARNING through stdlib `logging` (and `parser.check_errors` logs `str(error)`, which quotes the
+  SQL, at ERROR) — raw on stderr, past `_drop_value_fields`. The reviewer reproduced it through the
+  lane API (`POST /connections/{id}/count` → 422 `selection_not_select`, the literal in
+  `docker compose logs app`) for Oracle and PostgreSQL; the PostgreSQL half predates M3 and `main`
+  has no cap either. The sentinel run above never exercised the selection path. Test-first:
+  `test_third_party_loggers_are_capped` asserts `sqlglot` at CRITICAL (sqlglot never logs at
+  CRITICAL, so it is silent), and the new offline
+  `test_a_refused_selection_never_logs_its_literal[oracle|postgres]` runs `validate_selection` on
+  the `EXPLAIN PLAN FOR … 'SENTINEL-SEL'` query under the production JSON/DEBUG config plus a root
+  handler and asserts `selection_not_select` with no sentinel in the captured stdout/stderr/root
+  text or in the error. All three failed before the cap (the sqlglot WARNING quoted
+  `SENTINEL-SEL`) and pass with it. Live re-check on the rebuilt lane stack: `POST
+  /api/v1/connections/{id}/count` with an `EXPLAIN …` query carrying a sentinel literal on
+  `smoke-ora-src` and on the PG source `bank-restore-rw` → 422 `selection_not_select` each, no
+  sentinel in the bodies, 0 sentinel lines in `docker compose logs app`/`worker` (the 2 app lines
+  are the `audit` events). Gates: `ruff format` (303 files unchanged) · `ruff check` · `mypy dps`
+  (109 files) · `pytest -q` 2088 passed, 8 skipped (OCR mock, tesseract binary, `[ner]` extra; lane
+  stack with `oracle` + `sources` up) · `DPS_TEST_REQUIRE_SERVICES=1 pytest -q
+  tests/test_no_values_in_logs_m3.py tests/test_observability.py` 38 passed ·
+  `smoke_test.py --m3` 39 passed, 2 skipped (OCR not ready).
+
 ## Task 21 — smoke `--m3`, benchmark `--engine`, HANDOFF, README, API reference
 
 - **Secret refs and connection names.** The plan names the refs `local/oracle-crm-ro`, … ; the

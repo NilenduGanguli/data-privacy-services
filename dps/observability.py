@@ -147,6 +147,10 @@ _THIRD_PARTY_LEVELS = (
     ("boto3", logging.WARNING),
     ("s3transfer", logging.WARNING),
     ("urllib3", logging.WARNING),
+    # sqlglot logs the statement it falls back to parsing as a Command ("EXPLAIN PLAN FOR … WHERE
+    # n = '…'") at WARNING, and parser.check_errors logs str(error) — which quotes the SQL — at
+    # ERROR, so a refused selection's literal would reach stderr: silenced entirely.
+    ("sqlglot", logging.CRITICAL),
 )
 
 

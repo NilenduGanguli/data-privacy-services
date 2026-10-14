@@ -909,7 +909,10 @@ persona surrogates are anchor-dependent and are reported as informational in the
 and `urllib3` at WARNING (with `httpx`/`httpcore` and the document libraries): pymongo's DEBUG
 command log writes every document of a write and the server's E11000 reply (which quotes the
 duplicate key), botocore's writes request bodies. Found by the M3 log scan's sentinel run (§12
-gates); `DPS_LOG_LEVEL=DEBUG` is now safe on app and worker.
+gates); `DPS_LOG_LEVEL=DEBUG` is now safe on app and worker. The `sqlglot` logger is capped at
+CRITICAL (it never logs there, so it is silent): parsing a refused selection such as
+`EXPLAIN PLAN FOR SELECT … WHERE n = '…'` made sqlglot log the whole statement, literal included,
+at WARNING on stderr (M3 G6 review r1; `test_a_refused_selection_never_logs_its_literal`).
 
 **Traps (M3).**
 

@@ -24,11 +24,14 @@ import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from dps.observability import _EVENT_NAME, _SAFE_FIELDS
+
+if TYPE_CHECKING:
+    from dps.layers.connectors.base import Engine
 
 ROOT = Path(__file__).resolve().parents[1]
 M3 = [
@@ -197,6 +200,25 @@ def test_the_capture_sees_a_planted_sentinel(
     logging.getLogger("logscan_m3_stdlib").warning("stdlib %s", f"{SENTINEL}-STDLIB")
     captured = _captured(json_logs, capsys)
     assert f"{SENTINEL}-PLANTED" in captured and f"{SENTINEL}-STDLIB" in captured
+
+
+@pytest.mark.parametrize("engine", ["oracle", "postgres"])
+def test_a_refused_selection_never_logs_its_literal(
+    engine: Engine, json_logs: io.StringIO, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """sqlglot parses ``EXPLAIN PLAN FOR …`` as an unsupported command and logs the statement text
+    (literal included) through stdlib ``logging``; the ``sqlglot`` cap keeps it out of the logs."""
+    from dps.jobs_models import Selection
+    from dps.layers.connectors.selection import SelectionError, validate_selection
+
+    sel = Selection(query=f"EXPLAIN PLAN FOR SELECT * FROM t WHERE n = '{SENTINEL}-SEL'")
+    with pytest.raises(SelectionError) as refused:
+        validate_selection(sel, engine, None)
+    assert refused.value.code == "selection_not_select"
+    captured = _captured(json_logs, capsys)
+    assert SENTINEL not in captured, "a refused selection's literal reached the logs"
+    leaked = [i for i, text in enumerate(_error_texts([refused.value])) if SENTINEL in text]
+    assert not leaked, f"sentinel text in the raised error at positions {leaked}"
 
 
 async def _oracle_paths(oracle_conn: Any, schema: Any, errors: list[BaseException]) -> None:

@@ -207,6 +207,10 @@ def test_third_party_loggers_are_capped() -> None:
     for name in ("pymongo", "botocore", "boto3", "s3transfer", "urllib3"):
         assert logging.getLogger(name).level == logging.WARNING, name
         assert not logging.getLogger(f"{name}.command").isEnabledFor(logging.INFO), name
+    # sqlglot's parser logs the statement it cannot fully parse ("EXPLAIN PLAN FOR … WHERE n = '…'")
+    # at WARNING and its parse errors at ERROR, literal included: silenced (M3 review r1).
+    assert logging.getLogger("sqlglot").level == logging.CRITICAL
+    assert not logging.getLogger("sqlglot").isEnabledFor(logging.ERROR)
 
 
 def test_m3_connector_fields_are_allow_listed() -> None:
