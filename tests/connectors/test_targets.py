@@ -1190,3 +1190,28 @@ def test_column_plans_carry_the_timestamp_precision() -> None:
     plan = next(p for p in plans if p.name == name)
     assert plan.ts_precision == 9 and plan.output_column().ts_precision == 9
     assert all(p.ts_precision is None for p in plans if p.name != name)
+
+
+def test_tabular_synthesis_is_refused_for_a_document_source(settings: Settings) -> None:
+    """WP-I (m3 merge): M5's tabular engines (copula, MOSTLY, linked) model the flat columns of
+    one table; a MongoDB document's leaves (nested fields, arrays) have no such column, and a
+    sampled value would replace a whole top-level field. Refused at submit, before any read;
+    surrogate synthesis (``tabular: none``) of MongoDB stays available."""
+    mdb = make_connection(
+        "c_src", engine="mongo", roles=["source", "target"], params={"database": "crm"}
+    )
+    snap = accepted_snapshot("c_src", "profiles").model_copy(
+        update={"engine": "mongo", "object_ref": "profiles"}
+    )
+
+    def run(**options: Any) -> RunSpec:
+        r = spec(**UAT_TABLE, mode="synthesize", options=options)
+        return r.model_copy(
+            update={"source": r.source.model_copy(update={"object": ObjectRef(name="profiles")})}
+        )
+
+    assert _code(run(tabular="copula"), settings, snap, source_conn=mdb, target_conn=mdb) == (
+        "tabular_invalid",
+        422,
+    )
+    _check(run(), snap, settings=settings, source_conn=mdb, target_conn=mdb)

@@ -16,9 +16,10 @@ projection the run reads) · ``length_overflow`` (in place and same-table append
 back into its own column: a method whose output cannot fit it is refused here, every such column
 named, instead of failing the job at prepare) · ``group_not_found`` / ``group_key_mismatch`` ·
 ``tabular_invalid`` (M5: tabular synthesis outside synthesize mode, into an ``in_place``/``append``
-write, or with an engine this deployment has not enabled; differential privacy or linked
-generation without the ``mostly`` engine; a linked generation that does not write files, names
-the source object as its child, or lacks the child's accepted snapshot).
+write, from a MongoDB source (WP-I m3), or with an engine this deployment has not enabled;
+differential privacy or linked generation without the ``mostly`` engine; a linked generation that
+does not write files, names the source object as its child, or lacks the child's accepted
+snapshot).
 
 A same-table append re-reads its own new rows unless every new key sorts above every selected
 key; only one integer key with ``generate`` (an owned, ascending, non-cycling sequence ahead of the
@@ -512,6 +513,10 @@ def _check_target(spec: RunSpec, source_conn: Connection, target_conn: Connectio
             raise _fail(invalid, 422, "an append target must be a database connection")
 
 
+#: Engines whose rows are documents (nested fields and arrays), not flat tables.
+_DOCUMENT_ENGINES = frozenset({"mongo"})
+
+
 def _check_tabular(
     spec: RunSpec,
     settings: Settings,
@@ -519,8 +524,9 @@ def _check_tabular(
     source_conn: Connection,
     child_snapshot: ClassificationSnapshot | None,
 ) -> None:
-    """M5 tabular synthesis: synthesize mode, a table or files target, an enabled engine;
-    differential privacy and linked generation with the MOSTLY engine only (Task 7B)."""
+    """M5 tabular synthesis: synthesize mode, a table or files target, an enabled engine, a
+    flat-table source (not MongoDB: WP-I m3); differential privacy and linked generation with the
+    MOSTLY engine only (Task 7B)."""
     options = spec.options
     engine = options.tabular
     if options.tabular_dp and engine != "mostly":
@@ -531,6 +537,15 @@ def _check_tabular(
         raise _fail("tabular_invalid", 422, "linked generation needs the mostly engine")
     if engine == "none":
         return
+    if source_conn.engine in _DOCUMENT_ENGINES:
+        # WP-I (m3): the tabular engines model one table's flat columns; a document's leaves
+        # (nested fields, arrays) are not such columns
+        raise _fail(
+            "tabular_invalid",
+            422,
+            "tabular synthesis models a table's flat columns: a document source synthesizes "
+            "with surrogates (tabular: none)",
+        )
     if spec.mode != "synthesize" or spec.target.write_mode in _DATABASE_WRITES:
         raise _fail(
             "tabular_invalid",
