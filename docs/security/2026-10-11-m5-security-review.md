@@ -48,7 +48,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-03 | HIGH | S5 scanner SSRF guard missing | S5 (wiring at the M4 merge: a blocking item of that merge) | `tests/security/test_netguard.py` | functions fixed; wiring pending M4 |
 | F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | — | pending |
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
-| F-06 | MED | RLS posture blind to `owner_directory`'s role: with the migration login unset, the API role read every tenant's jobs/connections/policies | see §3.6 | — | pending |
+| F-06 | MED | RLS posture blind to `owner_directory`'s role: with the migration login unset, the API role read every tenant's jobs/connections/policies | see §3.6 | `tests/test_rls_posture_unit.py::test_a_policy_open_to_the_runtime_role_is_named`, `tests/db/test_rls.py::test_migrating_as_the_runtime_role_is_refused_in_every_environment` | fixed + test |
 | F-07 | MED | CSV formula injection in the L2 `files` export | see §3.7 | — | pending |
 | F-08 | MED | No SSRF guard on tenant-controlled connection endpoints (S3 `endpoint_url`, DB hosts) | see §3.8 | — | pending |
 | F-09 | MED | Presidio wrote customer text to the logs at `DEBUG` | S13 | `tests/test_observability.py::test_third_party_loggers_are_capped`, `tests/test_no_values_in_logs_m5.py` | fixed |
@@ -79,6 +79,16 @@ connection's `secret_ref` name stays visible to `jobs` keys (it is a name, not a
 credentials need the password itself; the endpoint alone was not made a production marker (UAT and
 production schemas can share a database). Test: `tests/api/test_production_resource_gate.py`
 (the clone, the patch, an admin-made untagged holder, the retry rule).
+
+### 3.6 F-06 — no tenant policy may apply to the runtime login
+
+`assert_rls_posture` now lists every policy besides `tenant_isolation` on a tenant table that
+applies to the runtime login — `PUBLIC`, the login itself or a role it belongs to (`pg_policies.roles`
+joined with `pg_has_role`) — as `<table>: policy <name> applies to the runtime role …`
+(`db.CROSS_TENANT_PROBLEM`). That is what `owner_directory` (`USING (true)`, created `TO
+CURRENT_USER`) becomes when migrations run as the API login (`DPS_PG_MIGRATION_USER` unset). The
+app refuses to boot on such a problem in every environment, local included (other posture problems
+remain fatal in staging/prod only). HANDOFF documents the rule.
 
 ## 4. Considered and refuted
 

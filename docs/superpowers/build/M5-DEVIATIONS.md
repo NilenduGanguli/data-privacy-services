@@ -1172,3 +1172,7 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   `in_place`/`append` (`targets.check_retry_scope`; the retry gap was noted by the crypto finder).
   `tests/test_egress_tls.py`'s production connection uses its own credential (`test-pg-admin`), since
   the jobs key's later TLS connection named the same `secret_ref`. The endpoint is not a marker.
+- **F-06 (RLS posture):** `evaluate_rls_posture(…, runtime_policies=())` (defaulted, additive) and a
+  catalogue query in `assert_rls_posture`; `_JobPlatform._connect` refuses a `CROSS_TENANT_PROBLEM` in
+  every environment. Not done: refusing `pg_migration_login == pg_user` statically — a deployment may
+  migrate with a login that is not the runtime one only by name; the catalogue check is what matters.

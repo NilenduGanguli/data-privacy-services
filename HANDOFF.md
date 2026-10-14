@@ -250,6 +250,11 @@ picks it up when the `migrate` one-shot runs again (`docker compose up -d` recre
 `POST /api/v1/job-groups/{id}/consistency-check` (counts and codes only; returned by `GET /job-groups`
 and `GET /job-groups/{id}`); a stack on an older schema needs the `migrate` one-shot again. Against the compose database:
 `DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
+**Run migrations as their own owner (S3 security review F-06).** `DPS_PG_MIGRATION_USER` falls back
+to the API login when unset; migrations run that way give the API login the M5 `owner_directory`
+policies (`USING (true)`), which read every tenant's jobs, connections and policies. The app's RLS
+posture check names each such policy and refuses to boot **in every environment** (other posture
+problems stay fatal in staging/prod only). Always set `DPS_PG_MIGRATION_USER` (compose: `dps_owner`).
 **M2 compose environment** (`x-dps-env`, shared by app, migrate and worker): `DPS_PG_HOST=dps-db`, logins
 `dps_app` / `dps_worker_login` / `dps_owner` (local passwords = role name), `DPS_MIGRATIONS_MODE=verify`
 (`auto` for `migrate`), `DPS_JOB_KEK` = a local demo literal unless the shell sets one, `DPS_SECRET_DIR=/var/run/secrets/dps`,

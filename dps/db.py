@@ -18,7 +18,7 @@ import hashlib
 import json
 import re
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -59,6 +59,11 @@ ALLOWED_EXTRA_POLICIES: dict[str, frozenset[str]] = {
     "dps_policy": frozenset({"owner_directory"}),  # M5 (045)
     "dps_tenant_usage": frozenset({"worker_usage"}),
 }
+#: The marker of a problem that opens tenant rows to the runtime role (a policy besides
+#: ``tenant_isolation`` that applies to it — ``owner_directory`` is ``USING (true)`` for the
+#: migration owner). It is a cross-tenant read, not a hardening gap: the app refuses to boot on it
+#: in every environment (S3 review F-06).
+CROSS_TENANT_PROBLEM = "applies to the runtime role"
 _SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _AUDIT_PART_RE = re.compile(r"^dps_audit_log_(\d{4})_(\d{2})$")
 
@@ -375,12 +380,16 @@ def evaluate_rls_posture(
     forced: dict[str, bool],
     partition_leaks: list[str],
     worker_member: bool = False,
+    runtime_policies: Sequence[str] = (),
 ) -> list[str]:
     """Pure: observed RLS facts → violations (empty = sound).
 
     ``predicate_ok[table]`` is true when ``tenant_isolation`` filters reads *and* checks writes on
     ``app.tenant_id``; ``worker_member`` is true when the runtime (API) role is a member of
-    ``dps_worker``, whose ``worker_claim`` policies would open the queue tables across tenants.
+    ``dps_worker``, whose ``worker_claim`` policies would open the queue tables across tenants;
+    ``runtime_policies`` lists ``<table>.<policy>`` for every policy besides ``tenant_isolation``
+    that applies to the runtime role (``PUBLIC``, the role itself or a role it belongs to) — each
+    one is a :data:`CROSS_TENANT_PROBLEM`.
     """
     problems: list[str] = []
     if not rls_enabled:
@@ -410,6 +419,12 @@ def evaluate_rls_posture(
             "runtime role has direct privileges on audit partitions: "
             + ", ".join(sorted(partition_leaks))
         )
+    for entry in sorted(set(runtime_policies)):
+        table, _, policy = entry.partition(".")
+        problems.append(
+            f"{table}: policy {policy} {CROSS_TENANT_PROBLEM} (it reads other tenants' rows; "
+            "run migrations as a separate owner, DPS_PG_MIGRATION_USER)"
+        )
     return problems
 
 
@@ -431,6 +446,17 @@ async def assert_rls_posture(settings: Settings | None = None) -> list[str]:
         rows = await conn.fetch(
             "SELECT tablename, policyname, qual, with_check FROM pg_policies WHERE schemaname = $1",
             schema,
+        )
+        # every policy besides tenant_isolation that applies to this login (PUBLIC, itself, or a
+        # role it is a member of): owner_directory is USING (true) for the migration owner only
+        opened = await conn.fetch(
+            "SELECT p.tablename, p.policyname FROM pg_policies p "
+            "WHERE p.schemaname = $1 AND p.tablename = ANY($2::text[]) "
+            "AND p.policyname <> 'tenant_isolation' AND EXISTS ("
+            "SELECT 1 FROM unnest(p.roles) AS r(name) LEFT JOIN pg_roles g ON g.rolname = r.name "
+            "WHERE r.name = 'public' OR pg_has_role(current_user, g.oid, 'MEMBER'))",
+            schema,
+            list(TENANT_TABLES),
         )
         flags = await conn.fetch(
             "SELECT c.relname, c.relforcerowsecurity AND c.relrowsecurity AS forced "
@@ -470,4 +496,5 @@ async def assert_rls_posture(settings: Settings | None = None) -> list[str]:
         forced={r["relname"]: bool(r["forced"]) for r in flags},
         partition_leaks=leaks,
         worker_member=bool(role["worker_member"]) if role else True,
+        runtime_policies=[f"{r['tablename']}.{r['policyname']}" for r in opened],
     )

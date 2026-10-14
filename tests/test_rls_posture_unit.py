@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from dps.db import ALLOWED_EXTRA_POLICIES, TENANT_TABLES, evaluate_rls_posture
+from dps.db import (
+    ALLOWED_EXTRA_POLICIES,
+    CROSS_TENANT_PROBLEM,
+    TENANT_TABLES,
+    evaluate_rls_posture,
+)
 
 GOOD_POLICIES = {
     t: ["tenant_isolation", *sorted(ALLOWED_EXTRA_POLICIES.get(t, frozenset()))]
@@ -44,3 +49,12 @@ def test_each_violation_is_named() -> None:
     leaks = ["dps.dps_audit_log_2026_10"]
     assert any("dps_audit_log_2026_10" in p for p in _eval(partition_leaks=leaks))
     assert any("dps_worker" in p for p in _eval(worker_member=True))
+
+
+def test_a_policy_open_to_the_runtime_role_is_named() -> None:
+    """S3 review F-06: ``owner_directory`` (``USING (true)``) is meant for the migration owner;
+    granted to the runtime role it reads every tenant's rows, which the allow-list alone missed."""
+    problems = _eval(runtime_policies=["dps_job.owner_directory", "dps_policy.owner_directory"])
+    assert any("dps_job: policy owner_directory" in p for p in problems)
+    assert all(CROSS_TENANT_PROBLEM in p for p in problems)
+    assert _eval(runtime_policies=[]) == []

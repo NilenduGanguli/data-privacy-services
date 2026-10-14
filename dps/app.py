@@ -402,7 +402,9 @@ class _JobPlatform:
         problems = await db.assert_rls_posture(settings)
         for problem in problems:
             logger.warning("rls_posture_problem", reason=problem)
-        if problems and settings.is_production:
+        # a policy that opens tenant rows to the runtime role is refused everywhere (F-06)
+        cross_tenant = [p for p in problems if db.CROSS_TENANT_PROBLEM in p]
+        if cross_tenant or (problems and settings.is_production):
             raise PostureError("rls posture refused: " + "; ".join(problems))
         kek = self.app.state.kek is not None
         ready = migrations == "verified"
