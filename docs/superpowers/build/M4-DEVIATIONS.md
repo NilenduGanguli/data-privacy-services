@@ -1524,3 +1524,12 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   `tests/scanner/test_inventory_export.py::test_evidence_names_the_policy_version_the_scan_ran`,
   `tests/scanner/test_scan_policy_refs.py` (both raised `CodedError` before). Console: the codes are
   worded on the New-scan page.
+- **M5 database keys on every scans route** (test only): `tests/scanner/test_scans_api.py::
+  test_database_keys_with_the_scan_scope_drive_every_scans_route` walks every `/api/v1/scans`
+  operation from the OpenAPI document with a database key minted through `/admin/keys`: scope `scan`
+  passes, a database key without it is 403 everywhere, no key is 401, a `t2` key sees no `t1` scan
+  (404) and is 403 when it names `t1`, evidence of the scan reads with the scan key, audit rows name
+  the database key id, and a disabled key is 401 at once. It passed on its first run: the scans
+  routes authenticate through `require_scope("scan")`, which M5's `ChainKeyStore` (static, then
+  database keys) already serves, and `jobs.create_job` already applies M5's per-tenant `max_queued`
+  to scans — no code change was needed.

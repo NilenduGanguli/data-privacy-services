@@ -15,7 +15,10 @@ tenant ids; `_…` is refused with 403 `tenant_reserved`), `X-Request-ID`.
 - Every `/scans` route needs scope **`scan`** (403 `scope_required` otherwise) and the metadata
   database (503 `db_unavailable` while `DPS_PG_HOST` is unset or the database is down), except
   `POST /scans/personas/preview`, which is stateless and needs no database. All are rate-limited
-  per key like Layer 1.
+  per key like Layer 1. The key is a static key (`DPS_API_KEYS`) or an M5 database key minted on the
+  Admin page (`POST /admin/keys`, e.g. `{"name": "qa-scanner", "tenant_ids": ["t1"], "scopes":
+  ["scan"]}`): both pass the same scope and tenant checks; a scan records the key id as
+  `created_by`, and a disabled database key is refused at once on this replica.
 - Errors are `{"detail": str, "code": str}`; `detail` never quotes the request (no URL, query,
   label, storage state, key or value). 422 validation errors of the request model list
   `{type, loc, msg}` only (the scan spec refuses unknown keys at every level, so a `submit` field

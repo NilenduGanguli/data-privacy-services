@@ -490,6 +490,84 @@ def test_persona_preview_is_reproducible_and_matches_the_scan_persona(api_client
         assert c.post("/api/v1/scans/personas/preview", json=bad, headers=FULL).status_code == 422
 
 
+def _db_key(c: Any, name: str, tenants: list[str], scopes: list[str]) -> dict[str, Any]:
+    """Mint an M5 database key through the admin API (the raw key is in this answer only)."""
+    r = c.post(
+        "/api/v1/admin/keys",
+        json={"name": name, "tenant_ids": tenants, "scopes": scopes, "expires_in_days": 30},
+        headers=FULL,
+    )
+    assert r.status_code == 201, r.text
+    created: dict[str, Any] = r.json()
+    return created
+
+
+def _scan_routes(c: Any, scan_id: str) -> list[tuple[str, str, dict[str, Any] | None]]:
+    """Every ``/api/v1/scans`` operation the app serves, with concrete paths (from OpenAPI, so a
+    route added later is covered too)."""
+    spec = c.get("/api/v1/openapi.json").json()
+    bodies: dict[str, dict[str, Any]] = {
+        "/api/v1/scans": {"url": URL},
+        "/api/v1/scans/personas/preview": {"locale": "en_IN", "count": 1},
+    }
+    out = []
+    for path, ops in sorted(spec["paths"].items()):
+        if not path.startswith("/api/v1/scans"):
+            continue
+        concrete = path.replace("{scan_id}", scan_id).replace("{page_no}", "1")
+        for method in sorted(ops):
+            out.append((method, concrete, bodies.get(path) if method == "post" else None))
+    return out
+
+
+@pytest.mark.db
+def test_database_keys_with_the_scan_scope_drive_every_scans_route(api_client: Any) -> None:
+    """M5 database keys (``/admin/keys``) on the scanner: a key with ``scan`` passes the scope and
+    tenant checks of every scans route (and reads the scan's evidence); a database key without
+    ``scan`` is refused on every one; a key of another tenant sees no scan of this one; a
+    disabled key stops at once; the scan and its audit rows name the database key."""
+    c, sink = api_client
+    scanner = _db_key(c, "qa-scanner", ["t1"], ["scan"])
+    jobs_only = _db_key(c, "crm-provisioner", ["t1"], ["jobs", "detect"])
+    other = _db_key(c, "qa-scanner-t2", ["t2"], ["scan"])
+    scan_h = {"X-API-KEY": scanner["key"]}
+    created = c.post("/api/v1/scans", json={"url": URL}, headers=scan_h)
+    assert created.status_code == 202, created.text
+    scan = created.json()["scan"]
+    assert scan["tenant_id"] == "t1" and scan["created_by"] == scanner["record"]["id"]
+    assert created.json()["key_material"]["dek"] and created.json()["synthesis_seed"]["seed"]
+    routes = _scan_routes(c, scan["id"])
+    assert len(routes) == 10
+    for method, path, body in routes:
+        if (method, path) == ("post", f"/api/v1/scans/{scan['id']}/cancel"):
+            continue  # last: it ends the scan
+        r = c.request(method, path, json=body, headers=scan_h)
+        assert r.status_code not in (401, 403), (method, path, r.status_code, r.text)
+        denied = c.request(method, path, json=body, headers={"X-API-KEY": jobs_only["key"]})
+        assert denied.status_code == 403, (method, path, denied.text)
+        anonymous = c.request(method, path, json=body)
+        assert anonymous.status_code == 401, (method, path)
+    listed = c.get("/api/v1/scans", headers=scan_h).json()["items"]
+    assert len(listed) == 2 and listed[-1]["id"] == scan["id"]  # + the route walk's POST /scans
+    foreign = c.get(f"/api/v1/scans/{scan['id']}", headers={"X-API-KEY": other["key"]})
+    assert (foreign.status_code, foreign.json()["code"]) == (404, "scan_not_found")
+    ungranted = c.get(
+        f"/api/v1/scans/{scan['id']}", headers={"X-API-KEY": other["key"], "X-DPS-Tenant": "t1"}
+    )
+    assert ungranted.status_code == 403
+    canceled = c.post(f"/api/v1/scans/{scan['id']}/cancel", headers=scan_h)
+    assert canceled.status_code == 200 and canceled.json()["state"] == "canceled"
+    evidence = c.get("/api/v1/evidence", params={"job_id": scan["id"]}, headers=scan_h)
+    assert evidence.status_code == 200, evidence.text
+    assert c.get("/api/v1/evidence", headers={"X-API-KEY": jobs_only["key"]}).status_code == 200
+    rows = [e for e in sink.events if e.action in ("scan.create", "scan.cancel")]
+    assert {e.key_id for e in rows} == {scanner["record"]["id"]}
+    disabled = c.post(f"/api/v1/admin/keys/{scanner['record']['id']}/disable", headers=FULL)
+    assert disabled.status_code == 200, disabled.text
+    assert c.get("/api/v1/scans", headers=scan_h).status_code == 401
+    assert all(scanner["key"] not in json.dumps(e.model_dump(mode="json")) for e in sink.events)
+
+
 def test_openapi_has_no_submit_route() -> None:
     from fastapi.testclient import TestClient
 
