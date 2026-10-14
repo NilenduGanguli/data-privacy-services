@@ -717,6 +717,28 @@ ALIAS_REFUSED = [
     "SELECT contact_id, channel FROM contacts",
     "SELECT * FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
     "SELECT o.* FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    # M3 verify r1 B6: a column-list alias renames the object's columns by position
+    "SELECT c.contact_id, c.channel FROM crm.contacts AS c(contact_id, channel, email)",
+    "SELECT * FROM crm.contacts AS c(contact_id, channel, email)",
+    "SELECT contact_id, channel FROM crm.contacts c(contact_id, channel, email)",
+    "SELECT contact_id, channel FROM crm.contacts AS c(contact_id)",
+    "SELECT c.contact_id, c.channel FROM crm.contacts c JOIN crm.other AS o(id, x) ON o.id = c.contact_id",
+    "WITH x(a) AS (SELECT email FROM crm.contacts) SELECT contact_id, channel FROM crm.contacts",
+    # ... and PIVOT / UNPIVOT re-shape rows so another column's values land under a column's name
+    "SELECT contact_id, channel FROM crm.contacts UNPIVOT (channel FOR src IN (email, channel)) "
+    "WHERE src = 'x'",
+    "SELECT * FROM crm.contacts UNPIVOT (channel FOR src IN (email, channel))",
+    "SELECT contact_id, channel FROM crm.contacts PIVOT (max(email) FOR channel IN ('x' AS channel))",
+    "SELECT contact_id, channel FROM (crm.contacts) UNPIVOT (channel FOR src IN (email, channel))",
+    "SELECT c.contact_id, c.channel FROM crm.contacts c JOIN crm.other UNPIVOT (v FOR k IN (a, b)) "
+    "ON 1 = 1",
+]
+#: Oracle-only re-mapping shapes (PostgreSQL does not parse them: refused as a parse error).
+ALIAS_REFUSED_ORACLE = [
+    "SELECT contact_id, channel FROM crm.contacts MATCH_RECOGNIZE (PARTITION BY contact_id "
+    "ORDER BY contact_id MEASURES email AS channel ONE ROW PER MATCH PATTERN (a) DEFINE a AS 1=1)",
+    "SELECT * FROM crm.contacts MATCH_RECOGNIZE (PARTITION BY contact_id ORDER BY contact_id "
+    "MEASURES email AS channel ALL ROWS PER MATCH PATTERN (a) DEFINE a AS 1=1)",
 ]
 ALIAS_ALLOWED = [
     "SELECT contact_id, channel FROM crm.contacts",
@@ -739,7 +761,7 @@ def test_a_query_output_named_like_a_column_must_be_that_column(
     """M3 G2 B5: the reviewed snapshot binds methods to the object's columns, so a query output
     under a column's name must be that very column (unaliased or aliased to itself, qualified
     only by the object or its own alias); anything else is refused at submit and discovery."""
-    for query in ALIAS_REFUSED:
+    for query in ALIAS_REFUSED + (ALIAS_REFUSED_ORACLE if engine == "oracle" else []):
         with pytest.raises(SelectionError) as err:
             validate_selection(Selection(query=query), engine, shape)
         assert err.value.code == "selection_query_alias", query
@@ -753,3 +775,24 @@ def test_a_query_output_named_like_a_column_must_be_that_column(
         validate_selection(Selection(query=query), engine, None)  # no shape: no column check
     for query in ALIAS_ALLOWED:
         validate_selection(Selection(query=query), engine, shape)
+
+
+def test_rendering_fails_closed_on_a_construct_the_engine_cannot_express() -> None:
+    """M3 verify r1 B6: sqlglot's PostgreSQL generator drops ``UNPIVOT`` with a warning, so the
+    bound text (stored, validated again and executed) would silently differ from the text as
+    written. Every rendering refuses it instead, shape or no shape."""
+    query = (
+        "SELECT contact_id, channel FROM crm.contacts UNPIVOT (channel FOR s IN (email, channel))"
+    )
+    sel = Selection(query=query)
+    for render in (
+        lambda: parameterize_literals(sel, "postgres"),
+        lambda: query_template(query, "postgres"),
+        lambda: compile_query(sel, "postgres"),
+    ):
+        with pytest.raises(SelectionError) as err:
+            render()
+        assert err.value.code == "selection_parse_error"
+        assert "contact" not in str(err.value) and "UNPIVOT" not in str(err.value)
+    # Oracle expresses it, so the shape-aware alias check is what refuses it there
+    assert "UNPIVOT" in parameterize_literals(sel, "oracle").query.upper()  # type: ignore[union-attr]

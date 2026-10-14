@@ -302,6 +302,8 @@ def runs_as(engine: Engine, shape: TableShape, bound: Selection) -> str | None:
 
 def _bind(sel: Selection, engine: Engine, shape: TableShape | None) -> Selection:
     try:
+        # the text as written first (B6): rendering the bound form cannot hide a refused shape
+        validate_selection(sel, engine, shape)
         bound = parameterize_literals(sel, engine)
         validate_selection(bound, engine, shape)
     except SelectionError as exc:

@@ -593,3 +593,83 @@ async def test_a_query_alias_cannot_put_a_column_under_a_kept_columns_name(
     assert _count(oracle_conn, email_in_channel) == 0
     ev = await get_evidence("t1", job.progress.evidence_id or "")
     assert ev is not None and ev.pack.verification["passed"]
+
+
+async def test_unpivot_pivot_or_match_recognize_cannot_remap_a_column(
+    handler_ctx: HandlerContext,
+    oracle_conn: Any,
+    oracle_schema: OracleTestSchema,
+    register_oracle: RegisterOracle,
+) -> None:
+    """M3 verify r1 B6: ``UNPIVOT (channel FOR src IN (email, channel)) WHERE src = :s`` puts
+    EMAIL values under CHANNEL, whose reviewed method is ``keep`` (the verifier's lane run wrote
+    20000/20000 source e-mails and its evidence passed). UNPIVOT, PIVOT, MATCH_RECOGNIZE and
+    column-list aliases are refused at submit (422, nothing created) and by a discovery job."""
+    owner = oracle_schema.owner
+    with oracle_conn.cursor() as cur:
+        cur.execute(
+            f'CREATE TABLE "{owner}"."CONTACTS_P" (CONTACT_ID NUMBER(10) PRIMARY KEY, '
+            "EMAIL VARCHAR2(400), CHANNEL VARCHAR2(400))"
+        )
+        cur.executemany(
+            f'INSERT INTO "{owner}"."CONTACTS_P" VALUES (:1, :2, :3)',
+            [
+                (i, f"contact.{i}@example.com", ("web", "branch", "phone")[i % 3])
+                for i in range(200)
+            ],
+        )
+    oracle_conn.commit()
+    conn = await register_oracle("t1", roles={"source", "target"}, name="ora-pivot")
+    obj = ObjectRef(owner=owner, name="CONTACTS_P")
+    keep_key = [SnapshotOverride(path="$.CONTACT_ID", method=MethodSpec(method="keep"))]
+    snap = await discover_and_accept(handler_ctx, "t1", conn.id, obj, overrides=keep_key)
+    methods = {c.name: c.method.method for c in snap.columns}
+    assert methods["CHANNEL"] == "keep" and methods["EMAIL"] != "keep"
+    target = {
+        "write_mode": "table",
+        "connection_id": conn.id,
+        "object": {"owner": owner, "name": "CONTACTS_PQ"},
+    }
+    table = f'"{owner}".contacts_p'
+    unpivot = (
+        f"SELECT contact_id, channel FROM {table} "
+        "UNPIVOT (channel FOR src IN (email, channel)) WHERE src = :s"
+    )
+    for selection in (
+        {"query": unpivot, "params": {"s": "EMAIL"}},
+        {"query": f"SELECT * FROM {table} UNPIVOT (channel FOR src IN (email, channel))"},
+        {
+            "query": f"SELECT contact_id, channel FROM {table} MATCH_RECOGNIZE (PARTITION BY "
+            "contact_id ORDER BY contact_id MEASURES email AS channel ONE ROW PER MATCH "
+            "PATTERN (a) DEFINE a AS 1 = 1)"
+        },
+        {
+            "query": f"SELECT contact_id, channel FROM {table} "
+            "PIVOT (max(email) FOR channel IN ('web' AS channel))"
+        },
+        {"query": f"SELECT c.contact_id, c.channel FROM {table} c(contact_id, channel, email)"},
+    ):
+        with pytest.raises(SpecError) as err:
+            await _run(handler_ctx, conn, obj, snap.id, target, source={"selection": selection})
+        assert (err.value.code, err.value.status) == ("selection_query_alias", 422), selection
+    assert (
+        _count(
+            oracle_conn,
+            "SELECT COUNT(*) FROM all_tables WHERE owner = :o AND table_name = 'CONTACTS_PQ'",
+            {"o": owner},
+        )
+        == 0
+    )
+    disc = await submit_discover(
+        DiscoverSpec(
+            connection_id=conn.id,
+            objects=[obj],
+            selection={"query": unpivot, "params": {"s": "EMAIL"}},
+        ),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    failed = await drive(handler_ctx, "t1", disc.id)
+    assert (failed.state, failed.error_code) == (JobState.failed, "selection_query_alias")

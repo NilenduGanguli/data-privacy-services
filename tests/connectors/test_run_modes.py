@@ -255,6 +255,65 @@ async def test_a_query_alias_cannot_put_a_column_under_a_kept_columns_name(
     assert (failed.state, failed.error_code) == (JobState.failed, "selection_query_alias")
 
 
+async def test_a_column_list_alias_or_pivot_cannot_remap_a_column(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """M3 verify r1 B6: ``FROM t AS c(…, segment, …, email)`` renames columns by position, so
+    ``c.segment`` would be the e-mail column under SEGMENT's reviewed method (``keep``) — the
+    verifier wrote 4000/4000 such values on the lane. Column-list aliases and PIVOT/UNPIVOT are
+    refused at submit (422, nothing created) and by a discovery job."""
+    obj = await source_pg.customers_table(rows=200, name="r_customers")
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat-r")
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    methods = {c.name: c.method.method for c in snap.columns}
+    assert methods["segment"] == "keep" and methods["email"] != "keep"
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "r_customers_uat"},
+    }
+    table = f'"{source_pg.schema}".r_customers'
+    swapped = (
+        "c(customer_id, full_name, date_of_birth, national_id, id_type, tax_id, segment, "
+        "mobile, country_code, email)"
+    )
+    for query in (
+        f"SELECT c.customer_id, c.segment FROM {table} AS {swapped}",
+        f"SELECT * FROM {table} AS {swapped}",
+        f"SELECT customer_id, segment FROM {table} {swapped}",
+        f"SELECT customer_id, segment FROM {table} UNPIVOT (segment FOR src IN (email, segment))",
+    ):
+        with pytest.raises(SpecError) as err:
+            await submit_run(
+                run_spec(src.id, obj, snap.id, target, source={"selection": {"query": query}}),
+                tenant_id="t1",
+                principal=LOCAL_PRINCIPAL,
+                settings=handler_ctx.settings,
+                kek=handler_ctx.kek,
+            )
+        assert (err.value.code, err.value.status) == ("selection_query_alias", 422), query
+    created = await source_pg.admin.fetchval(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = $1 AND table_name = 'r_customers_uat'",
+        source_pg.schema,
+    )
+    assert created == 0
+    disc = await submit_discover(
+        DiscoverSpec(
+            connection_id=src.id,
+            objects=[obj],
+            selection={"query": f"SELECT c.customer_id, c.segment FROM {table} AS {swapped}"},
+        ),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    failed = await drive(handler_ctx, "t1", disc.id)
+    assert (failed.state, failed.error_code) == (JobState.failed, "selection_query_alias")
+
+
 async def test_in_place_round_trips_with_the_returned_key(
     handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
 ) -> None:

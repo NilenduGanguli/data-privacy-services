@@ -72,6 +72,8 @@ def _has_selection(sel: Selection) -> bool:
 
 def _bind(sel: Selection, engine: Engine, shape: Any) -> Selection:
     try:
+        # the text as written first (B6): rendering the bound form cannot hide a refused shape
+        validate_selection(sel, engine, shape)
         bound = parameterize_literals(sel, engine)
         validate_selection(bound, engine, shape)
     except SelectionError as exc:

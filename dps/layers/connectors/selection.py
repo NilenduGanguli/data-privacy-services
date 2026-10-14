@@ -32,7 +32,9 @@ Rejection codes: ``selection_parse_error``, ``selection_multiple_statements``,
 Given the object's shape, a query's outputs are bound to the object's columns by name (the read
 projection, :func:`read_projection`), so an output that carries a column's name must be that
 column itself (M3 G2 B5, :func:`_check_query_outputs`): otherwise the reviewed method of one
-column would be applied to another column's, an expression's or another table's values.
+column would be applied to another column's, an expression's or another table's values. A query
+that renames columns by position (a column-list alias) or re-shapes rows (``PIVOT``,
+``UNPIVOT``, ``MATCH_RECOGNIZE``) is refused for the same reason (M3 verify r1 B6).
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ from typing import Any, cast
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import SqlglotError
+from sqlglot.errors import ErrorLevel, SqlglotError, UnsupportedError
 from sqlglot.tokens import TokenType
 
 from dps.jobs_models import SampleSpec, Selection  # noqa: F401 - re-exported (contract §5.2)
@@ -192,6 +194,10 @@ _DML = _node_types(
     "Describe",
 )
 _INTO = _node_types("Into")
+#: Clauses that re-shape rows so one column's values can come out under another column's name
+#: (Oracle/PostgreSQL ``PIVOT``/``UNPIVOT``, Oracle ``MATCH_RECOGNIZE … MEASURES``): refused
+#: in a query given the object's shape (M3 verify r1 B6).
+_REMAP = _node_types("Pivot", "MatchRecognize")
 _LOCK = _node_types("Lock")
 #: String literals whose text is the value as written (bound like plain strings).
 _PLAIN_STRINGS = _node_types("RawString", "National")
@@ -471,9 +477,17 @@ def _bind_literals(
 def _render(node: exp.Expression, engine: Engine, *, style: str, order: list[str]) -> str:
     """SQL text with sentinels swapped for ``$n`` (PG exec) or ``:name`` (Oracle, templates).
 
-    ``order`` receives the bind names in order of first appearance.
+    ``order`` receives the bind names in order of first appearance. Fails closed: a construct
+    the engine's generator cannot express (PostgreSQL ``UNPIVOT``…) would otherwise be dropped
+    from the text with a warning, so the stored template and the executed SQL would differ from
+    what was validated (M3 verify r1 B6); it is refused as ``selection_parse_error`` instead.
     """
-    sql = node.sql(dialect=_DIALECT[engine])
+    try:
+        sql = node.sql(dialect=_DIALECT[engine], unsupported_level=ErrorLevel.RAISE)
+    except UnsupportedError:
+        raise SelectionError(
+            "selection_parse_error", "the statement uses a construct this engine does not support"
+        ) from None
 
     def repl(match: re.Match[str]) -> str:
         name = match.group(1).lower()
@@ -699,18 +713,28 @@ def _check_query_outputs(sel: Selection, engine: Engine, shape: TableShape) -> N
     only by the object or its own alias (unqualified only when the object is the sole source).
     ``*`` needs the object as the sole source and ``t.*`` the object's qualifier. Outputs with
     other names are not columns of the object and are not read (:func:`read_projection`).
+    A query that renames or re-shapes columns anywhere (a column-list alias ``AS c(a, b)``,
+    ``PIVOT``/``UNPIVOT``, ``MATCH_RECOGNIZE``) is refused outright (M3 verify r1 B6).
     """
     if sel.query is None:
         return
     stmt = _parse(sel.query, engine, wrap_where=False)
     _fold(stmt, engine)
-    qualifiers, only = _query_sources(stmt, shape, engine)
-    known = {c.name for c in shape.columns}
     refused = SelectionError(
         "selection_query_alias",
         "a query output named like a column of the object must be that column itself "
         "(no alias, expression or other source)",
     )
+    for node in _walk(stmt):
+        # B6: a column-list alias (``AS c(a, b)``, also on a CTE) renames columns by position,
+        # and PIVOT/UNPIVOT/MATCH_RECOGNIZE re-shape rows: either can put another column's
+        # values under a column's name, whatever the select list says. Refused anywhere.
+        if _REMAP and isinstance(node, _REMAP):
+            raise refused
+        if isinstance(node, exp.TableAlias) and node.args.get("columns"):
+            raise refused
+    qualifiers, only = _query_sources(stmt, shape, engine)
+    known = {c.name for c in shape.columns}
     for proj in stmt.expressions:
         if isinstance(proj, exp.Star):
             if not only:
