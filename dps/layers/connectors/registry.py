@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from dps.config import Settings
 from dps.connections import Connection, Credentials, load_credentials
 from dps.jobs_models import SpecError
 from dps.layers.connectors.base import ConnectionTestResult, Connector, ConnectorError
-from dps.netguard import require_tls_connection
+from dps.netguard import check_connection_endpoint, require_tls_connection
 from dps.storage import ObjectStore, StorageError, target_store
 
 #: Engines with a tabular connector (M3 added oracle and mongo; each opens after the TLS check).
@@ -48,6 +49,7 @@ async def open_connector(
         raise ConnectorError("engine_unavailable", f"no tabular connector for {conn.engine}")
     creds = credentials or await load_credentials(conn, settings=settings, kek=kek)
     _require_tls(conn, settings, creds)  # M5: every engine, before any connection is opened
+    await _require_allowed_endpoint(conn, settings, creds)  # F-08: no SSRF target at use either
     if conn.engine == "postgres":
         from dps.layers.connectors.postgres import PostgresConnector  # Task 15
 
@@ -106,6 +108,24 @@ def _require_tls(conn: Connection, settings: Settings, creds: Credentials | None
         raise ConnectorError(exc.code, exc.detail) from None
 
 
+async def _require_allowed_endpoint(
+    conn: Connection, settings: Settings, creds: Credentials | None
+) -> None:
+    """F-08: a stored connection whose endpoint is (or now resolves to) a link-local/metadata,
+    multicast, reserved or — outside local — loopback address is refused at use
+    (``host_forbidden``, not retryable), so a row stored before the rule or a DNS change cannot
+    turn DPS into an SSRF probe. The credentials' ``uri``/``dsn`` hosts are checked too."""
+    secret = (
+        {k: v.get_secret_value() for k, v in creds.extra.items() if k in ("uri", "dsn")}
+        if creds is not None
+        else None
+    )
+    try:
+        await asyncio.to_thread(check_connection_endpoint, conn, settings, secret=secret)
+    except SpecError as exc:
+        raise ConnectorError(exc.code, exc.detail) from None
+
+
 async def open_target_store(
     conn: Connection, settings: Settings, *, kek: bytes | None
 ) -> ObjectStore:
@@ -118,6 +138,7 @@ async def open_target_store(
         None if conn.engine == "pvc" else await load_credentials(conn, settings=settings, kek=kek)
     )
     _require_tls(conn, settings, creds)
+    await _require_allowed_endpoint(conn, settings, creds)  # F-08
     return target_store(conn, settings, creds)
 
 

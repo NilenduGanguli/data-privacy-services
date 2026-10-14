@@ -281,3 +281,102 @@ def check_scan_url(
 def chromium_resolver_rules(hosts: Sequence[str]) -> str:
     """Chromium flag value: resolve ONLY the registered hosts; every other name fails DNS."""
     return "MAP * ~NOTFOUND, " + ", ".join(f"EXCLUDE {h}" for h in sorted(set(hosts)))
+
+
+# --- connection endpoints (S3 review F-08: the scanner guard's core on the connection surface) ---
+#: ``HOST=…`` inside an Oracle connect descriptor (any case, any spacing).
+_ORACLE_HOST = re.compile(r"\(\s*host\s*=\s*([^)\s]+)\s*\)", re.IGNORECASE)
+#: A database host as written in params: a hostname (underscores tolerated) or an IP literal.
+_DB_HOST = re.compile(r"[a-z0-9_.\-]{1,253}")
+
+
+def _endpoint_host(raw: str) -> str:
+    """``raw`` as a bare lower-case host. Raises ``NetGuardError`` for anything that is not a
+    host (credentials, a path, a wildcard) — value-free."""
+    try:
+        return normalize_host(raw)
+    except ValueError:
+        pass
+    text = raw.strip().rstrip(".").lower()
+    if _DB_HOST.fullmatch(
+        text
+    ):  # e.g. ``source_pg``: not DNS-valid, but a host some resolvers know
+        return text
+    raise NetGuardError("host_forbidden", "the connection host is not a valid host name")
+
+
+def _uri_hosts(uri: str) -> list[str]:
+    """The hosts of a MongoDB URI (``mongodb://[user:pw@]h1[:p],h2/…``, ``mongodb+srv://h/…``)."""
+    rest = uri.split("://", 1)[1] if "://" in uri else uri
+    netloc = rest.split("/", 1)[0].split("?", 1)[0].rsplit("@", 1)[-1]
+    hosts: list[str] = []
+    for part in netloc.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("["):  # [v6]:port
+            hosts.append(part[1 : part.find("]")] if "]" in part else part)
+        else:
+            hosts.append(part.rsplit(":", 1)[0] if part.count(":") == 1 else part)
+    return hosts
+
+
+def _dsn_hosts(dsn: str) -> list[str]:
+    """The hosts of an Oracle DSN: every ``HOST=`` of a descriptor, or an Easy Connect host."""
+    dsn = dsn.strip()
+    if dsn.startswith("("):
+        return _ORACLE_HOST.findall(dsn)
+    rest = dsn.split("://", 1)[1] if "://" in dsn else dsn
+    rest = rest.lstrip("/").split("/", 1)[0].split("?", 1)[0]
+    if rest.startswith("["):
+        return [rest[1 : rest.find("]")]] if "]" in rest else [rest]
+    return [rest.rsplit(":", 1)[0] if rest.count(":") == 1 else rest] if rest else []
+
+
+def connection_hosts(spec: _Endpoint, *, secret: Mapping[str, str] | None = None) -> list[str]:
+    """Every host a connection would dial: ``params.host``; an s3 ``endpoint_url``'s host; and,
+    from its credentials, a MongoDB ``uri``'s hosts and an Oracle ``dsn``'s hosts."""
+    raw: list[str] = []
+    if spec.params.host:
+        raw.append(spec.params.host)
+    if spec.engine == "s3" and spec.params.endpoint_url:
+        try:
+            hostname = urlsplit(spec.params.endpoint_url).hostname
+        except ValueError:
+            raise NetGuardError("host_forbidden", "the endpoint URL is malformed") from None
+        if not hostname:
+            raise NetGuardError("host_forbidden", "the endpoint URL has no host")
+        raw.append(hostname)
+    secret = secret or {}
+    if spec.engine == "mongo" and secret.get("uri"):
+        raw += _uri_hosts(secret["uri"])
+    if spec.engine == "oracle" and secret.get("dsn"):
+        raw += _dsn_hosts(secret["dsn"])
+    return [_endpoint_host(h) for h in raw if h.strip()]
+
+
+def check_connection_endpoint(
+    spec: _Endpoint,
+    settings: Settings,
+    *,
+    secret: Mapping[str, str] | None = None,
+    resolver: Resolver = default_resolver,
+) -> None:
+    """Refuse a connection whose endpoint is a numeric host encoding or is (or resolves to) a
+    link-local/metadata, multicast, unspecified, reserved or — outside ``env=local`` — loopback
+    address (S3 review F-08). RFC 1918 stays allowed (internal databases are the use case). A name
+    that does not resolve is left to the driver, which cannot connect to it either. Run at accept
+    (create/patch) and again at use (``open_connector``/``open_target_store``).
+
+    Raises:
+        SpecError: ``host_forbidden`` (422, value-free).
+    """
+    from dps.jobs_models import SpecError  # here: netguard stays importable by dps.jobs_models
+
+    try:
+        for host in connection_hosts(spec, secret=secret):
+            check_resolved_host(
+                host, allow_loopback=settings.env == "local", resolver=resolver, strict_dns=False
+            )
+    except NetGuardError as exc:
+        raise SpecError(exc.code, 422, exc.detail) from None

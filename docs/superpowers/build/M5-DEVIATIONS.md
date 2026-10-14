@@ -1179,3 +1179,7 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
 - **F-07 (CSV export):** the finder's fix prefixed every text cell starting with `+`/`-`; that would
   mangle exported phone numbers (`+44 …`), so `+`/`-` followed only by digits, spaces, dots, dashes
   and parentheses stays unprefixed (Excel reads that as arithmetic at worst — no function call).
+- **F-08 (connection SSRF):** at accept a name that does not resolve is allowed (the API pod may not
+  resolve a database the workers reach; the driver cannot dial it either) — the scanner guard refuses
+  it instead (`strict_dns`). Hosts with underscores (`source_pg`) are tolerated for databases. A
+  `host_forbidden` at use is re-raised by the connection test (not reported as `connection_failed`).

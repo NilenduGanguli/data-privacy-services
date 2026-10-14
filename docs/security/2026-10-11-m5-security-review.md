@@ -50,7 +50,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
 | F-06 | MED | RLS posture blind to `owner_directory`'s role: with the migration login unset, the API role read every tenant's jobs/connections/policies | see §3.6 | `tests/test_rls_posture_unit.py::test_a_policy_open_to_the_runtime_role_is_named`, `tests/db/test_rls.py::test_migrating_as_the_runtime_role_is_refused_in_every_environment` | fixed + test |
 | F-07 | MED | CSV formula injection in the L2 `files` export | see §3.7 | `tests/connectors/test_files.py::test_csv_cells_a_spreadsheet_would_evaluate_are_neutralised` | fixed + test |
-| F-08 | MED | No SSRF guard on tenant-controlled connection endpoints (S3 `endpoint_url`, DB hosts) | see §3.8 | — | pending |
+| F-08 | MED | No SSRF guard on tenant-controlled connection endpoints (S3 `endpoint_url`, DB hosts) | see §3.8 | `tests/security/test_connection_ssrf.py`, `tests/api/test_connection_ssrf_api.py` | fixed + test |
 | F-09 | MED | Presidio wrote customer text to the logs at `DEBUG` | S13 | `tests/test_observability.py::test_third_party_loggers_are_capped`, `tests/test_no_values_in_logs_m5.py` | fixed |
 | F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 | — | pending |
 | F-11 | MED | Tokenization oracle under DPS's bank credentials (any profile string, any caller with `obfuscate`) | see §3.11 | — | pending |
@@ -98,6 +98,19 @@ phone shape (`+1 (555) 010-0100` and `-12.50` stay as they are, so exported phon
 mangled; `+cmd|…` and `-2+3+cmd|…` are guarded). Numbers, dates, booleans and bytes are rendered in
 forms no spreadsheet evaluates and are never prefixed. JSONL and Parquet are unchanged (not
 spreadsheet-evaluated).
+
+### 3.8 F-08 — the SSRF guard on connection endpoints
+
+`netguard.check_connection_endpoint` shares the scanner guard's core (`forbidden_ip_reason`,
+`check_resolved_host`): every host a connection dials — `params.host`, an s3 `endpoint_url`'s host,
+the MongoDB `uri` and Oracle `dsn` hosts of its credentials — must not be a numeric encoding nor be or
+resolve to link-local/metadata, multicast, unspecified, reserved or (outside local) loopback
+addresses. It runs at `POST /connections` and `PATCH` (DNS off the event loop) and again at use
+(`open_connector`, `open_target_store`), so a row stored earlier or a DNS change is caught before any
+driver dials; `POST /connections/{id}/test` answers the refusal as 422 instead of probing. RFC 1918
+stays allowed. Residual: the driver resolves the name again (rebinding window) — the egress
+NetworkPolicy of the OpenShift manifests is the network-level backstop; SRV targets of a
+`mongodb+srv://` URI are not resolved by the guard.
 
 ## 4. Considered and refuted
 

@@ -13,6 +13,7 @@ DPS will page with (``runs_as``) and the number of bound parameters.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -32,7 +33,7 @@ from dps.connections import (
     record_test,
     update_connection,
 )
-from dps.jobs_models import ConnectionSpec, Selection
+from dps.jobs_models import ConnectionSpec, InlineCredentials, Selection
 from dps.layers.api.deps import (
     audit_action,
     audited,
@@ -64,7 +65,7 @@ from dps.layers.connectors.selection import (
     selection_checks,
     validate_selection,
 )
-from dps.netguard import require_tls_connection
+from dps.netguard import check_connection_endpoint, require_tls_connection
 from dps.ratelimit import enforce_rate_limit
 from dps.secrets import SecretUnavailable
 
@@ -126,6 +127,19 @@ async def _open(request: Request, conn: Connection, action: str) -> Connector:
     return await open_connector(conn, _settings(request), action=action, kek=kek_of(request))
 
 
+async def _check_endpoint(
+    spec: ConnectionSpec | Connection, request: Request, creds: InlineCredentials | None
+) -> None:
+    """F-08: refuse an endpoint that is (or resolves to) a forbidden address before it is stored
+    (``host_forbidden`` 422). DNS runs off the event loop."""
+    secret = (
+        {k: v.get_secret_value() for k, v in creds.extra.items() if k in ("uri", "dsn")}
+        if creds is not None
+        else None
+    )
+    await asyncio.to_thread(check_connection_endpoint, spec, _settings(request), secret=secret)
+
+
 def _dump(conn: Connection) -> dict[str, Any]:
     return conn.model_dump(mode="json")
 
@@ -139,6 +153,7 @@ async def create(body: ConnectionSpec, request: Request) -> dict[str, Any]:
         if PRODUCTION in body.tags:
             _require_admin_for_production(request)
         require_tls_connection(body, _settings(request))  # M5: TLS-only egress (422)
+        await _check_endpoint(body, request, body.credentials)  # F-08: no SSRF target (422)
         conn = await create_connection(
             tenant,
             body,
@@ -187,9 +202,9 @@ async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> 
         if body.params is not None:  # M5: the changed endpoint must use TLS too (422)
             if current.production or (body.tags is not None and PRODUCTION in body.tags):
                 _require_admin_for_production(request)  # authorisation answers before TLS
-            require_tls_connection(
-                current.model_copy(update={"params": body.params}), _settings(request)
-            )
+            moved = current.model_copy(update={"params": body.params})
+            require_tls_connection(moved, _settings(request))
+            await _check_endpoint(moved, request, body.credentials)  # F-08 (422)
         updated = await update_connection(
             tenant,
             connection_id,
@@ -254,7 +269,7 @@ async def _test(request: Request, conn: Connection, body: ConnectionTestRequest)
     try:
         connector = await open_connector(conn, settings, action="test", kek=kek, credentials=creds)
     except ConnectorError as exc:
-        if exc.code == "engine_unavailable":
+        if exc.code in ("engine_unavailable", "host_forbidden"):  # F-08: a refusal, not a test
             raise
         return _failed(conn.engine, "connect", "connection_failed")
     try:
