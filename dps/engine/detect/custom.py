@@ -73,12 +73,12 @@ class RecognizerSpec(BaseModel):
     name: str
     supported_entity: str
     supported_language: str = "en"
-    patterns: tuple[PatternSpecModel, ...] = ()
-    deny_list: tuple[str, ...] = ()
-    context: tuple[str, ...] = ()
+    patterns: tuple[PatternSpecModel, ...] = Field(default=(), max_length=20)
+    deny_list: tuple[str, ...] = Field(default=(), max_length=1000)
+    context: tuple[str, ...] = Field(default=(), max_length=50)
     sensitivity: Sensitivity | None = None
     #: Exact matched texts this recognizer never reports (pattern and deny-list hits alike).
-    allow_list: tuple[str, ...] = ()
+    allow_list: tuple[str, ...] = Field(default=(), max_length=1000)
 
     @field_validator("supported_entity")
     @classmethod

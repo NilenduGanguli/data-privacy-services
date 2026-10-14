@@ -42,7 +42,12 @@ from dps.engine.synth.surrogates import (
     seed_bytes,
     seed_from_caller,
 )
-from dps.engine.taxonomy import Sensitivity, entity_info, record_sensitivity
+from dps.engine.taxonomy import (
+    Sensitivity,
+    entity_info,
+    metric_entity_label,
+    record_sensitivity,
+)
 from dps.engine.transform import fpe
 from dps.engine.transform.apply import (
     ApplyOptions,
@@ -310,7 +315,7 @@ class PrivacyEngine:
             sensitivity = record_sensitivity(f.entity_type for f in findings)
         for f in findings:
             for d in f.detectors:
-                FINDINGS.labels(f.entity_type, d.split(":")[0]).inc()
+                FINDINGS.labels(metric_entity_label(f.entity_type), d.split(":")[0]).inc()
         return findings, sensitivity
 
     # -- T3: LLM metadata labelling (opt-in, value-free; spec §5.3) ---------------------------

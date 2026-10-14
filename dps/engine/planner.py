@@ -10,9 +10,12 @@ from __future__ import annotations
 from typing import Any, Literal, cast
 
 from dps.engine.findings import Finding, Plan, PlanEntry
-from dps.engine.policy import Policy
+from dps.engine.policy import KEYLESS_METHODS, Policy
 from dps.engine.taxonomy import Sensitivity, entity_info, record_sensitivity
 from dps.engine.transform.methods import METHODS
+from dps.errors import CodedError
+
+__all__ = ["KEYLESS_METHODS", "build_plan", "explain_plan"]
 
 _FPE_METHODS = {"fpe_digits", "fpe_text"}
 _MODES = ("obfuscate", "synthesize")
@@ -36,6 +39,8 @@ def build_plan(
 
     Raises:
         ValueError: ``mode`` is not ``obfuscate`` or ``synthesize``.
+        CodedError: 422 ``synthesize_method_invalid`` — a method outside
+            :data:`~dps.engine.policy.KEYLESS_METHODS` in synthesize mode.
     """
     if mode not in _MODES:
         raise ValueError(f"mode must be obfuscate or synthesize, got {mode!r}")
@@ -57,6 +62,14 @@ def build_plan(
                 f"policy:{finding.entity_type}"
                 if finding.entity_type in policy.treat
                 else "policy:default_sensitive"
+            )
+        if mode == "synthesize" and method not in KEYLESS_METHODS:
+            # the policy model refuses these; a policy that bypassed validation still cannot
+            # make synthetic output carry a keyed token or a bank token (S3 review F-12)
+            raise CodedError(
+                "synthesize_method_invalid",
+                f"synthesize mode runs key-less methods only ({finding.entity_type})",
+                status=422,
             )
         if method in _FPE_METHODS and not fpe_enabled:
             method, params, reason = "det_token", {}, f"{reason}|fallback:fpe_disabled"

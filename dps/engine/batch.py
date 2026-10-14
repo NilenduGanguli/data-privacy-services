@@ -80,11 +80,12 @@ from dps.engine.findings import (
 )
 from dps.engine.jsonpath import child_path, flatten, get_path, parse_path
 from dps.engine.planner import build_plan
+from dps.engine.policy import KEYLESS_METHODS as POLICY_KEYLESS_METHODS
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import PrivacyEngine
 from dps.engine.synth.keys import KeyPseudonyms, PseudonymError
 from dps.engine.synth.surrogates import SynthesisSeed, seed_bytes
-from dps.engine.taxonomy import entity_info, record_sensitivity
+from dps.engine.taxonomy import entity_info, metric_entity_label, record_sensitivity
 from dps.engine.transform.apply import (
     ApplyOptions,
     RevealHint,
@@ -111,20 +112,8 @@ if TYPE_CHECKING:  # the constraints module needs the [tabular] extra; M2 jobs r
     from dps.engine.synth.constraints import ConstraintSet
     from dps.engine.transform.external import ExternalTokenizer
 
-#: Methods that need no key material (usable in synthesize mode).
-KEYLESS_METHODS = frozenset(
-    {
-        "surrogate",
-        "keep",
-        "null",
-        "redact",
-        "bucket",
-        "generalize",
-        "mask_partial",
-        "dictionary",
-        "noise",
-    }
-)
+#: Methods that need no key material (usable in synthesize mode): the policy's set (F-12).
+KEYLESS_METHODS = POLICY_KEYLESS_METHODS
 #: Row country code → surrogate locale (``policy.locale.by_country_field``).
 LOCALE_BY_COUNTRY = {
     "US": "en_US",
@@ -895,7 +884,7 @@ class BatchTransformer:
         for method, count in methods.items():
             TRANSFORMS.labels(self.mode, method).inc(count)
         for (entity, detector), count in findings_seen.items():
-            FINDINGS.labels(entity, detector).inc(count)
+            FINDINGS.labels(metric_entity_label(entity), detector).inc(count)
         verification = Verification(passed=not hits, checked=checked, hits=hits[:_MAX_HITS])
         if hits:
             VERIFY_FAIL.labels(self.mode).inc()

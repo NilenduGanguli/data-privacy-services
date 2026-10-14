@@ -147,6 +147,10 @@ _BUILTIN: Mapping[str, EntityInfo] = MappingProxyType({e.name: e for e in _ENTRI
 
 TAXONOMY: dict[str, EntityInfo] = dict(_BUILTIN)
 _REGISTRY_LOCK = threading.Lock()
+#: The most custom names the process-global registry holds (S3 review F-10). A policy can only
+#: raise a custom tier above the MEDIUM default; a *new* name past the cap is refused (the request
+#: fails with 400, it is never silently downgraded). Names already registered keep working.
+MAX_CUSTOM_ENTITIES = 5000
 
 #: Entities whose co-occurrence raises a record's sensitivity (spec §5.2).
 QUASI_IDENTIFIERS = frozenset(
@@ -182,14 +186,23 @@ def register_entity(info: EntityInfo) -> None:
     * for a custom name the stored tier is the max of the requested tier and the tier the name
       already has, which for a name nobody registered yet is the ``MEDIUM`` default.
 
+    A new name whose tier is the MEDIUM default is not stored (it reads the same either way), and
+    at most :data:`MAX_CUSTOM_ENTITIES` custom names are (S3 review F-10).
+
     Raises:
-        ValueError: when ``info.name`` is a built-in entity type.
+        ValueError: when ``info.name`` is a built-in entity type, or a new name would pass the cap.
     """
     if is_builtin_entity(info.name):
         raise ValueError(f"built-in entity type {info.name!r} cannot be re-registered")
     with _REGISTRY_LOCK:
         current = entity_info(info.name).sensitivity
         tier = Sensitivity.max_of([current, info.sensitivity])
+        if info.name not in TAXONOMY and tier is Sensitivity.MEDIUM:
+            return  # the unregistered default already: storing it would only grow the registry
+        if info.name not in TAXONOMY and len(TAXONOMY) - len(_BUILTIN) >= MAX_CUSTOM_ENTITIES:
+            raise ValueError(
+                "the custom entity registry is full: use an entity type already registered"
+            )
         TAXONOMY[info.name] = dataclasses.replace(info, sensitivity=tier)
 
 
@@ -203,3 +216,13 @@ def record_sensitivity(entity_types: Iterable[str]) -> Sensitivity:
     elif "PERSON_NAME" in types and quasi:
         tier = Sensitivity.max_of([tier, Sensitivity.MEDIUM])
     return tier
+
+
+#: The label every custom entity type gets in metrics (bounded label values, S3 review F-10).
+CUSTOM_LABEL = "custom"
+
+
+def metric_entity_label(name: str) -> str:
+    """``name`` for a built-in entity type, :data:`CUSTOM_LABEL` for any other (custom names are
+    caller-chosen: unbounded, and readable on the anonymous ``/metrics``)."""
+    return name if name in _BUILTIN else CUSTOM_LABEL

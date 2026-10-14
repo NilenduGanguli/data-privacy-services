@@ -52,9 +52,9 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-07 | MED | CSV formula injection in the L2 `files` export | see §3.7 | `tests/connectors/test_files.py::test_csv_cells_a_spreadsheet_would_evaluate_are_neutralised` | fixed + test |
 | F-08 | MED | No SSRF guard on tenant-controlled connection endpoints (S3 `endpoint_url`, DB hosts) | see §3.8 | `tests/security/test_connection_ssrf.py`, `tests/api/test_connection_ssrf_api.py` | fixed + test |
 | F-09 | MED | Presidio wrote customer text to the logs at `DEBUG` | S13 | `tests/test_observability.py::test_third_party_loggers_are_capped`, `tests/test_no_values_in_logs_m5.py` | fixed |
-| F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 | — | pending |
+| F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 | `tests/security/test_custom_entity_bounds.py` | fixed + test |
 | F-11 | MED | Tokenization oracle under DPS's bank credentials (any profile string, any caller with `obfuscate`) | see §3.11 | — | pending |
-| F-12 | MED | Synthesize mode emitted the bank's real tokens as "synthetic" values | see §3.12 | — | pending |
+| F-12 | MED | Synthesize mode emitted the bank's real tokens as "synthetic" values | see §3.12 | `tests/security/test_synthesize_keyless.py` | fixed + test |
 | F-13 | MED | Retry and job-group admission bound only the public `kid`, not the DEK | see §3.13 | — | pending |
 | F-14 | MED | The once-only job/group key was lost when the answer failed after commit (strict audit refusal) | see §3.14 | — | pending |
 | F-15 | LOW | S13 log-scan test missing | S13 | `tests/test_no_values_in_logs_m5.py` | fixed |
@@ -121,6 +121,27 @@ driver dials; `POST /connections/{id}/test` answers the refusal as 422 instead o
 stays allowed. Residual: the driver resolves the name again (rebinding window) — the egress
 NetworkPolicy of the OpenShift manifests is the network-level backstop; SRV targets of a
 `mongodb+srv://` URI are not resolved by the guard.
+
+### 3.10 F-10 — bounded labels and a bounded registry
+
+`dps_findings_total` labels a custom type `custom` (L1 and L2), so neither a flood of names nor a
+tenant's project names reach the keyless `/metrics`. The process-global registry stores a custom
+name only when it raises the tier above the MEDIUM default (what an unregistered name already reads
+as) and holds at most 5000 names; a new name past the cap fails the request closed (400) instead of
+being stored or downgraded. Policies are capped at 50 recognizers (20 patterns, 50 context words,
+1000 deny/allow terms each) and 500 declared fields, inline or stored. Residual: `/metrics` stays
+keyless by design (ops scrape); per-tenant LLM counters carry tenant ids — restrict the ops port with
+the OpenShift NetworkPolicy (Task 25).
+
+### 3.12 F-12 — synthesize mode is key-less
+
+`SynthesizeConfig` refuses any method outside `KEYLESS_METHODS` (now defined in
+`dps.engine.policy`; `dps.engine.batch.KEYLESS_METHODS` is the same set), so a policy that would make
+`/synthesize`, NDJSON, `/documents/synthesize`, a stored policy or an L2 free-text span call the bank
+tokenizer (or any keyed method) is refused when validated; `build_plan` raises 422
+`synthesize_method_invalid` as the backstop for a policy built around validation. The test drives
+the three L1 routes with a counting tokenizer: zero calls. M0's planner test used an FPE synthesize
+override to exercise the planner's fallback; it now asserts the refusal.
 
 ## 4. Considered and refuted
 

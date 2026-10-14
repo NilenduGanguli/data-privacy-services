@@ -1186,3 +1186,10 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
 - **F-04 (NER DOB):** the targeted rule (NER yields to an overlapping typed hit of a higher tier)
   instead of ranking every overlap by tier first: a global tier-first ranking would also reorder
   pattern-vs-pattern overlaps (CARD_PAN vs AADHAAR etc.) the M0/M1 suites settle deliberately.
+- **F-10 (custom names):** custom tiers stay process-global (the planner, discovery and the batch
+  transformer read `entity_info`); per-request tiers would touch every engine path at the finish
+  stage. Bounded instead: only tiers above MEDIUM are stored, at most 5000 names, refusal past the cap.
+- **F-12 (synthesize methods):** refused at policy validation (not only at plan time) so every entry
+  point fails before detection runs; `KEYLESS_METHODS` moved to `dps/engine/policy.py` (re-exported by
+  `batch` and `planner`). `tests/test_planner.py::test_synthesize_fallbacks_and_reversibility_follow_the_registry`
+  became `test_synthesize_overrides_are_key_less_and_beat_keep_non_sensitive`.
