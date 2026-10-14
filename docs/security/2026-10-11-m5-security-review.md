@@ -215,6 +215,36 @@ Hints without a version are verified as v1 (issued before); an external hint's e
 an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguous except for the
 `None`/`""` profile (residual for v1 hints only).
 
+### 3.23 Where each fix landed (branch `fsec`)
+
+| Commit | Content |
+|---|---|
+| `dc85450` | Task 0: the contract-surface guard |
+| `6061767` | Task 17: S1, S2, S3, S5 (functions), S6, S11, S13 and F-09 — the guard tests under `tests/security/` |
+| `1fd9730` | S1 test correction (the inline-policy cases reach the value validators) |
+| `f112044` | F-01 |
+| `54b5bb4` | F-06 |
+| `6c4a3ef` | F-07 |
+| `514280d` | F-08 |
+| `ceff56c` | F-04 |
+| `c24c96f` | F-10 and F-12 |
+| `e89ece8` | F-11 |
+| `6ec3933` | F-19 |
+| `4e92dd2` | F-13 (migration 046) |
+| `fde5a94` | F-14 |
+| `7c3fd5c` | F-18 |
+| `da904a9` | F-20 |
+| `d2bada1` | F-21 |
+| `0c63e01` | F-22 |
+
+Proof beyond the tests: the finders' probes re-run on the fixed branch
+(`~/.cache/dps-build/reports/S3-impl/probes/*.after.out`) — the D3 clone is refused (403, 0 rows
+changed), `(a+)+$` is refused before it runs, the oracle makes 0 tokenizer calls under an allow-list,
+`/synthesize` never returns a bank token, a forged-profile cache writes 20/20 under the right
+profile, every key-bearing answer is `no-store`, `repr(Settings)` shows 0/13 secrets, 1000-recognizer
+requests add 0 metric series, a previous-KEK blob opens in the rotation window, and with the real
+Presidio model a birth date is transformed in 8/8 runs.
+
 ## 4. Considered and refuted
 
 - **`pvc` file-export targets not tenant-namespaced under `DPS_EXPORT_ROOT`** — every write key carries
@@ -238,6 +268,15 @@ an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguou
 - Failed authentications have no tenant and are not audited; they are counted in
   `dps_requests_total{outcome="rejected"}`. DB keys propagate to other replicas within
   `DPS_KEY_CACHE_SECONDS`.
+- `DPS_TOKENIZER_PROFILES` unset means unrestricted tokenization (local/dev); the production posture
+  refuses a tokenizer without it, and the bank should give DPS its own data elements (HANDOFF).
+- A once-only key whose answer is lost in transit (not refused by DPS) cannot be detected by the
+  server; callers that cannot afford that supply their own key material or seed.
+- v1 bind tags (hints issued before F-22) still verify; their `None`/`""` profile ambiguity remains
+  for those hints only.
+- `/metrics` is keyless by design (ops scraping); restrict the ops port by NetworkPolicy (Task 25).
+- The scanner SSRF guard (S5) is wired at the M4 merge; until then the functions and tests exist but
+  no scanner route calls them (there is no scanner on this branch).
 
 ## 6. Re-running the review
 
@@ -246,4 +285,5 @@ an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguou
 DPS_TEST_REQUIRE_SERVICES=1 ./lane.sh pytest -q -m db tests/security/test_cross_tenant.py \
   tests/api/test_production_resource_gate.py
 ./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-<lens>/<probe>.py   # the finders' probes
+./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-impl/probes/<probe>.py  # re-run copies
 ```
