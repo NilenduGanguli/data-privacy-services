@@ -11,10 +11,13 @@ targets take neither. Credentials are only ever opened by :func:`load_credential
 
 **Production credentials** (S3 security review, D3 bound to the resource): a ``secret_ref`` that a
 ``production``-tagged connection holds is a production credential. Without ``admin`` no other
-connection may name it (create or patch: 403 ``admin_scope_required``), and ``in_place``/``append``
-through any connection that holds it needs ``admin`` (:func:`production_refs`, used by
-``validate_run`` and the retry check) — a ``jobs`` key cannot clone the production connection
-without its tag and rewrite production data in place.
+connection may name it (create or patch: 403 ``admin_scope_required``), a connection that already
+holds it is changed or deleted like a production-tagged one (any change, any delete: ``admin``;
+review round 1 B2 — restating the same ``secret_ref`` with a new endpoint would otherwise send the
+production login to the caller's server), and ``in_place``/``append`` through any connection that
+holds it needs ``admin`` (:func:`production_refs`, used by ``validate_run`` and the retry check) — a
+``jobs`` key cannot clone the production connection without its tag and rewrite production data in
+place.
 
 **Who may change a connection** (security review SEC-3). Any mutation of a connection that is or
 becomes tagged ``production`` (update, delete, credential rotation) needs the ``admin`` scope. On a
@@ -188,6 +191,15 @@ def _production_credential_refused() -> ConnectionStoreError:
 def _admin_required() -> ConnectionStoreError:
     return ConnectionStoreError(
         "admin_scope_required", 403, "changing a production-tagged connection needs the admin scope"
+    )
+
+
+def _production_holder_refused() -> ConnectionStoreError:
+    return ConnectionStoreError(
+        "admin_scope_required",
+        403,
+        "this connection holds a production credential: changing or deleting it needs the admin "
+        "scope",
     )
 
 
@@ -427,10 +439,11 @@ async def update_connection(
     """Apply ``patch`` (validated against the contract's connection rules); None if absent.
 
     ``admin``: the caller holds the ``admin`` scope. Without it, a connection that is or would
-    become production-tagged is not changed (``admin_scope_required`` 403), and an endpoint
-    change of a connection holding credentials needs ``credentials`` or ``secret_ref`` in the
-    same patch (``connection_endpoint_change_requires_credentials`` 403); both are checked under
-    the row lock before anything is written.
+    become production-tagged, or that holds a production credential (:func:`production_refs`),
+    is not changed (``admin_scope_required`` 403), and an endpoint change of a connection holding
+    credentials needs ``credentials`` or ``secret_ref`` in the same patch
+    (``connection_endpoint_change_requires_credentials`` 403); all are checked under the row lock
+    before anything is written.
 
     Secrets: ``credentials`` re-seals (and drops a ``secret_ref``), ``secret_ref`` drops the sealed
     blob, neither keeps what is stored. Changing ``params`` or the secret clears ``last_test``
@@ -454,13 +467,12 @@ async def update_connection(
         becomes_production = patch.tags is not None and "production" in patch.tags
         if not admin and (current.production or becomes_production):
             raise _admin_required()
-        if (
-            not admin
-            and patch.secret_ref is not None
-            and patch.secret_ref != current.secret_ref
-            and patch.secret_ref in await production_refs(tenant_id, conn=conn)
-        ):
-            raise _production_credential_refused()
+        if not admin:
+            refs = await production_refs(tenant_id, conn=conn)
+            if holds_production_credentials(current, refs):  # review r1 B2: like the tagged one
+                raise _production_holder_refused()
+            if patch.secret_ref is not None and patch.secret_ref in refs:
+                raise _production_credential_refused()
         holds_credentials = sealed is not None or current.secret_ref is not None
         resupplied = patch.credentials is not None or patch.secret_ref is not None
         if (
@@ -535,16 +547,22 @@ async def update_connection(
 
 async def delete_connection(tenant_id: str, connection_id: str, *, admin: bool = False) -> bool:
     """Delete the connection; ``connection_in_use`` (409) while a non-terminal job uses it,
-    ``admin_scope_required`` (403) for a production-tagged one unless ``admin``."""
+    ``admin_scope_required`` (403) unless ``admin`` for a production-tagged one or one that holds
+    a production credential (review r1 B2)."""
     s = db.schema_ident()
     async with db.acquire(tenant_id) as conn, conn.transaction():
-        tags = await conn.fetchval(
-            f"SELECT tags FROM {s}.dps_connection WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+        row = await conn.fetchrow(
+            f"SELECT tags, secret_ref FROM {s}.dps_connection "
+            "WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
             tenant_id,
             connection_id,
         )
-        if tags is not None and "production" in tags and not admin:
-            raise _admin_required()
+        if row is not None and not admin:
+            if "production" in (row["tags"] or []):
+                raise _admin_required()
+            ref = row["secret_ref"]
+            if ref is not None and ref in await production_refs(tenant_id, conn=conn):
+                raise _production_holder_refused()
         busy = await conn.fetchval(
             f"SELECT 1 FROM {s}.dps_job WHERE tenant_id = $1 "
             "AND (connection_id = $2 OR target_connection_id = $2) "

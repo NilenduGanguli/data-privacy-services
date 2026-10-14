@@ -1,13 +1,16 @@
 """D3 bound to the credentials, not the connection row (S3 finding, auth-tenancy #1).
 
 A ``secret_ref`` held by a ``production``-tagged connection is a production credential: a key
-without ``admin`` cannot name it in another connection (create or patch), and an ``in_place`` /
-``append`` through *any* connection that holds it needs ``admin`` — so a ``jobs`` key can no longer
-clone the production connection without its tag and rewrite production in place. A retry of a
-production ``in_place``/``append`` job re-checks the same rule."""
+without ``admin`` cannot name it in another connection (create or patch), cannot change or delete a
+connection that already holds it (review round 1 B2), and an ``in_place`` / ``append`` through
+*any* connection that holds it needs ``admin`` — so a ``jobs`` key can no longer clone the
+production connection without its tag and rewrite production in place, nor re-point a holder at
+its own server. A retry of a production ``in_place``/``append`` job re-checks the same rule."""
 
 from __future__ import annotations
 
+import socket
+import threading
 from typing import Any
 
 import pytest
@@ -90,6 +93,85 @@ def test_in_place_through_any_holder_of_a_production_credential_needs_admin(
         "/api/v1/jobs/run/validate", json=_in_place(dev.json()["id"], dev_snap), headers=JOBS
     )
     assert plain.json().get("code") != "admin_scope_required"
+
+
+class _Listener:
+    """A TCP listener that only counts the connections it receives (S3 review r1 B2's fake
+    server: no login may ever reach an endpoint the caller chose)."""
+
+    def __init__(self) -> None:
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(5)
+        self.port = self.sock.getsockname()[1]
+        self.connections = 0
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.connections += 1
+            conn.close()
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("holder_made_by", ["jobs-key-before-the-tag", "admin"])
+def test_a_jobs_key_cannot_change_or_delete_a_production_credential_holder(
+    api_client, holder_made_by: str
+) -> None:  # noqa: ANN001
+    """S3 review r1 B2: an untagged connection that already holds the production credential was
+    re-pointed by a ``jobs`` key that restated the same ``secret_ref`` (200), and the next test sent
+    the production login and password to the caller's server; the same key deleted it (204)."""
+    c, _ = api_client
+    if holder_made_by == "admin":
+        prod = _create(c, "bank-prod", FULL, secret_ref=PROD_REF, tags=["production"])
+        holder = _create(c, "prod-holder", FULL, secret_ref=PROD_REF)
+    else:  # a jobs key made it before the production connection was tagged
+        holder = _create(c, "early-holder", JOBS, secret_ref=PROD_REF)
+        prod = _create(c, "bank-prod", FULL, secret_ref=PROD_REF, tags=["production"])
+    assert prod.status_code == 201 and holder.status_code == 201, (prod.text, holder.text)
+    holder_id = holder.json()["id"]
+    url = f"/api/v1/connections/{holder_id}"
+    before = c.get(url, headers=JOBS).json()
+    fake = _Listener()
+    try:
+        moved = {**PG, "host": "127.0.0.1", "port": fake.port}
+        for body in (
+            {"params": moved, "secret_ref": PROD_REF},  # the exploit: the same ref restated
+            {"params": moved},
+            {"secret_ref": "dps/src/test-pg"},
+            {"credentials": {"username": "u", "password": "pw-holder-distinct"}},
+            {"roles": ["source"]},
+            {"name": "holder-renamed"},
+        ):
+            refused = c.patch(url, json=body, headers=JOBS)
+            assert refused.status_code == 403, (body, refused.text)
+            assert refused.json()["code"] == "admin_scope_required"
+        after = c.get(url, headers=JOBS).json()
+        for field in ("name", "params", "secret_ref", "roles", "tags", "has_secret"):
+            assert after[field] == before[field], field
+        c.post(f"{url}/test", json={}, headers=JOBS)  # tests the stored endpoint only
+        assert fake.connections == 0  # no login ever reached the caller's server
+        gone = c.delete(url, headers=JOBS)
+        assert gone.status_code == 403 and gone.json()["code"] == "admin_scope_required"
+        assert c.get(url, headers=JOBS).status_code == 200
+    finally:
+        fake.close()
+    # the admin scope still may
+    renamed = c.patch(url, json={"name": "holder-renamed"}, headers=FULL)
+    assert renamed.status_code == 200, renamed.text
+    assert c.delete(url, headers=FULL).status_code == 204
+    # a holder of a non-production credential keeps the jobs-scope rules
+    dev = _create(c, "bank-dev", JOBS, secret_ref="dps/src/test-pg")
+    dev_url = f"/api/v1/connections/{dev.json()['id']}"
+    assert c.patch(dev_url, json={"name": "bank-dev-2"}, headers=JOBS).status_code == 200
+    assert c.delete(dev_url, headers=JOBS).status_code == 204
 
 
 def _job(write_mode: str, *, target: str | None = None) -> Any:  # noqa: ANN401

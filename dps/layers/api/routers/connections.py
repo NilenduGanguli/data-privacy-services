@@ -1,8 +1,9 @@
 """``/api/v1/connections`` (contract §9, scope ``jobs``; the ``production`` tag needs ``admin``).
 
-SEC-3: updating or deleting a production-tagged connection needs ``admin``; moving a connection
-that holds credentials to another endpoint needs its credentials in the same request or ``admin``
-(:mod:`dps.connections`). The update's audit event names the changed fields
+SEC-3: updating or deleting a production-tagged connection needs ``admin`` — and so does updating
+or deleting a connection that holds a production credential (review round 1 B2); moving a
+connection that holds credentials to another endpoint needs its credentials in the same request or
+``admin`` (:mod:`dps.connections`). The update's audit event names the changed fields
 (``counts["field.<name>"]``), never a value. The test route takes no param overrides.
 
 Credentials never appear in a response (``has_secret`` only); a connection test stores its
@@ -28,8 +29,10 @@ from dps.connections import (
     create_connection,
     delete_connection,
     get_connection,
+    holds_production_credentials,
     list_connections,
     load_credentials,
+    production_refs,
     record_test,
     update_connection,
 )
@@ -191,8 +194,8 @@ async def get(connection_id: str, request: Request) -> dict[str, Any]:
 @router.patch("/connections/{connection_id}", dependencies=_JOBS)
 async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> dict[str, Any]:
     """Update name, params, secret, roles or tags. Any change of a connection that is or becomes
-    production-tagged needs admin; an endpoint change of a connection holding credentials needs
-    them again (``credentials`` / ``secret_ref``) or admin."""
+    production-tagged, or that holds a production credential, needs admin; an endpoint change of a
+    connection holding credentials needs them again (``credentials`` / ``secret_ref``) or admin."""
     fields: dict[str, int] = {}
 
     async def run() -> dict[str, Any]:
@@ -202,6 +205,14 @@ async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> 
         if body.params is not None:  # M5: the changed endpoint must use TLS too (422)
             if current.production or (body.tags is not None and PRODUCTION in body.tags):
                 _require_admin_for_production(request)  # authorisation answers before TLS
+            admin = principal_of(request).has_scope("admin")
+            if not admin and holds_production_credentials(current, await production_refs(tenant)):
+                raise DpsHttpError(  # review r1 B2: before TLS, like the tagged connection
+                    403,
+                    "admin_scope_required",
+                    "this connection holds a production credential: changing or deleting it "
+                    "needs the admin scope",
+                )
             moved = current.model_copy(update={"params": body.params})
             require_tls_connection(moved, _settings(request))
             await _check_endpoint(moved, request, body.credentials)  # F-08 (422)
@@ -228,7 +239,7 @@ async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> 
 @router.delete("/connections/{connection_id}", status_code=204, dependencies=_JOBS)
 async def delete(connection_id: str, request: Request) -> Response:
     """Delete a connection (409 ``connection_in_use`` while a live job uses it; a
-    production-tagged one needs admin)."""
+    production-tagged one, or one holding a production credential, needs admin)."""
 
     async def run() -> None:
         admin = principal_of(request).has_scope("admin")
