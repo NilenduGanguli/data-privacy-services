@@ -279,3 +279,68 @@ def test_compose_runs_the_mock_under_its_profiles() -> None:
         env = services[name]["environment"]
         assert env["DPS_TOKENIZER_URL"] == "${DPS_TOKENIZER_URL:-http://tokenizer-mock:8420}"
         assert env["DPS_TOKENIZER_PROVIDER"] == "${DPS_TOKENIZER_PROVIDER:-http}"
+
+
+def test_a_document_path_is_tokenized_leaf_by_leaf_in_one_call() -> None:
+    """WP-I (m3 merge): M5's batch pre-tokenization read ``row[name]``; a MongoDB plan names a
+    leaf path (``$.ids[*].ssn``) whose name is the whole top-level field, so the tokenizer got the
+    array's JSON as one "SSN". Every leaf the path matches is sent instead, in one call."""
+    from dps.engine.batch import BatchTransformer, ColumnPlan
+    from dps.engine.policy import MethodSpec, resolve_policy
+    from dps.engine.transform.crypto import generate_key_material
+    from dps.layers.connectors.base import ColumnInfo, ObjectRef, TableShape
+
+    sent: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        values = json.loads(request.content)["values"]
+        sent.append(values)
+        return httpx.Response(200, json={"tokens": ["tk_" + v[::-1] for v in values]})
+
+    engine = PrivacyEngine(
+        _settings(), tokenizer=HttpTokenizer("http://svc", transport=httpx.MockTransport(handler))
+    )
+    shape = TableShape(
+        object=ObjectRef(name="people"),
+        key=["_id"],
+        key_source="primary_key",
+        columns=[
+            ColumnInfo(path="$._id", name="_id", data_type="int", kind="int", is_key=True),
+            ColumnInfo(path="$.ids[*].ssn", name="ids", data_type="string", kind="text"),
+        ],
+    )
+    plans = [
+        ColumnPlan(
+            path="$.ids[*].ssn",
+            name="ids",
+            entity_type="SSN",
+            method=MethodSpec(method="external_tokenize", params={"profile": "ssn"}),
+            text_column=False,
+            reversible=True,
+            kind="text",
+            length=None,
+        )
+    ]
+    t = BatchTransformer(
+        engine,
+        policy=resolve_policy(POLICY, default_name="gdpr-pseudonymise"),
+        mode="obfuscate",
+        columns=plans,
+        shape=shape,
+        key=generate_key_material("key"),
+        seed=None,
+        locale="en_US",
+        unclassified="keep",
+    )
+    rows: list[dict[str, Any]] = [
+        {"_id": i, "ids": [{"ssn": f"123-45-{6700 + i}"}, {"ssn": f"987-65-{4300 + i}"}]}
+        for i in range(5)
+    ]
+    result = t.transform(rows)
+    assert len(sent) == 1 and sorted(sent[0]) == sorted(
+        leaf["ssn"] for r in rows for leaf in r["ids"]
+    )
+    for old, new in zip(rows, result.rows, strict=True):
+        for a, b in zip(old["ids"], new["ids"], strict=True):
+            assert b["ssn"].startswith("tk_") and b["ssn"] != a["ssn"]
+    assert result.verification.passed
