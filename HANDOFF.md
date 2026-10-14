@@ -1259,3 +1259,52 @@ counts), `pytest -q tests/test_no_values_in_logs_m3.py` and the `oracle and mong
 `python tools/seed_sources.py --target all --rows 20000 --seed 7` twice (second run `unchanged`),
 `python tools/smoke_test.py --m3` (39/39 passed, 2 OCR checks skipped without `--profile docs`),
 the two benchmarks above. The lane verification (M3 Definition of Done 1–10) and the tag follow.
+
+## 14. M3 integrated on `main` (2026-10-14, WP-I)
+
+`git merge --no-ff m3` (`b878c50`): 23 files conflicted (HANDOFF, contract, compose, `config.py`,
+`batch.py`, connector `base`/`discovery`/`jobs_run`/`registry`/`targets`, `observability.py`,
+`pyproject.toml`, `tools/seed_sources.py`, four test files and seven console files); both sides kept.
+Migrations: M1–M2 001–010, M3 020, M5 040–045 (each number once, every file in its range). Compose:
+`oracle` (profiles `oracle`, `full`) and `mongo` (`sources`, `full`) join M5's `tokenizer-mock`; every
+host port stays a defaulted variable. Console: no new page (M3 extends the wizard, the jobs list and
+the job page); nav and routes cover every merged page.
+
+**Conflict resolutions worth knowing.** `registry.open_connector` loads the credentials and runs M5's
+TLS rule once for every engine, then opens the PostgreSQL, Oracle or MongoDB connector.
+`BatchTransformer` takes M5's `tabular`/`constraints`/`pseudonyms` and M3's `leaf_restore`; plans on
+document paths are checked against `by_path`. The run pipeline keeps main's `scan_written` (the
+review-required gate) and drops M3's `post_sample_hits`, whose document reading moved into it. The
+demo seed draws the customers from M3's `tools/seed_model.py` and keeps M5's rule-valid PANs
+(`seed_model.pan_for`).
+
+**Adaptations on main** (each test-first, commits `fix(integrate): …` / `test(integrate): …`):
+
+- SEC-2: the Oracle/MongoDB demo refs live under `default/` (compose already wrote them there); M3's
+  tests write their refs under each test tenant's folder. Through the API, another tenant's folder
+  is `secret_ref_foreign_tenant` and an escaping path 422 (`tests/api/test_api_connections_m3_security.py`).
+- SEC-3: a jobs key cannot change or delete a production Oracle/MongoDB connection; every Oracle and
+  MongoDB endpoint param (host, port, service name, database, replica set, TLS, Oracle protocol)
+  needs the credentials restated (same test file).
+- Oracle TLS: `options.protocol=tcps` now really dials `tcps://` (before, M5's rule approved it and the
+  connector dialled plain TCP); a secret `dsn` decides the rule when present, by its protocol, not by
+  a `tcps` substring.
+- Main's discovery fix on M3 data: the mixed-PII name cue reads a MongoDB leaf and its siblings; the
+  post-write review, the synthesize kept review and the identifier check key MongoDB leaves by path
+  (a classified leaf never vouches for an unclassified sibling; `$.kyc.taxId` is read as a PAN, not
+  as the `kyc` sub-document); a date/timestamp counts only as a whole value — `TIMESTAMP(9)`
+  fractions read as a "phone" one time in nine and made every Oracle CRM run `review_required`.
+- D-A on M3 engines: a MongoDB `ObjectId` key gets a keyed ObjectId pseudonym (every MongoDB
+  synthesize into a table or files was refused before); the Oracle `ROWID` pseudo key is never
+  pseudonymised; tabular synthesis is refused for a MongoDB source (`tabular_invalid`); a synthesize
+  job replaces a replaced column's value where the row's free text repeats it (Oracle `NOTES` repeat
+  the customer's city; D-A surrogates `CITY`, and the sweep failed every Oracle synthesize closed);
+  external tokenization pre-tokenizes each leaf a document path matches.
+- Tests: the migration test checks each milestone range and unique numbers; an address-line leaf keeps
+  main's own `line1` cue under an e-mail parent.
+
+**Traps.** The M3 integration tests reseed the shared demo `CRM.*` and `crm.profiles` at test sizes
+(2 400 rows); reseed with `tools/seed_sources.py --target all --rows 20000 --seed 7` before a demo or
+a source-vs-target count. Console tests overwrite the tracked screenshots under
+`docs/superpowers/build/m3-shots/` (A-N2). Start main with `DPS_TOKENIZER_MOCK_PORT=8430` while the
+M4 lane holds 8420. Gates and results: `~/.cache/dps-build/reports/I-m3.md`.
