@@ -4,9 +4,16 @@
 #   docker build -t data-privacy-services:local .                       # what compose builds
 #   docker build --platform linux/amd64 -t <registry>/data-privacy-services:<semver> .
 #   docker build --build-arg WITH_NER=1 ...                               # + Presidio and spaCy
+#   docker build --build-arg EXTRAS=synth-ml ...                          # + opt-in extras (bank side)
+#
+# One image, three roles (app, worker, migrate). It runs as uid 10001 (compose) or as any UID whose
+# group is 0 (OpenShift's restricted SCC), with a read-only root filesystem: the process writes only
+# to /tmp (HOME; a tmpfs/emptyDir) and to the artefact and export volumes under /app/var.
 
 # ---------------------------------------------------------------- stage 1: console
-FROM node:22-slim AS frontend
+# Built on the build host's own platform: the dist is plain JS/CSS, so a --platform linux/amd64
+# build on an arm64 Mac never runs npm under emulation.
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend
 WORKDIR /ui
 # Dependency layer (cached unless the manifest changes). The lockfile is committed, so `npm ci`
 # only: a silent fallback to `npm install` would build with unpinned versions.
@@ -38,28 +45,48 @@ COPY dps ./dps
 # [fpe] is MIT-licensed fastfpe; FF1 is still gated at runtime by DPS_FPE_ENABLED (spec D8).
 # [docs] (M1) is required by the app: the documents routes import the pipeline at startup.
 # pypdfium2's manylinux wheel bundles PDFium; the other document libraries ship wheels too.
-# [db] (asyncpg) and [connectors] (sqlglot, pyarrow, boto3) are the job platform (M2): app, worker
-# and migrate run this one image. [tabular] arrives with M5 (contract §11.1); until then uv notes
-# that the package has no such extra and installs the rest.
+# [db] (asyncpg) and [connectors] (sqlglot, pyarrow, boto3, oracledb, pymongo) are the job platform
+# (M2, M3): app, worker and migrate run this one image. [tabular] (M5: numpy + scipy) runs the
+# Gaussian-copula engine and the fidelity/privacy metrics (contract §11.1).
 # The [ner] extra (Presidio + spaCy models) is deliberately not baked in: pass --build-arg WITH_NER=1.
 # Without it, names in free text are found by their cues only, and reports state that gap
 # (report.verification.coverage, status "partial").
+# EXTRAS adds opt-in extras to either variant, e.g. --build-arg EXTRAS=synth-ml for a bank-built
+# image with MOSTLY AI after its licence and size review (torch ≈ 2 GB; never in the default
+# image); without it options.tabular="mostly" is refused with tabular_invalid. Extra names only:
+# lower-case letters, digits, '-' and ',' (anything else stops the build).
 ARG WITH_NER=0
-RUN if [ "$WITH_NER" = "1" ]; then \
-      uv pip install --system --no-cache -e ".[fpe,ner,docs,db,connectors,tabular]" \
+ARG EXTRAS=""
+RUN case "$EXTRAS" in *[!a-z0-9,-]*) echo "EXTRAS: lower-case extra names separated by commas" >&2; exit 2;; esac \
+    && if [ "$WITH_NER" = "1" ]; then \
+      uv pip install --system --no-cache -e ".[fpe,ner,docs,db,connectors,tabular${EXTRAS:+,$EXTRAS}]" \
         && python -m spacy download en_core_web_sm; \
     else \
-      uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular]"; \
+      uv pip install --system --no-cache -e ".[fpe,docs,db,connectors,tabular${EXTRAS:+,$EXTRAS}]"; \
     fi
 COPY --from=frontend /ui/dist ./frontend/dist
 # tools/: the seed-sources one-shot and the operator tools (seed, bench, demo, reveal) run in it.
 COPY tools ./tools
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-# /app/var holds the local artefact and export volumes; named volumes inherit this ownership.
+# Arbitrary UID (OpenShift runs the image as a random UID in group 0) and a read-only root:
+# - the image user 10001 has group 0 as its primary group, so compose's processes create group-0
+#   files like OpenShift's do;
+# - /app/var (the local artefact and export volumes; named volumes and emptyDirs inherit this
+#   ownership and mode) belongs to uid 10001 and group 0, writable by both, and its directories
+#   are setgid: what any UID creates in them stays group 0. With the entrypoint's umask 0002 it is
+#   also group-writable, so a later UID (a redeploy, another namespace UID) keeps writing where
+#   the previous one wrote;
+# - the code under /app is readable by group 0 and writable by nobody but root, whatever the
+#   build context's file modes were (a 664 file would otherwise be writable by every OpenShift
+#   UID);
+# - HOME=/tmp: libraries that write under ~ write to the /tmp scratch mount, never the root fs.
 RUN chmod 0755 /usr/local/bin/entrypoint.sh \
-    && useradd --create-home --uid 10001 appuser \
+    && useradd --create-home --uid 10001 --gid 0 appuser \
     && mkdir -p /app/var/artefacts /app/var/exports \
-    && chown -R appuser /app/var
+    && chown -R 10001:0 /app/var \
+    && chgrp -R 0 /app && chmod -R g+rX,g-w /app && chmod -R g=u /app/var \
+    && find /app/var -type d -exec chmod g+s {} +
+ENV HOME=/tmp
 # Runs as a non-root user; /app stays root-owned and read-only to the process (except /app/var).
 USER 10001
 EXPOSE 8400

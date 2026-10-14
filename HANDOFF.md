@@ -65,11 +65,13 @@ deploy facts — image, ports, env, extras, probes, labels.
 
 | Artefact | Kind | Notes |
 |---|---|---|
-| `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001**. The same image runs three roles: `app` (uvicorn), `worker` (`python -m dps.worker`, M2) and `migrate` (`python -m dps.migrate`, M2) |
+| `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001** (primary group 0) or any arbitrary UID in group 0 with a read-only root (M5 Task 24, §2). The same image runs three roles: `app` (uvicorn), `worker` (`python -m dps.worker`, M2) and `migrate` (`python -m dps.migrate`, M2); compose also runs the tokenizer mock and the seed one-shots from it |
 | M2 job platform | API + console | `/api/v1` connections, jobs (discover, run with `table` / `files` / `in_place` / `append`, controls), snapshots, job groups, evidence and artefacts (`docs/technical/api-m2.md`); console pages Data sources & jobs (07), job detail (03), the five-step New-job wizard (06), the evidence pack (10) and the evidence list of Reports (09) |
 | `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents + the job platform; extras `fpe`, `docs`, `db`, `connectors` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` / `e2e` (Playwright 1.55.0 for `tools/console_check.py` and `tests/console/test_console_m2.py`, never in the image) |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
+| `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); `--m3` adds 7 Oracle + MongoDB checks (§13); the M5 block (8 checks, always last: policy store hashes, report tiles, posture, a DB key minted, used, disabled and refused, the bank-tokenizer round trip, scrubbed 422s, `no-store` on `/api/`) skips its database and tokenizer checks when `/readyz` says they are down and fails on a skip under `DPS_SMOKE_REQUIRE_M5=1`; prints verdicts, never bodies |
+| `tools/demo_client.py` | module | M5 Task 24: `DpsClient(base_url, api_key, *, tenant=None, timeout=60.0)` with `get/post/patch/delete/raw/download/wait_job/as_tenant` (paths under `/api/v1` unless they name `/api/…` or an ops route) and `load_keys(path)` (the demo key file, refused when other users can read or write it); errors (`DemoError`: `status`, `code`) carry the method, the route template and the status only — shared by the flow report and the demo tools |
+| `tools/flow_report.py` | script | M5 Task 24: calls every route of contract §9 once against a running stack (`EXPECT`: method, route template, expected status) and writes `reports/flow-report.md` (git-ignored): route templates, statuses, durations, response key names and error codes — never a value, an id or a key; exit 1 when a status or a relied-on outcome (job succeeded, connection test ok, consistency passed) differs; scanner calls skip without a browser worker (§15) |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §13); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
@@ -79,11 +81,14 @@ deploy facts — image, ports, env, extras, probes, labels.
 docker build -t data-privacy-services:local .                                      # what compose builds (tag = ${DPS_IMAGE_TAG:-local})
 docker build --platform linux/amd64 -t <registry>/data-privacy-services:<semver> .   # amd64 from a Mac
 docker build --build-arg WITH_NER=1 -t <registry>/data-privacy-services:<semver>-ner .
+docker build --build-arg EXTRAS=synth-ml -t <registry>/data-privacy-services:<semver>-ml .   # opt-in extras (bank side)
 ```
 
 Tag semver + git sha. The image (app, worker and migrate all run it):
 
-- stage 1 `node:22-slim`: `npm ci` (lockfile only, no `npm install` fallback) + `npm run build`;
+- stage 1 `node:22-slim` on the **build host's** platform (`FROM --platform=$BUILDPLATFORM`, M5
+  Task 24: the dist is plain JS/CSS, so an amd64 build on an arm64 Mac never runs npm under
+  emulation): `npm ci` (lockfile only, no `npm install` fallback) + `npm run build`;
 - stage 2 `python:3.12-slim`: `tesseract-ocr` + `tesseract-ocr-eng` from apt and
   `ENV DPS_OCR_PROVIDER=auto` (M1: local OCR when no Azure endpoint is configured),
   `uv` 0.11.21 (pinned, copied from `ghcr.io/astral-sh/uv:0.11.21`),
@@ -91,20 +96,36 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
   `numpy>=2.0` + `scipy>=1.13` for the Gaussian-copula engine and the fidelity/privacy metrics;
   `ner` + `en_core_web_sm` added when `WITH_NER=1`; the optional `synth-ml` extra, MOSTLY AI, is
   never installed in an image built from this Dockerfile: adding it is a bank-side opt-in after the
-  licence and image-size review (torch ≈ 2 GB; `uv pip install -e ".[synth-ml]"` in a derived
-  image), and without it `options.tabular="mostly"` is refused with `tabular_invalid`), the
-  console dist at `/app/frontend/dist`, `tools/` at `/app/tools`, and `/app/var/{artefacts,exports}`
-  owned by uid 10001;
+  licence and image-size review (torch ≈ 2 GB; `--build-arg EXTRAS=synth-ml`, M5 Task 24: `EXTRAS`
+  is a comma list of further extras for either `WITH_NER` variant — lower-case names only, anything
+  else stops the build with exit 2), and without it `options.tabular="mostly"` is refused with
+  `tabular_invalid`), the console dist at `/app/frontend/dist`, `tools/` at `/app/tools`, and
+  `/app/var/{artefacts,exports}` owned by uid 10001 and group 0;
+- **arbitrary UID, read-only root (M5 Task 24)**: the image user 10001 has group 0 as its primary
+  group (`useradd --uid 10001 --gid 0`); `/app` is group 0, readable and never writable by group 0
+  (`chmod -R g+rX,g-w /app`, whatever the build context's modes); `/app/var` is group-writable
+  (`chmod -R g=u /app/var`) with setgid directories, and the entrypoint sets `umask 0002`, so
+  everything a process creates on the artefact and export volumes stays writable for the next UID of
+  group 0 (compose's 10001, an OpenShift namespace UID, a redeploy under another UID);
+  `ENV HOME=/tmp` (the tmpfs/emptyDir); `PYTHONDONTWRITEBYTECODE=1`. Checked by
+  `DPS_TEST_IMAGE=data-privacy-services:<tag> pytest -q tests/test_image_runtime.py`
+  (`DPS_TEST_IMAGE_PLATFORM=linux/amd64` for an amd64 build): uid 1000770000:0, `--read-only`,
+  `--cap-drop ALL` — the extras import, Tesseract runs, `/app` and site-packages are not writable,
+  `/tmp` and the volumes are, `/health` answers, and a new UID writes where uid 10001 wrote;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
   (15 s interval, 15 s start period);
-- `ENTRYPOINT docker/entrypoint.sh` (runs `python -m dps.migrate` first when `DPS_MIGRATIONS_MODE=auto`,
+- `ENTRYPOINT docker/entrypoint.sh` (`umask 0002`; runs `python -m dps.migrate` first when `DPS_MIGRATIONS_MODE=auto`,
   `DPS_PG_HOST` is set and the command is `uvicorn` — single-container app runs; compose uses the
   `migrate` one-shot) and
   `CMD uvicorn dps.app:create_app --factory --host 0.0.0.0 --port 8400 --no-access-log`.
 
 Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (arm64, M1 lane: the
 `docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB. M2 lane
-(2026-10-12, arm64, without M1): 687 MB. The integrated image is in §11.
+(2026-10-12, arm64, without M1): 687 MB. The integrated image is in §11. M5 Task 24 (2026-10-14,
+M0–M3 + M5 on `main`): arm64 1.18 GB unpacked / 286 MB compressed (the `uv pip install` layer is
+565 MB unpacked; the arbitrary-UID permissions layer 86 kB), `--platform linux/amd64` 292 MB
+compressed; cold builds took 449 s (arm64) and 591 s (amd64 under emulation, of which `uv pip
+install` 368 s: wheel downloads), warm rebuilds of a change after the install step a few seconds.
 
 Development install: `uv pip install -e ".[dev,fpe,docs,db,connectors,tabular,uitest,e2e]"` (`tabular`
 is M5's numpy + scipy; the unit tests of the copula engine and the metrics skip without it; `uitest` and
@@ -126,7 +147,20 @@ docker compose up -d --scale worker=3 worker                         # more work
 docker compose --profile docs --profile sources down
 ```
 
-That is the whole local stack (profile `full` is the same set). Smaller stacks: plain `docker compose
+**The whole demo stack (M5 Task 24):** `docker compose --profile full up --build -d` — every service:
+app, worker, migrate, dps-db (default), the OCR mock (`docs`), source-pg, MinIO, the demo secrets and
+seed one-shots, MongoDB (`sources`), Oracle Free (`oracle`; ~2.7 GB) and the bank tokenizer mock
+(`tokenizer`); M4's browser-worker and demo-site join through their `scanner`/`full` profiles. Poll
+`/readyz` until `"ready": true` and `docker compose ps` until the one-shots exited 0 (never `up
+--wait`); then `DPS_SMOKE_REQUIRE_OCR=1 DPS_SMOKE_REQUIRE_M5=1 python tools/smoke_test.py [--m3]`
+(`--m3` after `python tools/seed_sources.py --target all --rows 20000 --seed 7`) and `python
+tools/flow_report.py`. Under `full` the app starts after the tokenizer mock is healthy
+(`depends_on … required: false`, like the OCR mock), because `/readyz` probes the tokenizer once at
+startup. Every role of the app image gets `DPS_SYNTH_TABULAR_ENGINE=copula`,
+`DPS_KEY_CACHE_SECONDS=5` (a key minted through `/admin/keys` reaches every replica within 5 s; the
+production default stays 30) and `DPS_REPORT_PDF_ENABLED=true` (each overridable from the shell).
+`--profile docs --profile sources` above is the same set without Oracle and the tokenizer mock.
+Smaller stacks: plain `docker compose
 up --build -d` runs app, worker, metadata DB and migrate (then `DPS_SMOKE_M2=off python
 tools/smoke_test.py`: 25 checks with the two OCR checks skipped — the job checks need the
 `sources` profile's demo source); `--profile docs` adds the OCR mock, `--profile sources` the demo
@@ -560,6 +594,11 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
   staging/prod, `DPS_ALLOW_INSECURE_COIN_MINT=true` (record the approval with the deployment).
   Prefer `DPS_COIN_CA_FILE` with the proxy's CA whenever it can be obtained.
+- **Container runtime (M5 Task 24):** the image runs as uid 10001 with group 0 or as any arbitrary
+  UID in group 0 (OpenShift's restricted SCC); compose runs every role with a read-only root, a
+  `/tmp` tmpfs, `cap_drop: [ALL]` and `no-new-privileges`. The process can write `/tmp` (also
+  `HOME`) and the `/app/var` artefact and export volumes only — never the code, site-packages or
+  `/etc` (group 0 reads them; `tests/test_image_runtime.py` checks it on a built image).
 - Every response: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`; HSTS outside `local`. The console HTML carries a strict CSP
   (`script-src 'self'`, `frame-ancestors 'none'`).
@@ -624,6 +663,38 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
 
 ## 8. Traps
 
+- **Images and the local stack (M5 Task 24):**
+  - M4's `Dockerfile.browser` must get the same arbitrary-UID lines when M4 and this change meet on
+    one branch — `tests/test_images.py::test_the_browser_image_is_arbitrary_uid_safe` fails until
+    then (measured on branch `m4`'s image: an arbitrary UID runs Chromium but cannot write the
+    artefact volume): `useradd … --uid 10001 --gid 0`, then after its last `COPY`
+    `COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh`, `RUN chmod 0755
+    /usr/local/bin/entrypoint.sh && chgrp -R 0 /app && chmod -R g+rX,g-w /app && chmod -R g=u
+    /app/var && find /app/var -type d -exec chmod g+s {} +`, `ENV HOME=/tmp`, `ENTRYPOINT
+    ["/usr/local/bin/entrypoint.sh"]` (checked: an image built from `m4` with these lines runs
+    Chromium as uid 10001 and as uid 1000770000:0, read-only, `cap_drop ALL`, and writes the
+    volume; its permissions layer is 20 kB).
+  - Leave `/ms-playwright` alone: the Playwright base image ships it mode `0777` throughout (every
+    UID can run — and, on a writable root, modify — the browsers), and a recursive `chgrp`/`chmod`
+    there (the plan's wording) copies every browser file into a new layer (measured: +1.46 GB, 4.24
+    → 6.2 GB). The browser-worker must therefore always run with a read-only root: compose's
+    `browser-worker` inherits `read_only: true` from `worker` (`tests/test_compose_m5.py`), and the
+    OpenShift manifests set `readOnlyRootFilesystem: true` (Task 25).
+  - Never `chmod -R g=u /app` (the plan's wording): the code would be writable by every OpenShift
+    UID. Only `/app/var` is group-writable.
+  - Volumes written by an image older than this change hold `10001:10001 0755` directories; any
+    other UID then fails with `storage_error` (measured). Re-permission once — `docker compose run
+    --rm --no-deps --user 0 --entrypoint sh worker -c 'chgrp -R 0 /app/var/artefacts
+    /app/var/exports && chmod -R g+rwX /app/var/artefacts /app/var/exports && find /app/var -type
+    d -exec chmod g+s {} +'` — or `down -v` locally.
+  - On OpenShift keep the image `ENTRYPOINT` (set `args`, not `command`): it sets `umask 0002`.
+  - `docker compose exec` does not pass through the entrypoint (its shells show umask `0022`); the
+    services' own processes run with `0002` (`/proc/1/status`).
+  - `.gitignore` anchors `/reports/` (tool reports and screenshots at the repository root): an
+    unanchored `reports/` would silently ignore new files of the package `dps/layers/reports/`.
+  - The smoke test's last M5 check (`Cache-Control: no-store` on every `/api/` response) passes
+    once M5 Task 17 S11 (security review, lane `fsec`) is on the branch; until then it is the
+    only failure on a `full` stack.
 - `uvicorn dps.app:create_app --factory` — there is no module-level `app`.
 - The image installs `dps` **editable** on purpose: `dps/app.py` serves `<source root>/frontend/dist`.
   A wheel install into site-packages starts without the console (`frontend_disabled` in the log).
@@ -1308,3 +1379,54 @@ demo seed draws the customers from M3's `tools/seed_model.py` and keeps M5's rul
 a source-vs-target count. Console tests overwrite the tracked screenshots under
 `docs/superpowers/build/m3-shots/` (A-N2). Start main with `DPS_TOKENIZER_MOCK_PORT=8430` while the
 M4 lane holds 8420. Gates and results: `~/.cache/dps-build/reports/I-m3.md`.
+
+
+## 15. M5 Task 24 — images, the `full` stack, the smoke M5 block, the flow report (finish stage, lane `fimg`, 2026-10-14)
+
+Built on `main` as merged so far (M0–M3 + M5; M4 not yet merged) in `dps-wt-fimg` (branch `fimg`;
+`.env`: `DPS_IMAGE_TAG=fimg`, app 8417, dps-db 5493, source-pg 5494, MinIO 9080/9081, Oracle 1527,
+Mongo 27023, OCR 5076, demo site 8427, tokenizer mock 8437). Deviations from the plan:
+`docs/superpowers/build/M5-DEVIATIONS.md` "Task 24"; measurements and proofs:
+`~/.cache/dps-build/reports/S4-impl.md`.
+
+**What changed.** `Dockerfile`: `ARG EXTRAS` (opt-in extras, validated), the arbitrary-UID rules of
+§2 (user 10001 in group 0, `/app` group-readable and never group-writable, `/app/var`
+group-writable and setgid, `HOME=/tmp`), the console stage on `$BUILDPLATFORM`;
+`docker/entrypoint.sh`: `umask 0002`; compose: `DPS_SYNTH_TABULAR_ENGINE`, `DPS_KEY_CACHE_SECONDS=5`,
+`DPS_REPORT_PDF_ENABLED` for every role, the app waits for a running tokenizer mock; `.gitignore`
+`/reports/`, `.dockerignore` `reports`; `tools/smoke_test.py` M5 block; new `tools/demo_client.py`
+and `tools/flow_report.py`.
+
+**Verified (2026-10-14, lane stack `docker compose --profile full up --build -d`):**
+
+- Images: `docker compose build app` (arm64) and `docker build --platform linux/amd64` both build;
+  `DPS_TEST_IMAGE=data-privacy-services:fimg pytest -q tests/test_image_runtime.py` 3 passed on
+  arm64 and on amd64 (`DPS_TEST_IMAGE_PLATFORM=linux/amd64`, emulated). The image of `main` before
+  this change fails the same test (an arbitrary UID gets `HOME=/` and cannot write the volumes).
+- Every role of the app image as uid 1000770000:0 (a compose override with `user:` on app, worker,
+  migrate, tokenizer-mock, seed-sources; all read-only) on volumes uid 10001 wrote first:
+  `/readyz` ready (api-core, llm-gateway, fpe, tokenizer, ocr, db, jobs, keys); `migrate` and
+  `seed-sources` exited 0; `DPS_SMOKE_REQUIRE_OCR=1 DPS_SMOKE_REQUIRE_M5=1 python tools/smoke_test.py
+  --m3` 48/49 — every check but `api responses are not cacheable` (S11, M5 Task 17, lane `fsec`);
+  `python tools/flow_report.py` exit 0 (92 calls: 82 as expected, 10 scanner calls skipped — no
+  browser worker on `main` yet); no `PermissionError`, `Read-only file system` or `StorageError` in
+  the logs of app, worker, migrate, tokenizer-mock, seed-sources, demo-secrets or the OCR mock
+  (dps-db logs only the integration suite's deliberate grant refusals). As uid 10001 the same:
+  smoke 41/42 (without `--m3`), flow report exit 0.
+- `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"` 341 passed against that stack.
+- `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr or oracle or mongo"` 301 passed, 3 skipped
+  (two need a host `tesseract`, one is MongoDB's by-design "no composite keys" conformance case).
+  Its M3 console tests rewrite the tracked screenshots under
+  `docs/superpowers/build/m3-shots/` (A-N2); they were restored from git, not committed.
+- M4 slot-in, checked on a probe image built from branch `m4` with the §8 recipe for
+  `Dockerfile.browser`: Chromium launches as uid 10001 and as uid 1000770000:0 with a read-only
+  root, `cap_drop ALL` and `no-new-privileges`; the artefact volume is writable, `/ms-playwright`
+  is not (read-only root); `m4`'s own image cannot write the volume as an arbitrary UID.
+- Value-free proofs: a scan of every container log of the stack and of the flow report for 2 000
+  sampled source values per personal column (names, e-mails, mobiles, national ids, tax ids), the
+  smoke/flow sample record, the SSN probe, the bootstrap key, the tokenizer token and key, the demo
+  KEK, raw DB API keys (`dps_` + 32) and `tk_` tokens — 0 hits; source-vs-target counts on the
+  smoke's and the flow's `bank_uat` tables: 0 target values equal to a source value in `full_name`,
+  `national_id`, `tax_id`, `email`, `mobile` and `notes` (dates and the FF1 customer ids only
+  collide with other customers' values at the domain's occupancy rate, e.g. 62.0 % of shifted
+  birth dates fall on a day some customer has against 63.7 % of the span's days occupied).

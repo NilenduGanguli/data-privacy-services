@@ -42,6 +42,18 @@ runs under the group's key into ``bank_uat.customers_smoke``, ``crm_uat.profiles
 ``m3 consistency 3/3`` (the group's check passes with three consistent pairs), ``m3 evidence``
 (each pack verified, under the group's key id) and ``m3 raw pii to llm`` (the counter is 0). The
 key is held in memory for the three submissions and dropped; nothing of it is printed.
+
+The M5 block (eight checks) runs last, on every stack: ``policies with hashes`` (the policy store
+lists every shipped preset with its 64-hex hash); when ``/readyz`` reports the database
+``reports summary`` (the Overview tiles, ``raw_pii_sent_to_llm`` 0), ``posture report`` (the
+eleven posture checks), ``db key lifecycle`` (a one-day ``detect`` key minted through the admin
+API — answered ``Cache-Control: no-store`` — authenticates within ``DPS_KEY_CACHE_SECONDS``) and
+``db key disabled`` (once disabled it is refused); when ``/readyz`` reports the tokenizer
+``external tokenization round trip`` (an SSN tokenized by the bank tokenizer mock as ``tk_…`` and
+revealed); then ``422 never echoes input`` and ``api responses are not cacheable`` (``no-store`` on
+``/api/``). Checks whose component is down print ``SKIP`` and do not fail —
+``DPS_SMOKE_REQUIRE_M5=1`` (the M5 gate on ``--profile full``) turns a skip into a failure. The
+temporary key is held in memory only and disabled before the block ends.
 """
 
 from __future__ import annotations
@@ -51,6 +63,7 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -76,6 +89,7 @@ KEY = (
 )
 WAIT_SECONDS = float(os.environ.get("DPS_SMOKE_WAIT_SECONDS") or "90")
 REQUIRE_OCR = os.environ.get("DPS_SMOKE_REQUIRE_OCR") == "1"
+REQUIRE_M5 = os.environ.get("DPS_SMOKE_REQUIRE_M5") == "1"
 H = {"X-API-KEY": KEY}
 DEMO = Path(__file__).resolve().parents[1] / "demo" / "documents"
 # A fictional customer: made-up values whose identifiers only have to pass their checksums.
@@ -491,7 +505,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             if not run_m2:
                 check("m3 needs the job platform", False, "the M2 checks did not run")
             m3_checks(c)
-    tail = f", {len(skipped)} skipped (OCR not ready)" if skipped else ""
+        m5_checks(c, H)
+    tail = f", {len(skipped)} skipped (component not ready)" if skipped else ""
     print(f"\nall {len(results)} checks passed against {BASE}{tail}")
 
 
@@ -952,6 +967,140 @@ def m3_checks(c: httpx.Client) -> None:
         "m3 raw pii to llm",
         b"dps_llm_raw_pii_sent_total 0.0" in c.get("/metrics").content,
         "dps_llm_raw_pii_sent_total 0",
+    )
+
+
+# -- M5: policy store, reports, posture, DB keys, bank tokenizer, scrubbed errors, caching -------
+
+#: A fictional SSN (the well-known sample number): the tokenizer round trip and the 422 probe.
+M5_SSN = "123-45-6789"
+#: How long a new DB-backed key may take to authenticate: the local stack's
+#: ``DPS_KEY_CACHE_SECONDS=5`` plus a margin (the creating replica refreshes at once).
+KEY_PROPAGATION_SECONDS = float(os.environ.get("DPS_SMOKE_KEY_WAIT_SECONDS") or "12")
+
+
+def skip_m5(name: str, why: str) -> None:
+    """An M5 check whose component is not ready: ``SKIP``, a failure under
+    ``DPS_SMOKE_REQUIRE_M5=1``."""
+    if REQUIRE_M5:
+        check(name, False, f"{why} (DPS_SMOKE_REQUIRE_M5=1)")
+    skipped.append(name)
+    print(f"SKIP  {name} — {why}", flush=True)
+
+
+def _key_works(c: httpx.Client, key: str, deadline: float) -> bool:
+    """Whether ``key`` authenticates ``POST /detect`` before ``deadline`` (monotonic)."""
+    while True:
+        status = c.post(
+            "/api/v1/detect", json={"text": "x"}, headers={"X-API-KEY": key}
+        ).status_code
+        if status == 200 or time.monotonic() >= deadline:
+            return status == 200
+        time.sleep(0.5)
+
+
+def m5_db_key_checks(c: httpx.Client, h: dict[str, str]) -> None:
+    """``db key lifecycle`` and ``db key disabled``: mint, use, disable, refuse (value-free)."""
+    made = c.post(
+        "/api/v1/admin/keys",
+        headers=h,
+        json={"name": "smoke-temp", "tenant_ids": ["default"], "scopes": ["detect"],
+              "expires_in_days": 1},
+    )  # fmt: skip
+    body = made.json() if made.status_code == 201 else {}
+    key = str(body.get("key") or "")
+    key_id = str((body.get("record") or {}).get("id") or "")
+    works = bool(key) and _key_works(c, key, time.monotonic() + KEY_PROPAGATION_SECONDS)
+    disabled = c.post(f"/api/v1/admin/keys/{key_id}/disable", headers=h) if key_id else None
+    check(
+        "db key lifecycle",
+        made.status_code == 201
+        and works
+        and made.headers.get("cache-control") == "no-store"
+        and disabled is not None
+        and disabled.status_code == 200,
+        f"HTTP {made.status_code}, authenticated={works}, "
+        f"disable HTTP {disabled.status_code if disabled is not None else '-'}",
+    )
+    refused = c.post("/api/v1/detect", json={"text": "x"}, headers={"X-API-KEY": key}).status_code
+    check("db key disabled", refused == 401, f"HTTP {refused} with the disabled key")
+    del key, body
+
+
+def m5_checks(c: httpx.Client, h: dict[str, str]) -> None:
+    """The eight M5 checks (module docstring); never prints a body, a token or a key."""
+    pol = c.get("/api/v1/policies", headers=h)
+    presets = pol.json().get("presets", []) if pol.status_code == 200 else []
+    check(
+        "policies with hashes",
+        pol.status_code == 200
+        and bool(presets)
+        and all(re.fullmatch(r"[0-9a-f]{64}", str(p.get("hash"))) for p in presets),
+        f"HTTP {pol.status_code}, {len(presets)} presets",
+    )
+    components = c.get("/readyz").json().get("components", {})
+    if components.get("db", {}).get("ok"):
+        summ = c.get("/api/v1/reports/summary", params={"days": 14}, headers=h)
+        tiles = summ.json().get("tiles", {}) if summ.status_code == 200 else {}
+        check(
+            "reports summary",
+            summ.status_code == 200 and tiles.get("raw_pii_sent_to_llm") == 0,
+            f"HTTP {summ.status_code}, raw_pii_sent_to_llm={tiles.get('raw_pii_sent_to_llm')}",
+        )
+        post = c.get("/api/v1/admin/posture", headers=h)
+        pbody = post.json() if post.status_code == 200 else {}
+        check(
+            "posture report",
+            post.status_code == 200 and pbody.get("total") == 11,
+            f"HTTP {post.status_code}, {pbody.get('passed')}/{pbody.get('total')} checks pass",
+        )
+        m5_db_key_checks(c, h)
+    else:
+        for name in ("reports summary", "posture report", "db key lifecycle", "db key disabled"):
+            skip_m5(name, "/readyz reports no metadata database")
+    if components.get("tokenizer", {}).get("ok"):
+        policy = {
+            "preset": "gdpr-pseudonymise",
+            "treat": {"SSN": {"method": "external_tokenize", "profile": "ssn"}},
+        }
+        out = c.post(
+            "/api/v1/obfuscate", headers=h, json={"data": {"ssn": M5_SSN}, "policy": policy}
+        )
+        obody = out.json() if out.status_code == 200 else {}
+        token = str((obody.get("result") or {}).get("ssn") or "")
+        back = c.post(
+            "/api/v1/reveal",
+            headers=h,
+            json={
+                "data": obody.get("result"),
+                "key_material": obody.get("key_material") or {},
+                "reveal_hints": obody.get("reveal_hints") or [],
+            },
+        )
+        check(
+            "external tokenization round trip",
+            out.status_code == 200
+            and token.startswith("tk_")
+            and back.status_code == 200
+            and back.json().get("result") == {"ssn": M5_SSN},
+            f"HTTP {out.status_code}/{back.status_code}, token issued={token.startswith('tk_')}",
+        )
+        del obody, token
+    else:
+        skip_m5("external tokenization round trip", "/readyz reports the tokenizer not ready")
+    bad = c.post(
+        "/api/v1/detect", headers=h, json={"text": 123456789, "options": {"locale": [M5_SSN]}}
+    )
+    check(
+        "422 never echoes input",
+        bad.status_code == 422 and M5_SSN not in bad.text and "123456789" not in bad.text,
+        f"HTTP {bad.status_code}",
+    )
+    cache = c.get("/api/v1/policies/presets", headers=h).headers.get("cache-control")
+    check(
+        "api responses are not cacheable",
+        cache == "no-store",
+        f"Cache-Control {cache or 'absent'} on /api/v1/policies/presets",
     )
 
 

@@ -23,6 +23,8 @@ service-account*.json
 application_default_credentials.json
 data
 var
+# M5 tool outputs (flow and demo reports, console screenshots): never in a build context
+reports
 .claude
 .gstack
 .serena

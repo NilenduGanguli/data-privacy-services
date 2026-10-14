@@ -3,8 +3,14 @@
 # documents routes use for scanned pages and images (M1); profile `sources` adds the demo source
 # Postgres, MinIO and the demo-secrets / seed-sources one-shots (M2); `full` is all of them. M3
 # adds Oracle Free (profile `oracle`, ${DPS_ORACLE_PORT:-1522}) and the MongoDB replica set (profile
-# `sources`, ${DPS_MONGO_PORT:-27018}); M4 the browser worker.
+# `sources`, ${DPS_MONGO_PORT:-27018}); M4 the browser worker and the demo site (profile `scanner`);
+# M5 the bank tokenizer mock (profile `tokenizer`, ${DPS_TOKENIZER_MOCK_PORT:-8420}).
 #   docker compose --profile oracle --profile sources up -d oracle mongo   # M3 sources alone
+#
+# The whole demo (contract §11: every service, every role of the image; Oracle Free needs ~3 min
+# and 2.7 GB on first start). Poll /readyz until "ready": true — never `up --wait`:
+#   docker compose --profile full up --build -d
+#   python tools/smoke_test.py && python tools/flow_report.py   # all checks; reports/flow-report.md
 #
 #   docker compose up --build -d       # console + API on http://127.0.0.1:${DPS_APP_PORT:-8400}
 #   docker compose --env-file docker/compose.sources.env --profile docs --profile sources up -d --build
@@ -69,6 +75,12 @@ x-dps-env: &dps-env
   DPS_TOKENIZER_PROVIDER: ${DPS_TOKENIZER_PROVIDER:-http}
   DPS_TOKENIZER_URL: ${DPS_TOKENIZER_URL:-http://tokenizer-mock:8420}
   DPS_TOKENIZER_TOKEN: ${DPS_TOKENIZER_TOKEN:-dps-local-tokenizer-token}
+  # M5 (Task 24): the Gaussian-copula engine for synthesize jobs, DB-backed API keys that reach
+  # every replica within 5 s (the local demo mints a key and uses it at once; production keeps
+  # the 30 s default) and evidence / roll-up PDFs. Every role of the app image reads them.
+  DPS_SYNTH_TABULAR_ENGINE: ${DPS_SYNTH_TABULAR_ENGINE:-copula}
+  DPS_KEY_CACHE_SECONDS: ${DPS_KEY_CACHE_SECONDS:-5}
+  DPS_REPORT_PDF_ENABLED: ${DPS_REPORT_PDF_ENABLED:-true}
 
 x-dps-volumes: &dps-volumes
   - dps-artefacts:/app/var/artefacts
@@ -89,6 +101,9 @@ services:
       azure-ocr-mock:
         condition: service_healthy
         required: false            # without --profile docs the app starts and reports ocr "down"
+      tokenizer-mock:
+        condition: service_healthy
+        required: false            # /readyz probes the tokenizer once at startup (M5, full profile)
     volumes: *dps-volumes
     environment:
       <<: *dps-env

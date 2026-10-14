@@ -1107,3 +1107,101 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
 - Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
   `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
   semantics are documented in HANDOFF §5 and contract §8.3.
+
+## Task 24 — Images, local stack, smoke-test extension, flow report (finish stage, lane `fimg`, 2026-10-14)
+
+Finish-stage work (programme plan §2.6 F2, orchestration stream S4), built on `main` as merged so far
+(M0–M3 + M5; M4 not yet merged) in worktree `dps-wt-fimg`, branch `fimg`. Proofs and measurements:
+`~/.cache/dps-build/reports/S4-impl.md`.
+
+- **`Dockerfile` — `EXTRAS`:** `ARG EXTRAS=""` adds `${EXTRAS:+,$EXTRAS}` to **both** install lines
+  (the plan shows one; the `WITH_NER=1` variant keeps its own line), so `--build-arg EXTRAS=synth-ml`
+  works with and without NER. Added: a `case` guard stops the build (exit 2, the rule named, the
+  argument never echoed) when `EXTRAS` holds anything but lower-case extra names, digits, `-` and
+  `,` — the argument is spliced into a shell command. Closes the Task 7 → Task 24 deferred item (the
+  MOSTLY SDK itself stays unverified: no `synth-ml` image was built — torch ≈ 2 GB). The stale
+  "`[tabular]` arrives with M5" comment is gone (Task 1 deferred item).
+- **`Dockerfile` — arbitrary UID, deviates from the plan's two lines.** The plan's `chgrp -R 0 /app &&
+  chmod -R g=u /app` would make the code (root-owned, `rw` for its owner) writable by every UID of
+  group 0, i.e. by every OpenShift UID — contrary to the image's "`/app` read-only to the process"
+  property. As built: `chgrp -R 0 /app && chmod -R g+rX,g-w /app && chmod -R g=u /app/var` (group 0
+  reads all of `/app`, writes only `/app/var`, whatever the build context's modes) and `ENV
+  HOME=/tmp`, as planned. **Measured gap, then fixed (test first):** with only that, artefacts that
+  uid 10001 wrote into the shared volume (directories `10001:10001 0755`) refused a later arbitrary
+  UID, and the smoke's `m2 parquet export` died with `storage_error` (`finalize_failed StorageError`
+  in the worker log). So also: the image user's primary group is 0 (`useradd --uid 10001 --gid 0`),
+  `/app/var` directories are setgid (`find /app/var -type d -exec chmod g+s {} +`), and
+  `docker/entrypoint.sh` sets `umask 0002` — what any UID creates there is `2775`/`664`, group 0.
+  Not in the plan's file list: `docker/entrypoint.sh` (one line + comment). OpenShift manifests must
+  keep the image `ENTRYPOINT` (`args`, not `command`) — HANDOFF §8.
+- **`Dockerfile` — console stage on `$BUILDPLATFORM`** (not in the plan): `FROM
+  --platform=$BUILDPLATFORM node:22-slim AS frontend`. The dist is platform-free; an amd64 build on
+  the arm64 Mac then reuses the native console layers instead of running npm under emulation (the
+  amd64 build log shows every `frontend` step `CACHED` from the native build).
+- **`Dockerfile.browser` (M4) is not on `main`**, so its "same two lines" cannot be added here
+  without an add/add conflict at the M4 merge. Instead `tests/test_images.py::
+  test_the_browser_image_is_arbitrary_uid_safe` (skipped while the file is absent) pins the rules for
+  it, and HANDOFF §8 gives the recipe (`--gid 0`, the entrypoint with its umask, `chgrp -R 0 /app &&
+  chmod -R g+rX,g-w /app && chmod -R g=u /app/var && find … chmod g+s`, `ENV HOME=/tmp`).
+  **Deviation:** no `chgrp`/`chmod -R` of `/ms-playwright` (the plan's third line): the Playwright
+  base ships it `0777` throughout, so every UID can already run the browsers, and the recursive
+  change copies every browser file into a new layer — measured on a probe image built from branch
+  `m4` with the plan's line: +1.46 GB (4.24 → 6.2 GB). Without it the permissions layer is 20 kB and
+  the probe runs Chromium as uid 10001 and as 1000770000:0 (read-only root, `cap_drop ALL`) and
+  writes the artefact volume, which `m4`'s own image cannot do as an arbitrary UID (measured). The
+  browsers' 0777 makes a read-only root mandatory for the browser-worker; `tests/test_compose_m5.py`
+  pins it for compose (`extends: worker` inherits `read_only: true`), Task 25 for OpenShift. The
+  guard fails on `m4`'s file and on the heavy variant, and passes on the recipe.
+- **`docker-compose.yml`:** the three M5 settings go into the shared `x-dps-env` anchor (every role of
+  the app image — app, worker, migrate — and M4's `browser-worker`, which `extends: worker`), each
+  overridable (`${DPS_SYNTH_TABULAR_ENGINE:-copula}`, `${DPS_KEY_CACHE_SECONDS:-5}`,
+  `${DPS_REPORT_PDF_ENABLED:-true}`); the plan wrote literals on app and worker. Added: `app`
+  `depends_on: tokenizer-mock` (`service_healthy`, `required: false`, like the OCR mock) — `/readyz`
+  probes the tokenizer once at startup, so under `full` it read "down" when the app won the race and
+  the smoke's tokenizer check skipped. `full` already named every service; `tests/test_compose_m5.py`
+  now pins that every profiled service carries `full` (M4's services slot in the same way).
+- **`.gitignore`:** `var/` was already there (twice); `reports/` is added **anchored** as `/reports/`
+  — unanchored, it would also ignore new files under the tracked package `dps/layers/reports/`
+  (test with `git check-ignore`). `.dockerignore` gains `reports` (not in the plan: tool reports and
+  screenshots never reach a build context).
+- **Smoke M5 block (`tools/smoke_test.py`):** eight checks as the plan names them, whose code holds
+  seven: the eighth is `db key disabled` (the disabled key answers 401 — the lifecycle's end).
+  `time.sleep(6)` became a poll of the new key (`DPS_SMOKE_KEY_WAIT_SECONDS`, default 12 s; the
+  creating replica refreshes at once). `policies with hashes` checks 64 lower-case hex digits, not
+  only the length. `DPS_SMOKE_REQUIRE_M5=1` turns an M5 skip into a failure (the DoD's "none SKIP"),
+  like `DPS_SMOKE_REQUIRE_OCR`. **Measured on the `full` stack:** every check passes except the last,
+  `api responses are not cacheable`: `Cache-Control: no-store` on every `/api/` response is M5 Task
+  17 S11 (security review, lane `fsec`), not yet on `main` — the check stays as the plan writes it.
+- **`tools/demo_client.py`:** the plan's signatures exactly (checked by a test). Additions:
+  `route_template(path)` (ids, numbers, days → `{id}`, `{n}`, `{day}`), `DpsClient.url_path`
+  (paths are under `/api/v1` unless they start with `/api/` or name `/health`, `/readyz`, `/metrics`,
+  `/demo/`, `/docs`), `base_url`/`tenant` properties, `close()` and context-manager use, and a
+  `_transport` class attribute for tests (no constructor change). `DemoError(method, path, status,
+  code=None)`: the message is method, route template, `HTTP <status>` (or `not reached`) and the
+  response's error code when it is a value-free identifier; transport errors are `DemoError` with
+  status 0 and code `unreachable` (the URL is never shown); `wait_job` raises code `wait_timeout`
+  and, for `kind="scans"`, returns the scan with its `summary`. `load_keys` takes a flat
+  `{name: key}` object or a `{"keys": {…}}` wrapper and refuses a file other users can read **or
+  write** (the plan: world-readable).
+- **`tools/flow_report.py`:** `EXPECT` has 85 rows — every route `main` serves (75; a test compares
+  the table with the app's routes, so a new route without a row fails) plus M4's 10 scanner routes
+  as built on branch `m4` (allowed to be missing from the app only until M4 merges; then the coverage
+  test needs their templates to match). The scanner rows run only when `/readyz` reports the browser
+  worker, else they are reported `skipped` (not a failure). Job controls on a finished run expect
+  their documented 409s (`job_not_pausable`, `job_not_paused`, `job_terminal`,
+  `job_not_retryable`). The run is **two** grouped `table` runs of 500 rows (one would make the
+  consistency check answer 409 `member_not_ready`: it needs two targets). Besides statuses the flow
+  checks the outcomes it relies on (both runs `succeeded`, the connection test `ok`, the run spec
+  valid, the consistency check `passed`) and names error codes of refusals — value-free. Keys: by
+  default `DPS_API_KEY` (else the local bootstrap literal), taken as an operator key; the plan's
+  "demo keys" are `--demo-keys [PATH]` (`--key-name`, default `demo-console`): a tenant-scoped key
+  cannot start the cross-tenant retention job or create a tenant, so those two rows then expect
+  403 (`TENANT_KEY_EXPECT`). The demo keys are opt-in, not the default, so a report run never fills
+  the demo tenant's pages with flow artefacts. The flow's connections use the compose stack's local
+  demo logins inline (`dps_reader`, `dps_writer`; any tenant), names carry a UTC timestamp, the two
+  connections are deleted at the end; tenant policies and tenant records cannot be deleted and stay.
+  Like `smoke_test.py`, the tools import `tools.demo_client` with the repository root on `sys.path`
+  (the plan: `tools/` on `sys.path`); `demo_client` itself imports nothing from the repository, so
+  F3's tools may use either form.
+- **Contract:** unchanged (the plan lists no contract change for Task 24; HANDOFF §2, §3, §6 and §8
+  carry the build and run facts).
