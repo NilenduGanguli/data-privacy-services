@@ -151,11 +151,11 @@ Security hardening left for the owner (value-free, not exploitable from outside;
 
 Console:
 
-- The Overview labels the most-used policy, not the tenant's adopted one; the evidence page repeats
-  the key-custody sentence; after rotating or disabling one's own key the top bar keeps the old
-  caller pill; the Policies page learns it is read-only from the first refused write.
-- Wizard step 4 accepts any text in "Key offset" (step 5 refuses it with the raw validation
-  message), and an offset that collides with existing keys is found only when the job prepares.
+- The Overview labels the most-used policy, not the tenant's adopted one; after rotating or
+  disabling one's own key the top bar keeps the old caller pill; the Policies page learns it is
+  read-only from the first refused write.
+- An append offset that collides with existing keys is found only when the job prepares (the
+  wizard checks its form, not the table).
 - Evidence packs sealed before a fix keep their original wording (packs are immutable and hashed).
 
 UI scanner (M4, from its lane verification):

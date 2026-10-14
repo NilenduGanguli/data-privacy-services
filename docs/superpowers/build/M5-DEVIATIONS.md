@@ -1201,6 +1201,8 @@ Each fix test-first (the test failed before the change), all on `main`'s code as
 | M5 G3 review r2 N2 (part) — a roll-up document for a future day left a refresh marker that never ages out | a day after today is 404 `rollup_not_found` before any refresh | `e2ad31f` · `tests/test_reports_future_day.py` |
 | M3 G6 review N2 — `bench_connector.py --engine oracle\|mongo` defaulted to 200 000 rows | 20 000 rows / 5 000-row partitions for Oracle and MongoDB (PostgreSQL unchanged) | `753e2e4` · `tests/test_bench_defaults.py` |
 | M3 G6 review N3 — the smoke test sent `cursor=` on the first connections page | no cursor parameter until the API returns one | `dadeb7c` · `tests/test_smoke_cursor.py` |
+| M5 console review N2 — the evidence pack's section 2 said the key custody twice | the "Key id" row carries the key id and scope only | `423c716` · `src/pages/EvidencePack.custody.test.tsx` |
+| H2 verify open issue 2 — wizard step 4 let "0" or "abc" through as the append key offset; step 5 showed the raw validation message | `offsetProblem` mirrors the server's `PkOffset` rule (a whole number above 0, or a 1–16 character prefix) inline under the field and keeps step 4 closed; the MongoDB append readiness test now uses a complete strategy (`generate`) | `28130d4`, `b30d452` · `src/pages/wizard/offset.test.ts` |
 
 Not fixed here (owner decisions, contract changes, security items the security stream owns, or
 larger than a polish item) and listed under the CHANGELOG's "Known limitations": the synthesis
@@ -1210,3 +1212,10 @@ in-place synthesize with a declared foreign key, the metadata database lost afte
 here: 500 instead of 503, `/readyz` not re-probed), MongoDB connector input errors as 502, the
 admin/tenant hardening items of the M5 G3/G4 reviews, the `SelectionError` context, the console
 nits, `.env.example`, the one-shot health status and the scanner residuals of M4's verification.
+
+Browser check of the console fixes (private Playwright 1.55.0 in `~/.cache/dps-build/pw-fdocs`,
+the console in fixture mode, 1440 and 390 px): a quick switch from `pci-dss` (its answer delayed by
+1.5 s and marked) to `analytics-safe` shows `analytics-safe` without the late answer on the fixed
+page, and shows the late answer on the page as it was before (`64c46e3`); Overview and Policies
+render with no console error and no horizontal scroll. Screenshots in
+`~/.cache/dps-build/reports/S7-shots/`.
