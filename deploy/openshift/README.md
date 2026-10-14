@@ -151,7 +151,10 @@ built from `../mock_azure_ocr`) and uses `…/dps-dev/data-privacy-services` and
 `…/dps-dev/data-privacy-services-browser`; its tokenizer and OCR URLs point at the in-namespace mocks.
 
 A peer may need more than one range or another port: add `ipBlock` entries or ports with JSON6902
-`add` operations in the same release patch. Tunables that are not placeholders (set them the same
+`add` operations in the same release patch. An IngressController published with `HostNetwork`
+reaches the app from the host network: add the peer
+`namespaceSelector: {matchLabels: {policy-group.network.openshift.io/host-network: ""}}` to
+`app-ingress-from-router` (and to `metrics-from-monitoring` if Prometheus runs there too). Tunables that are not placeholders (set them the same
 way when the defaults do not fit): replicas, resources, the worker's `/tmp` size (it spools each
 `files`-target partition before the upload), the Route's `haproxy.router.openshift.io/timeout`,
 `DPS_S3_REGION`, `DPS_S3_BUCKET`, `DPS_LLM_MODEL`, `DPS_FPE_ENABLED` (FF1 after the licence review),
@@ -182,6 +185,8 @@ Optional schema check (needs network for the schemas):
   both workers (release patch, JSON6902 `add` to `/spec/template/spec/containers/0/env/-`), roll,
   then run `python -m dps.rekey` once (it re-seals through both pools, so it needs both logins: e.g.
   `oc exec deploy/dps-worker -- python -m dps.rekey`); `"unreadable": 0` → remove the previous KEK and roll.
+- **Settings changes:** the ConfigMap `dps` has no name hash (the Wega layout), so pods keep the old
+  values until `oc rollout restart deploy/dps-app deploy/dps-worker deploy/dps-browser-worker`.
 - **Scaling:** workers scale horizontally (the queue is SKIP LOCKED with leases; every worker runs
   the reaper; retention is scheduled at most once per interval across replicas).
 - **Probe and metrics endpoints** (`/health`, `/readyz`, `/metrics`) answer without a key on the app
