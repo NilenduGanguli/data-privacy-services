@@ -7,7 +7,13 @@ request of every page, popup and iframe of that context:
   autosave, a ``navigator.sendBeacon`` ping, PUT/PATCH/DELETE, a CORS preflight — is aborted,
   whatever page issued it and whether or not the page was filled. A GET that asks the server to
   treat it as another method (an ``X-HTTP-Method-Override``-style header or a ``_method`` query
-  key) counts as that other method. There is no switch to change any of this.
+  key) counts as that other method. There is no switch to change any of this. The rule does not
+  rest on the route alone (M4 verify r2 N1): a popup's first document is scripted by its opener
+  before Playwright can route it, and a beacon or ``keepalive`` request outlives its page. So
+  ``ISOLATE_JS`` applies it in every realm, before a request exists: ``sendBeacon`` is always
+  refused (it is always a POST; counted ``api_removed``), ``keepalive`` is always dropped (counted
+  ``api_removed``), and ``fetch`` / ``XMLHttpRequest`` refuse any other method or override (counted
+  with reason ``method``, resource type ``fetch`` / ``xhr``, as the route would count them).
 * **Hosts, on every hop.** Requests to hosts outside ``CrawlScope.network_host_allowed`` are
   aborted by the route handler. Playwright routes only the first hop of a request, so the context
   is also created with the guard's **scope proxy** (``proxy.ScopeProxy``, wired by
@@ -36,8 +42,8 @@ request of every page, popup and iframe of that context:
   still open.
 * **Locked documents.** ``arm`` also *locks* every frame of every open page of the context
   (``ISOLATE_JS`` lock), not only the armed page's: the workers they started are terminated, and
-  ``navigator.sendBeacon`` (returns ``false``), the ``keepalive`` flag of ``fetch`` (dropped),
-  ``new WebSocket`` and ``new Worker`` (refused) stop working. From the first ``arm`` on, every
+  ``new WebSocket`` and ``new Worker`` are refused (beacons and ``keepalive`` already are, in
+  every document). From the first ``arm`` on, every
   new document of the scan is locked at birth (``LOCK_JS``): ``arm`` registers that script
   *before* it lists the open pages, then locks every page the context reports until one round
   trip later a pass finds none it has not locked, so a popup opened while ``arm`` runs is locked
@@ -46,6 +52,19 @@ request of every page, popup and iframe of that context:
   passes. These are the channels a route cannot see: a dedicated worker's socket, and
   requests that outlive their page. Each refused use is counted (reason ``api_removed``, resource
   type ``beacon``/``keepalive``/``websocket``/``worker``) through a page binding.
+* **Inert documents** (M4 verify r2 N1). A page can open ``window.open('')`` and use the popup's
+  realm at once: Playwright has not attached to the new target yet, so nothing that realm sends
+  is routed, and over HTTPS the scope proxy sees only the tunnel. A document of a window born at
+  ``about:blank``, while it is ``about:blank`` (Chromium swaps the popup's first document for a
+  second ``about:blank`` one in the same window, and ``document.open()`` gives a document its
+  opener's URL, so a document is marked when it is first seen at ``about:blank``: on
+  ``window.open``'s return, on ``document.open``/``write``, or on a request), and every frame
+  born in one, is *inert*: ``fetch``, ``XMLHttpRequest``, ``EventSource``, ``WebSocket`` and
+  ``Worker`` refuse every request (counted ``api_removed``, through the opener's binding when the
+  popup has none yet), and the document gets a ``Content-Security-Policy`` that loads nothing
+  (no image, script, style, frame, ping or form action). A navigation of the popup is routed (the
+  popup's own target), and the same-origin page it loads is not inert. Filled or not: a popup the
+  filled page opens after ``arm`` sends nothing, whether or not the crawler closes it in time.
 * **Fill values.** Once a page has been armed, any request on any page of the scan whose URL
   carries a fill value (normalised, decoded up to four times) is aborted: a draft the page kept
   in local storage can resurface on a later page.
@@ -64,8 +83,8 @@ request of every page, popup and iframe of that context:
   ``SharedWorker``, ``RTCPeerConnection``, ``fetchLater``, ``WebSocketStream`` and
   ``WebTransport`` are gone on every page, filled or not (no route sees what they send: a
   ``fetchLater`` POST over HTTPS, a stream socket), ``beforeunload`` listeners are ignored, and
-  the lockable wrappers above are in place (installed at birth, so a page cannot keep a reference
-  to an original).
+  the wrappers above (methods, locks, inert documents) are in place (installed at birth, so a
+  page cannot keep a reference to an original).
 * **JavaScript hardening** (``HARDEN_JS``, on by default) turns ``form.submit()`` and
   ``form.requestSubmit()`` into counted no-ops and cancels every submit event in the capture
   phase, so a page whose JS submits on change does not even attempt the request. It is defence in
@@ -184,28 +203,116 @@ HARDEN_JS = r"""
 #:   or when the document goes; HTTPS only), ``WebSocketStream`` (a socket ``route_web_socket``
 #:   does not replace) and ``WebTransport`` (QUIC is off by ``LAUNCH_ARGS`` as well). Deleted, a
 #:   use is a ``ReferenceError``: there is nothing to refuse, so nothing is counted.
-#: * ``sendBeacon``, ``fetch`` (``keepalive``), ``WebSocket`` and ``Worker`` are wrapped *now*, so a
-#:   page never holds an original; the wrappers refuse once the document is locked
-#:   (``__dpsGuardLock``, called by ``ScanGuard.arm`` and by ``LOCK_JS``), and locking terminates
-#:   the workers the document started. The wrappers stay writable (frameworks such as zone.js wrap
-#:   them again and call through); ``__dpsGuardLock`` cannot be replaced.
+#: * ``sendBeacon``, ``fetch``, ``XMLHttpRequest`` (``open``/``setRequestHeader``/``send``),
+#:   ``WebSocket``, ``Worker``, ``EventSource``, ``window.open`` and ``Document.prototype.open`` /
+#:   ``write`` / ``writeln`` are wrapped *now*, so a page never holds an original. In every realm a
+#:   beacon is refused, ``keepalive`` dropped and a method other than GET/HEAD (or an override)
+#:   refused, so no route is needed for the method rule (M4 verify r2 N1); in an inert document
+#:   (see the module docstring) every request is refused and a CSP loads nothing; ``WebSocket``
+#:   and ``Worker`` refuse once the document is locked (``__dpsGuardLock``, called by
+#:   ``ScanGuard.arm`` and by ``LOCK_JS``), and locking terminates the workers the document
+#:   started. The wrappers stay writable (frameworks such as zone.js wrap them again and call
+#:   through); ``__dpsGuardLock`` and ``__dpsInert`` cannot be replaced.
 ISOLATE_JS = r"""
 (() => {
   const W = window;
   const fixed = (o, k, v) => { try { Object.defineProperty(o, k, { value: v, configurable: false, writable: false, enumerable: false }); } catch (e) {} };
   const swap = (o, k, v) => { try { Object.defineProperty(o, k, { value: v, configurable: true, writable: true, enumerable: false }); } catch (e) {} };
+  // the report binding of this realm, else of the realm that made it (an inert popup can be
+  // scripted before Playwright has added the binding to it)
   const R0 = W.__dpsGuardReport;
-  const report = (kind, method, url) => {
+  let R1 = null;
+  try { const o = W.opener || (W !== W.top ? W.parent : null); if (o && typeof o.__dpsGuardReport === 'function') { R1 = o.__dpsGuardReport; } } catch (e) {}
+  const report = (kind, method, url, why) => {
     try {
-      const r = typeof R0 === 'function' ? R0 : W.__dpsGuardReport;
+      const own = typeof R0 === 'function' ? R0 : W.__dpsGuardReport;
+      const r = typeof own === 'function' ? own : R1;
       let u = '';
       try { u = new URL(String(url), W.location.href).href; } catch (e) {}
-      if (typeof r === 'function') { Promise.resolve(r(kind, String(method || 'GET'), u)).catch(() => 0); }
+      if (typeof r === 'function') { Promise.resolve(r(kind, String(method || 'GET'), u, why || 'api_removed')).catch(() => 0); }
     } catch (e) {}
   };
-  const refused = (what) => new DOMException(what + ' is blocked on a filled page in a DPS scan', 'SecurityError');
+  const refused = (what) => new DOMException(what + ' is blocked in a DPS scan', 'SecurityError');
   let locked = false;
   const workers = new Set();
+
+  // Inert documents: the documents of a window born at about:blank (a popup, which its opener
+  // scripts before Playwright has attached to it, so nothing it sends is routed) while they are
+  // about:blank, and every frame born inside one. Chromium swaps the popup's first document for
+  // another about:blank document (same window, this script does not run again), and
+  // document.open() gives a document the opener's URL: so a document is marked inert (an own,
+  // fixed property) whenever it is seen at about:blank, by window.open's return, document.open /
+  // write, or a request. The same-origin page the popup then loads reuses the window too, and
+  // that page is routed: it is not inert. An inert document gets a CSP that loads nothing.
+  let inertRealm = false;
+  try {
+    if (W === W.top) { inertRealm = W.location.protocol === 'about:'; }
+    else { const p = W.parent.__dpsInert; inertRealm = typeof p === 'function' && p() === true; }
+  } catch (e) { inertRealm = false; }
+  const MARK = '__dpsInertDocument';
+  const inertDocs = new WeakSet();
+  const CSP = "default-src 'none'; script-src 'none'; style-src 'none'; img-src 'none'; media-src 'none'; font-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'";
+  const marked = (d) => { try { return inertDocs.has(d) || !!Object.getOwnPropertyDescriptor(d, MARK); } catch (e) { return true; } };
+  const markInert = (d) => {
+    if (!d || inertDocs.has(d)) { return; }
+    inertDocs.add(d);
+    fixed(d, MARK, true);
+    try {
+      const m = d.createElement('meta');
+      m.httpEquiv = 'Content-Security-Policy';
+      m.content = CSP;
+      let head = d.head;
+      if (!head) {
+        const root = d.documentElement || d.appendChild(d.createElement('html'));
+        head = root.insertBefore(d.createElement('head'), root.firstChild);
+      }
+      head.insertBefore(m, head.firstChild);
+    } catch (e) {}
+  };
+  const inert = () => {
+    if (!inertRealm) { return false; }
+    const d = W.document;
+    if (marked(d)) { markInert(d); return true; }
+    if (W.location.protocol === 'about:') { markInert(d); return true; }
+    return false;
+  };
+  fixed(W, '__dpsInert', inert);
+  inert();
+  // the opener's first chance to touch a popup's (swapped) document comes after window.open
+  // returns, and a document.open() / write() on an about:blank document comes before its URL
+  // changes: both mark it first
+  const touch = (win) => { try { const f = win && win.__dpsInert; if (typeof f === 'function') { f(); } } catch (e) {} };
+  const openFn = W.open;
+  if (typeof openFn === 'function') {
+    swap(W, 'open', function open() {
+      const win = openFn.apply(this, arguments);
+      touch(win);
+      return win;
+    });
+  }
+  const DP = W.Document && W.Document.prototype;
+  for (const name of ['open', 'write', 'writeln']) {
+    const orig = DP && DP[name];
+    if (typeof orig !== 'function') { continue; }
+    swap(DP, name, function () {
+      try { if (String(this.URL).startsWith('about:')) { touch(this.defaultView); } } catch (e) {}
+      return orig.apply(this, arguments);
+    });
+  }
+  // only GET and HEAD leave the browser (decision D4), in every realm, whether or not a route
+  // can see it; a method override asks the server for another method
+  const OVERRIDES = ['x-http-method-override', 'x-http-method', 'x-method-override'];
+  const methodOk = (method, url, hasHeader) => {
+    const m = String(method || 'GET').toUpperCase();
+    if (m !== 'GET' && m !== 'HEAD') { return false; }
+    for (const h of OVERRIDES) { if (hasHeader(h)) { return false; } }
+    try {
+      for (const k of new URL(String(url), W.location.href).searchParams.keys()) {
+        if (k.trim().toLowerCase() === '_method') { return false; }
+      }
+    } catch (e) {}
+    return true;
+  };
 
   const C = W.ServiceWorkerContainer;
   if (C) {
@@ -230,12 +337,12 @@ ISOLATE_JS = r"""
   }
   try { Object.defineProperty(W, 'onbeforeunload', { get() { return null; }, set(v) {}, configurable: false }); } catch (e) {}
 
+  // a beacon is always a POST, and it outlives its page: refused in every realm
   const NP = W.Navigator && W.Navigator.prototype;
-  const beacon = NP && NP.sendBeacon;
-  if (beacon) {
+  if (NP && NP.sendBeacon) {
     swap(NP, 'sendBeacon', function sendBeacon(url) {
-      if (locked) { report('beacon', 'POST', url); return false; }
-      return beacon.apply(this, arguments);
+      report('beacon', 'POST', url);
+      return false;
     });
   }
 
@@ -243,26 +350,62 @@ ISOLATE_JS = r"""
   const Req = W.Request;
   if (fetchFn) {
     swap(W, 'fetch', function fetch(input, init) {
-      if (locked) {
-        // build the Request once (as fetch would): its flags cannot change after this read
-        let req;
-        try { req = new Req(input, init); } catch (e) { return Promise.reject(e); }
-        if (req.keepalive) {
-          report('keepalive', req.method, req.url);
-          try { req = new Req(req, { keepalive: false }); } catch (e) { return Promise.reject(refused('keepalive')); }
-        }
-        return fetchFn.call(this, req);
+      // build the Request once (as fetch would): its method, headers and flags cannot change
+      // after this read
+      let req;
+      try { req = new Req(input, init); } catch (e) { return Promise.reject(e); }
+      if (inert()) {
+        report('fetch', req.method, req.url);
+        return Promise.reject(new TypeError('Failed to fetch: ' + refused('fetch').message));
       }
-      return fetchFn.call(this, input, init);
+      if (!methodOk(req.method, req.url, (h) => req.headers.has(h))) {
+        report('fetch', req.method, req.url, 'method');
+        return Promise.reject(new TypeError('Failed to fetch: ' + refused('fetch').message));
+      }
+      if (req.keepalive) {
+        // a keepalive request outlives its page, where no route sees it: the flag is dropped
+        report('keepalive', req.method, req.url);
+        try { req = new Req(req, { keepalive: false }); } catch (e) { return Promise.reject(refused('keepalive')); }
+      }
+      return fetchFn.call(this, req);
     });
   }
 
-  const wrapCtor = (name, onCreate) => {
+  const XP = W.XMLHttpRequest && W.XMLHttpRequest.prototype;
+  if (XP && XP.open && XP.send && XP.setRequestHeader) {
+    const xopen = XP.open, xsend = XP.send, xheader = XP.setRequestHeader;
+    const xstate = new WeakMap();
+    swap(XP, 'open', function open(method, url) {
+      xstate.set(this, { method: String(method), url: String(url), headers: new Set() });
+      return xopen.apply(this, arguments);
+    });
+    swap(XP, 'setRequestHeader', function setRequestHeader(name, value) {
+      const st = xstate.get(this);
+      const out = xheader.apply(this, arguments);
+      if (st) { st.headers.add(String(name).trim().toLowerCase()); }
+      return out;
+    });
+    swap(XP, 'send', function send() {
+      const st = xstate.get(this);
+      const bad = inert() ? 'api_removed'
+        : (st && !methodOk(st.method, st.url, (h) => st.headers.has(h)) ? 'method' : null);
+      if (bad === null) { return xsend.apply(this, arguments); }
+      report('xhr', st ? st.method : 'GET', st ? st.url : '', bad);
+      // as a refused request looks to the page: an error, asynchronously
+      const x = this;
+      setTimeout(() => {
+        for (const t of ['error', 'loadend']) { try { x.dispatchEvent(new ProgressEvent(t)); } catch (e) {} }
+      }, 0);
+      return undefined;
+    });
+  }
+
+  const wrapCtor = (name, kind, refuse, onCreate) => {
     const Orig = W[name];
     if (typeof Orig !== 'function') { return; }
     const Wrapped = function (url) {
       if (!new.target) { throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator."); }
-      if (locked) { report(name === 'WebSocket' ? 'websocket' : 'worker', 'GET', url); throw refused(name); }
+      if (refuse()) { report(kind, 'GET', url); throw refused(name); }
       const made = Reflect.construct(Orig, arguments, new.target === Wrapped ? Orig : new.target);
       if (onCreate) { onCreate(made); }
       return made;
@@ -274,8 +417,9 @@ ISOLATE_JS = r"""
     swap(Orig.prototype, 'constructor', Wrapped);
     swap(W, name, Wrapped);
   };
-  wrapCtor('WebSocket', null);
-  wrapCtor('Worker', (w) => workers.add(w));
+  wrapCtor('WebSocket', 'websocket', () => locked || inert(), null);
+  wrapCtor('Worker', 'worker', () => locked || inert(), (w) => workers.add(w));
+  wrapCtor('EventSource', 'eventsource', inert, null);
 
   fixed(W, '__dpsGuardLock', function () {
     locked = true;
@@ -296,7 +440,11 @@ _SETTLE_PASSES = 50
 _LOCK_RETRY_S = 0.1
 #: the page binding ``ISOLATE_JS`` reports refused uses through, and what it may report
 REPORT_BINDING = "__dpsGuardReport"
-REPORTED_KINDS: frozenset[str] = frozenset({"beacon", "keepalive", "websocket", "worker"})
+REPORTED_KINDS: frozenset[str] = frozenset(
+    {"beacon", "keepalive", "websocket", "worker", "fetch", "xhr", "eventsource"}
+)
+#: the reasons ``ISOLATE_JS`` may give: a refused API, or a method other than GET/HEAD
+REPORTED_REASONS: frozenset[str] = frozenset({"api_removed", "method"})
 _MAX_REPORTED_URL = 8192
 
 
@@ -787,14 +935,24 @@ class ScanGuard:
             )
 
     def _report(
-        self, source: Mapping[str, object], kind: object, method: object, url: object
+        self,
+        source: Mapping[str, object],
+        kind: object,
+        method: object,
+        url: object,
+        why: object = "api_removed",
     ) -> None:
-        """``ISOLATE_JS`` reports a refused use of a locked API (no request exists to route).
+        """``ISOLATE_JS`` reports a request it refused itself (none exists to route): a use of a
+        refused API (reason ``api_removed``) or a method other than GET/HEAD (reason ``method``).
 
-        Page-callable, so only a known ``kind`` is counted, the method and host are reduced to
-        their value-free forms like any other, and the URL stays in memory only."""
+        Page-callable, so only a known ``kind`` and ``why`` are counted (anything else counts as
+        ``api_removed``), the method and host are reduced to their value-free forms like any
+        other, and the URL stays in memory only. A popup's first document reports through its
+        opener's binding when it has none of its own yet (the row is then attributed to the
+        opener's page); a popup is never bound to a crawl page, so its own rows carry none."""
         if not isinstance(kind, str) or kind not in REPORTED_KINDS:
             return
+        reason = why if isinstance(why, str) and why in REPORTED_REASONS else "api_removed"
         text = url[:_MAX_REPORTED_URL] if isinstance(url, str) else ""
         try:
             host = (urlsplit(text).hostname or "").lower()
@@ -805,7 +963,7 @@ class ScanGuard:
         page_no = self._page_no.get(page) if isinstance(page, Page) else None
         verb = stored_method(method) if isinstance(method, str) else "OTHER"
         stored = stored_host(host, allowed=allowed)
-        self._record(Decision(False, "api_removed"), page_no, verb, kind, stored, text)
+        self._record(Decision(False, reason), page_no, verb, kind, stored, text)
 
     def _check_hop(self, method: str, url: str, headers: Mapping[str, str]) -> bool:
         """The scope proxy's question for one hop (``CONNECT`` passes ``https://host:port/``).

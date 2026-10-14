@@ -1412,3 +1412,58 @@ there) and passes now.
   events with value-free targets equal `scope_routes_reached`), and a replay whose handler flips to
   `#/logout` after discovery (row `failed`/`scope_reached`). Evidence: `test_inventory_export.py`,
   `test_evidence_html_scan.py`, `ScanEvidence.test.tsx`, `format.test.ts`.
+
+## M4 lane verification round 2 — fix for N1 (popup realms no route sees)
+
+- **N1 — POSTs from an `about:blank` popup's realm left the browser over HTTPS, uncounted**
+  (`guard.py` `ISOLATE_JS`). A page that calls `window.open('')` can use the popup's realm at
+  once, before Playwright has attached to the new target: nothing that realm sends is routed, and
+  over HTTPS the scope proxy sees only the tunnel. `guard.close` stopped plain fetches, but a beacon
+  and a `keepalive` POST outlive the close. The method rule therefore no longer rests on the route:
+  - **Every realm, filled or not, locked or not:** `navigator.sendBeacon` always refuses (it is
+    always a POST; returns `false`, counted `api_removed`/`beacon`); `fetch` always drops
+    `keepalive` (counted `api_removed`/`keepalive`); `fetch` and `XMLHttpRequest` (`open` /
+    `setRequestHeader` / `send` wrapped) refuse any method but GET/HEAD and any method override
+    (`X-HTTP-Method-Override`-style header, `_method` query key) before a request exists. A refused
+    fetch rejects with a `TypeError` and a refused XHR fires `error`/`loadend`, as a route abort
+    would look to the page.
+  - **Inert documents:** a document of a window born at `about:blank`, while it is `about:blank`,
+    and every frame born inside one. In it, `fetch`, `XMLHttpRequest`, `EventSource`, `WebSocket`
+    and `Worker` refuse *every* request (also GET: a popup the filled page opens after `arm` would
+    otherwise carry the value out in a GET no route sees), and the document gets a meta
+    `Content-Security-Policy` that loads nothing (`default-src 'none'`, `form-action 'none'`, …:
+    images, scripts, styles, frames, pings, form POSTs). Found while building it: Chromium swaps the
+    popup's first document for a second `about:blank` document in the **same** window (init scripts
+    do not run again), and `document.open()` gives a document its opener's URL. So a document is
+    marked inert (an own fixed property plus a realm-local set) when first seen at `about:blank`:
+    on the return of the wrapped `window.open`, in the wrapped `Document.prototype.open/write/
+    writeln`, or on a request; the mark survives `document.open()` (and so does the CSP, verified).
+    The same-origin page a popup then loads reuses the window too, but is a new document, routed
+    and not inert (the relay-popup tests still load their worker).
+  - **Counting:** a popup can be scripted before Playwright has added the report binding to it, so
+    `ISOLATE_JS` falls back to its opener's (or parent's) binding captured at birth (the row is then
+    attributed to the opener's crawl page; through the popup's own binding it carries page `None`,
+    as a popup is never bound to a crawl page). `_report` takes an optional fifth argument `why`
+    (allow-list `REPORTED_REASONS = {api_removed, method}`, anything else counts `api_removed`);
+    `REPORTED_KINDS` adds `fetch`, `xhr`, `eventsource`.
+- **Deviation from the finding's wording** ("refuse … counted as `api_removed`"): a fetch/XHR refused
+  *for its method* is counted with reason **`method`** and resource type `fetch`/`xhr` — the exact
+  row the route wrote for it before (`test_crawler`, `test_no_submit` and the evidence pack keep
+  their meaning: "a POST was refused because of its method"). Everything refused in an inert
+  document, beacons and dropped `keepalive` flags are counted `api_removed`. Visible consequence: a
+  page's own POST autosave, beacon and unload flush are now refused in JS rather than aborted by the
+  route, so `closing` rows for POSTs became `method`/`api_removed` rows; the route's `closing` abort
+  is still proven by a GET in the unload flush (`test_closing_a_page_through_the_guard_…`).
+- Tests (`tests/scanner/test_popup_realms.py`, counting server over TLS, paths only):
+  unguarded positive control (every load-time POST/PUT/DELETE/beacon/keepalive and the post-fill
+  base64 GET fetch, GET XHR, image and POST XHR all arrive); **three full `ScanRunner` scans**
+  (`new_scan_context`, hardening on) of the hostile page: 0 hostile requests received, the
+  load-time and post-fill popups demonstrably opened (`/diag-*` images), page `done`, guard rows
+  `POST beacon api_removed`, `GET fetch api_removed`, `GET xhr api_removed`, POST/PUT/DELETE
+  refused; an inert-document test (subresources, a form POST, an `<a ping>`, a child frame's
+  POST/GET, a socket, an EventSource, after `document.open()`, and a popup whose `opener` was
+  nulled): unguarded all arrive, guarded none (the popup's own navigation is routed and allowed);
+  a fakes-only test of the binding's kind/reason allow-list. On the HEAD code the scan test
+  received `POST /hostile-beacon`, `POST /hostile-keepalive` and more, and the inert test leaked; a
+  run with the CSP disabled leaked frame/ping/subresources, so the CSP is load-bearing.
+  `test_guard.py` updated where the counted reason moved (see above).

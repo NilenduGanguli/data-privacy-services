@@ -372,7 +372,10 @@ guard enforces it below the page for every request of the scan's isolated browse
 1. **Methods.** Only `GET` and `HEAD` leave the browser. Every other method — a form `POST`, an
    XHR/fetch autosave, a beacon, `PUT`/`PATCH`/`DELETE`, a CORS preflight — is aborted, whatever
    page issued it. A `GET` asking to be treated as another method (an override header or a
-   `_method` query key) counts as that method. There is no switch.
+   `_method` query key) counts as that method. There is no switch. The rule is also applied in
+   every page realm before a request exists (a popup's first document is scripted by its opener
+   before any route can see it): beacons are always refused, `keepalive` is always dropped, and
+   `fetch`/XHR refuse other methods. A popup's `about:blank` document loads nothing at all.
 2. **Hosts, on every hop.** Only the scan's allowed hosts are reachable: Chromium sends every
    connection of the context through the in-process **scope proxy**, so redirect hops and worker
    traffic are held to the same hosts; QUIC and non-proxied WebRTC are disabled by launch flags.
@@ -381,8 +384,8 @@ guard enforces it below the page for every request of the scan's isolated browse
 4. **Filled pages.** From the first fill until the page is closed, every navigation (a GET form
    submission is a navigation) and every script request is aborted; only passive resources load. A
    request on any page whose URL carries a fill value is aborted.
-5. **Locked documents.** `sendBeacon`, `fetch(keepalive)`, `WebSocket`, `Worker` stop working on
-   every open page once a page is filled; `SharedWorker`, service workers, `RTCPeerConnection`,
+5. **Locked documents.** `WebSocket` and `Worker` stop working on every open page once a page is
+   filled (beacons and `keepalive` never work); `SharedWorker`, service workers, `RTCPeerConnection`,
    `fetchLater`, `WebSocketStream` and `WebTransport` are unavailable on every page.
 6. **Closing.** A page is closed only after its route aborts everything and its unload handlers
    have run against that route, so unload-time traffic cannot leave.

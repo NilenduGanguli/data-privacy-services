@@ -220,6 +220,7 @@ _UNLOAD = """<!doctype html><html><body onbeforeunload="return 'stay'"><p>draft<
 const send = (tag) => {
   navigator.sendBeacon('/beacon-' + tag, 'draft');
   fetch('/ka-' + tag, {method: 'POST', body: 'draft', keepalive: true}).catch(() => 0);
+  fetch('/ka-get-' + tag, {keepalive: true}).catch(() => 0);
 };
 addEventListener('pagehide', () => send('pagehide'));
 addEventListener('beforeunload', (e) => { send('beforeunload'); e.preventDefault(); e.returnValue = ''; });
@@ -538,7 +539,9 @@ async def _plain_close_sends_unload_posts(chromium: Any, url: str, counts: _Coun
     await ctx.close()
     with counts.lock:
         sent, counts.non_get[:] = list(counts.non_get), []
+        got, counts.gets[:] = list(counts.gets), []
     assert any(p.startswith("POST /beacon-") or p.startswith("POST /ka-") for p in sent), sent
+    assert any(p.startswith("/ka-get-") for p in got), got
 
 
 @pytest.mark.browser
@@ -573,7 +576,10 @@ async def test_closing_a_page_through_the_guard_lets_no_unload_request_out(
     assert counts.non_get == []
     assert guard.pages_left_open == 0
     blocked = {(c.method, c.reason) for c in counted if c.decision == "blocked"}
-    assert ("POST", "closing") in blocked  # the route saw the draft flush and aborted it
+    # the draft flush: its POSTs never become requests (ISOLATE_JS refuses a beacon and any method
+    # but GET/HEAD in every realm), and the route aborted its GET while the page went
+    assert {("POST", "api_removed"), ("POST", "method"), ("GET", "closing")} <= blocked
+    assert not any(p.startswith("/ka-get-") for p in counts.gets)
 
 
 class _StuckPage:
@@ -836,7 +842,7 @@ async def test_a_filled_page_can_beacon_keepalive_socket_or_start_workers_nowher
     await asyncio.sleep(0.5)
     assert results == {
         "beacon": False,
-        "keepalive_post": "failed",  # the route aborts it; keepalive was stripped first
+        "keepalive_post": "failed",  # refused: no POST leaves, from any realm
         "keepalive_get": "failed",
         "keepalive_getter": "failed",
         "websocket": "refused",
@@ -853,12 +859,14 @@ async def test_a_filled_page_can_beacon_keepalive_socket_or_start_workers_nowher
         for c in counted
         if (c.decision, c.reason) == ("blocked", "api_removed")
     }
-    assert {(4, "POST", "beacon"), (4, "POST", "keepalive"), (4, "GET", "keepalive")} <= removed
+    assert {(4, "POST", "beacon"), (4, "GET", "keepalive")} <= removed
     assert {(4, "GET", "websocket"), (4, "GET", "worker")} <= removed
+    refused = {(c.page_no, c.method, c.resource_type, c.reason) for c in counted}
+    assert (4, "POST", "fetch", "method") in refused  # the keepalive POST, refused by its method
     keepalive = [c for c in counted if (c.resource_type, c.reason) == ("keepalive", "api_removed")]
     # the getter's first read (false) is the only one: the Request is built once, so the flag the
     # wrapper checked is the flag the browser uses, and nothing is reported for it
-    assert sum(c.count for c in keepalive) == 2
+    assert sum(c.count for c in keepalive) == 1
     assert all(c.host in ("127.0.0.1", "-") for c in counted)
 
 
@@ -1494,6 +1502,12 @@ def test_isolate_js_is_always_installed_and_blocks_what_no_route_sees() -> None:
         "__dpsGuardLock",
         "'fetchLater'",
         "'WebSocketStream'",
+        "XMLHttpRequest",
+        "EventSource",
+        "'method'",
+        "__dpsInert",
+        "Content-Security-Policy",
+        "form-action 'none'",
     ):
         assert needle in ISOLATE_JS, needle
     src = (ROOT / "dps/layers/scanner/guard.py").read_text(encoding="utf-8")
