@@ -1508,3 +1508,19 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   `./docker/secrets/default/dps/ui/demo-onboarding/` to `default/dps/ui/demo-onboarding/`, and the
   browser-worker waits for it (`service_completed_successfully`). Test: `tests/test_compose.py`
   (browser-worker and demo-storage-state tests; both failed before).
+- **M5 policy references on scans** (`dps/layers/api/routers/scans.py`, `dps/layers/scanner/__init__.py`,
+  `dps/layers/scanner/inventory.py`): `POST /scans` resolves `policy: "@<name>[:v<N>]"` with M5's
+  `policy_refs.resolve` before the policy is checked (contract §5.5 already listed `/scans`), so the
+  stored spec carries the published body (`name`, `version`) the browser-worker runs; the store's codes
+  (`invalid_policy_ref` 400, `policy_not_found` 404, `policy_not_published` 409,
+  `policy_store_unavailable`) come back as they are and are audited `scan.create` rejected. The scan
+  evidence's `policy` block gains `version` (as a run's). M5's engine refuses a relaxed body
+  (`verify_warn_disallowed`, a `CodedError`, not an `EngineError`): `open_runtime` now fails the scan
+  with that code instead of letting the exception escape, and the cancel-path finalize no longer
+  raises on such a body (`_policy_name`, `_write_pack`). Navigation audit rows keep `policy` empty for a
+  dict policy (an inline dict could carry any `name`/`version`; M5 labels only store-resolved
+  policies `<name>@v<N>`). Tests: `tests/scanner/test_scans_api.py::
+  test_policy_references_resolve_at_accept_and_pin_the_version` (was 422 `policy_invalid`),
+  `tests/scanner/test_inventory_export.py::test_evidence_names_the_policy_version_the_scan_ran`,
+  `tests/scanner/test_scan_policy_refs.py` (both raised `CodedError` before). Console: the codes are
+  worded on the New-scan page.

@@ -347,3 +347,38 @@ def test_evidence_pack_shape_and_labels(
         obf.consistency["seed_fingerprint"] is None
         and obf.errors[0]["code"] == "submission_detected"
     )
+
+
+def test_evidence_names_the_policy_version_the_scan_ran(
+    scan_settings: Settings, scan_engine: PrivacyEngine
+) -> None:
+    """M5: a scan accepted with ``@<name>[:v<N>]`` runs the stored body; its evidence names the
+    policy, its hash and the version, as a run's evidence does (``policy.version``)."""
+    import dataclasses
+
+    from dps.engine.policy import load_preset
+
+    body = load_preset("gdpr-pseudonymise").model_dump(mode="json")
+    body.update({"name": "retail-kyc", "version": 3})
+    rt = dataclasses.replace(
+        make_runtime("http://demo-site:8410", scan_settings, scan_engine),
+        policy=scan_engine.policy(body),
+    )
+    pack = build_scan_evidence(
+        evidence_id="ev_03TEST",
+        job=_job(rt),
+        runtime=rt,
+        pages=[],
+        fields=[],
+        counts={},
+        outcome=None,
+        result="succeeded",
+        errors=[],
+        settings=scan_settings,
+        exports={},
+    )
+    assert pack.policy == {
+        "name": "retail-kyc",
+        "hash": rt.policy.config_hash(),
+        "version": "3",
+    }

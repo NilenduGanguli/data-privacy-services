@@ -141,6 +141,45 @@ def test_storage_state_refs_get_the_connection_rule_at_accept(api_client: Any) -
     assert ok.json()["scan"]["spec"]["auth"]["storage_state_ref"] == "dps/ui/demo-onboarding"
 
 
+@pytest.mark.db
+def test_policy_references_resolve_at_accept_and_pin_the_version(api_client: Any) -> None:
+    """M5 (contract §5.5): ``policy: "@<name>[:v<N>]"`` on ``POST /scans`` is the tenant's
+    published body at accept time, so the job spec — which the browser-worker runs and the
+    evidence names — holds exactly that version; the policy store's refusal codes come back as
+    they are, audited, and another tenant cannot name the policy."""
+    from tests.test_policy_store import NAME, _adopt_and_tune
+
+    c, sink = api_client
+    hashes = _adopt_and_tune(c)
+    active = _create(c, {"url": URL, "policy": f"@{NAME}"})
+    assert active.status_code == 202, active.text
+    stored = active.json()["scan"]["spec"]["policy"]
+    assert (stored["name"], stored["version"]) == (NAME, 2)
+    assert stored["detect"]["min_score"] == 0.55  # the tuned v2 body, not the preset's
+    pinned = _create(c, {"url": URL, "policy": f"@{NAME}:v1"})
+    assert pinned.status_code == 202, pinned.text
+    assert pinned.json()["scan"]["spec"]["policy"]["version"] == 1
+    for ref, status, code in (
+        ("@nope", 404, "policy_not_found"),
+        (f"@{NAME}:v9", 404, "policy_not_found"),
+        ("@Not-A-Ref", 400, "invalid_policy_ref"),
+    ):
+        r = _create(c, {"url": URL, "policy": ref})
+        assert (r.status_code, r.json()["code"]) == (status, code), r.text
+    other = _create(c, {"url": URL, "policy": f"@{NAME}"}, **{"X-DPS-Tenant": "t2"})
+    assert (other.status_code, other.json()["code"]) == (404, "policy_not_found")
+    created = [(e.outcome, e.status) for e in sink.events if e.action == "scan.create"]
+    assert created == [
+        ("ok", 202),
+        ("ok", 202),
+        ("rejected", 404),
+        ("rejected", 404),
+        ("rejected", 400),
+        ("rejected", 404),
+    ]
+    assert hashes["v1"] != hashes["v2"]
+
+
 #: Bodies the ScanSpec model refuses before validate_scan runs: POST /scans still answers the
 #: contract §9 code (value-free), mapped by the refused field's location.
 MODEL_REFUSALS: list[tuple[dict[str, Any], str]] = [

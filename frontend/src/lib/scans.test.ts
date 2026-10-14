@@ -103,7 +103,9 @@ describe('form checks', () => {
     for (const code of ['url_invalid', 'host_not_registered', 'scope_invalid', 'start_url_denied', 'inline_auth_forbidden', 'auth_invalid',
       'har_not_supported', 'fill_invalid', 'policy_invalid', 'key_material_invalid', 'wrap_key_invalid', 'kek_unconfigured',
       // SEC-5: the stored session reference gets a connection secret_ref's rule (contract §5.1)
-      'secret_ref_foreign_tenant', 'secret_ref_not_shared', 'secret_ref_invalid']) {
+      'secret_ref_foreign_tenant', 'secret_ref_not_shared', 'secret_ref_invalid',
+      // M5: @name[:vN] policy references resolved at accept (contract §5.5) and strict verification
+      'policy_not_found', 'policy_not_published', 'invalid_policy_ref', 'policy_store_unavailable', 'verify_warn_disallowed']) {
       const text = createErrorText(new ApiError(422, `the scan was refused: ${code}`, code));
       expect(text, code).not.toContain(code);
       expect(text, code).not.toMatch(/^422/);

@@ -49,6 +49,7 @@ from dps.layers.api.deps import (
 )
 from dps.layers.api.errors import DpsHttpError
 from dps.layers.api.idempotency import REPLAY_HEADER
+from dps.layers.api.policy_refs import resolve as resolve_policy_ref
 from dps.layers.scanner.classify import value_classifier
 from dps.layers.scanner.inventory import (
     inventory_csv,
@@ -223,6 +224,9 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
         kek = kek_of(request)
         if kek is None:
             raise DpsHttpError(503, "kek_unconfigured", "scans need DPS_JOB_KEK to seal the scan")
+        # M5 (contract §5.5): an @name[:vN] reference becomes the tenant's published body now, so
+        # the stored spec — which the browser-worker runs and the evidence names — pins the version
+        body.policy = await resolve_policy_ref(request, body.policy)
         try:
             validated = validate_scan(
                 body, settings=settings, hosts=await _hosts(request, tenant), tenant_id=tenant

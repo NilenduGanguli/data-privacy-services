@@ -661,8 +661,12 @@ def build_scan_evidence(
     auth = spec.get("auth") or {}
     cons = spec.get("consistency") or {}
     fill = spec.get("fill") or {}
-    if runtime is not None:
-        policy = {"name": runtime.policy.name, "hash": runtime.policy.config_hash()}
+    if runtime is not None:  # M5: the version too, as a run's evidence names it (``@name:vN``)
+        policy = {
+            "name": runtime.policy.name,
+            "hash": runtime.policy.config_hash(),
+            "version": str(runtime.policy.version),
+        }
     policy = policy or {"name": "", "hash": ""}
     flags = number_flags([(p.page_no, p.url_redacted, p.risk_flags) for p in pages])
     by_entity = Counter(f.entity_type for f in fields if f.entity_type)

@@ -71,7 +71,7 @@ There is **no route** that submits a form, writes to a scanned site, or returns 
 | `capture.screenshots` | `true` | |
 | `capture.har` | `false` | `true` → 422 `har_not_supported` (a HAR holds response bodies) |
 | `consistency` | `{scope: "key"}` | M2's `ConsistencySpec`: `key_material` / `synthesis_seed` to reuse the caller's (same tokens and personas as an earlier scan), `wrap_key: {type: "rsa-oaep-256", public_key_pem}` to receive the key RSA-wrapped |
-| `policy` | `DPS_DEFAULT_POLICY` | a preset name or an inline policy (method per entity type, detector threshold) |
+| `policy` | `DPS_DEFAULT_POLICY` | a preset name, an inline policy (method per entity type, detector threshold) or — M5, contract §5.5 — `@<name>` / `@<name>:v<N>`: the tenant's published version, resolved at accept, so the stored spec (`spec.policy`, with `name` and `version`) is exactly what the browser-worker runs and the evidence's `policy.version` names it |
 | `purpose` | — | `{ticket, legal_basis}` recorded in the evidence pack |
 
 ```http
@@ -131,6 +131,8 @@ Refused at `POST /scans` (nothing is queued; the refusal is audited without the 
 | `har_not_supported` | 422 | `capture.har: true` |
 | `fill_invalid` | 422 | personas outside 1–50, `display_persona` outside 1 … `personas`, an unsupported locale, any other refused `fill` field |
 | `policy_invalid` | 422 | the policy does not resolve |
+| `invalid_policy_ref` / `policy_not_found` / `policy_not_published` | 400 / 404 / 409 | an `@<name>[:v<N>]` reference that is malformed, names no policy or version of the caller's tenant, or has never been published (M5, contract §5.5; `policy_store_unavailable` 400 without a metadata database) |
+| `verify_warn_disallowed` | 422 | the policy relaxes the leakage check (`verify.leakage_check: warn`) while `DPS_VERIFY_WARN_ALLOWED` is false (M5) |
 | `key_material_invalid` | 422 | a supplied `consistency.key_material` or `synthesis_seed` is not valid |
 | `wrap_key_invalid` | 422 | `wrap_key` is not `rsa-oaep-256` with a readable RSA public key |
 | `idempotency_key_invalid` / `idempotency_key_reused` | 422 | a malformed `Idempotency-Key`; the same key with another body (or a non-scan job) |
@@ -159,6 +161,7 @@ Refused by the browser-worker when it opens the scan (the job ends `failed` with
 | `key_unavailable` | the sealed key material is missing |
 | `spec_invalid` | the stored spec no longer validates |
 | `policy_invalid` | the policy no longer resolves |
+| `verify_warn_disallowed` | the stored policy relaxes the leakage check and this deployment no longer allows it (M5) |
 | `host_not_registered` | the host was unregistered after the scan was accepted (checked again at run time and on every request) |
 
 ## Job lifecycle of a scan

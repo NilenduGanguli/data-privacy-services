@@ -22,6 +22,7 @@ from dps.audit import AuditEvent
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_from_caller
 from dps.engine.transform.crypto import key_material_from_caller
+from dps.errors import CodedError
 from dps.ids import PREFIX_EVIDENCE, new_id
 from dps.jobs import ClaimedJob, JobPhase, JobState
 from dps.jobs_models import JobProgress, JobSecret, ScanSpec
@@ -130,6 +131,8 @@ async def open_runtime(ctx: HandlerContext, job: ClaimedJob, store: ScanStore) -
         policy = ctx.engine.policy(spec.policy)
     except EngineError:
         raise ScanSetupError("policy_invalid") from None
+    except CodedError as exc:  # M5: e.g. verify_warn_disallowed for a relaxed (stored) body
+        raise ScanSetupError(exc.code) from None
     async with db.acquire_queue(job.tenant_id) as conn:
         hosts = await store.registered_hosts(conn, job.tenant_id)
     if not hosts and ctx.settings.env in ("local", "dev"):
@@ -447,7 +450,7 @@ def _policy_name(ctx: HandlerContext, job: ClaimedJob, runtime: ScanRuntime | No
         return runtime.policy.name
     try:
         return ctx.engine.policy((job.spec or {}).get("policy")).name
-    except EngineError:
+    except (EngineError, CodedError):
         return ""
 
 
@@ -513,8 +516,8 @@ async def _write_pack(
     if runtime is None:
         try:
             p = ctx.engine.policy((job.spec or {}).get("policy"))
-            policy = {"name": p.name, "hash": p.config_hash()}
-        except EngineError:
+            policy = {"name": p.name, "hash": p.config_hash(), "version": str(p.version)}
+        except (EngineError, CodedError):
             policy = None
     evidence_id = new_id(PREFIX_EVIDENCE)
     pack = build_scan_evidence(
