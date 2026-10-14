@@ -40,6 +40,7 @@ from dps.auth import (
     coded_http_exception_handler,
 )
 from dps.config import Settings, get_settings
+from dps.engine.call_scope import call_scope
 from dps.engine.service import PrivacyEngine
 from dps.layers.api import validation
 from dps.layers.api.common import TRACE_HEADER, CodedHTTPException
@@ -193,6 +194,22 @@ class _ReplayHeader:
             await send(message)
 
         await self.app(scope, receive, send_with_flag)
+
+
+class _CallScope:
+    """Binds a fresh engine call scope for every HTTP request (S3 review round 1 B1/B3,
+    :mod:`dps.engine.call_scope`): the custom entity tiers its policies declare and the CPU budget
+    of its policy patterns belong to that request alone — every route, present or added later."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        with call_scope():
+            await self.app(scope, receive, send)
 
 
 class _ValueFreeErrors:
@@ -617,6 +634,7 @@ def create_app(
     app.state.kek = None
 
     # add_middleware prepends: the last one added is the outermost.
+    app.add_middleware(_CallScope)
     app.add_middleware(_ReplayHeader)
     app.add_middleware(_ValueFreeErrors)
     app.add_middleware(

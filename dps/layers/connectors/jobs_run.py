@@ -78,6 +78,7 @@ from dps.engine.batch import (
     row_anchor,
 )
 from dps.engine.detect.ensemble import Detector
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.policy import Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_bytes, seed_from_caller
@@ -431,6 +432,8 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
     except IncompatibleMethod as exc:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
+    except PatternTooSlow as exc:  # S3 review r1 B1: deterministic, a retry would refuse again
+        await _fail_to_finalize(ctx, job, exc.code, exc.detail)
     except CONSTRAINT_ERRORS as exc:
         await _fail_to_finalize(ctx, job, "incompatible_method", str(exc))
     except LeakageError as exc:
@@ -1279,6 +1282,8 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
         await _fail_partition(ctx, part, "leakage", str(exc))
     except IncompatibleMethod as exc:
         await _fail_partition(ctx, part, exc.code, str(exc))
+    except PatternTooSlow as exc:  # S3 review r1 B1: deterministic, a retry would refuse again
+        await _fail_partition(ctx, part, exc.code, exc.detail)
     except PkCollision as exc:
         await _fail_partition(ctx, part, exc.code, str(exc))
     except CONSTRAINT_ERRORS as exc:
@@ -2221,7 +2226,7 @@ async def _best_effort(step: Awaitable[dict[str, Any]]) -> dict[str, Any]:
     code}`` in the evidence instead of blocking the pack (and the key purge) behind retries."""
     try:
         return await step
-    except (ConnectorError, StorageError, ConnectionStoreError) as exc:
+    except (ConnectorError, StorageError, ConnectionStoreError, PatternTooSlow) as exc:
         return {"error": exc.code}
     except (SecretUnavailable, SealError):
         return {"error": "secret_unavailable"}

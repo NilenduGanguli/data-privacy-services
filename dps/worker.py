@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse
 from dps import __version__, db, jobs
 from dps.audit import AuditSink, DbAuditSink
 from dps.config import Settings, get_settings
+from dps.engine.call_scope import bind_call_scope
 from dps.engine.service import PrivacyEngine
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobKind, JobPhase
 from dps.observability import (
@@ -217,10 +218,13 @@ class Consumer:
         M5 (spec P1): the handler's task binds its job's tenant (``CURRENT_TENANT``) and a fresh
         ``LlmStats``, so LLM calls it makes count for that tenant (a task copies the context at
         creation: the binding is per task). Handlers that call the LLM copy the stats into
-        ``progress.metrics.llm`` (:func:`dps.observability.LlmStats.counts`).
+        ``progress.metrics.llm`` (:func:`dps.observability.LlmStats.counts`). S3 review round 1:
+        it also binds a fresh engine call scope (:mod:`dps.engine.call_scope`) — the job's custom
+        entity tiers and the CPU budget of its policy patterns are its own.
         """
         CURRENT_TENANT.set(tenant_id)
         LLM_STATS.set(LlmStats())
+        bind_call_scope()
         try:
             if predecessor is not None and not predecessor.done():
                 await asyncio.wait({predecessor})

@@ -3,16 +3,22 @@
 The registry is open: custom recognizers and declared fields may introduce entity names that are
 not listed here; they default to ``Family.OTHER`` / ``Sensitivity.MEDIUM`` unless registered.
 
-The registry is process-global and shared by every tenant, so it only ever raises protection:
-built-in entities cannot be replaced, and a custom entity's tier never drops below what every
-caller already sees for that name (fail closed, spec P8).
+Custom tiers belong to the **call** that declared them (S3 review round 1 B3): an API request and
+a worker handler task each bind their own :class:`CustomEntities` (:mod:`dps.engine.call_scope`),
+which :func:`register_entity` fills and :func:`entity_info` reads first. One tenant's policies can
+therefore never fill a registry another tenant's request needs, and a tier never leaks from one
+call into another. Only code outside a request or a job (tools, tests) uses the process-global
+``TAXONOMY``. Either way a registration only ever raises protection: built-in entities cannot be
+replaced, and a custom entity's tier never drops below what the caller already sees for that name
+(fail closed, spec P8).
 """
 
 from __future__ import annotations
 
 import dataclasses
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -147,10 +153,51 @@ _BUILTIN: Mapping[str, EntityInfo] = MappingProxyType({e.name: e for e in _ENTRI
 
 TAXONOMY: dict[str, EntityInfo] = dict(_BUILTIN)
 _REGISTRY_LOCK = threading.Lock()
-#: The most custom names the process-global registry holds (S3 review F-10). A policy can only
-#: raise a custom tier above the MEDIUM default; a *new* name past the cap is refused (the request
-#: fails with 400, it is never silently downgraded). Names already registered keep working.
+#: The most custom names one registry holds — a call's (:class:`CustomEntities`) or the
+#: process-global one (S3 review F-10). A policy can only raise a custom tier above the MEDIUM
+#: default; a *new* name past the cap is refused (the request fails with 400, it is never silently
+#: downgraded). A policy declares at most 550 names, so a call's registry never reaches it.
 MAX_CUSTOM_ENTITIES = 5000
+
+
+class CustomEntities:
+    """The custom entity tiers one call — an API request or a worker handler — registered (S3
+    review round 1 B3). Never shared between calls; thread-safe (a call's engine work may run on
+    several worker threads)."""
+
+    __slots__ = ("_infos", "_lock")
+
+    def __init__(self) -> None:
+        self._infos: dict[str, EntityInfo] = {}
+        self._lock = threading.Lock()
+
+    def get(self, name: str) -> EntityInfo | None:
+        """The tier this call registered for ``name``, if any."""
+        return self._infos.get(name)
+
+    def __len__(self) -> int:
+        return len(self._infos)
+
+
+#: The current call's registry (bound per request and per worker handler task); ``None`` outside
+#: them, where the process-global ``TAXONOMY`` is used.
+_CALL_ENTITIES: ContextVar[CustomEntities | None] = ContextVar("dps_custom_entities", default=None)
+
+
+def bind_custom_entities() -> Token[CustomEntities | None]:
+    """Give the current call a fresh :class:`CustomEntities`; returns the token to reset it."""
+    return _CALL_ENTITIES.set(CustomEntities())
+
+
+def reset_custom_entities(token: Token[CustomEntities | None]) -> None:
+    """Undo :func:`bind_custom_entities` (same context)."""
+    _CALL_ENTITIES.reset(token)
+
+
+def current_custom_entities() -> CustomEntities | None:
+    """The current call's registry; ``None`` outside a request or a job (process-global)."""
+    return _CALL_ENTITIES.get()
+
 
 #: Entities whose co-occurrence raises a record's sensitivity (spec §5.2).
 QUASI_IDENTIFIERS = frozenset(
@@ -166,44 +213,58 @@ def is_builtin_entity(name: str) -> bool:
 def entity_info(name: str) -> EntityInfo:
     """Look up an entity type; unknown names are MEDIUM / OTHER.
 
-    Built-in entries always win, even if the ``TAXONOMY`` dict was mutated directly.
+    Built-in entries always win, even if the ``TAXONOMY`` dict was mutated directly; then the
+    current call's registrations, then the process-global ones.
     """
+    builtin = _BUILTIN.get(name)
+    if builtin is not None:
+        return builtin
+    call = _CALL_ENTITIES.get()
     return (
-        _BUILTIN.get(name)
+        (call.get(name) if call is not None else None)
         or TAXONOMY.get(name)
         or EntityInfo(name, Family.OTHER, Sensitivity.MEDIUM, "custom or declared")
     )
 
 
 def register_entity(info: EntityInfo) -> None:
-    """Register a custom entity type, or raise the tier of one already registered.
+    """Register a custom entity type for the current call, or raise the tier of one already
+    registered (outside a request or a job: in the process-global ``TAXONOMY``).
 
-    The registry is shared by every caller in the process, so a registration can only raise
-    protection, never lower it:
+    A registration can only raise protection, never lower it:
 
-    * a built-in name (``SSN``, ``EMAIL`` …) is refused with ``ValueError`` — replacing it would
-      change the tier every other tenant gets;
+    * a built-in name (``SSN``, ``EMAIL`` …) is refused with ``ValueError`` — the taxonomy owns
+      built-in tiers;
     * for a custom name the stored tier is the max of the requested tier and the tier the name
-      already has, which for a name nobody registered yet is the ``MEDIUM`` default.
+      already reads as, which for a name nobody registered yet is the ``MEDIUM`` default.
 
-    A new name whose tier is the MEDIUM default is not stored (it reads the same either way), and
-    at most :data:`MAX_CUSTOM_ENTITIES` custom names are (S3 review F-10).
+    A new name whose tier is what it already reads as is not stored (it reads the same either
+    way), and a registry holds at most :data:`MAX_CUSTOM_ENTITIES` custom names (S3 review F-10).
 
     Raises:
         ValueError: when ``info.name`` is a built-in entity type, or a new name would pass the cap.
     """
     if is_builtin_entity(info.name):
         raise ValueError(f"built-in entity type {info.name!r} cannot be re-registered")
+    call = _CALL_ENTITIES.get()
+    if call is not None:
+        with call._lock:
+            _store(call._infos, info, held=len(call._infos))
+        return
     with _REGISTRY_LOCK:
-        current = entity_info(info.name).sensitivity
-        tier = Sensitivity.max_of([current, info.sensitivity])
-        if info.name not in TAXONOMY and tier is Sensitivity.MEDIUM:
-            return  # the unregistered default already: storing it would only grow the registry
-        if info.name not in TAXONOMY and len(TAXONOMY) - len(_BUILTIN) >= MAX_CUSTOM_ENTITIES:
-            raise ValueError(
-                "the custom entity registry is full: use an entity type already registered"
-            )
-        TAXONOMY[info.name] = dataclasses.replace(info, sensitivity=tier)
+        _store(TAXONOMY, info, held=len(TAXONOMY) - len(_BUILTIN))
+
+
+def _store(registry: MutableMapping[str, EntityInfo], info: EntityInfo, *, held: int) -> None:
+    current = entity_info(info.name).sensitivity
+    tier = Sensitivity.max_of([current, info.sensitivity])
+    if info.name not in registry and tier is current:
+        return  # it already reads as this tier: storing it would only grow the registry
+    if info.name not in registry and held >= MAX_CUSTOM_ENTITIES:
+        raise ValueError(
+            "the custom entity registry is full: use an entity type already registered"
+        )
+    registry[info.name] = dataclasses.replace(info, sensitivity=tier)
 
 
 def record_sensitivity(entity_types: Iterable[str]) -> Sensitivity:

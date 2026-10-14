@@ -54,6 +54,7 @@ from dps import db, jobs
 from dps.connections import ConnectionStoreError, get_connection, load_credentials
 from dps.engine.batch import KEYLESS_METHODS
 from dps.engine.detect.ensemble import Detector
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.detect.structural import classify_path, normalize_key
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import EngineError
@@ -647,6 +648,8 @@ async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
         logger.info("discover_done", job_id=job.id, count=len(snapshot_ids))
     except SelectionError as exc:
         await _fail(ctx, job, exc.code, str(exc))
+    except PatternTooSlow as exc:  # S3 review r1 B1: deterministic, a retry would refuse again
+        await _fail(ctx, job, exc.code, exc.detail)
     except ConnectorError as exc:
         if exc.retryable:
             await jobs.retry_job(

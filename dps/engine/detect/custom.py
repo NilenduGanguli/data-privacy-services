@@ -9,6 +9,11 @@ test fixtures. Presidio's ``deny_list`` keeps its meaning — terms that are alw
 
 Deny-list entries and patterns are often the sensitive terms themselves, so validation errors
 never echo the input (``hide_input_in_errors``) and a bad regex is reported without its text.
+
+Patterns and deny lists run on the ``regex`` module under the call's CPU budget
+(:mod:`dps.engine.detect.regex_guard`, S3 review round 1 B1): a pattern that backtracks past it
+refuses the call (``custom_pattern_too_slow``) instead of pinning a CPU. Declared-field globs are
+matched without any regex (:class:`PathGlob`): linear in the path whatever the stars.
 """
 
 from __future__ import annotations
@@ -17,13 +22,27 @@ import re
 from pathlib import Path
 from typing import Any
 
+import regex
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dps.engine.detect.patterns import CONTEXT_BONUS, CONTEXT_WINDOW, Hit
-from dps.engine.detect.regex_guard import UnsafePattern, check_pattern
+from dps.engine.detect.regex_guard import (
+    PatternBudget,
+    UnsafePattern,
+    call_budget,
+    check_pattern,
+    compile_policy_pattern,
+)
 from dps.engine.detect.structural import KeyCandidate
-from dps.engine.taxonomy import EntityInfo, Family, Sensitivity, is_builtin_entity, register_entity
+from dps.engine.taxonomy import (
+    EntityInfo,
+    Family,
+    Sensitivity,
+    current_custom_entities,
+    is_builtin_entity,
+    register_entity,
+)
 
 _ENTITY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 DENY_LIST_SCORE = 0.9
@@ -125,23 +144,140 @@ class DeclaredField(BaseModel):
         return self
 
 
-def path_glob(pattern: str) -> re.Pattern[str]:
-    """Compile a declared-field path glob (see :class:`DeclaredField`) for ``fullmatch``."""
-    out: list[str] = []
-    i = 0
-    while i < len(pattern):
-        if pattern.startswith("[*]", i):
-            out.append(r"\[[0-9]+\]")
-            i += 3
-        elif pattern[i] == "*":
-            out.append(r"[^.\[\]]*")
-            i += 1
-            while i < len(pattern) and pattern[i] == "*":  # ``**`` is ``*``: no stacked repeats
+#: The characters that end a name in a path; a glob ``*`` never crosses one.
+_PATH_SEPARATORS = ".[]"
+_SPLIT_PATH = re.compile(r"([.\[\]])")  # one character class: linear
+#: The name between the brackets of ``[*]``: an array index, ``[0-9]+``.
+_INDEX = "[*]"
+
+
+def split_path(path: str) -> list[str]:
+    """``path`` cut at ``.``, ``[`` and ``]``: names at even positions, separators at odd ones."""
+    return _SPLIT_PATH.split(path)
+
+
+def _name_matches(chunks: tuple[str, ...], name: str) -> bool:
+    """``name`` against one glob name cut at its ``*`` (``chunks``): the first chunk starts it,
+    the last ends it, and the others follow in order in between — leftmost placement is optimal,
+    so no backtracking (S3 review round 1 B1)."""
+    if len(chunks) == 1:
+        return name == chunks[0]
+    first, last = chunks[0], chunks[-1]
+    if len(name) < len(first) + len(last) or not name.startswith(first):
+        return False
+    if not name.endswith(last):
+        return False
+    pos, end = len(first), len(name) - len(last)
+    for chunk in chunks[1:-1]:
+        found = name.find(chunk, pos, end)
+        if found < 0:
+            return False
+        pos = found + len(chunk)
+    return True
+
+
+class PathGlob:
+    """A declared-field path glob (see :class:`DeclaredField`), matched without a regex.
+
+    The glob and the path are cut at ``.``, ``[`` and ``]``; separators must be equal and in the
+    same places (``*`` never crosses one, and ``[*]`` is ``[`` + an index + ``]``), and each name is
+    matched on its own by :func:`_name_matches`. The cost is linear in the path, whatever the
+    number or the arrangement of the stars (S3 review round 1 B1: the regex form backtracked
+    polynomially on ``$.*a*a*a*…b`` against a long name).
+    """
+
+    __slots__ = ("pattern", "_parts")
+
+    def __init__(self, pattern: str) -> None:
+        self.pattern = pattern
+        parts: list[str | tuple[str, ...] | None] = []  # None: an index name (``[*]``)
+        name: list[str] = []
+        i = 0
+        while i < len(pattern):
+            if pattern.startswith(_INDEX, i):
+                parts += [tuple("".join(name).split("*")), "[", None, "]"]
+                name = []
+                i += len(_INDEX)
+            elif pattern[i] in _PATH_SEPARATORS:
+                parts += [tuple("".join(name).split("*")), pattern[i]]
+                name = []
                 i += 1
-        else:
-            out.append(re.escape(pattern[i]))
-            i += 1
-    return re.compile("".join(out))
+            else:
+                name.append(pattern[i])
+                i += 1
+        parts.append(tuple("".join(name).split("*")))
+        self._parts = tuple(parts)
+
+    def match_parts(self, parts: list[str]) -> bool:
+        """True when the path cut by :func:`split_path` matches the whole glob."""
+        if len(parts) != len(self._parts):
+            return False
+        for index, (want, have) in enumerate(zip(self._parts, parts, strict=True)):
+            if index % 2:  # a separator
+                if want != have:
+                    return False
+            elif want is None:  # ``[*]``: one or more ASCII digits
+                if not (have.isascii() and have.isdigit()):
+                    return False
+            elif not _name_matches(want, have):  # type: ignore[arg-type]
+                return False
+        return True
+
+    def fullmatch(self, path: str) -> bool:
+        """True when ``path`` matches the whole glob."""
+        return self.match_parts(split_path(path))
+
+
+def path_glob(pattern: str) -> PathGlob:
+    """Compile a declared-field path glob (see :class:`DeclaredField`)."""
+    return PathGlob(pattern)
+
+
+_UNREGISTERED = object()
+
+
+class CustomTiers:
+    """The tiers a policy's custom recognizers and declared fields declare (``sensitivity``),
+    registered in every call that uses them (S3 review round 1 B3: a call's registry is its own).
+
+    :meth:`ensure` registers them in the current call's registry the first time it runs there; an
+    object built in one call and used in another (a worker caches a job's transformer across its
+    partition handlers) registers them again in each.
+    """
+
+    __slots__ = ("_infos", "_registered_in")
+
+    def __init__(self, recognizers: list[Any], declared: list[Any]) -> None:
+        infos: list[EntityInfo] = []
+        for rec in recognizers:
+            spec = rec if isinstance(rec, RecognizerSpec) else RecognizerSpec.model_validate(rec)
+            if spec.sensitivity is not None:
+                infos.append(
+                    EntityInfo(
+                        spec.supported_entity, Family.OTHER, spec.sensitivity, f"custom:{spec.name}"
+                    )
+                )
+        for item in declared:
+            field = item if isinstance(item, DeclaredField) else DeclaredField.model_validate(item)
+            if field.sensitivity is not None:
+                infos.append(
+                    EntityInfo(field.entity_type, Family.OTHER, field.sensitivity, "declared")
+                )
+        self._infos = tuple(infos)
+        self._registered_in: object = _UNREGISTERED
+
+    def ensure(self) -> None:
+        """Register the tiers in the current call (once per call).
+
+        Raises:
+            ValueError: a registry is full (:data:`dps.engine.taxonomy.MAX_CUSTOM_ENTITIES`).
+        """
+        registry = current_custom_entities()
+        if registry is self._registered_in or not self._infos:
+            return
+        for info in self._infos:
+            register_entity(info)
+        self._registered_in = registry
 
 
 def load_recognizers_yaml(source: str | Path) -> list[RecognizerSpec]:
@@ -158,32 +294,28 @@ class PolicyCustomDetector:
 
     def __init__(self, recognizers: list[RecognizerSpec], declared: list[DeclaredField]) -> None:
         self._declared = [(d, path_glob(d.path)) for d in declared]
+        #: this detector's own budget, used only outside a request or a worker handler (a call
+        #: binds one budget for all its detectors: :mod:`dps.engine.call_scope`)
+        self._budget = PatternBudget()
         # each matcher carries its recognizer's allow-list (per recognizer, not per name: two
         # recognizers may share a name)
         self._patterns: list[
-            tuple[RecognizerSpec, PatternSpecModel, re.Pattern[str], frozenset[str]]
+            tuple[RecognizerSpec, PatternSpecModel, regex.Pattern[str], frozenset[str]]
         ] = []
-        self._deny: list[tuple[RecognizerSpec, re.Pattern[str], frozenset[str]]] = []
+        self._deny: list[tuple[RecognizerSpec, regex.Pattern[str], frozenset[str]]] = []
+        #: the tiers this policy declares, in this call now and in any later call that uses it
+        self._tiers = CustomTiers(recognizers, declared)
+        self._tiers.ensure()
         for rec in recognizers:
             allowed = frozenset(rec.allow_list)
-            if rec.sensitivity is not None:
-                register_entity(
-                    EntityInfo(
-                        rec.supported_entity, Family.OTHER, rec.sensitivity, f"custom:{rec.name}"
-                    )
-                )
             for pat in rec.patterns:
-                self._patterns.append((rec, pat, re.compile(pat.regex), allowed))
+                self._patterns.append((rec, pat, compile_policy_pattern(pat.regex), allowed))
             if rec.deny_list:
                 alternation = "|".join(
                     re.escape(w) for w in sorted(rec.deny_list, key=len, reverse=True)
                 )
-                self._deny.append(
-                    (rec, re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE), allowed)
-                )
-        for d in declared:
-            if d.sensitivity is not None:
-                register_entity(EntityInfo(d.entity_type, Family.OTHER, d.sensitivity, "declared"))
+                deny = rf"(?<!\w)(?:{alternation})(?!\w)"
+                self._deny.append((rec, compile_policy_pattern(deny, regex.IGNORECASE), allowed))
 
     @property
     def text_entities(self) -> frozenset[str]:
@@ -194,16 +326,28 @@ class PolicyCustomDetector:
 
     def declared(self, path: str) -> KeyCandidate | None:
         """The first declaration whose path equals or glob-matches ``path``."""
+        self._tiers.ensure()
+        parts: list[str] | None = None
         for spec, glob in self._declared:
-            if path == spec.path or glob.fullmatch(path):
-                return KeyCandidate(spec.entity_type, spec.score, f"declared:{spec.path}")
+            if path != spec.path:
+                parts = parts if parts is not None else split_path(path)
+                if not glob.match_parts(parts):
+                    continue
+            return KeyCandidate(spec.entity_type, spec.score, f"declared:{spec.path}")
         return None
 
     def scan(self, text: str, key_hint: str | None) -> list[Hit]:
-        """Custom-pattern and deny-list hits in ``text``; empty matches are ignored."""
+        """Custom-pattern and deny-list hits in ``text``; empty matches are ignored.
+
+        Raises:
+            PatternTooSlow: a pattern ran past the call's time budget (nothing is skipped).
+        """
+        self._tiers.ensure()
+        budget = call_budget() or self._budget
+        budget.earn(len(text), len(self._patterns) + len(self._deny))
         hits: list[Hit] = []
-        for rec, pat, regex, allowed in self._patterns:
-            for m in regex.finditer(text):
+        for rec, pat, compiled, allowed in self._patterns:
+            for m in budget.run(compiled, text):
                 if m.end() == m.start() or m.group(0) in allowed:
                     continue
                 score = pat.score
@@ -221,8 +365,8 @@ class PolicyCustomDetector:
                         f"custom-pattern:{pat.name}",
                     )
                 )
-        for rec, regex, allowed in self._deny:
-            for m in regex.finditer(text):
+        for rec, compiled, allowed in self._deny:
+            for m in budget.run(compiled, text):
                 if m.group(0) in allowed:
                     continue
                 hits.append(

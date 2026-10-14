@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from dps.engine.detect.custom import CustomTiers
 from dps.engine.findings import (
     Finding,
     Locator,
@@ -594,6 +595,11 @@ class BatchTransformer:
         self.whole = [c for c in columns if not c.text_column]
         self.text = [c for c in columns if c.text_column]
         self.detector = engine.detector(policy, locale) if self.text else None
+        #: S3 review round 1 B3: the policy's custom tiers are registered in every call that
+        #: transforms a batch (a worker reuses this transformer across partition handler tasks)
+        self._custom_tiers = CustomTiers(
+            policy.detect.custom_recognizers, policy.detect.declared_fields
+        )
         self.out_cols = {c.name: c.output_column() for c in columns if top_level(c.output_column())}
         self.leaf_restore = leaf_restore
         self.pseudonyms = list(pseudonyms)
@@ -773,6 +779,7 @@ class BatchTransformer:
             IncompatibleMethod: a method's output does not fit its column.
             MethodError: a method prerequisite is missing (value-free message).
         """
+        self._custom_tiers.ensure()
         surrogates = (
             self.engine.surrogate_engine(self.seed, self.locale) if self.seed is not None else None
         )

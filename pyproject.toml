@@ -18,6 +18,7 @@ dependencies = [
     "phonenumbers>=8.13",       # phone validation + valid synthetic numbers
     "pyyaml>=6.0",              # policy presets and custom recognizers
     "python-multipart>=0.0.9",  # multipart uploads (documents, M1)
+    "regex>=2024.11.6",         # policy patterns: re semantics (VERSION0) with a matching timeout (ReDoS bound)
 ]
 
 [project.optional-dependencies]
