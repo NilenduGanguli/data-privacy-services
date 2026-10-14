@@ -237,9 +237,12 @@ def _identifiers(
     generated = write_mode == "append" and _strategy_kind(pk_strategy) == "generate"
     owner = live.object.owner or "public"
     out: list[tuple[ColumnClassification, str | None]] = []
+    pseudo = {c.name for c in (*live.columns, *snapshot.shape.columns) if c.pseudo}
     for c in snapshot.columns:
         if c.name not in wanted or c.text_column:
             continue
+        if c.name in pseudo:
+            continue  # WP-I (m3): a row locator (Oracle ROWID) is read-only, never written
         is_key = c.is_key or c.name in keys
         if is_key and generated:
             continue
@@ -285,6 +288,8 @@ def _pseudonym_of(
         return PseudonymColumn(**common, kind="text")
     if kind == "uuid":
         return PseudonymColumn(**common, kind="uuid")
+    if kind == "object_id":  # WP-I (m3): a MongoDB ObjectId key gets a keyed ObjectId
+        return PseudonymColumn(**common, kind="object_id")
     return None
 
 

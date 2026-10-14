@@ -21,7 +21,7 @@ job group must still join. So a sensitive key (and every join identifier) is rep
   for values below 10⁹, 19 for longer ones), in a band that does not depend on the column type
   (so a key and its foreign keys map alike whatever their integer types); text keeps its length
   and every character's class (digit, upper-case and lower-case ASCII letters are permuted,
-  everything else is kept); a UUID stays a UUID.
+  everything else is kept); a UUID stays a UUID and a MongoDB ObjectId an ObjectId.
 
 Pure Python (no extra), value-free errors. The permutation is a balanced Feistel network with an
 HMAC-SHA256 round function (four rounds, counter-mode output for wide halves), cycle-walked into
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import string
 import uuid
 from collections.abc import Sequence
@@ -68,6 +69,7 @@ MIN_PSEUDONYM_LIMIT = 2 * SMALL_TIER - 1
 MAX_PSEUDONYM_DIGITS = 18
 _ROUNDS = 4
 _CLASSES = (string.digits, string.ascii_uppercase, string.ascii_lowercase)
+_OBJECT_ID = re.compile(r"[0-9a-fA-F]{24}")
 
 
 class PseudonymError(ValueError):
@@ -168,10 +170,12 @@ class KeyPseudonyms:
     def text(self, entity_type: str, value: str, *, kind: str = "text") -> str:
         """The pseudonym of a text identifier: same length, same character class at every
         position (ASCII digits, upper- and lower-case letters permuted; others kept). ``kind
-        "uuid"`` maps a UUID to a UUID.
+        "uuid"`` maps a UUID to a UUID, ``kind "object_id"`` a MongoDB ObjectId's 24 hex digits
+        to 24 hex digits (a keyed cycle through all 2⁹⁶ ids).
 
         Raises:
-            PseudonymError: nothing to permute (no ASCII letter or digit), or not a UUID.
+            PseudonymError: nothing to permute (no ASCII letter or digit), not a UUID, or not an
+                ObjectId's 24 hex digits.
         """
         if kind == "uuid":
             try:
@@ -179,6 +183,11 @@ class KeyPseudonyms:
             except ValueError:
                 raise PseudonymError("a uuid identifier is not a UUID") from None
             return str(uuid.UUID(int=self._cycle(number, 2**128, f"{entity_type}|uuid")))
+        if kind == "object_id":  # WP-I (m3): a MongoDB ObjectId (12 bytes, 24 hex digits)
+            if not _OBJECT_ID.fullmatch(value):
+                raise PseudonymError("an object id identifier is not 24 hex digits")
+            mapped = self._cycle(int(value, 16), 2**96, f"{entity_type}|object_id")
+            return f"{mapped:024x}"
         positions: list[tuple[int, str]] = []
         for i, ch in enumerate(value):
             for alphabet in _CLASSES:

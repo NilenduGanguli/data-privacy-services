@@ -279,7 +279,8 @@ class PseudonymColumn(BaseModel):
     """D-A: a column whose identifiers a synthesize run replaces by keyed pseudonyms
     (:class:`~dps.engine.synth.keys.KeyPseudonyms`) instead of copying them (value-free).
 
-    ``kind`` is ``int`` (integers, ``numeric(p, 0)``), ``text`` (text, char) or ``uuid``;
+    ``kind`` is ``int`` (integers, ``numeric(p, 0)``), ``text`` (text, char), ``uuid`` or
+    ``object_id`` (a MongoDB ObjectId, written back in the source value's own type);
     ``digits`` the decimal digits an integer column holds; ``limit`` the largest magnitude it
     holds (a larger pseudonym fails the batch; without ``limit``, ``10**digits - 1``).
     ``label`` keys the pseudonym when it is not the entity type: an unclassified key or foreign
@@ -290,7 +291,7 @@ class PseudonymColumn(BaseModel):
     path: str
     name: str
     entity_type: str
-    kind: Literal["int", "text", "uuid"]
+    kind: Literal["int", "text", "uuid", "object_id"]
     digits: int | None = None
     limit: int | None = None
     label: str | None = None
@@ -871,10 +872,19 @@ class BatchTransformer:
                     if largest is not None and abs(number) > largest:
                         raise IncompatibleMethod(p.path, "incompatible_method")
                     text = str(number)
+                    stored = from_engine_text(text, column)
+                elif p.kind == "object_id":
+                    # WP-I (m3): written in the source value's own type (``bson.ObjectId``; a
+                    # 24-hex string key stays a string) — the engine never imports the driver
+                    text = self._keys.text(label, source, kind="object_id")
+                    original: Any = row.get(p.name)
+                    factory: Any = type(original)
+                    stored = text if isinstance(original, str) else factory(text)
                 else:
                     text = self._keys.text(label, source, kind=p.kind)
-                out[p.name] = from_engine_text(text, column)
-            except (PseudonymError, IncompatibleValue, ValueError):
+                    stored = from_engine_text(text, column)
+                out[p.name] = stored
+            except (PseudonymError, IncompatibleValue, ValueError, TypeError):
                 raise IncompatibleMethod(p.path, "incompatible_method") from None
             checked += 1
             if normalise(text) == normalise(source):
