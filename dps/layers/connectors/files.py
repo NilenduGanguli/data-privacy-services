@@ -18,9 +18,13 @@ batches ``1..n`` is complete whichever holder wrote each one.
 
 Values: CSV — a header row, ``None`` → empty, ``Decimal`` → plain digits, dates ISO-8601, bytes →
 hex; JSONL — one compact object per row with the same scalar rules (numbers stay numbers,
-``Decimal`` becomes a string); Parquet — a ``pyarrow`` schema from the column kinds. ``snappy``
-and ``zstd`` apply to Parquet only; text formats take ``gzip`` or nothing. Errors carry codes;
-nothing here logs a value.
+``Decimal`` becomes a string); Parquet — a ``pyarrow`` schema from the column kinds. A MongoDB
+field holding a sub-document or an array is one column (:func:`file_columns`): a nested JSON value
+in JSONL, its JSON text in CSV and Parquet, every nested leaf by the same scalar rules (``datetime``
+ISO-8601, ``Decimal128`` its digits, ``ObjectId`` its hex, ``Int64`` an int). An Oracle
+``TIMESTAMP(7-9)`` or ``TIMESTAMP WITH TIME ZONE`` arrives as exact text and stays text in Parquet;
+a row locator (``ROWID``) is never written. ``snappy`` and ``zstd`` apply to Parquet only; text
+formats take ``gzip`` or nothing. Errors carry codes; nothing here logs a value.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ import json
 import math
 import shutil
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -43,6 +47,7 @@ from uuid import UUID
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
     ColumnInfo,
     FilesSpec,
@@ -50,6 +55,7 @@ from dps.layers.connectors.base import (
     LedgerMark,
     PrepareReport,
     Row,
+    TableShape,
 )
 from dps.layers.connectors.targets import PrepareFailure
 from dps.storage import ObjectStore, StorageError, StoredObject
@@ -73,6 +79,14 @@ def effective_compression(spec: FilesSpec) -> str:
     return "gzip" if spec.compression == "gzip" else "none"
 
 
+def file_columns(shape: TableShape, names: list[str]) -> list[ColumnInfo]:
+    """The columns a files target writes for the projected ``names``: a document field is one
+    JSON-text column (:func:`~dps.layers.connectors.docpaths.field_columns`), and a row locator
+    (the ``ROWID`` pseudo key of a key-less Oracle table) is never written — it is not table data,
+    and in a synthetic file it would point back at the source row (S1-M3 r1 B1)."""
+    return [c for c in docpaths.field_columns(shape, names) if not c.pseudo]
+
+
 def _text_value(value: Any) -> str:
     if value is None:
         return ""
@@ -84,19 +98,41 @@ def _text_value(value: Any) -> str:
         return value.isoformat()
     if isinstance(value, bytes | bytearray | memoryview):
         return bytes(value).hex()
-    if isinstance(value, dict | list):
-        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return str(value)
+    if isinstance(value, Mapping | list | tuple):
+        return json.dumps(_plain(value), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    to_decimal = getattr(value, "to_decimal", None)  # BSON Decimal128 (no driver import here)
+    if callable(to_decimal):
+        return format(to_decimal(), "f")
+    return str(value)  # ObjectId → its hex, UUID → its text, other driver types → their text
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as plain JSON data (S1-M3 r1 B3): containers recursively, with the scalar rules
+    of the module docstring for every leaf — a nested ``datetime`` is ISO-8601, a ``Decimal`` or
+    ``Decimal128`` its digits, an ``ObjectId`` its hex, an ``Int64`` an int, bytes hex."""
+    if value is None or isinstance(value, bool | str):
+        return value
+    if isinstance(value, int):
+        return int(value)  # an Int64 is an int
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, Mapping):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(v) for v in value]
+    return _text_value(value)
 
 
 def _json_value(value: Any) -> Any:
-    if value is None or isinstance(value, bool | int | str):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else str(value)
-    if isinstance(value, dict | list):
-        return value
-    return _text_value(value)
+    return _plain(value)
+
+
+def _text_timestamp(column: ColumnInfo) -> bool:
+    """A timestamp the connector carries as text: Oracle ``TIMESTAMP(7-9)`` (FF9) and ``TIMESTAMP
+    WITH TIME ZONE`` (FF9 and the offset), as ``oracle_sql.is_ts9`` / ``is_tz`` read them. A
+    microsecond Parquet timestamp would lose the digits, so the file keeps the exact text (S1-M3
+    r1 B4)."""
+    return "TIME ZONE" in column.data_type or (column.ts_precision or 0) > 6
 
 
 def _arrow_type(column: ColumnInfo) -> pa.DataType:
@@ -112,6 +148,8 @@ def _arrow_type(column: ColumnInfo) -> pa.DataType:
     if kind == "date":
         return pa.date32()
     if kind == "timestamp":
+        if _text_timestamp(column):
+            return pa.string()
         aware = "with time zone" in column.data_type
         return pa.timestamp("us", tz="UTC") if aware else pa.timestamp("us")
     if kind == "bool":

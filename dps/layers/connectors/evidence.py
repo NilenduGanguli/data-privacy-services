@@ -39,6 +39,7 @@ from dps.ids import PREFIX_EVIDENCE, new_id
 from dps.jobs import JobInternal, PartitionView, decode_cursor, encode_cursor
 from dps.jobs_models import ClassificationSnapshot, Purpose
 from dps.layers.connectors.base import ObjectRef
+from dps.layers.connectors.docpaths import column_key
 from dps.layers.connectors.targets import RunPlan
 from dps.storage import AcquireFn, ArtefactService
 
@@ -379,7 +380,9 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
                     "params": p.method.params if p.reversible else {},
                     "reversible": p.reversible,
                     "text_column": p.text_column,
-                    "values": per_column.get(p.name),
+                    # the transformer's counter key: a nested document leaf counts under
+                    # its path, a flat column under its name (S1-M3 r1 privacy-console B2)
+                    "values": per_column.get(column_key(p.path, p.name)),
                     "fallbacks": None,
                 }
             )
@@ -408,7 +411,7 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
                     "params": {},
                     "reversible": False,
                     "text_column": False,
-                    "values": per_column.get(k.name),
+                    "values": per_column.get(column_key(k.path, k.name)),
                     "fallbacks": None,
                 }
             )

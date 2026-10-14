@@ -76,7 +76,7 @@ function ConnectionsCard({ connections, keys }: { connections: Connection[]; key
         })}
         {!connections.length && <tr className="empty-row"><td colSpan={5}>No connection is registered for this tenant.</td></tr>}
       </tbody></table></div>
-      <div className="callout sm" style={{ marginTop: 12 }}>In place rewrites the selected rows in the source table; append adds transformed copies as new rows. On connections tagged <b>production</b> both need a key with the admin scope; elsewhere the jobs scope. The console always asks for a confirmation with row counts first.</div>
+      <div className="callout sm" style={{ marginTop: 12 }}>In place rewrites the selected rows in the source table; append adds transformed copies as new rows. On connections tagged <b>production</b> both need a key with the admin scope, as does every other write there (a table load, files); elsewhere the jobs scope. The console always asks for a confirmation with row counts first.</div>
     </section>
   );
 }

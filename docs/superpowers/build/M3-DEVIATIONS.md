@@ -1576,3 +1576,100 @@ Open (not fixed here):
   `member_duplicate` (no connector opened), `derive_members` and the derived check → 409
   `member_not_ready`; case-distinct PostgreSQL tables stay two members. Limit kept: an Oracle object
   without an owner is not resolved to the connecting user's schema. Contract §6.5 wording amended.
+
+## M3 post-merge verification round 1 fixes on main (`S1-M3-{engines,security,privacy-console}-r1.md`)
+
+Seven blocking findings of the post-merge panel on `main` @ `144cc65` (M3 merged as `b878c50`), each
+fixed with a test that failed before the fix (`~/.cache/dps-build/s1-m3-fix-r1/logs/before-fix.log`,
+the fixed code reverse-applied over the new tests). Report: `~/.cache/dps-build/reports/S1-M3-fix-r1.md`.
+
+- **engines B1 — a key-less Oracle table synthesizes.** `jobs_run.copied_personal_columns` leaves
+  pseudo keys (`ColumnInfo.pseudo`, read from the snapshot's shape and the live shape it now also
+  receives) out of the written and key sets: the `ROWID` locator is never written, so it is never a
+  key the run would copy. The guard still names a real key or a classified column copied as its
+  source value (unit test). **Found while fixing (beyond the finding):** a `files` target wrote the
+  `ROWID` pseudo key as a column (both modes; in a synthetic file it points back at the source row,
+  and with the guard fixed synthesize would have reached it): `files.file_columns` drops pseudo
+  columns, `resolve_target` leaves them out of a files target's `write_columns`/`column_types`, and
+  the manifest lists `plan.target.write_columns` (was `plan.projection`). Tests:
+  `tests/test_da_m3_engines.py::test_the_prepare_guard_never_counts_a_rowid_pseudo_key_as_copied`
+  (table, files) and `tests/connectors/test_oracle_keyless_synthesize.py` (integration, 1 500 demo
+  address rows: into a table — succeeded, the five table columns, no `ROWID`; into parquet files —
+  no `ROWID` column; `CUSTOMER_ID` 100 % in `[10⁹, 2·10⁹)`, 0 source keys, 0 source address lines).
+- **engines B2 — the first name the CRM notes repeat never reaches a target (D-A; obfuscate N1 too).**
+  `_row_value_spans` searches, besides a planned whole value, each word of at least 3 letters of a
+  planned `PERSON_NAME` value (`_needles`; whole words, caseless by Unicode full case folding, never
+  overlapping a detector span), and it now runs in **both** modes (obfuscate: the span takes the text column's
+  method, a `det_token` envelope; synthesize: `build_plan`'s surrogate — a one-word name becomes the
+  row persona's first name, so the note names the synthetic row's own first name) and on
+  `unclassified: detect` document leaves. Narrower than the finding's "ideally other multi-word
+  entities too": address words ("Road", "Flat", "Nagar") are common words and would rewrite unrelated
+  text; whole address values were already row-value spans. Names of *other* people in free text
+  still need NER (HANDOFF §8). **Performance:** the search was one `re.compile` per needle and row
+  (13 683 compiles per 2 000 demo rows, 21 % of an obfuscate transform under the profiler); it is now
+  a substring test on the case-folded text (`_whole_word_spans`, a fold map only where folding
+  changes lengths), 4 % of the transform; measured on 4 000 demo rows (`CRM.CUSTOMERS` shape, six
+  planned columns): obfuscate 1 265 → 1 205 rows/s, synthesize 875 → 961 rows/s (same machine,
+  noisy: other suites were running). A property test checks it against a brute-force caseless
+  reference and, on ASCII, against the former `(?<!\w)…(?!\w)` + `re.IGNORECASE` search.
+  Two existing sweep tests built their "undetected copy" from the row's own name repeated as words
+  (`test_batch.py::test_an_undetected_copy_in_free_text_is_a_leak`,
+  `test_batch_documents_m3.py::test_leakage_in_documents_fails_closed`); that copy is a span now and
+  is replaced, so each test glues the name into one word (no detector, no whole-word span finds it)
+  to keep proving that the per-row sweep fails closed, and asserts that the spaced copy is replaced.
+  **Found by the smoke `--m3` run on the rebuilt stack (first build of this fix):** with the name
+  words swept as originals, 3 of the 20 000 demo customers failed every Oracle and MongoDB run closed
+  (`leakage`, `$.NOTES` `PERSON_NAME` `contained`): an 8+-letter first name that begins the row's
+  own city word ("Christopher" in a kept "Christopherville"). The sweep's `contained` and
+  `name_part` rules are substring rules, so a name word matched inside the kept city. A name-word
+  span now carries the detector `row_value_word` (`ROW_NAME_WORD_DETECTOR`): it is transformed like
+  any span but is not a sweep original; the whole name stays one (its 8+-letter parts still drive
+  `name_part` over the whole input), and nothing the sweep checked before is checked less.
+  Regression test `test_a_first_name_inside_a_kept_city_word_is_not_a_leak` (both modes, strict);
+  the 20 000-row offline repro of the smoke plan: 3 hits → 0. Tests: `tests/test_da_free_text_spans.py` (Oracle flat shape and the
+  MongoDB nested shape, both modes, 120 demo customers: 0 first names kept; case-insensitive and
+  whole-word rules) and `tests/e2e/test_m3_free_text_names.py` (Oracle `CRM.CUSTOMERS` and MongoDB
+  `crm.profiles` demo shapes, 600 customers, default policy, no NER, both modes: 0 / 600 row-aligned
+  notes keep the source first name; the source-vs-itself control ≥ 95 %; evidence passed).
+- **engines B3 — MongoDB → `files` in every format.** `files._plain` converts nested values
+  recursively (datetime → ISO-8601, `Decimal`/`Decimal128` → digits, `ObjectId` → hex, `Int64` →
+  int, bytes → hex, non-finite float → text) for JSONL and for the JSON text of CSV/Parquet; a
+  MongoDB field holding a sub-document or an array (or holding a scalar in some documents and a
+  container in others) is one column (`docpaths.field_columns`: `kind` `json`, data type
+  `document`, Parquet `string`), so `profile` is no longer typed from its first leaf. The manifest
+  types such a field `document`. Chosen over refusing files for MongoDB at submit: the path works
+  now. Tests: `tests/connectors/test_files_documents.py` (offline, the demo document shape in jsonl,
+  csv and parquet) and `tests/connectors/test_files_m3_engines.py` (integration: `crm.profiles`
+  obfuscate → jsonl, csv, parquet and synthesize → jsonl: succeeded, 600 rows, nested leaves plain
+  JSON, 0 row-aligned survivors per sensitive leaf, 0 source values anywhere for obfuscate).
+- **engines B4 — Oracle `TIMESTAMP(7-9)` (and `WITH TIME ZONE`) → Parquet.** `_arrow_type` maps a
+  timestamp the connector carries as text (`ts_precision > 6`, or `TIME ZONE` in the Oracle type, as
+  `oracle_sql.is_ts9`/`is_tz` read it) to `string`, keeping FF9 (and the offset) exact; PostgreSQL's
+  `timestamp with time zone` stays a UTC timestamp. Tests: offline (FF9 and offset text exact, PG
+  unchanged) and integration (`CUSTOMERS` with `LAST_CONTACT_AT TIMESTAMP(9)`, obfuscate and
+  synthesize → parquet: succeeded, the kept column equals the source FF9 text row for row).
+- **security B1 — every write into a production-tagged connection needs `admin`.** `validate_run`
+  checks the scope for any write mode (the `table` and `files` targets as well as `in_place`/`append`;
+  `confirm_write` stays an `in_place`/`append` rule and is still checked first for them).
+  `targets.check_retry_scope` + `POST /jobs/{id}/retry` re-check it against the job's target
+  connection, else its source, as tagged now — before the key checks, so a `jobs` key gets 403
+  `admin_scope_required`, not 409 `key_material_required`. Reading a production source into a
+  non-production target stays a `jobs` right. Contract §5.3, §8.1 and the route map amended;
+  HANDOFF "Who may write a production connection". Tests: 8 new cases in
+  `tests/connectors/test_targets.py::test_validation_table` and `tests/api/test_production_write_gate.py`
+  (PostgreSQL, Oracle and MongoDB connections through the API: `table` truncate_insert, `table`
+  upsert and `files` into a production target → 403 on validate and on run, no job created; admin →
+  `{"ok": true}`; a non-production target stays allowed; a failed production `in_place` and
+  `table` run → retry 403 for `jobs`, 200 for admin). **Coordination with `fsec` (`f112044`, S3
+  auth-tenancy F1 — production bound to the credentials):** that commit edits the same lines; at its
+  merge keep both: the admin check **outside** the `in_place`/`append` block for every write mode,
+  with its `holds_production_credentials(written, production_refs)`, and `check_retry_scope` for
+  every write mode with `production_refs`.
+- **privacy-console B1 — the Evidence page labels MongoDB leaves by path.** `EvidencePack.tsx`
+  renders `columnLabel()` in section 3 (column cell, both kept-column lists), so the kept note names
+  `contact.addresses[].type`, `kyc.verifiedAt`, not `contact`, `kyc`. Vitest in
+  `EvidencePack.test.tsx`.
+- **privacy-console B2 — a MongoDB pack counts each nested leaf.** `build_pack` reads each column's
+  count with the transformer's key, `docpaths.column_key(path, name)` (the name of a flat column,
+  the path of a nested leaf). Packs sealed before the fix keep their empty counts (sealed and
+  hashed by design). Test `tests/test_evidence.py::test_a_mongo_pack_counts_each_nested_leaf_under_its_path`.

@@ -4,6 +4,7 @@ import { DownloadButton } from '../components/DownloadButton';
 import { FidelityPanel } from '../components/FidelityPanel';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError, type Download } from '../lib/api';
+import { columnLabel } from '../lib/engines';
 import {
   engineName, errorText, finishedOutcome, fmtCount, fmtDuration, fmtUtc, methodText, packSelection, packTargetText, recordNoun, shortId, shortSha, shortType,
   typeNoteShort, writeModeLabel, verificationText, verificationTone,
@@ -181,7 +182,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
               const s = byPath.get(String(c.path));
               return (
                 <tr key={String(c.path)}>
-                  <td className="m" data-l="Column">{s?.name ?? String(c.path).replace(/^\$\./, '')}</td>
+                  <td className="m" data-l="Column">{columnLabel(s ?? { path: String(c.path), name: String(c.path).replace(/^\$\./, '') })}</td>
                   <td className="faint" data-l="Type">{c.data_type ? shortType(String(c.data_type)) : s ? shortType(s.data_type) : '—'}</td>
                   <td data-l="Entity">{text(c.entity_type)}{c.text_column && c.entity_type !== 'FREE_TEXT' ? ' · free text' : ''}</td>
                   <td className="num m" data-l="Conf.">{typeof c.confidence === 'number' ? c.confidence.toFixed(2) : s?.entity_type ? s.confidence.toFixed(2) : '—'}</td>
@@ -193,7 +194,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
             })}
             {!p.columns.length && <tr><td colSpan={7} className="faint">No column was planned.</td></tr>}
           </tbody></table></div>
-          <p className="note">{keptNone.length ? `${keptNone.length} ${keptNone.length === 1 ? 'column' : 'columns'} kept, no entity: ${keptNone.map((c) => c.name).join(', ')}. ` : ''}{keptByPolicy.length ? `${keptByPolicy.length} classified ${keptByPolicy.length === 1 ? 'column' : 'columns'} kept by the policy or the review: ${keptByPolicy.map((c) => `${c.name} (${c.entity_type})`).join(', ')}. ` : ''}{flagged.length ? `The post-write sample found personal data in ${flagged.join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
+          <p className="note">{keptNone.length ? `${keptNone.length} ${keptNone.length === 1 ? 'column' : 'columns'} kept, no entity: ${keptNone.map((c) => columnLabel(c)).join(', ')}. ` : ''}{keptByPolicy.length ? `${keptByPolicy.length} classified ${keptByPolicy.length === 1 ? 'column' : 'columns'} kept by the policy or the review: ${keptByPolicy.map((c) => `${columnLabel(c)} (${c.entity_type})`).join(', ')}. ` : ''}{flagged.length ? `The post-write sample found personal data in ${flagged.join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
         </Sec>
 
         <Sec n={4} title="Execution" right={`${parts.length} ${parts.length === 1 ? 'partition' : 'partitions'}`}>

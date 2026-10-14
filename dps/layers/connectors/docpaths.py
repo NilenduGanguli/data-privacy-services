@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from typing import Any, Final
 
 from dps.engine.jsonpath import child_path, flatten, get_path
-from dps.layers.connectors.base import NEVER_TRANSFORMED_KINDS, ColumnInfo, Row
+from dps.layers.connectors.base import NEVER_TRANSFORMED_KINDS, ColumnInfo, Row, TableShape
 
 _INDEX: Final = re.compile(r"\[\d+\]")
 _WILDCARD: Final = "[*]"
@@ -123,6 +123,36 @@ def values_at(doc: Any, path: str) -> list[Any]:
 def top_level(column: ColumnInfo) -> bool:
     """True when the column is one key of a flat row (every SQL column, a Mongo top-level field)."""
     return column.path in (f"$.{column.name}", f"$['{column.name}']")
+
+
+#: ``ColumnInfo.data_type`` of a document field written whole by a flat writer (:func:`field_columns`).
+DOCUMENT_TYPE: Final = "document"
+
+
+def field_columns(shape: TableShape, names: list[str]) -> list[ColumnInfo]:
+    """The column a flat writer (a ``files`` target) writes for each top-level field in ``names``.
+
+    A field of a flat row (every SQL column, a MongoDB field that is a scalar in every sampled
+    document) is the shape's own column. A MongoDB field with nested leaves — a sub-document, an
+    array, or a field some documents hold as a scalar and others as a container — is one column of
+    JSON text: ``data_type`` :data:`DOCUMENT_TYPE`, ``kind`` ``json`` (S1-M3 r1 B3; its first leaf's
+    kind would type ``profile`` as a timestamp).
+
+    Raises:
+        KeyError: a name the shape does not hold.
+    """
+    out: list[ColumnInfo] = []
+    for name in names:
+        columns = [c for c in shape.columns if c.name == name]
+        if not columns:
+            raise KeyError(name)
+        if len(columns) == 1 and top_level(columns[0]):
+            out.append(columns[0])
+            continue
+        out.append(
+            ColumnInfo(path=child_path("$", name), name=name, data_type=DOCUMENT_TYPE, kind="json")
+        )
+    return out
 
 
 def column_key(path: str, name: str) -> str:

@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { FidelityPanel } from '../components/FidelityPanel';
 import * as fx from '../dev/fixtures';
+import type { ClassificationSnapshot, ColumnClassification, EvidenceOut } from '../lib/types';
 import { html, occurrences, text } from '../test/render';
 import { EvidenceSheet } from './EvidencePack';
 
@@ -41,6 +42,58 @@ describe('EvidenceSheet', () => {
     expect(t).toContain('6 Synthetic fidelity and privacy');
     expect(t).toContain('The synthetic report is a measurement, not a claim.');
     expect(t).not.toContain('pseudonymised data is still personal data');
+  });
+});
+
+// S1-M3 r1 (privacy-console B1): every MongoDB leaf shares its top-level field's name, so the
+// sheet labels a column by its path — the kept note names the leaves really kept, not "contact".
+describe('EvidenceSheet for a MongoDB pack', () => {
+  const keep = { method: 'keep', params: {} };
+  const leaf = (path: string, entity: string | null, text_column = false): ColumnClassification => ({
+    path, name: path.replace(/^\$\./, '').split(/[.[]/)[0], data_type: 'string', kind: 'text', is_key: path === '$._id',
+    entity_type: entity, confidence: entity ? 0.97 : 0, sensitivity: null, detectors: [], value_hit_rate: entity ? 0.97 : 0,
+    null_rate: 0, distinct_ratio: 1, shapes: [], text_column, anchor: false, suggested: keep, method: keep, override: false,
+    synthesize_suggested: null, synthesize_method: null, type_note: null,
+  });
+  const base = packs.ev_01K7ZQ9QA1;
+  const mdb: EvidenceOut = {
+    ...base,
+    pack: {
+      ...base.pack,
+      source: { ...base.pack.source, engine: 'mongo', object: 'crm.profiles' },
+      target: { ...base.pack.target, engine: 'mongo', object: 'crm_uat.profiles' },
+      columns: [
+        { path: '$.contact.email', entity_type: 'EMAIL', method: 'email', params: {}, reversible: true, values: 3469, confidence: 0.99, override: false },
+        { path: '$.contact.mobile', entity_type: 'PHONE', method: 'fpe_digits', params: {}, reversible: true, values: 3469, confidence: 0.98, override: false },
+        { path: '$.customerId', entity_type: 'CUSTOMER_ID', method: 'fpe_digits', params: {}, reversible: true, values: 3469, confidence: 1, override: false },
+      ],
+    },
+  };
+  const snapshot = {
+    id: 'snap_mdb', tenant_id: 't1', job_id: null, connection_id: 'c_mdb', engine: 'mongo', object_ref: 'crm.profiles', status: 'accepted',
+    policy_name: 'gdpr-pseudonymise', policy_hash: 'h', shape: { object: { owner: null, name: 'profiles' }, columns: [], key: ['_id'], key_source: 'primary_key', row_estimate: null },
+    columns: [
+      leaf('$._id', null), leaf('$.contact.email', 'EMAIL'), leaf('$.contact.mobile', 'PHONE'), leaf('$.contact.addresses[*].type', null),
+      leaf('$.customerId', 'CUSTOMER_ID'), leaf('$.kyc.verifiedAt', null), leaf('$.segment', null),
+    ],
+    sample_rows: 500, overrides: [], content_hash: 'c', created_at: NOW.toISOString(), accepted_at: NOW.toISOString(), accepted_by: 'jobs',
+  } as unknown as ClassificationSnapshot;
+  const t = text(html(<EvidenceSheet ev={mdb} job={null} snapshot={snapshot} onJson={noop} onPdf={noop} />));
+
+  it('labels each protected leaf by its path, never by the shared field name', () => {
+    expect(t).toContain('contact.email');
+    expect(t).toContain('contact.mobile');
+    expect(t).toContain('customerId');
+  });
+
+  it('names the leaves actually kept in the kept note', () => {
+    const note = t.slice(t.indexOf('columns kept, no entity:'), t.indexOf('Discovery sampled'));
+    expect(note).toContain('contact.addresses[].type');
+    expect(note).toContain('kyc.verifiedAt');
+    expect(note).toContain('_id');
+    // a bare field name ends at a comma or the sentence's full stop, never at a path dot
+    expect(note).not.toMatch(/(?:^|[:,] )contact(?:,|\.(?:\s|$))/);
+    expect(note).not.toMatch(/(?:^|[:,] )kyc(?:,|\.(?:\s|$))/);
   });
 });
 

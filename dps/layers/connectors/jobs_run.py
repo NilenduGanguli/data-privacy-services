@@ -120,6 +120,7 @@ from dps.layers.connectors.files import (
     FilesWriter,
     build_manifest,
     effective_compression,
+    file_columns,
     manifest_bytes,
     write_manifest,
 )
@@ -352,7 +353,7 @@ def _files_writer(
         spec.target.files,
         job_id=job_id,
         base_prefix=target_conn.params.prefix,
-        columns=[shape.column(n) for n in projection],
+        columns=file_columns(shape, projection),
     )
 
 
@@ -605,7 +606,7 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         )
         if spec.mode == "synthesize":
             copied = copied_personal_columns(
-                plan, snapshot, set(tabular.columns) if tabular is not None else set()
+                plan, snapshot, set(tabular.columns) if tabular is not None else set(), shape
             )
             if copied:  # D-A invariant (G2 review r1): never reached, fails closed if it is
                 raise PrepareFailure(
@@ -1729,20 +1730,31 @@ def apply_synthetic_review(verification: dict[str, Any], flagged: list[str]) -> 
 
 
 def copied_personal_columns(
-    plan: RunPlan, snapshot: ClassificationSnapshot, sampled: set[str]
+    plan: RunPlan,
+    snapshot: ClassificationSnapshot,
+    sampled: set[str],
+    shape: TableShape | None = None,
 ) -> list[str]:
     """D-A: written columns a synthesize run would copy although discovery classified them, or
     keys it would write with their real values — neither planned, pseudonymised nor drawn by the
     tabular sampler. Empty by construction (:func:`~targets.build_column_plans`,
-    :func:`~targets.pseudonym_columns`); ``prepare`` fails closed on anything else."""
+    :func:`~targets.pseudonym_columns`); ``prepare`` fails closed on anything else.
+
+    A pseudo key (the ``ROWID`` an Oracle key-less table pages on: ``ColumnInfo.pseudo``, from the
+    snapshot's shape or the live ``shape``) is read-only and never written, so it is never a key
+    the run would copy (post-merge verification S1-M3 r1, B1)."""
     if plan.target.write_mode == "in_place":
         return []  # in place rewrites the planned and pseudonymised columns only
-    written = set(plan.target.write_columns)
+    pseudo = {
+        c.name for c in (*snapshot.shape.columns, *(shape.columns if shape else ())) if c.pseudo
+    }
+    keys = set(plan.key) - pseudo
+    written = set(plan.target.write_columns) - pseudo
     if not plan.target.generated_key:
-        written |= set(plan.key)
+        written |= keys
     replaced = {p.name for p in plan.columns} | {p.name for p in plan.pseudonyms} | sampled
     classified = {c.name for c in snapshot.columns if c.entity_type and not c.text_column}
-    return sorted((written & (classified | set(plan.key))) - replaced)
+    return sorted((written & (classified | keys)) - replaced)
 
 
 def synthetic_kept_columns(
@@ -1990,11 +2002,11 @@ async def _write_manifest(
     if plan.prepare.get("linked"):
         return await _write_linked_manifest(ctx, job, spec, plan, target_conn, parts, store)
     files = [f for p in parts for f in (p.meta.get("files") or [])]
-    columns = [
+    columns = [  # the written columns (a row locator such as ROWID is never written)
         ColumnInfo(
             path=f"$.{n}", name=n, data_type=plan.target.column_types.get(n, ""), kind="other"
         )
-        for n in plan.projection
+        for n in plan.target.write_columns
     ]
     writer = FilesWriter(
         store,

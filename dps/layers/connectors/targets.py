@@ -6,7 +6,9 @@ helpers are what ``prepare`` turns into the stored, value-free :class:`RunPlan`.
 
 **Validation order** (each rule raises :class:`~dps.jobs_models.SpecError` with a value-free
 detail): ``kek_unconfigured`` · ``engine_unavailable`` · ``snapshot_not_accepted`` ·
-``connection_role`` · ``confirm_write_required`` · ``admin_scope_required`` ·
+``connection_role`` · ``confirm_write_required`` (``in_place``/``append``) ·
+``admin_scope_required`` (any write mode into a ``production``-tagged connection; a retry checks
+it again, :func:`check_retry_scope`) ·
 ``in_place_invalid`` · ``pk_transform_in_place`` · ``pk_strategy_required`` ·
 ``pk_strategy_invalid`` (token key not reversible, synthesize token, same-table token/prefix or a
 key that is not one integer column, an offset on a non-integer key or a prefix on a non-text key)
@@ -53,6 +55,7 @@ from dps.engine.policy import MethodSpec, resolve_policy
 from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSEUDONYM_LIMIT
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.methods import METHODS
+from dps.jobs import Job, JobKind
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
 from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
@@ -430,6 +433,30 @@ def _written_connection(
     return target_conn
 
 
+def check_retry_scope(job: Job, written: Connection | None, *, principal: Principal) -> None:
+    """A retry restarts a run job's writes: when the connection it writes (``written``: the job's
+    target connection, else its source) is tagged ``production``, the retry needs ``admin``
+    again, whatever the write mode — the same gate :func:`validate_run` applied at submission
+    (S1-M3 r1 security B1).
+
+    Raises:
+        SpecError: ``admin_scope_required`` (403).
+    """
+    mode = str(((job.spec or {}).get("target") or {}).get("write_mode") or "")
+    if (
+        job.kind == JobKind.run
+        and written is not None
+        and written.production
+        and not principal.has_scope("admin")
+    ):
+        raise _fail(
+            "admin_scope_required",
+            403,
+            f"retrying {mode or 'a run'} that writes a production-tagged connection needs the "
+            "admin scope",
+        )
+
+
 def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
     if spec.group_id is None:
         return
@@ -651,15 +678,17 @@ def validate_run(
     written = _written_connection(spec, source_conn, target_conn)
     if written is not None and "target" not in written.roles:
         raise _fail("connection_role", 422, "the written connection lacks the target role")
-    if mode in _DATABASE_WRITES:
-        if not target.confirm_write:
-            raise _fail("confirm_write_required", 422, f"{mode} writes need confirm_write: true")
-        if written is not None and written.production and not principal.has_scope("admin"):
-            raise _fail(
-                "admin_scope_required",
-                403,
-                f"{mode} on a production-tagged connection needs the admin scope",
-            )
+    if mode in _DATABASE_WRITES and not target.confirm_write:
+        raise _fail("confirm_write_required", 422, f"{mode} writes need confirm_write: true")
+    # D3 (S1-M3 r1 security B1): every write into a production-tagged connection needs admin —
+    # a table load truncates or upserts an existing table or collection, a files target writes
+    # production storage — not only in_place/append (which also need confirm_write)
+    if written is not None and written.production and not principal.has_scope("admin"):
+        raise _fail(
+            "admin_scope_required",
+            403,
+            f"{mode} writes to a production-tagged connection need the admin scope",
+        )
     keys = _key_columns(snapshot)
     if spec.mode == "synthesize":
         _check_identifiers(spec, snapshot, source_conn.engine)
@@ -988,16 +1017,24 @@ def resolve_target(
     }
     if t.write_mode == "files":
         # file columns are unbounded: a planned text-like column is ``text`` (a fallback token is
-        # longer than the value); the types are for the manifest only, never SQL
+        # longer than the value); the types are for the manifest only, never SQL. A document
+        # field is one ``document`` (JSON text) column and a row locator (ROWID) is never written
+        # (``files.file_columns``, S1-M3 r1 B1/B3)
+        fields = [c for c in docpaths.field_columns(source_shape, projection) if not c.pseudo]
         types = {
-            n: "text"
-            if n in planned and source_shape.column(n).kind in _TEXT_OUTPUT_KINDS
-            else source_shape.column(n).data_type
-            for n in projection
+            c.name: "text"
+            if c.name in planned
+            and c.kind in _TEXT_OUTPUT_KINDS
+            and c.data_type != docpaths.DOCUMENT_TYPE
+            else c.data_type
+            for c in fields
         }
         return (
             ResolvedTarget(
-                **common, files=t.files, write_columns=list(projection), column_types=types
+                **common,
+                files=t.files,
+                write_columns=[c.name for c in fields],
+                column_types=types,
             ),
             _unbounded_plans(plans, source_shape),
         )

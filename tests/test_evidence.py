@@ -218,3 +218,55 @@ def test_m5_synthesize_without_tabular_says_nothing_was_measured() -> None:
     }
     assert build_pack(evidence_inputs(mode="obfuscate")).privacy is None
     assert "version" not in build_pack(evidence_inputs(mode="obfuscate")).policy
+
+
+def test_a_mongo_pack_counts_each_nested_leaf_under_its_path() -> None:
+    """S1-M3 r1 (privacy-console B2): the transformer counts a nested document leaf under its
+    path (``col:$.contact.email``), a top-level field under its name (``col:customerId``); the
+    pack reads each count with the same key, so a nested leaf's VALUES is never empty."""
+    import dataclasses
+
+    from dps.engine.batch import ColumnPlan
+
+    inputs = evidence_inputs(mode="obfuscate")
+    assert inputs.plan is not None
+    leaves = [
+        ("$.contact.email", "contact", "EMAIL", "email"),
+        ("$.contact.mobile", "contact", "PHONE", "det_token"),
+        ("$.accounts[*].iban", "accounts", "IBAN", "det_token"),
+        ("$.customerId", "customerId", "CUSTOMER_ID", "det_token"),
+    ]
+    plans = [
+        ColumnPlan(
+            path=path,
+            name=name,
+            entity_type=entity,
+            method=MethodSpec(method=method),
+            text_column=False,
+            reversible=True,
+            kind="text",
+            length=None,
+        )
+        for path, name, entity, method in leaves
+    ]
+    counters = {
+        "det_token": 9000,
+        "email": 3469,
+        "col:$.contact.email": 3469,
+        "col:$.contact.mobile": 3400,
+        "col:$.accounts[*].iban": 2100,
+        "col:customerId": 3469,
+    }
+    job = inputs.job.model_copy(
+        update={"progress": inputs.job.progress.model_copy(update={"values_by_method": counters})}
+    )
+    pack = build_pack(
+        dataclasses.replace(inputs, job=job, plan=inputs.plan.model_copy(update={"columns": plans}))
+    )
+    values = {c["path"]: c["values"] for c in pack.columns}
+    assert values == {
+        "$.contact.email": 3469,
+        "$.contact.mobile": 3400,
+        "$.accounts[*].iban": 2100,
+        "$.customerId": 3469,
+    }

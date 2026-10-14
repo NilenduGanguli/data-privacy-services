@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from dps import jobs
 from dps.auth import require_scope
 from dps.config import Settings
+from dps.connections import get_connection
 from dps.jobs import Job, JobKind, JobState
 from dps.jobs_models import ConsistencySpec, DiscoverSpec, RunSpec, SpecError
 from dps.layers.api.deps import (
@@ -45,6 +46,7 @@ from dps.layers.connectors.submit import (
     submit_discover,
     submit_run,
 )
+from dps.layers.connectors.targets import check_retry_scope
 from dps.ratelimit import enforce_rate_limit
 from dps.tenants import TenantError, check_daily_quota
 
@@ -267,6 +269,11 @@ async def retry(
     async def run_retry() -> dict[str, Any]:
         tenant = tenant_of(request)
         job = await _owned(request, job_id)
+        # D3: a retry writes again — into a production-tagged connection it needs admin, as the
+        # run did at submission (the job's target connection, else its source)
+        written_id = job.target_connection_id or job.connection_id
+        written = await get_connection(tenant, written_id) if written_id else None
+        check_retry_scope(job, written, principal=principal_of(request))
         sealed: bytes | None = None
         consistency = body.consistency if body is not None else None
         if consistency is not None and (consistency.key_material or consistency.synthesis_seed):

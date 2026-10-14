@@ -3,7 +3,9 @@
 Pure CPU: callers run :meth:`BatchTransformer.transform` in ``asyncio.to_thread``. Whole-value
 findings come from the accepted snapshot (detector ``"snapshot"``); free-text columns are scanned
 per row and planned with the column's method (obfuscate: ``det_token`` envelopes, so a reveal needs
-no stored hints) or with ``build_plan`` (synthesize). A new surrogate engine is made per batch,
+no stored hints) or with ``build_plan`` (synthesize); where a row's free text repeats one of its own
+replaced values — a city, a name, or a word of a name such as the first name — that repeat is a
+span too, detected or not (``_row_value_spans``, D-A). A new surrogate engine is made per batch,
 which bounds its persona cache.
 
 **Anchors** (contract §6.2): each row's raw anchor is ``<ENTITY>:<hash>`` of the snapshot's anchor
@@ -64,7 +66,7 @@ import dataclasses
 import json
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, cast
 
@@ -161,8 +163,18 @@ class _Unit(NamedTuple):
 UNCLASSIFIED_ENTITY = "UNCLASSIFIED"
 #: The detector name of a span that repeats the row's own value of a replaced column (D-A).
 ROW_VALUE_DETECTOR = "row_value"
+#: The detector name of a span that repeats one word of the row's own replaced name (S1-M3 r1 B2).
+#: Transformed like any span, but not an original of the per-row sweep: the sweep's rules are
+#: substring rules, and a name word is a substring of other words ("Christopher" in a kept city
+#: "Christopherville"), so the whole name stays the original its 8+-letter parts are checked by.
+ROW_NAME_WORD_DETECTOR = "row_value_word"
+_ROW_VALUE_DETECTORS = frozenset({ROW_VALUE_DETECTOR, ROW_NAME_WORD_DETECTOR})
 #: Entity types of whole values that are free text themselves (never searched for in other text).
 _TEXT_ENTITIES = frozenset({"FREE_TEXT", "MIXED_PII", UNCLASSIFIED_ENTITY})
+#: A word of a replaced name with at least this many letters is searched for on its own in the
+#: row's free text (S1-M3 r1 B2: "KYC call with <first name>"; ``_needles``).
+NAME_PART_MIN = 3
+_NAME_WORD = re.compile(r"[^\W\d_]+")
 _UNCLASSIFIED_TEXT = ColumnInfo(path="$", name="", data_type="", kind="text")
 
 
@@ -413,40 +425,95 @@ def verify_row(
     return hits
 
 
+def _needles(column: ColumnPlan, value: str) -> list[str]:
+    """What :func:`_row_value_spans` searches for one planned whole value: the value (at least
+    :data:`EXACT_MIN` normalised characters) and, for a name, each of its words of at least
+    :data:`NAME_PART_MIN` letters — the CRM notes repeat the first name alone ("KYC call with
+    Asha; …"), never the whole ``FULL_NAME``."""
+    out = [value] if len(normalise(value)) >= EXACT_MIN else []
+    if column.entity_type == NAME_ENTITY:
+        for part in _NAME_WORD.findall(value):
+            if len(normalise(part)) >= NAME_PART_MIN and part not in out:
+                out.append(part)
+    return out
+
+
 def _row_value_spans(
     path: str,
     text: str,
     found: list[Finding],
     originals: list[tuple[ColumnPlan, str, bool]],
 ) -> list[Finding]:
-    """D-A (WP-I m3): in a synthesize job, the row's own values of planned whole columns where they
-    occur in its free text (a city the CRM notes repeat: "… Prefers branch in Pune"), as spans of
-    the column's entity type — the detectors alone miss a city without NER, and a synthetic table
-    never carries a source value. Whole words only (no match inside a longer word), at least
-    :data:`EXACT_MIN` characters, never overlapping a detector span."""
+    """D-A (WP-I m3): the row's own values of planned whole columns where they occur in its free
+    text (a city the CRM notes repeat: "… Prefers branch in Pune"), as spans of the column's entity
+    type — the detectors alone miss a city or a first name without NER, and a synthetic table never
+    carries a source value. A name is searched whole and word by word (:func:`_needles`; S1-M3 r1
+    B2: the notes repeat the first name only). Whole words only (no match inside a longer word),
+    case-insensitive, never overlapping a detector span or an earlier span. Both modes: an
+    obfuscated note transforms the name it repeats with the text column's method."""
     taken = [(f.locator.start or 0, f.locator.end or len(text)) for f in found]
     out: list[Finding] = []
+    hay = text.casefold()
     for column, original, whole in originals:
-        value = original.strip()
-        if not whole or len(normalise(value)) < EXACT_MIN or column.entity_type in _TEXT_ENTITIES:
+        if not whole or column.entity_type in _TEXT_ENTITIES:
             continue
-        pattern = re.compile(rf"(?<!\w){re.escape(value)}(?!\w)", re.IGNORECASE)
-        for match in pattern.finditer(text):
-            start, end = match.span()
-            if any(start < b and a < end for a, b in taken):
-                continue
-            taken.append((start, end))
-            out.append(
-                Finding(
-                    locator=Locator(path=path, start=start, end=end),
-                    entity_type=column.entity_type,
-                    score=1.0,
-                    detectors=[ROW_VALUE_DETECTOR],
-                    sensitivity=entity_info(column.entity_type).sensitivity,
-                    value_hash=hash_value(match.group(0)),
+        value = original.strip()
+        for needle in _needles(column, value):
+            detector = ROW_VALUE_DETECTOR if needle == value else ROW_NAME_WORD_DETECTOR
+            for start, end in _whole_word_spans(text, hay, needle):
+                if any(start < b and a < end for a, b in taken):
+                    continue
+                taken.append((start, end))
+                out.append(
+                    Finding(
+                        locator=Locator(path=path, start=start, end=end),
+                        entity_type=column.entity_type,
+                        score=1.0,
+                        detectors=[detector],
+                        sensitivity=entity_info(column.entity_type).sensitivity,
+                        value_hash=hash_value(text[start:end]),
+                    )
                 )
-            )
     return out
+
+
+def _word_char(text: str, i: int) -> bool:
+    """``text[i]`` is a word character as ``re``'s ``\\w`` reads it (outside the text: no)."""
+    return 0 <= i < len(text) and (text[i].isalnum() or text[i] == "_")
+
+
+def _fold_map(text: str) -> tuple[dict[int, int], dict[int, int]]:
+    """Where each character of ``text`` starts and ends in ``text.casefold()`` (a fold such as
+    ``ß`` → ``ss`` changes lengths): ``(fold start → char index, fold end → char index + 1)``."""
+    starts: dict[int, int] = {}
+    ends: dict[int, int] = {}
+    at = 0
+    for i, ch in enumerate(text):
+        starts[at] = i
+        at += len(ch.casefold())
+        ends[at] = i + 1
+    return starts, ends
+
+
+def _whole_word_spans(text: str, hay: str, needle: str) -> Iterator[tuple[int, int]]:
+    """``(start, end)`` of each caseless, whole-word occurrence of ``needle`` in ``text``, left to
+    right and non-overlapping: ``text[start:end].casefold() == needle.casefold()`` (Unicode full
+    case folding: ``ASHA`` is ``Asha``, ``STRASSE`` is ``Straße``), and the characters around it are
+    not word characters (``re``'s ``\\w``). ``hay`` is ``text.casefold()``: a needle absent from it
+    costs one substring test, and no regex is compiled per row."""
+    folded = needle.casefold()
+    if not folded or folded not in hay:
+        return
+    starts, ends = _fold_map(text) if len(hay) != len(text) else ({}, {})
+    pos = hay.find(folded)
+    while pos >= 0:
+        stop = pos + len(folded)
+        start, end = (starts.get(pos), ends.get(stop)) if starts else (pos, stop)
+        if start is None or end is None or _word_char(text, start - 1) or _word_char(text, end):
+            pos = hay.find(folded, pos + 1)
+            continue
+        yield start, end
+        pos = hay.find(folded, stop)
 
 
 def _checked(originals: list[tuple[ColumnPlan, str, bool]]) -> int:
@@ -663,7 +730,9 @@ class BatchTransformer:
                         "reversible": False,
                     }
                 )
-                if e.method == "keep" and e.finding.detectors == [ROW_VALUE_DETECTOR]
+                if e.method == "keep"
+                and bool(e.finding.detectors)
+                and set(e.finding.detectors) <= _ROW_VALUE_DETECTORS
                 else e
                 for e in build_plan(
                     found, self.policy, "synthesize", fpe_enabled=self.engine.fpe_enabled
@@ -672,6 +741,8 @@ class BatchTransformer:
         for entry in planned:
             if entry.method == "keep":
                 continue  # kept on purpose: neither transformed nor searched for
+            if entry.finding.detectors == [ROW_NAME_WORD_DETECTOR]:
+                continue  # transformed, not a sweep original (``ROW_NAME_WORD_DETECTOR``)
             loc = entry.finding.locator
             span = text[loc.start or 0 : loc.end]
             as_span = col.model_copy(update={"entity_type": entry.finding.entity_type})
@@ -679,13 +750,17 @@ class BatchTransformer:
         return planned
 
     def _unclassified(
-        self, row: Row, findings_seen: Counter[tuple[str, str]]
+        self,
+        row: Row,
+        findings_seen: Counter[tuple[str, str]],
+        originals: list[tuple[ColumnPlan, str, bool]],
     ) -> list[tuple[_Unit, str, list[Finding]]]:
         """Document leaves outside the shape (``unclassified`` = ``detect`` or ``redact``).
 
-        ``detect``: string leaves with their detector spans (leaves without a finding are
-        skipped). ``redact``: every scalar leaf except booleans, ObjectIds and binary, with no
-        spans (a whole-value ``redact``).
+        ``detect``: string leaves with their detector spans and the row's own replaced values
+        they repeat (:func:`_row_value_spans`; leaves without a finding are skipped). ``redact``:
+        every scalar leaf except booleans, ObjectIds and binary, with no spans (a whole-value
+        ``redact``).
         """
         out: list[tuple[_Unit, str, list[Finding]]] = []
         for name, value in row.items():
@@ -701,6 +776,7 @@ class BatchTransformer:
                         self.detector = self.engine.detector(self.policy, self.locale)
                     plan = self._unclassified_plan(path, "det_token")
                     found = self._spans(plan, leaf, findings_seen)
+                    found += _row_value_spans(path, leaf, found, originals)
                     if found:
                         out.append((_Unit(plan, path, self._text_out(path)), leaf, found))
                 elif self.unclassified == "redact":
@@ -816,12 +892,12 @@ class BatchTransformer:
                     continue
                 searched.append((unit, text))  # free text is always searched, findings or not
                 found = self._spans(at, text, findings_seen)
-                if self.mode == "synthesize":
-                    found += _row_value_spans(at.path, text, found, originals)
+                # the row's own replaced values (and name words) its free text repeats (D-A)
+                found += _row_value_spans(at.path, text, found, originals)
                 per_column[self._column_key(col)] += len(found)
                 entries += self._plan_spans(at, text, found, originals)
             if self.unclassified != "keep":
-                for unit, text, found in self._unclassified(row, findings_seen):
+                for unit, text, found in self._unclassified(row, findings_seen, originals):
                     _put(doc, unit.path, text)
                     searched.append((unit, text))
                     per_column[generalise(unit.path)] += max(1, len(found)) if found else 1
