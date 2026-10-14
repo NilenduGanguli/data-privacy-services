@@ -243,4 +243,5 @@ answers 502 (`tokenization service unavailable`) and a job batch retries with
 | 422 `invalid_name`, `invalid_preset`, `invalid_change_ticket`, `invalid_note`, `verify_warn_disallowed` | `/policies` (create, publish) |
 | 403 `external_token_not_bound` | `/reveal` |
 | 429 `daily_row_quota_exceeded` · 422 `tabular_invalid`, `synthesize_in_place_sensitive_key`, `tls_required` | `/jobs/run`, `/jobs/run/validate`, `/connections` |
+| 422 `host_forbidden` (at the security stream's merge, M5 Task 17: `dps.netguard`) | `/connections` (create, a `PATCH` that changes `params`, `/connections/{id}/test`): a host the connection dials is a numeric host encoding or is, or resolves to, a link-local/metadata, multicast, unspecified, reserved or (outside `local`) loopback address; at use, the job's `error_code` (not retried) |
 | `privacy_gate`, `leakage`, `exact_row_match`, `synthesize_pseudonym_unsupported`, `tokenization_unavailable` | job `error_code` (prepare or partition) |

@@ -4,11 +4,11 @@
         [--mode obfuscate|synthesize]
         [--write-mode table|in_place|files] [--parallelism 4] [--batch 1000]
         [--partition-rows N] [--base-url http://127.0.0.1:8400] [--api-key …]
+        [--source-dsn postgresql://…/bank] [--label 1-worker] [--out docs/technical/bench]
 
 ``--rows`` / ``--partition-rows`` default to 200 000 / 50 000 for PostgreSQL and to the documented
 M3 benchmark, 20 000 / 5 000, for Oracle and MongoDB (whose source is the shared demo customer
 space).
-        [--source-dsn postgresql://…/bank] [--label 1-worker] [--out docs/technical/bench]
 
 Against the compose stack (profile ``sources``): (1) creates ``bench.customers_bench`` in the source
 (the customers DDL; rows recycle a pool of 5 000 surrogate-engine customers — throughput does not

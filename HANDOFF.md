@@ -134,9 +134,9 @@ In staging/prod the secret settings must come from `_FILE` (§3.3).
 | `DPS_COIN_SCOPE` | — |  | M0 | COIN scope, base64-encoded; sent as `coinscope<scope>`. |
 | `DPS_COIN_TOKEN_TTL_SECONDS` | `840` |  | M0 | How long a minted COIN token is reused. |
 | `DPS_SSL_CERT_FILE` | — |  | M0 | Organisation CA bundle for egress (Stellar, and the COIN mint without `DPS_COIN_CA_FILE`); required in staging/prod when any egress URL is set. |
-| `DPS_COIN_CA_FILE` | — |  | M0 | CA bundle (file or directory) for the COIN token mint; else `DPS_SSL_CERT_FILE`. |
-| `DPS_COIN_TLS_INSECURE` | `false` |  | M0 | Skip TLS verification on the COIN mint only (the VDI's intercepting proxy); `/readyz` then reports `coin_tls: insecure`. |
-| `DPS_ALLOW_INSECURE_COIN_MINT` | `false` |  | M0 | The documented VDI exception: staging/prod refuse `DPS_COIN_TLS_INSECURE=true` without it. |
+| `DPS_COIN_CA_FILE` | — |  | M1 | CA bundle (file or directory) for the COIN token mint; else `DPS_SSL_CERT_FILE`, else httpx's default store (`SSL_CERT_FILE`, then `SSL_CERT_DIR` from the environment, else certifi). |
+| `DPS_COIN_TLS_INSECURE` | `false` |  | M1 | Skip TLS verification on the COIN mint only (the VDI's intercepting proxy); `/readyz` then reports `coin_tls: insecure`. |
+| `DPS_ALLOW_INSECURE_COIN_MINT` | `false` |  | M1 | The documented VDI exception: staging/prod refuse `DPS_COIN_TLS_INSECURE=true` without it. |
 | `DPS_VERTEX_PROJECT` | — |  | M0 | Vertex AI project (laptop path; needs the `vertex` extra and ADC). |
 | `DPS_VERTEX_LOCATION` | `global` |  | M0 | Vertex AI location. |
 | `DPS_AUDIT_ENABLED` | `true` |  | M0 | One value-free audit event per request and job action; refused off in staging/prod. |
@@ -280,12 +280,14 @@ defaults. Tests and tools take endpoints only from `DPS_TEST_*` (contract §12.2
 follow the same port variables: `DPS_TEST_APP_URL`, `DPS_TEST_PG_DSN`, `DPS_TEST_SOURCE_PG_DSN`,
 `DPS_TEST_S3_ENDPOINT`, `DPS_TEST_OCR_URL`, `DPS_TEST_ORACLE_DSN` / `_USER` / `_PASSWORD`,
 `DPS_TEST_MONGO_URI`, `DPS_TEST_DEMO_SITE`; `DPS_TEST_REQUIRE_SERVICES=1` turns a missing service
-from a skip into a failure (every milestone gate sets it). The tools read `DPS_BASE_URL` /
-`DPS_TEST_APP_URL` and `DPS_API_KEY` (default: the local demo key); `tools/smoke_test.py` also
-`DPS_SMOKE_WAIT_SECONDS` (90), `DPS_SMOKE_REQUIRE_OCR=1` (fail instead of skipping its OCR checks),
-`DPS_SMOKE_M2=auto|on|off` and `DPS_SMOKE_M3_TIMEOUT` (600 s for `--m3`); the console checks
-`DPS_SHOTS_DIR` (screenshot root, default the git-ignored `reports/console/`) and
-`DPS_PLAYWRIGHT_CHROMIUM` (a Chromium binary when Playwright's build 1187 is not cached);
+from a skip into a failure (every milestone gate sets it), and with it
+`DPS_TEST_REQUIRE_TESSERACT=1` does the same for a missing host `tesseract`
+(`tests/documents/test_ocr_tesseract.py`). The tools read `DPS_BASE_URL` / `DPS_TEST_APP_URL` and
+`DPS_API_KEY` (default: the local demo key); `tools/smoke_test.py` also `DPS_SMOKE_WAIT_SECONDS`
+(90), `DPS_SMOKE_REQUIRE_OCR=1` (fail instead of skipping its OCR checks), `DPS_SMOKE_M2=auto|on|off`,
+`DPS_SMOKE_JOB_TIMEOUT` (180 s for each M2 job run) and `DPS_SMOKE_M3_TIMEOUT` (600 s for `--m3`);
+the console checks `DPS_SHOTS_DIR` (screenshot root, default the git-ignored `reports/console/`)
+and `DPS_PLAYWRIGHT_CHROMIUM` (a Chromium binary when Playwright's build 1187 is not cached);
 `tools/scratch_pg.sh` `DPS_SCRATCH_DIR`.
 
 ### 3.3 Production posture (the boot guard)
@@ -484,7 +486,12 @@ caller once (D2). What a deployment mounts:
 | Secret `dps-connector-refs` | the connection `secret_ref` folders under `DPS_SECRET_DIR` | app, worker, browser-worker |
 | ConfigMap `dps-ca-bundle` | `DPS_SSL_CERT_FILE`, `DPS_PG_SSL_ROOT_CERT` (and optionally `DPS_COIN_CA_FILE`, `DPS_TOKENIZER_CA_FILE`) | every role |
 
-`DPS_BOOTSTRAP_API_KEY` is a local demo literal and is never set outside a laptop.
+`DPS_BOOTSTRAP_API_KEY` is a local demo literal and is never set outside a laptop. A KEK
+(`dps-job-kek`) is base64 of exactly 32 random bytes (any other length is refused at start):
+
+```bash
+python -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())'
+```
 
 **Connection credentials** (`dps/connections.py`, SEC-2). A connection's `secret_ref` names a folder
 under the caller's tenant folder, `DPS_SECRET_DIR/<tenant_id>/<ref>/` (the tenant comes from the
@@ -553,9 +560,13 @@ clients and the console.
 - PostgreSQL sources: every read runs in `BEGIN READ ONLY` with `statement_timeout`,
   `lock_timeout=5s` and `application_name = dps:<action>:<job id>`; sessions are reset on release
   (`pg_advisory_unlock_all()`, `RESET ALL`); binds are coerced by the prepared statement's types.
-  `in_place`/`append` targets keep a write ledger `dps_write_ledger` in the target schema (the
-  target login needs `CREATE` there, or a pre-created ledger); a failed job keeps its ledger rows
-  for the resume.
+  The connection test's advisory `no_sql_string_functions` counts the SQL-string and export
+  functions the source login can execute (`dblink*`, `crosstab*`, `connectby`, `xpath_table`,
+  `pg_background_launch`, `query_export_to_s3`): give the source login none.
+  `in_place`/`append` targets keep a write ledger `dps_write_ledger` in the target schema, or in
+  the schema `target.ledger_owner` names (Oracle too); the target login needs `CREATE` there, or a
+  pre-created ledger with `SELECT`, `INSERT`, `UPDATE` and `DELETE`; a failed job keeps its ledger
+  rows for the resume.
 - Oracle (python-oracledb 26.0.0 thin): synchronous pool used from worker threads (`min=0`,
   `max=DPS_ORACLE_POOL_MAX`, `expire_time=1`, `call_timeout`); sessions carry `module`, `action`
   and `client_identifier` = the job id, and `NLS_SORT = BINARY NLS_COMP = BINARY`; reads never lock;
@@ -761,6 +772,14 @@ Build and run:
   build pulls `ghcr.io/astral-sh/uv:latest`, so offline tag the cached image for the stack
   (`docker tag document_intelligence-azure-ocr-mock:latest
   document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG}`) and start without `--build`.
+- **(Task 25)** Kustomize generator/component ordering: inside one kustomization it runs the
+  resources, then its own generators, then its components, then its patches, so an overlay's
+  `configMapGenerator` `behavior: merge` cannot reach a ConfigMap a component generates (set such
+  a value with a patch in that overlay, or merge from a parent, e.g. the release overlay).
+- **(Task 25)** The copied dev mock: kustomize loads files only from inside a kustomization root,
+  so `deploy/openshift/components/dev-mocks/server.py` is a byte-identical copy of
+  `docker/tokenizer-mock/server.py` (`tests/deploy/test_openshift.py` keeps them equal): change
+  both.
 
 Documents and OCR:
 
@@ -912,6 +931,10 @@ DPS_SMOKE_REQUIRE_OCR=1 python tools/smoke_test.py --m3                # every b
 python tools/flow_report.py                                          # Task 24
 python tools/demo_seed.py && python tools/e2e_demo.py --console      # Task 26, under 10:00
 pytest -q tests/test_no_values_in_logs_m1.py tests/test_no_values_in_logs_m2.py tests/test_no_values_in_logs_m3.py
+pytest -q tests/test_no_values_in_logs_m4.py                         # M4 (at its merge)
+# DoD 9 (at the fsec merge): the security tests and the M5 log scan, and
+# docs/security/2026-10-11-m5-security-review.md complete with every row's status
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/security tests/test_no_values_in_logs_m5.py
 git ls-files | xargs grep -nE "AKIA[0-9A-Z]{16}|BEGIN (RSA |EC )?PRIVATE KEY"   # nothing
 ```
 

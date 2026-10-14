@@ -126,16 +126,18 @@ FIELD_DOCS: dict[str, tuple[str, str]] = {
         "`DPS_COIN_CA_FILE`); required in staging/prod when any egress URL is set.",
     ),
     "coin_ca_file": (
-        "M0",
-        "CA bundle (file or directory) for the COIN token mint; else `DPS_SSL_CERT_FILE`.",
+        "M1",
+        "CA bundle (file or directory) for the COIN token mint; else `DPS_SSL_CERT_FILE`, else "
+        "httpx's default store (`SSL_CERT_FILE`, then `SSL_CERT_DIR` from the environment, else "
+        "certifi).",
     ),
     "coin_tls_insecure": (
-        "M0",
+        "M1",
         "Skip TLS verification on the COIN mint only (the VDI's intercepting proxy); `/readyz` "
         "then reports `coin_tls: insecure`.",
     ),
     "allow_insecure_coin_mint": (
-        "M0",
+        "M1",
         "The documented VDI exception: staging/prod refuse `DPS_COIN_TLS_INSECURE=true` without it.",
     ),
     "vertex_project": ("M0", "Vertex AI project (laptop path; needs the `vertex` extra and ADC)."),
