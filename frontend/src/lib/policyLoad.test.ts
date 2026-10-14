@@ -1,12 +1,13 @@
 // Policies page loading (programme plan F4 polish M1-N, M5 console review N3/N4/R2-5): a quick
-// switch between policies never shows the previous policy's late answer, a refused draft save is
-// shown by the page instead of escaping as an unhandled rejection, and declared paths that are
-// also Object.prototype names keep their "since" version.
+// switch between policies never shows the previous policy, neither its late answer nor its detail
+// while the next one loads, and an edit is saved only to the policy it was made on; a refused
+// draft save is shown by the page instead of escaping as an unhandled rejection, and declared
+// paths that are also Object.prototype names keep their "since" version.
 import { describe, expect, it } from 'vitest';
 import * as fx from '../dev/fixtures';
 import { ApiError } from './api';
-import { declaredSince } from './policyEdit';
-import { Latest, loadPolicyDetail, saveEdit, type PolicyDetailSink, type PolicyDetailSource } from './policyLoad';
+import { declaredSince, type Body } from './policyEdit';
+import { editTarget, Latest, loadPolicyDetail, onScreen, saveEdit, type PolicyDetailSink, type PolicyDetailSource } from './policyLoad';
 import type { PolicyDoc, TenantPolicyDetail } from './types';
 
 interface Deferred<T> { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void }
@@ -27,6 +28,12 @@ const NOW = new Date('2026-10-13T10:15:00Z');
 const bodyA = { ...fx.gdprBody(1), description: 'preset A' } as unknown as PolicyDoc;
 const bodyB = { ...fx.gdprBody(1), description: 'preset B' } as unknown as PolicyDoc;
 const tenantDetail = fx.gdprDetail(NOW);
+// a second tenant policy (pci-dss adopted: v1 = the preset, no draft)
+const pciDetail: TenantPolicyDetail = {
+  ...tenantDetail, name: 'pci-dss', base_preset: 'pci-dss', active_version: 1, draft: false, draft_changes: 0, draft_body: null, draft_by: null, draft_updated_at: null,
+  active_body: { ...fx.gdprBody(1), name: 'pci-dss', description: 'pci-dss v1' }, versions: tenantDetail.versions.slice(-1),
+};
+const analyticsBody = { ...fx.gdprBody(1), name: 'analytics-safe', description: 'analytics-safe preset' } as PolicyDoc;
 
 describe('Latest', () => {
   it('keeps only the newest load current', () => {
@@ -100,15 +107,82 @@ describe('loadPolicyDetail', () => {
   });
 });
 
-describe('saveEdit', () => {
-  it('applies the edit to the current body and swallows a refusal the page already shows', async () => {
-    const saved: unknown[] = [];
-    const base = { preset: 'gdpr-pseudonymise' };
-    saveEdit(async (b) => { saved.push(b); }, base, (b) => ({ ...b, edited: true }));
-    expect(saved).toEqual([{ preset: 'gdpr-pseudonymise', edited: true }]);
+describe('a switch while the next policy loads (M1-N, console review N4)', () => {
+  it('tenant A to tenant B: A leaves the page at once, and nothing of it can be shown or edited while B is pending', async () => {
+    const latest = new Latest();
+    const pending = deferred<TenantPolicyDetail>();
+    const src: PolicyDetailSource = { get: (n) => (n === tenantDetail.name ? Promise.resolve(tenantDetail) : pending.promise), validate: () => Promise.reject(new Error('unused')) };
+    const { shown, sink } = screen();
+    await loadPolicyDetail(tenantDetail.name, true, src, sink, latest.begin());
+    expect(shown.detail).toBe(tenantDetail);
+    const switching = loadPolicyDetail(pciDetail.name, true, src, sink, latest.begin());
+    // pci-dss has not answered: the page holds nothing of gdpr-pseudonymise any more
+    expect(shown.detail).toBeNull();
+    expect(shown.body).toBeNull();
+    // and before the load starts (the render that already names pci-dss) gdpr's detail is neither shown nor editable
+    expect(onScreen(pciDetail.name, tenantDetail, null)).toEqual({ detail: null, presetBody: null });
+    expect(editTarget(onScreen(pciDetail.name, tenantDetail, null).detail, true)).toBeNull();
+    pending.resolve(pciDetail);
+    await switching;
+    expect(shown.detail).toBe(pciDetail);
+    expect(onScreen(pciDetail.name, pciDetail, null).detail).toBe(pciDetail);
+  });
+
+  it('preset to tenant: the preset body leaves the page at once and is never shown under the tenant policy', async () => {
+    const latest = new Latest();
+    const pending = deferred<TenantPolicyDetail>();
+    const src: PolicyDetailSource = { get: () => pending.promise, validate: async () => analyticsBody };
+    const { shown, sink } = screen();
+    await loadPolicyDetail('analytics-safe', false, src, sink, latest.begin());
+    expect(shown.body).toBe(analyticsBody);
+    const switching = loadPolicyDetail(tenantDetail.name, true, src, sink, latest.begin());
+    expect(shown.body).toBeNull();
+    expect(shown.detail).toBeNull();
+    expect(onScreen(tenantDetail.name, null, analyticsBody)).toEqual({ detail: null, presetBody: null });
+    pending.resolve(tenantDetail);
+    await switching;
+    expect(shown.detail).toBe(tenantDetail);
+    expect(shown.body).toBeNull();
+  });
+
+  it('a reload of the same policy (after publish) keeps it on screen until the answer', async () => {
+    const latest = new Latest();
+    const again = deferred<TenantPolicyDetail>();
+    let calls = 0;
+    const src: PolicyDetailSource = { get: () => (calls++ === 0 ? Promise.resolve(tenantDetail) : again.promise), validate: () => Promise.reject(new Error('unused')) };
+    const { shown, sink } = screen();
+    await loadPolicyDetail(tenantDetail.name, true, src, sink, latest.begin());
+    const reload = loadPolicyDetail(tenantDetail.name, true, src, sink, latest.begin(), true);
+    expect(shown.detail).toBe(tenantDetail);
+    const published = { ...tenantDetail, active_version: 4, draft: false, draft_body: null };
+    again.resolve(published);
+    await reload;
+    expect(shown.detail).toBe(published);
+  });
+
+  it('shows a preset body only under its own name', () => {
+    expect(onScreen('analytics-safe', null, analyticsBody).presetBody).toBe(analyticsBody);
+    expect(onScreen('pci-dss', null, analyticsBody).presetBody).toBeNull();
+    expect(onScreen(tenantDetail.name, tenantDetail, analyticsBody)).toEqual({ detail: tenantDetail, presetBody: null });
+  });
+});
+
+describe('editTarget and saveEdit', () => {
+  it('saves an edit to the policy it was made on, and swallows a refusal the page already shows', async () => {
+    const target = editTarget(tenantDetail, true);
+    expect(target).toEqual({ policy: 'gdpr-pseudonymise', base: tenantDetail.draft_body });
+    expect(editTarget(pciDetail, true)).toEqual({ policy: 'pci-dss', base: pciDetail.active_body });
+    const saved: [string, Body][] = [];
+    saveEdit(async (policy, b) => { saved.push([policy, b]); }, target, (b) => ({ ...b, edited: true }));
+    expect(saved).toEqual([['gdpr-pseudonymise', { ...tenantDetail.draft_body, edited: true }]]);
     // A refused save rejects; saveEdit must handle it (an unhandled rejection fails this run).
-    saveEdit(() => Promise.reject(new ApiError(422, 'invalid', 'invalid_policy')), base, (b) => b);
+    saveEdit(() => Promise.reject(new ApiError(422, 'invalid', 'invalid_policy')), target, (b) => b);
     await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it('has no target, so saves nothing, without an editable detail on screen', () => {
+    expect(editTarget(null, true)).toBeNull();
+    expect(editTarget(tenantDetail, false)).toBeNull(); // read-only key, or no policy store
     let called = false;
     saveEdit(async () => { called = true; }, null, (b) => b);
     expect(called).toBe(false);
