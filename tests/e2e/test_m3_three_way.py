@@ -366,7 +366,9 @@ def test_three_way_consistency_join(m3_app: Any, m3_workers: Workers) -> None:
     for jid in run_ids:
         listed = c.get("/api/v1/evidence", params={"job_id": jid}, headers=JOBS).json()["items"]
         pack = c.get(f"/api/v1/evidence/{listed[0]['id']}", headers=JOBS).json()["pack"]
-        assert pack["verification"]["passed"] and pack["consistency"]["kid"] == key["kid"]
+        verification = pack["verification"]  # counts, statuses and column names only
+        assert verification["passed"], {k: v for k, v in verification.items() if k != "hits"}
+        assert pack["consistency"]["kid"] == key["kid"]
 
     # drift: a fourth member protecting the join column differently must fail the check
     drift_snap = _discover_override_accept(
