@@ -7,8 +7,8 @@ plain names ``<k>``, userinfo and fragment dropped), :func:`template` (the same 
 crawl template) or :func:`redact_origin`. A segment is value-like when the classifier recognises
 it or, whatever the classifier says, when it holds a run of 4+ digits, 6+ digits in all (digit
 groups joined by ``-``, ``.``, ``/``, ``+`` or a space are one number: ``501-002-345-678``,
-``+91-987-654-321``), a date shape (``1-5-90``), an alphanumeric run of 8+ characters with a digit,
-an ``@``, an ``=`` or whitespace, a date with a month name (``12May90``, ``May-12-90``,
+``+91-987-654-321``), a date shape (``1-5-90``, ``1_5_90``, ``1:5:90``: any separator), an
+alphanumeric run of 8+ characters with a digit, an ``@``, an ``=`` or whitespace, a date with a month name (``12May90``, ``May-12-90``,
 ``12-de-mayo-de-90``, ``the-12th-of-may-90``; English, Spanish and Hindi names, the connector
 words ``de``/``del``/``of``/``the`` allowed between the parts), or is an id form (date, UUID, long
 hex, token). Consecutive all-numeric path segments holding 6+ digits between them
@@ -54,8 +54,11 @@ _VALUE_RUN = re.compile(r"\d{4,}|(?<![A-Za-z0-9])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8
 #: Digit groups shorter than four still make one number: 6+ digits in all is a value
 #: (``501-002-345-678``, ``501.002.345.678``, ``+91-987-654-321``, ``12-05-90``).
 _MIN_DIGITS = 6
-#: A date with short groups (``1-5-90``, ``01/05/1990`` once decoded) is a value whatever its count.
-_DATE_SHAPE = re.compile(r"(?<!\d)\d{1,2}[-./ ]\d{1,2}[-./ ]\d{2,4}(?!\d)")
+#: A date with short groups (``1-5-90``, ``01/05/1990`` once decoded) is a value whatever its count,
+#: whatever separates the groups: any character that is not a letter or digit, or ``_``
+#: (``1_5_90``, ``1:5:90``, ``1+5+90``, ``1|5|90``; M4 verify r1 F2). ``\d`` is any decimal digit,
+#: Devanagari digits included (``१_५_९०``).
+_DATE_SHAPE = re.compile(r"(?<!\d)\d{1,2}[\W_]\d{1,2}[\W_]\d{2,4}(?!\d)")
 #: A date with a month name (``12May90``, ``12-may-90``, ``May-12-90``, ``12th Sept 1990``): a day
 #: and a year around an English, Spanish or Hindi month name, in any order, with or without
 #: separators. A month name with a day or a year only (``may-24``, ``12-may``) is a route.
@@ -81,7 +84,8 @@ _LETTER = "A-Za-z\u0900-\u097f"
 _MONTH = rf"(?:(?<![{_LETTER}])|(?<=\d(?:st|nd|rd|th)))(?:{_MONTHS})(?![{_LETTER}])"
 _DAY = r"(?<!\d)\d{1,2}(?:st|nd|rd|th)?(?![\d])"
 _YEAR = r"(?<!\d)(?:\d{4}|\d{2})(?!\d)"
-_PUNCT = r"[\s\-./_,']{0,3}"
+#: Between date parts: up to three characters that are not letters or digits, or ``_``.
+_PUNCT = r"[\W_]{0,3}"
 #: Between two date parts: up to three separators, optionally around up to two whole connector
 #: words (``12 de mayo de 90``, ``12th of the May 1990``).
 _SEP = rf"{_PUNCT}(?:(?<![A-Za-z])(?:de|del|of|the)(?![A-Za-z]){_PUNCT}){{0,2}}"

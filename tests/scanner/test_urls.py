@@ -412,6 +412,80 @@ def test_value_free_templates_pass_the_record_guard() -> None:
         assert template_is_value_free(tpl), tpl
 
 
+# M4 verify r1 F2: a short date whose parts are separated by any non-word character or "_"
+_SHORT_DATES = [
+    "1_5_90",
+    "12_5_90",
+    "1,5,90",
+    "1:5:90",
+    "1~5~90",
+    "1+5+90",
+    "1%2B5%2B90",
+    "1|5|90",
+    "1%7C5%7C90",
+    "1_5_1990",
+    "01_05_90",
+    "12:may:90",
+    "12+may+90",
+    "12~may~90",
+    "12|May|1990",
+    "१_५_९०",  # Devanagari digits: १_५_९०
+    "%E0%A5%A7_%E0%A5%AB_%E0%A5%AF%E0%A5%A6",
+]
+#: what must not survive of each date (its digits and month name, as written or decoded)
+_SHORT_DATE_PARTS = ("5", "90", "may", "May", "५", "९", "%E0")
+
+
+@pytest.mark.parametrize("classify", [_none, _real_detector()], ids=["none", "detector"])
+@pytest.mark.parametrize("date", _SHORT_DATES)
+def test_short_dates_with_any_separator_are_redacted(
+    date: str, classify: Callable[[str], str | None]
+) -> None:
+    url = f"http://h/dob/{date}"
+    assert redact_url(url, classify) == "http://h/dob/{id}"
+    assert template(url, classify) == "h/dob/{id}"
+    assert template(f"http://h/x#/dob/{date}", classify) == "h/x#/dob/{id}"
+    assert template(f"http://h/x?{date}=1&page=2", classify) == "h/x?<k>&page"
+    assert redact_url(f"http://h/x?dob_{date}=a", classify) == "http://h/x?<k>=<v>"
+    for tpl in (f"h/dob/{date}", f"h/x#/dob/{date}", f"h/x?{date}", f"h/x?page&dob_{date}"):
+        assert not template_is_value_free(tpl), tpl
+    record = PageRecord(
+        page_no=1,
+        url_redacted=redact_url(url, classify),
+        depth=0,
+        parent_page_no=None,
+        status="queued",
+        discovered_via="start",
+        template=template(url, classify),
+    )
+    for part in _SHORT_DATE_PARTS:
+        assert part not in record.url_redacted and part not in record.template
+
+
+@pytest.mark.parametrize("classify", [_none, _real_detector()], ids=["none", "detector"])
+@pytest.mark.parametrize(
+    "path",
+    ["/dob/1/5_90", "/dob/1_5/90", "/dob/1:5/90", "/dob/12/may_90", "/dob/12_may/90"],
+)
+def test_a_short_date_split_over_segments_with_any_separator_is_redacted(
+    path: str, classify: Callable[[str], str | None]
+) -> None:
+    out = redact_url(f"http://h{path}", classify)
+    assert out == "http://h/dob/{id}/{id}"
+    assert template(f"http://h{path}", classify) == "h/dob/{id}/{id}"
+    assert not template_is_value_free(f"h{path}")
+
+
+def test_short_separators_leave_routes_and_versions_alone() -> None:
+    for plain in (
+        "http://h/docs/v1_2/x86_64/api_v2",
+        "http://h/a/b_c/step_2",
+        "http://h/x/1_2_3",
+        "http://h/tag/c++/1:2",
+    ):
+        assert redact_url(plain, _none) == plain, plain
+
+
 DENY = ("/logout", "/admin")
 
 
