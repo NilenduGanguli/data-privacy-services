@@ -55,7 +55,7 @@ def test_a_dict_key_that_is_a_value_is_not_echoed(client: TestClient) -> None:
     """An unknown key of a strict model is named by its location: one that is not a field name
     is shown as ``<key>``."""
     r = client.post(
-        "/api/v1/detect", json={"text": "x", "policy": {"base": "gdpr-pseudonymise", SSN: 1}}
+        "/api/v1/detect", json={"text": "x", "policy": {"preset": "gdpr-pseudonymise", SSN: 1}}
     )
     assert r.status_code == 400, r.text
     assert SSN not in r.text and "<key>" in r.text
@@ -82,7 +82,7 @@ def test_a_discriminator_tag_is_not_echoed() -> None:
     "policy",
     [
         {  # custom.py: "entity type '<value>' must match …"
-            "base": "gdpr-pseudonymise",
+            "preset": "gdpr-pseudonymise",
             "detect": {
                 "custom_recognizers": [
                     {
@@ -93,7 +93,7 @@ def test_a_discriminator_tag_is_not_echoed() -> None:
                 ]
             },
         },
-        {"base": "gdpr-pseudonymise", "treat": {"SSN": {"method": SSN}}},  # "unknown method …"
+        {"preset": "gdpr-pseudonymise", "treat": {"SSN": {"method": SSN}}},  # "unknown method …"
     ],
 )
 def test_an_invalid_inline_policy_is_not_echoed(client: TestClient, policy: dict) -> None:  # type: ignore[type-arg]
