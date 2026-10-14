@@ -1499,3 +1499,12 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   `tests/scanner/test_scan_job_e2e.py::test_storage_state_ref_resolves_under_the_tenant_folder_only`
   (a ref naming another tenant's folder: 403 at accept, `secret_unavailable` at load). Console:
   the three codes are worded on the New-scan page (`frontend/src/lib/scans.ts`).
+- **SEC-2 — one tenant-scoped secret tree for the scanner** (`docker-compose.yml`): the browser-worker
+  no longer overrides `DPS_SECRET_DIR` with a bind mount of `./docker/secrets`; it reads the worker's
+  `dps-secrets` volume (read-only), the tree the app checks `storage_state_ref` against at accept, so a
+  shared reference listed for a tenant (or another tenant's folder) means the same to both. The demo
+  session moves into that volume like M2's and M3's demo refs: `demo-secrets` (now also in profile
+  `scanner`) copies the committed demo literal read-only from
+  `./docker/secrets/default/dps/ui/demo-onboarding/` to `default/dps/ui/demo-onboarding/`, and the
+  browser-worker waits for it (`service_completed_successfully`). Test: `tests/test_compose.py`
+  (browser-worker and demo-storage-state tests; both failed before).

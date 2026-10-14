@@ -1386,7 +1386,7 @@ Playwright base (3.53 GB: Chromium, Firefox, WebKit and their system libraries).
 
 | Service | Image | Host port | Notes |
 |---|---|---|---|
-| `browser-worker` | `data-privacy-services-browser:${DPS_IMAGE_TAG:-local}` | none (ops `/health` `/readyz` `/metrics` on 9401 inside the network) | `extends: worker` — the same database, `DPS_JOB_KEK`, artefact store, volumes and hardening (read-only root, `/tmp` tmpfs 512 MiB, `cap_drop: ALL`, `no-new-privileges`); overrides: `DPS_MIGRATIONS_MODE=off` (the `migrate` one-shot owns DDL), `DPS_BROWSER_CONCURRENCY=2`, `DPS_BROWSER_METRICS_PORT=9401`, `DPS_SCAN_REGISTERED_HOSTS=localhost,127.0.0.1,demo-site`, `DPS_FPE_ENABLED` (must equal the app's), `DPS_SECRET_DIR=/var/run/secrets/dps-local` ← `./docker/secrets:ro`; `shm_size: 1gb`, `init: true`, `mem_limit: 2g` |
+| `browser-worker` | `data-privacy-services-browser:${DPS_IMAGE_TAG:-local}` | none (ops `/health` `/readyz` `/metrics` on 9401 inside the network) | `extends: worker` — the same database, `DPS_JOB_KEK`, artefact store, volumes and hardening (read-only root, `/tmp` tmpfs 512 MiB, `cap_drop: ALL`, `no-new-privileges`); overrides: `DPS_MIGRATIONS_MODE=off` (the `migrate` one-shot owns DDL), `DPS_BROWSER_CONCURRENCY=2`, `DPS_BROWSER_METRICS_PORT=9401`, `DPS_SCAN_REGISTERED_HOSTS=localhost,127.0.0.1,demo-site`, `DPS_FPE_ENABLED` (must equal the app's); secrets: the worker's tenant-scoped `dps-secrets` volume (`DPS_SECRET_DIR=/var/run/secrets/dps`, read-only — the same tree the app checks a `storage_state_ref` against at accept, SEC-2/SEC-5), after `demo-secrets` has run; `shm_size: 1gb`, `init: true`, `mem_limit: 2g` |
 | `demo-site` | `node:22-slim` running `demo/onboarding/server.mjs` (bind-mounted read-only; no build) | `127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}:8410` | `GET /health`; `GET /__received` counts every non-GET request and GET-form submission it ever received (the D4 proof); `mem_limit: 256m`; in-network name `demo-site:8410` |
 
 ```bash
@@ -1404,10 +1404,14 @@ docker compose --profile scanner down
 
 **Demo session.** `docker/secrets/default/dps/ui/demo-onboarding/storage_state.json` is the demo
 site's session cookie (`demo_session`, domain `demo-site`) — a **local demo literal**, committed like
-the compose demo key; it opens nothing but the demo site. Storage states resolve tenant-scoped
-(`DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json`, SEC-2 layout), so ref `dps/ui/demo-onboarding`
-works for tenant `default` (the bootstrap key without `X-DPS-Tenant`); another tenant needs its own
-folder. Staging/prod mount real storage states the same way, from a secret, never from the repo.
+the compose demo key; it opens nothing but the demo site. The `demo-secrets` one-shot (profiles
+`sources`, `scanner`, `full`) copies it read-only into the stack's `dps-secrets` volume under the demo
+tenant's folder, beside M2's and M3's demo refs; the browser-worker reads that volume like the worker.
+Storage states resolve tenant-scoped (`DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json`, SEC-2 layout,
+through `dps.secrets.resolve_secret_ref`), so ref `dps/ui/demo-onboarding` works for tenant `default`
+(the bootstrap key without `X-DPS-Tenant`); another tenant needs its own folder (`POST /scans` refuses a
+reference into another tenant's folder, SEC-5). Staging/prod mount real storage states the same way,
+from a secret, never from the repo.
 
 **Verified 2026-10-13 on this lane** (`COMPOSE_PROJECT_NAME` `dps-wt-m4`, `DPS_IMAGE_TAG=m4`,
 app 8414, demo-site 8420): `docker compose --profile scanner up -d --build` → app, worker,

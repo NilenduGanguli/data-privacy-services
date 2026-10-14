@@ -94,7 +94,7 @@ docker compose --profile scanner down
 ```
 
 Open the console at `/scanner/new`, paste the key, and scan `http://demo-site:8410/apply` with the
-session `dps/ui/demo-onboarding` (the demo site's login, mounted from `docker/secrets/default/…`):
+session `dps/ui/demo-onboarding` (the demo site's login, copied by `demo-secrets` from `docker/secrets/default/…`):
 the crawl map and navigation log fill in live; the scan detail shows each page's original and
 annotated screenshots, the **parallel view** (flip synthetic ↔ obfuscated), the field inventory with
 risk flags, the masked captures, the persona/field exports and the evidence pack. The scan's key and

@@ -151,9 +151,11 @@ def test_the_browser_worker_extends_the_worker_under_the_scanner_profile() -> No
         "127.0.0.1",
         "demo-site",
     }
-    # the local storage-state references: the repo's docker/secrets, read-only
-    assert env["DPS_SECRET_DIR"] == "/var/run/secrets/dps-local"
-    assert "./docker/secrets:/var/run/secrets/dps-local:ro" in bw["volumes"]
+    # SEC-2: one tenant-scoped secret tree for the stack — the worker's dps-secrets volume (which
+    # the app checks references against at accept), no secret folder of its own
+    assert "DPS_SECRET_DIR" not in env
+    assert "volumes" not in bw
+    assert bw["depends_on"]["demo-secrets"]["condition"] == "service_completed_successfully"
     assert bw["shm_size"] and bw["init"] is True and bw["mem_limit"] == "2g"
     assert "http://localhost:9401/health" in " ".join(bw["healthcheck"]["test"])
     assert bw["labels"]["component"] == "browser-worker"
@@ -162,6 +164,8 @@ def test_the_browser_worker_extends_the_worker_under_the_scanner_profile() -> No
     assert worker["read_only"] is True and worker["cap_drop"] == ["ALL"]
     assert "DPS_JOB_KEK" in worker["environment"] and "DPS_ARTEFACT_STORE" in worker["environment"]
     assert "dps-artefacts:/app/var/artefacts" in worker["volumes"]
+    assert "dps-secrets:/var/run/secrets/dps:ro" in worker["volumes"]
+    assert worker["environment"]["DPS_SECRET_DIR"] == "/var/run/secrets/dps"
 
 
 def test_the_demo_site_runs_the_onboarding_app_on_a_lane_safe_port() -> None:
@@ -213,7 +217,9 @@ def test_the_browser_image_is_the_playwright_base_with_the_scanner_extra() -> No
 
 def test_the_demo_storage_state_is_a_tenant_scoped_local_literal() -> None:
     """``storage_state_ref`` ``dps/ui/demo-onboarding`` of the default tenant (SEC-2 layout
-    ``DPS_SECRET_DIR/<tenant>/<ref>/``): the demo site's session cookie for host ``demo-site``."""
+    ``DPS_SECRET_DIR/<tenant>/<ref>/``): the demo site's session cookie for host ``demo-site``.
+    The demo-secrets one-shot (which the ``scanner`` profile runs too) copies it from the repo,
+    read-only, into the stack's dps-secrets volume under the demo tenant's folder."""
     import json
 
     path = ROOT / "docker/secrets/default/dps/ui/demo-onboarding/storage_state.json"
@@ -222,6 +228,15 @@ def test_the_demo_storage_state_is_a_tenant_scoped_local_literal() -> None:
     (cookie,) = state["cookies"]
     assert (cookie["name"], cookie["domain"], cookie["path"]) == ("demo_session", "demo-site", "/")
     assert cookie["value"] == "demo-valid"  # the demo site's documented local literal
+    demo = _services()["demo-secrets"]
+    assert "scanner" in demo["profiles"]
+    assert "./docker/secrets/default/dps/ui:/seed/ui:ro" in demo["volumes"]
+    script = " ".join(demo["command"])
+    assert 'mkdir -p "$$d/ui/demo-onboarding";' in script
+    assert (
+        'cp /seed/ui/demo-onboarding/storage_state.json "$$d/ui/demo-onboarding/storage_state.json";'
+        in script
+    )
     # compose bind-mounts it; it never enters an image's build context
     ignored = (ROOT / ".dockerignore").read_text("utf-8").splitlines()
     assert "docker/secrets" in ignored
