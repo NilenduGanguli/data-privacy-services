@@ -355,7 +355,8 @@ async def test_resume_after_kill(
     assert case.ledger_rows(killed.id) == 0 and case.ledger_rows(ref.id) == 0
     evidence = await get_evidence(TENANT, killed.progress.evidence_id or "")
     assert evidence is not None and evidence.pack.counts["resumed_partitions"] >= 1
-    assert evidence.pack.verification["passed"]
+    verification = evidence.pack.verification  # counts, statuses and column names only
+    assert verification["passed"], {k: v for k, v in verification.items() if k != "hits"}
     logs = "".join(p.read_text(errors="replace") for p in tmp_path.glob("*.log"))
     from tools.seed_model import seed_customers
 

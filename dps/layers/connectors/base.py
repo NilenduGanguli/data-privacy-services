@@ -49,6 +49,10 @@ Row = dict[str, Any]
 Key = tuple[Any, ...]
 #: Persisted form of a key: ``[{"t": "int|dec|str|char|date|ts|bytes|uuid|oid", "v": "<text>"}]``.
 EncodedKey = list[dict[str, str]]
+#: Column kinds holding one date or time per value: a pattern inside its digits (a "phone" in
+#: TIMESTAMP(9)'s nine fractional digits) is not personal data; only a whole-value finding (a date
+#: of birth) counts in discovery and in the post-write reviews (WP-I m3).
+TEMPORAL_KINDS: frozenset[str] = frozenset({"date", "timestamp"})
 
 NEVER_TRANSFORMED_KINDS = frozenset({"binary", "lob_binary", "object_id"})
 #: Source engines whose connector the registry opens, so discovery and runs may read them (M2:

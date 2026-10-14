@@ -95,6 +95,7 @@ from dps.jobs_models import (
 )
 from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
+    TEMPORAL_KINDS,
     BatchWriter,
     ColumnInfo,
     Connector,
@@ -1656,6 +1657,8 @@ def scan_written(
                 transformed += 1
                 continue
             sensitive = [f for f in findings if f.sensitivity.rank >= Sensitivity.MEDIUM.rank]
+            if column.kind in TEMPORAL_KINDS:  # one date per value: spans in its digits are noise
+                sensitive = [f for f in sensitive if f.locator.whole]
             if not sensitive:
                 continue
             if key not in unclassified:
@@ -1816,6 +1819,7 @@ def kept_review(
                 for t in texts
                 for f in detector.detect(data={column.name: t}).findings
                 if f.sensitivity.rank >= Sensitivity.MEDIUM.rank
+                and (f.locator.whole or column.kind not in TEMPORAL_KINDS)
             ]
             if found:
                 cells[key] += 1

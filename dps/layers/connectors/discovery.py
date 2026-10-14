@@ -73,6 +73,7 @@ from dps.jobs_models import (
 from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
     NEVER_TRANSFORMED_KINDS,
+    TEMPORAL_KINDS,
     ColumnInfo,
     Connector,
     ConnectorError,
@@ -390,6 +391,10 @@ def classify_columns(
                 span_rows += 1
                 span_detectors.update(d.split(":")[0] for f in spans for d in f.detectors)
             sensitive = [f for f in result.findings if _sensitive(f.entity_type)]
+            if column.kind in TEMPORAL_KINDS:
+                # a date or timestamp is one value: a pattern inside its digits (a "phone" in
+                # TIMESTAMP(9)'s nine fractional digits) is not personal data (WP-I m3)
+                sensitive = [f for f in sensitive if f.locator.whole]
             if sensitive:
                 sensitive_rows += 1
                 seen.update(f.entity_type for f in sensitive)
