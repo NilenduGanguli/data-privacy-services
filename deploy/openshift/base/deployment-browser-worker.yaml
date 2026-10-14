@@ -2,7 +2,9 @@
 # Chromium). The scanner never submits anything (D4); its network policy allows the registered scan
 # targets only. It never calls the LLM, OCR or the tokenizer, so those are switched off here and their
 # secrets are not mounted (a role without the credential has the feature off, not failing). Like
-# the worker it opens both database pools at start (the app and the worker login).
+# the worker it opens both database pools at start (the app and the worker login). Its scan evidence
+# packs carry DPS_IMAGE_DIGEST, so it sets its own: the browser image's digest (env overrides the
+# ConfigMap's app digest; the release overlay derives both from `images:`, the check denies another).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,6 +37,7 @@ spec:
             - {name: DPS_LLM_PROVIDER, value: ""}
             - {name: DPS_OCR_PROVIDER, value: "off"}
             - {name: DPS_TOKENIZER_PROVIDER, value: ""}
+            - {name: DPS_IMAGE_DIGEST, value: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
             - {name: DPS_PG_PASSWORD_FILE, value: /var/run/secrets/dps/pg-app/password}
             - {name: DPS_PG_WORKER_PASSWORD_FILE, value: /var/run/secrets/dps/pg-worker/password}
             - {name: DPS_JOB_KEK_FILE, value: /var/run/secrets/dps/kek/kek}

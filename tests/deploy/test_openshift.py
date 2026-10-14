@@ -17,6 +17,7 @@ import inspect
 import ipaddress
 import os
 import re
+from collections.abc import Sequence
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ README = DEPLOY / "README.md"
 RELEASE_EXAMPLE = DEPLOY / "release-example"
 OVERLAYS = ("dev", "prod")
 ROLES = ("dps-app", "dps-worker", "dps-browser-worker")
-SECRET_NAME = re.compile(r"(KEY|SECRET|PASSWORD|TOKEN|KEK)$")
+MAINTAIN = "dps-migrate-maintain"  # the audit-partition CronJob (S5 review r1, B1)
 KUSTOMIZE = oc.find_kustomize()
 
 
@@ -76,6 +77,47 @@ def secret_volumes(pod: dict[str, Any]) -> set[str]:
     return {v["secret"]["secretName"] for v in pod.get("volumes", []) if "secret" in v}
 
 
+def image_digest(container: dict[str, Any]) -> str:
+    """The ``sha256:…`` part of a container's digest-pinned image."""
+    return str(container["image"]).split("@", 1)[1]
+
+
+def release_overlay(tmp_path: Path, *, derive: bool = True, literals: Sequence[str] = ()) -> Path:
+    """The release example with values a bank would set, over ``overlays/prod``, in ``tmp_path``.
+
+    No ``.example`` host, TEST-NET CIDR or example digest is left (app image ``a…a``, browser
+    image ``b…b``), so the gate's only findings are the ones a test provokes. ``derive=False``
+    drops the example's ``replacements`` (the digest settings then stay what the layers below set);
+    ``literals`` are merged into the ``dps`` ConfigMap.
+    """
+    text = (RELEASE_EXAMPLE / "kustomization.yaml").read_text("utf-8")
+    for old, new in (
+        ("bank.example", "corp.internal"),
+        ("198.51.100.", "10.20.30."),
+        ("1" * 64, "a" * 64),
+        ("2" * 64, "b" * 64),
+    ):
+        text = text.replace(old, new)
+    spec = yaml.safe_load(text)
+    # kustomize refuses an absolute path as a kustomization root: refer to the overlay relatively
+    spec["resources"] = [os.path.relpath(DEPLOY / "overlays" / "prod", tmp_path)]
+    if not derive:
+        del spec["replacements"]
+    spec["configMapGenerator"][0]["literals"].extend(literals)
+    (tmp_path / "kustomization.yaml").write_text(yaml.safe_dump(spec, sort_keys=False), "utf-8")
+    return tmp_path
+
+
+def stamped_digests(docs: list[dict[str, Any]]) -> dict[str, str]:
+    """``DPS_IMAGE_DIGEST`` each DPS container starts with (ConfigMap, then its own env)."""
+    out: dict[str, str] = {}
+    for _, name, pod in oc.workloads(docs):
+        container = oc.dps_container(pod)
+        if container is not None:
+            out[name] = oc.pod_environment(docs, container).get("DPS_IMAGE_DIGEST", "")
+    return out
+
+
 # --- roles -------------------------------------------------------------------------------------
 
 
@@ -85,6 +127,7 @@ def test_overlays_render_every_role(overlay: str) -> None:
     names = {(d["kind"], d["metadata"]["name"]) for d in docs}
     assert {("Deployment", n) for n in ROLES} <= names
     assert ("Job", "dps-migrate-0") in names
+    assert ("CronJob", MAINTAIN) in names
     assert one(docs, "Service", "dps-app")["spec"]["type"] == "ClusterIP"
     assert one(docs, "Service", "dps-db")["spec"]["type"] == "ExternalName"
     route = one(docs, "Route", "dps-app")
@@ -103,7 +146,8 @@ def test_overlays_render_every_role(overlay: str) -> None:
 
     # One image, four roles (spec §4); the browser worker has its own image (contract §11.1).
     commands = {
-        name: main_container(pod_of(docs, name))["args"] for name in (*ROLES, "dps-migrate-0")
+        name: main_container(pod_of(docs, name))["args"]
+        for name in (*ROLES, "dps-migrate-0", MAINTAIN)
     }
     assert commands["dps-app"][:3] == ["uvicorn", "dps.app:create_app", "--factory"]
     # uvicorn's access log is stdlib logging and bypasses the structlog allow-list (Dockerfile CMD).
@@ -111,6 +155,7 @@ def test_overlays_render_every_role(overlay: str) -> None:
     assert commands["dps-worker"] == ["python", "-m", "dps.worker"]
     assert commands["dps-browser-worker"] == ["python", "-m", "dps.browser_worker"]
     assert commands["dps-migrate-0"] == ["python", "-m", "dps.migrate"]
+    assert commands[MAINTAIN] == ["python", "-m", "dps.migrate", "--maintain"]
     for name in ROLES:
         image = main_container(pod_of(docs, name))["image"]
         repo = image.split("@")[0].rsplit("/", 1)[-1]
@@ -122,6 +167,7 @@ def test_overlays_render_every_role(overlay: str) -> None:
         assert repo == expected, (name, image)
         assert pod_of(docs, name)["serviceAccountName"] == name
     assert pod_of(docs, "dps-migrate-0")["serviceAccountName"] == "dps-migrate"
+    assert pod_of(docs, MAINTAIN)["serviceAccountName"] == "dps-migrate"
 
     replicas = {n: one(docs, "Deployment", n)["spec"]["replicas"] for n in ROLES}
     assert replicas == (
@@ -195,7 +241,7 @@ def test_images_are_pinned_by_digest(overlay: str) -> None:
 def test_no_literal_secrets_and_every_secret_is_a_mounted_file(overlay: str) -> None:
     docs = render(overlay)
     for key in oc.configmap_data(docs, "dps"):
-        assert not SECRET_NAME.search(key), key
+        assert not oc.is_secret_setting(key), key
     for _, name, pod in oc.workloads(docs):
         volumes = {v["name"]: v for v in pod.get("volumes", [])}
         for c in oc.containers(pod):
@@ -204,7 +250,7 @@ def test_no_literal_secrets_and_every_secret_is_a_mounted_file(overlay: str) -> 
             for entry in c.get("env", []):
                 env_name = entry["name"]
                 if "value" in entry:
-                    assert not SECRET_NAME.search(env_name), (name, env_name)
+                    assert not oc.is_secret_setting(env_name), (name, env_name)
                 if env_name.startswith("DPS_"):
                     # posture (M5 Task 16): a secret is a file, never an environment variable
                     assert "secretKeyRef" not in entry.get("valueFrom", {}), (name, env_name)
@@ -220,7 +266,10 @@ def test_every_dps_variable_is_a_setting(overlay: str) -> None:
     """A typo in a variable name is silently ignored by Settings (``extra="ignore"``)."""
     fields = set(Settings.model_fields)
     docs = render(overlay)
-    names = set(oc.configmap_data(docs, "dps"))
+    cm = oc.configmap_data(docs, "dps")
+    names = {k for k in cm if k.startswith("DPS_")}
+    # the one library variable: botocore's CA bundle (S3), which DPS_SSL_CERT_FILE does not reach
+    assert set(cm) - names == {"AWS_CA_BUNDLE"}
     for _, _, pod in oc.workloads(docs):
         for c in oc.containers(pod):
             names |= {e["name"] for e in c.get("env", []) if e["name"].startswith("DPS_")}
@@ -230,11 +279,35 @@ def test_every_dps_variable_is_a_setting(overlay: str) -> None:
         assert field in fields, env_name
 
 
-def test_only_the_migrate_job_mounts_the_owner_secret() -> None:
+def test_secret_settings_cover_the_posture_guard() -> None:
+    """The checker's secret names are the guard's (S5 review r1, N4): not only a suffix regex."""
+    from dps.posture import SECRET_ENV
+
+    assert set(SECRET_ENV) <= oc.SECRET_SETTINGS
+    docs = render("prod")
+    one(docs, "ConfigMap", "dps")["data"]["DPS_COIN_CLIENT_ID"] = "x"
+    main_container(pod_of(docs, "dps-worker"))["env"] += [
+        {"name": "DPS_S3_ACCESS_KEY_ID", "value": "x"},
+        {"name": "DPS_JOB_KEK_PREVIOUS", "value": "x"},
+    ]
+    denied = [f for f in oc.check(docs, settings=False) if f.rule == "literal-secret"]
+    assert all(f.level == "deny" for f in denied)
+    for name in ("DPS_COIN_CLIENT_ID", "DPS_S3_ACCESS_KEY_ID", "DPS_JOB_KEK_PREVIOUS"):
+        assert any(f.message.startswith(name + " ") for f in denied), name
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_the_s3_client_trusts_the_org_ca_like_every_other_egress(overlay: str) -> None:
+    """botocore reads ``AWS_CA_BUNDLE``, not ``SSL_CERT_FILE`` nor ``DPS_SSL_CERT_FILE`` (N1)."""
+    cm = oc.configmap_data(render(overlay), "dps")
+    assert cm["AWS_CA_BUNDLE"] == cm["DPS_SSL_CERT_FILE"] == "/etc/dps/ca/org-ca.pem"
+
+
+def test_only_the_migrate_workloads_mount_the_owner_secret() -> None:
     for overlay in OVERLAYS:
         docs = render(overlay)
-        owners = [n for _, n, pod in oc.workloads(docs) if "dps-pg-owner" in secret_volumes(pod)]
-        assert owners == ["dps-migrate-0"], overlay
+        owners = {n for _, n, pod in oc.workloads(docs) if "dps-pg-owner" in secret_volumes(pod)}
+        assert owners == {"dps-migrate-0", MAINTAIN}, overlay
         migrate = pod_of(docs, "dps-migrate-0")
         container = main_container(migrate)
         assert container["args"] == ["python", "-m", "dps.migrate"]
@@ -245,6 +318,62 @@ def test_only_the_migrate_job_mounts_the_owner_secret() -> None:
         assert one(docs, "Job", "dps-migrate-0")["spec"]["backoffLimit"] == 6
         # the app and the workers only verify the schema
         assert oc.configmap_data(docs, "dps")["DPS_MIGRATIONS_MODE"] == "verify"
+
+
+@pytest.mark.parametrize("target", [*OVERLAYS, "release-example"])
+def test_a_daily_cronjob_keeps_the_audit_log_writable(target: str) -> None:
+    """S5 review r1, B1: ``dps_audit_log`` has one partition per UTC month and no DEFAULT one.
+
+    Only the owner login creates partitions — ``dps.migrate`` this month and the next three,
+    ``--maintain`` the same and it also drops the months past ``DPS_AUDIT_RETENTION_MONTHS`` — and
+    the migrate Job runs once per release, so without a schedule every audit write fails about four
+    months after the last release.
+    """
+    docs = render(target)
+    cron = one(docs, "CronJob", MAINTAIN)["spec"]
+    # every day, so a failed run still has three months of partitions in hand; UTC like the months
+    minute, hour, *days = cron["schedule"].split()
+    assert days == ["*", "*", "*"] and minute.isdigit() and hour.isdigit(), cron["schedule"]
+    assert cron["timeZone"] == "Etc/UTC"
+    assert cron.get("suspend") is not True
+    # one run at a time; each run bounded (with Forbid a hung run would block every later one); a
+    # missed schedule still starts late; a short history of finished Jobs
+    assert cron["concurrencyPolicy"] == "Forbid"
+    job = cron["jobTemplate"]["spec"]
+    assert 0 < job["activeDeadlineSeconds"] <= 3600
+    assert 0 < job["backoffLimit"] <= 6
+    assert cron["startingDeadlineSeconds"] > 0
+    assert 1 <= cron["successfulJobsHistoryLimit"] <= 5
+    assert 1 <= cron["failedJobsHistoryLimit"] <= 5
+    # the migrate Job's pod with one more argument: the owner login and the CA bundle only, the
+    # same account, security context, resources and labels (component=migrate: egress-dps-db)
+    release_job = next(
+        d for d in docs if d["kind"] == "Job" and d["metadata"]["name"].startswith("dps-migrate-")
+    )
+    expected = copy.deepcopy(release_job["spec"]["template"])
+    expected["spec"]["containers"][0]["args"] = ["python", "-m", "dps.migrate", "--maintain"]
+    assert job["template"] == expected
+    assert secret_volumes(job["template"]["spec"]) == {"dps-pg-owner"}
+    labels = job["template"]["metadata"]["labels"]
+    assert labels["app.kubernetes.io/component"] == "migrate"
+    db = one(docs, "NetworkPolicy", "egress-dps-db")
+    assert _selected(db, "migrate")
+    # a CronJob's template is mutable: its name is not a per-release placeholder like the Job's
+    renamed = [f.resource for f in oc.placeholder_findings(docs) if f.rule == "placeholder-job"]
+    assert f"CronJob/{MAINTAIN}" not in renamed
+
+
+def test_the_release_check_keeps_the_owner_login_in_the_migrate_workloads() -> None:
+    docs = render("prod")
+    # the migrate Job and the maintenance CronJob pass (a run-to-completion pod has no probes)
+    assert not [f for f in oc.check(docs, settings=False) if f.rule in ("owner-secret", "probes")]
+    one(docs, "CronJob", MAINTAIN)["metadata"]["name"] = "dps-reports"
+    pod_of(docs, "dps-worker")["volumes"].append(
+        {"name": "pg-owner", "secret": {"secretName": "dps-pg-owner", "defaultMode": 288}}
+    )
+    denied = [f for f in oc.check(docs, settings=False) if f.rule == "owner-secret"]
+    assert {f.resource for f in denied} == {"CronJob/dps-reports", "Deployment/dps-worker"}
+    assert all(f.level == "deny" for f in denied)
 
 
 def test_each_role_mounts_only_the_secrets_it_uses() -> None:
@@ -345,6 +474,112 @@ def test_the_app_dials_the_dps_db_host_by_its_certificate_name(target: str) -> N
     cm = oc.configmap_data(docs, "dps")
     assert cm["DPS_PG_HOST"] == one(docs, "Service", "dps-db")["spec"]["externalName"]
     assert cm["DPS_PG_SSL_ROOT_CERT"]
+
+
+def test_the_release_check_denies_a_db_host_that_is_not_the_alias() -> None:
+    """S5 review r1, N5: the release gate itself keeps ``DPS_PG_HOST`` and ``dps-db`` the same."""
+    docs = render("release-example")
+    assert not [f for f in oc.check(docs, settings=False) if f.rule == "db-host"]
+    one(docs, "ConfigMap", "dps")["data"]["DPS_PG_HOST"] = "pgsql-other.bank.example"
+    denied = [f for f in oc.check(docs, settings=False) if f.rule == "db-host"]
+    assert [(f.level, f.resource) for f in denied] == [("deny", "ConfigMap/dps")]
+
+
+# --- provenance: the image digest each container stamps into evidence ------------------------------
+
+
+@pytest.mark.parametrize("target", [*OVERLAYS, "release-example"])
+def test_each_container_stamps_its_own_image_digest(target: str) -> None:
+    """S5 review r1, B2: evidence packs carry ``DPS_IMAGE_DIGEST`` — the worker's job packs and,
+    since M4, the browser worker's scan packs — so each DPS container's value is the digest of the
+    image it runs. The browser worker runs its own image: its env entry overrides the ConfigMap's.
+    """
+    docs = render(target)
+    stamped = stamped_digests(docs)
+    assert set(stamped) == {*ROLES, MAINTAIN} | {n for k, n, _ in oc.workloads(docs) if k == "Job"}
+    for _, name, pod in oc.workloads(docs):
+        container = oc.dps_container(pod)
+        if container is not None:
+            assert stamped[name] == image_digest(container), name
+    assert "DPS_IMAGE_DIGEST" in env_of(main_container(pod_of(docs, "dps-browser-worker")))
+    if target == "release-example":
+        assert stamped["dps-browser-worker"] != stamped["dps-app"]
+    assert not [f for f in oc.check(docs, settings=False) if f.rule == "image-digest-setting"]
+
+
+def test_a_release_that_sets_every_parameter_passes_the_gate(tmp_path: Path) -> None:
+    """Every parameter set with a bank's values: 0 denied, 0 warnings — the digest settings follow
+    ``images:`` through the example's ``replacements`` (each digest is set once, in ``images:``).
+    """
+    if KUSTOMIZE is None:
+        pytest.skip("needs the kustomize binary (marker deploy)")
+    release = release_overlay(tmp_path)
+    docs = oc.render(release, KUSTOMIZE)
+    assert oc.check(docs) == []  # with the Settings and posture probe of every role
+    assert oc.main([str(release), "--settings", "off", "--fail-on-warn"]) == 0
+    stamped = stamped_digests(docs)
+    assert stamped.pop("dps-browser-worker") == "sha256:" + "b" * 64
+    assert set(stamped.values()) == {"sha256:" + "a" * 64}
+
+
+def test_the_release_check_denies_a_stale_digest_setting(tmp_path: Path) -> None:
+    """S5 review r1, B2: the images are bumped (``a…a``, ``b…b``) but ``DPS_IMAGE_DIGEST`` still
+    names another build (``c…c``), so evidence would name an image that did not produce it. This
+    passed ``--fail-on-warn`` with 0 findings before; now every container that reads it is denied.
+    """
+    if KUSTOMIZE is None:
+        pytest.skip("needs the kustomize binary (marker deploy)")
+    stale = "DPS_IMAGE_DIGEST=sha256:" + "c" * 64
+    release = release_overlay(tmp_path, derive=False, literals=[stale])
+    findings = oc.check(oc.render(release, KUSTOMIZE), settings=False)
+    denied = [f for f in findings if f.rule == "image-digest-setting"]
+    assert all(f.level == "deny" for f in denied)
+    assert sorted(f.resource for f in denied) == [
+        f"CronJob/{MAINTAIN} container migrate",
+        "Deployment/dps-app container app",
+        "Deployment/dps-worker container worker",
+        "Job/dps-migrate-1-0-0 container migrate",
+    ]
+    # the browser worker's own entry is still the zero placeholder: a warning (the gate refuses it
+    # with --fail-on-warn), not this denial
+    zero = [f.resource for f in findings if f.rule == "placeholder-digest"]
+    assert zero == ["Deployment/dps-browser-worker"]
+    assert oc.main([str(release), "--settings", "off"]) == 1
+
+
+def test_the_release_check_denies_the_app_digest_in_the_browser_worker(tmp_path: Path) -> None:
+    """Without its own entry the browser worker inherits the ConfigMap's value: the app image's."""
+    if KUSTOMIZE is None:
+        pytest.skip("needs the kustomize binary (marker deploy)")
+    docs = oc.render(release_overlay(tmp_path), KUSTOMIZE)
+    browser = main_container(pod_of(docs, "dps-browser-worker"))
+    browser["env"] = [e for e in browser["env"] if e["name"] != "DPS_IMAGE_DIGEST"]
+    denied = [f for f in oc.check(docs, settings=False) if f.rule == "image-digest-setting"]
+    assert [(f.level, f.resource) for f in denied] == [
+        ("deny", "Deployment/dps-browser-worker container browser-worker")
+    ]
+
+
+def test_the_digest_setting_must_be_a_literal_the_check_can_compare() -> None:
+    docs = render("prod")  # zero digests everywhere: placeholders that warn, no denial
+    assert not [f for f in oc.check(docs, settings=False) if f.rule == "image-digest-setting"]
+    del one(docs, "ConfigMap", "dps")["data"]["DPS_IMAGE_DIGEST"]
+    main_container(pod_of(docs, "dps-browser-worker"))["env"] = [
+        e
+        for e in main_container(pod_of(docs, "dps-browser-worker"))["env"]
+        if e["name"] != "DPS_IMAGE_DIGEST"
+    ] + [{"name": "DPS_IMAGE_DIGEST", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}]
+    findings = [f for f in oc.check(docs, settings=False) if f.rule == "image-digest-setting"]
+    assert len(findings) == 5 and all(f.level == "deny" for f in findings)
+    denied = {f.resource: f.message for f in findings}
+    unset = [r for r, m in denied.items() if "DPS_IMAGE_DIGEST is not set" in m]
+    assert sorted(unset) == [
+        f"CronJob/{MAINTAIN} container migrate",
+        "Deployment/dps-app container app",
+        "Deployment/dps-worker container worker",
+        "Job/dps-migrate-0 container migrate",
+    ]
+    assert "literal" in denied["Deployment/dps-browser-worker container browser-worker"]
 
 
 # --- what runs where ----------------------------------------------------------------------------
@@ -506,6 +741,7 @@ def test_metrics_are_scraped_and_the_alerts_exist() -> None:
         "DpsTokenizerFailing": "warning",
         "DpsNoDbKeysLoaded": "warning",
         "DpsWorkersAbsent": "critical",
+        "DpsAuditMaintenanceStale": "warning",
     }
     # the raw-PII alert carries the tenant and reads both counters (Task 16B, HANDOFF §5)
     raw = rules["DpsRawPiiSentToLlm"]["expr"]
@@ -514,6 +750,11 @@ def test_metrics_are_scraped_and_the_alerts_exist() -> None:
     # only the app loads DB keys: the gauge reads 0 in every worker
     assert 'app_kubernetes_io_component="app"' in rules["DpsNoDbKeysLoaded"]["expr"]
     assert 'app_kubernetes_io_component="worker"' in rules["DpsWorkersAbsent"]["expr"]
+    # the audit-partition CronJob (B1) has not succeeded for days, or never since it was created:
+    # kube-state-metrics series, which rules in a user namespace may read for that namespace
+    stale = rules["DpsAuditMaintenanceStale"]["expr"]
+    assert f'kube_cronjob_status_last_successful_time{{cronjob="{MAINTAIN}"}}' in stale
+    assert f'kube_cronjob_created{{cronjob="{MAINTAIN}"}}' in stale
     for name, r in rules.items():
         assert r["annotations"]["summary"], name
 
@@ -532,6 +773,22 @@ def test_committed_overlays_carry_placeholders_that_only_warn(overlay: str) -> N
         "placeholder-cidr",
         "placeholder-job",
     } <= rules
+
+
+def test_placeholder_hosts_are_found_inside_lists() -> None:
+    """S5 review r1, N6: a host is bounded by any character a host name cannot hold."""
+    listed = "a.example.invalid,b.example.invalid https://c.example.invalid:8443/x"
+    assert oc.INVALID_HOST.findall(listed) == [
+        "a.example.invalid",
+        "b.example.invalid",
+        "c.example.invalid",
+    ]
+    assert oc.EXAMPLE_HOST.findall("dps.bank.example,x.bank.example") == [
+        "dps.bank.example",
+        "x.bank.example",
+    ]
+    assert not oc.INVALID_HOST.findall("host.invalid.corp.internal")  # not the .invalid TLD
+    assert not oc.EXAMPLE_HOST.findall("postgres.example.invalid")  # a placeholder, not an example
 
 
 def test_placeholders_are_documented() -> None:

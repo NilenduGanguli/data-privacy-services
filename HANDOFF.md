@@ -71,7 +71,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
-| `deploy/openshift` | kustomize manifests | M5 Task 25: base (app, worker, browser-worker, migrate Job, `dps-db` ExternalName, Route), components (network policies, monitoring, dev mocks), `dev`/`prod` overlays with placeholders, a worked release example; `tools/openshift_check.py` is the release gate (§15) |
+| `deploy/openshift` | kustomize manifests | M5 Task 25: base (app, worker, browser-worker, migrate Job, audit-maintenance CronJob, `dps-db` ExternalName, Route), components (network policies, monitoring, dev mocks), `dev`/`prod` overlays with placeholders, a worked release example; `tools/openshift_check.py` is the release gate (§15) |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §13); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
 ## 2. Build
@@ -1317,11 +1317,13 @@ M4 lane holds 8420. Gates and results: `~/.cache/dps-build/reports/I-m3.md`.
 
 Manifests in `deploy/openshift` (Wega layout; full guide and parameter table in
 `deploy/openshift/README.md`): `base/` (Deployments `dps-app`, `dps-worker`, `dps-browser-worker`;
-Job `dps-migrate-0`; Services `dps-app` and `dps-db` — an ExternalName to the platform PostgreSQL;
+Job `dps-migrate-0`; CronJob `dps-migrate-maintain` (audit partitions, daily); Services `dps-app`
+and `dps-db` — an ExternalName to the platform PostgreSQL;
 Route `dps-app` with edge TLS, HTTP redirected, router timeout 300 s; PDBs `maxUnavailable: 1`;
 four ServiceAccounts without tokens; ConfigMap `dps` from `configmap-dps.env`), components
 `network-policies` (default-deny + one allow per path), `monitoring` (PodMonitor + PrometheusRule
-with the seven alerts of §5, `DpsRawPiiSentToLlm` critical), `dev-mocks` (tokenizer mock running a
+with the seven alerts of §5 plus `DpsAuditMaintenanceStale`, `DpsRawPiiSentToLlm` critical),
+`dev-mocks` (tokenizer mock running a
 byte-identical copy of `docker/tokenizer-mock/server.py`, Azure OCR mock), overlays `dev`
 (namespace `dps-dev`, one replica each, mocks, stub LLM, TLS egress off) and `prod` (`dps-prod`,
 app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
@@ -1334,13 +1336,31 @@ app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
 - **Secrets are files only** (`DPS_*_FILE`, the M5 posture rule). The app and both workers pass the
   production posture guard at boot, so each mounts `dps-api-keys` and `dps-job-kek`; both workers
   open the API pool and the worker pool at start, so they hold both logins (`dps-pg-app`,
-  `dps-pg-worker`; the runtime proof below failed without the first); only the migrate Job mounts
-  `dps-pg-owner`. The
+  `dps-pg-worker`; the runtime proof below failed without the first); only the migrate Job and the
+  CronJob `dps-migrate-maintain` mount `dps-pg-owner`. The
   browser worker runs with `DPS_LLM_PROVIDER=""`, `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`
   and mounts none of their secrets.
 - **Metadata DB host:** `DPS_PG_HOST` is the platform host itself (equal to `dps-db`'s
   externalName): verify-full TLS (`DPS_PG_SSL_ROOT_CERT`, `dps/db.py`) checks the certificate against
   the name dialled, which a platform certificate does not issue for `dps-db`.
+- **Audit-log partitions (S5 review r1, B1):** `dps_audit_log` has one RANGE partition per UTC month
+  and no DEFAULT partition, and only the owner login creates them (`dps.migrate`: this month + 3;
+  `--maintain`: the same, plus dropping months older than `DPS_AUDIT_RETENTION_MONTHS`). The migrate
+  Job runs once per release, so the CronJob `dps-migrate-maintain` runs `python -m dps.migrate
+  --maintain` daily at 03:17 UTC (`concurrencyPolicy: Forbid`, `activeDeadlineSeconds: 1800`,
+  `startingDeadlineSeconds: 3600`, 3 Jobs of history) in the migrate Job's pod (a test keeps the two
+  pod templates equal but for the argument). Without it every audit write fails about four months
+  after a release (`audit_flush_failed` only; no metric). Alert `DpsAuditMaintenanceStale` (warning)
+  reads kube-state-metrics: no success for 3 days, or never 3 days after creation.
+- **Image digest per container (S5 review r1, B2):** evidence packs carry `DPS_IMAGE_DIGEST` (job
+  packs from the worker; scan packs from the browser worker after M4), so the ConfigMap holds the app
+  image's digest and the browser worker sets its own in its env (env overrides `envFrom`). The release
+  overlay derives both from `images:` with `replacements` (kustomize runs them after `images` in the
+  same kustomization; `release-example` shows the block); `tools/openshift_check.py` denies
+  (`image-digest-setting`) a DPS container whose value is unset, not a literal, or not its own image's
+  digest (the zero placeholder only warns), and (`db-host`) a `DPS_PG_HOST` that is not `dps-db`'s
+  externalName. The ConfigMap also sets `AWS_CA_BUNDLE` to `org-ca.pem` (boto3 reads neither
+  `SSL_CERT_FILE` nor `DPS_SSL_CERT_FILE`).
 - **Placeholders → release overlay:** zero digests (images and `DPS_IMAGE_DIGEST`), `.invalid` hosts
   (DB, S3, Stellar, COIN, OCR gateway, tokenizer, Route), TEST-NET-1 NetworkPolicy peers (one per
   endpoint: DB `192.0.2.10/32`, gateways `.1`–`.4`, object store `.5`, source databases
@@ -1357,7 +1377,12 @@ app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
   skipped (`dps.browser_worker` arrives with the M4 merge); `kustomize build` (v5.8.1) of dev, prod
   and the release example; `kubeconform -strict` (Kubernetes 1.29 schemas, the OpenShift 4.14 Route
   schema, the datree CRD catalog for PodMonitor/PrometheusRule): dev 32/32, prod 25/25, release
-  example 25/25 valid; `promtool check rules` on the PrometheusRule: 7 rules, SUCCESS.
+  example 25/25 valid; `promtool check rules` on the PrometheusRule: 7 rules, SUCCESS. After the S5
+  review r1 fix: 52 passed, 1 skipped; `kubeconform -strict` dev 33/33, prod 26/26, release example
+  26/26 with the Kubernetes 1.27 and 1.29 schemas and with the OpenShift 4.14 and 4.16 strict
+  catalogs (the CronJob included); kustomize 5.8.1 and `kubectl kustomize` 5.7.1 render identically;
+  `promtool check rules` 8 rules SUCCESS and `promtool test rules` (stale, recent, never succeeded,
+  just created, daily successes) SUCCESS.
 - **Runtime proof (no cluster available):** each role's rendered prod pod spec run with Docker —
   the ConfigMap + container env (`DPS_ENV=prod`), every secret a `root:<fsGroup>` 0440 file at its
   mount path, UID 1000680000 with group 0 and the fsGroup, `--read-only`, `--cap-drop ALL`,
@@ -1371,4 +1396,10 @@ app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
   (why `DPS_PG_HOST` is the certificate's name); 0 hits of the API key, the KEK or the request's
   e-mail in any container log. The first worker run failed — `password authentication failed for
   user dps_app` — because the worker opens the API pool too: fixed (both workers hold both logins).
+  The CronJob's rendered prod pod spec (same emulation, owner secret only) applied the 17 migrations
+  on an empty database and ensured partitions `2026_10`…`2027_01`; an audit insert dated 2027-02-01
+  then failed (`no partition of relation "dps_audit_log" found for row`, the B1 failure); a rerun the
+  same day applied 0 and dropped 0; the same command with the clock at 2026-11-14 created `2027_02`
+  (the insert then succeeded), and at 2027-12-02 created `2027_12`…`2028_03` and dropped `2026_10`
+  (retention 13 months); 0 DSN/password/traceback lines in its output.
   Not done: a live cluster apply.

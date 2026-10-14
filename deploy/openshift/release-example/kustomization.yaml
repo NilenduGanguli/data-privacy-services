@@ -1,9 +1,10 @@
 # A worked release overlay over overlays/prod: it sets every deploy parameter of
-# deploy/openshift/README.md, here with documentation values (.example hosts, TEST-NET-2 CIDRs, a
-# 1…1 digest) that the release check also refuses, so this file cannot be shipped as is.
+# deploy/openshift/README.md, here with documentation values (.example hosts, TEST-NET-2 CIDRs, the
+# 1…1 and 2…2 digests) that the release check also refuses, so this file cannot be shipped as is.
 #
 #   cp -r deploy/openshift/release-example <release-dir>   # e.g. next to the checkout, untracked
-#   # point `resources` at <checkout>/deploy/openshift/overlays/prod and replace every value below
+#   # point `resources` at overlays/prod by a RELATIVE path (kustomize refuses an absolute one),
+#   # e.g. ../data-privacy-services/deploy/openshift/overlays/prod, and replace every value below
 #   python tools/openshift_check.py <release-dir> --fail-on-warn   # 0 warnings, 0 denials
 #   kustomize build <release-dir> | oc apply -f -
 #
@@ -19,7 +20,7 @@ images:
     digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
   - name: image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services-browser
     newName: registry.bank.example/dps/data-privacy-services-browser
-    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
 generatorOptions:
   disableNameSuffixHash: true
 configMapGenerator:
@@ -32,7 +33,6 @@ configMapGenerator:
       - DPS_COIN_URL=https://coin.bank.example/oauth2/token
       - DPS_AZURE_VISION_ENDPOINT=https://ocr-gateway.bank.example
       - DPS_TOKENIZER_URL=https://tokenizer.bank.example
-      - DPS_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111
 patches:
   - target: {kind: Service, name: dps-db}
     patch: |-
@@ -72,3 +72,27 @@ patches:
     patch: |-
       - {op: test, path: /spec/egress/0/to/0/ipBlock/cidr, value: 192.0.2.64/27}
       - {op: replace, path: /spec/egress/0/to/0/ipBlock/cidr, value: 198.51.100.64/27}
+# DPS_IMAGE_DIGEST (stamped into every evidence pack) follows the images above: the ConfigMap's
+# value is the app image's digest (app, worker, migrate), the browser worker's own env entry the
+# browser image's. kustomize runs `replacements` after `images` in the same kustomization, so keep
+# this block in the release overlay that sets `images:`; the release check denies a container whose
+# DPS_IMAGE_DIGEST is not its own image's digest. An image without a digest fails the render here.
+replacements:
+  - source:
+      kind: Deployment
+      name: dps-app
+      fieldPath: spec.template.spec.containers.[name=app].image
+      options: {delimiter: "@", index: 1}
+    targets:
+      - select: {kind: ConfigMap, name: dps}
+        fieldPaths:
+          - data.DPS_IMAGE_DIGEST
+  - source:
+      kind: Deployment
+      name: dps-browser-worker
+      fieldPath: spec.template.spec.containers.[name=browser-worker].image
+      options: {delimiter: "@", index: 1}
+    targets:
+      - select: {kind: Deployment, name: dps-browser-worker}
+        fieldPaths:
+          - spec.template.spec.containers.[name=browser-worker].env.[name=DPS_IMAGE_DIGEST].value

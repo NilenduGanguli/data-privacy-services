@@ -1,5 +1,6 @@
 # Base: everything identical in every environment. One image, four roles (spec §4): app, worker,
-# browser-worker (its own image, M4), migrate. The metadata database is external (dps-db
+# browser-worker (its own image, M4), migrate (the per-release Job, plus the daily CronJob that keeps
+# the audit log's monthly partitions ahead). The metadata database is external (dps-db
 # ExternalName to the platform PostgreSQL); Oracle Free and the other source-system mocks are never
 # deployed here. Placeholders (zero digests, .invalid hosts, 192.0.2.0/24 peers, the Job name
 # dps-migrate-0) are set by the release overlay: deploy/openshift/README.md lists every one, and
@@ -12,6 +13,7 @@ resources:
   - deployment-worker.yaml
   - deployment-browser-worker.yaml
   - job-migrate.yaml
+  - cronjob-migrate-maintain.yaml
   - service-app.yaml
   - service-dps-db.yaml
   - route-app.yaml

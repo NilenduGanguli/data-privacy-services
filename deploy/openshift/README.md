@@ -11,6 +11,7 @@ placeholder and, with `--fail-on-warn`, refuses a release overlay that still car
 ```
 deploy/openshift/
   base/                      dps-app, dps-worker, dps-browser-worker (Deployments), dps-migrate-0 (Job),
+                             dps-migrate-maintain (CronJob: audit partitions, daily),
                              Services dps-app + dps-db (ExternalName), Route, PDBs, ServiceAccounts,
                              ConfigMap dps (configmap-dps.env: every non-secret setting)
   components/network-policies   default-deny + one allow per path a role uses
@@ -31,6 +32,7 @@ Render: `kustomize build deploy/openshift/overlays/prod` (kustomize ≥ 5.0; `oc
 | `dps-worker` | Deployment | `data-privacy-services`: `python -m dps.worker` | `ops` 9400 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` |
 | `dps-browser-worker` | Deployment | `data-privacy-services-browser`: `python -m dps.browser_worker` | `ops` 9401 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-s3`, `dps-connector-refs` (LLM, OCR and tokenizer are switched off here) |
 | `dps-migrate-<release>` | Job | `data-privacy-services`: `python -m dps.migrate` (`DPS_MIGRATIONS_MODE=auto`) | — | `dps-pg-owner` only |
+| `dps-migrate-maintain` | CronJob, daily 03:17 UTC | `data-privacy-services`: `python -m dps.migrate --maintain` (the migrate Job's pod, §6) | — | `dps-pg-owner` only |
 | `dps-app` | Service + Route | edge TLS, HTTP redirected, router timeout 300 s | 8400 | — |
 | `dps-db` | Service (ExternalName) | the platform PostgreSQL 16 (never deployed by DPS) | 5432 | — |
 
@@ -48,6 +50,11 @@ they hold the app login and the worker login, each in its own file. The browser
 worker sets `DPS_LLM_PROVIDER=""`, `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`: the scanner
 calls none of them and holds none of their credentials.
 
+Evidence packs record the image that produced them (`DPS_IMAGE_DIGEST`): the ConfigMap's value is the
+app image's digest (app, worker, migrate), and the browser worker, which runs its own image and
+stamps its scan packs, sets its own in its env (an `env` entry overrides the ConfigMap's). The release
+overlay derives both from `images:` (§4).
+
 ## 2. What the platform provides first
 
 1. A namespace (`dps-dev`, `dps-prod`) with **user-workload monitoring** enabled on the cluster (for
@@ -56,8 +63,9 @@ calls none of them and holds none of their credentials.
    `dps_worker_login` (contract §2.3; migration 001 also creates them when the owner may), TLS with a
    certificate for the host name DPS dials (`DPS_PG_HOST`, §4).
 3. ConfigMap **`dps-ca-bundle`** with two keys: `pg-root.pem` (the database server's CA,
-   `DPS_PG_SSL_ROOT_CERT`) and `org-ca.pem` (the organisation CA bundle for every TLS egress,
-   `DPS_SSL_CERT_FILE`).
+   `DPS_PG_SSL_ROOT_CERT`) and `org-ca.pem` (the organisation CA bundle for every TLS egress:
+   `DPS_SSL_CERT_FILE` for the gateways, and `AWS_CA_BUNDLE` for the S3 client, which reads neither
+   `SSL_CERT_FILE` nor `DPS_SSL_CERT_FILE`).
 4. PVC **`dps-exports`** for `pvc` file targets (`DPS_EXPORT_ROOT=/mnt/dps-exports`): the worker
    writes the files, the app's connection test puts and deletes a probe object there. It is mounted
    by every app and worker replica, so it must be **ReadWriteMany**, and its storage must let the
@@ -71,7 +79,7 @@ calls none of them and holds none of their credentials.
 |---|---|---|---|
 | `dps-pg-app` | `password` | app, worker, browser-worker | the `dps_app` login (`DPS_PG_PASSWORD_FILE`): both workers open the API pool at start too |
 | `dps-pg-worker` | `password` | worker, browser-worker | the `dps_worker_login` login (`DPS_PG_WORKER_PASSWORD_FILE`) |
-| `dps-pg-owner` | `password` | the migrate Job only | the `dps_owner` (DDL) login |
+| `dps-pg-owner` | `password` | the migrate Job and CronJob `dps-migrate-maintain` only | the `dps_owner` (DDL) login |
 | `dps-job-kek` | `kek` | app, worker, browser-worker | base64 of 32 random bytes; seals job keys and inline secrets |
 | `dps-api-keys` | `api_keys.json` | app, worker, browser-worker | static keys, e.g. `[{"name":"ops","key_sha256":"<64 hex>","tenant_ids":["*"],"scopes":["admin"]}]`; day-to-day keys live in the database (§5) |
 | `dps-coin` | `client_id`, `client_secret`, `scope` | app, worker | COIN OAuth2 client for the Stellar LLM gateway |
@@ -87,6 +95,12 @@ oc -n dps-prod create secret generic dps-job-kek --from-file=kek=./job.kek     #
 oc -n dps-prod create configmap dps-ca-bundle --from-file=pg-root.pem --from-file=org-ca.pem
 ```
 
+Images from a registry other than the cluster's own need a pull secret, created from a registry
+auth file and linked to every ServiceAccount that runs a DPS image:
+`oc -n dps-prod create secret generic dps-pull --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=./registry-auth.json`,
+then `oc -n dps-prod secrets link <sa> dps-pull --for=pull` for `dps-app`, `dps-worker`,
+`dps-browser-worker` and `dps-migrate`.
+
 **Connector secret refs.** A connection's `secret_ref` names a folder
 `DPS_SECRET_DIR/<tenant_id>/<ref>/` (`DPS_SECRET_DIR=/var/run/secrets/dps/refs`) holding `username`,
 `password`, `dsn` (Oracle), `uri` (MongoDB), `access_key_id` + `secret_access_key` (S3),
@@ -100,14 +114,19 @@ secrets store, Vault agent) at the same path.
 
 1. `oc new-project dps-prod`; create §2's secrets, `dps-ca-bundle` and `dps-exports`.
 2. Write the release overlay: copy `release-example/` outside the checkout, point `resources` at
-   `<checkout>/deploy/openshift/overlays/prod`, and set every parameter of §4 (the example shows one
-   JSON6902 `test` + `replace` per placeholder; keep the `test`s).
+   `deploy/openshift/overlays/prod` by a **relative** path (kustomize refuses an absolute one, e.g.
+   `../data-privacy-services/deploy/openshift/overlays/prod`), and set every parameter of §4 (the
+   example shows one JSON6902 `test` + `replace` per placeholder; keep the `test`s, and keep its
+   `replacements` block, which derives `DPS_IMAGE_DIGEST` from `images:`).
 3. Gate it: `python tools/openshift_check.py <release-dir> --fail-on-warn` → `0 denied, 0 warnings`
    (run from the repository's venv so it also builds each role's settings and runs the production
    posture guard on them; without `dps` importable it warns `settings-skipped`).
 4. Apply: `kustomize build <release-dir> | oc apply -f -`.
-5. Wait for the schema: `oc wait --for=condition=complete job/dps-migrate-<release> --timeout=10m`
-   (the app and the workers only verify the migrations; their `/readyz` reports them until then).
+5. Wait for the schema: `oc wait --for=condition=complete job/dps-migrate-<release> --timeout=10m`.
+   Until it completes, the app's `/readyz` shows component `jobs` as `migrations pending or
+   drifted`, and the worker exits at start on the pending migrations (`MigrationDrift`) and
+   restarts (`CrashLoopBackOff`) — expected on a first install and on a release with new migrations;
+   it recovers on its next restart once the Job is complete.
 6. `oc rollout status deploy/dps-app deploy/dps-worker deploy/dps-browser-worker`.
 7. Bootstrap the first database key (printed once):
    `oc exec deploy/dps-app -- python -m dps.keys_cli create --name platform-admin --tenants '*' --scopes '*' --expires-in-days 90`
@@ -116,18 +135,22 @@ secrets store, Vault agent) at the same path.
    (`DPS_SMOKE_M2=off`: there is no demo source database in a bank namespace).
 
 Each release renames the migrate Job (`dps-migrate-<release>`): a Job's pod template is immutable,
-and the completed Job of the previous release stays as its record.
+and the completed Job of the previous release stays as its record. The CronJob
+`dps-migrate-maintain` keeps its name (a CronJob's template is mutable): the release updates its
+image like the Job's.
 
 ## 4. Deploy parameters (every placeholder)
 
 `python tools/openshift_check.py deploy/openshift/overlays/prod` lists them as warnings; a release
-overlay sets all of them. Values marked "same" must be equal (tests/deploy keep them so).
+overlay sets all of them. Values marked "same" must be equal (the release check denies a
+difference, rule `db-host`).
 
 | Parameter | Committed placeholder | Where it is set |
 |---|---|---|
 | app image | `image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services` @ `sha256:0000…0000` | release `images:` (`newName` + `digest`) |
 | browser-worker image | `image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services-browser` @ `sha256:0000…0000` | release `images:` |
-| `DPS_IMAGE_DIGEST` | `sha256:0000…0000` | release `configMapGenerator: dps` (`behavior: merge`): the app image's digest, stamped into every evidence pack |
+| `DPS_IMAGE_DIGEST` (ConfigMap `dps`) | `sha256:0000…0000` | **derived**: the release overlay's `replacements` copy the app image's digest from `images:` (app, worker, migrate Job and CronJob stamp it into evidence packs) |
+| `DPS_IMAGE_DIGEST` (`dps-browser-worker` env) | `sha256:0000…0000` | **derived** the same way from the browser image's digest (its scan evidence packs); kustomize runs `replacements` after `images` in the same kustomization, so the block stays in the overlay that sets `images:` |
 | `DPS_PG_HOST` | `postgres.example.invalid` | release `configMapGenerator: dps` — the platform PostgreSQL host, **same** as `dps-db`'s externalName |
 | `dps-db` `externalName` | `postgres.example.invalid` | release patch on Service `dps-db` |
 | `DPS_S3_ENDPOINT_URL` | `https://s3.example.invalid` | release `configMapGenerator: dps` |
@@ -164,8 +187,8 @@ way when the defaults do not fit): replicas, resources, the worker's `/tmp` size
 
 | Level | Rules |
 |---|---|
-| **warn** (a placeholder or an example value) | `placeholder-digest` (an all-zero digest in an image or a setting), `placeholder-host` (a `.invalid` host anywhere), `placeholder-cidr` (a NetworkPolicy peer in `192.0.2.0/24`), `placeholder-job` (`dps-migrate-0`), `example-value` (the release example's `.example` hosts, TEST-NET-2/3 peers and `1…1` digest), `settings-skipped` |
-| **deny** (always fails) | `pod-security`, `container-security`, `resources`, `probes`, `image-digest`, `literal-secret` (a literal secret variable, a `DPS_*` from a `secretKeyRef`, an `envFrom` secret, a secret-named ConfigMap key), `secret-file` (a `*_FILE` outside a mounted Secret/ConfigMap), `owner-secret` (`dps-pg-owner` outside the migrate Job), `service-account`, `default-deny`, `prod-mocks` (a mock or source system with `DPS_ENV` staging/prod), `posture` (each DPS container's settings, built from the ConfigMap and its env with dummy secret files, fail `Settings` or — staging/prod Deployments — the production posture guard) |
+| **warn** (a placeholder or an example value) | `placeholder-digest` (an all-zero digest in an image or a setting), `placeholder-host` (a `.invalid` host anywhere, also inside a list), `placeholder-cidr` (a NetworkPolicy peer in `192.0.2.0/24`), `placeholder-job` (`dps-migrate-0`), `example-value` (the release example's `.example` hosts, TEST-NET-2/3 peers and `1…1`/`2…2` digests), `settings-skipped` |
+| **deny** (always fails) | `pod-security`, `container-security`, `resources`, `probes` (Deployments; not the Job and CronJob), `image-digest`, `image-digest-setting` (a DPS container whose `DPS_IMAGE_DIGEST` is unset, not a literal, or not its own image's digest — the zero placeholder only warns), `literal-secret` (a literal secret variable — the posture guard's secret names or a secret-like name —, a `DPS_*` from a `secretKeyRef`, an `envFrom` secret, a secret-named ConfigMap key), `secret-file` (a `*_FILE` outside a mounted Secret/ConfigMap), `owner-secret` (`dps-pg-owner` outside the migrate Job and CronJob `dps-migrate-maintain`), `service-account`, `default-deny`, `db-host` (`DPS_PG_HOST` not `dps-db`'s externalName), `prod-mocks` (a mock or source system with `DPS_ENV` staging/prod), `posture` (each DPS container's settings, built from the ConfigMap and its env with dummy secret files, fail `Settings` or — staging/prod Deployments — the production posture guard) |
 
 Exit 0 = pass, 1 = a denial (or a warning with `--fail-on-warn`), 2 = the render failed. The
 committed overlays pass with warnings only; `tests/deploy/test_openshift.py` (`pytest -m deploy`)
@@ -178,8 +201,19 @@ Optional schema check (needs network for the schemas):
 - **Alerts** (`components/monitoring`): `DpsRawPiiSentToLlm` (critical — must never fire),
   `DpsLlmExposureBlocked`, `DpsVerificationFailures`, `DpsTokenizerFailing`, `DpsNoDbKeysLoaded`
   (expected right after installation until §3 step 7), `DpsExactRowResamplesHigh` (info),
-  `DpsWorkersAbsent` (critical). The PodMonitor copies the role label onto every series
-  (`app_kubernetes_io_component`).
+  `DpsWorkersAbsent` (critical), `DpsAuditMaintenanceStale` (below). The PodMonitor copies the role
+  label onto every series (`app_kubernetes_io_component`).
+- **Audit-log partitions** (CronJob `dps-migrate-maintain`): `dps_audit_log` has one partition per
+  UTC month and no DEFAULT partition, and only the owner login creates them. The migrate Job makes
+  this month and the next three; the CronJob runs `python -m dps.migrate --maintain` every day at
+  03:17 UTC, which keeps three months ahead and drops the months older than
+  `DPS_AUDIT_RETENTION_MONTHS` (13). Without it every audit write would fail about four months after
+  the last release (`audit_flush_failed` in the logs; the audit search and report roll-ups stop).
+  One run at a time (`concurrencyPolicy: Forbid`), each bounded to 30 minutes, 3 Jobs of history.
+  `DpsAuditMaintenanceStale` (warning) fires when it has not succeeded for 3 days, or never 3 days
+  after it was created; it reads kube-state-metrics' CronJob series, which a rule in the namespace
+  may query (not with the `leaf-prometheus` evaluation scope). To run it by hand:
+  `oc create job --from=cronjob/dps-migrate-maintain dps-migrate-maintain-manual`.
 - **KEK rotation** (HANDOFF §6): mount the new KEK in `dps-job-kek` as `kek` and the old one as
   `kek_previous`, add `DPS_JOB_KEK_PREVIOUS_FILE=/var/run/secrets/dps/kek/kek_previous` to the app and
   both workers (release patch, JSON6902 `add` to `/spec/template/spec/containers/0/env/-`), roll,

@@ -74,3 +74,24 @@ spec:
             summary: "No DPS worker is up: jobs are queued but nothing claims them"
             description: >-
               No dps-worker pod has answered its /metrics scrape for 10 minutes.
+        # kube-state-metrics series (platform monitoring): a rule in a user namespace may read them
+        # for its own namespace (not with the leaf-prometheus evaluation scope). The second branch
+        # covers a CronJob that has never succeeded since it was created.
+        - alert: DpsAuditMaintenanceStale
+          expr: >-
+            time() - max by (namespace)
+            (kube_cronjob_status_last_successful_time{cronjob="dps-migrate-maintain"}) > 3 * 86400
+            or (time() - max by (namespace)
+            (kube_cronjob_created{cronjob="dps-migrate-maintain"}) > 3 * 86400
+            unless on (namespace)
+            kube_cronjob_status_last_successful_time{cronjob="dps-migrate-maintain"})
+          for: 1h
+          labels: {severity: warning}
+          annotations:
+            summary: "The audit-log partition maintenance has not succeeded for 3 days"
+            description: >-
+              CronJob dps-migrate-maintain (python -m dps.migrate --maintain, daily) creates the next
+              months' dps_audit_log partitions; the table has no DEFAULT partition, so once the
+              created months run out every audit write fails (audit_flush_failed in the logs). Read
+              the last failed Job's pod log and run it once by hand:
+              oc create job --from=cronjob/dps-migrate-maintain dps-migrate-maintain-manual.

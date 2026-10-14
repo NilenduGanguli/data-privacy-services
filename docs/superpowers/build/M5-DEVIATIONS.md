@@ -1180,6 +1180,51 @@ from main `64c46e3`, M3 merged, M4 not yet). The plan's layout and test list as 
   `/readyz` and `/metrics` answer without a key on port 8400 and are therefore reachable through the
   Route (README §6 says so).
 
+## S5 review r1 fix — audit partitions between releases (B1), one image digest per container (B2)
+
+Finish stage, branch `fos`, review `S5-review-r1.md` (2 blocking findings), fixed test-first.
+
+- **B1:** nothing on OpenShift ran `python -m dps.migrate --maintain`, and `dps_audit_log` has no
+  DEFAULT partition, so every audit write would fail about four months after the last release. Added
+  the base CronJob `dps-migrate-maintain`: `["python", "-m", "dps.migrate", "--maintain"]` daily at
+  03:17 `Etc/UTC` (the partitions are UTC months), `concurrencyPolicy: Forbid`,
+  `startingDeadlineSeconds: 3600`, history 3/3, and on the Job template `backoffLimit: 3` and
+  `activeDeadlineSeconds: 1800` (with Forbid a hung run would otherwise block every later one). Its
+  pod is the migrate Job's — SA `dps-migrate`, only `dps-pg-owner` and `dps-ca-bundle`, the same
+  security context, resources and `component: migrate` labels (DNS + `egress-dps-db`); a test keeps
+  the two pod templates equal except for the argument. `--maintain` first reruns `run_migrations`
+  (a no-op under the same advisory lock), which is as built (`dps/migrate.py`), not changed here.
+  Checker: `owner-secret` accepts `CronJob/dps-migrate-maintain` (exact name) besides
+  `Job/dps-migrate-*`, and `probes` exempts CronJob as well as Job. Added (reviewer's optional item)
+  alert `DpsAuditMaintenanceStale` (warning): kube-state-metrics' `kube_cronjob_status_last_successful_time`
+  older than 3 days, or `kube_cronjob_created` older than 3 days with no success — rules in a user
+  namespace may read platform metrics for that namespace; checked with `promtool test rules`.
+- **B2:** `DPS_IMAGE_DIGEST` was one ConfigMap value, so the browser worker (its own image; its M4
+  scan evidence packs read `settings.image_digest`) stamped the app's digest, and a release that
+  bumped the images but not the literal shipped stale provenance through `--fail-on-warn`. The
+  browser worker now has its own `DPS_IMAGE_DIGEST` env entry (zero placeholder; env overrides
+  `envFrom`). `release-example` derives both values with kustomize `replacements` from the images'
+  `@sha256:` part (source option `delimiter: "@"`, `index: 1`; kustomize runs replacements after
+  `images` in the same kustomization; a tag-only image fails the render) instead of a literal, and
+  uses a distinct browser digest (`2…2`, an example value like `1…1`). New deny rule
+  `image-digest-setting`: a DPS container's effective value must be a literal equal to its own image's
+  digest; unset denies, the zero placeholder only warns (`placeholder-digest`), an image without a
+  digest is left to `image-digest`.
+- Non-blocking items fixed because they were cheap and in the same files: N1 `AWS_CA_BUNDLE`
+  (= `org-ca.pem`) in the ConfigMap (boto3 ignores `SSL_CERT_FILE`/`DPS_SSL_CERT_FILE`; the code-side
+  `verify=` stays for F1/F2); N2 the release overlay's `resources` must be a relative path (README,
+  example header); N3 README §3: the worker exits with `MigrationDrift` and restarts until the
+  migrate Job completes; N4 `literal-secret` also matches `dps.posture.SECRET_ENV` names
+  (`SECRET_SETTINGS`, a test keeps it a superset); N5 deny rule `db-host` (`DPS_PG_HOST` must be
+  `dps-db`'s externalName); N6 host regexes end at any non-host character (lists); N12 README pull
+  secret for an external registry. Carried: N7 (`--proxy-headers` without `--forwarded-allow-ips`, an
+  F1 decision), N8 (M4 merge follow-ups), N9 (spread, opt-in PVC, preStop), N10, N11 (flaky
+  `test_one_audit_event_per_stream`, F4).
+- Tests: 16 new (52 deploy tests). Proofs: kubeconform `-strict` with the Kubernetes 1.27 and 1.29
+  schemas and the OpenShift 4.14/4.16 strict catalogs (a `timeZonee` typo is refused, so the CronJob is
+  really validated); the CronJob's rendered prod pod spec under the arbitrary-UID, read-only Docker
+  emulation against a TLS PostgreSQL 16, with the clock moved (HANDOFF §15).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

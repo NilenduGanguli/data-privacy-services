@@ -8,16 +8,20 @@ the release overlay the deploy agent writes over ``overlays/prod`` sets each of 
 overlays render and pass; ``--fail-on-warn`` makes the same check the release gate, refusing a
 release overlay that still carries one (the Wega pattern). The worked example
 (``deploy/openshift/release-example``) uses documentation values (``.example`` hosts,
-TEST-NET-2/3 CIDRs, a ``1…1`` digest) that warn as well, so a verbatim copy fails the gate too.
+TEST-NET-2/3 CIDRs, the ``1…1`` and ``2…2`` digests) that warn as well, so a verbatim copy fails
+the gate too.
 
 Hardening violations are *denials* (non-zero exit always): pod security for the ``restricted-v2``
 SCC (non-root arbitrary UID, ``RuntimeDefault`` seccomp, read-only root, no privilege escalation,
 all capabilities dropped, no host namespaces or ``hostPath``), resources, probes, digest-pinned
-images, secrets only as mounted files, the owner (DDL) login only in the migrate Job, a
-``default-deny`` NetworkPolicy, and no mocks or source systems in staging/prod. With the ``dps``
-package importable, each DPS container's settings are built from the ConfigMap and its env (every
-``*_FILE`` pointed at a dummy file) in a clean subprocess and, in staging/prod, run through the
-production posture guard (``dps.posture.posture_problems``).
+images, secrets only as mounted files, the owner (DDL) login only in the migrate Job and the
+audit-maintenance CronJob, a ``default-deny`` NetworkPolicy, and no mocks or source systems in
+staging/prod. Two consistency rules deny as well: each DPS container's ``DPS_IMAGE_DIGEST`` (stamped
+into every evidence pack) is the digest of the image that container runs, and ``DPS_PG_HOST`` is the
+``dps-db`` Service's externalName. With the ``dps`` package importable, each DPS container's
+settings are built from the ConfigMap and its env (every ``*_FILE`` pointed at a dummy file) in a
+clean subprocess and, in staging/prod, run through the production posture guard
+(``dps.posture.posture_problems``).
 
 Usage::
 
@@ -49,17 +53,40 @@ from typing import Any, Literal
 import yaml
 
 ZERO_DIGEST = "sha256:" + "0" * 64
-EXAMPLE_DIGEST = "sha256:" + "1" * 64
+EXAMPLE_DIGESTS = ("sha256:" + "1" * 64, "sha256:" + "2" * 64)  # app, browser (release example)
 TEST_NET_1 = ipaddress.ip_network("192.0.2.0/24")  # RFC 5737: committed placeholders
 EXAMPLE_NETS = (ipaddress.ip_network("198.51.100.0/24"), ipaddress.ip_network("203.0.113.0/24"))
-INVALID_HOST = re.compile(r"(?:[A-Za-z0-9-]+\.)+invalid(?=[:/]|$)")
-EXAMPLE_HOST = re.compile(r"(?:[A-Za-z0-9-]+\.)+example(?=[:/]|$)")
+# A host ends at any character a host name cannot hold (a comma list, a port, a path, the end).
+INVALID_HOST = re.compile(r"(?:[A-Za-z0-9-]+\.)+invalid(?![A-Za-z0-9.-])")
+EXAMPLE_HOST = re.compile(r"(?:[A-Za-z0-9-]+\.)+example(?![A-Za-z0-9.-])")
 SECRET_NAME = re.compile(r"(KEY|SECRET|PASSWORD|TOKEN|KEK)$")
+#: The secrets the production posture guard requires as files (``dps.posture.SECRET_ENV``; a test
+#: keeps this a superset). Kept here so the check runs without ``dps`` importable.
+SECRET_SETTINGS = frozenset(
+    {
+        "DPS_JOB_KEK",
+        "DPS_JOB_KEK_PREVIOUS",
+        "DPS_API_KEYS",
+        "DPS_COIN_CLIENT_ID",
+        "DPS_COIN_CLIENT_SECRET",
+        "DPS_PG_PASSWORD",
+        "DPS_PG_WORKER_PASSWORD",
+        "DPS_PG_MIGRATION_PASSWORD",
+        "DPS_TOKENIZER_TOKEN",
+        "DPS_AZURE_VISION_KEY",
+        "DPS_S3_ACCESS_KEY_ID",
+        "DPS_S3_SECRET_ACCESS_KEY",
+    }
+)
 PROD_FORBIDDEN = re.compile(r"mock|oracle|mongo|minio|source-pg")
 WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
+RUN_TO_COMPLETION = ("Job", "CronJob")  # no liveness/readiness probes
 OWNER_SECRET = "dps-pg-owner"
 MIGRATE_PREFIX = "dps-migrate-"
+MAINTAIN_CRONJOB = "dps-migrate-maintain"  # python -m dps.migrate --maintain, daily
 DPS_CONFIGMAP = "dps"
+DIGEST_SETTING = "DPS_IMAGE_DIGEST"
+DB_SERVICE = "dps-db"
 
 
 class RenderError(RuntimeError):
@@ -130,6 +157,26 @@ def objects(docs: Sequence[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     return [d for d in docs if d.get("kind") == kind]
 
 
+def is_secret_setting(name: str) -> bool:
+    """A variable that must never carry a literal: the guard's secrets, or a secret-like name."""
+    return name in SECRET_SETTINGS or bool(SECRET_NAME.search(name))
+
+
+def is_migrate_workload(kind: str, name: str) -> bool:
+    """The per-release migrate Job (``dps-migrate-<release>``) or the audit-maintenance CronJob."""
+    return (kind == "Job" and name.startswith(MIGRATE_PREFIX)) or (
+        kind == "CronJob" and name == MAINTAIN_CRONJOB
+    )
+
+
+def reads_dps_configmap(container: dict[str, Any]) -> bool:
+    """Whether a container takes the ``dps`` ConfigMap as its environment (a DPS process)."""
+    return any(
+        source.get("configMapRef", {}).get("name") == DPS_CONFIGMAP
+        for source in container.get("envFrom", []) or []
+    )
+
+
 def pod_spec(doc: dict[str, Any]) -> dict[str, Any] | None:
     """The pod spec of a workload object (``None`` for anything else)."""
     spec = doc.get("spec", {})
@@ -167,9 +214,8 @@ def configmap_data(docs: Sequence[dict[str, Any]], name: str = DPS_CONFIGMAP) ->
 def dps_container(pod: dict[str, Any]) -> dict[str, Any] | None:
     """The container that reads the ``dps`` ConfigMap (a DPS process), if any."""
     for c in pod.get("containers", []):
-        for source in c.get("envFrom", []):
-            if source.get("configMapRef", {}).get("name") == DPS_CONFIGMAP:
-                return c
+        if reads_dps_configmap(c):
+            return c
     return None
 
 
@@ -259,7 +305,7 @@ def placeholder_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
                         "warn", "placeholder-host", where, f"{path} names {host}; set the real one"
                     )
                 )
-            if EXAMPLE_DIGEST in value or EXAMPLE_HOST.search(value):
+            if any(d in value for d in EXAMPLE_DIGESTS) or EXAMPLE_HOST.search(value):
                 out.append(
                     Finding("warn", "example-value", where, f"{path} still has the example's value")
                 )
@@ -326,7 +372,7 @@ def _pod_findings(kind: str, name: str, pod: dict[str, Any]) -> Iterator[Finding
         for part in ("requests", "limits"):
             if not {"cpu", "memory"} <= set(res.get(part, {}) or {}):
                 yield Finding("deny", "resources", cname, f"cpu and memory {part} are required")
-        if kind != "Job" and c in pod.get("containers", []):
+        if kind not in RUN_TO_COMPLETION and c in pod.get("containers", []):
             if not (c.get("livenessProbe") and c.get("readinessProbe")):
                 yield Finding("deny", "probes", cname, "liveness and readiness probes are required")
         if "@sha256:" not in str(c.get("image", "")):
@@ -339,7 +385,7 @@ def _pod_findings(kind: str, name: str, pod: dict[str, Any]) -> Iterator[Finding
         mounts = [(m["mountPath"], volumes.get(m["name"], {})) for m in c.get("volumeMounts", [])]
         for entry in c.get("env", []) or []:
             env_name = str(entry.get("name"))
-            if "value" in entry and SECRET_NAME.search(env_name):
+            if "value" in entry and is_secret_setting(env_name):
                 yield Finding("deny", "literal-secret", cname, f"{env_name} has a literal value")
             if env_name.startswith("DPS_") and "secretKeyRef" in (entry.get("valueFrom") or {}):
                 yield Finding(
@@ -362,13 +408,13 @@ def hardening_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
         secrets = {
             v["secret"].get("secretName") for v in pod.get("volumes", []) or [] if "secret" in v
         }
-        if OWNER_SECRET in secrets and not (kind == "Job" and name.startswith(MIGRATE_PREFIX)):
+        if OWNER_SECRET in secrets and not is_migrate_workload(kind, name):
             out.append(
                 Finding(
                     "deny",
                     "owner-secret",
                     f"{kind}/{name}",
-                    f"only the migrate Job mounts {OWNER_SECRET}",
+                    f"only the migrate Job and CronJob/{MAINTAIN_CRONJOB} mount {OWNER_SECRET}",
                 )
             )
     for account in objects(docs, "ServiceAccount"):
@@ -380,7 +426,7 @@ def hardening_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
             )
     for cm in objects(docs, "ConfigMap"):
         for key in cm.get("data") or {}:
-            if str(key).startswith("DPS_") and SECRET_NAME.search(str(key)):
+            if str(key).startswith("DPS_") and is_secret_setting(str(key)):
                 out.append(Finding("deny", "literal-secret", ref(cm), f"{key} is a secret setting"))
     policies = objects(docs, "NetworkPolicy")
     if not any(
@@ -397,6 +443,92 @@ def hardening_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
                 out.append(
                     Finding("deny", "prod-mocks", ref(doc), f"no mock or source system in {env}")
                 )
+    return out
+
+
+# --- denials: consistency (provenance, the database host) -----------------------------------
+
+
+def _short(digest: str) -> str:
+    return digest[:19] + "…" if len(digest) > 19 else digest
+
+
+def image_digest_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
+    """A ``deny`` per DPS container whose ``DPS_IMAGE_DIGEST`` is not its own image's digest.
+
+    Evidence packs carry the setting (job packs from the worker, scan packs from the browser
+    worker), so each container must name the image it runs: the browser worker overrides the
+    ConfigMap's app digest in its env. The zero placeholder is left to ``placeholder-digest``
+    (a warning) and an image without a digest to ``image-digest``.
+    """
+    out: list[Finding] = []
+    for kind, name, pod in workloads(docs):
+        for c in containers(pod):
+            entries = [e for e in c.get("env", []) or [] if e.get("name") == DIGEST_SETTING]
+            if not (reads_dps_configmap(c) or entries):
+                continue  # not a DPS process
+            where = f"{kind}/{name} container {c.get('name')}"
+            if any("value" not in e for e in entries):
+                out.append(
+                    Finding(
+                        "deny",
+                        "image-digest-setting",
+                        where,
+                        f"{DIGEST_SETTING} must be a literal value (the check compares it with "
+                        "the image)",
+                    )
+                )
+                continue
+            image = str(c.get("image", ""))
+            if "@sha256:" not in image:
+                continue
+            digest = image.rsplit("@", 1)[1]
+            value = pod_environment(docs, c).get(DIGEST_SETTING, "")
+            if not value:
+                out.append(
+                    Finding(
+                        "deny",
+                        "image-digest-setting",
+                        where,
+                        f"{DIGEST_SETTING} is not set: evidence would name no image (set this "
+                        "container's image digest)",
+                    )
+                )
+            elif value != ZERO_DIGEST and value != digest:
+                out.append(
+                    Finding(
+                        "deny",
+                        "image-digest-setting",
+                        where,
+                        f"{DIGEST_SETTING} {_short(value)} is not this container's image digest "
+                        f"{_short(digest)}: evidence would name another build",
+                    )
+                )
+    return out
+
+
+def database_host_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
+    """A ``deny`` when ``DPS_PG_HOST`` is not the ``dps-db`` Service's externalName.
+
+    DPS dials ``DPS_PG_HOST`` (verify-full TLS checks the certificate against the name dialled);
+    ``dps-db`` is the in-namespace alias of the same server, and the README keeps them equal.
+    """
+    host = configmap_data(docs).get("DPS_PG_HOST")
+    out: list[Finding] = []
+    for service in objects(docs, "Service"):
+        spec = service.get("spec", {}) or {}
+        if service["metadata"]["name"] != DB_SERVICE or spec.get("type") != "ExternalName":
+            continue
+        if host is not None and host != spec.get("externalName"):
+            out.append(
+                Finding(
+                    "deny",
+                    "db-host",
+                    f"ConfigMap/{DPS_CONFIGMAP}",
+                    f"DPS_PG_HOST is not Service/{DB_SERVICE}'s externalName: set both to the "
+                    "platform PostgreSQL host",
+                )
+            )
     return out
 
 
@@ -495,7 +627,8 @@ def configuration_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
 
 def check(docs: Sequence[dict[str, Any]], *, settings: bool = True) -> list[Finding]:
     """Every finding for a render: hardening and configuration denials, placeholder warnings."""
-    findings = hardening_findings(docs) + placeholder_findings(docs)
+    findings = hardening_findings(docs) + image_digest_findings(docs) + database_host_findings(docs)
+    findings += placeholder_findings(docs)
     if settings:
         findings += configuration_findings(docs)
     return findings

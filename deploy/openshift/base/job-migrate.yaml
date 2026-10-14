@@ -2,6 +2,7 @@
 # mounts the owner login. `-0` is the committed placeholder: the release overlay renames the Job per
 # release (dps-migrate-<release>), because a Job's pod template is immutable and each release must
 # leave its own completed Job behind (the Wega rule). The app and the workers only verify the schema.
+# Its pod is copied into the CronJob dps-migrate-maintain (audit partitions, daily): change both.
 apiVersion: batch/v1
 kind: Job
 metadata:
