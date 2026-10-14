@@ -1183,6 +1183,13 @@ those streams' facts go ("(at the M4 merge)", "(Task 24/25/26)", "†" in the RE
    ```
 
    then `python tools/settings_table.py` and commit the regenerated table with the merge.
+3. Once `deploy/openshift/base` is merged,
+   `tests/test_handoff.py::test_handoff_names_every_workload_that_mounts_each_secret` runs: every
+   Deployment, Job and CronJob that mounts a Secret must be named in that Secret's §5 row
+   (checked against `fos` at `0b6a1e0`: it passes; against HANDOFF as of `3dc5d73` it fails on the
+   two rows of S7 review r1 B1 and on the browser-worker and CronJob rows).
+   §12's M4 and DoD 9 lines and §11's two Task 25 traps are written for those merges: drop the
+   "(at the …)" marks then.
 
 ## Programme plan F4 polish and review nits (finish stage, stream S7, branch `fdocs`)
 
@@ -1203,6 +1210,10 @@ Each fix test-first (the test failed before the change), all on `main`'s code as
 | M3 G6 review N3 — the smoke test sent `cursor=` on the first connections page | no cursor parameter until the API returns one | `dadeb7c` · `tests/test_smoke_cursor.py` |
 | M5 console review N2 — the evidence pack's section 2 said the key custody twice | the "Key id" row carries the key id and scope only | `423c716` · `src/pages/EvidencePack.custody.test.tsx` |
 | H2 verify open issue 2 — wizard step 4 let "0" or "abc" through as the append key offset; step 5 showed the raw validation message | `offsetProblem` mirrors the server's `PkOffset` rule (a whole number above 0, or a 1–16 character prefix) inline under the field and keeps step 4 closed; the MongoDB append readiness test now uses a complete strategy (`generate`) | `28130d4`, `b30d452` · `src/pages/wizard/offset.test.ts` |
+| S7 review r1 B2 — M1-N / N4 was half closed: while the next policy loaded, the previous one's detail stayed on screen and editable under the new name, and a save wrote its body into the new policy's draft | `onScreen` shows (and lets the page edit) only what was loaded for the route's name; a switch to another policy or key clears the page at once, a same-policy reload keeps it; a pending tenant policy shows "Loading <name>…" with no preset facts, adopt or write control; every write names the policy it was made on (`editTarget`, `saveEdit`; publish, discard, adopt); a write's late answer for a policy the user left is dropped; a switch closes an open dialog | `7bb202c` · `src/lib/policyLoad.test.ts`, `src/pages/Policies.test.tsx` |
+| S7 review r1 B1 — HANDOFF §5 said only `dps-app` reads `dps-pg-app` and called `dps-api-keys` optional, although the worker opens the API pool and runs the posture guard (non-empty `DPS_API_KEYS` in staging/prod) | §5 names every role that needs each secret (the worker, the browser-worker at the M4 merge, the operator's `dps.keys_cli`/`dps.rekey` runs); `dps-api-keys` is required at boot (it may hold `[]`); §3.3 says the worker runs the guard | `a6ebfa7` · `tests/test_handoff.py` |
+| S7 review r1 N3 — the append key offset accepted "0.5" (floored to 0, 422 at step 5) and turned "1.5" into 1 | digits and digit-group separators only | `08949db` · `src/pages/wizard/offset.test.ts` |
+| S7 review r1 N1, N2, N4–N8 — documentation gaps | "Since" M1 for the three SEC-1 COIN settings; the lost facts (COIN CA fallback, `no_sql_string_functions`, `ledger_owner`, KEK command) restored; `DPS_SMOKE_JOB_TIMEOUT`, `DPS_TEST_REQUIRE_TESSERACT`; §12 DoD 9 and the M4 log scan; `host_forbidden` in `api-m5.md`; the Task 25 kustomize traps; `bench_connector.py`'s usage block | `616f63a` · docs only, each fact read against the code or its branch (`settings_table.py --check` for the table) |
 
 Not fixed here (owner decisions, contract changes, security items the security stream owns, or
 larger than a polish item) and listed under the CHANGELOG's "Known limitations": the synthesis
@@ -1219,3 +1230,13 @@ the console in fixture mode, 1440 and 390 px): a quick switch from `pci-dss` (it
 page, and shows the late answer on the page as it was before (`64c46e3`); Overview and Policies
 render with no console error and no horizontal scroll. Screenshots in
 `~/.cache/dps-build/reports/S7-shots/`.
+
+S7 fix r1 browser re-check (same setup; probes, outputs and screenshots in
+`~/.cache/dps-build/reports/S7-fix-r1/`): the review's probe (adopt `pci-dss`, open
+`gdpr-pseudonymise`, delay `pci-dss`'s detail 4 s, switch) now shows "Loading pci-dss…" in the
+window with no matrix, 0 editable controls, no publish, discard or adopt and no write sent, then
+`pci-dss`'s own v1; preset `analytics-safe` to tenant `gdpr-pseudonymise` shows the loading line,
+not the preset's body (1440 and 390 px, no horizontal scroll); a save of `gdpr-pseudonymise` still
+in flight when the user switches goes to `gdpr-pseudonymise` with its own body and its late answer
+leaves `pci-dss` on screen; a publish dialog open during a back navigation closes and stays closed.
+0 console errors in every probe.
