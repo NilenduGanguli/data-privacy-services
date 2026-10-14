@@ -48,9 +48,10 @@ docker compose --env-file docker/compose.sources.env --profile full up --build -
                                      # a local demo literal), worker, metadata DB, OCR mock, demo PostgreSQL,
                                      # Oracle Free (~2.7 GB, 1-3 min first start), MongoDB, MinIO, tokenizer mock
 curl -fsS 127.0.0.1:8400/readyz      # poll until "ready": true (never `docker compose up --wait`)
+python tools/seed_sources.py --target all --rows 20000 --seed 7   # one customer space in PG, Oracle, MongoDB
+python tools/smoke_test.py --m3      # end-to-end checks; verdicts only, never a value
 python tools/demo_seed.py            # † tenant, keys, connections, policies, the demo job group
 python tools/e2e_demo.py --console   # † the ten-minute demo end to end, with console screenshots
-python tools/smoke_test.py --m3      # end-to-end checks; verdicts only, never a value
 docker compose --profile full down   # -v for a clean slate
 ```
 
