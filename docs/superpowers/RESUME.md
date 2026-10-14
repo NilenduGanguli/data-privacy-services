@@ -4,7 +4,7 @@
 > programme exactly where it stopped, without the original chat. It complements, and points into, the
 > binding documents listed in §2. **Do not trust the snapshot in §4 blindly — run §3 first.**
 
-**Last updated:** 2026-10-14 16:05 IST by the orchestrating session (workflow `wf_c77f2c08-9ae`, running 25 h, 93 agents finished, none lost).
+**Last updated:** 2026-10-14 17:15 IST. **Active orchestration: workflow `wf_c6c9b6f6-603` "dps-finish-fast"** (script copy: `docs/superpowers/build/orchestration/dps-finish-fast.workflow.js`); the earlier `wf_c77f2c08-9ae` "dps-to-v1" and `wf_4dc1989c-3ce` were stopped at 16:45.
 **Goal:** tag `v1.0.0` on `main` with every Definition-of-Done gate green (M0–M5 shipped).
 
 ---
@@ -102,6 +102,25 @@ Interpretation rules:
 - If `docker compose ls` fails: `open -a Docker` and wait for `docker info`.
 
 ## 4. Snapshot (re-check with §3)
+
+### 4.00 Orchestration since 2026-10-14 17:00 IST — "dps-finish-fast" (owner: finish fast, max effort, max parallelism)
+
+Docker Desktop raised to **16 CPUs / 36 GiB** (backup of the old settings: `~/.cache/dps-build/docker-settings-store.backup.json`).
+Seven streams run at once (every agent at max effort, verifications as parallel panels by lens):
+
+| Stream | Worktree / branch | Work | Then |
+|---|---|---|---|
+| S1 | main | M3 post-merge verification panel → tag `v0.4.0-m3` | after S2: merge `m4` → panel → tag `v0.5.0-m4` |
+| S2 | `dps-wt-m4` / `m4` | finish the in-progress merge of main into `m4`, adapt the scanner (SEC-5, SEC-2, M5 keys/posture/policy refs, discovery semantics), panel review | feeds S1, S3b, S4b, S6b |
+| S3 | `dps-wt-fsec` / `fsec` | security: 5 parallel finders by lens → adversarial refutation → T0 + T17 + confirmed fixes | after S2: merge `m4`, T8B + scanner SSRF/D4 |
+| S4 | `dps-wt-fimg` / `fimg` | T24 images, compose `full`, smoke M5 block, flow report, demo client | after S2: scanner in images/compose/smoke |
+| S5 | `dps-wt-fos` / `fos` | T25 OpenShift manifests | — |
+| S6 | `dps-wt-fdemo` / `fdemo` | T26B deck builder + test, demo script draft | after S4 + S2: T26 demo seed + e2e demo run, deck from real outputs, Keynote QA |
+| S7 | `dps-wt-fdocs` / `fdocs` | T27 docs tooling and drafts, polish items | — |
+| Release | main | merge fsec, fimg, fos, fdemo, fdocs → T28 → final verification panel (8 lenses) → `v1.0.0`, worktree cleanup | |
+
+Finish-stream ports: fsec 8416…, fimg 8417…, fdemo 8418…, fos 8419…, fdocs 8422… (each worktree's `.env`).
+Reports: `~/.cache/dps-build/reports/S*-*.md`, `FINAL-*`, `release*.md`.
 
 ### 4.0 Latest progress — 2026-10-14 16:05 IST (newest first; the table in 4.1 is the older detailed snapshot)
 
