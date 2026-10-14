@@ -1080,6 +1080,90 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
   `in_source` equals the source-vs-target count and the pack needs review), `tests/test_surrogates.py` (PAN now
   `0000`, invalid by design).
 
+## Task 25 — OpenShift manifests: kustomize base, components, dev and prod overlays (finish stage)
+
+Finish-stage work (programme plan §2.6, F2 deploy), built in worktree `dps-wt-fos` (branch `fos`,
+from main `64c46e3`, M3 merged, M4 not yet). The plan's layout and test list as written, except:
+
+- `DPS_PG_HOST`: the plan says `dps-db`; as built it is the platform host itself (placeholder
+  `postgres.example.invalid`, equal to `dps-db`'s externalName — a test keeps them equal).
+  `dps/db.py` `_ssl_context` verifies the server certificate with `check_hostname=True` whenever
+  `DPS_PG_SSL_ROOT_CERT` is set (a production posture requirement), against the host dialled; a
+  platform certificate does not name `dps-db`, so dialling the ExternalName alias would fail every
+  connection. The `dps-db` Service stays (contract) as the in-namespace alias.
+- ConfigMap `dps`: adds `DPS_VERIFY_WARN_ALLOWED=false` and `DPS_LLM_EGRESS_CHECK=strict` (Task 16's
+  boot rules — the plan's own posture test failed without the first) and `DPS_IMAGE_DIGEST` (a
+  zero-digest placeholder; the worker stamps it into every evidence pack). Drops
+  `DPS_SCAN_STORE_UNMASKED_ORIGINALS`: an M4 setting main's `Settings` does not have yet (default
+  false; M4's posture rule enforces it) — the new test that every `DPS_*` name is a real setting
+  would refuse it until the M4 merge.
+- App args keep the Dockerfile's `--no-access-log` (uvicorn's access log bypasses the structlog
+  allow-list) next to the plan's `--proxy-headers`.
+- Worker: mounts `dps-api-keys` (the plan: not needed for jobs). `dps.worker.main` runs
+  `assert_production_posture`, which requires `DPS_API_KEYS(_FILE)`; the probe shows the prod worker
+  without it (and the KEK) failing three posture rules. COIN, OCR and tokenizer stay (the engine).
+  Both workers get `terminationGracePeriodSeconds: 60` (drain of `DPS_JOB_DRAIN_TIMEOUT_SECONDS=30` plus
+  margin; the plan's "follow the app" gave the browser worker 30); the worker's `/tmp` is 4Gi
+  (`files` targets spool a partition there before the upload).
+- Browser worker: boots through the same posture guard (M4 `dps/browser_worker.py`), so it mounts
+  `dps-api-keys` and the KEK. It has no LLM/OCR/tokenizer mounts (plan), which with the shared
+  ConfigMap fails the guard (azure OCR needs a key, the http tokenizer a token — probe recorded), so
+  its env switches them off: `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`,
+  `DPS_LLM_PROVIDER=""` (the M4 scanner calls none of them). It keeps S3 (captures are artefacts) and
+  the connector refs (storage states).
+- The exports PVC is also mounted by the app: `POST /connections/{id}/test` of a `pvc` target puts and
+  deletes a probe object under `DPS_EXPORT_ROOT` in the app process (`registry.test_store`). The
+  README asks for ReadWriteMany.
+- Network policies: `egress-source-databases` selects the app and the worker (plan: worker only) — the
+  app opens connectors to `test` and `browse` (`routers/connections.py`); the object store has its own
+  `egress-object-store` for the app and both workers (the browser worker stores captures through the
+  ArtefactService), so `egress-gateways` is app + worker with one rule per endpoint (Stellar `.1`,
+  COIN `.2`, OCR `.3`, tokenizer `.4`) that a release patch tests and replaces one by one;
+  `egress-dps-db` also selects the migrate Job; the router policy also accepts OpenShift's newer
+  `policy-group.network.openshift.io/ingress` label; the dev-mocks component adds
+  `dev-mocks-ingress` / `egress-dev-mocks` (default-deny would cut the mocks off).
+- Selectors (Deployments, Services, PDBs) use `app.kubernetes.io/name` + `component` (plan: component
+  only). Every pod sets `enableServiceLinks: false` (Services named `dps-*` would inject `DPS_*`
+  variables that `Settings` reads) and `HOME=/tmp` (no passwd entry for the arbitrary UID; independent
+  of Task 24's image `ENV`).
+- PDB `dps-app`: `maxUnavailable: 1` (plan `minAvailable: 1`: with dev's one replica that blocks
+  every node drain; with prod's three it keeps two up instead of one).
+- Secret volumes: `defaultMode: 288` (decimal 0440; kustomize renders `0440` as 288 anyway); no
+  `optional: true` on `dps-api-keys` and `dps-tokenizer`, whose `*_FILE` variables are always set — a
+  missing secret would otherwise surface as a `Settings` file error at boot instead of a pod event
+  (`dps-connector-refs` stays optional: it is a directory, not a `_FILE`).
+- Monitoring: the PodMonitor sets `podTargetLabels: [app.kubernetes.io/component]` (the plan's
+  `DpsWorkersAbsent` selects `app_kubernetes_io_component`, which exists only with it);
+  `DpsNoDbKeysLoaded` selects the app (the gauge reads 0 in every worker process and would fire
+  forever); `DpsVerificationFailures`, `DpsExactRowResamplesHigh` and `DpsTokenizerFailing` sum across
+  pods (one alert, not one per pod), the last with `for: 5m`.
+- prod replicas: three JSON6902 files `patch-replicas-{app,worker,browser-worker}.yaml` (the worker's a
+  `test` only) instead of one `patch-replicas.yaml` (a JSON6902 patch cannot carry a value per target).
+- Route: `haproxy.router.openshift.io/timeout: 300s` (document routes run synchronously; the router's
+  default is 30 s).
+- Added for the Wega lessons (not in the plan): `tools/openshift_check.py` — placeholders and example
+  values warn; hardening, the owner secret, default-deny, mocks in prod, literal secrets and each
+  DPS role's `Settings` + production posture (a clean subprocess with dummy secret files) deny;
+  `--fail-on-warn` is the release gate — and `deploy/openshift/release-example/`, a release overlay
+  with every parameter set (documentation values that themselves warn as `example-value`), whose
+  clean result proves the parameter list complete.
+- Tests (`tests/deploy/test_openshift.py`): 36 (plan 13) — the plan's nine (the posture test runs per
+  role) plus Settings for every workload, every `DPS_*` name a setting, the DB host, secrets per role,
+  the dev mocks, network policies per role, monitoring, placeholders only warn, the release example,
+  a leftover placeholder, exit codes, the deny rules, the JSON6902 guard and the role modules (the
+  `dps.browser_worker` part skips until the M4 merge).
+- Verification: `kubeconform -strict` needs the OpenShift Route schema (not in its default catalog):
+  the run used `melmorabity/openshift-json-schemas` `v4.14-standalone-strict` for Route and the datree
+  CRD catalog for PodMonitor/PrometheusRule (dev 32/32, prod 25/25, release example 25/25 valid);
+  `promtool check rules` (local `prom/prometheus` image): 7 rules, SUCCESS. No cluster apply.
+- HANDOFF: the plan's "§7 (OpenShift)" is a new §15 (§7 is "Secrets" in the file as built; it gains
+  the OpenShift secret names) and a §1 row; contract §1 row and §11.1 line.
+- For the merge stage: the module test activates when M4 brings `dps.browser_worker`; M4's posture
+  additions are checked automatically by the browser-worker posture test; Task 24's images must make
+  `/app` readable by group 0 (the manifests already set `HOME=/tmp`). Security note for F1: `/health`,
+  `/readyz` and `/metrics` answer without a key on port 8400 and are therefore reachable through the
+  Route (README §6 says so).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -1106,4 +1190,5 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
   container itself runs once an `m5` image exists (Task 24 smoke).
 - Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
   `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
-  semantics are documented in HANDOFF §5 and contract §8.3.
+  semantics are documented in HANDOFF §5 and contract §8.3. **Closed by Task 25** (finish stage,
+  `deploy/openshift/components/monitoring/prometheusrule.yaml`).

@@ -71,6 +71,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
+| `deploy/openshift` | kustomize manifests | M5 Task 25: base (app, worker, browser-worker, migrate Job, `dps-db` ExternalName, Route), components (network policies, monitoring, dev mocks), `dev`/`prod` overlays with placeholders, a worked release example; `tools/openshift_check.py` is the release gate (§15) |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §13); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
 ## 2. Build
@@ -586,7 +587,10 @@ directories under each tenant's folder `DPS_SECRET_DIR/<tenant_id>/`: `dps/src/*
 `dps/src/mongo-crm`, `dps/tgt/mongo-crm-uat` under the demo tenant `default/`; an Oracle ref adds a
 `dsn` file, a Mongo ref a `uri` file), and `DPS_SECRET_DIR/_shared/*` for a secret
 several tenants may use. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
-set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
+set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds. On OpenShift
+these are the Secrets `dps-pg-app`, `dps-pg-worker`, `dps-pg-owner`, `dps-job-kek`, `dps-api-keys`,
+`dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3` and `dps-connector-refs` (which role mounts which,
+and their keys: §15 and `deploy/openshift/README.md` §2).
 
 Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
 **under the caller's tenant folder**, `DPS_SECRET_DIR/<tenant_id>/<ref>/` (the tenant comes from the
@@ -1308,3 +1312,48 @@ demo seed draws the customers from M3's `tools/seed_model.py` and keeps M5's rul
 a source-vs-target count. Console tests overwrite the tracked screenshots under
 `docs/superpowers/build/m3-shots/` (A-N2). Start main with `DPS_TOKENIZER_MOCK_PORT=8430` while the
 M4 lane holds 8420. Gates and results: `~/.cache/dps-build/reports/I-m3.md`.
+
+## 15. OpenShift (M5 Task 25, finish stage, branch `fos`)
+
+Manifests in `deploy/openshift` (Wega layout; full guide and parameter table in
+`deploy/openshift/README.md`): `base/` (Deployments `dps-app`, `dps-worker`, `dps-browser-worker`;
+Job `dps-migrate-0`; Services `dps-app` and `dps-db` — an ExternalName to the platform PostgreSQL;
+Route `dps-app` with edge TLS, HTTP redirected, router timeout 300 s; PDBs `maxUnavailable: 1`;
+four ServiceAccounts without tokens; ConfigMap `dps` from `configmap-dps.env`), components
+`network-policies` (default-deny + one allow per path), `monitoring` (PodMonitor + PrometheusRule
+with the seven alerts of §5, `DpsRawPiiSentToLlm` critical), `dev-mocks` (tokenizer mock running a
+byte-identical copy of `docker/tokenizer-mock/server.py`, Azure OCR mock), overlays `dev`
+(namespace `dps-dev`, one replica each, mocks, stub LLM, TLS egress off) and `prod` (`dps-prod`,
+app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
+
+- **Pod security (`restricted-v2`):** no `runAsUser` (the namespace's arbitrary UID), `runAsNonRoot`,
+  `RuntimeDefault` seccomp, read-only root, no privilege escalation, `drop: [ALL]`, no SA token, no
+  service links (Services named `dps-*` would inject `DPS_*` variables), `/tmp` an `emptyDir`,
+  `HOME=/tmp` in the pod env (so the manifests do not depend on the image's `HOME`), secret files
+  mode `0440` read through the SCC-assigned `fsGroup`, images pinned by digest.
+- **Secrets are files only** (`DPS_*_FILE`, the M5 posture rule). The app and both workers pass the
+  production posture guard at boot, so each mounts `dps-api-keys` and `dps-job-kek`; the worker
+  logs in as `dps_worker_login` (no app login); only the migrate Job mounts `dps-pg-owner`. The
+  browser worker runs with `DPS_LLM_PROVIDER=""`, `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`
+  and mounts none of their secrets.
+- **Metadata DB host:** `DPS_PG_HOST` is the platform host itself (equal to `dps-db`'s
+  externalName): verify-full TLS (`DPS_PG_SSL_ROOT_CERT`, `dps/db.py`) checks the certificate against
+  the name dialled, which a platform certificate does not issue for `dps-db`.
+- **Placeholders → release overlay:** zero digests (images and `DPS_IMAGE_DIGEST`), `.invalid` hosts
+  (DB, S3, Stellar, COIN, OCR gateway, tokenizer, Route), TEST-NET-1 NetworkPolicy peers (one per
+  endpoint: DB `192.0.2.10/32`, gateways `.1`–`.4`, object store `.5`, source databases
+  `192.0.2.32/27`, scan targets `192.0.2.64/27`) and the Job name `dps-migrate-0` (renamed per
+  release). `python tools/openshift_check.py <dir>` warns on each and denies hardening violations and
+  — with `dps` importable — any role whose settings fail `Settings` or (staging/prod) the posture
+  guard; `--fail-on-warn` is the release gate. Every JSON6902 `replace` is preceded by a `test` of the
+  committed value (tests enforce it).
+- **Platform prerequisites:** user-workload monitoring; ConfigMap `dps-ca-bundle` (`pg-root.pem`,
+  `org-ca.pem`); RWX PVC `dps-exports` (the worker writes `pvc` targets, the app's connection test
+  probes it); the secrets above; network paths for every peer. Connector `secret_ref` folders come
+  from `dps-connector-refs` with an `items` layout (or a CSI/Vault mount) at `DPS_SECRET_DIR`.
+- **Verified 2026-10-14 (`fos`):** `pytest -m deploy tests/deploy/test_openshift.py` 35 passed, 1
+  skipped (`dps.browser_worker` arrives with the M4 merge); `kustomize build` (v5.8.1) of dev, prod
+  and the release example; `kubeconform -strict` (Kubernetes 1.29 schemas, the OpenShift 4.14 Route
+  schema, the datree CRD catalog for PodMonitor/PrometheusRule): dev 32/32, prod 25/25, release
+  example 25/25 valid; `promtool check rules` on the PrometheusRule: 7 rules, SUCCESS. Not done here:
+  a live cluster apply (none available) and running the images under an arbitrary UID (Task 24).

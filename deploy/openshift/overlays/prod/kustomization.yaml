@@ -1,0 +1,32 @@
+# prod: the base with network policies and monitoring, no mocks; app 3, worker 2, browser-worker 1.
+# Not applied as is: a release overlay over this directory sets every placeholder (image digests,
+# hosts, CIDRs, the migrate Job's name) — deploy/openshift/README.md and ../../release-example.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dps-prod
+resources:
+  - ../../base
+components:
+  - ../../components/network-policies
+  - ../../components/monitoring
+images:
+  - name: data-privacy-services
+    newName: image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  - name: data-privacy-services-browser
+    newName: image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services-browser
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: dps
+    behavior: merge
+    literals:
+      - DPS_ENV=prod
+patches:
+  - path: patch-replicas-app.yaml
+    target: {kind: Deployment, name: dps-app}
+  - path: patch-replicas-worker.yaml
+    target: {kind: Deployment, name: dps-worker}
+  - path: patch-replicas-browser-worker.yaml
+    target: {kind: Deployment, name: dps-browser-worker}

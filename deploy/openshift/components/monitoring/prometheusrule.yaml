@@ -1,0 +1,76 @@
+# Alerts on the DPS metrics (HANDOFF §5, contract §8.3). Labels and annotations carry tenant ids,
+# modes and counts only — never a value. DpsRawPiiSentToLlm must never fire (spec P1): with
+# DPS_LLM_EGRESS_CHECK=strict a prompt holding a raw value is blocked (DpsLlmExposureBlocked) instead.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: dps
+  labels: {app.kubernetes.io/name: data-privacy-services}
+spec:
+  groups:
+    - name: dps.privacy
+      rules:
+        - alert: DpsRawPiiSentToLlm
+          expr: >-
+            sum by (tenant_id) (increase(dps_llm_raw_pii_sent_by_tenant_total[10m])) > 0
+            or dps_llm_raw_pii_sent_total > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "Raw sensitive values reached the LLM gateway (tenant {{ $labels.tenant_id }})"
+            description: >-
+              dps_llm_raw_pii_sent_by_tenant_total increased: a prompt carrying a raw value was sent.
+              Production runs DPS_LLM_EGRESS_CHECK=strict, which blocks such prompts; check the
+              setting and the gateway logs (llm_egress_raw_values_sent), which name counts only.
+        - alert: DpsLlmExposureBlocked
+          expr: sum by (tenant_id) (increase(dps_llm_exposure_blocked_by_tenant_total[15m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "The LLM egress verifier blocked a prompt (tenant {{ $labels.tenant_id }})"
+            description: >-
+              A caller's prompt held a protected or self-identifying value; nothing was sent and the
+              caller fell back to its deterministic path (fallback egress_blocked).
+        - alert: DpsVerificationFailures
+          expr: sum by (mode) (increase(dps_verification_failures_total[15m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "Leakage verification failed ({{ $labels.mode }})"
+            description: >-
+              A leakage sweep found an original in an output; under strict verification the unit
+              was refused and nothing was written for it (code leakage).
+    - name: dps.platform
+      rules:
+        - alert: DpsExactRowResamplesHigh
+          expr: sum(increase(dps_tabular_resamples_total[1h])) > 1000
+          labels: {severity: info}
+          annotations:
+            summary: "Synthetic tables redraw many rows that equal a real row"
+            description: >-
+              More than 1000 synthetic rows in an hour were redrawn because they matched a real
+              row exactly: the source has few distinct value combinations for the modelled columns.
+        - alert: DpsTokenizerFailing
+          expr: sum(increase(dps_external_token_calls_total{outcome!="ok"}[10m])) > 10
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Calls to the bank tokenization service are failing"
+            description: >-
+              external_tokenize calls answered refused, malformed or unavailable; jobs retry with
+              tokenization_unavailable and L1 answers 502.
+        - alert: DpsNoDbKeysLoaded
+          expr: dps_auth_keys_loaded{app_kubernetes_io_component="app"} == 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "An app replica serves no database API keys ({{ $labels.pod }})"
+            description: >-
+              The replica's key snapshot is empty: only the static DPS_API_KEYS_FILE keys work there.
+              Expected right after installation until the first key is created with
+              python -m dps.keys_cli create.
+        - alert: DpsWorkersAbsent
+          expr: absent(up{app_kubernetes_io_component="worker"} == 1)
+          for: 10m
+          labels: {severity: critical}
+          annotations:
+            summary: "No DPS worker is up: jobs are queued but nothing claims them"
+            description: >-
+              No dps-worker pod has answered its /metrics scrape for 10 minutes.

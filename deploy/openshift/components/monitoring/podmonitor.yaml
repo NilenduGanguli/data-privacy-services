@@ -1,0 +1,17 @@
+# /metrics of the app (port http, 8400) and of both workers (port ops, 9400 / 9401). Each pod has
+# one of the two named ports. podTargetLabels copies the role onto every series
+# (app_kubernetes_io_component), which the alerts select on.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dps
+  labels: {app.kubernetes.io/name: data-privacy-services}
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, worker, browser-worker]}
+  podTargetLabels: [app.kubernetes.io/component]
+  podMetricsEndpoints:
+    - {port: http, path: /metrics, interval: 30s}
+    - {port: ops, path: /metrics, interval: 30s}

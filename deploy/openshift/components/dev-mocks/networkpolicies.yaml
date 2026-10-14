@@ -1,0 +1,41 @@
+# The mocks sit behind default-deny like everything else: the app and the worker (the engine's two
+# callers) may reach them; nothing else may, and the mocks call nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dev-mocks-ingress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [tokenizer-mock, azure-ocr-mock]}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: data-privacy-services}
+            matchExpressions:
+              - {key: app.kubernetes.io/component, operator: In, values: [app, worker]}
+      ports:
+        - {protocol: TCP, port: 8420}
+        - {protocol: TCP, port: 5000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-dev-mocks
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, worker]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: data-privacy-services}
+            matchExpressions:
+              - {key: app.kubernetes.io/component, operator: In, values: [tokenizer-mock, azure-ocr-mock]}
+      ports:
+        - {protocol: TCP, port: 8420}
+        - {protocol: TCP, port: 5000}

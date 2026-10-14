@@ -1,0 +1,74 @@
+# A worked release overlay over overlays/prod: it sets every deploy parameter of
+# deploy/openshift/README.md, here with documentation values (.example hosts, TEST-NET-2 CIDRs, a
+# 1…1 digest) that the release check also refuses, so this file cannot be shipped as is.
+#
+#   cp -r deploy/openshift/release-example <release-dir>   # e.g. next to the checkout, untracked
+#   # point `resources` at <checkout>/deploy/openshift/overlays/prod and replace every value below
+#   python tools/openshift_check.py <release-dir> --fail-on-warn   # 0 warnings, 0 denials
+#   kustomize build <release-dir> | oc apply -f -
+#
+# Every patch is JSON6902 with a `test` of the committed placeholder before the `replace`, so a
+# changed base fails the render instead of patching the wrong field (the Wega rule).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../overlays/prod
+images:
+  - name: image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services
+    newName: registry.bank.example/dps/data-privacy-services
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  - name: image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services-browser
+    newName: registry.bank.example/dps/data-privacy-services-browser
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: dps
+    behavior: merge
+    literals:
+      - DPS_PG_HOST=pgsql-dps.bank.example
+      - DPS_S3_ENDPOINT_URL=https://s3.bank.example
+      - DPS_STELLAR_BASE_URL=https://stellar.bank.example
+      - DPS_COIN_URL=https://coin.bank.example/oauth2/token
+      - DPS_AZURE_VISION_ENDPOINT=https://ocr-gateway.bank.example
+      - DPS_TOKENIZER_URL=https://tokenizer.bank.example
+      - DPS_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111
+patches:
+  - target: {kind: Service, name: dps-db}
+    patch: |-
+      - {op: test, path: /spec/externalName, value: postgres.example.invalid}
+      - {op: replace, path: /spec/externalName, value: pgsql-dps.bank.example}
+  - target: {kind: Route, name: dps-app}
+    patch: |-
+      - {op: test, path: /spec/host, value: dps.apps.example.invalid}
+      - {op: replace, path: /spec/host, value: dps.apps.bank.example}
+  - target: {kind: Job, name: dps-migrate-0}
+    patch: |-
+      - {op: test, path: /metadata/name, value: dps-migrate-0}
+      - {op: replace, path: /metadata/name, value: dps-migrate-1-0-0}
+  - target: {kind: NetworkPolicy, name: egress-dps-db}
+    patch: |-
+      - {op: test, path: /spec/egress/0/to/0/ipBlock/cidr, value: 192.0.2.10/32}
+      - {op: replace, path: /spec/egress/0/to/0/ipBlock/cidr, value: 198.51.100.10/32}
+  - target: {kind: NetworkPolicy, name: egress-gateways}
+    patch: |-
+      - {op: test, path: /spec/egress/0/to/0/ipBlock/cidr, value: 192.0.2.1/32}
+      - {op: replace, path: /spec/egress/0/to/0/ipBlock/cidr, value: 198.51.100.1/32}
+      - {op: test, path: /spec/egress/1/to/0/ipBlock/cidr, value: 192.0.2.2/32}
+      - {op: replace, path: /spec/egress/1/to/0/ipBlock/cidr, value: 198.51.100.2/32}
+      - {op: test, path: /spec/egress/2/to/0/ipBlock/cidr, value: 192.0.2.3/32}
+      - {op: replace, path: /spec/egress/2/to/0/ipBlock/cidr, value: 198.51.100.3/32}
+      - {op: test, path: /spec/egress/3/to/0/ipBlock/cidr, value: 192.0.2.4/32}
+      - {op: replace, path: /spec/egress/3/to/0/ipBlock/cidr, value: 198.51.100.4/32}
+  - target: {kind: NetworkPolicy, name: egress-object-store}
+    patch: |-
+      - {op: test, path: /spec/egress/0/to/0/ipBlock/cidr, value: 192.0.2.5/32}
+      - {op: replace, path: /spec/egress/0/to/0/ipBlock/cidr, value: 198.51.100.5/32}
+  - target: {kind: NetworkPolicy, name: egress-source-databases}
+    patch: |-
+      - {op: test, path: /spec/egress/0/to/0/ipBlock/cidr, value: 192.0.2.32/27}
+      - {op: replace, path: /spec/egress/0/to/0/ipBlock/cidr, value: 198.51.100.32/27}
+  - target: {kind: NetworkPolicy, name: egress-scan-targets}
+    patch: |-
+      - {op: test, path: /spec/egress/0/to/0/ipBlock/cidr, value: 192.0.2.64/27}
+      - {op: replace, path: /spec/egress/0/to/0/ipBlock/cidr, value: 198.51.100.64/27}

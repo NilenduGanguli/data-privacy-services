@@ -1,0 +1,11 @@
+# The app's in-cluster address (the Route targets it). Workers have no Service: nothing calls them;
+# their ops ports are scraped by the PodMonitor directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dps-app
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: app}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: app}
+  ports: [{name: http, port: 8400, targetPort: http, protocol: TCP}]

@@ -1,0 +1,14 @@
+# The platform PostgreSQL 16 instance (never deployed by DPS): an in-namespace alias for operators
+# (`psql -h dps-db`) and the one place the platform host is named in the cluster. The release overlay
+# sets externalName — and DPS_PG_HOST to the same host: DPS dials the platform host itself, because
+# verify-full TLS (DPS_PG_SSL_ROOT_CERT) checks the server certificate against the name dialled, and
+# a platform certificate names its own host, not `dps-db` (tests/deploy keep the two equal).
+apiVersion: v1
+kind: Service
+metadata:
+  name: dps-db
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: database}
+spec:
+  type: ExternalName
+  externalName: postgres.example.invalid
+  ports: [{name: postgres, port: 5432, protocol: TCP}]

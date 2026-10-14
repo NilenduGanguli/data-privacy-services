@@ -1,0 +1,4 @@
+# JSON6902, "test before replace" (the Wega rule): the base carries replicas: 2 on every role, so a
+# base that changes fails this render instead of being patched blindly.
+- {op: test, path: /spec/replicas, value: 2}
+- {op: replace, path: /spec/replicas, value: 1}

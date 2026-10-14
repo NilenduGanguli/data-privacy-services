@@ -1,0 +1,37 @@
+# dev: one replica each, the two dev mocks (tokenizer, Azure OCR), the stub LLM, TLS egress relaxed
+# for the in-namespace mocks. Images, hosts and CIDRs stay placeholders until a dev release overlay
+# sets them (README). Order: the base's resources, then this file's generators (the dps ConfigMap
+# merge below reaches the base's generated ConfigMap), then the components, then the patches.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dps-dev
+resources:
+  - ../../base
+components:
+  - ../../components/network-policies
+  - ../../components/monitoring
+  - ../../components/dev-mocks
+images:
+  - name: data-privacy-services
+    newName: image-registry.openshift-image-registry.svc:5000/dps-dev/data-privacy-services
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  - name: data-privacy-services-browser
+    newName: image-registry.openshift-image-registry.svc:5000/dps-dev/data-privacy-services-browser
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  - name: azure-ocr-mock
+    newName: image-registry.openshift-image-registry.svc:5000/dps-dev/azure-ocr-mock
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: dps
+    behavior: merge
+    literals:
+      - DPS_ENV=dev
+      - DPS_LLM_PROVIDER=stub
+      - DPS_TOKENIZER_URL=http://dps-tokenizer-mock:8420
+      - DPS_AZURE_VISION_ENDPOINT=http://dps-azure-ocr-mock:5000
+      - DPS_EGRESS_TLS_REQUIRED=false
+patches:
+  - path: patch-replicas.yaml
+    target: {kind: Deployment, name: "dps-(app|worker|browser-worker)"}

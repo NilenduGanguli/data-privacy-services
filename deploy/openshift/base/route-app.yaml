@@ -1,0 +1,16 @@
+# The console and API behind the OpenShift router: TLS terminated at the edge, plain HTTP
+# redirected. The release overlay sets the host. Document routes run synchronously (OCR of a
+# 200-page PDF takes minutes), so the router timeout is raised from its 30 s default.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: dps-app
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: app}
+  annotations:
+    haproxy.router.openshift.io/timeout: 300s
+spec:
+  host: dps.apps.example.invalid
+  to: {kind: Service, name: dps-app, weight: 100}
+  port: {targetPort: http}
+  tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}
+  wildcardPolicy: None
