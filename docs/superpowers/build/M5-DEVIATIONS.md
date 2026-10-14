@@ -1107,3 +1107,106 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
 - Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
   `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
   semantics are documented in HANDOFF §5 and contract §8.3.
+
+## Task 27 — HANDOFF complete, README, API reference, changelog (finish stage, stream S7, branch `fdocs`)
+
+Finish-stage work, built on `main` `64c46e3` (M0, M1, M2, M3 and M5 merged). The UI scanner (M4),
+Task 24 (images, compose `full` settings, smoke M5 block, flow report), Task 25 (OpenShift) and
+Task 26 (demo) are not on this branch, so the documents describe the merged code and mark where
+those streams' facts go ("(at the M4 merge)", "(Task 24/25/26)", "†" in the README). The release
+(Task 28) folds them in and regenerates the settings table.
+
+- `tools/settings_table.py` as planned, plus: columns *Variable · Default · Secret · Since · What it
+  does*; `problems()` names every setting without a `FIELD_DOCS` entry and every stale entry (both
+  fail `--check` and `tests/test_handoff.py`); a hidden `--handoff PATH` for the tests; defaults come
+  from the class, never the environment, and secret fields always render `—`. The descriptions were
+  checked against the code, which corrected the old HANDOFF in places: `DPS_MIN_SCORE` *is* read
+  (the detector floor for `POST /schema/generator-spec` samples), `DPS_DEFAULT_POLICY` takes a
+  shipped preset (not an `@name` reference), `DPS_MIGRATIONS_MODE=verify` with pending migrations
+  turns the job routes to 503 `db_unavailable`, the retry back-off is `min(max, base × 2^attempts)`
+  with ±50 % jitter.
+- `tests/test_handoff.py`: the plan's four tests and three for the tool (an undocumented or stale
+  setting is named; a stale table fails `--check` and the rewrite fixes it without touching the rest
+  of the file; secret rows never show a default). `test_handoff_lists_every_secret_the_manifests_mount`
+  **skips while `deploy/openshift/base` is absent** (Task 25 is on branch `fos`); it runs, and must
+  pass, once that merges (DoD 1 allows no other skip). HANDOFF §5 lists the plan's secret names; the
+  manifests' names win if they differ.
+- `HANDOFF.md` rewritten to the final 13 sections. Milestone history and gate records moved to
+  `CHANGELOG.md` (exit evidence) and the build reports; every current fact of the old sections was
+  kept (traps regrouped by area). "Last verified" stays the first line after the title for Task 28.
+- `docs/technical/api-m5.md`: routes, fields and codes **as built**. The plan's `host_forbidden`
+  does not exist in the code (the scanner's SSRF refusals arrive with Task 17's netguard work in
+  the security stream); `invalid_grace`, `invalid_cursor`, `key_expired`, `policy_store_unavailable`,
+  `invalid_change_ticket` and `invalid_note` do and are listed.
+- `CHANGELOG.md` is the draft: one paragraph per milestone from the shipped code and its exit
+  evidence (M4's from branch `m4`'s lane verification r3, to be confirmed after its merge), then
+  "Known limitations" gathered from every review and verification report; HTML comments mark what
+  the release fills. `README.md` has its final shape with "†" on the files and profile that arrive
+  with the finish-stage merges.
+- `.env.example` is still not updated (M5 Task 1's deferred item): reading or writing `.env*` files
+  is denied to the build agents. Recorded under the CHANGELOG's known limitations; the owner can
+  append the variables from HANDOFF §3.
+
+**For the integrator (merge of `fdocs` after M4, `fsec`, `fimg`, `fos`, `fdemo`):**
+
+1. HANDOFF conflicts: keep this file's structure and move the merged sections' facts into it —
+   M4 → §1 (browser image row), §3.3 (posture rules), §4 (profile `scanner`, services
+   `browser-worker` and `demo-site`, `DPS_DEMO_SITE_PORT`), §5 (`storage_state.json` refs), §6 (scan
+   targets), §9 (adding scanner hosts: `host_not_registered`), §10 (`browser` readiness, scanner
+   metrics), §11 (scanner traps), §12 (browser gate); Task 24 → §1/§2 (arbitrary UID, `EXTRAS`
+   build argument, sizes), §4 (compose settings, smoke M5 block, `tools/flow_report.py`); Task 25
+   → §5 table (the manifests' secret names), §7 (README steps and parameter table), §10 (alerts);
+   Task 26 → §4 (demo seed, e2e demo) and the README "†" lines; the security stream → the README
+   link and §3.3 if the posture changed. Remove the "(at the …)" and "†" marks that are then true.
+2. `tests/test_handoff.py` then names every setting the merges added. M4's eighteen settings, ready
+   to paste into `FIELD_DOCS` (check them against the merged `dps/config.py`):
+
+   ```python
+   "browser_concurrency": ("M4", "Scans one browser-worker runs at a time (1–16)."),
+   "browser_metrics_port": ("M4", "Browser-worker ops server (`/health`, `/readyz`, `/metrics`); `0` turns it off."),
+   "browser_headless": ("M4", "Headless Chromium; must stay `true` in staging/prod."),
+   "scan_max_pages": ("M4", "Hard cap of pages per scan (1–500)."),
+   "scan_max_depth": ("M4", "Link depth when a scan names none (0–5)."),
+   "scan_page_timeout_seconds": ("M4", "One page's load-and-fill time limit."),
+   "scan_job_timeout_seconds": ("M4", "One scan's time limit."),
+   "scan_registered_hosts": ("M4", "Local/dev fallback list of scannable hosts; production reads each tenant's `registered_hosts`."),
+   "scan_store_unmasked_originals": ("M4", "Store unmasked page captures (local only; must be `false` in staging/prod)."),
+   "scan_max_per_template": ("M4", "Visits per URL template."),
+   "scan_max_spa_clicks_per_page": ("M4", "In-page navigation clicks tried per page."),
+   "scan_max_fields_per_page": ("M4", "Form fields classified and filled per page."),
+   "scan_max_skipped_rows": ("M4", "Skipped-page rows kept for the crawl map."),
+   "scan_max_events": ("M4", "Navigation-log rows kept per scan."),
+   "scan_settle_ms": ("M4", "Wait after a load or a fill for client-side rendering."),
+   "scan_viewport_width": ("M4", "Browser viewport width (px)."),
+   "scan_viewport_height": ("M4", "Browser viewport height (px)."),
+   "scan_screenshot_max_height": ("M4", "Full-page captures are cropped at this height (px)."),
+   ```
+
+   then `python tools/settings_table.py` and commit the regenerated table with the merge.
+
+## Programme plan F4 polish and review nits (finish stage, stream S7, branch `fdocs`)
+
+Each fix test-first (the test failed before the change), all on `main`'s code as merged:
+
+| Item (source) | Fix | Commit · test |
+|---|---|---|
+| M1-N / M5 console review N4 — the Policies page could show the previous policy's late answer after a quick switch; `readOnly` never reset on a new key | `lib/policyLoad.ts`: `Latest` guards every load (`loadPolicyDetail` drops answers and errors of a policy the user left and clears the old preset body); the diff effects drop late answers; a new key starts writable | `2df5da9` · `src/lib/policyLoad.test.ts` |
+| M5 console review N3 — a refused draft save escaped as an unhandled rejection | `saveEdit` handles it (the page already shows the error) | `2df5da9` · same file |
+| M5 console review R2-5 — `declaredSince` skipped declared paths named like `Object.prototype` members | prototype-free map | `2df5da9` · same file |
+| M5 console review N1, R2-1 — fixed reassuring text beside a non-zero "raw PII sent to LLM" / exact-row figure | wording from the number; the tile (`Kpi alert`) and chip turn rose above 0 | `7934d2a` · `src/components/zeroTiles.test.tsx` |
+| A-N1 (H2 verify) — `tools/demo_m2.py` stopped at `group_not_found` after `down -v` | a saved group the server lost is left untouched (it holds the only copy of its key) and the next free name is used | `2cba6e8` · `tests/test_demo_m2_group.py` |
+| A-N2 (H2 verify, M3 G6 review N1) — `tools/console_check.py` and the M3 console tests rewrote committed screenshots | `tools/shots.py`: shots go to the git-ignored `reports/console/<name>/`; `DPS_SHOTS_DIR` moves them on purpose; `/reports/` (anchored: `dps/layers/reports` stays tracked) is ignored | `9c1c8bb`, `dbd6d8a` · `tests/test_shots_dir.py` |
+| M5 G4 review N1 — `GET /policies/{name}/versions/2147483648` and `diff?from=99999999999` answered 500 | version numbers bounded 1–999999 (422 outside) | `adff249` · `tests/test_policy_store_bounds.py` |
+| M5 G3 review r2 N10 — an evidence PDF with hundreds of review columns, custody or fallback entries failed to render (500) | lists in one cell capped at 20 entries + "… and N more (see the JSON pack)" | `4ac7d59` · `tests/test_evidence_pdf_long_lists.py` |
+| M5 G3 review r2 N2 (part) — a roll-up document for a future day left a refresh marker that never ages out | a day after today is 404 `rollup_not_found` before any refresh | `e2ad31f` · `tests/test_reports_future_day.py` |
+| M3 G6 review N2 — `bench_connector.py --engine oracle\|mongo` defaulted to 200 000 rows | 20 000 rows / 5 000-row partitions for Oracle and MongoDB (PostgreSQL unchanged) | `753e2e4` · `tests/test_bench_defaults.py` |
+| M3 G6 review N3 — the smoke test sent `cursor=` on the first connections page | no cursor parameter until the API returns one | `dadeb7c` · `tests/test_smoke_cursor.py` |
+
+Not fixed here (owner decisions, contract changes, security items the security stream owns, or
+larger than a polish item) and listed under the CHANGELOG's "Known limitations": the synthesis
+residuals (name and e-mail pools, verbatim non-personal columns under `tabular: none`, dependent
+fields, FF1 collisions onto issued ids, identifier-check scope), the evidence wording items, the
+in-place synthesize with a declared foreign key, the metadata database lost after start (found
+here: 500 instead of 503, `/readyz` not re-probed), MongoDB connector input errors as 502, the
+admin/tenant hardening items of the M5 G3/G4 reviews, the `SelectionError` context, the console
+nits, `.env.example`, the one-shot health status and the scanner residuals of M4's verification.
