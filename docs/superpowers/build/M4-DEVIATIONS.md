@@ -1320,3 +1320,95 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   (url, scope ×4, auth ×2, fill ×4, scope-before-fill), each answering exactly `{detail, code}`, no
   URL value in the body, one `rejected` 422 audit event without values; unknown keys / wrong `mode`
   / mixed bodies stay codeless field lists; a caller without the `scan` scope still gets 403 first.
+
+## M4 lane verification round 1 — fixes for the five blocking findings
+
+Findings: `/Users/neelu/.cache/dps-build/reports/M4-verify-r1.md` (HEAD `fabbd81`). Every fix was
+written test first; each new test failed on `fabbd81` (the verifier's probes reproduced each finding
+there) and passes now.
+
+- **F1 — D4/D-C race in `ScanGuard.arm`** (`guard.py`). `_lock` registered `LOCK_JS` with
+  `add_init_script` only *after* `_open_pages` had taken its snapshot, so a popup opened in between
+  was in neither (not locked at birth, not in the list); its pre-fill worker relayed the value on a
+  `wss://` socket in 2 of 3 verifier runs. Now `arm` registers `LOCK_JS` first (on the first arm),
+  then lists, marks filled and locks the open pages, then loops: one round trip to the browser
+  (`page.evaluate("0")`, the context's `cookies()` if the page cannot evaluate) so every page event
+  sent before it has reached `context.pages`, then mark and lock every page not locked yet, until a
+  pass finds none. Bounded by `_SETTLE_PASSES = 50`; a page that is still opening pages after that
+  makes `arm` return `False` (`locks_failed`), so the caller does not fill (fail closed). Docstrings
+  (module "Locked documents" and `arm`) updated.
+  Tests: `test_https_popups_opened_while_arm_runs_relay_nothing` (HTTPS counting server, the
+  verifier's race page: a synchronous `about:blank` popup with a worker every 3 ms, also while `arm`
+  runs; unguarded positive control: ≥10 upgrades carrying the base64 value; guarded ×3: armed, 0
+  upgrades, 0 `/leak-*`, refused workers counted `api_removed`), and two fakes-only tests: the
+  lock-at-birth script is registered before the page list is first read and every late page is
+  marked and locked (`limit` 1/5/40); a context whose page list never stops growing gives `False`.
+  The verifier's own probe `g1_blank_popup_worker.py`: 5 guarded runs, 0 upgrades each (control 59).
+- **F2 — short dates with any separator** (`urls.py`). `_DATE_SHAPE` is
+  `(?<!\d)\d{1,2}[\W_]\d{1,2}[\W_]\d{2,4}(?!\d)` and `_PUNCT` (between month-name date parts)
+  `[\W_]{0,3}`: `1_5_90`, `1,5,90`, `1:5:90`, `1~5~90`, `1+5+90` (and `%2B`), `1|5|90` (and `%7C`),
+  `12:may:90`, `12+may+90`, `12|May|1990`, Devanagari digits (`१_५_९०`, raw and encoded) are `{id}`
+  in the redacted URL, the template, hash routes and query keys, and `template_is_value_free` refuses
+  each raw form; split over segments (`/dob/1/5_90`, `/1_5/90`, `/1:5/90`, `/12/may_90`) every part
+  is `{id}`. Routes and versions (`v1_2`, `x86_64`, `1_2_3`, `c++/1:2`) stay readable. Tests in
+  `test_urls.py`, each with the None classifier and with `Detector(en_IN)`, including the
+  `PageRecord` guard.
+- **B4 — text under a parent with no box of its own** (`dom.py`). A text node is rendered when its
+  parent is visible or — a parent that is not `display:none` / hidden but has no client rects
+  (`display:contents`: a styled element, a component host with `:host{display:contents}`, a
+  `<slot>`) — when a `Range` over the node itself has client rects (`_RENDERED_JS`, one rule shared
+  by `textOk` — extraction and late text — and `CENSUS_JS`). So such text is read and classified,
+  and in the census. Not drawn stays out: fallback text of a slot that has assigned nodes, text
+  under `display:none` / `visibility:hidden`.
+- **B5 — strings drawn from attributes** (`dom.py` `CENSUS_JS`, box items, swept, and classified
+  when the capture has a detector): the `alt` of a visible `<img>` (drawn when the image is broken
+  or loading; a loaded image whose alt holds a value is boxed whole — over-masking, fail closed) and
+  of `<input type=image>`, an `<optgroup>` label in a listbox (the group's box, which covers its
+  options too), an option's `label` attribute (besides its text), and the placeholder of an empty
+  `<input>` / `<textarea>` (only while it shows). Audit of other attribute-drawn strings, kept as
+  open items: CSS generated content (`content: attr(x)` or a literal string on `::before`/
+  `::after`/`::marker`), `<li value>` list markers, a closed `<select>` whose selected option has
+  a `label` attribute (the field sweep compares the option's text), `<track>` captions, `<canvas>`
+  text, and `<video poster>` images. Tooltips (`title`), `aria-*` and `<area alt>` are not drawn in
+  a screenshot.
+  Tests (B4/B5): new `CENSUS_PAGES` cases (`tests/scanner/helpers.py`, injected with
+  `setHTMLUnsafe` so declarative shadow roots attach; the helper now waits for images to load or
+  fail): `contents`, `slotted`, `slot_fallback`, `contents_only`, `slotted_only`, `alt`,
+  `alt_only`, `input_image`, `optgroup`, `option_label`, `placeholder`. Pixel tests
+  (`test_capture_census.py`) for the masked capture and both obfuscated captures; OCR tests
+  (`test_capture_ocr.py`, tesseract): the unmasked control reads every value and the second copy,
+  the masked capture and both obfuscated captures read none; extraction/census tests
+  (`test_dom_browser.py`), including hidden twins that must stay out.
+  Behaviour worth knowing: in `contents`, `slotted` and `slot_fallback` the second copy of the name
+  is now a read text node that no detector flags (a bare name), so an obfuscated capture rewrites
+  only the flagged copy, finds the original still in the text it read and is **withheld
+  (`leakage`)** rather than shown — the same as for any undetected copy in an ordinary text node.
+  The verifier's `probe_r3.py` (copied to `probe-m4-verify-fix-r1/b45`): `contents` masked 0+0,
+  both obfuscated withheld (leakage); `alt` and `optgroup` 0+0 in all three captures; `slotted` now
+  has its email found and masked, while its bare name stays readable once — exactly as on a control
+  page with the same name in a plain `<b>` (`plainspan`: 1+1 in all three): a detector-recall limit
+  for an unlabelled name (like N9), not a rendering gap.
+- **R3-B1 — a click whose own handler reached a denied route** (`crawler.py`). The discovery click
+  and the replay click (`_navigate`) mark the main frame's document first (a random token in a
+  non-enumerable window property); after the settle, `_reached_refused_route` takes the URL the tab
+  landed on: when its scope verdict is not `ok` **and** the tab still shows the clicked document (a
+  same-document navigation: a hash route or `pushState` set by the handler, no request the guard
+  could refuse), the route has run. It is then neither `_consider`ed nor `_skip`ped: a value-free
+  `spa`/`reached` event (redacted URL or origin, note = the verdict) is written,
+  `RunOutcome.scope_routes_reached` counts it, and that tab is not processed further (discovery
+  moves to the next clickable; a replay raises `_NavFailed("scope_reached")`, so the queued route's
+  row is `failed`/`scope_reached`). **Deviation from the finding's wording** ("if it is not ok, do
+  not call `_consider` or `_skip`"): when the tab shows a *new* document, the navigation was a
+  request the guard saw — refused and counted `blocked` with reason `deny`/`not_allowed` (the
+  `test_the_deny_list_holds_for_clicks_redirects_and_frames` case, 0 hits on `/logout`), or an HTTPS
+  redirect hop counted in `scope_paths_reached` — so the existing skipped row stays truthful there
+  and is kept; writing `reached` for a navigation the guard refused would be the opposite false
+  claim. The counter is in the evidence `scan` block (`scope_routes_reached`), the printable HTML
+  and the console's evidence page ("Never-visit routes"); the navigation log words `spa` events by
+  result (`reached` in rose; refused clicks "not clicked · …"). `_click` docstring corrected; the
+  module docstring and `api-m4.md` describe it.
+  Tests (`test_scope_rail.py`): the `onclick` hash page and the `pushState` page (counting server:
+  the route ran, `/api/session/end` ≥ 1, `/logout` 0; no `deny` row, no `skip` event; `reached`
+  events with value-free targets equal `scope_routes_reached`), and a replay whose handler flips to
+  `#/logout` after discovery (row `failed`/`scope_reached`). Evidence: `test_inventory_export.py`,
+  `test_evidence_html_scan.py`, `ScanEvidence.test.tsx`, `format.test.ts`.

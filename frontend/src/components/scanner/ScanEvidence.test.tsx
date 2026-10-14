@@ -21,7 +21,7 @@ export const SCAN_PACK: EvidencePack = {
     non_get_allowed: 0, scope_paths_reached: 0, blocked_requests: { GET: 1, POST: 71 }, navigations: 21,
     validation: { obfuscate: { checked: 61, accepted: 57, rejected: 4 }, synthesize: { checked: 61, accepted: 60, rejected: 1 } },
     captures: { captured: 3, withheld: 0 }, spa_routes: 1, truncated: null, submit_attempts_neutralised: 4, websockets_closed: 0,
-    dialogs_dismissed: 0, popups_closed: 0, events_dropped: 0, fills_skipped: 0,
+    dialogs_dismissed: 0, popups_closed: 0, events_dropped: 0, fills_skipped: 0, scope_routes_reached: 0,
     risk_flags: [{ code: 'A1', flag: 'autocomplete_enabled_sensitive', severity: 'high', page_no: 3, path: 'http://demo-site:8410/apply/us', field_nos: [3, 11], entity_types: ['SSN'], query_keys: [], where: null }],
   },
   timings: { duration_s: 72.265, started_at: '2026-10-13T18:40:08+00:00', finished_at: '2026-10-13T18:41:21+00:00' },
@@ -51,6 +51,11 @@ describe('the evidence pack of a scan', () => {
     // nothing of a table run's vocabulary, and no claim of a leakage sweep the scan finalize does not run
     expect(t).not.toMatch(/rows from|Row counts|Post-write sample|Partition|[Ll]eakage sweep/);
     expect(t).toContain('Stored fill values 37 tokens · 0 hits');
+  });
+  it('counts refused routes a page ran itself, and asks for review when there are any', () => {
+    expect(text(render(<ScanPackSections p={SCAN_PACK} sha="2a16" />))).toMatch(/Never-visit routes 0 run .* pass/);
+    const t = text(render(<ScanPackSections p={{ ...SCAN_PACK, scan: { ...SCAN_PACK.scan, scope_routes_reached: 2 } }} sha="2a16" />));
+    expect(t).toMatch(/Never-visit routes 2 run .* review/);
   });
   it('says so when a non-GET request was allowed', () => {
     const t = text(render(<ScanPackSections p={{ ...SCAN_PACK, scan: { ...SCAN_PACK.scan, non_get_allowed: 2 } }} sha="2a16" />));

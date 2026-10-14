@@ -709,6 +709,7 @@ def build_scan_evidence(
         "popups_closed": outcome.popups_closed if outcome else 0,
         "events_dropped": outcome.events_dropped if outcome else 0,
         "fills_skipped": outcome.fills_skipped if outcome else 0,
+        "scope_routes_reached": outcome.scope_routes_reached if outcome else 0,
     }
     auth_kind = (
         "storage_state_ref"

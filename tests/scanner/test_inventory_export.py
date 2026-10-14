@@ -279,7 +279,13 @@ def test_evidence_pack_shape_and_labels(
         "blocked": {"POST": 3, "GET": 1},
         "navigations": 1,
     }
-    outcome = RunOutcome(pages_visited=1, fields=5, spa_routes=1, submit_attempts_neutralised=2)
+    outcome = RunOutcome(
+        pages_visited=1,
+        fields=5,
+        spa_routes=1,
+        submit_attempts_neutralised=2,
+        scope_routes_reached=1,
+    )
     pack = build_scan_evidence(
         evidence_id="ev_01TEST",
         job=_job(rt),
@@ -300,6 +306,7 @@ def test_evidence_pack_shape_and_labels(
     assert pack.scan["blocked_requests"] == {"POST": 3, "GET": 1}
     assert pack.scan["by_entity"] == {"AADHAAR": 1, "GENDER": 1, "PASSWORD": 1, "PERSON_NAME": 1}
     assert pack.scan["risk_flags"][0]["code"] == "A1" and pack.scan["spa_routes"] == 1
+    assert pack.scan["scope_routes_reached"] == 1
     assert pack.scan["validation"]["obfuscate"] == {"checked": 4, "accepted": 3, "rejected": 1}
     assert pack.reveal_map == [
         {

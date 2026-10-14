@@ -141,7 +141,7 @@ export function eventVerb(e: Pick<ScanEvent, 'kind' | 'method'>): string {
   return e.kind;
 }
 
-const RESULT_TONE: Record<string, Tone> = { blocked: 'teal', skipped: 'slate', captured: 'violet', withheld: 'amber', failed: 'rose' };
+const RESULT_TONE: Record<string, Tone> = { blocked: 'teal', skipped: 'slate', captured: 'violet', withheld: 'amber', failed: 'rose', reached: 'rose' };
 export const eventResultTone = (result: string): Tone | null => RESULT_TONE[result] ?? null;
 
 /** The note column of the navigation log (mockup 12's sentences). */
@@ -166,7 +166,10 @@ export function eventNote(e: ScanEvent, pages: ReadonlyMap<number, ScanPage>): s
       if (e.result === 'captured') return e.note_code === 'obfuscate' ? 'obfuscated capture' : 'obfuscated capture · synthetic replacement';
       if (e.result === 'withheld') return 'withheld — a value could not be masked';
       return 'no personal data rendered';
-    case 'spa': return 'SPA route found by clicking';
+    case 'spa':
+      if (e.result === 'reached') return `the page's own click handler ran a refused route (${skipLabel(e.note_code)}) · not crawled`;
+      if (e.result === 'skipped') return `not clicked · ${skipLabel(e.note_code)}`;
+      return 'SPA route found by clicking';
     case 'navigate':
       if (e.result === 'failed') return `failed · ${e.note_code.replace(/_/g, ' ')}`;
       if (pg && (pg.status === 'done' || pg.status === 'redirected')) {

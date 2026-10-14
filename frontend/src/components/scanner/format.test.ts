@@ -114,6 +114,10 @@ describe('navigation log', () => {
     expect(eventNote(event({ kind: 'capture', result: 'captured', note_code: 'obfuscate' }), pages)).toBe('obfuscated capture');
     expect(eventNote(event({ kind: 'capture', result: 'withheld', note_code: 'residual' }), pages)).toBe('withheld — a value could not be masked');
     expect(eventNote(event({ kind: 'spa', result: 'queued', note_code: 'spa_click' }), pages)).toBe('SPA route found by clicking');
+    expect(eventNote(event({ kind: 'spa', result: 'skipped', note_code: 'deny' }), pages)).toBe('not clicked · deny list');
+    expect(eventNote(event({ kind: 'spa', result: 'reached', note_code: 'deny' }), pages))
+      .toBe("the page's own click handler ran a refused route (deny list) · not crawled");
+    expect(eventResultTone('reached')).toBe('rose');
     expect(eventNote(event({ kind: 'navigate', result: '200', method: 'GET', page_no: 3, note_code: 'link' }), pages)).toBe('1 form · 7 fields');
     expect(eventNote(event({ kind: 'navigate', result: 'failed', method: 'GET', page_no: 9, note_code: 'timeout' }), pages)).toBe('failed · timeout');
     expect(eventNote(event({ kind: 'dialog', result: 'dismissed', note_code: 'confirm' }), pages)).toBe('confirm dialog dismissed');

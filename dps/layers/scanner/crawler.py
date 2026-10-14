@@ -8,6 +8,12 @@ processed in fresh tabs:
 3. an obfuscated capture when the page renders personal data or arrived pre-filled;
 4. discovery: in-scope links (depth/page/template budgets, deny list) and click-only SPA routes
    (a clickable whose resolved target, a hash route included, the scope refuses is never clicked).
+   A clickable with no target to check (``href="#"`` with an ``onclick``, ``role="link"``, a
+   ``javascript:`` link) may run a route the scope refuses in the same document (a hash route or
+   ``pushState`` set by its handler): no request exists for the guard to refuse, so the route has
+   run. Such a landing is never recorded as a skipped page or a queued route: a value-free
+   ``spa``/``reached`` event names it, ``RunOutcome.scope_routes_reached`` counts it (evidence
+   pack ``scan`` block), and that tab is not processed further (M4 verify r1 R3-B1).
 
 There is no code path that sends a form: the only clicks are on in-scope link-like elements
 outside any form on unfilled tabs (SPA discovery and its replay, both on ``[data-dps-click]``
@@ -25,6 +31,7 @@ import asyncio
 import contextlib
 import functools
 import re
+import secrets
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -112,6 +119,14 @@ _OTHER_HOST = ("other_origin", "unregistered_host")
 _MODES: tuple[Literal["synthesize", "obfuscate"], ...] = ("synthesize", "obfuscate")
 NETWORKIDLE_MAX_MS = 5000
 CLICK_TIMEOUT_MS = 3000
+#: Before a click: a mark only this document holds (a fresh token in a non-enumerable property).
+#: After it: whether the tab still shows the document that was clicked (a same-document navigation:
+#: a hash route or ``pushState``), as opposed to a new document the guard saw being requested.
+_MARK_DOCUMENT_JS = (
+    "(t) => { Object.defineProperty(window, '__dpsClickDoc', "
+    "{ value: t, configurable: true, enumerable: false, writable: false }); return true; }"
+)
+_SAME_DOCUMENT_JS = "(t) => window.__dpsClickDoc === t"
 
 
 class _NavFailed(Exception):
@@ -390,12 +405,15 @@ class ScanRunner:
         if frame is None:
             raise _NavFailed("replay")
         try:
+            mark = await self._mark_document(page)
             verdict, _ = await self._click(frame, t.replay.frame_index, t.replay.ordinal)
         except PlaywrightError:
             raise _NavFailed("replay") from None
         if verdict != "ok":  # the element now points somewhere the scope refuses: not clicked
             raise _NavFailed(verdict, skipped=True)
         await page.wait_for_timeout(self.s.scan_settle_ms)
+        if await self._reached_refused_route(page, mark, t):
+            raise _NavFailed("scope_reached")  # the page's own handler ran it: stop this tab
         return response
 
     async def _click(self, frame: Frame, frame_index: int, ordinal: int) -> tuple[str, str | None]:
@@ -406,8 +424,15 @@ class ScanRunner:
         (``<a href="#/logout">``) never reaches the network, so the request guard cannot refuse
         it: the page's own route handler would run. Its target is therefore checked here, before
         the click, with the same :meth:`CrawlScope.navigation_verdict` as a link (a hash route is
-        checked against the deny list). An element without ``href`` (``role="link"``) and a
-        ``javascript:`` link have no target to check; their navigations meet the guard.
+        checked against the deny list).
+
+        An element without ``href`` (``role="link"``), a ``javascript:`` link and an ``href="#"``
+        link whose ``onclick`` navigates have no target to check before the click. A navigation
+        to a new document meets the guard (refused and counted when the scope refuses its path).
+        A same-document one — a hash route or ``pushState`` the handler sets — sends no request
+        and cannot be refused: the route has run when the click returns. The callers therefore
+        check where the tab landed (:meth:`_reached_refused_route`) and record such a landing as
+        reached, never as skipped.
         """
         await frame.evaluate(
             CLICKABLES_JS, {"frameIndex": frame_index, "shadow": self.rt.spec.scope.shadow_dom}
@@ -446,6 +471,39 @@ class ScanRunner:
         if url is not None and verdict != "scheme" and url not in self._seen:
             self._seen.add(url)
             self._skip(url, parent, verdict)
+
+    async def _mark_document(self, page: Page) -> str:
+        """Mark the main frame's document before a click (see ``_MARK_DOCUMENT_JS``)."""
+        token = secrets.token_hex(12)
+        with contextlib.suppress(PlaywrightError):
+            await page.main_frame.evaluate(_MARK_DOCUMENT_JS, token)
+        return token
+
+    async def _reached_refused_route(self, page: Page, mark: str, parent: Target) -> bool:
+        """After a click: whether the tab is still in the document that was clicked (``mark``)
+        while its URL is one the scope refuses — a hash route or ``pushState`` the page's own
+        handler set, with no request the guard could refuse, so the route has run. Then a
+        value-free ``spa``/``reached`` event (the redacted URL or the origin, and the verdict) is
+        written and ``scope_routes_reached`` counted; the caller neither queues nor skips the URL
+        and stops processing that tab. A new document is not such a landing: its navigation
+        request met the guard, which refused it (counted ``blocked``) or, for an HTTPS redirect
+        hop it cannot see into, counted it in ``scope_paths_reached``."""
+        url = canonical(page.url)
+        if url is None:
+            return False
+        verdict = self.rt.scope.navigation_verdict(url)
+        if verdict == "ok":
+            return False
+        try:
+            same = bool(await page.main_frame.evaluate(_SAME_DOCUMENT_JS, mark))
+        except PlaywrightError:
+            same = False  # navigating or an error page: a new document
+        if not same:
+            return False
+        self.outcome.scope_routes_reached += 1
+        shown = self._origin_of(url) if verdict in _OTHER_HOST else self._redact(url)
+        self._event("spa", "reached", page_no=parent.page_no, target=shown, note=verdict)
+        return True
 
     async def _close(self, page: Page) -> None:
         await self._guard.close(page)  # unload traffic aborted; never page.close()
@@ -913,11 +971,14 @@ class ScanRunner:
                 # Click 2 of 2 in the scanner: SPA route discovery — the same kind of element as
                 # the replay click (``_click``), on a fresh, unfilled tab; never one whose target
                 # the scope refuses (``_click`` checks it first).
+                mark = await self._mark_document(page)
                 verdict, target = await self._click(frame, c.frame_index, c.ordinal)
                 if verdict != "ok":
                     self._refuse_click(target, t, verdict)
                     continue
                 await page.wait_for_timeout(self.s.scan_settle_ms)
+                if await self._reached_refused_route(page, mark, t):
+                    continue  # the page's own handler ran a refused route: recorded as reached
                 url = canonical(page.url)
                 if url is not None and self._template(url) != base:
                     replay = ClickReplay(parent=t, frame_index=c.frame_index, ordinal=c.ordinal)

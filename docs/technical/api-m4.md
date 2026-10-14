@@ -245,7 +245,12 @@ host names are recorded (contract open question 17).
 **Events** (`ScanEvent`, the navigation log): `seq`, `ts`, `kind` (`navigate` `request` `fill`
 `capture` `skip` `spa` `popup` `dialog` `error`), `method`, `result` (an HTTP status, `captured`,
 `skipped`, `blocked`, …), `page_no`, `target` (redacted URL or origin), `note_code`, `counts`. At
-most `DPS_SCAN_MAX_EVENTS` rows per scan (`events_dropped` in the evidence beyond that).
+most `DPS_SCAN_MAX_EVENTS` rows per scan (`events_dropped` in the evidence beyond that). A `spa`
+event with result `reached` (note: the scope verdict, e.g. `deny`) records a click whose own handler
+ran a route the scope refuses in the same document (an `href="#"` link whose `onclick` sets a hash
+route or calls `pushState`): no request existed for the guard to refuse, so the route ran; it is
+neither queued nor recorded as a skipped page, that tab is not processed further, and a replayed
+route that lands there is `failed` with `scope_reached`.
 
 **Inventory** (`InventoryRow`): `page_no`, `path` (redacted URL), `form_index`, `field_no`, `label`,
 `tag`, `input_type`, `name_attr`, `autocomplete`, `pattern`, `maxlength`, `required`,
@@ -347,13 +352,14 @@ tokenised field `field:<page>/<form>/<field>`) with a `scan` block:
  "validation": {"synthesize": {"checked": 61, "accepted": 60, "rejected": 1}, "obfuscate": {"…": 0}},
  "captures": {"captured": 3, "withheld": 0}, "spa_routes": 1, "truncated": null,
  "submit_attempts_neutralised": 4, "websockets_closed": 0, "dialogs_dismissed": 0,
- "popups_closed": 0, "events_dropped": 0, "fills_skipped": 0}
+ "popups_closed": 0, "events_dropped": 0, "fills_skipped": 0, "scope_routes_reached": 0}
 ```
 
 `submissions` is 0 by construction (no code path submits); `non_get_allowed` is its measured
 counterpart; `scope_paths_reached` counts HTTPS redirect hops to a denied path that neither the
 route nor the proxy could refuse (they are GETs, never processed as pages, and counted rather than
-hidden). The pack's `verification` block for a scan counts the stored token fields
+hidden); `scope_routes_reached` counts the `spa`/`reached` events above (refused routes a page's
+own click handler ran without a request). The pack's `verification` block for a scan counts the stored token fields
 (`values_checked`) and the filled pages (`batches`); it is not a sweep over page data (that sweep
 runs per capture, before an image is stored). The printable HTML (`/evidence/{id}/html`) renders
 the scan block.

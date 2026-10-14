@@ -79,6 +79,43 @@ function route() {
 window.addEventListener('hashchange', route);
 </script>
 </body></html>"""
+# M4 verify r1 R3-B1: an ``href="#"`` link whose own click handler routes to a denied path without
+# a request the guard could refuse — a hash route set by script, a ``pushState``. The scanner
+# cannot know before the click (the target is "#"); the route runs. The record must say so.
+_ROUTER = b"""<script>
+function route() {
+  if (location.hash === '#/logout') { fetch('/api/session/end'); }
+  if (location.hash === '#/profile') { fetch('/api/profile'); }
+}
+window.addEventListener('hashchange', route);
+</script>"""
+ONCLICK_HASH_HOME = (
+    b"""<!doctype html><html><head><title>Home</title></head><body><h1>Account</h1>
+<nav><a href="#" onclick="location.hash='#/logout'; return false">Sign out</a>
+<a href="#/profile">Profile</a></nav>"""
+    + _ROUTER
+    + b"</body></html>"
+)
+PUSHSTATE_HOME = (
+    b"""<!doctype html><html><head><title>Home</title></head><body><h1>Account</h1>
+<nav><a href="#" onclick="history.pushState({}, '', '/logout'); fetch('/api/session/end');
+return false">Sign out</a> <a href="#/profile">Profile</a></nav>"""
+    + _ROUTER
+    + b"</body></html>"
+)
+# replay: at discovery the handler routes to #/profile (allowed, queued); once that route ran it
+# routes to #/logout, so the replay click lands on a denied route
+FLIP_HANDLER_HOME = b"""<!doctype html><html><head><title>Home</title></head><body>
+<h1>Account</h1>
+<nav><a id="m" href="#" onclick="location.hash = localStorage.getItem('flip') === '1' ? '#/logout' : '#/profile'; return false">Menu</a></nav>
+<script>
+function route() {
+  if (location.hash === '#/logout') { fetch('/api/session/end'); }
+  if (location.hash === '#/profile') { fetch('/api/profile'); localStorage.setItem('flip', '1'); }
+}
+window.addEventListener('hashchange', route);
+</script>
+</body></html>"""
 PAGE = b"<!doctype html><html><head><title>P</title></head><body><p>page</p></body></html>"
 REDIRECTS = {"/go": "/logout", "/home/go": "/outside"}
 
@@ -424,3 +461,68 @@ async def test_the_replay_click_never_clicks_a_hash_route_the_deny_list_names(
     assert [(p.status, p.status_reason) for p in replays] == [("skipped", "deny")]
     refused = [e for e in sink.events if e.kind == "navigate" and e.result == "skipped"]
     assert [e.note_code for e in refused] == ["deny"]
+
+
+# --- M4 verify r1 R3-B1: a click whose own handler reached a denied route -----------------------
+async def _crawl(
+    chromium: Any, settings: Settings, engine: PrivacyEngine, base: str
+) -> tuple[MemoryScanSink, Any]:
+    from dps.layers.scanner.crawler import ScanRunner
+
+    sink = MemoryScanSink()
+    rt = make_runtime(
+        base,
+        settings,
+        engine,
+        path="/",
+        cookies=False,
+        screenshots=False,
+        deny=("/logout",),
+        max_depth=2,
+    )
+    outcome = await ScanRunner(
+        settings=settings, engine=engine, sink=sink, browser=chromium, runtime=rt
+    ).run()
+    return sink, outcome
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("home", [ONCLICK_HASH_HOME, PUSHSTATE_HOME], ids=["hash", "pushstate"])
+async def test_a_click_whose_handler_reached_a_denied_route_is_recorded_as_reached(
+    chromium: Any, scan_settings: Settings, scan_engine: PrivacyEngine, home: bytes
+) -> None:
+    """The discovery click on ``href="#"`` ran a denied route in the same document (the counting
+    server proves it: ``/api/session/end`` was called). No record may say the deny list held for
+    it: no skipped ``deny`` row and no queued route for it; a value-free ``spa``/``reached`` event
+    names the refused route instead, and ``scope_routes_reached`` counts it."""
+    for base, hits in _serve(home):
+        sink, outcome = await _crawl(chromium, scan_settings, scan_engine, base)
+        assert hits["/api/session/end"] >= 1  # the route ran: the scanner cannot prevent this
+        assert hits["/api/profile"] >= 1 and hits["/logout"] == 0  # control; no request to it
+        reached = [e for e in sink.events if e.kind == "spa" and e.result == "reached"]
+        assert reached and {e.note_code for e in reached} == {"deny"}
+        assert all("#" not in e.target and "?" not in e.target for e in reached)
+        assert outcome.scope_routes_reached == len(reached)
+        assert not [p for p in sink.pages.values() if p.status_reason == "deny"]
+        assert not [e for e in sink.events if e.kind == "skip"]
+        queued = [p for p in sink.pages.values() if p.discovered_via == "spa_click"]
+        assert all(p.status == "done" for p in queued)  # only the allowed route was queued
+
+
+@pytest.mark.browser
+async def test_a_replay_click_that_lands_on_a_denied_route_stops_that_tab(
+    chromium: Any, scan_settings: Settings, scan_engine: PrivacyEngine
+) -> None:
+    """The replay of a queued route clicks the same ``href="#"`` element, whose handler now routes
+    to ``#/logout``: the tab is not processed (no extraction, no fill), the route's row is failed
+    with ``scope_reached`` (not skipped with ``deny``), and a ``spa``/``reached`` event counts it."""
+    for base, hits in _serve(FLIP_HANDLER_HOME):
+        sink, outcome = await _crawl(chromium, scan_settings, scan_engine, base)
+        assert hits["/api/profile"] >= 1  # discovery queued the route while it was allowed
+        assert hits["/api/session/end"] >= 1  # the replay's click ran the denied route
+        replays = [p for p in sink.pages.values() if p.discovered_via == "spa_click"]
+        assert [(p.status, p.status_reason) for p in replays] == [("failed", "scope_reached")]
+        assert not [p for p in sink.pages.values() if p.status_reason == "deny"]
+        reached = [e for e in sink.events if e.kind == "spa" and e.result == "reached"]
+        assert reached and outcome.scope_routes_reached == len(reached)
+        assert {e.page_no for e in reached} >= {replays[0].page_no}

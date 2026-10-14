@@ -482,7 +482,7 @@ def _scan_section(pack: EvidencePack) -> str:
 <div class=kpi>Forms · fields<b>{e(scan.get("forms"))} · {e(scan.get("fields"))}</b><span class=muted>{e(scan.get("personas"))} personas, shown: {e(scan.get("display_persona"))}</span></div>
 <div class=kpi>Submissions<b class=ok>{e(scan.get("submissions"))}</b><span class=muted>no submit path exists</span></div>
 <div class=kpi>Non-GET requests allowed<b class="{"ok" if nothing else "bad"}">{e(scan.get("non_get_allowed"))}</b><span class=muted>measured from the request log</span></div></div>
-<p>Submissions: {e(scan.get("submissions"))} · Non-GET requests allowed: {e(scan.get("non_get_allowed"))} · Requests to denied paths that left the browser: {e(scan.get("scope_paths_reached", 0))} · Blocked: {blocked_text} · Navigations: {e(scan.get("navigations"))} · Captures: {e(captures.get("captured", 0))} captured, {e(captures.get("withheld", 0))} withheld</p>
+<p>Submissions: {e(scan.get("submissions"))} · Non-GET requests allowed: {e(scan.get("non_get_allowed"))} · Requests to denied paths that left the browser: {e(scan.get("scope_paths_reached", 0))} · Refused routes a page's own click handler ran (no request to refuse): {e(scan.get("scope_routes_reached", 0))} · Blocked: {blocked_text} · Navigations: {e(scan.get("navigations"))} · Captures: {e(captures.get("captured", 0))} captured, {e(captures.get("withheld", 0))} withheld</p>
 <table><tr><th>Entity</th><th>Fields</th></tr>{entities}</table>
 <h2>UI scan — risk flags</h2><table><tr><th>Code</th><th>Flag</th><th>Severity</th><th>Page</th><th>Entities</th></tr>{flags}</table>
 <h2>UI scan — the page's own validation</h2><table><tr><th>Fill</th><th>Fields checked</th><th>Accepted</th><th>Rejected</th></tr>{validation}</table>

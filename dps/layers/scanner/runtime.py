@@ -140,3 +140,6 @@ class RunOutcome:
     popups_closed: int = 0
     websockets_closed: int = 0
     fills_skipped: int = 0  # a fill not done: leakage, a frame not locked, a page that navigated
+    #: clicks whose own handler ran a route the scope refuses in the same document (a hash route or
+    #: pushState set by an ``href="#"`` link's onclick): no request existed for the guard to refuse
+    scope_routes_reached: int = 0

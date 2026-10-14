@@ -63,9 +63,11 @@ def test_scan_block_rendered() -> None:
         "validation": {"synthesize": {"checked": 3, "accepted": 3, "rejected": 0}},
         "captures": {"captured": 1, "withheld": 0},
         "spa_routes": 1,
+        "scope_routes_reached": 2,
     }
     page = render_html(_pack(scan=scan), sha="s" * 64)
     assert "UI scan" in page and "Submissions: 0" in page and "POST 3" in page
+    assert "own click handler ran (no request to refuse): 2" in page  # M4 verify r1 R3-B1
     assert (
         "Non-GET requests allowed: 0" in page and "A1" in page and "pii_rendered_unmasked" in page
     )

@@ -119,6 +119,7 @@ export function ScanPackSections({ p, sha }: { p: EvidencePack; sha: string }): 
   const captures = (s.captures ?? {}) as Record<string, number>;
   const nonGet = num(s.non_get_allowed);
   const reached = num(s.scope_paths_reached);
+  const routesRun = num(s.scope_routes_reached);
   const neutral = [
     [num(s.submit_attempts_neutralised), 'submit attempts neutralised'], [num(s.dialogs_dismissed), 'dialogs dismissed'],
     [num(s.popups_closed), 'pop-ups closed'], [num(s.websockets_closed), 'web sockets closed'], [num(s.fills_skipped), 'fills skipped'],
@@ -178,6 +179,7 @@ export function ScanPackSections({ p, sha }: { p: EvidencePack; sha: string }): 
           <tr><td data-l="Check"><b>Submissions</b></td><td className="m" data-l="Result">{fmtCount(num(s.submissions))}</td><td className="wide" data-l="What">The scan request has no submit field and the worker never presses a button</td><td data-l="Status"><span className="chip emerald">pass</span></td></tr>
           <tr><td data-l="Check"><b>Non-GET requests allowed</b></td><td className="m" data-l="Result">{fmtCount(nonGet)}</td><td className="wide" data-l="What">Every request of the scan&apos;s browser counted by the request guard; {blocked.length ? blocked.map(([m, n]) => `${fmtCount(n)} ${m}`).join(' · ') : 'none'} blocked ({fmtCount(blockedTotal)})</td><td data-l="Status"><span className={`chip ${nonGet === 0 ? 'emerald' : 'rose'}`}>{nonGet === 0 ? 'pass' : 'review'}</span></td></tr>
           <tr><td data-l="Check"><b>Never-visit paths</b></td><td className="m" data-l="Result">{fmtCount(reached)} reached</td><td className="wide" data-l="What">Requests to denied paths that left the browser</td><td data-l="Status"><span className={`chip ${reached === 0 ? 'emerald' : 'rose'}`}>{reached === 0 ? 'pass' : 'review'}</span></td></tr>
+          <tr><td data-l="Check"><b>Never-visit routes</b></td><td className="m" data-l="Result">{fmtCount(routesRun)} run</td><td className="wide" data-l="What">Refused routes a page&apos;s own click handler ran in the same document (hash route or pushState: no request to refuse)</td><td data-l="Status"><span className={`chip ${routesRun === 0 ? 'emerald' : 'rose'}`}>{routesRun === 0 ? 'pass' : 'review'}</span></td></tr>
           <tr><td data-l="Check"><b>Stored fill values</b></td><td className="m" data-l="Result">{fmtCount(num(v.values_checked))} tokens · {fmtCount(hits)} hits</td><td className="wide" data-l="What">Fields are filled with synthetic persona values or tokens of them, never with a value read from a page ({fmtCount(num(v.batches))} pages filled); captures that render personal data are masked before storage or withheld</td><td data-l="Status"><span className={`chip ${passed ? 'emerald' : 'rose'}`}>{passed ? 'pass' : 'fail'}</span></td></tr>
         </tbody></table></div>
       </Sec>
