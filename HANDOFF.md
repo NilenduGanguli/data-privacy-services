@@ -290,10 +290,15 @@ from a skip into a failure (every milestone gate sets it). The tools read `DPS_B
 
 ### 3.3 Production posture (the boot guard)
 
-`DPS_ENV=staging|prod` runs `dps.posture` before the app is built; a violation stops the process,
-naming the setting, never its value. It requires:
+`DPS_ENV=staging|prod` runs `dps.posture` before the app is built, and the worker (`python -m
+dps.worker`) runs the same guard at start, before it opens the database; a violation stops the
+process, naming the setting, never its value. A staging/prod worker therefore needs the settings
+and mounted secrets below, `DPS_API_KEYS_FILE` included, although it serves no API (§5). (At the
+M4 merge the browser-worker runs the guard as well, without the rules of what it does not serve:
+API keys, CORS origins, the OCR key and the tokenizer token.) It requires:
 
-- auth on, `DPS_BOOTSTRAP_API_KEY` unset, `DPS_API_KEYS` set (from `_FILE`), `DPS_LLM_PROVIDER` not
+- auth on, `DPS_BOOTSTRAP_API_KEY` unset, `DPS_API_KEYS` set (from `_FILE`; the file may hold `[]`
+  once every key is DB-backed), `DPS_LLM_PROVIDER` not
   `stub`; `stellar` needs `DPS_SSL_CERT_FILE` and both URLs; `DPS_COIN_TLS_INSECURE=true` only with
   `DPS_ALLOW_INSECURE_COIN_MINT=true`; audit on; with `DPS_OCR_PROVIDER=azure` (or `auto` resolving
   to it) a key and an `https` endpoint (`auto` resolving to nothing is refused; Tesseract is
@@ -467,15 +472,15 @@ caller once (D2). What a deployment mounts:
 
 | Kubernetes object (Task 25 plan; the manifests are the source of truth once merged) | Feeds | Read by |
 |---|---|---|
-| Secret `dps-pg-app` | `DPS_PG_PASSWORD_FILE` | `dps-app` |
-| Secret `dps-pg-worker` | `DPS_PG_WORKER_PASSWORD_FILE` | `dps-worker`, `dps-browser-worker` |
-| Secret `dps-pg-owner` | `DPS_PG_MIGRATION_PASSWORD_FILE` | the `dps-migrate` Job only |
-| Secret `dps-job-kek` | `DPS_JOB_KEK_FILE` (and `DPS_JOB_KEK_PREVIOUS_FILE` during a rotation) | app, worker |
-| Secret `dps-api-keys` | `DPS_API_KEYS_FILE` (static keys; optional once DB keys exist) | app |
+| Secret `dps-pg-app` | `DPS_PG_PASSWORD_FILE` (the API login, `DPS_PG_USER`) | `dps-app`; `dps-worker` and (at the M4 merge) `dps-browser-worker`, which open this pool at start as well as their own; the operator's `dps.keys_cli` and `dps.rekey` runs |
+| Secret `dps-pg-worker` | `DPS_PG_WORKER_PASSWORD_FILE` | `dps-worker`, `dps-browser-worker` (at the M4 merge), the operator's `dps.rekey` run |
+| Secret `dps-pg-owner` | `DPS_PG_MIGRATION_PASSWORD_FILE` | the `dps-migrate` Job and (Task 25 as built) the daily `dps-migrate-maintain` CronJob, the same pod; nothing else |
+| Secret `dps-job-kek` | `DPS_JOB_KEK_FILE` (and `DPS_JOB_KEK_PREVIOUS_FILE` during a rotation) | app, worker, `dps-browser-worker` (at the M4 merge; it does not start without it), the operator's `dps.rekey` run |
+| Secret `dps-api-keys` | `DPS_API_KEYS_FILE` (static keys). **Required at boot in staging/prod** by the posture guard of the app and of the worker (§3.3); once every key is DB-backed it may hold `[]` | app, worker; the Task 25 manifests mount it in `dps-browser-worker` too, whose guard (at the M4 merge) does not require it |
 | Secret `dps-coin` | `DPS_COIN_CLIENT_ID_FILE`, `DPS_COIN_CLIENT_SECRET_FILE`, `DPS_COIN_SCOPE_FILE` | app, worker |
 | Secret `dps-tokenizer` | `DPS_TOKENIZER_TOKEN_FILE` | app, worker |
 | Secret `dps-ocr` | `DPS_AZURE_VISION_KEY_FILE` | app, worker |
-| Secret `dps-s3` | `DPS_S3_ACCESS_KEY_ID_FILE`, `DPS_S3_SECRET_ACCESS_KEY_FILE` | app, worker |
+| Secret `dps-s3` | `DPS_S3_ACCESS_KEY_ID_FILE`, `DPS_S3_SECRET_ACCESS_KEY_FILE` | app, worker, `dps-browser-worker` (at the M4 merge: scan artefacts) |
 | Secret `dps-connector-refs` | the connection `secret_ref` folders under `DPS_SECRET_DIR` | app, worker, browser-worker |
 | ConfigMap `dps-ca-bundle` | `DPS_SSL_CERT_FILE`, `DPS_PG_SSL_ROOT_CERT` (and optionally `DPS_COIN_CA_FILE`, `DPS_TOKENIZER_CA_FILE`) | every role |
 
@@ -511,11 +516,12 @@ a connection naming any of its own tenant's refs with an endpoint of its choice 
 or mount fewer refs per tenant.
 
 **Bootstrap of the first admin key** (staging/prod, DB-backed keys). With the metadata database's
-credentials in the environment (any pod with the image): `python -m dps.keys_cli create --name
-platform-admin --tenants '*' --scopes '*' --expires-in-days 90` prints one JSON document with the
-raw key, once; store it in the secret manager and leave `DPS_BOOTSTRAP_API_KEY` unset. `list`,
-`rotate ID [--grace-hours H]`, `disable ID` and `enable ID` manage keys the same way (exit 2 with
-`{"error", "detail"}` on a refusal); every mutating command writes an audit row owned by `_system`.
+API login (`dps-pg-app`) in the environment (any pod with the image): `python -m dps.keys_cli
+create --name platform-admin --tenants '*' --scopes '*' --expires-in-days 90` prints one JSON
+document with the raw key, once; store it in the secret manager and leave `DPS_BOOTSTRAP_API_KEY`
+unset. `list`, `rotate ID [--grace-hours H]`, `disable ID` and `enable ID` manage keys the same way
+(exit 2 with `{"error", "detail"}` on a refusal); every mutating command writes an audit row owned
+by `_system`.
 
 ## 6. Services and dependencies
 
@@ -576,9 +582,10 @@ parameter table this section summarises once merged. The planned shape (M5 plan 
 - One image, four workloads: Deployment `dps-app` (API + console, port 8400, Route with edge TLS),
   Deployment `dps-worker` (ops 9400, the `dps-exports` PVC at `DPS_EXPORT_ROOT`), Deployment
   `dps-browser-worker` (image `data-privacy-services-browser`, ops 9401, `/dev/shm` in memory), and
-  the Job `dps-migrate-<release>` (the only workload that mounts `dps-pg-owner`; it runs with
-  `DPS_MIGRATIONS_MODE=auto`). ServiceAccounts `dps-app`, `dps-worker`, `dps-browser-worker`,
-  `dps-migrate`, all without a mounted token.
+  the Job `dps-migrate-<release>` (it runs with `DPS_MIGRATIONS_MODE=auto`; it and, as Task 25 is
+  built, the daily CronJob `dps-migrate-maintain` running `python -m dps.migrate --maintain` in the
+  same pod are the only workloads that mount `dps-pg-owner`). ServiceAccounts `dps-app`,
+  `dps-worker`, `dps-browser-worker`, `dps-migrate`, all without a mounted token.
 - The metadata database is the platform's PostgreSQL 16 behind the ExternalName Service `dps-db`;
   Oracle Free, MongoDB, MinIO and the source PostgreSQL are never deployed there (bank systems).
 - Every pod `runAsNonRoot`, seccomp `RuntimeDefault`, no `runAsUser`; every container without
