@@ -24,6 +24,7 @@ from dps.layers.scanner.models import (
     ScanSpecError,
     TextFacts,
     redact_scan_spec,
+    spec_refusal_code,
     validate_scan,
 )
 
@@ -322,3 +323,65 @@ def test_persona_preview_request_bounds() -> None:
         PersonaPreviewRequest(locale="fr_FR")
     with pytest.raises(ValidationError):
         PersonaPreviewRequest.model_validate({"count": 1, "submit": True})
+
+
+def _errors(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """The errors FastAPI reports for ``body`` (``loc`` prefixed with ``body``)."""
+    try:
+        ScanSpec.model_validate(body)
+    except ValidationError as exc:
+        return [{**e, "loc": ("body", *e["loc"])} for e in exc.errors()]
+    raise AssertionError("the body was accepted")
+
+
+URL0 = "http://127.0.0.1:8410/apply"
+
+
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        ({"url": "http:/"}, "url_invalid"),
+        ({"url": 7}, "url_invalid"),
+        ({"url": URL0, "scope": {"max_depth": 6}}, "scope_invalid"),
+        ({"url": URL0, "scope": {"max_pages": 0}}, "scope_invalid"),
+        ({"url": URL0, "scope": {"deny": ["no-slash"]}}, "scope_invalid"),
+        ({"url": URL0, "scope": "x"}, "scope_invalid"),
+        ({"url": URL0, "auth": {"storage_state_ref": "a/../b"}}, "auth_invalid"),
+        ({"url": URL0, "auth": {"storage_state_ref": "a", "storage_state": {}}}, "auth_invalid"),
+        ({"url": URL0, "fill": {"personas": 51}}, "fill_invalid"),
+        ({"url": URL0, "fill": {"personas": 1, "display_persona": 2}}, "fill_invalid"),
+        ({"url": URL0, "fill": {"locale": "fr_FR"}}, "fill_invalid"),
+        (
+            {"url": URL0, "fill": {"personas": 51}, "auth": {"storage_state_ref": "a/../b"}},
+            "auth_invalid",
+        ),
+        ({"url": "x", "fill": {"personas": 51}}, "url_invalid"),
+    ],
+)
+def test_spec_refusal_code_maps_model_refusals_by_location(body: dict[str, Any], code: str) -> None:
+    assert spec_refusal_code(_errors(body)) == code
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"url": URL0, "submit": True},
+        {"url": URL0, "scope": {"submit": True}},
+        {"url": URL0, "fill": {"submit": True}},
+        {"url": URL0, "auth": {"cookie": "x"}},
+        {"url": URL0, "mode": "publish"},
+        {"url": URL0, "capture": {"har": "maybe"}},
+        {"url": URL0, "parallel_view": "x"},
+        {"url": URL0, "fill": {"personas": 51}, "mode": "publish"},
+        {"url": URL0, "scope": {"max_depth": 9, "submit": True}},
+    ],
+)
+def test_spec_refusal_code_leaves_uncoded_refusals_alone(body: dict[str, Any]) -> None:
+    assert spec_refusal_code(_errors(body)) is None
+
+
+def test_spec_refusal_code_needs_body_errors() -> None:
+    assert spec_refusal_code([]) is None
+    assert spec_refusal_code([{"type": "missing", "loc": ("body",), "msg": "x"}]) is None
+    assert spec_refusal_code([{"type": "json_invalid", "loc": ("body", 0), "msg": "x"}]) is None
+    assert spec_refusal_code([{"type": "missing", "loc": ("header", "x"), "msg": "x"}]) is None

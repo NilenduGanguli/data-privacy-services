@@ -119,14 +119,14 @@ Refused at `POST /scans` (nothing is queued; the refusal is audited without the 
 
 | Code | Status | When |
 |---|---|---|
-| `url_invalid` | 422 | not an `http(s)` URL, carries userinfo, or does not parse |
+| `url_invalid` | 422 | not an `http(s)` URL, carries userinfo, or does not parse (also a `url` the model refuses: shorter than 8 or longer than 2048 characters, not a string) |
 | `host_not_registered` | 422 | the URL's host is not registered for the tenant |
-| `scope_invalid` | 422 | `max_pages` above `DPS_SCAN_MAX_PAGES`, `max_depth` outside 0–5, a malformed glob |
+| `scope_invalid` | 422 | `max_pages` outside 1 … `DPS_SCAN_MAX_PAGES`, `max_depth` outside 0–5, a malformed glob, any other refused `scope` field |
 | `start_url_denied` | 422 | the start path (or its hash route) matches the deny list, or is outside a non-empty allow list |
 | `inline_auth_forbidden` | 422 | inline `auth.storage_state` where inline secrets are not allowed (staging/prod) |
-| `auth_invalid` | 422 | both a ref and an inline state, or a ref containing `..` |
+| `auth_invalid` | 422 | both a ref and an inline state, a ref containing `..` or outside the ref pattern, any other refused `auth` field |
 | `har_not_supported` | 422 | `capture.har: true` |
-| `fill_invalid` | 422 | personas outside 1–50, `display_persona` above `personas`, an unsupported locale |
+| `fill_invalid` | 422 | personas outside 1–50, `display_persona` outside 1 … `personas`, an unsupported locale, any other refused `fill` field |
 | `policy_invalid` | 422 | the policy does not resolve |
 | `key_material_invalid` | 422 | a supplied `consistency.key_material` or `synthesis_seed` is not valid |
 | `wrap_key_invalid` | 422 | `wrap_key` is not `rsa-oaep-256` with a readable RSA public key |
@@ -135,8 +135,15 @@ Refused at `POST /scans` (nothing is queued; the refusal is audited without the 
 | `kek_unconfigured` | 503 | no `DPS_JOB_KEK`: a scan cannot be sealed |
 | `db_unavailable` | 503 | no metadata database |
 
-A model-level refusal (an unknown key, a wrong type, a locale or persona count outside the model's
-bounds) is FastAPI's 422 with `{type, loc, msg}` only. The plan's `db_unconfigured` is
+Every refusal in this table is `{"detail": "the scan was refused: <code>", "code": "<code>"}` and is
+audited (`scan.create`, `rejected`). Most `url`/`scope`/`auth`/`fill` rules are checked by the
+`ScanSpec` model before `validate_scan` runs; `POST /scans` maps those refusals by the refused
+field's location (`url` → `url_invalid`, `scope.*` → `scope_invalid`, `auth.*` → `auth_invalid`,
+`fill.*` → `fill_invalid`; with several refused sections, the first in that order), so the caller
+gets the same code either way. A refusal with no code stays FastAPI's 422 with `{type, loc, msg}`
+only (no input echoed): an unknown key at any level (decision D4, even inside `scope`/`auth`/`fill`),
+a refused `mode`, `parallel_view`, `capture`, `consistency`, `policy` or `purpose` field, a body that
+is not a JSON object, or a body that mixes one of those with a coded refusal. The plan's `db_unconfigured` is
 `db_unavailable` as built (the M2 name), and its `consistency_invalid` is split into
 `key_material_invalid` and `wrap_key_invalid`.
 

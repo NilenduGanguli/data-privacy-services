@@ -1284,3 +1284,39 @@ enforced below the page. Each item was established by a probe of the pinned Chro
   surface and the `dps_scan_*` metrics (§5), tenant-scoped storage-state refs and the KEK need
   (§7), §9, and in §12 traps 8–9 plus the smoke gate with this lane's measured run.
 - Contract: no name changed by Tasks 24–25, so no contract edit.
+
+## G7 review round 1 — B1: model-level refusals of `POST /scans` carry the contract codes
+
+- Finding (M4-G7-review-r1 B1): `scope_invalid` (depth, glob), `auth_invalid` and `fill_invalid`
+  never reached an HTTP caller — the `ScanSpec` field constraints and model validators refused those
+  bodies first with FastAPI's codeless 422, so `validate_scan`'s re-checks only ran for
+  programmatically built specs. `api-m4.md` and contract §9 documented the codes; the Task 25 entry
+  above wrongly called that table "as built".
+- Fix (review option (a), mapping variant; the model validators are unchanged, nothing is weakened):
+  `dps.layers.scanner.models.spec_refusal_code(errors)` maps a request's validation errors by
+  location — `url` → `url_invalid`, `scope.*` → `scope_invalid`, `auth.*` → `auth_invalid`,
+  `fill.*` → `fill_invalid`, first refused section in `validate_scan`'s order — reading only `type`
+  and `loc`. `POST /scans` is registered with a route class (`_CreateScanRoute`, via
+  `router.add_api_route(..., route_class_override=...)` since `router.post` takes no route class)
+  that turns a mapped `RequestValidationError` into the value-free `{"detail": "the scan was
+  refused: <code>", "code"}` 422 and audits it as `scan.create` `rejected`, like every other
+  accept-time refusal. The route's dependencies (scope, rate limit, database) still run first.
+- Deliberately left codeless (FastAPI `[{type, loc, msg}]`, no input echoed): an unknown key at any
+  level (`extra_forbidden`, decision D4 — including inside `scope`/`auth`/`fill`), a refused field of
+  another section (`mode`, `parallel_view`, `capture`, `consistency`, `policy`, `purpose`), a body
+  that is not a JSON object, and a body mixing such an error with a coded one (a single code would
+  hide the other problem).
+- Beyond the review's three codes: `url` model refusals (length 8–2048, not a string) now answer
+  `url_invalid`, and `max_pages: 0` answers `scope_invalid`, so every `validate_scan` code is
+  reachable over HTTP.
+- Contract §9 amended in this commit (the mapping, the codeless cases, and the rules behind
+  `scope_invalid`/`auth_invalid`/`fill_invalid`); no code name changed. `api-m4.md` table rows and
+  footnote corrected. The console's `CREATE_ERRORS` wording for these codes is now shown (no
+  frontend change needed: it already keys on `code`).
+- Tests (written first; 12 of 13 API cases failed before the fix with a codeless 422):
+  `tests/scanner/test_models.py` — `spec_refusal_code` maps 13 refused bodies to their codes and
+  leaves 9 uncoded bodies (extra keys at three levels, `mode`, `capture`, `parallel_view`, mixed) and
+  non-body errors alone; `tests/scanner/test_scans_api.py` (db) — one live `POST /scans` per code
+  (url, scope ×4, auth ×2, fill ×4, scope-before-fill), each answering exactly `{detail, code}`, no
+  URL value in the body, one `rejected` 422 audit event without values; unknown keys / wrong `mode`
+  / mixed bodies stay codeless field lists; a caller without the `scan` scope still gets 403 first.

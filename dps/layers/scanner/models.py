@@ -17,6 +17,7 @@ the URL) and :func:`redact_scan_spec` produces the value-free ``dps_job.spec`` (
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -557,7 +558,8 @@ def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) 
     depth outside 0..5, a bad glob), ``start_url_denied`` (the start path or its hash route is
     denied, or the path is outside a non-empty allow list), ``inline_auth_forbidden`` (inline storage state where inline secrets are
     not allowed), ``auth_invalid``, ``har_not_supported`` or ``fill_invalid``. The model refuses
-    most of these already; the re-check covers programmatic construction.
+    most of these already (``POST /scans`` answers those refusals with the same codes, see
+    :func:`spec_refusal_code`); the re-check covers programmatic construction.
     """
     raw = spec.url.strip()
     if "@" in urlsplit(raw).netloc:
@@ -613,6 +615,39 @@ def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) 
         max_depth=max_depth,
         hosts=allowed,
     )
+
+
+#: ``ScanSpec`` sections whose model-level refusals carry a contract §9 code, in the order
+#: :func:`validate_scan` checks them (the first refused section names the code).
+_SECTION_CODES: tuple[tuple[str, str], ...] = (
+    ("url", "url_invalid"),
+    ("scope", "scope_invalid"),
+    ("auth", "auth_invalid"),
+    ("fill", "fill_invalid"),
+)
+
+
+def spec_refusal_code(errors: Sequence[Mapping[str, Any]]) -> str | None:
+    """The contract §9 code for a ``POST /scans`` body the ``ScanSpec`` model refused, or ``None``.
+
+    The model refuses most bounds and cross-field rules before :func:`validate_scan` runs (a
+    ``max_depth`` above 5, a malformed glob, ``display_persona`` above ``personas``, a ref with
+    ``..``…), so the route maps the request's validation errors by location: ``url`` →
+    ``url_invalid``, ``scope.*`` → ``scope_invalid``, ``auth.*`` → ``auth_invalid``, ``fill.*`` →
+    ``fill_invalid``; with several refused sections, the first in :func:`validate_scan`'s order.
+    ``None`` (FastAPI's field list stays) when any error has no code: an unknown key at any level
+    (decision D4, ``extra_forbidden``), a refused field of another section, or a body that is not
+    a JSON object. Reads only ``type`` and ``loc``, never the input.
+    """
+    sections: set[str] = set()
+    for error in errors:
+        loc = tuple(error.get("loc", ()))
+        if len(loc) < 2 or loc[0] != "body" or error.get("type") == "extra_forbidden":
+            return None
+        if loc[1] not in dict(_SECTION_CODES):
+            return None
+        sections.add(str(loc[1]))
+    return next((code for name, code in _SECTION_CODES if name in sections), None)
 
 
 def redact_scan_spec(v: ValidatedScan, url_redacted: str) -> dict[str, Any]:

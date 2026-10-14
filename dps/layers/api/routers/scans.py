@@ -10,11 +10,14 @@ scanned site, or returns stored key material (decision D4, the contract §9 clos
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
 
 from dps import db, jobs
 from dps.auth import require_scope
@@ -62,6 +65,7 @@ from dps.layers.scanner.models import (
     ScanSpecError,
     ScanSummary,
     redact_scan_spec,
+    spec_refusal_code,
     validate_scan,
 )
 from dps.layers.scanner.personas_fill import persona_values, preview_entities
@@ -171,7 +175,32 @@ def _wrapped(key: KeyMaterial, wrap_key: dict[str, str] | None) -> KeyMaterial:
         ) from None
 
 
-@router.post("", status_code=202, dependencies=_SCAN)
+class _CreateScanRoute(APIRoute):
+    """``POST /scans``: a body the ``ScanSpec`` model refuses answers the contract §9 code.
+
+    The model checks most bounds and cross-field rules before :func:`validate_scan` runs, so a
+    ``RequestValidationError`` is mapped by location with :func:`spec_refusal_code` to a value-free
+    ``{"detail", "code"}`` 422 and audited as a refusal, like every other accept-time refusal. An
+    error with no code (an unknown key, decision D4; another section's field) keeps FastAPI's
+    ``[{type, loc, msg}]`` 422. The route's dependencies (scope, rate limit, database) run first.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def refusing(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                code = spec_refusal_code(exc.errors())
+                if code is None:
+                    raise
+                err = DpsHttpError(422, code, f"the scan was refused: {code}")
+                raise rejected(request, "scan.create", err) from None
+
+        return refusing
+
+
 async def create_scan(body: ScanSpec, request: Request, response: Response) -> dict[str, Any]:
     """Validate, seal and queue a scan; the key and the seed are in this answer only."""
     settings, engine = _settings(request), _engine(request)
@@ -237,6 +266,16 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
         return ScanCreated(scan=job, replay=True).model_dump(mode="json")
     response.headers["Cache-Control"] = "no-store"  # the key and the seed are in this body
     return ScanCreated(scan=job, key_material=key_out, synthesis_seed=seed).model_dump(mode="json")
+
+
+router.add_api_route(
+    "",
+    create_scan,
+    methods=["POST"],
+    status_code=202,
+    dependencies=_SCAN,
+    route_class_override=_CreateScanRoute,
+)
 
 
 @router.post(

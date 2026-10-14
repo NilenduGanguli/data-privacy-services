@@ -118,6 +118,65 @@ def test_create_validation_and_scope(api_client: Any) -> None:
     assert c.get("/api/v1/scans", headers=JOBS).status_code == 403
 
 
+#: Bodies the ScanSpec model refuses before validate_scan runs: POST /scans still answers the
+#: contract §9 code (value-free), mapped by the refused field's location.
+MODEL_REFUSALS: list[tuple[dict[str, Any], str]] = [
+    ({"url": "http:/"}, "url_invalid"),
+    ({"url": URL, "scope": {"max_depth": 6}}, "scope_invalid"),
+    ({"url": URL, "scope": {"max_pages": 0}}, "scope_invalid"),
+    ({"url": URL, "scope": {"deny": ["no-slash"]}}, "scope_invalid"),
+    ({"url": URL, "scope": {"allow": ["/a?b"]}}, "scope_invalid"),
+    ({"url": URL, "auth": {"storage_state_ref": "dps/../other"}}, "auth_invalid"),
+    (
+        {"url": URL, "auth": {"storage_state_ref": "dps/ui/x", "storage_state": {"cookies": []}}},
+        "auth_invalid",
+    ),
+    ({"url": URL, "fill": {"personas": 51}}, "fill_invalid"),
+    ({"url": URL, "fill": {"personas": 0}}, "fill_invalid"),
+    ({"url": URL, "fill": {"personas": 2, "display_persona": 3}}, "fill_invalid"),
+    ({"url": URL, "fill": {"locale": "fr_FR"}}, "fill_invalid"),
+    # two refused sections: the code of the first in validate_scan's order
+    ({"url": URL, "fill": {"personas": 51}, "scope": {"max_depth": 9}}, "scope_invalid"),
+]
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(("body", "code"), MODEL_REFUSALS)
+def test_model_refusals_carry_the_contract_code(
+    api_client: Any, body: dict[str, Any], code: str
+) -> None:
+    c = _client(api_client)
+    r = _create(c, body)
+    assert r.status_code == 422, r.text
+    assert r.json() == {"detail": f"the scan was refused: {code}", "code": code}
+    assert "ananya" not in r.text and "example-mail" not in r.text
+    _client_, sink = api_client
+    refused = [e for e in sink.events if e.action == "scan.create"]
+    assert [(e.outcome, e.status) for e in refused] == [("rejected", 422)]
+    assert "ananya" not in json.dumps([e.model_dump(mode="json") for e in refused])
+
+
+@pytest.mark.db
+def test_uncoded_model_refusals_stay_field_lists(api_client: Any) -> None:
+    """An unknown key (decision D4), a wrong ``mode`` or a body mixing a coded refusal with an
+    uncoded one keeps FastAPI's ``[{type, loc, msg}]`` 422 (no code, no input echoed)."""
+    c = _client(api_client)
+    for body in (
+        {"url": URL, "scope": {"submit": True}},
+        {"url": URL, "fill": {"submit": True}},
+        {"url": URL, "mode": "publish"},
+        {"url": URL, "fill": {"personas": 51}, "mode": "publish"},
+    ):
+        r = _create(c, body)
+        assert r.status_code == 422, r.text
+        out = r.json()
+        assert "code" not in out and isinstance(out["detail"], list)
+        assert "ananya" not in r.text
+    assert c.post("/api/v1/scans", json={"url": URL}, headers=JOBS).status_code == 403
+    bad = c.post("/api/v1/scans", json={"url": URL, "fill": {"personas": 51}}, headers=JOBS)
+    assert bad.status_code == 403  # the scope check still comes first
+
+
 @pytest.mark.db
 def test_wrap_key_returns_only_wrapped_material(api_client: Any) -> None:
     from cryptography.hazmat.primitives import serialization
