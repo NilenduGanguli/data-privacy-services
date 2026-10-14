@@ -1,5 +1,11 @@
 # HANDOFF — data-privacy-services (DPS)
 
+**M3 (Oracle + MongoDB, cross-system job groups) built on lane `dps-wt-m3`, branch `m3`
+(2026-10-14)** — see §12: run commands, the Oracle and MongoDB rules, traps, measured throughput
+and the gates of the G6 build (log scan, `smoke_test.py --m3` 39/39 checks with 2 OCR skips,
+benchmarks). Lane verification and the `v0.4.0-m3` tag follow (programme plan §2.2); not yet
+merged to `main`.
+
 **Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
 — merged with `--no-ff`; the gates of the integrated tree are recorded in §11. The lane records
 of each milestone and of M0 follow unchanged.
@@ -63,7 +69,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
 | `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
-| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
+| `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §12); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network) |
 
 ## 2. Build
 
@@ -144,7 +150,8 @@ are measured, not promised (spec §7):
 | obfuscate → `table`, 12 partitions (`--parallelism 12 --partition-rows 17000`) | 3 | 4 828 | 41.4 s |
 
 One worker process is bound by one Python interpreter (the transform runs in a thread under the
-GIL): more partitions per worker do not add throughput, more worker replicas do. `python
+GIL): more partitions per worker do not add throughput, more worker replicas do. Oracle and MongoDB
+figures (M3): §12 "Measured throughput (M3)". `python
 tools/demo_m2.py` (10 tables into `bank_uat` under one job group, then in place and append) took
 30 s with 3 workers; every job succeeded with verification passed and every foreign key of the UAT
 copy found its parent.
@@ -378,7 +385,8 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 `DPS_DB_PORT` (5441), `DPS_SOURCE_PG_PORT` (5442), `DPS_MINIO_PORT` (9010), `DPS_MINIO_CONSOLE_PORT`
 (9011), `DPS_OCR_PORT` (5016), `DPS_ORACLE_PORT` (1522) and `DPS_MONGO_PORT` (27018; the others arrive with their services, §3 "Lane-safe stacks"). The M3 tests read `DPS_TEST_ORACLE_DSN` / `DPS_TEST_ORACLE_USER` / `DPS_TEST_ORACLE_PASSWORD` (default `127.0.0.1:${DPS_ORACLE_PORT:-1522}/FREEPDB1`, `system`, `dps_local_oracle`) and `DPS_TEST_MONGO_URI` (default `mongodb://127.0.0.1:${DPS_MONGO_PORT:-27018}/?directConnection=true`).
 `DPS_SMOKE_REQUIRE_OCR=1` makes `tools/smoke_test.py` fail instead of skipping its OCR checks;
-`DPS_SMOKE_M2=auto|on|off` selects its job-platform checks.
+`DPS_SMOKE_M2=auto|on|off` selects its job-platform checks; `--m3` adds the Oracle + MongoDB
+checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
 
 ## 5. Probes and ops surfaces
 
@@ -637,8 +645,9 @@ the references the deployment's tenants may use (open issue, see the M2 build re
 ## 9. Next milestones
 
 M1 documents (done: v0.2.0, §10) → **M2 jobs + PostgreSQL (done: tag `v0.1.0-m2`; Postgres, worker,
-migrations, the jobs API and console)** → integrated on `main` (§11) → M3 Oracle + MongoDB → M4 UI
-scanner (browser worker image) → M5 hardening + showcase. Each adds a section here.
+migrations, the jobs API and console)** → integrated on `main` (§11) → **M3 Oracle + MongoDB (built on
+lane `m3`, §12; verification and tag `v0.4.0-m3` pending)** → M4 UI scanner (browser worker image) →
+M5 hardening + showcase. Each adds a section here.
 
 ## 10. M1 — documents and Layer 1 complete (v0.2.0)
 
@@ -801,3 +810,157 @@ the M1 version; `v0.1.0-m2` is M2's lane tag).
    same `Idempotency-Key` is refused as `idempotency_key_reused`; mint a new key.
 4. New console CSS goes under its page root (`.<name>-page`); the M1 and M2 pages share short class
    names (`.m`, `.plan`, `.two`, `.grp`, `.stack`), so a global rule leaks into the other pages.
+
+## 12. M3 — Oracle and MongoDB, cross-system job groups (lane `dps-wt-m3`, 2026-10-14)
+
+M3 adds the `oracle` and `mongo` engines to the job platform (connect → discover → review → run in
+`table`, `in_place`, `append`; `files` stays M2's engine-agnostic writer), job groups that share one
+caller-held key across systems, and the group consistency check (`POST
+/job-groups/{id}/consistency-check`, migration 020). API reference: `docs/technical/api-m3.md`.
+Services, ports and the demo secret refs are in §3's table (`oracle`, `mongo`, `demo-secrets`);
+settings in §4 "M3 settings".
+
+**Run it (lane ports from `.env`; the defaults are 8400 / 1522 / 27018):**
+
+```bash
+docker compose --profile oracle --profile sources up --build -d
+docker compose ps        # poll: app, worker, dps-db, source-pg, minio, oracle (allow 1-3 min), mongo healthy;
+                         # migrate, minio-init, demo-secrets, seed-sources exited 0 (never `up --wait`)
+curl -s 127.0.0.1:${DPS_APP_PORT:-8400}/readyz        # ready: true, db and jobs ok
+python tools/seed_sources.py --target all --rows 20000 --seed 7   # PG bank (already seeded by the one-shot),
+                         # CRM.* + LOANS.APPLICANTS on Oracle, crm.profiles on MongoDB; a 2nd run prints "unchanged"
+python tools/smoke_test.py --m3                       # M0-M2 checks + 7 M3 checks (see below)
+python tools/bench_connector.py --engine oracle --rows 20000 --parallelism 4 --partition-rows 5000
+python tools/bench_connector.py --engine mongo  --rows 20000 --parallelism 4 --partition-rows 5000
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle or mongo"          # M3 integration gate
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/test_no_values_in_logs_m3.py
+docker compose --profile oracle --profile sources down              # also resets Oracle's demo data (no volume)
+```
+
+`smoke_test.py --m3` (after the M0–M2 checks; `DPS_SMOKE_M3_TIMEOUT`, default 600 s, bounds the three
+runs together) prints one verdict per check, counts only: `m3 connections` (creates or reuses
+`smoke-ora-src` = `dps/src/oracle-crm-ro`, `smoke-ora-tgt` = `dps/tgt/oracle-crm-masked`,
+`smoke-mdb-src` = `dps/src/mongo-crm`, `smoke-mdb-tgt` = `dps/tgt/mongo-crm-uat`, and tests them with
+M2's `bank-pg-ro`/`bank-uat`), `m3 discover` (`bank.customers`, `crm.profiles`, `CRM.CUSTOMERS`),
+`m3 group` (a new `smoke-m3-<epoch>` group; its key is in the create answer only and is dropped after
+the three submissions), `m3 runs` (three `table` runs under the group key into
+`bank_uat.customers_smoke`, `crm_uat.profiles_smoke`, `CRM_MASKED.CUSTOMERS_SMOKE`; Oracle is submitted
+last so it anchors the check), `m3 consistency 3/3`, `m3 evidence` (each pack verified under the
+group's key id) and `m3 raw pii to llm`. The seeds must agree: the check samples the newest member
+(Oracle), so Oracle may not hold customers the other two lack (seed all three with the same `--rows`).
+
+**Oracle rules (python-oracledb thin, `dps/layers/connectors/oracle.py`, `oracle_sql.py`).**
+
+- Pool (`OraclePool`): synchronous, used only from worker threads; `min=0`, `max=DPS_ORACLE_POOL_MAX`,
+  `expire_time=1` (dead peer found within a minute), `call_timeout=DPS_ORACLE_CALL_TIMEOUT_MS` per
+  round trip, `tcp_connect_timeout`, a 30 s timed wait for a session; every session carries
+  `module=DPS_ORACLE_MODULE`, `action` (`read`/`write`/`test`/…) and `client_identifier` = the job id
+  for the DBA's audit. Sessions start with `NLS_SORT = BINARY NLS_COMP = BINARY`, so key order in the
+  database is Python's code-point order (keyset paging and partition bounds rely on it). A session
+  that failed inside a checkout is dropped, never reused.
+- Reads never lock (`FOR UPDATE` is refused by the selection validator and never generated);
+  `FETCH FIRST` only on non-locking reads; `arraysize = prefetchrows = batch`.
+- Fetch types: CLOB/NCLOB come back whole as `str` (a per-cursor output type handler, not the
+  process-global `fetch_lobs`), `IS JSON` columns as text; CLOB offsets are UTF-16 units, so astral
+  characters round-trip (pinned by `test_oracle_clob_astral_roundtrip`).
+- Binds: `CHAR`/`NCHAR` keys bind as `DB_TYPE_CHAR`/`NCHAR` (a VARCHAR2 bind compares without blank
+  padding and finds nothing: `test_oracle_char_key_paging`); `TIMESTAMP(7–9)` keys page through
+  `TO_TIMESTAMP(:v, '…FF9')` text so nanoseconds survive (`test_oracle_timestamp9_key_paging`);
+  datetimes bind as `DB_TYPE_TIMESTAMP` (a bare `datetime` binds as DATE and drops fractions).
+- Keys: the primary key or a unique not-null index; a key-less table is read in **ROWID ranges**
+  (`ROWID` pseudo column, read-only — `in_place`, upsert and `query` selections are refused there).
+  NVARCHAR2/NCHAR keys run as **one partition** (Oracle orders them by UTF-16 code units).
+- Writes: `table` = MERGE upserts or truncate-insert via `executemany`; `in_place` = `UPDATE … WHERE
+  key = :k` of the reviewed columns only; `append` with `generate`/`offset`/`token` keys and a
+  collision pre-check. Every committed batch advances `DPS_WRITE_LEDGER` (in the target owner's
+  schema, created by prepare, cleared at finalize) in the same transaction: a replayed or skipped
+  batch is `ledger_conflict` and writes nothing.
+- Refused column types for copies: `LONG`, `LONG RAW`, `BFILE`, `XMLTYPE`, `TIMESTAMP WITH LOCAL
+  TIME ZONE`, `VECTOR`, object types, `ROWID` columns (`column_unsupported`; project them out).
+- Driver errors: only the code leaves the module (`ORA-00942`); Oracle 23ai's `ORA-00001` message
+  quotes the duplicate row and is never read.
+
+**MongoDB rules (pymongo `AsyncMongoClient` ≥ 4.13, `mongo.py`, `mongo_docs.py`, `docpaths.py`).**
+
+- The demo server is a one-member replica set (`rs0`) reached with `directConnection=true`;
+  transactions (hence `in_place` and every `append`) need a replica set — a standalone server gets
+  `transactions_unsupported` at prepare.
+- Reads: keyset on `_id` (one BSON type per collection for partitions and `in_place`), whole
+  top-level fields projected so array positions stay exact; discovery uses `$sample`; selections
+  are allow-listed filter documents (`api-m3.md`). Documents flow through the L1 JSON engine: leaf
+  paths (`$.contact.email`, `$.accounts[*].iban`) are classified and transformed; untouched values
+  keep their BSON types byte for byte.
+- Writes: `table` = `bulk_write(ordered=False)` upserts by `_id` (truncate-insert or upsert);
+  `in_place` = `$set` of the transformed leaves by `_id` inside a transaction with the
+  `dps_write_ledger` collection; `append` inserts new `_id`s in a transaction with the ledger.
+  Field names with `.` or a leading `$` cannot be addressed (`path_unsupported`). A created
+  target gets the `_id` index only — **secondary indexes are not copied** (`indexes_not_copied`
+  in the prepare report).
+- Every operation carries `comment = "dps:<action>:<job id>"` (the profiler/`currentOp` analogue of
+  Oracle's module/action); errors keep only `mongo:<code>`; E11000 is `pk_collision`.
+
+**Cross-system joins need FPE.** Oracle `NUMBER` ids, PostgreSQL `bigint` ids and MongoDB
+`"CUST-10000123"` strings join only when the key column is protected with a format-preserving method
+(`fpe_digits`) under the group's key: `DPS_FPE_ENABLED=true` is the compose default; without it the
+FPE methods fall back (reported as fallbacks) and ids stored in different forms no longer join. Date shifts and
+persona surrogates are anchor-dependent and are reported as informational in the check.
+
+**Logs.** `configure_logging` caps the driver loggers `pymongo`, `botocore`, `boto3`, `s3transfer`
+and `urllib3` at WARNING (with `httpx`/`httpcore` and the document libraries): pymongo's DEBUG
+command log writes every document of a write and the server's E11000 reply (which quotes the
+duplicate key), botocore's writes request bodies. Found by the M3 log scan's sentinel run (§12
+gates); `DPS_LOG_LEVEL=DEBUG` is now safe on app and worker.
+
+**Traps (M3).**
+
+1. Oracle Free's first start takes 1–3 minutes (`healthcheck.sh` returns 4 until the init script
+   finished); poll `docker compose ps`, never `up --wait`.
+2. `docker compose down` resets Oracle (no volume): reseed with `tools/seed_sources.py --target
+   oracle` afterwards; an Oracle container initialised before M3 Task 15 must be recreated
+   (`docker compose rm -sfv oracle`) for the widened `NATIONAL_ID`.
+3. NVARCHAR2/NCHAR keys run as a single partition; key-less (ROWID) tables cannot be written in
+   place or upserted.
+4. `date_shift` keeps TIMESTAMP(9) digits: values with more than 6 fractional digits keep their
+   sub-microsecond digits after the shift (values with ≤ 6 digits are unchanged in form).
+5. Identity keys (`GENERATED BY DEFAULT AS IDENTITY`) and same-table `append`: earlier explicit
+   inserts can run ahead of the identity sequence, so appended rows could collide (`ORA-00001` →
+   `pk_collision`); check `identity next value > MAX(key)` before such a run.
+6. The consistency check samples the newest member's target: re-running one member re-anchors
+   it; seed the three systems with the same `--rows` or lower `min_coverage`.
+7. A run of `smoke_test.py` without `--m3` rewrites `bank_uat.customers_smoke` without the group
+   key; a later consistency check of an older smoke group then fails its PG pairs — run a fresh
+   `--m3` smoke instead of re-checking an old group.
+
+**Measured throughput (M3, 2026-10-14; lane image of `717df9a`, tools of this change)** — `python
+tools/bench_connector.py --engine <e> --rows 20000 --parallelism 4 --partition-rows 5000 --batch 1000`
+against this lane's compose stack on the same Apple-silicon Mac as M2 (host 18 CPUs; Docker Desktop
+29.5.3 VM with 12 CPUs and ~15 GiB; Oracle Free 23.26 capped at 2.7 GB, MongoDB 7 at 1 GB),
+`DPS_FPE_ENABLED=true`, discovery with the `gdpr-pseudonymise` preset, one worker (concurrency 4),
+`table` writes into scratch targets (`CRM_MASKED.CUSTOMERS_BENCH`, `crm_uat.profiles_bench`,
+`bank_uat.customers_bench_obfuscate`). Wall clock from submission to the terminal state (prepare,
+preflight, partitions, finalize and evidence included — at 20 000 rows the fixed cost is a large
+share); results in `docs/technical/bench/m3-2026-10-13-*.json` and the PostgreSQL run at the same
+size in `m2-2026-10-13-obfuscate-table-1-worker.json` (dates in UTC):
+
+| Engine · run | Rows | Partitions | Workers | Rows/s | Wall |
+|---|---|---|---|---|---|
+| Oracle `CRM.CUSTOMERS` (16 columns incl. a CLOB, 10 transformed) → `table` | 20 000 | 4 | 1 | 942 | 21.2 s |
+| MongoDB `crm.profiles` (nested documents and arrays) → `table` | 20 000 | 4 | 1 | 860 | 23.3 s |
+| PostgreSQL `bench.customers_bench` → `table` (same size and stack, for comparison) | 20 000 | 4 | 1 | 2 474 | 8.1 s |
+| PostgreSQL (the M2 figure above) | 200 000 | 4 | 1 | 3 004 | 66.6 s |
+
+Source vs target (counts only, after the smoke and benchmark runs): in `CRM_MASKED.CUSTOMERS_SMOKE`,
+`CRM_MASKED.CUSTOMERS_BENCH`, `crm_uat.profiles_smoke`, `crm_uat.profiles_bench` and
+`bank_uat.customers_smoke` no target value of a name, national id, tax id, e-mail, mobile, address
+line, PIN, IBAN or notes field equals any source value of that field (0 of 20 000 per field; tax id
+0 of 11 989). Kept by the preset as non-personal labels: `SEGMENT`/`segment`, `id_type`,
+`kyc_status`, address `type`, `tags`, and `CITY` (the gdpr preset keeps CITY; PIN is generalised).
+MongoDB `customerId`: 8 (smoke) and 7 (bench) of 20 000 masked ids equal *some other* customer's
+source id — expected FF1 collisions in an 8-digit domain (≈ 20 000² / 9·10⁷ ≈ 4.4), not survivors.
+
+**Gates of the G6 build (Tasks 20, 21; 2026-10-14, lane stack up):** `ruff format`/`ruff check dps
+tests tools`, `mypy dps`, `pytest -q` (see `docs/superpowers/build/M3-DEVIATIONS.md` "Task 21" for
+counts), `pytest -q tests/test_no_values_in_logs_m3.py` and the `oracle and mongo` sentinel run,
+`python tools/seed_sources.py --target all --rows 20000 --seed 7` twice (second run `unchanged`),
+`python tools/smoke_test.py --m3` (39/39 passed, 2 OCR checks skipped without `--profile docs`),
+the two benchmarks above. The lane verification (M3 Definition of Done 1–10) and the tag follow.

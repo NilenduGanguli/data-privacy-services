@@ -1468,3 +1468,55 @@ Open (not fixed here):
   `pytest -q tests/test_no_values_in_logs_m3.py` 22 passed ·
   `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle and mongo" tests/test_no_values_in_logs_m3.py`
   1 passed.
+
+## Task 21 — smoke `--m3`, benchmark `--engine`, HANDOFF, README, API reference
+
+- **Secret refs and connection names.** The plan names the refs `local/oracle-crm-ro`, … ; the
+  compose `demo-secrets` one-shot (Task 2, as built) writes `dps/src/oracle-crm-ro`,
+  `dps/tgt/oracle-crm-masked`, `dps/src/mongo-crm`, `dps/tgt/mongo-crm-uat`, and the console
+  harness (`tests/console/m3_console.py`, Task 18) already registers `smoke-ora-src`/`-tgt` and
+  `smoke-mdb-src`/`-tgt` against them. The four specs now live once in `tools/m2_api.py`
+  (`M3_CONNECTIONS`, `ORACLE_PARAMS`); `tests/test_tools_m3.py` pins that the console harness uses the
+  same engine, params and ref per name. `smoke-pg` of the plan is M2's `bank-pg-ro` (source) and
+  `bank-uat` (target) — the connections M2's smoke creates.
+- **Smoke order and anchor.** Runs are submitted PostgreSQL → MongoDB → Oracle (as the console
+  check does): the consistency check samples the newest member, and the PG `bank` (20 000
+  customers from the one-shot) holds every id Oracle and MongoDB hold. `m3 group` also asserts that
+  `GET /job-groups/{id}` does not echo the key; the key is dropped (`del`) after the three
+  submissions. `m3 evidence` checks `verification.passed` **and** `consistency.kid` = the group's
+  kid per pack. `discover_and_accept` in the smoke tool gained a `timeout` (M3 discovery: 300 s).
+  `--m3` without the M2 checks (no metadata DB) fails with `m3 needs the job platform`.
+- **Benchmark through the API, not in-process.** `bench_connector.py` measures through the stack
+  like M2 (discover → run → poll), so `--engine oracle|mongo` reuses it: the source is the seeded
+  demo customer space (`seed_oracle`/`seed_mongo` to exactly `--rows`, seed 7 — a no-op when
+  already seeded, so the smoke data is unchanged), discovery and the run use the
+  `gdpr-pseudonymise` preset (the plan's "gdpr preset"), `table` writes into
+  `CRM_MASKED.CUSTOMERS_BENCH` / `crm_uat.profiles_bench` (truncate-insert), one worker. Other write
+  modes are refused for `--engine oracle|mongo` (argparse error). Results are written as
+  `m3-<date>-<engine>-…json`; the PostgreSQL naming is unchanged. `m2_api.Client.discover_and_accept`
+  takes `owner: str | None` (MongoDB) and an optional `policy`. Measured with `--parallelism 4
+  --partition-rows 5000` (4 partitions, like M2's 4 × 50 000) and, for comparison at the same size
+  on the same stack, a PostgreSQL run (`m2-2026-10-13-obfuscate-table-1-worker.json`, committed).
+- **Not done here: the tag.** The plan's Step 4 tags `v0.4.0-m3`; the programme plan (§5 rule 5,
+  §2.2) reserves tags for the release step after the lane verification, and this job's
+  instructions forbid creating tags. HANDOFF §12 says the tag follows the verification.
+- **Contract:** the M3 error, selection and consistency codes are folded into the contract's
+  "Further M2 validation codes" paragraph (open contract question 9), additive only.
+- **Screenshots:** `docs/superpowers/build/m3-shots/` (60 PNGs, ~30 MB, from the G5 browser
+  checks; synthetic seed data only, each page asserted free of seeded values by its test) is
+  committed as the plan's file list says. M2's console shots were git-ignored instead; if the
+  repository size matters at integration, move them to an artefact store and ignore the folder.
+- **Observed, not changed (M2 code on this branch):** the evidence/bench `values_by_method` shows
+  `fallback:fallback:fpe_domain_too_small` (a doubled prefix) for the 4-character tax-id domain;
+  main fixed the doubled prefix after this lane branched (`9d19f7b`), so it resolves at integration.
+- **Gates (lane stack up: `--profile oracle --profile sources`):** `ruff format dps tests tools`
+  (303 files unchanged) · `ruff check dps tests tools` (all passed) · `mypy dps` (109 files, no
+  issues) · `pytest -q` 2086 passed, 8 skipped (OCR mock not started ×3, no host `tesseract`, the
+  `ner` extra, …) in 7 min · `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/test_no_values_in_logs_m3.py
+  tests/test_tools_m3.py tests/test_tools_m2.py tests/test_observability.py` 49 passed ·
+  `seed_sources.py --target all --rows 20000 --seed 7` (second run `unchanged`) · `python
+  tools/smoke_test.py --m3` 39/39 passed, 2 OCR checks skipped · `bench_connector.py --engine
+  oracle|mongo --rows 20000` 941.6 / 860.3 rows/s (PostgreSQL at the same size 2474.0) · source vs
+  target counts on the five smoke/bench targets: 0 survivors in every personal field · stack log
+  scan: 0 of 149 484 seeded Oracle/MongoDB values in `docker compose logs app worker`. No frontend
+  file changed (no npm gate needed).
