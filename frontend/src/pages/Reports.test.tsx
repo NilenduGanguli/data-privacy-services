@@ -54,6 +54,9 @@ describe('ReportsView', () => {
     expect(t).toContain('passed · 0 exact rows');
     expect(t).toContain('failed · 2 leaks caught');
     expect(t).toContain('POST /api/v1/obfuscate · daily roll-up');
+    // a scan is named by its host, with what it did (mockup 09; S2 console r1 B2)
+    expect(t).toContain('UI scan of onboarding-uat.bank.internal');
+    expect(t).toContain('CHG-48102 · 38 pages · 12 forms · 20 personas · 0 submissions');
     expect(out).toContain('aria-label="Download evidence pack j_01K7ZQ…9Q as PDF"');
     expect(t).toContain('Show older packs');
   });

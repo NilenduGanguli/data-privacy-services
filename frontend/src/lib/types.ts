@@ -224,7 +224,7 @@ export interface AuditFilters {
   from?: string; to?: string; action?: string; layer?: AuditLayer; outcome?: AuditOutcome; q?: string; tenants?: string; limit?: number; cursor?: string;
 }
 export interface PostureCheck { id: string; name: string; ok: boolean; detail: string; enforced_at_boot: boolean }
-export interface PostureReport { env: string; enforced: boolean; passed: number; total: number; checked_at: string; checks: PostureCheck[] }
+export interface PostureReport { env: string; enforced: boolean; passed: number; total: number; checked_at: string; checks: PostureCheck[]; scan_fallback_hosts?: string[] }
 /** `busy`: the worker's claimed slots (an int, dps/layers/api/routers/admin.py::_queue). */
 export interface WorkerRow { worker_id: string; role: string; version: string; online: boolean; busy: number; draining: boolean; last_seen: string | null }
 export interface QueueRow { table: 'dps_job' | 'dps_job_partition' | string; state: string; n: number; oldest_s: number }
@@ -254,7 +254,7 @@ export interface EvidenceItemSummary {
   mode?: string | null; policy?: string | null; policy_version?: string | number | null; ticket?: string | null; source?: string | null;
   target?: string | null; write_mode?: string | null; rows_written?: number | null; verification_passed?: boolean | null; hits?: number | null;
   review_required?: boolean | null; verification_status?: string | null;
-  fidelity_score?: number | null; exact_row_matches?: number | null; pages?: number | null; submissions?: number | null;
+  fidelity_score?: number | null; exact_row_matches?: number | null; pages?: number | null; forms?: number | null; personas?: number | null; submissions?: number | null;
 }
 export interface EvidenceItem {
   id: string; job_id: string; job_kind: string; outcome: string; created_at: string; pack_sha256: string; layer: string; summary: EvidenceItemSummary;

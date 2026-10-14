@@ -531,6 +531,65 @@ def test_the_overview_counts_the_personal_fields_scans_found(api_client: Any) ->
 
 
 @pytest.mark.db
+def test_overview_and_reports_rows_name_the_scanned_host_its_forms_and_personas(
+    api_client: Any,
+) -> None:
+    """S2 console r1 B2 (mockups 01 and 09: "UI scan of <host> · N pages · N forms · N personas ·
+    N submissions"): a scan's ``recent_jobs`` brief names the host of its redacted origin (a scan
+    has no ``object_ref``), and its evidence pack's summary names that host and carries the forms
+    and personas of the pack's ``scan`` block (a scan pack has ``source.origin``, no
+    ``source.object``). Both read "—" before. The pack comes from the real scan-pack builder."""
+    from dps.jobs import Job
+    from dps.layers.scanner.inventory import build_scan_evidence
+
+    c = _client(api_client)
+    created = _create(c, {"url": URL, "fill": {"personas": 3, "locale": "en_IN"}})
+    assert created.status_code == 202, created.text
+    job = Job.model_validate(created.json()["scan"])
+    settings = c.app.state.settings
+    pack = build_scan_evidence(
+        evidence_id="ev_s2b2scan",
+        job=job,
+        runtime=None,
+        pages=[],
+        fields=[],
+        counts={"pages_visited": 21, "forms": 7, "fields": 63, "personal": 51},
+        outcome=None,
+        result="succeeded",
+        errors=[],
+        settings=settings,
+        exports={},
+    ).model_dump(mode="json")
+    assert pack["source"]["origin"] == "http://127.0.0.1:8410" and "object" not in pack["source"]
+
+    async def store() -> None:
+        conn = await _connect(settings, "t1")
+        try:
+            await conn.execute(
+                f"INSERT INTO {settings.pg_schema}.dps_evidence "
+                "(id, tenant_id, job_id, pack, pack_sha256) VALUES ($1, 't1', $2, $3::jsonb, 'x')",
+                pack["id"],
+                job.id,
+                pack,
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(store())
+    summary = c.get("/api/v1/reports/summary", params={"days": 7}, headers=FULL)
+    assert summary.status_code == 200, summary.text
+    [brief] = [j for j in summary.json()["recent_jobs"] if j["id"] == job.id]
+    assert (brief["kind"], brief["source"], brief["target"]) == ("scan", "127.0.0.1:8410", None)
+    listed = c.get("/api/v1/reports/evidence", params={"layer": "ui"}, headers=FULL)
+    assert listed.status_code == 200, listed.text
+    [item] = [i for i in listed.json()["items"] if i["job_id"] == job.id]
+    s = item["summary"]
+    got = (s["source"], s["pages"], s["forms"], s["personas"], s["submissions"])
+    assert got == ("127.0.0.1:8410", 21, 7, 3, 0), s
+    assert "ananya" not in summary.text + listed.text  # the start URL's query stays redacted
+
+
+@pytest.mark.db
 def test_hosts_registered_on_the_admin_page_decide_what_a_tenant_may_scan(api_client: Any) -> None:
     """M5 Admin › UI-scanner hosts writes ``dps_tenant.registered_hosts`` (normalised); from then on
     ``POST /scans`` accepts exactly those hosts for the tenant, and the local fallback list
@@ -586,11 +645,24 @@ def _scan_routes(c: Any, scan_id: str) -> list[tuple[str, str, dict[str, Any] | 
     return out
 
 
+def _job_routes(c: Any, job_id: str) -> list[tuple[str, str]]:
+    """Every ``/api/v1/jobs/{job_id}…`` operation the app serves, with ``job_id`` filled in (from
+    OpenAPI, so a route added later is covered too)."""
+    spec = c.get("/api/v1/openapi.json").json()
+    return [
+        (method, path.replace("{job_id}", job_id))
+        for path, ops in sorted(spec["paths"].items())
+        if path.startswith("/api/v1/jobs/{job_id}")
+        for method in sorted(ops)
+    ]
+
+
 @pytest.mark.db
 def test_database_keys_with_the_scan_scope_drive_every_scans_route(api_client: Any) -> None:
     """M5 database keys (``/admin/keys``) on the scanner: a key with ``scan`` passes the scope and
     tenant checks of every scans route (and reads the scan's evidence); a database key without
-    ``scan`` is refused on every one; a key of another tenant sees no scan of this one; a
+    ``scan`` is refused on every one — and on every ``/api/v1/jobs/{job_id}…`` route that names
+    the scan (S2 adaptations r1 B1); a key of another tenant sees no scan of this one; a
     disabled key stops at once; the scan and its audit rows name the database key."""
     c, sink = api_client
     scanner = _db_key(c, "qa-scanner", ["t1"], ["scan"])
@@ -613,6 +685,18 @@ def test_database_keys_with_the_scan_scope_drive_every_scans_route(api_client: A
         assert denied.status_code == 403, (method, path, denied.text)
         anonymous = c.request(method, path, json=body)
         assert anonymous.status_code == 401, (method, path)
+    job_routes = _job_routes(c, scan["id"])
+    assert {p.rsplit("/", 1)[-1] for _, p in job_routes} >= {"cancel", "pause", "resume", "retry"}
+    for method, path in job_routes:
+        denied = c.request(method, path, headers={"X-API-KEY": jobs_only["key"]})
+        assert (denied.status_code, denied.json()["code"]) == (403, "scope_required"), (
+            method,
+            path,
+            denied.text,
+        )
+        assert c.request(method, path, headers=scan_h).status_code == 403, (method, path)
+    still = c.get(f"/api/v1/scans/{scan['id']}", headers=scan_h).json()["scan"]
+    assert still["state"] == "queued"  # no refused control changed it
     listed = c.get("/api/v1/scans", headers=scan_h).json()["items"]
     assert len(listed) == 2 and listed[-1]["id"] == scan["id"]  # + the route walk's POST /scans
     foreign = c.get(f"/api/v1/scans/{scan['id']}", headers={"X-API-KEY": other["key"]})
@@ -632,6 +716,42 @@ def test_database_keys_with_the_scan_scope_drive_every_scans_route(api_client: A
     assert disabled.status_code == 200, disabled.text
     assert c.get("/api/v1/scans", headers=scan_h).status_code == 401
     assert all(scanner["key"] not in json.dumps(e.model_dump(mode="json")) for e in sink.events)
+
+
+@pytest.mark.db
+def test_a_key_without_the_scan_scope_neither_controls_nor_lists_scans_through_jobs(
+    api_client: Any,
+) -> None:
+    """S2 adaptations r1 B1 (contract §8.1: ``scan`` covers scans). ``/api/v1/jobs`` serves every
+    job kind, so a key holding ``jobs`` but not ``scan`` got 200 on ``POST /jobs/{scan}/cancel``
+    and the scan was canceled. Now each ``/jobs/{id}`` route checks the job's kind: 403
+    ``scope_required`` (audited ``job.cancel`` rejected), the scan does not change, and
+    ``GET /jobs`` lists no scan for such a key. A key holding both scopes still controls it."""
+    c, sink = api_client
+    jobs_db = _db_key(c, "crm-provisioner", ["t1"], ["jobs", "detect"])
+    both = _db_key(c, "ops-desk", ["t1"], ["jobs", "scan"])
+    scan = _create(c).json()["scan"]
+    for headers in (JOBS, {"X-API-KEY": jobs_db["key"]}):
+        for action in ("cancel", "pause", "resume"):
+            r = c.post(f"/api/v1/jobs/{scan['id']}/{action}", headers=headers)
+            assert (r.status_code, r.json()["code"]) == (403, "scope_required"), (action, r.text)
+        for path in (f"/api/v1/jobs/{scan['id']}", f"/api/v1/jobs/{scan['id']}/partitions"):
+            r = c.get(path, headers=headers)
+            assert (r.status_code, r.json()["code"]) == (403, "scope_required"), (path, r.text)
+        listed = c.get("/api/v1/jobs", headers=headers)
+        assert listed.status_code == 200, listed.text
+        assert all(j["kind"] != "scan" for j in listed.json()["items"])
+        only_scans = c.get("/api/v1/jobs", params={"kind": "scan"}, headers=headers)
+        assert (only_scans.status_code, only_scans.json()["code"]) == (403, "scope_required")
+    state = c.get(f"/api/v1/scans/{scan['id']}", headers=FULL).json()["scan"]["state"]
+    assert state == "queued"
+    refused = [e for e in sink.events if e.action == "job.cancel" and e.job_id == scan["id"]]
+    assert len(refused) == 2 and {(e.outcome, e.status) for e in refused} == {("rejected", 403)}
+    both_h = {"X-API-KEY": both["key"]}
+    assert scan["id"] in [j["id"] for j in c.get("/api/v1/jobs", headers=both_h).json()["items"]]
+    assert c.get(f"/api/v1/jobs/{scan['id']}", headers=both_h).status_code == 200
+    canceled = c.post(f"/api/v1/jobs/{scan['id']}/cancel", headers=both_h)
+    assert canceled.status_code == 200 and canceled.json()["state"] == "canceled", canceled.text
 
 
 def test_openapi_has_no_submit_route() -> None:

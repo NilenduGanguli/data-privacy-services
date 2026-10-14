@@ -9,6 +9,11 @@ rules (contract §3.1): 409 ``job_terminal`` / ``job_finalizing`` / ``job_not_pa
 ``POST /jobs/run/validate`` answers what ``POST /jobs/run`` would refuse (same status and code) or
 ``{"ok": true}``, without creating a job or returning a key: the console's step 5 asks it before it
 says "all checks passed".
+
+Every ``/jobs/{id}`` route answers for any job kind, so each checks the job's kind against the key's
+scopes as evidence and artefacts do (contract §8.1: ``scan`` covers scans): a scan read or
+controlled here needs ``scan`` as well as the route's ``jobs`` (403 ``scope_required``, controls
+audited ``rejected``), and ``GET /jobs`` lists no scan for a key without it (S2 adaptations r1 B1).
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from dps.layers.api.deps import (
 from dps.layers.api.errors import DpsHttpError
 from dps.layers.api.idempotency import REPLAY_HEADER
 from dps.layers.api.policy_refs import resolve
+from dps.layers.api.routers.evidence import job_kinds, require_kind_scope
 from dps.layers.connectors.submit import (
     check_run,
     seal_retry_secret,
@@ -69,10 +75,21 @@ def _job(job: Job) -> dict[str, Any]:
 
 
 async def _owned(request: Request, job_id: str) -> Job:
+    """The tenant's job, readable with this key: 404 ``job_not_found``, or 403 ``scope_required``
+    when the key lacks the scope of the job's kind (a scan needs ``scan``)."""
     job = await jobs.get_job(tenant_of(request), job_id)
     if job is None:
         raise DpsHttpError(404, "job_not_found", "job not found")
+    require_kind_scope(principal_of(request), job.kind.value)
     return job
+
+
+async def _check_kind(request: Request, job_id: str) -> None:
+    """404 ``job_not_found`` / 403 ``scope_required`` before a control acts on ``job_id``."""
+    kind = (await job_kinds(tenant_of(request), [job_id])).get(job_id)
+    if kind is None:
+        raise DpsHttpError(404, "job_not_found", "job not found")
+    require_kind_scope(principal_of(request), kind)
 
 
 def _replayed(response: Response, job: Job) -> dict[str, Any]:
@@ -178,14 +195,19 @@ async def list_(
     limit: int = 50,
     cursor: str | None = None,
 ) -> dict[str, Any]:
-    """The tenant's jobs, newest first (filters: kind, state, group)."""
+    """The tenant's jobs, newest first (filters: kind, state, group); scans only for a key with
+    ``scan`` (``kind=scan`` without it: 403 ``scope_required``)."""
 
     async def body() -> dict[str, Any]:
+        scans = principal_of(request).has_scope("scan")
+        if kind == JobKind.scan:
+            require_kind_scope(principal_of(request), kind.value)
         items, nxt = await jobs.list_jobs(
             tenant_of(request),
             kind=kind,
             state=state,
             group_id=group_id,
+            exclude_kind=None if scans else JobKind.scan,
             **page_args(limit, cursor),
         )
         return {"items": [_job(j) for j in items], "next_cursor": nxt}
@@ -231,6 +253,7 @@ async def _control(request: Request, job_id: str, action: str) -> dict[str, Any]
     async def body() -> dict[str, Any]:
         tenant = tenant_of(request)
         fn = {"cancel": jobs.cancel, "pause": jobs.pause, "resume": jobs.resume}[action]
+        await _check_kind(request, job_id)  # a scan is controlled with the scan scope only
         job = await fn(tenant, job_id)
         if job is None:
             raise DpsHttpError(404, "job_not_found", "job not found")

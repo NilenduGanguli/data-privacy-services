@@ -21,6 +21,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import asyncpg
 from pydantic import BaseModel, Field
@@ -374,6 +375,23 @@ def _target(spec: dict[str, Any]) -> str | None:
     return None
 
 
+def scan_host(origin: Any) -> str | None:
+    """``host[:port]`` of a scan's redacted origin (``http://demo-site:8410`` -> ``demo-site:8410``),
+    the name the console gives a scan (mockups 01 and 09: "UI scan of <host>"); None without one."""
+    if not isinstance(origin, str) or not origin:
+        return None
+    parts = urlsplit(origin)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    host = parts.hostname
+    if not host:
+        return None
+    host = f"[{host}]" if ":" in host else host
+    return f"{host}:{port}" if port else host
+
+
 async def _brief(tenant_id: str, job: jobs.Job) -> JobBrief:
     progress = job.progress
     total, done = progress.partitions_total, progress.partitions_done
@@ -397,7 +415,10 @@ async def _brief(tenant_id: str, job: jobs.Job) -> JobBrief:
         kind=job.kind.value,
         mode=job.mode,
         state=job.state.value,
-        source=job.object_ref,
+        # a scan has no source object: it is named by the host it scans (S2 console r1 B2)
+        source=scan_host((job.spec or {}).get("url_origin"))
+        if job.kind.value == "scan"
+        else job.object_ref,
         target=_target(job.spec),
         progress_pct=round(100 * done / total) if total else None,
         note=note,
@@ -698,7 +719,8 @@ def _evidence_summary(pack: dict[str, Any]) -> dict[str, Any]:
         "policy": sub("policy").get("name"),
         "policy_version": sub("policy").get("version"),
         "ticket": sub("purpose").get("ticket"),
-        "source": sub("source").get("object"),
+        # a scan pack names its origin, not an object (S2 console r1 B2)
+        "source": sub("source").get("object") or scan_host(sub("source").get("origin")),
         "target": target.get("object")
         or (target["files"].get("prefix") if isinstance(target.get("files"), dict) else None),
         "write_mode": target.get("write_mode"),
@@ -711,6 +733,8 @@ def _evidence_summary(pack: dict[str, Any]) -> dict[str, Any]:
         "fidelity_score": sub("fidelity").get("score"),
         "exact_row_matches": sub("privacy").get("exact_row_matches"),
         "pages": scan.get("pages"),
+        "forms": scan.get("forms"),
+        "personas": scan.get("personas"),
         "submissions": scan.get("submissions"),
     }
 

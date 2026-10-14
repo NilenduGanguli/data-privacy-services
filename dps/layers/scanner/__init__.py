@@ -135,8 +135,8 @@ async def open_runtime(ctx: HandlerContext, job: ClaimedJob, store: ScanStore) -
         raise ScanSetupError(exc.code) from None
     async with db.acquire_queue(job.tenant_id) as conn:
         hosts = await store.registered_hosts(conn, job.tenant_id)
-    if not hosts and ctx.settings.env in ("local", "dev"):
-        hosts = ctx.settings.scan_registered_hosts_list
+    if not hosts:  # local/dev only (the rule POST /scans applies at accept)
+        hosts = ctx.settings.scan_fallback_hosts
     start = canonical(spec.url)
     try:
         origin = Origin.of(start or "")

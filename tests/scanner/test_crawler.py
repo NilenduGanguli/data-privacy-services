@@ -331,3 +331,123 @@ async def test_every_screen_the_crawler_stores_holds_no_readable_value(
         _, png, _ = control.artefacts[control.pages[1].artefacts["original"]]
         seen = _readable(_ocr(cmd, png), demo_data, keys, strict=True)
         assert len(seen) >= max(2, len(keys) // 2), seen
+
+
+# --- S2 captures-privacy r1 B1: a fill that scrolls a same-origin frame ---------------------------
+#: A card step whose form is in a same-origin frame, below that frame's fold, with an e-mail and a
+#: PAN rendered above the field (made-up values). Filling the field scrolls the frame, so both
+#: filled screens show the values: their masks were placed as if the frame were not scrolled.
+_CARD_STEP = (
+    b"<!doctype html><html><head><meta charset='utf-8'><title>card step</title><style>"
+    b"body{font:22px/1.5 Arial,Helvetica,sans-serif;margin:24px;color:#111;background:#fff}"
+    b"</style></head><body><h2>card step</h2><p>Enter your card details below.</p>"
+    b"<iframe src='/card/widget' style='width:900px;height:360px;border:0'></iframe></body></html>"
+)
+
+
+def _card_widget() -> bytes:
+    from tests.scanner.helpers import CENSUS_EMAIL, CENSUS_PAN
+
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'><title>card widget</title><style>"
+        "body{font:22px/1.5 Arial,Helvetica,sans-serif;margin:24px;color:#111;background:#fff}"
+        "input{font-size:22px;width:500px} .big{font-size:26px}</style></head><body>"
+        "<h2>card widget</h2><div style='height:700px'>Card terms and conditions apply.</div>"
+        f"<p class='big'>Statement for {CENSUS_EMAIL}</p><p class='big'>PAN: {CENSUS_PAN}</p>"
+        "<form method='post' action='/card/save'><p><label for='cn'>Name on card</label><br>"
+        "<input id='cn' name='ccName' autocomplete='cc-name'></p></form>"
+        "<div style='height:40px'></div></body></html>"
+    ).encode()
+
+
+@pytest.fixture
+def card_site() -> Any:
+    """A counting server for the card step (any non-GET request it receives is a submission)."""
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    hits: Counter[str] = Counter()
+    pages = {"/card": _CARD_STEP, "/card/widget": _card_widget()}
+
+    class Site(BaseHTTPRequestHandler):
+        def _count(self) -> None:
+            hits[f"{self.command} {self.path.split('?')[0]}"] += 1
+
+        def do_GET(self) -> None:  # noqa: N802 - http.server's name
+            self._count()
+            body = pages.get(self.path.split("?")[0], b"")
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:  # noqa: N802
+            self._count()
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *a: Any) -> None:
+            pass
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Site)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{port}", hits
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.mark.browser
+@pytest.mark.tesseract
+@pytest.mark.parametrize("mode", ["synthesize", "obfuscate"])
+async def test_a_fill_that_scrolls_a_frame_never_shows_its_values(
+    mode: str,
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    card_site: tuple[str, Counter[str]],
+) -> None:
+    """S2 captures-privacy r1 B1 (``iframe_fill_scroll``): the crawler fills the card form in a
+    same-origin frame, which scrolls that frame onto the e-mail and PAN above the field. No stored
+    screen — original, annotated, both filled screens, the masked capture — shows either value; the
+    control (the same page, the field filled the same way, shot unmasked) shows both, so the frame
+    really is scrolled onto them. Nothing is submitted."""
+    from tests.scanner.helpers import CENSUS_EMAIL, CENSUS_PAN
+    from tests.scanner.test_capture_ocr import _ocr, _readable, _tesseract
+
+    cmd = _tesseract()
+    base, hits = card_site
+    values = {"email": CENSUS_EMAIL, "pan": CENSUS_PAN}
+    keys = tuple(values)
+    sink = MemoryScanSink()
+    runtime = make_runtime(
+        base, scan_settings, scan_engine, path="/card", max_depth=0, mode=mode, cookies=False
+    )
+    await _runner(
+        settings=scan_settings, engine=scan_engine, sink=sink, browser=chromium, runtime=runtime
+    ).run()
+    page = sink.pages[1]
+    expected = {"original", "annotated", "filled_synthesize", "filled_obfuscate"}
+    assert set(page.artefacts) >= expected, sorted(page.artefacts)
+    stored = expected | ({"masked_capture"} & set(page.artefacts))
+    for variant in sorted(stored):
+        _, png, _ = sink.artefacts[page.artefacts[variant]]
+        strict = variant in ("original", "annotated")
+        assert _readable(_ocr(cmd, png), values, keys, strict=strict) == [], variant
+    assert [k for k in hits if not k.startswith("GET ")] == []  # D4: nothing submitted
+    ctx = await chromium.new_context(viewport={"width": 1280, "height": 900})
+    try:
+        control = await ctx.new_page()
+        await control.goto(f"{base}/card")
+        widget = next(f for f in control.frames if f.url.endswith("/card/widget"))
+        await widget.locator("#cn").fill("Jordan Ellis")  # what the fill does: it scrolls the frame
+        shot = await control.screenshot(full_page=True)
+    finally:
+        await ctx.close()
+    assert _readable(_ocr(cmd, shot), values, keys, strict=True) == list(keys)

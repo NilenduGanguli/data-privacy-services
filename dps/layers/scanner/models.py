@@ -159,10 +159,12 @@ class FrameFacts(BaseModel):
     frame is listed too, with ``read=False``, because its content is in a screenshot but in no
     finding.
 
-    ``offset`` is the frame's box in document coordinates of the top page (zero-size: not
-    rendered). It is ``None`` only for an unread frame whose box could not be determined. A capture
-    must black out every unread frame's box, and is withheld when one is ``None`` or a frame
-    failed while it was read (``PageSnapshot.frames_failed``; ``dom.unread_frame_boxes``).
+    ``offset`` is, in document coordinates of the top page (zero-size: not rendered), the box a
+    read frame's document is drawn in — its content box, where the child's viewport coordinates
+    start (S2 captures-privacy r1 B1) — and an unread frame's border box. It is ``None`` only for
+    an unread frame whose box could not be determined. A capture must black out every unread
+    frame's box, and is withheld when one is ``None`` or a frame failed while it was read
+    (``PageSnapshot.frames_failed``; ``dom.unread_frame_boxes``).
     """
 
     model_config = _HIDDEN

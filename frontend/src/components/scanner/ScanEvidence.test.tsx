@@ -1,9 +1,11 @@
 // The evidence pack page for a scan (M4): the pack as dps/layers/scanner/inventory.py::build_scan_evidence
 // builds it (job_kind "scan", a `scan` block, no columns, partitions or row counts).
 import { describe, expect, it } from 'vitest';
-import { render, text } from '../../test/render';
+import { html, render, text } from '../../test/render';
 import { SCAN_PACK } from '../../test/scanPack';
-import { canonicalJson, isScanJobId, isScanPack, scanEvidenceRow, scanPackTitle, ScanPackSections } from './ScanEvidence';
+import type { EvidenceItem } from '../../lib/types';
+import { EvidenceTable } from '../EvidenceTable';
+import { canonicalJson, isScanPack, scanPackTitle, ScanPackSections } from './ScanEvidence';
 
 describe('the evidence pack of a scan', () => {
   it('is recognised by its job kind and scan block', () => {
@@ -47,16 +49,21 @@ describe('canonicalJson', () => {
   });
 });
 
-describe('a scan in the evidence list', () => {
-  const row = { id: 'ev_1', job_id: 's_01SCANJOB', created_at: '2026-10-13T18:41:21Z', outcome: 'succeeded', mode: 'synthesize', label: 'x',
-    source_object: null, target: null, write_mode: null, policy: 'gdpr-pseudonymise', ticket: null, passed: true, hits: 0, rows_written: 0, html_artefact_id: 'art_h' };
-  it('is told apart by its job id prefix (dps/ids.py)', () => {
-    expect(isScanJobId('s_01SCANJOB')).toBe(true);
-    expect(isScanJobId('j_01RUNJOB')).toBe(false);
-    expect(isScanJobId('snap_01X')).toBe(false);
+describe('a scan in the evidence list (Reports, mockup 09)', () => {
+  // GET /reports/evidence summarises a scan pack by the host of its origin and its scan block (S2 console r1 B2)
+  const item: EvidenceItem = { id: 'ev_1', job_id: 's_01SCANJOB', job_kind: 'scan', outcome: 'succeeded', created_at: '2026-10-13T18:41:21Z', pack_sha256: 'x', layer: 'ui',
+    summary: { mode: 'synthesize', policy: 'gdpr-pseudonymise', policy_version: '1', ticket: null, source: 'demo-site:8410', target: null, verification_passed: true, hits: 0, pages: 21, forms: 7, personas: 3, submissions: 0 } };
+  const dl = async (): Promise<{ blob: Blob; filename: string }> => ({ blob: new Blob([]), filename: 'x' });
+  const table = (it: EvidenceItem): string => text(html(<EvidenceTable rows={[{ kind: 'pack', created_at: it.created_at, item: it }]} downloads={{ packJson: dl, packPdf: dl, rollup: dl }} hasOlder={false} busy={false} onOlder={() => undefined} total={1} />));
+  it('names the scanned host and what the scan did: pages, forms, personas, submissions', () => {
+    const t = table(item);
+    expect(t).toContain('UI scan of demo-site:8410');
+    expect(t).toContain('21 pages · 7 forms · 3 personas · 0 submissions');
+    expect(t).not.toContain('UI scan of —');
   });
-  it('links to the scan, names the UI scanner layer and claims no rows or leak count', () => {
-    expect(scanEvidenceRow(row)).toEqual({ href: '/scanner/scans/s_01SCANJOB', what: 'UI scan → captures and exports', sub: 'nothing written to the scanned site', layer: 'UI scanner', verification: 'passed' });
-    expect(scanEvidenceRow({ ...row, outcome: 'canceled', passed: false, ticket: 'CHG-1' }).sub).toBe('CHG-1 · nothing written to the scanned site · canceled');
+  it('reads an older server, whose summary has no forms or personas, without inventing them', () => {
+    const t = table({ ...item, summary: { ...item.summary, forms: undefined, personas: undefined, pages: 1 } });
+    expect(t).toContain('1 page · 0 submissions');
+    expect(t).not.toMatch(/forms|personas/);
   });
 });

@@ -133,9 +133,8 @@ async def _scan(request: Request, scan_id: str) -> Job:
 async def _hosts(request: Request, tenant: str) -> frozenset[str]:
     async with db.acquire(tenant) as conn:
         hosts = await _store(request).registered_hosts(conn, tenant)
-    settings = _settings(request)
-    if not hosts and settings.env in ("local", "dev"):
-        hosts = settings.scan_registered_hosts_list
+    if not hosts:  # local/dev only: DPS_SCAN_REGISTERED_HOSTS (Admin › UI-scanner hosts says so)
+        hosts = _settings(request).scan_fallback_hosts
     return frozenset(hosts)
 
 

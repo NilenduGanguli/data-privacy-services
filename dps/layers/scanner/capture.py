@@ -31,6 +31,12 @@ Rules:
 * Boxes are measured on the live page right before the screenshot and again right after it
   (child-frame offsets included, CSS animations and transitions off); if anything moved while the
   screenshot was taken the capture is withheld rather than masked in the wrong place.
+* A read child frame draws its document's viewport at its content box (inside its border and
+  padding), wherever that document is scrolled to: rects inside it are measured in its viewport,
+  mapped through the content box and cut to what the frame (and every frame around it) shows. A
+  read frame whose pixels are not the page's — transformed, zoomed, or a content box that is not
+  its document's viewport — is painted over whole like an unread one (``dom.FrameGeometry``;
+  S2 captures-privacy r1 B1).
 * :func:`obfuscated_capture` replaces rendered values and pre-filled input values **in the DOM**
   (tokens with a reversible map in ``obfuscate`` mode, surrogates in ``synthesize`` mode), arms
   the guard first (a modified page must never navigate), rewrites each node whole (only while it
@@ -72,9 +78,11 @@ from dps.layers.scanner.dom import (
     SET_VALUES_JS,
     CensusItem,
     Extraction,
+    FrameGeometry,
     census_rects,
     extract_page,
     extraction_of,
+    frame_geometry,
     late_texts,
     render_census,
     stamped,
@@ -262,26 +270,89 @@ async def _read_frames(
     return ext
 
 
+def _intersect(a: Rect, b: Rect) -> Rect:
+    """The overlap of ``a`` and ``b`` (zero-size when they do not overlap)."""
+    x, y = max(a.x, b.x), max(a.y, b.y)
+    return Rect(
+        x=x,
+        y=y,
+        w=max(0.0, min(a.x + a.w, b.x + b.w) - x),
+        h=max(0.0, min(a.y + a.h, b.y + b.h) - y),
+    )
+
+
+def _shown_part(rects: Sequence[Rect], clip: Rect | None) -> list[Rect]:
+    """The parts of ``rects`` a frame shows (``clip``: the box it shows; ``None``: the top page,
+    whose whole document is shot). A rect scrolled out of its frame's view is not drawn at all."""
+    if clip is None:
+        return list(rects)
+    out = [_intersect(r, clip) for r in rects]
+    return [r for r in out if r.w > 0 and r.h > 0]
+
+
+@dataclass(frozen=True)
+class _LiveFrames:
+    """The page as a capture measures it now. ``snapshot``: the read frames' offsets (content box
+    origins) measured now; ``unread``: the boxes of every live child frame that was not read
+    (always painted over); ``opaque``: the boxes of the read frames whose pixels are not the page's
+    (``FrameGeometry.flat``), painted over whenever values are masked; ``whole``: the read frames
+    inside such a box, whose text and fields are not masked one by one; ``shows``: the box each
+    other read child frame shows (its content box cut to its ancestors')."""
+
+    snapshot: PageSnapshot
+    ext: Extraction
+    unread: list[Rect]
+    opaque: list[Rect]
+    whole: frozenset[int]
+    shows: dict[int, Rect]
+
+
 async def _fresh_frames(
     page: Page, frames: Mapping[int, Frame], snapshot: PageSnapshot
-) -> tuple[PageSnapshot, Extraction, list[Rect]] | None:
-    """``snapshot`` with the read frames' offsets measured now, its extraction, and the boxes of
-    every live child frame that was not read (by identity; measured now too). ``None``: withhold (a
-    frame failed while it was read, a read frame changed or cannot be located, an unread frame
-    cannot be located)."""
+) -> _LiveFrames | None:
+    """The live frames of ``snapshot`` (by identity; measured now). ``None``: withhold (a frame
+    failed while it was read, a read frame changed or cannot be located, an unread frame cannot be
+    located)."""
     ext = await _read_frames(page, frames, snapshot)
     if ext is None:
         return None
     by_index = {f.frame_index: f for f in snapshot.frames if f.read}
+    index_of = {id(frame): index for index, frame in ext.frames.items()}
+    geometry: dict[int, FrameGeometry] = {}
+    for index, frame in ext.frames.items():
+        if index == 0:
+            continue
+        measured = await frame_geometry(frame, (0.0, 0.0))  # the page is at 0,0 (``SCROLL_JS``)
+        if measured is None:
+            return None
+        geometry[index] = measured
     fresh: list[FrameFacts] = []
+    opaque: list[Rect] = []
+    whole: set[int] = set()
+    shows: dict[int, Rect] = {}
     for index, frame in ext.frames.items():
         facts = by_index.get(index)
         if facts is None:
             return None
-        offset = _ZERO if index == 0 else await _frame_box(frame)
-        if offset is None:
-            return None
-        fresh.append(facts.model_copy(update={"offset": offset}))
+        if index == 0:
+            fresh.append(facts.model_copy(update={"offset": _ZERO}))
+            continue
+        geo = geometry[index]
+        fresh.append(facts.model_copy(update={"offset": geo.content}))
+        shown, mapped, parent = geo.content, geo.flat, frame.parent_frame
+        while mapped and parent is not None and parent is not page.main_frame:
+            above = index_of.get(id(parent))
+            if above is None or not geometry[above].flat:
+                mapped = False  # inside a frame painted over whole (unread, or not flat)
+                break
+            shown = _intersect(shown, geometry[above].content)
+            parent = parent.parent_frame
+        if mapped:
+            shows[index] = shown
+            continue
+        whole.add(index)
+        if not geo.flat and geo.border.w > 0 and geo.border.h > 0:
+            opaque.append(geo.border)  # transformed or zoomed: no rect inside maps onto the page
     read = list(ext.frames.values())
     unread: list[Rect] = []
     for frame in page.frames:
@@ -294,7 +365,14 @@ async def _fresh_frames(
             return None
         if box.w > 0 and box.h > 0:
             unread.append(box)
-    return snapshot.model_copy(update={"frames": fresh}), ext, unread
+    return _LiveFrames(
+        snapshot=snapshot.model_copy(update={"frames": fresh}),
+        ext=ext,
+        unread=unread,
+        opaque=opaque,
+        whole=frozenset(whole),
+        shows=shows,
+    )
 
 
 # --- every copy of a value --------------------------------------------------------------------
@@ -465,6 +543,8 @@ class _MaskPlan:
     values: list[tuple[str, str]]
     detector: Detector | None
     census: bool
+    #: ``capture_screen(unmasked=True)``: no value is masked, so a read frame is never painted over
+    unmasked: bool = False
 
 
 Measure = Callable[[], Awaitable[list[MaskBox] | None]]
@@ -481,8 +561,9 @@ def _measurer(
         state = await _fresh_frames(page, frames, snapshot)
         if state is None:
             return None
-        live, ext, unread = state
-        masks = [MaskBox(rect=r, label=FRAME_LABEL) for r in unread]
+        live, ext = state.snapshot, state.ext
+        painted = state.unread if plan.unmasked else state.unread + state.opaque
+        masks = [MaskBox(rect=r, label=FRAME_LABEL) for r in painted]
         spans, fields, values = list(plan.spans), list(plan.fields), list(plan.values)
         if plan.census:
             late = await late_texts(ext)
@@ -517,26 +598,31 @@ def _measurer(
                     return None
                 census += swept
                 fields += _swept_fields(live.fields, values)
-        spans, fields = _unique_spans(spans), _unique_fields(fields)
-        census = _unique_census(census)
+        # a frame painted over whole needs no mask inside it (and none could be placed there)
+        spans = [s for s in _unique_spans(spans) if s[0] not in state.whole]
+        fields = [(f, e) for f, e in _unique_fields(fields) if f.frame_index not in state.whole]
+        census = [c for c in _unique_census(census) if items[c[0]].frame_index not in state.whole]
         if spans:
             rects = await text_rects(page, dict(ext.frames), live, [s[:4] for s in spans])
             for span, found in zip(spans, rects, strict=True):
                 if not found:
                     return None
-                masks += [MaskBox(rect=r, label=span[4]) for r in found]
+                shown = _shown_part(found, state.shows.get(span[0]))
+                masks += [MaskBox(rect=r, label=span[4]) for r in shown]
         if census:
             offsets = {f.frame_index: f.offset for f in live.frames if f.read and f.offset}
             rects = await census_rects(ext.frames, offsets, items, [c[:3] for c in census])
             for c, found in zip(census, rects, strict=True):
                 if not found:
                     return None
-                masks += [MaskBox(rect=r, label=c[3]) for r in found]
+                shown = _shown_part(found, state.shows.get(items[c[0]].frame_index))
+                masks += [MaskBox(rect=r, label=c[3]) for r in shown]
         for f, entity in fields:
             box = await _element_box(ext.frames.get(f.frame_index), f.key)
             if box is None:
                 return None
-            masks.append(MaskBox(rect=box, label=entity))
+            shown = _shown_part([box], state.shows.get(f.frame_index))
+            masks += [MaskBox(rect=r, label=entity) for r in shown]
         return masks
 
     return measure
@@ -655,7 +741,7 @@ async def capture_screen(
     if snapshot.truncated and not unmasked:
         return None  # text or fields the extraction did not read are in no finding
     if unmasked:
-        plan = _MaskPlan(spans=[], fields=[], values=[], detector=None, census=False)
+        plan = _MaskPlan(spans=[], fields=[], values=[], detector=None, census=False, unmasked=True)
     else:
         text_of = {(t.frame_index, t.i): t.text for t in snapshot.texts}
         values = [

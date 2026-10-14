@@ -1595,3 +1595,97 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   `/hostile-noopener` within 8 s (3/3 passes in isolation). Only the controls' wait changed — they
   prove the hostile page really sends what the guarded runs must refuse; `_until` returns as soon
   as every path arrived, and no guarded assertion was touched.
+
+## S2 fix round 1 — main merged into `m4`, verification findings (WP-I, 2026-10-14)
+
+Six blocking findings of the S2 lens verifiers (`~/.cache/dps-build/reports/S2-{gates,captures-privacy,
+adaptations,console}-r1.md`), each fixed test-first: every new test below failed on `a0e8d26` (log:
+`~/.cache/dps-build/s2-fix-r1/logs/01-new-tests-on-old-code.log`). The console's three are in
+`M4-DEVIATIONS-console.md`; the backend parts of those are listed here too.
+
+- **Captures — text in same-origin frames masked where the frame draws it** (captures-privacy B1;
+  `dps/layers/scanner/dom.py`, `capture.py`, `models.py`). Masks of text in a read child frame were
+  placed (1) with the child document's own scroll added (`TEXT_RECTS_JS`, `CENSUS_RECTS_JS`: a
+  fragment-scrolled frame put them 730 px below the text — and the scanner's own fill scrolls a
+  frame whose field is below its fold), (2) from the frame element's border box, not its content
+  box (a 40 px border or 50/60 px padding moved them up and left), (3) ignoring transforms; the
+  stored original, annotated and both filled screens showed the values. Now: rects inside a child
+  frame are measured in its viewport (the top frame keeps document coordinates); `dom.FrameGeometry`
+  (`frame_geometry`, `FRAME_BOX_JS`) maps them through the content box (border box plus
+  `clientLeft`/`clientTop` and padding), composed for nested frames by Playwright's border box of each
+  frame element; every mask of a child frame is cut to what that frame and the frames around it show
+  (a rect scrolled out of view draws nothing, instead of a mask over unrelated page content). A read
+  frame whose pixels are not the page's — a transform other than a translation, `scale`/`rotate`,
+  `zoom` or a motion path on the element or an ancestor in its document, a border box that is not
+  its layout size, or a content box that is not the child's `innerWidth`/`innerHeight` — **fails
+  closed**: it is painted over whole as `FRAME` (frames inside it are not masked one by one), in every
+  masked capture; the local-only `unmasked` control still paints only unread frames. Unread frames
+  keep their border box. `FrameFacts.offset` of a read frame is now its content box, and extracted
+  field rects in child frames are viewport-relative too. Tests: `tests/scanner/test_capture_census.py::
+  test_text_in_a_same_origin_frame_is_masked_where_the_frame_draws_it` (pixels at the browser's own
+  box of each value: fragment-scrolled, 40 px border, 50/60 px padding, `scale(2)`, each alone and
+  inside a bordered, padded frame; 8/8 failed before), `tests/scanner/test_capture_ocr.py::
+  test_text_in_a_same_origin_frame_is_never_readable` (OCR of the masked capture and both obfuscated
+  captures, with the unmasked control reading both values), `tests/scanner/test_crawler.py::
+  test_a_fill_that_scrolls_a_frame_never_shows_its_values` (`ScanRunner`, both modes: an iframe card
+  form below the fold; OCR of original, annotated, both filled screens and the masked capture, with a
+  control that fills the field the same way and reads both values unmasked; 0 non-GET requests).
+  Known gaps that stay open (S2 captures-privacy N1/N2: text added between an obfuscated capture's
+  snapshot and its re-extraction; closed shadow roots, CSS generated content, canvas text, input
+  values set after extraction) are unchanged by this round.
+- **`/jobs/{id}` routes check the job's kind** (adaptations B1, contract §8.1 "`scan` covers scans";
+  `dps/layers/api/routers/jobs.py`, `dps/jobs.py`). A database key holding `jobs` but not `scan`
+  canceled, paused and resumed scans through `POST /api/v1/jobs/{id}/cancel|pause|resume` and read
+  them through `GET /jobs/{id}`, `/partitions` and `GET /jobs?kind=scan` (the scans router refused it).
+  Each `/jobs/{id}` route now looks up the job's kind (`_owned`, and `job_kinds` for the controls, as
+  evidence and artefacts do) and calls `require_kind_scope`: a scan needs `scan` — 403
+  `scope_required`, controls audited `job.<action>` rejected, the scan unchanged; retry too.
+  `GET /jobs` leaves scans out for a key without `scan` (`list_jobs(exclude_kind=…)`, so pages stay
+  full) and `GET /jobs?kind=scan` is 403. A key with both scopes is unchanged. Contract §8.1 says so.
+  Tests: `tests/scanner/test_scans_api.py::test_database_keys_with_the_scan_scope_drive_every_scans_route`
+  (now also walks every `/api/v1/jobs/{job_id}…` operation of the OpenAPI document with the scan's id),
+  `::test_a_key_without_the_scan_scope_neither_controls_nor_lists_scans_through_jobs` (static and
+  database jobs-only keys; both failed before: 200).
+- **Scan rows on the Overview and in Reports name the host, forms and personas** (console B2;
+  `dps/reports.py`): `_brief` gave a scan `source=job.object_ref` (always `None`) and
+  `_evidence_summary` read `pack.source.object` (a scan pack has `source.origin`), so every row read
+  "UI scan of —". A scan's brief and its pack summary now name `scan_host(origin)` (`host[:port]` of
+  the redacted origin), and the summary carries the pack's `scan.forms` and `scan.personas`. Test:
+  `tests/scanner/test_scans_api.py::test_overview_and_reports_rows_name_the_scanned_host_its_forms_and_personas`
+  (a pack from the real `build_scan_evidence`; failed before: `source` `None`).
+- **The local/dev scan-host fallback has one source** (console B3; `dps/config.py`, `dps/posture.py`,
+  `scans.py`, `dps/layers/scanner/__init__.py`): `Settings.scan_fallback_hosts` is
+  `DPS_SCAN_REGISTERED_HOSTS` on a local or dev deployment and empty elsewhere; `POST /scans` and the
+  browser-worker apply it to a tenant with no registered host (as before), and `GET /admin/posture`
+  reports it as `scan_fallback_hosts` (new optional field) so Admin › UI-scanner hosts can say what
+  the deployment really does. Test: `tests/test_posture_m5.py::
+  test_posture_report_names_the_scan_host_fallback_where_the_scanner_applies_it`.
+- **Demo identifiers out of every D-A surrogate range — demo model 2** (gates B1; `tools/seed_model.py`,
+  `seed_sources.py`, `seed_oracle.py`, `seed_mongo.py`). The seeded-demo D-A tests
+  (`test_copula_job_on_the_seeded_demo_customers`, `test_surrogate_job_on_the_seeded_demo_customers`)
+  failed at random: the demo's 11,989 Aadhaar-shaped ids were drawn by the same generator as the
+  AADHAAR and 12-digit NATIONAL_ID surrogates (leading 1, Verhoeff), and its 3,998 SSNs from the SSN
+  surrogates' 9xx range. Path confirmed: the demo `national_id` column is NATIONAL_ID; a synthesize run
+  maps each 12-digit value through `unissued.twelve_digits` into the same 10¹⁰ space the demo holds
+  11,989 of, so about 11,989²/10¹⁰ ≈ 1.4 % of runs write one demo value (1,200 simulated runs of the
+  run's own surrogate path: 17 with a hit, all Aadhaar); each such run is rightly `review_required`,
+  which the tests' assertions (kept exactly) turn red. The demo now holds Aadhaar-shaped numbers with
+  a leading **0** (never issued; surrogates take 1, Verhoeff recomputed on the same ten digits) and SSNs
+  in area **666** (never issued; SSN/ITIN surrogates take 9xx, 9-digit NATIONAL_ID ones `000`; a
+  seed-keyed stride over 99×9,999 values, so every customer's SSN is distinct); NINOs (`QQ`), CURPs
+  (third letter `X`, which no inconvenient word has) and PANs (sequence 0001-9999) were already outside.
+  `DEMO_MODEL_VERSION = 2` goes into every seed marker (PG `_dps_seed_info.version`, Oracle
+  `CRM.DPS_SEED_INFO.MODEL_VERSION`, MongoDB `dps_seed_info.version`; old markers read as 1): a schema
+  seeded with the same parameters by an older model is reloaded (PG: also its restore copy;
+  "reloaded" on the CLI), so `docker compose up` (the `seed-sources` one-shot) and
+  `tools/seed_sources.py --target all` move existing stacks to model 2 without `--reset`. Tests:
+  `tests/test_seed_model.py::test_no_seeded_identifier_lies_where_a_surrogate_can_draw` (deterministic:
+  seed 7 × 20,000 and two more seeds; the old model put 11,989 Aadhaar and 3,998 SSN values inside a
+  draw range), `::test_the_draw_ranges_hold_every_surrogate_the_engine_draws` (the ranges are the
+  engine's), `::test_demo_ssns_depend_on_the_seed_and_stay_distinct`,
+  `tests/connectors/test_seed_sources_pg.py::test_a_schema_seeded_by_an_older_demo_model_is_reloaded`,
+  `tests/e2e/test_seed_shared_ids.py` (Oracle and MongoDB markers of model 1 reload once). The format
+  assertions of `test_seed_model.py` / `test_seed_sources.py` follow the new demo ranges; the D-A
+  test assertions are unchanged. Alternative not taken: redrawing a surrogate found in the source
+  column inside the synthesize run (a hot-path change; the post-write check already fails such a run
+  closed to review).

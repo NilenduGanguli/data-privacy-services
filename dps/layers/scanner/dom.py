@@ -184,7 +184,9 @@ EXTRACT_JS = (
   window.__dpsSnap = null;
   const fields = [], forms = new Map(), texts = [], links = [], clickables = [];
   let truncated = false, clickOrdinal = 0, budget = TEXT_BUDGET;
-  const sx = window.scrollX, sy = window.scrollY;
+  // document coordinates in the main frame (frame 0); a child frame's rects stay in its viewport,
+  // which its frame draws at its content box (``window.parent`` is the page's to replace)
+  const sx = frameIndex === 0 ? window.scrollX : 0, sy = frameIndex === 0 ? window.scrollY : 0;
   const onField = (el, inShadow) => {
     const tag = el.tagName.toLowerCase();
     const type = tag === 'input' ? (el.getAttribute('type') || 'text').toLowerCase()
@@ -351,15 +353,22 @@ CLICK_TARGET_JS = r"""
 }
 """
 
+#: Client rects of ``[i, start, end]`` text spans (``[spans, top]``): document coordinates in the top
+#: frame, viewport coordinates in a child frame (its frame draws that viewport at its content box;
+#: adding the child document's own scroll put masks of a scrolled frame below the text, S2
+#: captures-privacy r1 B1). ``top`` comes from the caller (Playwright's frame tree), not the page.
 TEXT_RECTS_JS = r"""
-(spans) => spans.map(([i, start, end]) => {
-  const node = (window.__dpsTextNodes || [])[i];
-  if (!node) return [];
-  const range = document.createRange();
-  try { range.setStart(node, start); range.setEnd(node, end); } catch (e) { return []; }
-  return Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
-    .map((r) => ({ x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height }));
-})
+([spans, top]) => {
+  const sx = top ? window.scrollX : 0, sy = top ? window.scrollY : 0;
+  return spans.map(([i, start, end]) => {
+    const node = (window.__dpsTextNodes || [])[i];
+    if (!node) return [];
+    const range = document.createRange();
+    try { range.setStart(node, start); range.setEnd(node, end); } catch (e) { return []; }
+    return Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
+      .map((r) => ({ x: r.left + sx, y: r.top + sy, w: r.width, h: r.height }));
+  });
+}
 """
 
 #: Rewrite extracted text nodes whole: a node is replaced only while it still holds exactly the text
@@ -463,13 +472,14 @@ CENSUS_JS = (
     .replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
 )
 
-#: Client rects (page coordinates) of ``[k, start, end]`` census spans of the last ``CENSUS_JS``
-#: call: a range for a text node (UTF-16 offsets), the whole element box for an element.
+#: Client rects of ``[k, start, end]`` census spans of the last ``CENSUS_JS`` call (``[spans, top]``;
+#: a range for a text node, UTF-16 offsets; the whole element box for an element): document
+#: coordinates in the top frame, viewport coordinates in a child frame (as ``TEXT_RECTS_JS``).
 CENSUS_RECTS_JS = r"""
-(spans) => spans.map(([k, start, end]) => {
+([spans, top]) => spans.map(([k, start, end]) => {
   const t = (window.__dpsCensus || [])[k];
   if (!t) return [];
-  const sx = window.scrollX, sy = window.scrollY;
+  const sx = top ? window.scrollX : 0, sy = top ? window.scrollY : 0;
   let rects;
   if (t.nodeType === Node.TEXT_NODE) {
     const range = document.createRange();
@@ -522,7 +532,103 @@ SCROLL_JS = (
     "return [window.scrollX, window.scrollY, document.documentElement.scrollHeight]; }"
 )
 
+#: Seen from a frame element in its parent document: the content box its child document is drawn
+#: in (inside the border and padding, which the border box Playwright measures includes), the
+#: element's layout size, and ``flat`` — false when the element or an ancestor of it in that
+#: document is transformed (anything but a translation), zoomed or placed on a motion path, so the
+#: child's CSS pixels are not the page's and no mask can be placed by arithmetic.
+FRAME_BOX_JS = r"""
+(el) => {
+  const px = (v) => parseFloat(v) || 0;
+  const moves = (t) => {
+    if (!t || t === 'none') return true;
+    const m = /^matrix\((.+)\)$/.exec(t);
+    if (m) {
+      const [a, b, c, d] = m[1].split(',').map(Number);
+      return a === 1 && b === 0 && c === 0 && d === 1;
+    }
+    const m3 = /^matrix3d\((.+)\)$/.exec(t);
+    if (m3) {
+      const v = m3[1].split(',').map(Number);
+      const unit = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
+      return unit.every((x, i) => v[i] === x) && v[15] === 1;
+    }
+    return false;
+  };
+  let flat = true;
+  for (let n = el; n && flat; n = n.parentElement || (n.parentNode && n.parentNode.host) || null) {
+    const st = getComputedStyle(n);
+    if (!moves(st.transform) || (st.scale && st.scale !== 'none') || (st.rotate && st.rotate !== 'none')
+        || (st.zoom && st.zoom !== '1' && st.zoom !== 'normal')
+        || (st.offsetPath && st.offsetPath !== 'none')) flat = false;
+  }
+  const st = getComputedStyle(el);
+  return {
+    left: el.clientLeft + px(st.paddingLeft), top: el.clientTop + px(st.paddingTop),
+    width: el.clientWidth - px(st.paddingLeft) - px(st.paddingRight),
+    height: el.clientHeight - px(st.paddingTop) - px(st.paddingBottom),
+    outerWidth: el.offsetWidth, outerHeight: el.offsetHeight, flat,
+  };
+}
+"""
+#: A child document's viewport size (its frame's content box, scrollbars included).
+VIEWPORT_JS = "() => [window.innerWidth, window.innerHeight]"
+#: Layout sizes are whole pixels; measured boxes are not.
+_SIZE_TOLERANCE = 1.0
+
 _NO_OFFSET = Rect(x=0, y=0, w=0, h=0)
+
+
+@dataclass(frozen=True)
+class FrameGeometry:
+    """Where a child frame is on the top page (document coordinates, at the given scroll).
+
+    ``border``: its element's border box as the browser draws it (transforms included) — what a
+    capture paints over when the frame is not read. ``content``: the box its document's viewport
+    is drawn in (border box plus border and padding), where the child's viewport coordinates
+    start. ``flat``: one CSS pixel of the child is one pixel of the page there — no transform,
+    zoom or motion path on the element or its ancestors, and the content box is the child's
+    viewport; when it is false no rect inside the frame can be mapped onto the page (S2
+    captures-privacy r1 B1), so a capture paints the whole frame over instead.
+    """
+
+    border: Rect
+    content: Rect
+    flat: bool
+
+
+async def _geometry(frame: Frame, scroll: tuple[float, float]) -> FrameGeometry:
+    """``frame_geometry``; raises ``PlaywrightError`` when the frame or its element is gone."""
+    element = await frame.frame_element()
+    box = await element.bounding_box()  # relative to the main viewport, transforms included
+    if box is None:  # not rendered (display:none, detached)
+        return FrameGeometry(border=_NO_OFFSET, content=_NO_OFFSET, flat=True)
+    raw: dict[str, Any] = await element.evaluate(FRAME_BOX_JS)
+    inner = await frame.evaluate(VIEWPORT_JS)
+    border = Rect(x=box["x"] + scroll[0], y=box["y"] + scroll[1], w=box["width"], h=box["height"])
+    content = Rect(
+        x=border.x + float(raw["left"]),
+        y=border.y + float(raw["top"]),
+        w=max(0.0, float(raw["width"])),
+        h=max(0.0, float(raw["height"])),
+    )
+    flat = (
+        bool(raw["flat"])
+        and abs(border.w - float(raw["outerWidth"])) <= _SIZE_TOLERANCE
+        and abs(border.h - float(raw["outerHeight"])) <= _SIZE_TOLERANCE
+        and abs(float(inner[0]) - content.w) <= _SIZE_TOLERANCE
+        and abs(float(inner[1]) - content.h) <= _SIZE_TOLERANCE
+    )
+    return FrameGeometry(border=border, content=content, flat=flat)
+
+
+async def frame_geometry(frame: Frame, scroll: tuple[float, float]) -> FrameGeometry | None:
+    """A child frame's :class:`FrameGeometry` now (``scroll``: the top page's scroll, added to make
+    document coordinates); ``None`` when it cannot be determined (the frame or its element is gone)."""
+    try:
+        return await _geometry(frame, scroll)
+    except PlaywrightError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -637,7 +743,8 @@ async def census_rects(
         if frame is None:
             continue
         try:
-            raw = await frame.evaluate(CENSUS_RECTS_JS, [js for _, js in todo])
+            top = frame.parent_frame is None
+            raw = await frame.evaluate(CENSUS_RECTS_JS, [[js for _, js in todo], top])
         except PlaywrightError:
             continue
         off = offsets.get(frame_index, _NO_OFFSET)
@@ -678,13 +785,11 @@ async def frame_map(page: Page, *, iframes: bool) -> dict[int, Frame]:
 
 
 async def _frame_offset(frame: Frame, scroll: tuple[float, float]) -> Rect:
+    """Where a read frame's viewport starts on the top page: its content box (zero for the main
+    frame and a frame not rendered). Raises ``PlaywrightError`` when the frame is gone."""
     if frame.parent_frame is None:
         return _NO_OFFSET
-    element = await frame.frame_element()
-    box = await element.bounding_box()  # relative to the main viewport
-    if box is None:
-        return _NO_OFFSET
-    return Rect(x=box["x"] + scroll[0], y=box["y"] + scroll[1], w=box["width"], h=box["height"])
+    return (await _geometry(frame, scroll)).content
 
 
 async def _unread_box(frame: Frame, scroll: tuple[float, float]) -> Rect | None:
@@ -842,7 +947,8 @@ async def text_rects(
         if frame is None:
             continue
         try:
-            raw = await frame.evaluate(TEXT_RECTS_JS, [js for _, js in items])
+            top = frame.parent_frame is None
+            raw = await frame.evaluate(TEXT_RECTS_JS, [[js for _, js in items], top])
         except PlaywrightError:
             continue
         off = offsets.get(frame_index, _NO_OFFSET)

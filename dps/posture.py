@@ -300,6 +300,8 @@ class PostureReport(BaseModel):
     total: int
     checked_at: datetime
     checks: list[PostureCheck]
+    #: the hosts a tenant with no registered host may scan (local/dev only; Admin shows them)
+    scan_fallback_hosts: list[str] = []
 
 
 async def _tenant_warn_policies(principal: Principal | None) -> list[str]:
@@ -442,6 +444,7 @@ async def posture_report(
         total=len(checks),
         checked_at=datetime.now(UTC),
         checks=checks,
+        scan_fallback_hosts=settings.scan_fallback_hosts,
     )
 
 

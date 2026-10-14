@@ -497,14 +497,19 @@ async def list_jobs(
     group_id: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    exclude_kind: JobKind | None = None,
 ) -> tuple[list[Job], str | None]:
-    """Newest first; keyset pagination on ``(created_at, id)``. ``ValueError`` on a bad cursor."""
+    """Newest first; keyset pagination on ``(created_at, id)``. ``ValueError`` on a bad cursor.
+    ``exclude_kind`` leaves one kind out (a key without the ``scan`` scope lists no scans)."""
     conds: list[str] = ["j.tenant_id = $1"]
     params: list[Any] = [tenant_id]
     for column, value in (("kind", kind), ("state", state), ("group_id", group_id)):
         if value is not None:
             params.append(str(value))
             conds.append(f"j.{column} = ${len(params)}")
+    if exclude_kind is not None:
+        params.append(str(exclude_kind))
+        conds.append(f"j.kind <> ${len(params)}")
     if cursor:
         ts, cid = decode_cursor(cursor)
         params += [ts, cid]

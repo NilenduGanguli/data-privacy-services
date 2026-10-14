@@ -7,7 +7,7 @@
  */
 import type { ReactNode } from 'react';
 import { fmtCount, fmtDuration, fmtUtc } from '../../lib/jobs';
-import type { EvidencePack, EvidenceSummary, NumberedRiskFlag } from '../../lib/types';
+import type { EvidencePack, NumberedRiskFlag } from '../../lib/types';
 import { entityName, flagSentence, flagTone, hostOf, pathOf } from './format';
 
 export function Sec({ n, title, right, keep, children }: { n: number; title: string; right?: ReactNode; keep?: boolean; children: ReactNode }): JSX.Element {
@@ -34,22 +34,6 @@ export function scanPackTitle(p: EvidencePack): string {
 
 /** Re-exported from lib/api.ts, where the evidence JSON download uses it too. */
 export { canonicalJson } from '../../lib/api';
-
-/** A scan's job id (dps/ids.py PREFIX_SCAN = "s"; runs are "j_…"). The evidence list carries no job kind. */
-export const isScanJobId = (jobId: string): boolean => jobId.startsWith('s_');
-
-export interface EvidenceRowView { href: string; what: string; sub: string; layer: string; verification: string }
-
-/** How a scan's row of the evidence list reads (Reports, mockup 09): a scan has no source table, target or rows. */
-export function scanEvidenceRow(s: EvidenceSummary): EvidenceRowView {
-  return {
-    href: `/scanner/scans/${encodeURIComponent(s.job_id)}`,
-    what: 'UI scan → captures and exports',
-    sub: [s.ticket, 'nothing written to the scanned site', s.outcome !== 'succeeded' ? s.outcome.replace('_', ' ') : null].filter(Boolean).join(' · '),
-    layer: 'UI scanner',
-    verification: s.passed ? 'passed' : 'failed',
-  };
-}
 
 function scopeText(scope: Record<string, any>): string {
   const parts = [`max ${fmtCount(num(scope.max_pages))} pages`, `depth ≤ ${text(scope.max_depth)}`, scope.same_origin === false ? 'other origins allowed' : 'same origin'];

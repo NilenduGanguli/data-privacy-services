@@ -299,3 +299,76 @@ INJECT_JS = """async (html) => {
   await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   return true;
 }"""
+
+
+# --- S2 captures-privacy r1 B1: same-origin frames drawn away from their border box -------------
+#: A frame document rendering two made-up values (each detected through its own text node: an
+#: e-mail and a PAN), each in a ``<span>`` with an id; ``{lead}``/``{tail}`` pad it (a tall
+#: document the frame scrolls in).
+FRAME_DOC = (
+    "<!doctype html><html><head><meta charset='utf-8'><style>"
+    "body{font:22px/1.5 Arial,Helvetica,sans-serif;margin:24px;color:#111;background:#fff}"
+    ".big{font-size:26px}</style></head><body><h2>Statement</h2>{lead}"
+    f"<p class='big'>Statement for <span id='v-email'>{CENSUS_EMAIL}</span></p>"
+    f"<p class='big'>PAN: <span id='v-pan'>{CENSUS_PAN}</span></p>{{tail}}</body></html>"
+)
+_TALL = "<div style='height:600px'>top of the statement</div>"
+#: case -> (iframe style, wrapper style, lead, tail, scroll the frame to the e-mail): a frame
+#: scrolled as a ``#fragment`` scrolls it, a 40 px border, 50/60 px padding, a ``scale(2)``
+#: transform, and a frame nested in a bordered, padded frame.
+FRAME_CASES: dict[str, tuple[str, str, str, str, bool]] = {
+    "scrolled": ("width:900px;height:300px;border:0", "", _TALL, _TALL, True),
+    "border": ("width:900px;height:260px;border:40px solid #ccc", "", "", "", False),
+    "padding": (
+        "width:900px;height:260px;border:0;padding:50px 0 0 60px;background:#eee",
+        "",
+        "",
+        "",
+        False,
+    ),
+    "scaled": (
+        "width:600px;height:200px;border:0;transform:scale(2);transform-origin:0 0",
+        "height:520px",
+        "",
+        "",
+        False,
+    ),
+}
+FRAME_VALUES = (CENSUS_EMAIL, CENSUS_PAN)
+#: Inserts ``[html, style, wrapper, nested, scroll]``: an iframe (``srcdoc``, same origin) at the
+#: top of the page; ``nested`` puts it inside an outer frame with a 30 px border and 20/30 px
+#: padding; ``scroll`` scrolls the inner document to ``#v-email`` (what a fragment does).
+FRAME_JS = """async ([html, style, wrapper, nested, scroll]) => {
+  const load = (f) => new Promise((done) => { f.onload = () => done(true); });
+  const holder = document.createElement('div');
+  holder.style.cssText = wrapper;
+  document.body.prepend(holder);
+  let doc = document, host = holder;
+  if (nested) {
+    const outer = document.createElement('iframe');
+    outer.srcdoc = "<!doctype html><html><body style='margin:12px;background:#fff'></body></html>";
+    outer.style.cssText = 'width:1000px;height:420px;border:30px solid #ccc;padding:20px 0 0 30px;display:block;box-sizing:content-box';
+    const ready = load(outer);
+    holder.appendChild(outer);
+    await ready;
+    doc = outer.contentDocument;
+    host = doc.body;
+  }
+  const f = doc.createElement('iframe');
+  f.id = 'v-frame';
+  f.srcdoc = html;
+  f.style.cssText = style + ';display:block;box-sizing:content-box';  // the site sets border-box
+  const ready = load(f);
+  host.appendChild(f);
+  await ready;
+  if (scroll) f.contentDocument.getElementById('v-email').scrollIntoView({ block: 'start' });
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  return true;
+}"""
+
+
+def frame_case_args(case: str, *, nested: bool = False) -> list[Any]:
+    """The ``FRAME_JS`` argument of a ``FRAME_CASES`` case (the inner frame nested or not)."""
+    style, wrapper, lead, tail, scroll = FRAME_CASES[case]
+    html = FRAME_DOC.replace("{lead}", lead).replace("{tail}", tail)
+    return [html, style, wrapper, nested, scroll]

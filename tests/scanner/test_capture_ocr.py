@@ -35,7 +35,11 @@ from tests.scanner.helpers import (
     CENSUS_PAGES,
     CENSUS_SINGLE_COPY,
     CENSUS_VALUES,
+    FRAME_CASES,
+    FRAME_JS,
+    FRAME_VALUES,
     INJECT_JS,
+    frame_case_args,
     guarded_context,
 )
 
@@ -322,3 +326,73 @@ async def test_a_value_outside_readable_text_nodes_is_never_readable(
         assert png is not None, name
         strict = name == "masked"
         assert _readable(_ocr(cmd, png), values, keys, strict=strict) == [], name
+
+
+async def _frame_page(
+    ctx: Any, url: str, case: str, nested: bool
+) -> tuple[Any, Any, dict[int, Any]]:
+    page = await ctx.new_page()
+    await page.goto(f"{url}/help")
+    await page.wait_for_load_state("load")
+    await page.evaluate(FRAME_JS, frame_case_args(case, nested=nested))
+    snap = await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
+    return page, snap, await frame_map(page, iframes=True)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["frame", "nested"])
+@pytest.mark.parametrize("case", list(FRAME_CASES))
+async def test_text_in_a_same_origin_frame_is_never_readable(
+    case: str,
+    nested: bool,
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    demo_site_url: str,
+) -> None:
+    """S2 captures-privacy r1 B1: an e-mail and a PAN rendered in a same-origin frame that is
+    fragment-scrolled, has a 40 px border, 50/60 px padding or ``scale(2)`` (alone, and inside a
+    bordered, padded frame) are readable in the unmasked control and in none of the masked capture
+    and the two obfuscated captures (before the fix the masked capture showed both)."""
+    cmd = _tesseract()
+    values = {v: v for v in FRAME_VALUES}
+    keys = tuple(values)
+    det = scan_engine.detector(scan_engine.policy(None), "en_IN")
+    outputs: dict[str, bytes | None] = {}
+    async with guarded_context(chromium, scan_settings, demo_site_url, cookies=True) as (ctx, _g):
+        page, snap, frames = await _frame_page(ctx, demo_site_url, case, nested)
+        rendered = classify_rendered(snap.texts, detector=det)
+        raw = await capture_screen(
+            page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, unmasked=True
+        )
+        outputs["masked"] = await capture_screen(
+            page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, detector=det
+        )
+    for mode in ("synthesize", "obfuscate"):
+        async with guarded_context(chromium, scan_settings, demo_site_url, cookies=True) as (
+            ctx,
+            guard,
+        ):
+            page, snap, frames = await _frame_page(ctx, demo_site_url, case, nested)
+            res = await obfuscated_capture(
+                page,
+                frames,
+                snap,
+                rendered=classify_rendered(snap.texts, detector=det),
+                prefilled=[],
+                engine=scan_engine,
+                policy=scan_engine.policy(None),
+                mode=mode,  # type: ignore[arg-type]
+                key=generate_key_material("key") if mode == "obfuscate" else None,
+                seed=seed_bytes(generate_synthesis_seed()),
+                locale="en_IN",
+                guard=guard,
+                settings=scan_settings,
+                page_no=1,
+            )
+            assert res.status == "captured", (mode, res.reason)
+            outputs[mode] = res.png
+    assert raw is not None
+    assert _readable(_ocr(cmd, raw), values, keys, strict=True) == list(keys)  # the control
+    for name, png in outputs.items():
+        assert png is not None, name
+        assert _readable(_ocr(cmd, png), values, keys, strict=name == "masked") == [], name

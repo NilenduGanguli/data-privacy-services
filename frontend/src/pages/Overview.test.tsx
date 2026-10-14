@@ -66,6 +66,7 @@ describe('OverviewView', () => {
     expect(t).toContain('1,412,204');
     expect(out).toContain('href="/data-sources/jobs/j_01K7ZQ3R8D5W9Q"');
     expect(out).toContain('href="/scanner/scans/s_01K7ZRB2M4XQ"');
+    expect(t).toContain('UI scan of onboarding-uat.bank.internal'); // the brief's source: the scanned host
     expect(t).toContain('CRM.CUSTOMERS → CRM_MASKED.CUSTOMERS');
     expect(t).toContain('awaiting review');
   });

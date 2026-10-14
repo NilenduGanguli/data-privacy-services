@@ -35,7 +35,10 @@ from tests.scanner.helpers import (
     CENSUS_NAME,
     CENSUS_OBFUSCATED_WITHHELD,
     CENSUS_PAGES,
+    FRAME_CASES,
+    FRAME_JS,
     INJECT_JS,
+    frame_case_args,
     guarded_context,
 )
 
@@ -380,3 +383,63 @@ async def test_obfuscated_capture_replaces_a_value_after_the_2000th_character(
     assert normalise(CENSUS_EMAIL2) not in normalise(shown)
     # the node was rewritten whole: its text before and after the value is still there
     assert shown.startswith(CENSUS_FILLER.strip()) and "Contact:" in shown
+
+
+# --- S2 captures-privacy r1 B1: text in a same-origin frame is masked where the frame draws it --
+async def frame_page(ctx: Any, url: str, case: str, *, nested: bool) -> Any:
+    """A demo page with a ``FRAME_CASES`` frame (``FRAME_JS``) at its top."""
+    page = await ctx.new_page()
+    await page.goto(f"{url}/help")
+    await page.wait_for_load_state("load")
+    await page.evaluate(FRAME_JS, frame_case_args(case, nested=nested))
+    return page
+
+
+async def frame_value_boxes(page: Any) -> list[dict[str, float]]:
+    """Where the browser draws the frame's two values in the top page: Playwright's box, which maps
+    through every frame's position, border, padding, scroll and transform (the capture's own
+    arithmetic is what is under test, so it is not used here)."""
+    for frame in page.frames:
+        if frame is page.main_frame:
+            continue
+        if await (await frame.frame_element()).get_attribute("id") != "v-frame":
+            continue
+        out = []
+        for element_id in ("v-email", "v-pan"):
+            b = await frame.locator(f"#{element_id}").bounding_box()
+            assert b is not None
+            out.append({"x": b["x"], "y": b["y"], "w": b["width"], "h": b["height"]})
+        return out
+    raise AssertionError("the value frame is not on the page")
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["frame", "nested"])
+@pytest.mark.parametrize("case", list(FRAME_CASES))
+async def test_text_in_a_same_origin_frame_is_masked_where_the_frame_draws_it(
+    case: str,
+    nested: bool,
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    demo_site_url: str,
+) -> None:
+    """S2 captures-privacy r1 B1. The masks of text in a read child frame were placed with the
+    frame's own scroll added (a fragment-scrolled frame: 730 px below the text), from the frame's
+    border box instead of its content box (40 px border: 40 px up and left; 50/60 px padding) and
+    ignoring a transform (``scale(2)``), so the stored original showed the values in clear. Each
+    value's mask now covers the box the browser draws it in — a transformed frame is painted over
+    whole (fail closed) — also when the frame sits inside another bordered, padded frame."""
+    det = scan_engine.detector(scan_engine.policy(None), "en_IN")
+    async with guarded_context(chromium, scan_settings, demo_site_url, cookies=True) as (ctx, _g):
+        page = await frame_page(ctx, demo_site_url, case, nested=nested)
+        snap, frames = await _read(page)
+        rendered = classify_rendered(snap.texts, detector=det)
+        found = {r.entity_type for r in rendered if r.frame_index > 0}
+        assert found >= {"EMAIL", "PAN_IN"}, found  # precondition: both values are findings
+        png = await capture_screen(
+            page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, detector=det
+        )
+        boxes = await frame_value_boxes(page)  # as shot: the page at 0,0, the frames as they are
+    assert png is not None, (case, nested)
+    for box in boxes:
+        assert _covered(png, box) > 0.5, (case, nested, box)

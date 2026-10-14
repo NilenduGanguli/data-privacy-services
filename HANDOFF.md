@@ -1537,9 +1537,32 @@ pages and 63 fields each, 60 POST + 1 GET blocked) left `/__received` at +0 with
 (`application_ref` stays readable on `/apply/review`, M4's open N9); the logs of all 15 containers hold
 none of the demo values, the session cookie, the scans' keys or seeds; a console walk of every M1–M5
 page (light/dark, 1440/390 px) had 0 console errors, 0 5xx and no horizontal scroll at 390 px.
-Known flake (main's code): `tests/connectors/test_synthesize_copula.py::
+Known flake (main's code), **fixed in S2 fix round 1 (§16.1)**: `tests/connectors/test_synthesize_copula.py::
 test_surrogate_job_on_the_seeded_demo_customers` failed once in ~8 runs with one synthetic
-`national_id` equal to a demo-source one — the demo seed (`tools/seed_model.py`) draws its SSNs and
+`national_id` equal to a demo-source one — the demo seed (`tools/seed_model.py`) drew its SSNs and
 Aadhaars from the same never-issued ranges the D-A surrogates use; the run's own identifier check
 compares with the source, so such a run is review-required, never silently written. Reports:
 `~/.cache/dps-build/reports/S2-premerge.md`.
+
+### 16.1 S2 fix round 1 (2026-10-14) — what changes for a build, a deploy or a demo
+
+Details and tests: `docs/superpowers/build/M4-DEVIATIONS.md` and `M4-DEVIATIONS-console.md` "S2 fix
+round 1"; report `~/.cache/dps-build/reports/S2-fix-r1.md`.
+
+- **Demo data model 2** (`tools/seed_model.py` `DEMO_MODEL_VERSION`): demo Aadhaar-shaped ids start with
+  `0` and demo SSNs use area `666`, ranges no D-A surrogate draws, so a synthesize run of the demo can
+  never write a demo value (the seeded-demo D-A tests are deterministic now). Every seed marker carries
+  the model version; **a stack seeded by model 1 is reloaded automatically** (same `--rows`/`--seed`, no
+  `--reset`): the compose `seed-sources` one-shot reloads PostgreSQL `bank` (and `bank_restore`) on the
+  next `docker compose up`, and `python tools/seed_sources.py --target all --rows 20000 --seed 7`
+  reloads Oracle and MongoDB. Anything that cached demo ids (screenshots, notes) shows model-1 values.
+- **Captures:** text in a read same-origin iframe is masked in the frame's viewport, mapped through its
+  content box and cut to what the frame shows; a transformed or zoomed read frame is painted over whole
+  (`FRAME`) — fail closed.
+- **API:** `/jobs/{id}` routes refuse a scan to a key without `scan` (403 `scope_required`); `GET /jobs`
+  lists no scans for such a key. `GET /admin/posture` gains `scan_fallback_hosts` (the
+  `DPS_SCAN_REGISTERED_HOSTS` list on local/dev, `[]` elsewhere); recent-job briefs and evidence
+  summaries of scans name the host (plus `forms`, `personas`).
+- **Console:** below 1100 px a menu button opens the navigation drawer (mockups' `vault.js`); scan
+  rows read "UI scan of <host> · … pages · … forms · … personas · … submissions"; Admin › UI-scanner
+  hosts states the local/dev fallback instead of "scans are refused".

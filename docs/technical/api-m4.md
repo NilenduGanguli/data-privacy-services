@@ -305,7 +305,12 @@ Each page's `artefacts` maps a variant to an artefact id (`GET /artefacts/{id}`)
 A capture **fails closed**: when a value cannot be located and masked (text split across nodes, a
 frame that could not be read, a page that changed under the capture, the leakage sweep finding an
 original), no image is stored for it (`capture_status: "withheld"`, event `capture/withheld` with
-the reason). The exports (artefact kinds `export_json`, `export_csv`) and the printable evidence
+the reason). Frames: a cross-origin frame (or any frame with `scope.iframes` off) is painted over
+whole (`FRAME`); text in a read same-origin frame is masked where that frame draws it — wherever its
+document is scrolled to, inside its border and padding, nested frames included — and a read frame
+that is transformed or zoomed is painted over whole as well. Not yet masked (known limits): text in
+closed shadow roots, CSS generated content (`::before`/`::after` `content`), canvas-drawn text and an
+input value a script sets after the page was read. The exports (artefact kinds `export_json`, `export_csv`) and the printable evidence
 pack (`evidence_html`) are stored at finalize.
 
 ## Export — `dps.scan-export.v1`

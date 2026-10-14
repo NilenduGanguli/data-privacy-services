@@ -550,6 +550,12 @@ class Settings(BaseSettings):
         """``scan_registered_hosts`` split on commas, lower-cased, trimmed, empties dropped."""
         return [p.strip().lower() for p in self.scan_registered_hosts.split(",") if p.strip()]
 
+    @property
+    def scan_fallback_hosts(self) -> list[str]:
+        """The hosts a tenant with no registered host may scan: ``scan_registered_hosts`` on a local
+        or dev deployment, none in staging or production (``POST /scans`` and Admin read this)."""
+        return self.scan_registered_hosts_list if self.env in ("local", "dev") else []
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
