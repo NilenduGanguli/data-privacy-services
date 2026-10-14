@@ -1,7 +1,8 @@
 // Wizard step 4: an Append's key offset or prefix is checked where it is typed (H2 verification,
 // programme plan F4 polish). The server needs exactly one of a whole-number offset above 0 or a
 // 1-16 character prefix of letters, digits, "_" and "-" (PkOffset); before this check step 4 let
-// "0" or "abc" through and step 5 showed the raw validation message.
+// "0" or "abc" through and step 5 showed the raw validation message; a fraction such as "0.5"
+// passed too and was sent as offset 0 (S7 review r1 N3).
 import { describe, expect, it } from 'vitest';
 import type { WizardDraft } from '../../lib/jobs';
 import { draft } from '../../lib/fixtures';
@@ -23,7 +24,7 @@ const append = (over: Partial<WizardDraft> = {}): WizardDraft =>
 describe('offsetProblem', () => {
   it('asks for an offset, and refuses one that is not a whole number above 0', () => {
     expect(offsetProblem(append({ pkOffset: '' }))).toMatch(/Enter the key offset/);
-    for (const bad of ['0', 'abc', '-5', '  ']) expect(offsetProblem(append({ pkOffset: bad })), bad).not.toBeNull();
+    for (const bad of ['0', 'abc', '-5', '  ', '0.5', '1.5', '1e3', '0x10']) expect(offsetProblem(append({ pkOffset: bad })), bad).not.toBeNull();
     for (const good of ['900000000', '900,000,000', '1 000']) expect(offsetProblem(append({ pkOffset: good })), good).toBeNull();
   });
   it('checks a text key prefix like the server does', () => {

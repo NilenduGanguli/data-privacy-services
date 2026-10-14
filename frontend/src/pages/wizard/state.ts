@@ -251,7 +251,10 @@ export function offsetProblem(d: Pick<WizardDraft, 'writeMode' | 'pkKind' | 'pkO
     return /^[A-Za-z0-9_-]{1,16}$/.test(prefix) ? null : 'The key prefix is 1 to 16 letters, digits, "_" or "-".';
   }
   if (!d.pkOffset.trim()) return 'Enter the key offset: a whole number above 0 that lifts every new key above the highest key in the table.';
-  return parseCount(d.pkOffset) === null ? 'The key offset must be a whole number above 0 (for example 900000000).' : null;
+  // digits and digit-group separators only: "0.5" or "1.5" would be floored (to 0, refused by the
+  // server, or silently to 1) and "1e3" or "0x10" read as other numbers than typed
+  const whole = /^\d[\d,\s_]*$/.test(d.pkOffset.trim()) ? parseCount(d.pkOffset) : null;
+  return whole === null ? 'The key offset must be a whole number above 0 (for example 900000000).' : null;
 }
 
 /** The accepted snapshot keeps every key column in the run's mode, as In place requires. */
