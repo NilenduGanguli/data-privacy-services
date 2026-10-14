@@ -267,6 +267,29 @@ addEventListener('message', (e) => relay('pm', e.data));
 new BroadcastChannel('dps-relay').onmessage = (e) => relay('bc', e.data);
 window.ready = true;
 </script></body></html>"""
+#: M4 verify r1 F1 (the D4/D-C race in ``arm``): before the fill, the page opens synchronous
+#: ``about:blank`` popups (a new one every few milliseconds, also while ``arm`` runs) and starts a
+#: dedicated worker in each popup's realm (``new w.Worker``, reached from the opener). After the
+#: fill, ``leak()`` hands the value to every such worker, which would send it on a ``wss://``
+#: socket (base64 in the URL) that no route and no proxy rule sees over HTTPS.
+_RACE_PAGE = """<!doctype html><html><body><input id="name"><script>
+const SRC = URL.createObjectURL(new Blob([`onmessage = (e) => {
+  const s = new WebSocket('wss://' + new URL(self.origin).host + '/leak-' + e.data[0] + '?d=' + btoa(e.data[1]));
+  s.onopen = () => s.send(e.data[1]); }`], {type: 'text/javascript'}));
+window.workers = [];
+try { const w = window.open('', 'first'); workers.push(['A', new w.Worker(SRC)]); } catch (e) {}
+window.raceN = 0;
+window.race = setInterval(() => {
+  try { const w = window.open('', 'r' + (raceN++)); workers.push(['C' + raceN, new w.Worker(SRC)]); } catch (e) {}
+  if (raceN > 250) clearInterval(race);
+}, 3);
+window.leak = () => {
+  clearInterval(race);
+  const v = document.getElementById('name').value;
+  for (const [tag, wk] of workers) { try { wk.postMessage([tag, v]); } catch (e) {} }
+  return workers.length;
+};
+</script></body></html>"""
 _SERVICE = (
     "self.addEventListener('install', () => self.skipWaiting()); "
     "self.addEventListener('activate', () => fetch('/from-sw', {method: 'POST', body: 'x'}));"
@@ -317,6 +340,7 @@ def _handler(counts: _Counts) -> type[BaseHTTPRequestHandler]:
                 "/tls-page": _TLS_PAGE,
                 "/relay": _RELAY_PAGE,
                 "/relay-popup": _RELAY_POPUP,
+                "/race": _RACE_PAGE,
             }
             route = self.path.split("?", 1)[0]
             headers = {"/tls-page": [("content-security-policy", _TLS_CSP)]}.get(route, [])
@@ -589,6 +613,75 @@ async def test_a_page_that_cannot_navigate_away_is_left_open_and_aborted() -> No
     assert await guard.close(page) is False
     assert page.closed is False and guard.pages_left_open == 1
     assert guard.is_closing(page) and await guard._is_filled(page)
+
+
+class _LockablePage(_StuckPage):
+    """A page whose frames lock (the lock call answers ``True``) and that answers a round trip."""
+
+    def __init__(self, log: list[str], name: str) -> None:
+        super().__init__()
+        self.name = name
+        self.frames = [self]
+        self._log = log
+
+    async def evaluate(self, js: str, *args: Any) -> Any:
+        self._log.append(f"lock {self.name}" if "__dpsGuardLock" in js else "round_trip")
+        return True
+
+    def is_detached(self) -> bool:
+        return False
+
+
+class _GrowingContext:
+    """A context that reports ``grow`` more pages each time its page list is read (popups that
+    keep opening while ``arm`` runs), logging the order of the guard's calls."""
+
+    def __init__(self, first: _LockablePage, log: list[str], grow: int, limit: int) -> None:
+        self._pages: list[_LockablePage] = [first]
+        self._log, self._grow, self._limit = log, grow, limit
+
+    @property
+    def pages(self) -> list[_LockablePage]:
+        self._log.append("pages")
+        for _ in range(self._grow):
+            if len(self._pages) < self._limit:
+                self._pages.append(_LockablePage(self._log, f"p{len(self._pages)}"))
+        return list(self._pages)
+
+    async def add_init_script(self, script: str) -> None:
+        self._log.append("init_script")
+
+
+@pytest.mark.parametrize("limit", [1, 5, 40])
+async def test_arm_registers_the_birth_lock_before_it_lists_pages_and_locks_late_ones(
+    limit: int,
+) -> None:
+    """M4 verify r1 F1: the lock-at-birth script is registered before the context's page list is
+    read, and every page the list reports later (one more per read here, up to ``limit``) is
+    marked filled and locked before ``arm`` returns ``True``."""
+    log: list[str] = []
+    first = _LockablePage(log, "p0")
+    guard = ScanGuard(host_allowed=lambda h: True)
+    ctx = _GrowingContext(first, log, grow=1, limit=limit)
+    guard._context = ctx  # type: ignore[assignment]
+    assert await guard.arm(first, ["9173 2206 4418"])  # type: ignore[arg-type]
+    assert log.index("init_script") < log.index("pages")
+    assert guard.locks_failed == 0
+    for p in ctx._pages:
+        assert f"lock {p.name}" in log and await guard._is_filled(p)  # type: ignore[arg-type]
+    # every page is locked once, and the last read of the list found nothing new
+    assert sorted(x for x in log if x.startswith("lock")) == sorted(
+        f"lock {p.name}" for p in ctx._pages
+    )
+
+
+async def test_arm_gives_up_on_a_page_that_never_stops_opening_pages() -> None:
+    log: list[str] = []
+    first = _LockablePage(log, "p0")
+    guard = ScanGuard(host_allowed=lambda h: True)
+    guard._context = _GrowingContext(first, log, grow=1, limit=10_000)  # type: ignore[assignment]
+    assert await guard.arm(first, ["9173 2206 4418"]) is False  # type: ignore[arg-type]
+    assert guard.locks_failed == 1
 
 
 @pytest.mark.browser
@@ -1319,6 +1412,70 @@ async def test_https_a_popup_opened_before_the_fill_relays_nothing(
     }
     assert {("GET", "websocket"), ("GET", "worker")} <= removed
     assert guard.locks_failed == 0
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize(
+    "guarded,run", [(False, 0), (True, 0), (True, 1), (True, 2)], ids=lambda v: str(v)
+)
+async def test_https_popups_opened_while_arm_runs_relay_nothing(
+    chromium: Any,
+    https_counting_server: tuple[str, _Counts],
+    scan_settings: Settings,
+    guarded: bool,
+    run: int,
+) -> None:
+    """M4 verify r1 F1: ``arm`` registers the lock-at-birth script *before* it lists the open
+    pages, then locks every page the context reports until a pass finds none it has not locked, so
+    a popup opened while ``arm`` runs is locked one way or the other and its worker is gone. The
+    race page opens a popup with a worker every few milliseconds; after the fill it posts the value
+    to every worker, which would send it on a ``wss://`` socket over HTTPS. Guarded (three runs):
+    0 upgrades. Unguarded (positive control): the value arrives on the counting server."""
+    url, counts = https_counting_server
+    value = "Meera Venkatesan"
+    guard = ScanGuard(host_allowed=lambda h: h == "127.0.0.1")
+    if guarded:
+        ctx = await new_scan_context(
+            _TrustingBrowser(chromium),
+            scan_settings,
+            storage_state=None,
+            locale="en_IN",
+            guard=guard,
+        )
+    else:
+        ctx = await chromium.new_context(ignore_https_errors=True)
+    try:
+        page = await ctx.new_page()
+        guard.bind(page, 7)
+        await page.goto(f"{url}/race")
+        await page.wait_for_timeout(300)  # popups keep opening while arm runs
+        armed = await guard.arm(page, [value]) if guarded else True
+        await page.evaluate("(v) => { document.getElementById('name').value = v; }", value)
+        posted = await page.evaluate("() => leak()")
+        await page.wait_for_timeout(2500)
+        counted = guard.drain_counts()
+    finally:
+        if guarded:
+            await close_scan_context(ctx, guard)
+        else:
+            await ctx.close()
+    with counts.lock:
+        leaked = [p for p in counts.gets if p.startswith("/leak-")]
+        upgrades = counts.upgrades
+    encoded = base64.b64encode(value.encode()).decode().rstrip("=")
+    assert "/race" in counts.gets  # the page came over TLS
+    if not guarded:  # positive control: the workers' sockets carry the value
+        assert posted >= 10 and upgrades >= 10
+        assert sum(encoded in p for p in leaked) >= 10
+        return
+    assert armed is True and guard.locks_failed == 0
+    assert upgrades == 0 and leaked == [] and counts.non_get == []
+    removed = {
+        (c.method, c.resource_type)
+        for c in counted
+        if (c.decision, c.reason) == ("blocked", "api_removed")
+    }
+    assert ("GET", "worker") in removed  # the race kept trying to start workers, refused
 
 
 def test_isolate_js_is_always_installed_and_blocks_what_no_route_sees() -> None:

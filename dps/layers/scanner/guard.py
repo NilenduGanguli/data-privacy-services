@@ -38,8 +38,12 @@ request of every page, popup and iframe of that context:
   (``ISOLATE_JS`` lock), not only the armed page's: the workers they started are terminated, and
   ``navigator.sendBeacon`` (returns ``false``), the ``keepalive`` flag of ``fetch`` (dropped),
   ``new WebSocket`` and ``new Worker`` (refused) stop working. From the first ``arm`` on, every
-  new document of the scan is locked at birth (``LOCK_JS``). ``arm`` returns ``False`` when any
-  live frame of any open page could not be locked. These are the channels a route cannot see: a dedicated worker's socket, and
+  new document of the scan is locked at birth (``LOCK_JS``): ``arm`` registers that script
+  *before* it lists the open pages, then locks every page the context reports until one round
+  trip later a pass finds none it has not locked, so a popup opened while ``arm`` runs is locked
+  either at birth or by that loop (M4 verify r1 F1). ``arm`` returns ``False`` when any live
+  frame of any open page could not be locked, or pages kept opening for ``_SETTLE_PASSES``
+  passes. These are the channels a route cannot see: a dedicated worker's socket, and
   requests that outlive their page. Each refused use is counted (reason ``api_removed``, resource
   type ``beacon``/``keepalive``/``websocket``/``worker``) through a page binding.
 * **Fill values.** Once a page has been armed, any request on any page of the scan whose URL
@@ -286,6 +290,9 @@ ISOLATE_JS = r"""
 LOCK_JS = "window.__dpsGuardLock && window.__dpsGuardLock();"
 _LOCK_CALL = "() => typeof window.__dpsGuardLock === 'function' && window.__dpsGuardLock() === true"
 _LOCK_ATTEMPTS = 3  # a frame mid-navigation is retried (its next document is locked at birth)
+#: ``arm``: passes of "lock the pages not locked yet, one round trip, look again" before it gives
+#: up (``False``) on a page that keeps opening pages while it is being armed
+_SETTLE_PASSES = 50
 _LOCK_RETRY_S = 0.1
 #: the page binding ``ISOLATE_JS`` reports refused uses through, and what it may report
 REPORT_BINDING = "__dpsGuardReport"
@@ -501,40 +508,81 @@ class ScanGuard:
         Needles stay for the rest of the scan and are checked on every page: a later page that
         would carry an earlier persona's value in a URL is caught too. The route rules apply at
         once, to ``page`` and to every other page of the context that is open now (a popup opened
-        before the fill can be handed a value by ``postMessage`` or ``BroadcastChannel``). Then
-        every frame of every open page is locked (their workers terminated; beacons, keepalive,
-        sockets and new workers refused) and, from the first call on, every new document of the
-        scan is locked at birth. Returns ``False`` when a live frame could not be locked
-        (``locks_failed``): the caller must not fill that page.
+        before the fill can be handed a value by ``postMessage`` or ``BroadcastChannel``). Every
+        frame of every open page is locked (their workers terminated; beacons, keepalive, sockets
+        and new workers refused) and, from the first call on, every new document of the scan is
+        locked at birth.
+
+        Order matters (M4 verify r1 F1): the lock-at-birth script is registered first, and only
+        then are the open pages listed, marked filled and locked; after one round trip to the
+        browser (so every page event sent before it has reached ``context.pages``) any page not
+        locked yet is marked and locked too, until a pass finds none. A page opened before the
+        script was registered is in a list taken after it; one opened later is locked at birth.
+
+        Returns ``False`` (``locks_failed``) when a live frame could not be locked, the script
+        could not be registered, or pages were still appearing after ``_SETTLE_PASSES`` passes:
+        the caller must not fill that page.
         """
         for value in fill_values:
             needle = normalise(value)
             if len(needle) >= MIN_NEEDLE:
                 self._needles.add(needle)
-        pages = self._open_pages(page)
-        for each in pages:
-            self._mark_filled(each)
-        return await self._lock(pages)
-
-    def _open_pages(self, page: Page) -> list[Page]:
-        """``page`` first, then every other open page of the context."""
-        others = list(self._context.pages) if self._context is not None else []
-        return [page, *(p for p in others if p is not page and not p.is_closed())]
-
-    async def _lock(self, pages: list[Page]) -> bool:
         ok = True
+        # First the lock-at-birth script, THEN the list of open pages (M4 verify r1 F1): a page
+        # that opens after the script is registered is locked at birth, and every page that
+        # opened before it is in a list taken after it. Taken the other way round, a popup opened
+        # in between was in neither, and its worker relayed a value on a wss:// socket.
         if self._context is not None and not self._locked_at_birth:
             try:
                 await self._context.add_init_script(script=LOCK_JS)
                 self._locked_at_birth = True
             except PlaywrightError:
                 ok = False
+        done: set[Page] = set()
+        pending = self._open_pages(page)
+        for _ in range(_SETTLE_PASSES):
+            for each in pending:
+                self._mark_filled(each)
+            if not await self._lock(pending):
+                ok = False
+            done.update(pending)
+            # one round trip: every page event Playwright sent before it has reached
+            # ``context.pages`` (the connection delivers events in order)
+            await self._round_trip(page)
+            pending = [p for p in self._open_pages(page) if p not in done]
+            if not pending:
+                break
+        else:
+            ok = False  # pages kept appearing: the last ones were locked, none can be vouched for
+        if not ok:
+            self.locks_failed += 1
+        return ok
+
+    def _open_pages(self, page: Page) -> list[Page]:
+        """``page`` first, then every other open page of the context."""
+        others = list(self._context.pages) if self._context is not None else []
+        return [page, *(p for p in others if p is not page and not p.is_closed())]
+
+    async def _round_trip(self, page: Page) -> None:
+        """One request to the browser and its answer (``page``'s, or the context's if ``page``
+        cannot evaluate: it is navigating or closed). Without a context there is nothing to
+        wait for: no other page can exist."""
+        if self._context is None:
+            return
+        try:
+            await page.evaluate("0")
+        except PlaywrightError:
+            if self._context is not None:
+                with contextlib.suppress(PlaywrightError):
+                    await self._context.cookies("http://localhost.invalid/")
+
+    async def _lock(self, pages: list[Page]) -> bool:
+        """Lock every frame of ``pages``; ``False`` when a live frame could not be locked."""
+        ok = True
         for page in pages:
             for frame in list(page.frames):
                 if not await self._lock_frame(frame):
                     ok = False
-        if not ok:
-            self.locks_failed += 1
         return ok
 
     @staticmethod
