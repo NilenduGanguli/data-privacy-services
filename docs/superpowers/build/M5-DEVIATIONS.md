@@ -1176,3 +1176,6 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   catalogue query in `assert_rls_posture`; `_JobPlatform._connect` refuses a `CROSS_TENANT_PROBLEM` in
   every environment. Not done: refusing `pg_migration_login == pg_user` statically — a deployment may
   migrate with a login that is not the runtime one only by name; the catalogue check is what matters.
+- **F-07 (CSV export):** the finder's fix prefixed every text cell starting with `+`/`-`; that would
+  mangle exported phone numbers (`+44 …`), so `+`/`-` followed only by digits, spaces, dots, dashes
+  and parentheses stays unprefixed (Excel reads that as arithmetic at worst — no function call).

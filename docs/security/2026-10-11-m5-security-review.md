@@ -49,7 +49,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | — | pending |
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
 | F-06 | MED | RLS posture blind to `owner_directory`'s role: with the migration login unset, the API role read every tenant's jobs/connections/policies | see §3.6 | `tests/test_rls_posture_unit.py::test_a_policy_open_to_the_runtime_role_is_named`, `tests/db/test_rls.py::test_migrating_as_the_runtime_role_is_refused_in_every_environment` | fixed + test |
-| F-07 | MED | CSV formula injection in the L2 `files` export | see §3.7 | — | pending |
+| F-07 | MED | CSV formula injection in the L2 `files` export | see §3.7 | `tests/connectors/test_files.py::test_csv_cells_a_spreadsheet_would_evaluate_are_neutralised` | fixed + test |
 | F-08 | MED | No SSRF guard on tenant-controlled connection endpoints (S3 `endpoint_url`, DB hosts) | see §3.8 | — | pending |
 | F-09 | MED | Presidio wrote customer text to the logs at `DEBUG` | S13 | `tests/test_observability.py::test_third_party_loggers_are_capped`, `tests/test_no_values_in_logs_m5.py` | fixed |
 | F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 | — | pending |
@@ -89,6 +89,15 @@ joined with `pg_has_role`) — as `<table>: policy <name> applies to the runtime
 CURRENT_USER`) becomes when migrations run as the API login (`DPS_PG_MIGRATION_USER` unset). The
 app refuses to boot on such a problem in every environment, local included (other posture problems
 remain fatal in staging/prod only). HANDOFF documents the rule.
+
+### 3.7 F-07 — formula guard on the CSV export
+
+`files.py::_csv_cell` writes a text cell with a leading apostrophe when a spreadsheet would
+evaluate it: it starts with `=`, `@`, TAB or CR, or with `+`/`-` followed by anything but a number or
+phone shape (`+1 (555) 010-0100` and `-12.50` stay as they are, so exported phone numbers are not
+mangled; `+cmd|…` and `-2+3+cmd|…` are guarded). Numbers, dates, booleans and bytes are rendered in
+forms no spreadsheet evaluates and are never prefixed. JSONL and Parquet are unchanged (not
+spreadsheet-evaluated).
 
 ## 4. Considered and refuted
 
