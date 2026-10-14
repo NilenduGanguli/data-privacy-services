@@ -43,8 +43,13 @@ async def test_files_are_the_contract_set() -> None:
         "008_rls_policies.sql",
         "009_grants.sql",
         "010_job_idempotency_fp.sql",
-        "020_job_group_last_check.sql",  # M3: the group's latest consistency check
     ]
+    # M3 (020–029): the group's latest consistency check
+    assert [f for f in FILES if "020" <= f < "030"] == ["020_job_group_last_check.sql"]
+    # WP-I: every number once, every file inside a milestone's range (contract §2.2)
+    numbers = [f[:3] for f in FILES]
+    assert len(numbers) == len(set(numbers)) and numbers == sorted(numbers)
+    assert all(n < "020" or "020" <= n < "060" for n in numbers)
 
 
 async def test_fresh_database_applies_every_file_once(fresh_db) -> None:  # noqa: ANN001
