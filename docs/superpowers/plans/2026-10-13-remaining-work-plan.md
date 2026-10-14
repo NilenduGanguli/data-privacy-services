@@ -144,7 +144,7 @@ Order: WP-H first, then lanes in completion order (expected m3 → m4 → m5). F
 3. Gates: fresh venv, ruff/mypy/pytest, every milestone integration marker on one stack, frontend
    test/build, smoke. Tag the lane's milestone after its verification on main: `v0.4.0-m3`, `v0.5.0-m4`.
 
-#### 2.5.1 M4 pre-merge gate (added 2026-10-14 16:30 — binding for the integrator of lane m4)
+#### 2.5.1 M4 pre-merge gate (added 2026-10-14 16:30; **superseded 16:45** — both workflows were stopped and replaced by workflow `dps-finish-fast`, which finishes the M4 pre-merge in `dps-wt-m4` first and only then merges `m4` into main; the ordering is enforced by that orchestrator, so the wait below no longer applies)
 
 Since 2026-10-14 16:25 a separate workflow (`wf_4dc1989c-3ce`, "dps-premerge-m4") is merging **main into `m4`** inside
 `/Users/neelu/document_intelligence/dps-wt-m4` and adapting the scanner (SEC-5, SEC-2, M5 keys/posture/policy refs,
