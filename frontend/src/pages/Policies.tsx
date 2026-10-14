@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { DeclaredFields } from '../components/DeclaredFields';
@@ -12,6 +12,7 @@ import { api, ApiError, errorText, type Download } from '../lib/api';
 import { utcDate } from '../lib/format';
 import { EMPTY_DRAFT, treatmentRows } from '../lib/policyDraft';
 import { addDeclaredField, changedEntities, declaredSince, isTenantPolicy, planPolicy, setTreatment, upsertRecognizer, type Body } from '../lib/policyEdit';
+import { Latest, loadPolicyDetail, saveEdit } from '../lib/policyLoad';
 import type {
   EntityInfo, PlanOut, PolicyDiff, PolicyDoc, PresetView, RecognizerSpec, RecognizerTestOut, TenantPolicyDetail, TenantPolicyView,
 } from '../lib/types';
@@ -121,13 +122,13 @@ export function PoliciesView(p: PoliciesViewProps): JSX.Element {
               : <>Obfuscated output is <b>pseudonymised and still personal data</b> (GDPR Art. 4(5), India's DPDP Act). Only the holder of the key can reverse it; DPS keeps no copy.</>}</div>
           </section>
           {body && <TreatmentMatrix body={body} entities={p.entities} changed={changed} readOnly={!editable} fpe={p.fpe}
-            onSet={(entity, spec) => { if (editBase) void actions.saveDraft(setTreatment(editBase, entity, spec)); }} />}
+            onSet={(entity, spec) => saveEdit(actions.saveDraft, editBase, (b) => setTreatment(b, entity, spec))} />}
         </div>
         <div className="pol-rest">
           {body && <DeclaredFields body={body} entities={p.entities} since={since} publisher={publisher} readOnly={!editable}
-            onDeclare={(f) => { if (editBase) void actions.saveDraft(addDeclaredField(editBase, f)); }} />}
+            onDeclare={(f) => saveEdit(actions.saveDraft, editBase, (b) => addDeclaredField(b, f))} />}
           <RecognizerBuilder entities={p.entities} readOnly={!editable} testRecognizer={actions.testRecognizer}
-            onAdd={(rec) => { if (editBase) void actions.saveDraft(upsertRecognizer(editBase, rec)); }} />
+            onAdd={(rec) => saveEdit(actions.saveDraft, editBase, (b) => upsertRecognizer(b, rec))} />
           <PlanPreview label={detail?.draft ? `draft v${next}` : `${p.name} v${active}`} body={body as Body | null} fpe={p.fpe} entities={p.entities}
             runPlan={(data) => actions.runPlan(data, (body as Body | null) ?? null)} onRows={setPlanRows} />
           {detail && <PolicyVersions detail={detail} selected={p.selected} diff={p.selectedDiff} now={p.now} onSelect={actions.select} downloadYaml={actions.downloadYaml}
@@ -178,6 +179,8 @@ export function Policies(): JSX.Element {
   const fail = useCallback((e: unknown): void => {
     if (e instanceof ApiError && (e.status === 403 || e.status === 401)) setReadOnly(true); else setError(errorText(e));
   }, []);
+  // A new key (or tenant) starts writable again; its first refused write makes the page read-only.
+  useEffect(() => { setReadOnly(false); }, [auth]);
 
   const loadList = useCallback(async (): Promise<void> => {
     try {
@@ -204,24 +207,22 @@ export function Policies(): JSX.Element {
 
   // a boolean, so a list reload after a save does not reload the detail and reset the selection
   const tenantPolicy = isTenantPolicy(name, store, tenantPolicies);
+  // Only the newest load may update the page: a quick switch between policies drops the late
+  // answer of the policy the user left (lib/policyLoad.ts).
+  const detailLoads = useRef(new Latest());
   const loadDetail = useCallback(async (): Promise<void> => {
     if (!name || !listed) return;
-    setError(null);
-    if (tenantPolicy) {
-      try { const d = await api.policies.get(auth, name); setDetail(d); setPresetBody(null); return; } catch (e) {
-        if (!(e instanceof ApiError && e.status === 404)) { setError(errorText(e)); return; }
-      }
-    }
-    setDetail(null);
-    api.policies.validate(auth, name).then(setPresetBody).catch((e: unknown) => setError(errorText(e)));
+    await loadPolicyDetail(name, tenantPolicy, { get: (n) => api.policies.get(auth, n), validate: (n) => api.policies.validate(auth, n) },
+      { detail: setDetail, presetBody: setPresetBody, error: setError }, detailLoads.current.begin());
   }, [auth, name, listed, tenantPolicy]);
   useEffect(() => { setSelected(null); setVersionBodies({}); void loadDetail(); }, [loadDetail]);
 
   useEffect(() => {
     if (!detail) { setDraftDiff(null); return; }
     const active = detail.active_version ?? 1;
-    if (detail.draft) api.policies.diff(auth, detail.name, active, 'draft').then(setDraftDiff).catch(() => setDraftDiff(null)); else setDraftDiff(null);
-    let live = true;
+    let live = true; // false once the policy (or its draft) changed: a late answer is dropped
+    if (detail.draft) api.policies.diff(auth, detail.name, active, 'draft').then((d) => { if (live) setDraftDiff(d); }).catch(() => { if (live) setDraftDiff(null); });
+    else setDraftDiff(null);
     Promise.all(detail.versions.slice(0, 20).map((v) => api.policies.version(auth, detail.name, v.version).then((b) => [v.version, b] as const).catch(() => null)))
       .then((pairs) => { if (live) setVersionBodies(Object.fromEntries(pairs.filter((x): x is readonly [number, Body] => !!x))); });
     return () => { live = false; };
@@ -233,7 +234,9 @@ export function Policies(): JSX.Element {
     if (sel === 'draft') { setSelectedDiff(draftDiff); return; }
     if (sel <= 1) { setSelectedDiff(null); return; }
     setSelectedDiff(null);
-    api.policies.diff(auth, detail.name, sel - 1, sel).then(setSelectedDiff).catch(() => setSelectedDiff(null));
+    let live = true;
+    api.policies.diff(auth, detail.name, sel - 1, sel).then((d) => { if (live) setSelectedDiff(d); }).catch(() => { if (live) setSelectedDiff(null); });
+    return () => { live = false; };
   }, [auth, detail, sel, draftDiff]);
 
   const write = async <T,>(p: Promise<T>): Promise<T> => {
