@@ -22,8 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -42,6 +41,7 @@ from dps.auth import (
 )
 from dps.config import Settings, get_settings
 from dps.engine.service import PrivacyEngine
+from dps.layers.api import validation
 from dps.layers.api.common import TRACE_HEADER, CodedHTTPException
 from dps.layers.api.idempotency import IDEMPOTENCY_HEADER, REPLAY_HEADER, IdempotencyCache
 from dps.layers.api.ndjson import NDJSON, STREAM_ROUTES
@@ -77,13 +77,19 @@ HSTS = "max-age=31536000; includeSubDomains"
 #: ``max_document_mb``; the documents router re-checks the file itself while reading it.
 DOCUMENT_MULTIPART_OVERHEAD = 1 << 20
 DOCUMENTS_PREFIX = "/api/v1/documents/"
+#: Every API route lives under this prefix (S11: never cached).
+API_PREFIX = "/api/"
 #: Seconds between reconnect attempts while the metadata database is down at boot.
 DB_RETRY_SECONDS = 10.0
 ASSET_CACHE = "public, max-age=31536000, immutable"
 
 
 class _SecurityHeaders:
-    """Adds nosniff / DENY / no-referrer (and HSTS outside local) to every response."""
+    """Adds nosniff / DENY / no-referrer (and HSTS outside local) to every response, and
+    ``Cache-Control: no-store`` + ``Pragma: no-cache`` to every ``/api/`` response that does not
+    set its own caching (security review S11): several answers carry key material (a DEK, a
+    synthesis seed, a one-time API key), revealed originals or tenant data, and the API key
+    travels in ``X-API-KEY``, which shared caches do not treat as authorization."""
 
     def __init__(self, app: ASGIApp, *, hsts: bool) -> None:
         self.app, self.hsts = app, hsts
@@ -92,6 +98,7 @@ class _SecurityHeaders:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        api = str(scope.get("path", "")).startswith(API_PREFIX)
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -101,6 +108,10 @@ class _SecurityHeaders:
                 headers.setdefault("Referrer-Policy", "no-referrer")
                 if self.hsts:
                     headers.setdefault("Strict-Transport-Security", HSTS)
+                if api:
+                    headers.setdefault("Cache-Control", "no-store")
+                    if "no-store" in headers["Cache-Control"]:
+                        headers.setdefault("Pragma", "no-cache")
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
@@ -215,16 +226,6 @@ class _ValueFreeErrors:
             if not started:
                 response = JSONResponse({"detail": "internal error"}, status_code=500)
                 await response(scope, receive, send)
-
-
-async def _validation_error(_: Request, exc: Exception) -> JSONResponse:
-    """422 listing each error's type, location and rule — never the input or its context."""
-    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
-    detail = [
-        {"type": e.get("type", ""), "loc": list(e.get("loc", ())), "msg": e.get("msg", "")}
-        for e in errors
-    ]
-    return JSONResponse({"detail": detail}, status_code=422)
 
 
 async def _refresh_ocr(ocr: OcrClient, settings: Settings) -> None:
@@ -609,7 +610,7 @@ def create_app(
     # CodedHTTPException, dps.auth's CodedAuthHTTPException — answers {"detail", "code"}; a plain
     # one keeps M0's {"detail"}. M2's DpsHttpError adds **extra (install_error_handlers).
     app.add_exception_handler(StarletteHTTPException, coded_http_exception_handler)
-    app.add_exception_handler(RequestValidationError, _validation_error)
+    validation.install(app)  # S1: 422s list loc/msg/type and never quote the input
     app.state.db_state = "unconfigured"
     app.state.kek = None
 

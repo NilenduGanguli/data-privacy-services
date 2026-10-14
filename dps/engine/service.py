@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from dps.config import Settings
 from dps.engine.detect.custom import custom_detector_from
@@ -74,7 +74,7 @@ from dps.engine.verify import (
     label_only_entities,
     verify_output,
 )
-from dps.errors import CodedError
+from dps.errors import CodedError, safe_errors_text
 from dps.llm.gateway import LlmGateway
 from dps.observability import FINDINGS, TRANSFORMS, VERIFY_FAIL, get_logger
 
@@ -256,6 +256,8 @@ class PrivacyEngine:
         """
         try:
             policy = resolve_policy(ref, default_name=self.settings.default_policy)
+        except ValidationError as exc:  # S1: the rule, never a quoted value
+            raise EngineError(f"invalid policy: {safe_errors_text(exc.errors())}") from None
         except (KeyError, ValueError) as exc:
             raise EngineError(f"invalid policy: {exc}") from None
         if policy.verify.leakage_check == "warn" and not self.settings.verify_warn_allowed:
@@ -288,6 +290,10 @@ class PrivacyEngine:
             custom = custom_detector_from(
                 policy.detect.custom_recognizers, policy.detect.declared_fields
             )
+        except ValidationError as exc:  # S1: the rule, never a quoted value
+            raise EngineError(
+                f"invalid custom recognizers: {safe_errors_text(exc.errors())}"
+            ) from None
         except ValueError as exc:
             raise EngineError(f"invalid custom recognizers: {exc}") from None
         return Detector(config, ner=self.ner, custom=custom)

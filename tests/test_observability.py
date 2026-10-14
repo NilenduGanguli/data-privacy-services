@@ -198,6 +198,23 @@ def test_m1_fields_are_allowed_and_values_still_dropped() -> None:
 
 
 def test_third_party_loggers_are_capped() -> None:
+    # as in a fresh process: no root handler yet (pytest installs its own), root at NOTSET
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    for handler in handlers:
+        root.removeHandler(handler)
+    root.setLevel(logging.NOTSET)
+    try:
+        _check_caps()
+    finally:
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+        for handler in handlers:
+            root.addHandler(handler)
+        root.setLevel(level)
+
+
+def _check_caps() -> None:
     configure_logging("DEBUG", json_output=True)
     assert logging.getLogger("pdfminer").level == logging.ERROR
     assert logging.getLogger("httpx").level == logging.WARNING
@@ -211,6 +228,15 @@ def test_third_party_loggers_are_capped() -> None:
     # at WARNING and its parse errors at ERROR, literal included: silenced (M3 review r1).
     assert logging.getLogger("sqlglot").level == logging.CRITICAL
     assert not logging.getLogger("sqlglot").isEnabledFor(logging.ERROR)
+    # Presidio's context enhancer logs the words around each hit ("Context list is: …") at DEBUG
+    # (S3 secrets-logs F1): NER libraries are capped, and the root logger — which every other
+    # library inherits — never goes below WARNING, whatever DPS_LOG_LEVEL is. DPS's own logs go
+    # through structlog's allow-list and keep the configured level.
+    for name in ("presidio-analyzer", "presidio_analyzer", "presidio-anonymizer", "spacy"):
+        assert not logging.getLogger(name).isEnabledFor(logging.INFO), name
+    assert logging.getLogger().getEffectiveLevel() >= logging.WARNING
+    for name in ("asyncpg", "google", "opentelemetry", "pypdfium2", "smart_open", "watchfiles"):
+        assert not logging.getLogger(name).isEnabledFor(logging.INFO), name
 
 
 def test_m3_connector_fields_are_allow_listed() -> None:

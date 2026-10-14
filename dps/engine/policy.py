@@ -76,7 +76,7 @@ class MethodSpec(BaseModel):
     @classmethod
     def _known(cls, value: str) -> str:
         if value not in METHOD_NAMES:
-            raise ValueError(f"unknown method {value!r}; known: {', '.join(METHOD_NAMES)}")
+            raise ValueError(f"unknown method; known: {', '.join(METHOD_NAMES)}")
         return value
 
 

@@ -46,14 +46,14 @@ def flatten(obj: Any, prefix: str = "$") -> list[tuple[str, Scalar]]:
 def parse_path(path: str) -> list[str | int]:
     """``"$.a.b[1]['k']"`` → ``["a", "b", 1, "k"]``. Raises ``ValueError`` on malformed paths."""
     if not path.startswith("$"):
-        raise ValueError(f"path must start with '$': {path!r}")
+        raise ValueError("path must start with '$'")
     rest = path[1:]
     out: list[str | int] = []
     pos = 0
     while pos < len(rest):
         match = _TOKEN.match(rest, pos)
         if not match:
-            raise ValueError(f"malformed path at offset {pos + 1}: {path!r}")
+            raise ValueError(f"malformed path at offset {pos + 1}")
         ident, index, quoted = match.groups()
         if ident is not None:
             out.append(ident)

@@ -96,8 +96,12 @@ class Settings(BaseSettings):
 
     # --- auth (static key store in M0; a DB-backed store arrives with jobs in M2) ---
     auth_enabled: bool = True
-    api_keys: str = ""  # JSON list of {name, key | key_sha256, tenant_ids, scopes}
-    bootstrap_api_key: str = ""  # one wildcard key for local demos; refused in production
+    api_keys: str = Field(
+        default="", repr=False
+    )  # JSON list of {name, key | key_sha256, tenant_ids, scopes}
+    bootstrap_api_key: str = Field(
+        default="", repr=False
+    )  # one wildcard key for local demos; refused in production
 
     # --- limits ---
     max_payload_mb: int = 8
@@ -122,8 +126,10 @@ class Settings(BaseSettings):
     llm_text_rewrite: bool = False
     stellar_base_url: str = ""
     coin_url: str = ""
-    coin_client_id: str = ""  # base64-encoded, decoded at use (org convention)
-    coin_client_secret: str = ""
+    coin_client_id: str = Field(
+        default="", repr=False
+    )  # base64-encoded, decoded at use (org convention)
+    coin_client_secret: str = Field(default="", repr=False)
     coin_scope: str = ""
     coin_token_ttl_seconds: int = 840
     ssl_cert_file: str = ""  # CA bundle for Stellar calls (and the COIN mint without coin_ca_file)
@@ -144,7 +150,9 @@ class Settings(BaseSettings):
     # the image's default) — see ``ocr_engine``.
     ocr_provider: str = ""
     azure_vision_endpoint: str = ""  # http://azure-ocr-mock:5000 locally; the org gateway in prod
-    azure_vision_key: str = ""  # DPS_AZURE_VISION_KEY_FILE in prod; Ocp-Apim-Subscription-Key
+    azure_vision_key: str = Field(
+        default="", repr=False
+    )  # DPS_AZURE_VISION_KEY_FILE in prod; Ocp-Apim-Subscription-Key
     ocr_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     ocr_poll_interval_seconds: float = Field(default=0.5, gt=0, le=10)
     max_document_mb: int = Field(default=20, ge=1, le=512)
@@ -186,11 +194,11 @@ class Settings(BaseSettings):
     pg_database: str = "dps"
     pg_schema: str = "dps"
     pg_user: str = "dps_app"
-    pg_password: str = ""
+    pg_password: str = Field(default="", repr=False)
     pg_worker_user: str = ""  # falls back to pg_user
-    pg_worker_password: str = ""
+    pg_worker_password: str = Field(default="", repr=False)
     pg_migration_user: str = ""  # falls back to pg_user
-    pg_migration_password: str = ""
+    pg_migration_password: str = Field(default="", repr=False)
     pg_pool_min: int = 2
     pg_pool_max: int = 16
     pg_ssl_root_cert: str = ""
@@ -198,8 +206,8 @@ class Settings(BaseSettings):
     migrations_mode: str = "auto"  # auto | verify | off
 
     # --- job sealing (base64 of 32 bytes; production reads it from DPS_JOB_KEK_FILE) ---
-    job_kek: str = ""
-    job_kek_previous: str = ""  # M5 rotation
+    job_kek: str = Field(default="", repr=False)
+    job_kek_previous: str = Field(default="", repr=False)  # M5 rotation
 
     # --- queue ---
     job_lease_seconds: int = 300
@@ -252,8 +260,8 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = ""
     s3_region: str = "us-east-1"
     s3_bucket: str = "dps-artefacts"
-    s3_access_key_id: str = ""
-    s3_secret_access_key: str = ""
+    s3_access_key_id: str = Field(default="", repr=False)
+    s3_secret_access_key: str = Field(default="", repr=False)
     s3_force_path_style: bool = True
     export_root: str = "./var/exports"
     image_digest: str = ""

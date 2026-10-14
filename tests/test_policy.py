@@ -149,7 +149,8 @@ def test_policy_validation_errors_never_echo_inline_values() -> None:
     assert "Ann Smith" not in str(err.value) and "6789" not in str(err.value)
     with pytest.raises(ValueError) as err:
         resolve_policy({"treat": {"SSN": {"method": "teleport"}}}, default_name="x")
-    assert "teleport" in str(err.value)  # the method name is policy vocabulary, not a value
+    # S1 (M5 Task 17): the rule is named; the submitted text is never echoed, whatever the field
+    assert "unknown method" in str(err.value) and "teleport" not in str(err.value)
 
 
 def test_preset_entity_keys_are_known_types() -> None:

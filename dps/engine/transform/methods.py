@@ -94,9 +94,9 @@ class TransformContext:
     cipher_factory: CipherFactory | None = None
     #: M5 ``external_tokenize``: ``(entity_type, value) → token`` (or token → value when
     #: revealing), filled by ``apply``'s (de)tokenize pre-pass; ``None`` = no adapter configured
-    external: Mapping[tuple[str, str], str] | None = None
+    external: Mapping[tuple[str, str], str] | None = field(default=None, repr=False)
     #: SEC-4: the server-held key binding external tokens to ``key`` (``None`` = no KEK)
-    binding: bytes | None = None
+    binding: bytes | None = field(default=None, repr=False)  # S2: never in a repr
 
     def subkey(self, method: str, length: int = crypto.SUBKEY_BYTES) -> bytes:
         """The HKDF subkey for ``method`` and this entity type (and path when field-scoped)."""

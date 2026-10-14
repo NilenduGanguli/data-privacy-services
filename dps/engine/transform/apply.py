@@ -28,7 +28,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -136,11 +136,11 @@ class ApplyOptions:
     #: M5 ``external_tokenize``: the bank tokenization adapter (``None`` = not configured) and
     #: tokens the caller already fetched for this batch (``(entity_type, value) → token``).
     tokenizer: ExternalTokenizer | None = None
-    external_cache: dict[tuple[str, str], str] | None = None
+    external_cache: dict[tuple[str, str], str] | None = field(default=None, repr=False)
     #: SEC-4: the server-held binding keys (current first; :func:`~dps.engine.transform.
     #: external.binding_keys`) and the audit hook called once per detokenization batch,
     #: ``(entity_type, profile, count)``, **before** the service is called (it may raise).
-    binding_keys: tuple[bytes, ...] = ()
+    binding_keys: tuple[bytes, ...] = field(default=(), repr=False)  # S2: never in a repr
     on_detokenize: Callable[[str, str | None, int], None] | None = None
 
 

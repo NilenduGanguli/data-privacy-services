@@ -1122,3 +1122,42 @@ code (M0–M3 + M5), so the test describes what is built:
   that test passes, the strict marker fails the run, and the merge moves the names into
   `SURFACE` / `ROUTES` (the names are never dropped).
 - A missing `PARAMS` target is reported as missing (the plan skipped it silently).
+
+## Task 17 — Security review pass: fixes and the guard tests (finish stage, `fsec`)
+
+Finish-stage work (worktree `dps-wt-fsec`). The review ran as five lens finders plus an adversarial
+refutation panel before this task; `docs/security/2026-10-11-m5-security-review.md` lists S1–S13,
+every confirmed finding (F-01…F-22) and the refuted candidates. Differences from the plan text:
+- **S1:** the scrubbing core lives in `dps/errors.py` (`safe_error_items`, `safe_errors_text`,
+  framework-free so the engine and the policy store use it too); `dps/layers/api/validation.py`
+  renders it. Beyond dropping `input`/`ctx`/`url`, a message that would quote the input is replaced
+  (`union_tag_invalid`, `uuid_*`, `url_*`, or any message containing the scalar input — finder F5
+  showed `union_tag_invalid` echoing an SSN), and a `loc` part that is not a field name, path or index
+  is `<key>`. The value-quoting validators (`custom.py` entity names and recognizer names,
+  `policy.py` method names, `jsonpath.py` paths) now name the rule only; M0's
+  `tests/test_api.py`, `tests/test_policy.py` and M5's `tests/test_policy_store.py` asserted the method
+  name was echoed and now assert it is not (the validators still refuse). The plan's 422 test is in
+  `test_validation_errors.py` with the finders' echo cases.
+- **S3:** one rule beyond the plan: an alternation with an empty branch inside a repeat bounded above
+  3 is refused (the parser factors `(a|aa)+` into `a(|a)`). Stacked `*` in declared-field globs
+  collapse to one (a refuted finder candidate, kept as hardening).
+- **S4:** the plan's corpus expected `name = 'x' --` to be refused; M2 strips comments by design (the
+  statement is rendered from the parse tree), so the test asserts no comment reaches the compiled
+  statement instead.
+- **S5:** `check_scan_url`, `chromium_resolver_rules`, `forbidden_ip_reason`, `check_resolved_host`
+  are implemented and tested; the `POST /scans` and crawler wiring waits for the M4 merge (no scanner
+  on this branch) and is a blocking item of it. Python 3.12 prints an IPv4-mapped address as
+  `::ffff:169.254.169.254` (the plan expected `::ffff:a9fe:a9fe`); `normalize_host` now also accepts
+  a bare IP literal (IPv6 included). NAT64 (`64:ff9b::/96`) and 6to4 addresses are unwrapped too.
+- **S6:** the route walk uses `fastapi.routing.iter_route_contexts` (FastAPI 0.143 nests included
+  routers; the plan's `app.routes` walk would check two routes). The marker is the scope tuple.
+- **S11:** `Pragma: no-cache` too, and only when the route did not set its own `Cache-Control`.
+- **S13:** the static scan covers 28 M5 modules (log calls allow-listed, no exception text, no
+  prints outside the operator CLIs); `DOMAIN_ERRORS` lets `tabular.py` turn its own value-free
+  `CopulaError`/`ConstraintError`/`TabularUnavailable` into a job detail. `rekey` logs `counts={…}`
+  (an allow-listed field) and refuses a configuration with `RekeyConfigError` (its `reason` is
+  printed, never an arbitrary exception text). Finder F1 (Presidio at DEBUG) is fixed here:
+  `configure_logging` keeps the stdlib root logger at WARNING or above whatever `DPS_LOG_LEVEL` is
+  (structlog keeps the configured level) and caps the Presidio and spaCy loggers.
+- **S7:** `test_cross_tenant.py` stores the evidence pack through its own connection (the app's pools
+  belong to the test client's loop).

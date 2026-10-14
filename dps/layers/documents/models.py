@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dps.engine.service import RequestOptions
 from dps.engine.taxonomy import Sensitivity
+from dps.errors import safe_errors_text
 
 DocFormat = Literal["pdf", "docx", "image", "text", "csv"]
 PageSource = Literal["text_layer", "ocr", "hybrid", "docx", "text", "csv", "empty", "unreadable"]
@@ -232,9 +233,6 @@ class DocumentInfo(BaseModel):
 
 
 def validation_message(exc: ValidationError) -> str:
-    """``loc: msg; …`` without input values (safe to return; bounded to 500 characters)."""
-    parts = (
-        f"{'.'.join(str(p) for p in e['loc']) or 'request'}: {e['msg']}"
-        for e in exc.errors(include_input=False, include_url=False)
-    )
-    return "; ".join(parts)[:500]
+    """``loc: msg; …`` without input values (safe to return; bounded to 500 characters). A
+    message that would quote the input is replaced by a fixed one (security review S1)."""
+    return safe_errors_text(exc.errors(include_url=False))

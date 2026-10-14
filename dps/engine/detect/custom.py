@@ -21,6 +21,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dps.engine.detect.patterns import CONTEXT_BONUS, CONTEXT_WINDOW, Hit
+from dps.engine.detect.regex_guard import UnsafePattern, check_pattern
 from dps.engine.detect.structural import KeyCandidate
 from dps.engine.taxonomy import EntityInfo, Family, Sensitivity, is_builtin_entity, register_entity
 
@@ -30,7 +31,8 @@ DENY_LIST_SCORE = 0.9
 
 def _check_entity_name(value: str) -> str:
     if not _ENTITY.match(value):
-        raise ValueError(f"entity type {value!r} must match {_ENTITY.pattern}")
+        # never the value: a customer value pasted into the wrong field must not come back
+        raise ValueError(f"entity types must match {_ENTITY.pattern}")
     return value
 
 
@@ -57,6 +59,10 @@ class PatternSpecModel(BaseModel):
             re.compile(value)
         except re.error as exc:
             raise ValueError(f"invalid regex: {exc}") from None
+        try:
+            check_pattern(value)  # S3: no catastrophic backtracking on caller text (ReDoS)
+        except UnsafePattern as exc:
+            raise ValueError(f"unsafe regex: {exc}") from None
         return value
 
 
@@ -89,7 +95,7 @@ class RecognizerSpec(BaseModel):
     @model_validator(mode="after")
     def _has_matcher(self) -> RecognizerSpec:
         if not self.patterns and not self.deny_list:
-            raise ValueError(f"recognizer {self.name!r} needs patterns or a deny_list")
+            raise ValueError("a recognizer needs patterns or a deny_list")
         _check_custom_tier(self.supported_entity, self.sensitivity)
         return self
 
@@ -130,6 +136,8 @@ def path_glob(pattern: str) -> re.Pattern[str]:
         elif pattern[i] == "*":
             out.append(r"[^.\[\]]*")
             i += 1
+            while i < len(pattern) and pattern[i] == "*":  # ``**`` is ``*``: no stacked repeats
+                i += 1
         else:
             out.append(re.escape(pattern[i]))
             i += 1
