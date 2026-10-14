@@ -65,6 +65,7 @@ An engine is not thread-safe; create one per request (the service does).
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 import secrets
@@ -97,7 +98,7 @@ from dps.engine.synth.personas import (
     seed_int,
 )
 from dps.engine.synth.reshape import Reshaper, code_letters
-from dps.engine.transform.crypto import b64u, unb64u
+from dps.engine.transform.crypto import b64u, rsa_oaep_unwrap, rsa_oaep_wrap, unb64u
 from dps.engine.verify import SWEEP_MIN_LEN, name_parts, normalise
 
 SEED_ALG = "dps.synth.v1"
@@ -209,6 +210,39 @@ def seed_bytes(seed: SynthesisSeed) -> bytes:
     if len(raw) != SEED_BYTES:
         raise ValueError(f"synthesis seed must be {SEED_BYTES} bytes")
     return raw
+
+
+class WrappedSeed(BaseModel):
+    """A synthesis seed RSA-OAEP-256-wrapped with the caller's ``wrap_key`` (S3 review F-20): the
+    seed is key material — it keys the D-A key pseudonyms — so it gets the DEK's wire protection.
+    ``seed_fingerprint`` (sha256 of the raw seed, 16 hex) lets the holder check what it unwrapped;
+    DPS cannot unwrap it, so a later run presents the unwrapped seed in clear over TLS."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    alg: str = SEED_ALG
+    wrapped_seed: str
+    wrap: dict[str, str]
+    seed_fingerprint: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+def wrap_synthesis_seed(seed: SynthesisSeed, public_key_pem: str) -> WrappedSeed:
+    """``seed`` wrapped for ``public_key_pem``. Raises ``ValueError`` like ``wrap_key_material``."""
+    raw = seed_bytes(seed)
+    wrapped, wrap = rsa_oaep_wrap(raw, public_key_pem)
+    return WrappedSeed(
+        alg=seed.alg,
+        wrapped_seed=wrapped,
+        wrap=wrap,
+        seed_fingerprint=hashlib.sha256(raw).hexdigest()[:16],
+        created_at=seed.created_at,
+    )
+
+
+def unwrap_synthesis_seed(wrapped_seed_b64: str, private_key_pem: str) -> bytes:
+    """Client-side helper (and test oracle): the raw 32 seed bytes."""
+    return rsa_oaep_unwrap(wrapped_seed_b64, private_key_pem)
 
 
 def seed_from_caller(payload: dict[str, Any]) -> SynthesisSeed:

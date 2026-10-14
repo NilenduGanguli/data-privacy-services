@@ -66,7 +66,12 @@ from dps.engine.service import (
     TransformResponse,
     VerificationFailed,
 )
-from dps.engine.synth.surrogates import generate_synthesis_seed, seed_from_caller
+from dps.engine.synth.surrogates import (
+    SynthesisSeed,
+    generate_synthesis_seed,
+    seed_from_caller,
+    wrap_synthesis_seed,
+)
 from dps.engine.transform.crypto import (
     KeyMaterial,
     generate_key_material,
@@ -306,6 +311,7 @@ def resolve_stream_material(
             raise EngineError(f"invalid key material: {exc}") from None
         material = {"key_material": key.model_dump(mode="json")}
     else:
+        engine._wrap_pem(options)  # F-20: an unusable wrap_key fails before any work
         try:
             seed = (
                 seed_from_caller(consistency.synthesis_seed)
@@ -567,6 +573,14 @@ def _header(
         scope = envelope.options.consistency.scope or policy.consistency.scope
         if scope != "request":
             header["synthesis_seed"] = consistency.synthesis_seed
+            pem = engine._wrap_pem(envelope.options)
+            if pem is not None and consistency.synthesis_seed is not None:
+                try:  # F-20: a seed is key material: wrapped like the obfuscate key
+                    header["synthesis_seed"] = wrap_synthesis_seed(
+                        SynthesisSeed.model_validate(consistency.synthesis_seed), pem
+                    ).model_dump(mode="json")
+                except ValueError as exc:
+                    raise EngineError(f"wrap_key: {exc}") from None
     return header
 
 

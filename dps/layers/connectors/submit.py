@@ -26,8 +26,10 @@ from dps.config import Settings
 from dps.connections import Connection, get_connection, production_refs
 from dps.engine.synth.surrogates import (
     SynthesisSeed,
+    WrappedSeed,
     generate_synthesis_seed,
     seed_from_caller,
+    wrap_synthesis_seed,
 )
 from dps.engine.transform.crypto import (
     KeyMaterial,
@@ -188,6 +190,21 @@ def _wrap(km: KeyMaterial, wrap_key: dict[str, str]) -> KeyMaterial:
         ) from None
 
 
+def _wrap_seed(seed: SynthesisSeed, wrap_key: dict[str, str]) -> WrappedSeed:
+    """F-20: the generated seed wrapped like the DEK (``wrap_key_invalid`` 422 otherwise)."""
+    pem = wrap_key.get("public_key_pem")
+    if wrap_key.get("type", "rsa-oaep-256") != "rsa-oaep-256" or not pem:
+        raise SpecError(
+            "wrap_key_invalid", 422, "wrap_key must be rsa-oaep-256 with a public_key_pem"
+        )
+    try:
+        return wrap_synthesis_seed(seed, pem)
+    except ValueError:
+        raise SpecError(
+            "wrap_key_invalid", 422, "wrap_key must carry a readable RSA public key"
+        ) from None
+
+
 @dataclass
 class _ValidRun:
     """What validation resolved for a run (memory only; the key is never logged)."""
@@ -198,6 +215,7 @@ class _ValidRun:
     km: KeyMaterial | None
     seed: SynthesisSeed | None
     returned_key: KeyMaterial | None
+    returned_seed: SynthesisSeed | WrappedSeed | None
 
 
 async def _validate_run(
@@ -239,10 +257,13 @@ async def _validate_run(
     km, seed = _material(spec)
     wrap = spec.consistency.wrap_key
     returned_key: KeyMaterial | None = None
+    returned_seed: SynthesisSeed | WrappedSeed | None = None
     if km is not None and spec.consistency.key_material is None:
         # validated before the job exists, so a bad wrap key never leaves a queued job behind
         returned_key = _wrap(km, wrap) if wrap else km
-    return _ValidRun(source, target, selection, km, seed, returned_key)
+    if seed is not None and spec.consistency.synthesis_seed is None:
+        returned_seed = _wrap_seed(seed, wrap) if wrap else seed  # F-20: a seed is a key
+    return _ValidRun(source, target, selection, km, seed, returned_key, returned_seed)
 
 
 async def check_run(
@@ -285,6 +306,7 @@ async def submit_run(
     assert kek is not None  # _validate_run refuses a missing KEK
     source, target, selection = valid.source, valid.target, valid.selection
     km, seed, returned_key = valid.km, valid.seed, valid.returned_key
+    returned_seed = valid.returned_seed
     engine = cast(Engine, source.engine)
     job_id = new_id(PREFIX_JOB)
     secret = JobSecret(
@@ -327,9 +349,7 @@ async def submit_run(
     replay = job.id != job_id
     key_out = returned_key.model_dump(mode="json") if returned_key and not replay else None
     seed_out = (
-        seed.model_dump(mode="json")
-        if seed is not None and not replay and spec.consistency.synthesis_seed is None
-        else None
+        returned_seed.model_dump(mode="json") if returned_seed is not None and not replay else None
     )
     return RunSubmission(job=job, key_material=key_out, synthesis_seed=seed_out, replay=replay)
 

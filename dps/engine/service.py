@@ -38,9 +38,11 @@ from dps.engine.synth.llm_text import synthesize_text
 from dps.engine.synth.surrogates import (
     SurrogateEngine,
     SynthesisSeed,
+    WrappedSeed,
     generate_synthesis_seed,
     seed_bytes,
     seed_from_caller,
+    wrap_synthesis_seed,
 )
 from dps.engine.taxonomy import (
     Sensitivity,
@@ -165,7 +167,8 @@ class TransformResponse(BaseModel):
     plan: list[dict[str, Any]]
     key_material: KeyMaterial | None = None
     reveal_hints: list[RevealHint] = Field(default_factory=list)
-    synthesis_seed: SynthesisSeed | None = None
+    #: clear, or wrapped with ``options.wrap_key`` (F-20: a seed is key material)
+    synthesis_seed: SynthesisSeed | WrappedSeed | None = None
     # Where each replacement landed (``options.return_segments``); ``None`` unless asked.
     segments: list[OutputSegment] | None = None
     report: Report
@@ -690,6 +693,7 @@ class PrivacyEngine:
         """
         t0 = time.perf_counter()
         policy = self.policy(policy_ref)
+        wrap_pem = self._wrap_pem(options)  # F-20: an unusable wrap_key fails before any work
         locale = self._locale(policy, options)
         detector = self._detector(policy, locale)
         findings, _ = self._detect(payload, detector, extra_findings)
@@ -766,11 +770,17 @@ class PrivacyEngine:
             duration_ms=(time.perf_counter() - t0) * 1000,
         )
         report.llm.update(llm)
+        seed_out: SynthesisSeed | WrappedSeed | None = seed if scope != "request" else None
+        if seed_out is not None and wrap_pem is not None:
+            try:  # F-20: the seed keys the D-A pseudonyms; it gets the DEK's wire protection
+                seed_out = wrap_synthesis_seed(seed, wrap_pem)
+            except ValueError as exc:
+                raise EngineError(f"wrap_key: {exc}") from None
         return TransformResponse(
             result=output,
             findings=findings,
             plan=explain_plan(plan),
-            synthesis_seed=seed if scope != "request" else None,
+            synthesis_seed=seed_out,
             segments=segments if options.return_segments else None,
             report=report,
         )

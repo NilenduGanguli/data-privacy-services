@@ -1209,3 +1209,6 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   longer uses `deps.audited` (it needs the group id to roll back).
 - **F-18 (policy in job rows):** sealed in the existing `spec_enc` blob (`SealedSelection.policy`)
   instead of a new column: the blob is already per job, AAD-bound and re-sealed by `dps.rekey`.
+- **F-20 (seed wrap):** `TransformResponse.synthesis_seed` is `SynthesisSeed | WrappedSeed | None`;
+  `GroupRequest` forbids extra fields (a misspelt `wrap_key` is 422, not ignored). `/schema/synthesize`
+  is left as is (its seed keys schema generation only, no pseudonym of a real key).

@@ -62,7 +62,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-17 | LOW | S1 residual echo in 422/400 bodies | S1 | `tests/security/test_validation_errors.py` | fixed |
 | F-18 | LOW | Inline-policy deny/allow-list terms stored in clear in `dps_job.spec` and listed by `GET /jobs` | see §3.18 | `tests/api/test_inline_policy_sealed.py` | fixed + test |
 | F-19 | LOW | `external_tokenize` token cache ignored the profile | see §3.19 | `tests/security/test_external_profile_cache.py` | fixed + test |
-| F-20 | LOW | Synthesis seeds never wrapped although a seed de-pseudonymises D-A keys | see §3.20 | — | pending |
+| F-20 | LOW | Synthesis seeds never wrapped although a seed de-pseudonymises D-A keys | see §3.20 | `tests/security/test_seed_wrap.py` | fixed + test |
 | F-21 | LOW | KEK rotation: sealed blobs opened with the current KEK only | see §3.21 | — | pending |
 | F-22 | LOW | SEC-4 bind tag not injective over (entity type, profile) | see §3.22 | — | pending |
 
@@ -189,6 +189,14 @@ the L2 reveal cache (`external_reveal_cache`) and the method's lookups — is ke
 `(entity type, profile, value or token)` (`methods.ExternalKey`, `external_key`), so two columns of
 one entity type under two data elements are each tokenized, written and revealed under their own
 profile.
+
+### 3.20 F-20 — seeds are wrapped like DEKs
+
+`crypto.rsa_oaep_wrap` (now shared by DEKs and seeds) and `surrogates.wrap_synthesis_seed` return
+`WrappedSeed` (`wrapped_seed`, `wrap`, `seed_fingerprint`). `/synthesize` validates `wrap_key` before
+any work and wraps its seed (JSON, NDJSON header, documents); `POST /jobs/run` wraps a generated
+seed; `POST /job-groups` takes `wrap_key` (key and seed) and refuses unknown fields. The unwrapped
+seed reproduces the output when presented again.
 
 ## 4. Considered and refuted
 

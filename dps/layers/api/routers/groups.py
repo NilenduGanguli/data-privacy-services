@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from dps import jobs
 from dps.auth import require_scope
 from dps.connections import Connection, get_connection
+from dps.engine.synth.surrogates import wrap_synthesis_seed
+from dps.engine.transform.crypto import rsa_oaep_wrap, wrap_key_material
 from dps.groups import (
     GROUP_NAME_RE,
     create_group,
@@ -57,10 +59,13 @@ _CHECK_ACTION = "group.consistency_check"
 
 
 class GroupRequest(BaseModel):
-    """Body of ``POST /job-groups``."""
+    """Body of ``POST /job-groups``: the name and, optionally, the caller's RSA key to wrap the
+    returned key and seed with (F-20). Unknown fields are refused, so a misspelt wrap request is
+    never silently ignored."""
 
-    model_config = ConfigDict(hide_input_in_errors=True)
+    model_config = ConfigDict(hide_input_in_errors=True, extra="forbid")
     name: str = Field(pattern=GROUP_NAME_RE.pattern)
+    wrap_key: dict[str, str] | None = None
 
 
 @router.post("/job-groups", status_code=201, dependencies=_JOBS)
@@ -69,9 +74,14 @@ async def create(body: GroupRequest, request: Request, response: Response) -> di
 
     tenant = tenant_of(request)
     try:
+        pem = _wrap_pem(body.wrap_key)  # validated before the group exists
         group, key, seed = await create_group(
             tenant, body.name, created_by=principal_of(request).key_id
         )
+        key_out: Any = key
+        seed_out: Any = seed
+        if pem is not None:  # F-20: the key and the seed get the same wire protection
+            key_out, seed_out = wrap_key_material(key, pem), wrap_synthesis_seed(seed, pem)
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "group.create", exc) from None
     try:
@@ -85,9 +95,27 @@ async def create(body: GroupRequest, request: Request, response: Response) -> di
     response.headers["Cache-Control"] = "no-store"
     return {
         "group": group.model_dump(mode="json"),
-        "key_material": key.model_dump(mode="json"),
-        "synthesis_seed": seed.model_dump(mode="json"),
+        "key_material": key_out.model_dump(mode="json"),
+        "synthesis_seed": seed_out.model_dump(mode="json"),
     }
+
+
+def _wrap_pem(wrap_key: dict[str, str] | None) -> str | None:
+    """The caller's public key PEM, checked before the group exists (``wrap_key_invalid``)."""
+    if wrap_key is None:
+        return None
+    pem = wrap_key.get("public_key_pem")
+    if wrap_key.get("type", "rsa-oaep-256") != "rsa-oaep-256" or not pem:
+        raise DpsHttpError(
+            422, "wrap_key_invalid", "wrap_key must be rsa-oaep-256 with a public_key_pem"
+        )
+    try:
+        rsa_oaep_wrap(b"probe", pem)
+    except ValueError:
+        raise DpsHttpError(
+            422, "wrap_key_invalid", "wrap_key must carry a readable RSA public key"
+        ) from None
+    return pem
 
 
 @router.get("/job-groups", dependencies=_JOBS)
