@@ -1193,3 +1193,8 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   point fails before detection runs; `KEYLESS_METHODS` moved to `dps/engine/policy.py` (re-exported by
   `batch` and `planner`). `tests/test_planner.py::test_synthesize_fallbacks_and_reversibility_follow_the_registry`
   became `test_synthesize_overrides_are_key_less_and_beat_keep_non_sensitive`.
+- **F-11 (tokenization oracle):** the allow-list is a deployment setting keyed by tenant (not a
+  `dps_tenant` column): it must work for Layer 1 without a metadata database. The Layer 1 audit hook
+  is bound by `begin_call` through a context variable (`external.TOKENIZE_AUDIT`), so every route
+  (JSON, NDJSON, documents) is covered without new engine call parameters. `tests/test_posture_m5.py`'s
+  production settings gained an allow-list.

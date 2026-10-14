@@ -395,6 +395,7 @@ the posture rules that tighten them in staging/prod arrive with M5's posture tas
 | `DPS_TOKENIZER_PROVIDER` | `""` | `external_tokenize` adapter: `""` (off) or `http` |
 | `DPS_TOKENIZER_URL` / `DPS_TOKENIZER_TOKEN` (`_FILE`) / `DPS_TOKENIZER_CA_FILE` | — | the bank tokenization service (http(s) with a host; the error never echoes the URL), its bearer token (prefer `DPS_TOKENIZER_TOKEN_FILE`) and CA bundle |
 | `DPS_TOKENIZER_TIMEOUT_SECONDS` / `_BATCH` / `_RETRIES` | 10 / 500 / 2 | |
+| `DPS_TOKENIZER_PROFILES` | `""` | (S3 review F-11) which entity types and data elements each tenant may tokenize: JSON `{"<tenant>\|*": ["SSN:dps-ssn", "CARD_PAN:dps-pan", "ENTITY"…]}` (`ENTITY` alone = no profile). Anything else is refused before the service is called (403 `tokenizer_profile_not_allowed`; a job fails with that code). `""` = unrestricted — staging/prod with a tokenizer refuse to boot without it. Give DPS **its own data elements** (profiles whose tokens never equal the tokens bank systems store), so a DPS caller can never build a codebook of the bank's tokens |
 | `DPS_KEY_CACHE_SECONDS` / `DPS_KEY_MAX_TTL_DAYS` / `DPS_KEY_ROTATION_MAX_AGE_DAYS` / `DPS_KEY_ROTATION_MAX_GRACE_HOURS` | 30 / 365 / 90 / 168 | DB-backed API keys |
 | `DPS_REPORT_PDF_ENABLED` / `DPS_ROLLUP_RETENTION_DAYS` | `true` / 400 | PDFs: `GET /api/v1/evidence/{id}/pdf` (rendered once with reportlab's built-in Helvetica, stored as an `evidence_pdf` artefact, streamed afterwards) and `format=pdf` on `/reports/api-rollups/{day}`; `false` → 404 `pdf_disabled`. Report roll-up and daily usage rows older than the retention days are deleted by the retention job |
 | `DPS_EGRESS_TLS_REQUIRED` / `DPS_CORS_ORIGINS` | `false` / `*` | posture: `true` and explicit origins in staging/prod; origins are a comma list, `""` = same-origin only |
@@ -531,7 +532,8 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   is refused (use `<NAME>_FILE`); with `DPS_PG_HOST` the KEK must be set; `DPS_EGRESS_TLS_REQUIRED=true`,
   every egress URL (`DPS_STELLAR_BASE_URL`, `DPS_COIN_URL`, `DPS_AZURE_VISION_ENDPOINT`,
   `DPS_S3_ENDPOINT_URL`, `DPS_TOKENIZER_URL`) `https` and, when any is set, `DPS_SSL_CERT_FILE` (the
-  organisation CA bundle); `DPS_TOKENIZER_TOKEN_FILE` with `DPS_TOKENIZER_PROVIDER=http`;
+  organisation CA bundle); `DPS_TOKENIZER_TOKEN_FILE` and `DPS_TOKENIZER_PROFILES` (F-11) with
+  `DPS_TOKENIZER_PROVIDER=http`;
   `DPS_CORS_ORIGINS` without `*`; and **strict verification at boot**: `DPS_VERIFY_WARN_ALLOWED=false`,
   `DPS_LLM_EGRESS_CHECK=strict`, every shipped preset and `DPS_DEFAULT_POLICY` with
   `verify.leakage_check: strict`. At request time a policy (inline, preset override or stored) with
@@ -771,7 +773,11 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
     each external hint carries a `bind` tag keyed by the caller's DEK and a server key derived from
     `DPS_JOB_KEK`; an unbound or mismatched tag is refused (403 `external_token_not_bound`) before
     any call, and every batch is audited first (`action: external.detokenize`, entity type and
-    count). Consequences: `external_tokenize` needs `DPS_JOB_KEK` on the app (else 400, plan
+    count). **F-11 (tokenization oracle):** tokenization uses the same credentials, so it is limited
+    to the entity types and profiles `DPS_TOKENIZER_PROFILES` lists for the tenant (refused with 403
+    `tokenizer_profile_not_allowed` before any call), and every Layer 1 tokenization batch is audited
+    first too (`action: external.tokenize`, entity type, count and the profile label). Synthesize mode
+    never tokenizes (F-12). Consequences: `external_tokenize` needs `DPS_JOB_KEK` on the app (else 400, plan
     reason `|external:unbound`); after a KEK rotation keep `DPS_JOB_KEK_PREVIOUS` for as long as
     callers may reveal external tokens bound under the old KEK — once it is dropped those tokens
     can no longer be revealed through DPS (the bank's own detokenize path still works).

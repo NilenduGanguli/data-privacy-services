@@ -194,6 +194,11 @@ def _m5_problems(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     problems += _egress_problems(settings)
     if settings.tokenizer_provider == "http" and not settings.tokenizer_token:
         problems.append("DPS_TOKENIZER_TOKEN_FILE must be set when the tokenizer is enabled")
+    if settings.tokenizer_provider == "http" and not settings.tokenizer_profiles_restricted:
+        problems.append(  # F-11: otherwise any obfuscate key is a tokenization oracle
+            "DPS_TOKENIZER_PROFILES must list the entity types and profiles each tenant may "
+            "tokenize when the tokenizer is enabled"
+        )
     if "*" in settings.cors_origin_list:
         problems.append(
             "DPS_CORS_ORIGINS must list origins explicitly (or be empty for same-origin only)"

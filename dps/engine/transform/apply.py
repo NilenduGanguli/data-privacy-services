@@ -50,6 +50,7 @@ from dps.engine.transform.methods import (
     run_method,
 )
 from dps.engine.transform.tokens import ENVELOPE_RE, make_envelope, parse_envelopes
+from dps.errors import CodedError
 
 if TYPE_CHECKING:  # the adapter module imports settings and httpx; apply needs only the protocol
     from dps.engine.transform.external import ExternalTokenizer
@@ -142,6 +143,11 @@ class ApplyOptions:
     #: ``(entity_type, profile, count)``, **before** the service is called (it may raise).
     binding_keys: tuple[bytes, ...] = field(default=(), repr=False)  # S2: never in a repr
     on_detokenize: Callable[[str, str | None, int], None] | None = None
+    #: F-11: may this batch be tokenized — ``(entity_type, profile) -> bool`` (``None`` = no
+    #: allow-list) — and the audit hook called once per tokenization batch, ``(entity_type,
+    #: profile, count)``, **before** the service is called (it may raise).
+    tokenize_allowed: Callable[[str, str | None], bool] | None = None
+    on_tokenize: Callable[[str, str | None, int], None] | None = None
 
 
 def anchor_for(document: Any, plan: Plan) -> str:
@@ -267,8 +273,17 @@ def _tokenize_prepass(
             profile = entry.params.get("profile")
             key = (entry.finding.entity_type, str(profile) if profile is not None else None)
             groups.setdefault(key, set()).add(value)
+    for entity, profile in groups:  # every batch is checked before the first call (F-11)
+        if options.tokenize_allowed is not None and not options.tokenize_allowed(entity, profile):
+            raise CodedError(
+                "tokenizer_profile_not_allowed",
+                "external_tokenize: this entity type and profile are not allowed for the tenant",
+                status=403,
+            )
     for (entity, profile), values in groups.items():
         ordered = sorted(values)
+        if options.on_tokenize is not None:
+            options.on_tokenize(entity, profile, len(ordered))
         tokens = options.tokenizer.tokenize(entity, ordered, profile=profile)
         cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
     return cache

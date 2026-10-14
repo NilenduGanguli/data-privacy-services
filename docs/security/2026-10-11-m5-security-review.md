@@ -53,7 +53,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-08 | MED | No SSRF guard on tenant-controlled connection endpoints (S3 `endpoint_url`, DB hosts) | see §3.8 | `tests/security/test_connection_ssrf.py`, `tests/api/test_connection_ssrf_api.py` | fixed + test |
 | F-09 | MED | Presidio wrote customer text to the logs at `DEBUG` | S13 | `tests/test_observability.py::test_third_party_loggers_are_capped`, `tests/test_no_values_in_logs_m5.py` | fixed |
 | F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 | `tests/security/test_custom_entity_bounds.py` | fixed + test |
-| F-11 | MED | Tokenization oracle under DPS's bank credentials (any profile string, any caller with `obfuscate`) | see §3.11 | — | pending |
+| F-11 | MED | Tokenization oracle under DPS's bank credentials (any profile string, any caller with `obfuscate`) | see §3.11 | `tests/security/test_tokenizer_profiles.py` | fixed + test |
 | F-12 | MED | Synthesize mode emitted the bank's real tokens as "synthetic" values | see §3.12 | `tests/security/test_synthesize_keyless.py` | fixed + test |
 | F-13 | MED | Retry and job-group admission bound only the public `kid`, not the DEK | see §3.13 | — | pending |
 | F-14 | MED | The once-only job/group key was lost when the answer failed after commit (strict audit refusal) | see §3.14 | — | pending |
@@ -132,6 +132,18 @@ being stored or downgraded. Policies are capped at 50 recognizers (20 patterns, 
 1000 deny/allow terms each) and 500 declared fields, inline or stored. Residual: `/metrics` stays
 keyless by design (ops scrape); per-tenant LLM counters carry tenant ids — restrict the ops port with
 the OpenShift NetworkPolicy (Task 25).
+
+### 3.11 F-11 — a tenant tokenizes only its allowed data elements
+
+`DPS_TOKENIZER_PROFILES` (JSON, tenant or `*` → `ENTITY:profile` entries) lists what each tenant
+may tokenize. Layer 1 (`apply._tokenize_prepass`, every route including NDJSON and documents) and
+Layer 2 (`BatchTransformer._pretokenize`, `TokenizerProfileRefused`) check every batch against the
+tenant bound to the call (`CURRENT_TENANT`) **before** the first call: 403
+`tokenizer_profile_not_allowed` / job code of the same name. Every Layer 1 tokenization batch is
+audited before the call (`external.tokenize`, like SEC-4's detokenize audit), with the profile label
+when an allow-list is set. Production refuses to boot with a tokenizer and no allow-list; HANDOFF tells
+the bank to give DPS its own data elements, so DPS tokens never equal the tokens bank systems store.
+Not done (optional in the finding): a low-entropy entity refusal — the allow-list covers it.
 
 ### 3.12 F-12 — synthesize mode is key-less
 

@@ -106,7 +106,13 @@ from dps.layers.connectors.base import (
     to_engine_text,
 )
 from dps.layers.connectors.docpaths import expand_wildcards, generalise, top_level
-from dps.observability import FINDINGS, TABULAR_RESAMPLES, TRANSFORMS, VERIFY_FAIL
+from dps.observability import (
+    CURRENT_TENANT,
+    FINDINGS,
+    TABULAR_RESAMPLES,
+    TRANSFORMS,
+    VERIFY_FAIL,
+)
 
 if TYPE_CHECKING:  # the constraints module needs the [tabular] extra; M2 jobs run without it
     from dps.engine.synth.constraints import ConstraintSet
@@ -335,6 +341,20 @@ class IncompatibleMethod(Exception):
     def __init__(self, path: str, code: str) -> None:
         super().__init__(f"{code}: the method output for {path} does not fit the target column")
         self.path, self.code = path, code
+
+
+class TokenizerProfileRefused(IncompatibleMethod):
+    """F-11: the job's tenant may not tokenize this column's entity type under its profile
+    (``DPS_TOKENIZER_PROFILES``); raised before the service is called (``tokenizer_profile_not_allowed``,
+    not retried)."""
+
+    def __init__(self, path: str) -> None:
+        Exception.__init__(
+            self,
+            "tokenizer_profile_not_allowed: external_tokenize is not allowed for this entity type "
+            "and profile on this tenant",
+        )
+        self.path, self.code = path, "tokenizer_profile_not_allowed"
 
 
 def row_anchor(row: Row, shape: TableShape, anchor: tuple[str, str] | None) -> str:
@@ -958,6 +978,13 @@ class BatchTransformer:
                 # every value the plan addresses (M3: a document path can match several leaves)
                 for _unit, text in self._values(row, col):
                     groups.setdefault(key, set()).add(text)
+        tenant = CURRENT_TENANT.get()  # bound by the worker for the job's tenant
+        for col in columns:  # F-11: every column is checked before the first call
+            profile = col.method.params.get("profile")
+            if not self.engine.settings.tokenizer_profile_allowed(
+                tenant, col.entity_type, str(profile) if profile is not None else None
+            ):
+                raise TokenizerProfileRefused(col.path)
         cache: dict[tuple[str, str], str] = {}
         for (entity, profile), values in groups.items():
             ordered = sorted(values)

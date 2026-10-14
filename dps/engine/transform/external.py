@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import ssl
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -45,6 +46,14 @@ MAX_TOKEN_CHARS = 512
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 #: ``(entity_type, plaintext) → token`` (tokenize) or ``(entity_type, token) → plaintext``.
 ExternalCache = dict[tuple[str, str], str]
+
+
+#: F-11: the audit hook of the current Layer 1 call, ``(entity_type, profile, count)``, called once
+#: per tokenization batch before the service is called (bound by ``begin_call``; worker threads
+#: copy the context). ``None`` outside an audited call.
+TOKENIZE_AUDIT: ContextVar[Callable[[str, str | None, int], None] | None] = ContextVar(
+    "dps_tokenize_audit", default=None
+)
 
 
 class ExternalServiceError(RuntimeError):

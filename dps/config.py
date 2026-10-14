@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import re
 import shutil
@@ -53,6 +54,38 @@ class _FileSecretSource(PydanticBaseSettingsSource):
             if value is not None:
                 result[key] = value
         return result
+
+
+_PROFILE_ENTRY = re.compile(r"[A-Z][A-Z0-9_]{0,63}(:[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?")
+_PROFILE_TENANT = re.compile(r"\*|[a-z0-9][a-z0-9_-]{0,62}")
+
+
+def _parse_tokenizer_profiles(raw: str) -> dict[str, frozenset[str]]:
+    """``DPS_TOKENIZER_PROFILES`` as ``{tenant or "*": {"ENTITY:profile" | "ENTITY"}}``.
+
+    Raises:
+        ValueError: not a JSON object of tenant ids to lists of ``ENTITY[:profile]`` entries (the
+            message names the rule, never an entry).
+    """
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("DPS_TOKENIZER_PROFILES is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError("DPS_TOKENIZER_PROFILES must be a JSON object of tenant ids to lists")
+    out: dict[str, frozenset[str]] = {}
+    for tenant, entries in data.items():
+        if not isinstance(tenant, str) or not _PROFILE_TENANT.fullmatch(tenant):
+            raise ValueError("DPS_TOKENIZER_PROFILES keys must be tenant ids or *")
+        if not isinstance(entries, list) or not all(
+            isinstance(e, str) and _PROFILE_ENTRY.fullmatch(e) for e in entries
+        ):
+            raise ValueError(
+                "DPS_TOKENIZER_PROFILES values must be lists of ENTITY or ENTITY:profile "
+                "(profile [A-Za-z0-9][A-Za-z0-9_.-]{0,63})"
+            )
+        out[tenant] = frozenset(entries)
+    return out
 
 
 class Settings(BaseSettings):
@@ -287,6 +320,10 @@ class Settings(BaseSettings):
     tokenizer_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
     tokenizer_batch: int = 500
     tokenizer_retries: int = Field(default=2, ge=0, le=10)
+    #: S3 review F-11: which entity types and data elements (profiles) each tenant may tokenize —
+    #: JSON ``{"<tenant>|*": ["ENTITY:profile", "ENTITY", …]}`` (``ENTITY`` alone = no profile).
+    #: ``""`` = unrestricted (local/dev); staging/prod with a tokenizer must set it (posture).
+    tokenizer_profiles: str = ""
     # --- M5: keys, reports, posture ---
     key_cache_seconds: int = 30
     key_max_ttl_days: int = Field(default=365, ge=1)
@@ -405,6 +442,29 @@ class Settings(BaseSettings):
         if any(e not in TABULAR_ENGINES for e in engines):
             raise ValueError("synth_tabular_engine accepts copula and mostly only")
         return ",".join(dict.fromkeys(engines))
+
+    @field_validator("tokenizer_profiles")
+    @classmethod
+    def _tokenizer_profiles(cls, v: str) -> str:
+        if v.strip():
+            _parse_tokenizer_profiles(v)  # raises a value-free ValueError
+        return v
+
+    def tokenizer_profile_allowed(
+        self, tenant: str | None, entity: str, profile: str | None
+    ) -> bool:
+        """F-11: may ``tenant`` tokenize ``entity`` under ``profile``? Always, when
+        ``tokenizer_profiles`` is unset; else the pair must be listed for the tenant or ``*``."""
+        if not self.tokenizer_profiles.strip():
+            return True
+        allowed = _parse_tokenizer_profiles(self.tokenizer_profiles)
+        wanted = entity if profile is None else f"{entity}:{profile}"
+        return wanted in allowed.get(tenant or "", frozenset()) | allowed.get("*", frozenset())
+
+    @property
+    def tokenizer_profiles_restricted(self) -> bool:
+        """True when an allow-list is configured (profiles are then admin-chosen labels)."""
+        return bool(self.tokenizer_profiles.strip())
 
     @field_validator("tokenizer_provider")
     @classmethod

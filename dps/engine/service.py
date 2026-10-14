@@ -64,6 +64,7 @@ from dps.engine.transform.crypto import (
     wrap_key_material,
 )
 from dps.engine.transform.external import (
+    TOKENIZE_AUDIT,
     ExternalServiceError,
     ExternalTokenizer,
     binding_keys,
@@ -81,7 +82,7 @@ from dps.engine.verify import (
 )
 from dps.errors import CodedError, safe_errors_text
 from dps.llm.gateway import LlmGateway
-from dps.observability import FINDINGS, TRANSFORMS, VERIFY_FAIL, get_logger
+from dps.observability import CURRENT_TENANT, FINDINGS, TRANSFORMS, VERIFY_FAIL, get_logger
 
 logger = get_logger(__name__)
 
@@ -474,7 +475,13 @@ class PrivacyEngine:
             locale=locale,
             tokenizer=self.tokenizer,
             binding_keys=self.token_binding,
+            tokenize_allowed=self._tokenize_allowed,  # F-11: the tenant's allow-list
+            on_tokenize=TOKENIZE_AUDIT.get(),  # F-11: one audit event per batch (Layer 1)
         )
+
+    def _tokenize_allowed(self, entity_type: str, profile: str | None) -> bool:
+        """F-11: the request's (or job's) tenant may tokenize ``entity_type`` under ``profile``."""
+        return self.settings.tokenizer_profile_allowed(CURRENT_TENANT.get(), entity_type, profile)
 
     @staticmethod
     def _ner_state(detector: Detector) -> NerState:
