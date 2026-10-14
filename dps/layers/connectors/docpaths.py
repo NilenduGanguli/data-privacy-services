@@ -125,6 +125,13 @@ def top_level(column: ColumnInfo) -> bool:
     return column.path in (f"$.{column.name}", f"$['{column.name}']")
 
 
+def column_key(path: str, name: str) -> str:
+    """A column's key in the post-write checks (WP-I m3): its name for a column of a flat row
+    (every SQL column, a top-level MongoDB field), its (wildcard) path for a nested document
+    leaf — MongoDB leaves share their top-level field's name, so a name cannot tell them apart."""
+    return name if path in (f"$.{name}", f"$['{name}']") else path
+
+
 def column_values(rows: list[Row], column: ColumnInfo) -> list[Any]:
     """Every sampled value of ``column``: SQL rows by column name, documents by (wildcard) path.
 

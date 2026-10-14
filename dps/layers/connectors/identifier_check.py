@@ -30,7 +30,16 @@ from dps.engine.synth.unissued import never_issued
 from dps.engine.taxonomy import Family, entity_info
 from dps.engine.verify import normalise
 from dps.jobs_models import ClassificationSnapshot, Selection
-from dps.layers.connectors.base import Connector, KeyRange, Row, TableShape, to_engine_text
+from dps.layers.connectors import docpaths
+from dps.layers.connectors.base import (
+    ColumnInfo,
+    Connector,
+    KeyRange,
+    Row,
+    TableShape,
+    to_engine_text,
+)
+from dps.layers.connectors.docpaths import column_key
 
 #: Financial identifiers checked against the source too (governments' are found by family).
 FINANCIAL_IDENTIFIERS = frozenset({"CARD_PAN", "IBAN", "ACCOUNT_NUMBER", "CRYPTO_ADDRESS"})
@@ -53,19 +62,24 @@ def identifier_columns(
     snapshot: ClassificationSnapshot | None,
     written: Iterable[str],
 ) -> dict[str, str]:
-    """``{column: entity type}`` of the written identifier-family columns (not free text): the
-    plan's entity type where the column is planned, else the snapshot's."""
+    """``{column key: entity type}`` of the written identifier-family columns (not free text):
+    the plan's entity type where the column is planned, else the snapshot's. ``written`` holds
+    row-level names; a key is the name of a flat column and the path of a MongoDB leaf
+    (:func:`~dps.layers.connectors.docpaths.column_key`, WP-I m3)."""
     out: dict[str, str] = {}
+    field: dict[str, str] = {}
     for c in snapshot.columns if snapshot else []:
         if c.entity_type and not c.text_column:
-            out[c.name] = c.entity_type
+            key = column_key(c.path, c.name)
+            out[key], field[key] = c.entity_type, c.name
     for p in planned:
+        key = column_key(p.path, p.name)
         if p.text_column:
-            out.pop(p.name, None)
+            out.pop(key, None)
         else:
-            out[p.name] = p.entity_type
+            out[key], field[key] = p.entity_type, p.name
     keep = set(written)
-    return {n: e for n, e in sorted(out.items()) if n in keep and is_identifier(e)}
+    return {k: e for k, e in sorted(out.items()) if field[k] in keep and is_identifier(e)}
 
 
 class _Members:
@@ -161,13 +175,19 @@ class IdentifierTally:
         }
 
 
+def _by_key(shape: TableShape) -> dict[str, ColumnInfo]:
+    return {column_key(c.path, c.name): c for c in shape.columns}
+
+
 async def _stream(
     connector: Connector,
     shape: TableShape,
     names: list[str],
     after_key: tuple[Any, ...] | None = None,
 ) -> AsyncIterator[list[Row]]:
-    present = [n for n in names if any(c.name == n for c in shape.columns)]
+    by_key = _by_key(shape)
+    # what the connector reads: row-level fields (a MongoDB leaf's whole top-level field)
+    present = list(dict.fromkeys(by_key[n].name for n in names if n in by_key))
     if not present:
         return
     pages = connector.read_partition(
@@ -206,15 +226,17 @@ async def _tally_target(
     target_shape: TableShape,
     after_key: tuple[Any, ...] | None,
 ) -> int:
-    by_name = {c.name: c for c in target_shape.columns}
+    by_key = _by_key(target_shape)
     read = 0
     async for rows in _stream(target, target_shape, names, after_key):
         read += len(rows)
         for row in rows:
             for name in names:
-                column = by_name.get(name)
+                column = by_key.get(name)
                 if column is not None:
-                    tally.add_target(name, to_engine_text(row.get(name), column))
+                    # every value the column holds in this row (each element of a wildcard path)
+                    for value in docpaths.column_values([row], column):
+                        tally.add_target(name, to_engine_text(value, column))
         rows.clear()
     return read
 
@@ -256,11 +278,14 @@ async def check_identifiers(
         out["scope_reason"] = reason
     if source is None or source_shape is None:
         return {**tally.result(source_compared=False), **out}
-    src_cols = {c.name: c for c in source_shape.columns}
+    src_cols = _by_key(source_shape)
     async for rows in _stream(source, source_shape, names):
         for name in names:
             column = src_cols.get(name)
             if column is not None:
-                tally.add_source(name, (to_engine_text(r.get(name), column) for r in rows))
+                tally.add_source(
+                    name,
+                    (to_engine_text(v, column) for v in docpaths.column_values(rows, column)),
+                )
         rows.clear()
     return {**tally.result(source_compared=True), **out}

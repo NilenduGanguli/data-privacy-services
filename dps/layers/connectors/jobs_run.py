@@ -114,6 +114,7 @@ from dps.layers.connectors.base import (
     encode_key,
     to_engine_text,
 )
+from dps.layers.connectors.docpaths import column_key
 from dps.layers.connectors.evidence import EvidenceInputs, build_pack, save_evidence
 from dps.layers.connectors.files import (
     FilesWriter,
@@ -1596,13 +1597,6 @@ async def finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         code = exc.code if isinstance(exc, ConnectorError | StorageError) else "finalize_error"
         logger.error("finalize_failed", job_id=job.id, error=type(exc).__name__)
         await _retry(ctx, job, code, type(exc).__name__)
-
-
-def column_key(path: str, name: str) -> str:
-    """A column's key in the post-write checks: its name for a column of a flat row (every SQL
-    column, a top-level MongoDB field), its (wildcard) path for a nested document leaf — so one
-    classified leaf of a MongoDB field never vouches for its unclassified siblings."""
-    return name if path in (f"$.{name}", f"$['{name}']") else path
 
 
 def scan_written(
