@@ -1107,3 +1107,79 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
 - Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
   `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
   semantics are documented in HANDOFF §5 and contract §8.3.
+
+## Task 26B — The showcase deck (finish stage S6a, worktree `dps-wt-fdemo`, branch `fdemo`)
+
+Finish-stage work (programme plan §2.6 F3). S6a builds the deck tool, its test and the `deck` extra
+without a real rehearsal; S6b (after merging `fimg`'s Task 24 and `m4`) writes `tools/e2e_demo.py`
+with `reports/e2e-demo-report.json`, runs the rehearsal, builds and commits
+`docs/demo/dps-showcase.pptx` and does the Keynote QA.
+
+- **No `.pptx` committed here.** A deck built from fixtures would show fixture numbers as if they were
+  measured; the plan's file `docs/demo/dps-showcase.pptx` arrives with S6b's rehearsal.
+- **Input contract fixed here** (e2e_demo.py does not exist yet; it lives in the `build_deck.py`
+  docstring): report schema `dps.e2e-demo.v1` — top level `generated_at`, `dps_version`, `commit`,
+  `tenant`, `total_seconds`, `steps[]` of `{id, title, status, seconds, facts}`. Facts the deck reads
+  mirror the API's own key paths so S6b can copy them: S1 `raw_pii_sent_to_llm`; S2 `findings`,
+  `entity_types[]`, `reveal_identical`, `raw_pii_sent_to_llm`; S4 `ocr_pages`, `findings`,
+  `extractable_chars`, `originals_left`; S6 `jobs[]` of `{engine, counts.rows_written,
+  counts.partitions, timings.rows_per_s, verification.passed}` (evidence pack keys); S7 `members[].engine`,
+  `pairs[].{left,right,checked,matched,consistent}`, `sampled`, `all_members_matched`, `passed`
+  (consistency-check result keys); S8 `counts.rows_written`, `fidelity.score`,
+  `privacy.exact_row_matches`, `privacy.nndr.{ratio,target,measured}`,
+  `privacy.membership_inference.{run,auc,target}`, `utility.{run,ratio,metric}` (synthetic pack keys);
+  S9 `scan.{pages,fields,personas,submissions}` (scan evidence keys) and `posts_received` (demo-site
+  `/__received`); S10 `packs_listed`, `audit_rows`, `pdf_ok`; S11 `posture.{passed,total}`,
+  `rotated_key_status`, `retention_state`. Screenshots: `reports/demo-screens/<page>-light.png` for
+  `playground`, `job`, `scan-parallel`, `evidence` (S12's walk writes `<page>-<theme>.png`). Only a
+  step with status `PASS` contributes figures.
+- **Speaker notes** come from the `#### Slide N` blocks of `docs/demo/DEMO-SCRIPT.md` (the plan: "taken
+  from the matching DEMO-SCRIPT beat"); a missing block falls back to built-in notes and is listed as a
+  missing input.
+- **Fonts.** A PPTX run cannot name a fallback font, so every run names `Helvetica Neue` and the theme
+  font scheme (what anything un-styled inherits) names `Arial`; the template's per-script theme fonts
+  are removed, so no other face is named anywhere in the package. The theme colours are the Vault tokens.
+- **Keynote safety beyond the plan:** no `p:graphicFrame` at all (the D1–D14 status table on slide 12
+  is pills and text boxes, not a table part); every shape drops its `p:style` (no inherited shadow,
+  outline or white text); solid fills; the template's stale thumbnail is dropped; the same inputs give a
+  byte-identical file (fixed zip timestamps, document dates from the report) so a rebuild without new
+  inputs makes no diff.
+- **Figures.** Nothing is derived (no sums, averages or list counts), so every number on a slide is an
+  input value as formatted; titles avoid free-standing digits ("Layer 2" became "Databases: …"); labels
+  glued to letters (S8, L2, D4) are names, not figures. The plan's test checks slides 7–11; a second
+  test checks slides 5–11 with a complete report.
+- **Missing inputs** render named slate placeholders (`placeholder:<key>`), are listed on stderr, and
+  `--strict` exits 1 without writing (an existing deck stays); an unreadable or wrong-schema report exits
+  2. Only name-shaped strings from the report are ever printed (entity types, allow-listed engines,
+  states and metrics, a tenant slug, a git sha, a semver).
+- **Bench bars:** the newest file per configuration (engine, mode, write mode, workers, parallelism), at
+  most eight; the host line appears only when every file reports the same CPU count.
+- **Tests:** `tests/test_deck.py` has 12 tests (the plan says `1 passed`): the plan's fixture test plus
+  slide 9 without MIA/utility, a complete report, no inputs and `--strict`, a failed step, string
+  filtering, malformed facts, a wrong-schema report, notes from the script, the notes parser, the
+  notes fallback, the CLI.
+- **Keynote QA not done here:** three `osascript` exports of a fixture preview timed out on `open`
+  (AppleEvent -1712); Keynote 14.4 received the file (it stamped its quarantine attribute) but showed
+  no document or window to AppleScript — most likely a modal dialog that needs a person. Visual QA used
+  LibreOffice headless renders of all twelve slides (complete inputs and no inputs). The Keynote PDF
+  review stays with S6b and the owner.
+- Contract §1 (extras sentence) and HANDOFF §1 (extras of the `dps` package) name the `deck` extra.
+
+## Task 26 — Presenter script draft (finish stage S6a, worktree `dps-wt-fdemo`)
+
+Finish-stage work. `docs/demo/DEMO-SCRIPT.md` is drafted from the plan's outline and spec §9; S6b
+finalises it after the rehearsal together with `tools/demo_seed.py`, `tools/e2e_demo.py` and
+`tests/console/test_console_pages.py`.
+
+- Labels are the console's as built (main plus the `m4` scanner pages): the Playground heading is "Try
+  the engine", the Data sources page heading is "Jobs" (the sidebar reads "Data sources & jobs"),
+  documents use "Load demo KYC scan" and "Download redacted PDF", the parallel view toggles "Filled with:
+  Synthetic persona / Obfuscated tokens" and shows "No submissions · POST interception on". For S6b's
+  console test: Task 26 expects the headings "Playground" and "Data sources & jobs", which the pages do
+  not render as their `h1`.
+- Each beat carries `#### Slide N` blocks (the deck's notes); the timeline table and the "Slides and
+  beats" line map slides to beats (Task 26B's one line). Slides 1–4 are an optional opening before the
+  clock; Policies has no slide.
+- The script quotes no figure: beats point at the number on screen or on the slide built from the
+  rehearsal. Commands and flags (`--skip-oracle`, `--reset-jobs`, `--console`) are the plan's; S6b
+  confirms them against the tools it writes.
