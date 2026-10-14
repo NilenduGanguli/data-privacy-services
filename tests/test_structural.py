@@ -101,7 +101,6 @@ def test_classify_path_scores_parent_segments(path: str, entity: str) -> None:
     [
         "$.contact.addresses[*].type",
         "$.contact.addresses[*].country",
-        "$.emailAddress.line1",  # an e-mail parent is not an address context
         "$.ipAddress.pin",
         "$.order.number",  # a generic leaf inherits only from a classified parent
         "$.accounts[*].balance",
@@ -112,6 +111,16 @@ def test_classify_path_leaves_unrelated_leaves_alone(path: str) -> None:
     from dps.engine.detect.structural import classify_path
 
     assert [c for c in classify_path(path) if c.score >= 0.6] == [], path
+
+
+def test_an_email_parent_adds_no_address_context() -> None:
+    """``line1`` is an address-line cue by its own name (main's integrated verify r1 B1), so
+    ``$.emailAddress.line1`` is classified — but only as its leaf name says: an e-mail parent is
+    not an address context and raises nothing (WP-I m3)."""
+    from dps.engine.detect.structural import classify_key, classify_path
+
+    assert classify_path("$.emailAddress.line1") == classify_key("$.line1")
+    assert classify_path("$.emailAddress.line1")[0].entity_type == "STREET_ADDRESS"
 
 
 def test_classify_path_equals_classify_key_without_parents() -> None:
