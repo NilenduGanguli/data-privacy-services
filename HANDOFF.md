@@ -364,8 +364,9 @@ default is the contract port; every image compose builds is tagged `${DPS_IMAGE_
 | `tokenizer-mock` | the app image | `${DPS_TOKENIZER_MOCK_PORT:-8420}` → 8420 | vaultless mock of the bank tokenization service (`docker/tokenizer-mock/server.py`, mounted read-only): tokens `tk_` + base32(AES-SIV); bearer token `dps-local-tokenizer-token` (local demo literal); app and worker point `DPS_TOKENIZER_URL` at it; without it `/readyz` reports `tokenizer` down and `external_tokenize` answers 502 |
 | `browser-worker`, `demo-site` | **(at the M4 merge)** | `demo-site` `${DPS_DEMO_SITE_PORT:-8410}` → 8410 | the scanner's worker (ops 9401 inside the network) and the demo onboarding site with its `/__received` counter |
 
-Every service has a healthcheck and a `mem_limit`; labels `app=data-privacy-services`,
-`component=<role>`, `env=local`. Compose environment shared by app, migrate and worker
+Every long-running service has a healthcheck and every service a `mem_limit`; the one-shots built
+on the app image inherit its `HEALTHCHECK` and show "unhealthy" after exiting 0 (harmless). Labels
+`app=data-privacy-services`, `component=<role>`, `env=local`. Compose environment shared by app, migrate and worker
 (`x-dps-env`): `DPS_PG_HOST=dps-db`, logins `dps_app` / `dps_worker_login` / `dps_owner`,
 `DPS_MIGRATIONS_MODE=verify` (`auto` for `migrate`), `DPS_JOB_KEK` = a local demo literal unless
 the shell sets one, `DPS_SECRET_DIR=/var/run/secrets/dps`, `DPS_ARTEFACT_DIR=/app/var/artefacts`
@@ -534,12 +535,12 @@ privilege roles, no BYPASSRLS), `dps_app` (the API login, member of `dps_app_rw`
 `dps_worker_login` (the worker login, member of both). The app role has no DELETE on API keys
 (keys are disabled, never deleted).
 
-Who talks to whom: `dps-app` → metadata DB, object storage, LLM gateway, OCR gateway,
-tokenization service, source/target databases (tests, describe, count); `dps-worker` → metadata DB,
-object storage, LLM gateway (opt-in labelling and text rewrite), OCR gateway, tokenization service,
-source and target databases, the export volume; `dps-browser-worker` → metadata DB, object
-storage, the registered scan hosts; `dps-migrate` → metadata DB only. Nothing calls DPS except
-API clients and the console.
+Who talks to whom: `dps-app` → metadata DB, object storage, LLM gateway, OCR gateway, tokenization
+service, source/target databases (tests, describe, count); `dps-worker` → metadata DB, object
+storage, LLM gateway (when a job's policy uses it; placeholders only), OCR gateway, tokenization
+service, source and target databases, the export volume; `dps-browser-worker` → metadata DB, object
+storage, the registered scan hosts; `dps-migrate` → metadata DB only. Nothing calls DPS except API
+clients and the console.
 
 **Database specifics worth knowing.**
 

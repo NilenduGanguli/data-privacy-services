@@ -97,7 +97,9 @@ admin key sees every tenant); database checks read "database unavailable" while 
 
 **Retention.** `POST /admin/retention/run` body `{dry_run}` (default `false`) queues a `retention`
 job owned by `_system`; it sweeps every tenant, so a key not granted `*` is 403 `tenant_forbidden`.
-Follow it with `GET /api/v1/jobs/{id}` as any job; its counts are in `progress.metrics.retention`.
+The answer's `job` is the queued job; `_system` is never a request tenant, so follow the run in
+`GET /admin/queue` and in its value-free `retention.run` audit event (`GET /admin/audit?tenants=*&action=retention`,
+counts only, read with a key granted `*`); the job keeps the same counts in `progress.metrics.retention`.
 
 ## Reports
 
