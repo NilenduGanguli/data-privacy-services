@@ -75,7 +75,9 @@ FULL_FACTS: dict[str, dict[str, Any]] = {
         "reveal_identical": True,
         "raw_pii_sent_to_llm": 0,
     },
+    "S3": {},
     "S4": {"ocr_pages": 2, "findings": 9, "extractable_chars": 0, "originals_left": 0},
+    "S5": {},
     "S6": {
         "jobs": [
             {
@@ -113,7 +115,8 @@ FULL_FACTS: dict[str, dict[str, Any]] = {
     "S9": S9_FACTS,
     "S10": {"packs_listed": 5, "audit_rows": 42, "pdf_ok": True},
     "S11": {
-        "posture": {"passed": 11, "total": 11},
+        # the local stack, measured: evaluated as if production, enforced only in staging/prod
+        "posture": {"passed": 5, "total": 11, "enforced": False, "env": "local"},
         "rotated_key_status": 401,
         "retention_state": "succeeded",
     },
@@ -312,7 +315,7 @@ def test_complete_report_fills_every_slot(tmp_path: Path) -> None:
     text10 = "\n".join(_texts(slides[9]))
     assert "POST requests received" in text10
     eleven = "\n".join(_texts(slides[10]))
-    assert "11 of 11" in eleven and "raw PII sent to an LLM" in eleven
+    assert "5 of 11" in eleven and "raw PII sent to an LLM" in eleven
     eight = "\n".join(_texts(slides[7]))
     assert "500" in eight and "Oracle" in eight and "MongoDB" in eight and "PostgreSQL" in eight
 
@@ -364,6 +367,199 @@ def test_a_step_that_did_not_pass_shows_no_figures(tmp_path: Path) -> None:
     assert any("S8" in m and "FAIL" in m for m in result.missing)
     for text in _texts(nine):
         assert "0.93" not in text
+
+
+# -- slide 1: "ran end to end" only for a rehearsal that did (S6a review r1, B1) -------------------
+def _with_statuses(statuses: dict[str, Any], *, drop: tuple[str, ...] = ()) -> dict[str, Any]:
+    """The complete report (S1-S11), each step PASS unless ``statuses`` says otherwise."""
+    doc = _report({sid: facts for sid, facts in FULL_FACTS.items() if sid not in drop})
+    for step in doc["steps"]:
+        step["status"] = statuses.get(step["id"], step["status"])
+    return doc
+
+
+def _build_doc(base: Path, doc: dict[str, Any]) -> tuple[Any, build_deck.BuildResult]:
+    """Build from ``doc`` with every screenshot and a bench file, in its own directory."""
+    base.mkdir(parents=True, exist_ok=True)
+    paths = _inputs(base, {}, screens=SCREENS_ALL)
+    paths["report"].write_text(json.dumps(doc), encoding="utf-8")
+    return _build(base, paths)
+
+
+def _strict_exit(base: Path) -> int:
+    """``--strict`` over the inputs :func:`_build_doc` wrote into ``base``."""
+    return build_deck.main(
+        [
+            "--report",
+            str(base / "e2e-demo-report.json"),
+            "--screens",
+            str(base / "demo-screens"),
+            "--bench",
+            str(base / "bench"),
+            "--script",
+            str(SCRIPT),
+            "--out",
+            str(base / "strict.pptx"),
+            "--strict",
+        ]
+    )
+
+
+def _title_texts(prs: Any) -> list[str]:
+    return _texts(list(prs.slides)[0])
+
+
+def _rehearsal_placeholder(prs: Any) -> str:
+    shapes = {s.name: s for s in _shapes(list(prs.slides)[0])}
+    assert "placeholder:rehearsal" in shapes
+    return str(shapes["placeholder:rehearsal"].text_frame.text)
+
+
+def test_title_slide_states_the_measured_end_to_end_time(tmp_path: Path) -> None:
+    prs, result = _build_doc(tmp_path, _report(FULL_FACTS))
+    # total_seconds 431.6 prints as 7:12 (whole seconds); the date is generated_at's
+    assert (
+        "Built from the rehearsal of 14 October 2026: the scripted demo ran end to end in 7:12."
+        in _title_texts(prs)
+    )
+    assert "placeholder:rehearsal" not in _names(list(prs.slides)[0])
+    assert result.missing == ()
+    assert _strict_exit(tmp_path) == 0
+
+
+@pytest.mark.parametrize(
+    ("statuses", "reason"),
+    [
+        # the e2e tool stops at the first failed step and reports the later ones NOT RUN
+        ({"S5": "FAIL", **{f"S{n}": "NOT RUN" for n in range(6, 12)}}, "first failure: S5"),
+        ({"S5": "ERROR"}, "first failure: S5"),
+        ({"S5": "BROKEN"}, "first failure: S5"),  # a status the deck does not know
+        ({"S5": None}, "first failure: S5"),
+        ({"S11": ["PASS"]}, "first failure: S11"),  # not even a string: unknown, never a crash
+        ({"S11": "NOT RUN"}, "S11 not run"),
+    ],
+)
+def test_title_slide_claims_no_end_to_end_run_when_a_step_did_not_pass(
+    tmp_path: Path, statuses: dict[str, Any], reason: str
+) -> None:
+    doc = _with_statuses(statuses)
+    doc["total_seconds"] = 130.2  # the wall time up to the failure is still written
+    prs, result = _build_doc(tmp_path, doc)
+    assert not [t for t in _title_texts(prs) if "end to end" in t or "2:10" in t]
+    words = _rehearsal_placeholder(prs)
+    assert reason in words and "did not complete" in words
+    assert any(m.startswith("slide 1:") and reason in m for m in result.missing)
+    assert _strict_exit(tmp_path) == 1
+
+
+def test_title_slide_names_the_steps_the_rehearsal_skipped(tmp_path: Path) -> None:
+    prs, _ = _build_doc(tmp_path / "one", _with_statuses({"S3": "SKIP"}))
+    assert (
+        "Built from the rehearsal of 14 October 2026: the scripted demo ran end to end in 7:12 "
+        "(S3 skipped)." in _title_texts(prs)
+    )
+    doc = _report({**FULL_FACTS, "S12": {}})  # the console walk, listed when it ran
+    for step in doc["steps"]:
+        if step["id"] in {"S3", "S12"}:
+            step["status"] = "SKIP"
+    prs, _ = _build_doc(tmp_path / "two", doc)
+    title = "\n".join(_title_texts(prs))
+    assert "the scripted demo ran end to end in 7:12 (S3 and S12 skipped)." in title
+
+
+def test_title_slide_needs_every_scripted_step_in_the_report(tmp_path: Path) -> None:
+    prs, result = _build_doc(tmp_path / "gap", _with_statuses({}, drop=("S4",)))
+    assert not [t for t in _title_texts(prs) if "end to end" in t]
+    assert "no step S4 in the report" in _rehearsal_placeholder(prs)
+    assert any(m.startswith("slide 1:") and "S4" in m for m in result.missing)
+    doc = _report(FULL_FACTS)
+    doc["steps"].append({"id": "Jane Q Customer", "status": "PASS"})  # not a step id: unreadable
+    prs, _ = _build_doc(tmp_path / "odd", doc)
+    assert not [t for t in _title_texts(prs) if "end to end" in t]
+    assert "Jane Q Customer" not in _rehearsal_placeholder(prs)
+
+
+# -- slide 11: the posture count in its context (S6a review r1, B2) -------------------------------
+def _posture_kpi(prs: Any) -> tuple[str, str, str]:
+    """(value text, value colour, caption) of slide 11's posture card."""
+    card = {s.name: s for s in _shapes(list(prs.slides)[10])}["kpi:posture"]
+    paras = card.text_frame.paragraphs
+    value = paras[1].runs[0]
+    caption = paras[2].runs[0].text if len(paras) > 2 and paras[2].runs else ""
+    return value.text, str(value.font.color.rgb), caption
+
+
+TAIL = "staging and production refuse to boot when a check enforced at boot fails"
+
+
+@pytest.mark.parametrize(
+    ("posture", "value", "tone", "caption"),
+    [
+        # the local demo stack: evaluated as if production, reported only: never the alarm colour
+        (
+            {"passed": 5, "total": 11, "enforced": False, "env": "local"},
+            "5 of 11 passed",
+            build_deck.AMBER,
+            f"local stack, evaluated as if production; {TAIL}",
+        ),
+        (
+            {"passed": 11, "total": 11, "enforced": False, "env": "dev"},
+            "11 of 11 passed",
+            build_deck.EMERALD,
+            f"dev stack, evaluated as if production; {TAIL}",
+        ),
+        # no (or no known) environment name: the context still shows, no name is printed
+        (
+            {"passed": 5, "total": 11, "enforced": False},
+            "5 of 11 passed",
+            build_deck.AMBER,
+            f"evaluated as if production, reported only here; {TAIL}",
+        ),
+        (
+            {"passed": 5, "total": 11, "enforced": False, "env": "prod"},
+            "5 of 11 passed",
+            build_deck.AMBER,
+            f"evaluated as if production, reported only here; {TAIL}",
+        ),
+        # an enforced failure keeps the alarm colour
+        (
+            {"passed": 10, "total": 11, "enforced": True, "env": "prod"},
+            "10 of 11 passed",
+            build_deck.ROSE,
+            "enforced on this production stack: it refuses to boot when a check enforced at boot "
+            "fails",
+        ),
+        (
+            {"passed": 11, "total": 11, "enforced": True, "env": "staging"},
+            "11 of 11 passed",
+            build_deck.EMERALD,
+            "enforced on this staging stack: it refuses to boot when a check enforced at boot fails",
+        ),
+    ],
+)
+def test_posture_count_is_shown_with_where_it_is_enforced(
+    tmp_path: Path, posture: dict[str, Any], value: str, tone: str, caption: str
+) -> None:
+    s11 = dict(FULL_FACTS["S11"], posture=posture)
+    prs, result = _build_doc(tmp_path, _report({**FULL_FACTS, "S11": s11}))
+    assert _posture_kpi(prs) == (value, tone, caption)
+    assert result.missing == ()
+    lede = {s.name: s for s in _shapes(list(prs.slides)[10])}["lede"].text_frame.text
+    assert "a posture check enforced at boot fails" in lede
+
+
+@pytest.mark.parametrize("enforced", [None, "false", 0])
+def test_posture_count_without_its_enforcement_is_a_placeholder(
+    tmp_path: Path, enforced: Any
+) -> None:
+    posture: dict[str, Any] = {"passed": 5, "total": 11, "env": "local"}
+    if enforced is not None:
+        posture["enforced"] = enforced
+    s11 = dict(FULL_FACTS["S11"], posture=posture)
+    prs, result = _build_doc(tmp_path, _report({**FULL_FACTS, "S11": s11}))
+    names = _names(list(prs.slides)[10])
+    assert "placeholder:posture" in names and "kpi:posture" not in names
+    assert any("S11 facts.posture.enforced" in m for m in result.missing)
 
 
 def test_strings_that_are_not_names_never_reach_a_slide(tmp_path: Path) -> None:

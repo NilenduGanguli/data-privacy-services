@@ -30,8 +30,14 @@ Input contract — ``reports/e2e-demo-report.json`` written by ``tools/e2e_demo.
 
     {"schema": "dps.e2e-demo.v1", "generated_at": "<ISO-8601 UTC>", "dps_version": "<semver>",
      "commit": "<git sha>", "tenant": "<tenant id>", "total_seconds": <float>,
-     "steps": [{"id": "S1", "title": "...", "status": "PASS|FAIL|NOT RUN|SKIP", "seconds": <float>,
-                "facts": {...}}, ...]}
+     "steps": [{"id": "S1", "title": "...", "status": "PASS|FAIL|ERROR|NOT RUN|SKIP",
+                "seconds": <float>, "facts": {...}}, ...]}
+
+Every scripted step S1 to S11 is listed (S12 too when ``--console`` ran): a step the run skipped is
+listed as ``SKIP``, never left out, and the steps after a failure as ``NOT RUN``. Slide 1 states
+that the scripted demo ran end to end, with ``total_seconds`` as m:ss, only when all of S1 to S11
+are listed and every listed step is ``PASS`` or ``SKIP`` (skipped steps are named); otherwise it
+shows a placeholder naming the first failure, which ``--strict`` refuses.
 
 Facts the deck reads (dotted paths inside a step's ``facts``; anything else is ignored)::
 
@@ -47,7 +53,13 @@ Facts the deck reads (dotted paths inside a step's ``facts``; anything else is i
          utility.{run,ratio,metric}                  (subset of the synthetic evidence pack)
     S9   scan.{pages,fields,personas,submissions}, posts_received (demo-site /__received)
     S10  packs_listed, audit_rows, pdf_ok
-    S11  posture.{passed,total}, rotated_key_status, retention_state
+    S11  posture.{passed,total,enforced}, posture.env (optional), rotated_key_status,
+         retention_state                             (posture: GET /admin/posture's own keys)
+
+``/admin/posture`` evaluates its checks as if in production in every environment and enforces
+them only in staging and prod (``enforced``), so a local stack fails the production-only checks by
+design: slide 11 captions the count with where it is enforced, in amber when it is not enforced and
+in rose only for an enforced failure.
 
 Screenshots — ``reports/demo-screens/<page>-<theme>.png`` from ``e2e_demo.py --console``; the deck
 uses the light theme of ``playground`` (slide 5), ``job`` (7), ``scan-parallel`` (10) and
@@ -110,6 +122,12 @@ SLATE_LINE = "94A3B8"
 SLATE_TEXT = "475569"
 
 STEP_STATUSES = {"FAIL", "NOT RUN", "SKIP", "ERROR"}  # anything else that is not PASS: "unknown"
+STEP_ID = re.compile(r"^S\d{1,2}$")
+SCRIPTED_STEPS = tuple(f"S{n}" for n in range(1, 12))  # S12 (the console walk) is optional
+#: ``env`` names the posture caption may print: where checks are only reported / enforced.
+REPORTED_ENVS = {"local": "local", "dev": "dev"}
+ENFORCED_ENVS = {"staging": "staging", "prod": "production"}
+BOOT_RULE = "to boot when a check enforced at boot fails"  # "staging and production refuse …"
 ENGINES = {"postgres": "PostgreSQL", "oracle": "Oracle", "mongo": "MongoDB"}
 WRITE_MODES = {"table": "table", "files": "files", "in_place": "in place", "append": "append"}
 MODES = {"obfuscate": "obfuscate", "synthesize": "synthesize"}
@@ -166,6 +184,16 @@ def _name(value: Any, pattern: re.Pattern[str]) -> str | None:
     return value if isinstance(value, str) and pattern.fullmatch(value) else None
 
 
+def _status_name(status: Any) -> str:
+    """A step status the deck may print: a known one, else ``unknown`` (never a free string)."""
+    return status if isinstance(status, str) and status in STEP_STATUSES else "unknown"
+
+
+def _and_list(items: Sequence[str]) -> str:
+    """``A``, ``A and B``, ``A, B and C``."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
 @dataclass
 class Report:
     """The e2e demo report, read defensively (only shapes the deck understands are used)."""
@@ -198,7 +226,7 @@ class Report:
             if isinstance(step, dict) and step.get("id") == sid:
                 status = step.get("status")
                 if status != "PASS":
-                    shown = status if status in STEP_STATUSES else "unknown"
+                    shown = _status_name(status)
                     return _Absent(
                         f"step {sid} (status {shown})",
                         f"Step {sid} did not pass in the rehearsal: fix it and rehearse again.",
@@ -211,6 +239,53 @@ class Report:
         """``None`` when step ``sid`` passed, else why its figures cannot be shown."""
         got = self._step(sid)
         return got if isinstance(got, _Absent) else None
+
+    def incomplete(self) -> str | None:
+        """Why the report does not show a complete rehearsal; ``None`` when it does.
+
+        Complete: every scripted step (S1 to S11) is listed and every listed step is ``PASS`` or
+        ``SKIP``. The reason names, in this order, the first step that failed (``FAIL``,
+        ``ERROR`` or a status the deck does not know), an entry without a step id, the first step
+        ``NOT RUN``, or the first scripted step the report does not list.
+        """
+        if self.doc is None:
+            return "no e2e demo report"
+        failed: str | None = None
+        unreadable: str | None = None
+        not_run: str | None = None
+        listed: set[str] = set()
+        for step in self.doc["steps"]:
+            sid = step.get("id") if isinstance(step, dict) else None
+            if not isinstance(sid, str) or not STEP_ID.fullmatch(sid):
+                unreadable = unreadable or "a step entry without a step id"
+                continue
+            listed.add(sid)
+            status = step.get("status")
+            if status in ("PASS", "SKIP"):
+                continue
+            if status == "NOT RUN":
+                not_run = not_run or f"{sid} not run"
+            elif failed is None:
+                failed = f"first failure: {sid}" + (
+                    "" if status == "FAIL" else f", status {_status_name(status)}"
+                )
+        absent = next(
+            (f"no step {s} in the report" for s in SCRIPTED_STEPS if s not in listed), None
+        )
+        return failed or unreadable or not_run or absent
+
+    def skipped(self) -> list[str]:
+        """The ids of the listed steps the rehearsal skipped, in report order."""
+        if self.doc is None:
+            return []
+        return [
+            step["id"]
+            for step in self.doc["steps"]
+            if isinstance(step, dict)
+            and isinstance(step.get("id"), str)
+            and STEP_ID.fullmatch(step["id"])
+            and step.get("status") == "SKIP"
+        ]
 
     def raw(self, sid: str, path: str) -> Any:
         """The value at ``path`` in step ``sid``'s facts, or an :class:`_Absent`."""
@@ -794,7 +869,7 @@ DEFAULT_NOTES = {
     10: "Layer 3: the scanner fills every screen with synthetic or obfuscated data in a parallel "
     "view. Nothing is ever submitted.",
     11: "Every job seals an evidence pack with a PDF; staging and production refuse to boot when a "
-    "posture check fails.",
+    "posture check enforced at boot fails.",
     12: "Decisions D1 to D4 were taken by the owner, D5 to D13 stand at their defaults, D14 is "
     "still to be set together.",
 }
@@ -813,7 +888,7 @@ DECISIONS: tuple[tuple[str, str, str, str], ...] = (
     ("D11", "Retention", "job metadata and evidence per tenant; raw values never kept", "Default"),
     ("D12", "Tenancy", "X-API-KEY with tenant grants and scopes; SSO later", "Default"),
     ("D13", "Naming", "Data Privacy Services, Privacy Console, Vault", "Default"),
-    ("D14", "Scale targets", "payload sizes, rows per job, jobs and documents per day", "Open"),
+    ("D14", "Scale targets", "payload size, rows per job, concurrent jobs, docs per day", "Open"),
 )
 NEXT_STEPS = (
     "Set the scale targets together (D14): they size batches, caps and the benchmark goals.",
@@ -856,34 +931,53 @@ def _slide_title(deck: Deck, report: Report) -> Any:
     )
     for i, tone in enumerate((TEAL_BRIGHT, AMBER_BRIGHT, EMERALD_BRIGHT, ROSE_BRIGHT)):
         deck.rect(slide, (0.9 + i * 0.55, 5.15, 0.45, 0.08), fill=tone, line=None, radius=None)
+    # "ran end to end" is a claim: only a rehearsal whose every scripted step passed (or was
+    # skipped, and named) may make it; the wall time of a failed run is the time to its failure
     stamp, total = report.generated_at(), report.total_seconds()
-    if stamp is not None and total is not None:
-        seconds = round(total)
-        deck.text(
-            slide,
-            (0.9, 5.45, 11.0, 0.4),
-            f"Built from the rehearsal of {stamp:%d %B %Y}: the scripted demo ran end to end "
-            f"in {seconds // 60}:{seconds % 60:02d}.",
-            size=14,
-            color=INK_ON_DARK,
-        )
-    elif report.doc is None:
+    gap = report.incomplete()
+    box = (0.9, 5.45, 7.2, 0.75)
+    if report.doc is None:
         deck.absent(
             slide,
-            (0.9, 5.45, 7.2, 0.75),
+            box,
             "rehearsal",
             _Absent(
                 "the e2e demo report", "Run tools/e2e_demo.py --console, then rebuild the deck."
             ),
         )
-    else:
+    elif gap is not None:
         deck.absent(
             slide,
-            (0.9, 5.45, 7.2, 0.75),
+            box,
+            "rehearsal",
+            _Absent(
+                f"a complete rehearsal ({gap})",
+                "The rehearsal did not complete: fix it and rehearse again "
+                "(tools/e2e_demo.py --console), then rebuild the deck.",
+            ),
+        )
+    elif stamp is None or total is None:
+        deck.absent(
+            slide,
+            box,
             "rehearsal",
             _Absent(
                 "report generated_at and total_seconds", "The report does not say when or how long."
             ),
+        )
+    else:
+        seconds = round(total)
+        skipped = report.skipped()
+        deck.text(
+            slide,
+            (0.9, 5.45, 11.0, 0.4),
+            f"Built from the rehearsal of {stamp:%d %B %Y}: the scripted demo ran end to end "
+            f"in {seconds // 60}:{seconds % 60:02d}"
+            + (f" ({_and_list(skipped)} skipped)" if skipped else "")
+            + ".",
+            size=14,
+            color=INK_ON_DARK,
+            name="rehearsal",
         )
     deck.chrome(slide, _footer(report), dark=True)
     return slide
@@ -1325,7 +1419,7 @@ def _slide_layer2(deck: Deck, report: Report, screens: Path | None, bench: list[
         cpus = {b.host_cpus for b in bench}
         host = cpus.pop() if len(cpus) == 1 else None
         caption = "tools/bench_connector.py" + (
-            f" on one Mac with {_fmt_count(host)} CPUs" if host else ""
+            f" on one host with {_fmt_count(host)} CPUs" if host else ""
         )
         deck.text(slide, (x, y + 0.3, w, 0.28), caption, size=10, color=INK_3)
         top = max(b.value for b in bench)
@@ -1488,7 +1582,7 @@ def _slide_consistency(deck: Deck, report: Report) -> Any:
             paras=[
                 Para([Run("Customer ids sampled", 12, INK_2, True)], space_after=2),
                 Para([Run(_fmt_count(sampled), 34, TEAL, True)], space_after=12),
-                Para([Run("Found in all three systems", 12, INK_2, True)], space_after=2),
+                Para([Run("Found in every system of the group", 12, INK_2, True)], space_after=2),
                 Para(
                     [Run(_fmt_count(everywhere), 34, EMERALD if passed else ROSE, True)],
                     space_after=12,
@@ -1605,7 +1699,7 @@ def _slide_synthetic(deck: Deck, report: Report) -> Any:
             "Membership inference (MIA) AUC",
             _fmt_ratio(auc),
             tone=EMERALD if auc <= auc_target else AMBER,
-            caption=f"target at most {_fmt_ratio(auc_target)}; a coin toss scores lowest",
+            caption=f"target at most {_fmt_ratio(auc_target)}; a coin toss scores about half",
         )
     elif mia_run is False:
         deck.absent(
@@ -1732,33 +1826,37 @@ def _slide_evidence(deck: Deck, report: Report, screens: Path | None) -> Any:
         kicker="EVIDENCE · POSTURE",
         title="Evidence for every job, posture at every boot",
         lede="Packs name the policy hash, the methods and the verification; staging and "
-        "production refuse to boot when a posture check fails.",
+        "production refuse to boot when a posture check enforced at boot fails.",
     )
     deck.picture(slide, (0.6, 2.1, 7.3, 4.7), find_screen(screens, "evidence"), "evidence")
     x, w = 8.2, 4.53
     passed, total = report.number("S11", "posture.passed"), report.number("S11", "posture.total")
-    if isinstance(passed, _Absent):
-        deck.absent(slide, (x, 2.1, w, 1.25), "posture", passed)
-    elif isinstance(total, _Absent):
-        deck.absent(slide, (x, 2.1, w, 1.25), "posture", total)
+    enforced = report.flag("S11", "posture.enforced")
+    if isinstance(passed, _Absent) or isinstance(total, _Absent) or isinstance(enforced, _Absent):
+        why = next(v for v in (passed, total, enforced) if isinstance(v, _Absent))
+        deck.absent(slide, (x, 2.1, w, 1.4), "posture", why)
     else:
+        # every environment evaluates the checks as if production; only staging and prod
+        # enforce them, so a failure is an alarm only where it is enforced
+        tone = EMERALD if passed == total else (ROSE if enforced else AMBER)
         deck.kpi(
             slide,
-            (x, 2.1, w, 1.25),
+            (x, 2.1, w, 1.4),
             "posture",
             "Posture checks",
             f"{_fmt_count(passed)} of {_fmt_count(total)} passed",
-            tone=EMERALD if passed == total else ROSE,
+            tone=tone,
+            caption=_posture_caption(enforced, report.raw("S11", "posture.env")),
             value_size=24,
         )
     llm = report.number("S1", "raw_pii_sent_to_llm")
     if isinstance(llm, _Absent):
-        deck.absent(slide, (x, 3.45, w, 1.25), "llm-zero", llm)
+        deck.absent(slide, (x, 3.6, w, 1.15), "llm-zero", llm)
     else:
         tenant = report.top("tenant", TENANT_NAME)
         deck.kpi(
             slide,
-            (x, 3.45, w, 1.25),
+            (x, 3.6, w, 1.15),
             "llm-zero",
             "Values of raw PII sent to an LLM",
             _fmt_count(llm),
@@ -1789,6 +1887,20 @@ def _slide_evidence(deck: Deck, report: Report, screens: Path | None) -> Any:
             deck.status(slide, x, y, got[0], got[1], size=11.5)
     deck.chrome(slide, _footer(report))
     return slide
+
+
+def _posture_caption(enforced: bool, env: Any) -> str:
+    """Where the posture count is enforced; names only a known ``env`` that agrees with it."""
+    if enforced:
+        where = ENFORCED_ENVS.get(env) if isinstance(env, str) else None
+        return f"enforced on this {where + ' ' if where else ''}stack: it refuses {BOOT_RULE}"
+    where = REPORTED_ENVS.get(env) if isinstance(env, str) else None
+    head = (
+        f"{where} stack, evaluated as if production"
+        if where
+        else "evaluated as if production, reported only here"
+    )
+    return f"{head}; staging and production refuse {BOOT_RULE}"
 
 
 def _count_line(report: Report, sid: str, path: str, label: str) -> tuple[bool, str] | _Absent:

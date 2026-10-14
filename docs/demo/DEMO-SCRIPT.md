@@ -16,8 +16,8 @@ data appears anywhere in the demo, on screen or in the deck.
 LLM gateway is the stub, the bank tokenization service is the vaultless mock. In the bank the same settings
 point at the org gateways (Stellar, Azure through the org gateway) and the bank's tokenizer.
 **Deck:** `docs/demo/dps-showcase.pptx`, built by `python tools/build_deck.py` from the rehearsal's own
-report and screenshots, so every number on a slide was measured. Its speaker notes are the **Slide N**
-blocks of this script.
+report and screenshots and the bench results, so every number on a slide was measured. Its speaker notes
+are the **Slide N** blocks of this script.
 
 **Slides and beats:** slides 1 to 4 open (optional, before the clock starts), slides 5 and 6 go with the
 Playground, 7 to 9 with Data sources, 10 with the UI scanner, 11 with Reports and Admin, 12 closes. Policies
@@ -34,7 +34,7 @@ has no slide; it is shown live only.
 | 3:00 | Policies (1:00) | Policies | — | v1 to v2 diff with its change ticket |
 | 4:00 | Data sources (3:00) | Data sources & jobs | 7–9 | partitions; evidence pack; three-way join; synthetic pack |
 | 7:00 | UI scanner (2:00) | UI scanner | 10 | "No submissions · POST interception on"; POSTs received 0 |
-| 9:00 | Reports and Admin (1:00) | Reports & audit, Admin | 11 | evidence PDF; audit trail; posture checks all passing |
+| 9:00 | Reports and Admin (1:00) | Reports & audit, Admin | 11 | evidence PDF; audit trail; posture checks with the ones enforced at boot marked; rotated key refused |
 | 10:00 | Close, then Q&A | — | 12 | — |
 
 ## Before the room (T−30 min)
@@ -52,6 +52,8 @@ python tools/build_deck.py --strict        # the deck from this rehearsal; fails
 
 - Oracle Free needs about three minutes on a first start. If it is slow, rehearse with
   `python tools/e2e_demo.py --console --skip-oracle` and present the PostgreSQL and MongoDB pair in the join.
+  Such a rehearsal cannot rebuild the deck with `--strict` (slide 8 needs all three pairs): keep the deck
+  built from the last full rehearsal.
 - Open the console at `http://127.0.0.1:8400`. In the top bar paste the `demo-console` key from
   `var/demo/demo-keys.json` (copy it to the clipboard without printing it, for example with `pbcopy`; the
   key never appears on the projector), set Tenant to `retail-banking-apac`, leave "Remember key on this
@@ -68,8 +70,9 @@ Present slides 1 to 4, then switch to the console.
 
 > "Data Privacy Services: one Privacy Engine, three entry points, two outcomes, and privacy we measure
 > rather than claim."
-> "Everything you will see runs on a local stack with synthetic seed data. The numbers on these slides come
-> from the rehearsal named in the footer, not from a brochure."
+> "Everything you will see runs on a local stack with synthetic seed data. The numbers on these slides were
+> measured, by the rehearsal named in the footer and, for throughput, by the bench runs, not taken from a
+> brochure."
 
 #### Slide 2 · Customer data keeps reaching places it should not
 
@@ -99,8 +102,8 @@ Present slides 1 to 4, then switch to the console.
 
 ## 0:00 · Overview (30 seconds)
 
-**Show:** sidebar **Overview** (page "Protection posture"): the KPI tiles, the posture checklist, the layer
-cards. Point at the tile **Raw PII sent to LLM**.
+**Show:** sidebar **Overview** (page "Protection posture"): the KPI tiles, the **Posture score** card, the
+layer cards. Point at the tile **Raw PII sent to LLM**.
 
 **Say:**
 > "One engine, three entry points, two outcomes. This tile is the promise: raw PII sent to an LLM, zero.
@@ -188,7 +191,7 @@ the synthetic pack shows exact-row matches 0.
 > "Layer 2 works on whole schemas: discover the columns, review the heat-map, run in partitions with
 > checkpoints, then a verification sweep and a sealed evidence pack."
 > "These are this rehearsal's jobs on Oracle, MongoDB and PostgreSQL, and the throughput we measured with
-> the bench tool on one laptop; production scales out with more workers."
+> the bench tool on one machine; production scales out with more workers."
 
 #### Slide 8 · One key, three systems, the same tokens
 
@@ -239,16 +242,23 @@ table with **Rotate**.
 **Say:**
 > "Every job and every scan leaves an evidence pack and a PDF an auditor can keep; the audit log says who ran
 > what, and when, without a single value in it."
-> "Staging and production refuse to boot when one of these posture checks fails."
+> "These posture checks are evaluated as if this were production. On this local stack they are only
+> reported, so the production-only ones fail here by design, for example the bootstrap admin key the
+> seed uses and the stub LLM.
+> Staging and production refuse to boot when a check marked enforced at boot fails."
 
-**Proof:** all posture checks pass; a rotated key is refused.
+**Proof:** the posture list marks the checks enforced at boot and says this stack only reports them (the
+local stack fails the production-only checks by design; read the count off the screen or slide 11); a
+rotated key is refused.
 
 #### Slide 11 · Evidence for every job, posture at every boot
 
 > "Evidence packs name the policy hash, the methods, the verification and the measurements, and print as a
 > PDF."
-> "Posture checks guard every boot of staging and production; the rehearsal also proved that a rotated key
-> stops working and that retention runs."
+> "In staging and production the service will not start when a posture check enforced at boot fails;
+> this local stack evaluates the same checks as if it were production and only reports them, so the
+> production-only ones fail here by design."
+> "The rehearsal also proved that a rotated key stops working and that retention runs."
 > "And the counter that matters most: raw PII sent to an LLM, zero, for this tenant."
 
 ## 10:00 · Close
@@ -278,7 +288,7 @@ table with **Rotate**.
 | Symptom | Recovery |
 |---|---|
 | A job stays `waiting` | `docker compose restart worker`; meanwhile open the rehearsal's finished job (ids in `reports/e2e-demo-report.md`). |
-| Oracle is not ready | Rehearse and present with `--skip-oracle`: the PostgreSQL and MongoDB pair in the join; slide 8 shows the rehearsal's three-way join. |
+| Oracle is not ready | Rehearse and present with `--skip-oracle`: the PostgreSQL and MongoDB pair in the join; slide 8 still shows the last full rehearsal's three-way join (keep that deck; a `--skip-oracle` run cannot rebuild it with `--strict`). |
 | The scan times out | Re-run with one persona; or show slide 10, the rehearsal's scan. |
 | The evidence PDF renders slowly | Use the HTML evidence page and **Print** from the browser. |
 | The console shows 401 or an empty page | Re-paste the `demo-console` key and check the Tenant field reads `retail-banking-apac`. |

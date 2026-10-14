@@ -1119,8 +1119,10 @@ with `reports/e2e-demo-report.json`, runs the rehearsal, builds and commits
   measured; the plan's file `docs/demo/dps-showcase.pptx` arrives with S6b's rehearsal.
 - **Input contract fixed here** (e2e_demo.py does not exist yet; it lives in the `build_deck.py`
   docstring): report schema `dps.e2e-demo.v1` — top level `generated_at`, `dps_version`, `commit`,
-  `tenant`, `total_seconds`, `steps[]` of `{id, title, status, seconds, facts}`. Facts the deck reads
-  mirror the API's own key paths so S6b can copy them: S1 `raw_pii_sent_to_llm`; S2 `findings`,
+  `tenant`, `total_seconds`, `steps[]` of `{id, title, status, seconds, facts}` (status `PASS`, `FAIL`,
+  `ERROR`, `NOT RUN` or `SKIP`; every scripted step S1–S11 is listed, a skipped one as `SKIP`, the
+  ones after a failure as `NOT RUN`; S12 when `--console` ran — see the S6a review r1 fix below).
+  Facts the deck reads mirror the API's own key paths so S6b can copy them: S1 `raw_pii_sent_to_llm`; S2 `findings`,
   `entity_types[]`, `reveal_identical`, `raw_pii_sent_to_llm`; S4 `ocr_pages`, `findings`,
   `extractable_chars`, `originals_left`; S6 `jobs[]` of `{engine, counts.rows_written,
   counts.partitions, timings.rows_per_s, verification.passed}` (evidence pack keys); S7 `members[].engine`,
@@ -1129,8 +1131,9 @@ with `reports/e2e-demo-report.json`, runs the rehearsal, builds and commits
   `privacy.exact_row_matches`, `privacy.nndr.{ratio,target,measured}`,
   `privacy.membership_inference.{run,auc,target}`, `utility.{run,ratio,metric}` (synthetic pack keys);
   S9 `scan.{pages,fields,personas,submissions}` (scan evidence keys) and `posts_received` (demo-site
-  `/__received`); S10 `packs_listed`, `audit_rows`, `pdf_ok`; S11 `posture.{passed,total}`,
-  `rotated_key_status`, `retention_state`. Screenshots: `reports/demo-screens/<page>-light.png` for
+  `/__received`); S10 `packs_listed`, `audit_rows`, `pdf_ok`; S11 `posture.{passed,total,enforced}`
+  and optionally `posture.env` (`GET /admin/posture`'s own keys), `rotated_key_status`,
+  `retention_state`. Screenshots: `reports/demo-screens/<page>-light.png` for
   `playground`, `job`, `scan-parallel`, `evidence` (S12's walk writes `<page>-<theme>.png`). Only a
   step with status `PASS` contributes figures.
 - **Speaker notes** come from the `#### Slide N` blocks of `docs/demo/DEMO-SCRIPT.md` (the plan: "taken
@@ -1183,3 +1186,63 @@ finalises it after the rehearsal together with `tools/demo_seed.py`, `tools/e2e_
 - The script quotes no figure: beats point at the number on screen or on the slide built from the
   rehearsal. Commands and flags (`--skip-oracle`, `--reset-jobs`, `--console`) are the plan's; S6b
   confirms them against the tools it writes.
+
+## S6a review r1 fix — B1: slide 1 claims an end-to-end run only for a complete rehearsal; B2: the posture count in its context (Tasks 26B, 26)
+
+- **B1.** `_slide_title` printed "the scripted demo ran end to end in m:ss" whenever `generated_at`
+  and `total_seconds` existed, so a rehearsal that failed at S5 (S6–S11 `NOT RUN`) still claimed an
+  end-to-end run, timed to its failure. Now the sentence needs a complete rehearsal
+  (`Report.incomplete()` is `None`): every scripted step S1–S11 listed and every listed step `PASS` or
+  `SKIP`; skipped steps are named ("… in 7:12 (S3 skipped)."). Otherwise slide 1 shows
+  `placeholder:rehearsal` — "a complete rehearsal (first failure: S5)", else an entry without a step
+  id, else "S11 not run", else "no step S4 in the report" — listed as missing, so `--strict` refuses
+  the build. Only step ids shaped `S<n>` and known statuses are printed (anything else is
+  "unknown"); a status that is not a string no longer crashes `_step` (it was a set lookup).
+  Contract addition for S6b's `e2e_demo.py`: list every scripted step, a skipped one as `SKIP`
+  (never left out).
+- **B2.** `GET /admin/posture` evaluates its eleven checks as if in production in every environment
+  and enforces them only in staging and prod (`enforced`), so the local demo stack fails the
+  production-only checks by design (as the M5 verifications measured: bootstrap key, stub LLM,
+  literal KEK, http egress, verify-warn allowed); the demo seed needs the bootstrap key, so the
+  stack can never show every check passing.
+  - Deck: the S11 contract adds `posture.enforced` (required: without it, or not a boolean, the
+    count is a placeholder listed as missing) and `posture.env` (optional; printed only when it
+    agrees with `enforced`: `local`/`dev` when not enforced, `staging`/`prod` when enforced). The
+    value is emerald when every check passed, **amber** when a check failed where it is not enforced
+    and rose only for an enforced failure; the caption says where it is enforced ("local stack,
+    evaluated as if production; staging and production refuse to boot when a check enforced at boot
+    fails" / "enforced on this production stack: it refuses to boot when …"). The posture card grew
+    to 1.4 in and the LLM card shrank to 1.15 in (its caption is one line), so the column still ends
+    above the footer.
+  - Wording: "refuse to boot when a posture check fails" (slide 11's lede, the built-in notes) and the
+    reviewer's suggested "refuse to boot unless all pass" both overclaim — `keys_rotated` and
+    `migrations_verified` are not enforced at boot (`dps/posture.py` `CHECKS`) — so the deck and the
+    script use the console's own rule (`PostureList`): staging and production refuse to boot when a
+    check marked "enforced at boot" fails.
+  - `docs/demo/DEMO-SCRIPT.md`: the timeline's proof and the Reports and Admin beat's say-line, proof
+    and slide 11 notes no longer promise every check passing; they say the local stack only reports
+    the checks and fails the production-only ones by design, quote no count, and state the boot rule
+    as above. The Overview beat names the **Posture score** card (the Overview has no checklist; the
+    checks are on the Admin page).
+- **Non-blocking review items taken:** N1 (slide 8's summary reads "Found in every system of the
+  group", true for any member count — `all_members_matched` is the intersection of every member; the
+  script says a `--skip-oracle` rehearsal cannot rebuild the deck under `--strict`, so keep the last
+  full rehearsal's deck), N5 (bench caption "on one host with N CPUs"; slide 7 notes "one machine":
+  the bench JSON records CPUs and the machine type only), N6 (D14 as spec §12 words it: payload size,
+  rows per job, concurrent jobs, docs per day), N7 (slide 1's m:ss is now tested against
+  `total_seconds`), N9 (MIA caption "a coin toss scores about half": the proxy's AUC is not
+  symmetrised), N10 (`python-pptx>=1.0,<2`: the tool uses package internals; contract §1 too), N13
+  (slide 1 notes name the bench runs as the other measured source).
+- **Not taken (owner / S6b):** N2 (strict by default for the committed deck path — S6b decides when it
+  commits the deck), N3 (`reports/` ignore rule — S6b, with the rehearsal outputs), N4 (Keynote PDF
+  review), N8 (chip-row height limit; the KYC sample's types fit), N11 (no action), N12 (the release
+  venv installs every extra).
+- Tests: `tests/test_deck.py` 12 → 30 — slide 1 states the measured time (431.6 s → 7:12) and
+  `--strict` builds; no claim and a placeholder for `FAIL` then `NOT RUN`, `ERROR`, an unknown
+  status, `null`, a list, and a lone `NOT RUN` (each also refused by `--strict`); skipped steps named;
+  a scripted step missing or an entry without a step id; six posture contexts (value, colour,
+  caption); `enforced` absent, a string or a number. `FULL_FACTS` gains S3 and S5 (a complete
+  S1–S11 report) and the local stack's posture shape (`enforced: false`, `env: local`). On the code
+  before this fix 17 of the 18 new cases fail (the list status with `TypeError: unhashable type`);
+  the 12 earlier tests and the positive control (slide 1's measured time) pass on both
+  (`~/.cache/dps-build/reports/s6a-fix-r1/`).
