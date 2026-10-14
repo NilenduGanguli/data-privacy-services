@@ -121,7 +121,11 @@ def _sdk_trainer(
             start=True,
             wait=True,
         )
-        frame = mostly.generate(generator, size=size, start=True, wait=True).data()
+        generated = mostly.generate(generator, size=size, start=True, wait=True).data()
+        # The SDK types data() as one frame or a frame per table; this generator has one table.
+        frame = generated.get("rows") if isinstance(generated, dict) else generated
+        if not isinstance(frame, pd.DataFrame):
+            raise TabularUnavailable("the generator did not return the generated table")
         return [dict(r) for r in frame.to_dict(orient="records")]
 
 

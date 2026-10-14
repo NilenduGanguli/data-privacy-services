@@ -189,6 +189,49 @@ def test_missing_sdk_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
         _sdk_trainer({"A": [1, 2]}, 10, 1)
 
 
+def _fake_sdk(monkeypatch: pytest.MonkeyPatch, generated: Any) -> None:
+    """Install a stand-in ``mostlyai.sdk`` whose generator hands back ``generated``."""
+    import sys
+    import types
+
+    class _Dataset:
+        def data(self) -> Any:
+            return generated
+
+    class _MostlyAI:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def train(self, **_: Any) -> object:
+            return object()
+
+        def generate(self, *_: Any, **__: Any) -> _Dataset:
+            return _Dataset()
+
+    package = types.ModuleType("mostlyai")
+    sdk = types.ModuleType("mostlyai.sdk")
+    sdk.MostlyAI = _MostlyAI  # type: ignore[attr-defined]
+    package.sdk = sdk  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mostlyai", package)
+    monkeypatch.setitem(sys.modules, "mostlyai.sdk", sdk)
+
+
+def test_sdk_output_is_narrowed_to_one_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    pd = pytest.importorskip("pandas")
+    values = [734251, 918273]
+    frame = pd.DataFrame({"A": values})
+    expected = [{"A": v} for v in values]
+    _fake_sdk(monkeypatch, frame)
+    assert _sdk_trainer({"A": values}, 2, 1) == expected
+    _fake_sdk(monkeypatch, {"rows": frame})  # the SDK's per-table dict form
+    assert _sdk_trainer({"A": values}, 2, 1) == expected
+    for unusable in ({"other": frame}, [{"A": values[0]}], None):
+        _fake_sdk(monkeypatch, unusable)
+        with pytest.raises(TabularUnavailable) as err:  # fails closed
+            _sdk_trainer({"A": values}, 2, 1)
+        assert all(str(v) not in str(err.value) for v in values)  # no values in the error
+
+
 @pytest.mark.ml
 def test_real_sdk_trains_and_generates() -> None:
     pytest.importorskip("mostlyai")

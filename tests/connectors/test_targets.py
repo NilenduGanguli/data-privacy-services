@@ -282,7 +282,9 @@ def test_append_rules(settings: Settings) -> None:
     assert _code(offset, settings, text_key) == ("pk_strategy_invalid", 422)
 
 
-def test_files_synthesize_group_and_tabular_rules(settings: Settings) -> None:
+def test_files_synthesize_group_and_tabular_rules(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     files = dict(write_mode="files", connection_id="c_pvc", files={"format": "csv"})
     _check(spec(**files), settings=settings, target_conn=PVC)
     assert _code(spec(write_mode="files", connection_id="c_pvc"), settings, target_conn=PVC) == (
@@ -348,7 +350,16 @@ def test_files_synthesize_group_and_tabular_rules(settings: Settings) -> None:
     mostly = spec(**UAT_TABLE, mode="synthesize", options={"tabular": "mostly"})
     assert _code(mostly, settings) == ("tabular_invalid", 422)  # not enabled
     with_mostly = settings.model_copy(update={"synth_tabular_engine": "copula,mostly"})
+    # Whether the synth-ml extra is installed is pinned both ways, so the result does not
+    # depend on which extras this environment has.
+    import dps.engine.synth.mostly as mostly_module
+
+    monkeypatch.setattr(mostly_module, "mostly_available", lambda: False)
     assert _code(mostly, with_mostly) == ("tabular_invalid", 422)  # the extra is not installed
+    assert _code(mostly, settings) == ("tabular_invalid", 422)  # still not enabled
+    monkeypatch.setattr(mostly_module, "mostly_available", lambda: True)
+    _check(mostly, settings=with_mostly)  # enabled and installed: accepted
+    assert _code(mostly, settings) == ("tabular_invalid", 422)  # installed but not enabled
 
 
 def test_column_plans_per_write_mode() -> None:
