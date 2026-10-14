@@ -33,6 +33,7 @@ from tests.scanner.helpers import (
     CENSUS_EMAIL2,
     CENSUS_FILLER,
     CENSUS_NAME,
+    CENSUS_OBFUSCATED_WITHHELD,
     CENSUS_PAGES,
     INJECT_JS,
     guarded_context,
@@ -40,12 +41,17 @@ from tests.scanner.helpers import (
 
 pytestmark = pytest.mark.browser
 
-#: The box of the first text range holding ``needle`` under element ``id`` (document coords).
+#: The box of the first text range holding ``needle`` under element ``id`` or its open shadow
+#: root (document coords).
 RANGE_JS = """([id, needle]) => {
   const el = document.getElementById(id);
-  const it = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  let n = it.nextNode();
-  while (n && !n.nodeValue.includes(needle)) n = it.nextNode();
+  let n = null;
+  for (const root of [el, el.shadowRoot].filter(Boolean)) {
+    const it = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    n = it.nextNode();
+    while (n && !n.nodeValue.includes(needle)) n = it.nextNode();
+    if (n) break;
+  }
   if (!n) return null;
   const at = n.nodeValue.indexOf(needle);
   const range = document.createRange();
@@ -90,17 +96,39 @@ COPIES: dict[str, list[tuple[str, str, str]]] = {
     "button": [("range", "c-b1", CENSUS_NAME), ("range", "c-b2", CENSUS_EMAIL)],
     "input_button": [("box", "c-in", "")],
     "listbox": [("box", "c-opt", "")],
+    # M4 verify r1 B4: no box of the parent's own
+    "contents": [("range", "c-ct", CENSUS_NAME), ("range", "c-cd", CENSUS_EMAIL)],
+    "slotted": [("range", "c-sl1", CENSUS_NAME), ("range", "c-sl2", CENSUS_EMAIL)],
+    "slot_fallback": [("range", "c-fb", CENSUS_NAME)],
+    "contents_only": [("range", "c-co", CENSUS_EMAIL)],
+    "slotted_only": [("range", "c-so", CENSUS_EMAIL)],
+    # M4 verify r1 B5: drawn from attributes
+    "alt": [("box", "c-alt", "")],
+    "alt_only": [("box", "c-ao", "")],
+    "input_image": [("box", "c-ii", "")],
+    "optgroup": [("box", "c-og", "")],
+    "option_label": [("box", "c-ol", "")],
+    "placeholder": [("box", "c-ph", "")],
 }
+#: COPIES cases whose only copy is the one checked: nothing in a table finds it first
+_ONLY = {"contents_only", "slotted_only", "alt_only"}
 
 
-async def _copy_rects(page: Any, case: str) -> list[dict[str, float]]:
-    out = []
+async def _copy_rects(
+    page: Any, case: str, *, rewritten_ok: bool = False
+) -> list[dict[str, float] | None]:
+    """The boxes of ``case``'s copies. ``rewritten_ok`` (obfuscated captures): a text copy that is
+    no longer in the DOM was read by the extraction and rewritten whole (``None``)."""
+    out: list[dict[str, float] | None] = []
     for kind, id_, needle in COPIES[case]:
         rect = await (
             page.evaluate(RANGE_JS, [id_, needle])
             if kind == "range"
             else page.evaluate(BOX_JS, id_)
         )
+        if rect is None and kind == "range" and rewritten_ok:
+            out.append(None)
+            continue
         assert rect is not None and rect["w"] > 0
         out.append(rect)
     return out
@@ -120,14 +148,17 @@ async def test_masked_capture_boxes_a_copy_in_a_control(
         page = await _page(ctx, demo_site_url, CENSUS_PAGES[case])
         snap, frames = await _read(page)
         rendered = classify_rendered(snap.texts, detector=det)
-        assert {r.entity_type for r in rendered} >= {"PERSON_NAME"}  # the table cell is found
+        if case in _ONLY:  # the extraction reads it, or only the census classifies it (alt)
+            assert case == "alt_only" or {r.entity_type for r in rendered} >= {"EMAIL"}
+        else:
+            assert {r.entity_type for r in rendered} & {"PERSON_NAME", "EMAIL"}  # table cell
         png = await capture_screen(
             page, frames, snap, rendered=rendered, prefilled=[], max_height=12000, detector=det
         )
         rects = await _copy_rects(page, case)
     assert png is not None
     for rect in rects:
-        assert _covered(png, rect) > 0.5
+        assert rect is not None and _covered(png, rect) > 0.5
 
 
 async def test_a_copy_rendered_one_character_per_node_withholds(
@@ -194,10 +225,14 @@ async def test_obfuscated_capture_boxes_a_copy_in_a_control(
         res = await _obfuscated(
             page, snap, frames, mode=mode, engine=scan_engine, guard=guard, settings=scan_settings
         )
-        rects = await _copy_rects(page, case)
+        rects = await _copy_rects(page, case, rewritten_ok=True)
+    if res.status == "withheld":  # an unflagged copy in read text: never shown (fail closed)
+        assert case in CENSUS_OBFUSCATED_WITHHELD and res.reason == "leakage", res.reason
+        return
     assert res.status == "captured" and res.png is not None, res.reason
     for rect in rects:
-        assert _covered(res.png, rect) > 0.5
+        if rect is not None:  # still in the DOM: it must be boxed
+            assert _covered(res.png, rect) > 0.5
 
 
 # --- B3: long text nodes ----------------------------------------------------------------------

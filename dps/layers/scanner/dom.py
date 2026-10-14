@@ -51,9 +51,26 @@ TEXT_READ_CAP = 20_000
 #: the extraction is ``truncated`` and a census fails closed.
 TEXT_READ_BUDGET = 2_000_000
 
+#: Whether a text node is drawn, decided from the node (M4 verify r1 B4): its parent element is
+#: visible, or — a parent with no box of its own (``display:contents``: a ``<slot>``, a component
+#: host styled ``:host{display:contents}``, any element so styled) that is not hidden — a range
+#: over the node itself has client rects. Shared by the extraction (``textOk``) and ``CENSUS_JS``.
+_RENDERED_JS = r"""
+  const rendered = (node, parent, visibleFn) => {
+    if (visibleFn(parent)) return true;
+    const st = getComputedStyle(parent);
+    if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return false;
+    const range = document.createRange();
+    try { range.selectNodeContents(node); } catch (e) { return false; }
+    return range.getClientRects().length > 0;
+  };
+"""
+
 #: Shared by ``EXTRACT_JS`` and ``LIVE_TEXT_JS``: which text nodes count as rendered text for
 #: classification, and the row/column header, ``<dt>`` or ``Label:`` hint next to one.
-_TEXT_HELPERS_JS = r"""
+_TEXT_HELPERS_JS = (
+    (
+        r"""
   const TEXT_CAP = __TEXT_CAP__, TEXT_BUDGET = __TEXT_BUDGET__;
   const SKIP_TEXT = 'script,style,noscript,template,select,option,textarea,button';
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
@@ -63,9 +80,12 @@ _TEXT_HELPERS_JS = r"""
     const st = getComputedStyle(el);
     return st.visibility !== 'hidden' && st.display !== 'none' && el.getClientRects().length > 0;
   };
+"""
+        + _RENDERED_JS
+        + r"""
   const textOk = (node) => {
     const parent = node.parentElement;
-    return !!parent && clean(node.nodeValue || '').length >= 2 && !parent.closest(SKIP_TEXT) && visible(parent);
+    return !!parent && clean(node.nodeValue || '').length >= 2 && !parent.closest(SKIP_TEXT) && rendered(node, parent, visible);
   };
   const inTable = (el) => !!el.closest('table,[role=grid],[role=table]');
   const labelHint = (el) => {
@@ -84,7 +104,11 @@ _TEXT_HELPERS_JS = r"""
     if (prev && /:\s*$/.test(text(prev)) && text(prev).length <= 40) return text(prev).replace(/:\s*$/, '');
     return null;
   };
-""".replace("__TEXT_CAP__", str(TEXT_READ_CAP)).replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
+"""
+    )
+    .replace("__TEXT_CAP__", str(TEXT_READ_CAP))
+    .replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
+)
 
 EXTRACT_JS = (
     r"""
@@ -354,20 +378,27 @@ REPLACE_TEXT_JS = r"""
 """
 
 #: The capture's census of every string a read frame renders NOW, separate from (and wider than)
-#: the classification text list: every text node under a visible parent with no minimum length and
-#: no ``button`` exclusion (only ``script``/``style``/``noscript``/``template``/``title`` and a
-#: ``textarea``'s source text, whose shown value is a field, are left out), every visible
-#: ``<option>`` (a listbox shows its options; a closed select's are not rendered and its shown
-#: option is swept as a field) and the label of every visible button-type ``<input>``.
+#: the classification text list: every rendered text node (``rendered``: a visible parent, or one
+#: with no box of its own whose text has client rects) with no minimum length and no ``button``
+#: exclusion (only ``script``/``style``/``noscript``/``template``/``title`` and a ``textarea``'s
+#: source text, whose shown value is a field, are left out), every visible ``<option>`` (its text
+#: and its ``label``; a listbox shows its options, a closed select's are not rendered and its shown
+#: option is swept as a field), and the strings the browser draws from attributes of a visible
+#: element (M4 verify r1 B5): the label of a button-type ``<input>``, an ``<optgroup>`` label, the
+#: ``alt`` of an ``<img>`` or ``<input type=image>`` (shown when the image is broken), and the
+#: placeholder of an empty ``<input>`` or ``<textarea>``.
 #: Open shadow roots are always descended (whether or not the extraction read them). Text nodes are
 #: measured by range (``box: false``); options and input labels by their element box
 #: (``box: true``). ``known``: a text node the classification list holds (extracted or late).
 #: ``null``: the frame is not the one the extraction read, or it renders more than can be checked.
-CENSUS_JS = r"""
+CENSUS_JS = (
+    (
+        r"""
 (token) => {
   const snap = window.__dpsSnap;
   if (!snap || snap.id !== token) return null;
-""" + r"""
+"""
+        + r"""
   const TEXT_CAP = __TEXT_CAP__, TEXT_BUDGET = __TEXT_BUDGET__;
   const SKIP = 'script,style,noscript,template,title,textarea,select';
   const LABELLED = new Set(['button', 'submit', 'reset']);
@@ -379,6 +410,9 @@ CENSUS_JS = r"""
     }
     return shown.get(el);
   };
+"""
+        + _RENDERED_JS
+        + r"""
   const known = new Set(window.__dpsTextNodes || []);
   const targets = [], items = [];
   let over = false, budget = TEXT_BUDGET;
@@ -395,12 +429,23 @@ CENSUS_JS = r"""
     while (node && !over) {
       if (node.nodeType === Node.TEXT_NODE) {
         const parent = node.parentElement;
-        if (parent && !parent.closest(SKIP) && visible(parent)) add(node, node.nodeValue, false);
+        if (parent && !parent.closest(SKIP) && rendered(node, parent, visible)) add(node, node.nodeValue, false);
       } else {
         const el = node, tag = el.localName;
-        if (tag === 'option') { if (visible(el)) add(el, el.text, true); }
-        else if (tag === 'input' && LABELLED.has((el.getAttribute('type') || '').toLowerCase())) {
-          if (visible(el)) add(el, el.value, true);
+        if (tag === 'option') {
+          // a listbox option shows its label attribute when it has one, else its text
+          if (visible(el)) { add(el, el.text, true); if (el.label !== el.text) add(el, el.label, true); }
+        } else if (tag === 'optgroup') {
+          if (visible(el)) add(el, el.label, true);  // a listbox draws the group's label
+        } else if (tag === 'img') {
+          if (visible(el)) add(el, el.alt, true);  // drawn when the image is broken or loading
+        } else if (tag === 'input') {
+          const type = (el.getAttribute('type') || 'text').toLowerCase();
+          if (LABELLED.has(type)) { if (visible(el)) add(el, el.value, true); }
+          else if (type === 'image') { if (visible(el)) add(el, el.alt, true); }
+          else if (!el.value && visible(el)) add(el, el.placeholder, true);
+        } else if (tag === 'textarea') {
+          if (!el.value && visible(el)) add(el, el.placeholder, true);
         }
         if (el.shadowRoot && el.shadowRoot.mode === 'open') visit(el.shadowRoot);
       }
@@ -412,7 +457,11 @@ CENSUS_JS = r"""
   window.__dpsCensus = targets;
   return over ? null : items;
 }
-""".replace("__TEXT_CAP__", str(TEXT_READ_CAP)).replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
+"""
+    )
+    .replace("__TEXT_CAP__", str(TEXT_READ_CAP))
+    .replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
+)
 
 #: Client rects (page coordinates) of ``[k, start, end]`` census spans of the last ``CENSUS_JS``
 #: call: a range for a text node (UTF-16 offsets), the whole element box for an element.

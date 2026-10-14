@@ -8,12 +8,15 @@ Rules:
   encoding, and returns ``None`` (withheld, fail closed) when any of them cannot be located.
   Every *other* copy of those values the page renders (``SWEEP_MIN_CHARS``+ letters/digits,
   compared normalised) is boxed too: the capture takes its own census of every string the read
-  frames render now (``dom.render_census``: every visible text node with no minimum length,
-  button text included, visible listbox options and ``input[type=button|submit|reset]`` labels)
-  and boxes every copy in it, plus every visible field showing one; a copy that is not wholly
+  frames render now (``dom.render_census``: every rendered text node with no minimum length,
+  button text and text under a ``display:contents`` parent or in a slot included, visible listbox
+  options and option labels, ``<optgroup>`` labels, ``input[type=button|submit|reset]`` labels,
+  ``<img>``/``input[type=image]`` alt text and the placeholder of an empty field) and boxes every
+  copy in it, plus every visible field showing one; a copy that is not wholly
   inside located copies (split across nodes, e.g. one character per ``<span>``) withholds
   (M4-G3 review r1 B1, r2 B1). With a detector, census strings the classification list does not
-  hold (buttons, options, input labels, short nodes) are classified and their hits boxed too.
+  hold (buttons, options, input labels, alt text, placeholders, short nodes) are classified and
+  their hits boxed too (M4 verify r1 B4/B5).
 * A page whose extraction did not read everything it renders (``PageSnapshot.truncated``: a text
   node longer than ``dom.TEXT_READ_CAP``, more than ``max_fields`` fields, more text than the read
   budget) is never captured (M4-G3 review r2 B3, N9).

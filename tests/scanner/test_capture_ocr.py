@@ -31,7 +31,9 @@ from dps.layers.scanner.capture import capture_screen, obfuscated_capture
 from dps.layers.scanner.classify import classify_field, classify_rendered, sensitive_prefilled
 from dps.layers.scanner.dom import extract_page, frame_map
 from tests.scanner.helpers import (
+    CENSUS_OBFUSCATED_WITHHELD,
     CENSUS_PAGES,
+    CENSUS_SINGLE_COPY,
     CENSUS_VALUES,
     INJECT_JS,
     guarded_context,
@@ -260,7 +262,13 @@ async def test_a_value_outside_readable_text_nodes_is_never_readable(
     """M4-G3 review r2 B1/B3: a detected value copied into a button, an input button label, a
     listbox option, one character per node, or past the 2000th character of a text node is not
     readable in the masked capture nor in either obfuscated capture (or the capture is withheld:
-    the per-character copy must be). The unmasked control reads every value, and the copy too."""
+    the per-character copy must be). The unmasked control reads every value, and the copy too.
+
+    M4 verify r1 B4/B5: the same for text under a ``display:contents`` parent, slotted text in a
+    component whose host is ``display:contents``, a slot's fallback text (with a second copy in a
+    table, and as the only copy), and for strings the browser draws from attributes: a broken
+    image's alt text, an image button's alt text, an ``<optgroup>`` label and an option's
+    ``label`` in a listbox, and a placeholder."""
     cmd = _tesseract()
     values = {v: v for v in CENSUS_VALUES[case]}
     keys = tuple(values)
@@ -302,13 +310,15 @@ async def test_a_value_outside_readable_text_nodes_is_never_readable(
     assert raw is not None
     control = _ocr(cmd, raw)
     assert _readable(control, values, keys, strict=True) == list(keys)  # the OCR reads them all
-    if case != "long":  # the second copy is readable unmasked (the long case has one copy each)
+    if case not in CENSUS_SINGLE_COPY:  # the second copy is readable unmasked
         first = normalise(keys[0])
         assert control.count(first) >= 2, case
     if case == "digits":
         assert outputs == {"masked": None, "synthesize": None, "obfuscate": None}
         return
     for name, png in outputs.items():
+        if png is None and name != "masked" and case in CENSUS_OBFUSCATED_WITHHELD:
+            continue  # withheld (leakage): an unflagged copy in read text is never shown
         assert png is not None, name
         strict = name == "masked"
         assert _readable(_ocr(cmd, png), values, keys, strict=strict) == [], name

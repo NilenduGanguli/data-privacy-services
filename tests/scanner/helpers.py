@@ -197,6 +197,14 @@ def _table(*rows: tuple[str, str]) -> str:
     return f"<table><tbody>{cells}</tbody></table>"
 
 
+#: A component whose host is ``display:contents`` (declarative shadow root, so no script runs).
+_CHIP = (
+    '<template shadowrootmode="open"><style>:host{display:contents}</style>'
+    "<b><slot></slot></b></template>"
+)
+#: An image or image button big enough for its alt text (the image itself does not exist).
+_BOX = 'style="width:600px;height:40px;font-size:24px"'
+
 #: case -> HTML prepended to a demo page's body (``INJECT_JS``): a table the detectors find
 #: through its row headers, plus a second copy of the value somewhere the r1 sweep did not look.
 CENSUS_PAGES: dict[str, str] = {
@@ -215,6 +223,35 @@ CENSUS_PAGES: dict[str, str] = {
     "long": _table(("Email", CENSUS_EMAIL))
     + f'<p id="c-long" style="font-size:14px;width:1200px">{CENSUS_FILLER} '
     + f"Contact: {CENSUS_EMAIL2}</p>",
+    # M4 verify r1 B4: text whose parent element has no box of its own (display:contents), a
+    # slotted text in a component whose host is display:contents, and a slot's fallback text
+    "contents": _table(("Full name", CENSUS_NAME), ("Email", CENSUS_EMAIL))
+    + f'<p>Welcome back, <span id="c-ct" style="display:contents">{CENSUS_NAME}</span></p>'
+    + f'<div id="c-cd" style="display:contents">{CENSUS_EMAIL}</div>',
+    "slotted": _table(("Full name", CENSUS_NAME), ("Email", CENSUS_EMAIL))
+    + f'<p>Customer: <user-chip id="c-sl1">{_CHIP}{CENSUS_NAME}</user-chip></p>'
+    + f'<p>Email on file: <user-chip id="c-sl2">{_CHIP}{CENSUS_EMAIL}</user-chip></p>',
+    "slot_fallback": _table(("Full name", CENSUS_NAME))
+    + '<p>Statement for <x-fallback id="c-fb"><template shadowrootmode="open">'
+    + f"<b><slot>{CENSUS_NAME}</slot></b></template></x-fallback></p>",
+    # the only copy in such a place: the extraction itself must read it to classify it
+    "contents_only": f'<div id="c-co" style="display:contents">Mail: {CENSUS_EMAIL}</div>',
+    "slotted_only": f'<p>Email on file: <user-chip id="c-so">{_CHIP}{CENSUS_EMAIL}</user-chip></p>',
+    # M4 verify r1 B5: strings the browser draws from attributes
+    "alt": _table(("Full name", CENSUS_NAME))
+    + f'<p><img id="c-alt" src="/no-such-avatar.png" alt="{CENSUS_NAME}" {_BOX}></p>',
+    "alt_only": f'<p><img id="c-ao" src="/no-such-card.png" alt="Card for {CENSUS_EMAIL}" {_BOX}></p>',
+    "input_image": _table(("Full name", CENSUS_NAME))
+    + f'<p><input id="c-ii" type="image" src="/no-such-go.png" alt="{CENSUS_NAME}" {_BOX}></p>',
+    "optgroup": _table(("Full name", CENSUS_NAME))
+    + '<p><select id="c-ogs" name="acct" size="4" style="width:600px">'
+    + f'<optgroup id="c-og" label="{CENSUS_NAME}"><option>Savings</option>'
+    + "<option>Current</option></optgroup></select></p>",
+    "option_label": _table(("Full name", CENSUS_NAME))
+    + '<p><select id="c-ols" name="payee" size="3" style="width:600px"><option>Savings</option>'
+    + f'<option id="c-ol" label="{CENSUS_NAME}">payee-2</option></select></p>',
+    "placeholder": _table(("Email", CENSUS_EMAIL))
+    + f'<p><input id="c-ph" name="alt" style="width:600px" placeholder="{CENSUS_EMAIL}"></p>',
 }
 #: case -> the made-up values that page renders (OCR must read none of them where masked); the
 #: first is the one rendered twice (except ``long``, whose second email is the one past 2000).
@@ -224,12 +261,41 @@ CENSUS_VALUES: dict[str, tuple[str, ...]] = {
     "listbox": (CENSUS_NAME,),
     "digits": (CENSUS_PAN, CENSUS_EMAIL),
     "long": (CENSUS_EMAIL, CENSUS_EMAIL2),
+    "contents": (CENSUS_NAME, CENSUS_EMAIL),
+    "slotted": (CENSUS_NAME, CENSUS_EMAIL),
+    "slot_fallback": (CENSUS_NAME,),
+    "contents_only": (CENSUS_EMAIL,),
+    "slotted_only": (CENSUS_EMAIL,),
+    "alt": (CENSUS_NAME,),
+    "alt_only": (CENSUS_EMAIL,),
+    "input_image": (CENSUS_NAME,),
+    "optgroup": (CENSUS_NAME,),
+    "option_label": (CENSUS_NAME,),
+    "placeholder": (CENSUS_EMAIL,),
 }
-INJECT_JS = """(html) => {
+#: cases whose second copy is a text node the extraction reads but no detector flags (a name with
+#: no label next to it): an obfuscated capture rewrites only the flagged copy, finds the original
+#: still in the text it read and is withheld (``leakage``) rather than shown
+CENSUS_OBFUSCATED_WITHHELD = frozenset({"contents", "slotted", "slot_fallback"})
+#: cases that render each value once (the others render the first value twice)
+CENSUS_SINGLE_COPY = frozenset({"long", "contents_only", "slotted_only", "alt_only"})
+#: Inserts the HTML (declarative shadow roots attached; no script runs) and waits until every
+#: image and image button in it has loaded or failed (a failed one shows its alt text).
+INJECT_JS = """async (html) => {
   const d = document.createElement('div');
   d.id = 'c-root';
   d.style.cssText = 'font-family:sans-serif;font-size:24px';
-  d.innerHTML = html;
+  d.setHTMLUnsafe(html);
   document.body.prepend(d);
+  const pending = Array.from(d.querySelectorAll('img, input[type=image]'))
+    .filter((el) => !(el instanceof HTMLImageElement && el.complete));
+  await Promise.race([
+    Promise.all(pending.map((el) => new Promise((done) => {
+      el.addEventListener('load', done, { once: true });
+      el.addEventListener('error', done, { once: true });
+    }))),
+    new Promise((done) => setTimeout(done, 3000)),
+  ]);
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   return true;
 }"""

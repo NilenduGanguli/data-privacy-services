@@ -384,3 +384,89 @@ def test_unread_frame_boxes_withhold_when_a_frame_cannot_be_located() -> None:
     assert unread_frame_boxes(lost) is None  # cannot be located: withhold the capture
     failed = PageSnapshot(**base, frames=[main, frame(1, box, read=False)], frames_failed=[1])
     assert unread_frame_boxes(failed) is None  # a frame that failed while read: withhold
+
+
+# --- M4 verify r1 B4/B5: text with no box of its parent's own, strings drawn from attributes ---
+#: hidden twins: what must stay out of both the extraction and the census
+_HIDDEN_TWINS = (
+    '<div style="display:none"><span style="display:contents">Hidden Twin One</span></div>'
+    '<div style="visibility:hidden"><span style="display:contents">Hidden Twin Two</span></div>'
+    '<x-twin><template shadowrootmode="open"><slot>Hidden Twin Three</slot></template>'
+    "<b>shown</b></x-twin>"
+)
+
+
+async def _injected(chromium: Any, url: str, settings: Settings, case: str) -> tuple[Any, Any]:
+    from tests.scanner.helpers import CENSUS_PAGES, INJECT_JS
+
+    ctx, page = await _open(chromium, f"{url}/help", settings, cookies=True)
+    await page.evaluate(INJECT_JS, CENSUS_PAGES[case] + _HIDDEN_TWINS)
+    return ctx, page
+
+
+@pytest.mark.parametrize(
+    "case,values",
+    [
+        ("contents", ("Zebulon Quixotic", "zebulon.quixotic@example.org")),
+        ("slotted", ("Zebulon Quixotic", "zebulon.quixotic@example.org")),
+        ("slot_fallback", ("Zebulon Quixotic",)),
+        ("contents_only", ("zebulon.quixotic@example.org",)),
+        ("slotted_only", ("zebulon.quixotic@example.org",)),
+    ],
+)
+async def test_text_under_a_parent_with_no_box_is_read_and_in_the_census(  # noqa: ANN001
+    chromium, demo_site_url, scan_settings, case: str, values: tuple[str, ...]
+) -> None:
+    """A text node whose parent is ``display:contents`` (a styled element, a component host, a
+    ``<slot>``) is drawn: the extraction reads it (so it is classified) and the census lists it as
+    a text node — both outside the table copy. A slot's fallback text that is not drawn (the slot
+    has assigned nodes) and text under ``display:none`` / ``visibility:hidden`` stay out."""
+    ctx, page = await _injected(chromium, demo_site_url, scan_settings, case)
+    try:
+        snap = await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
+        ext = dom.extraction_of(snap)
+        assert ext is not None
+        census = await dom.render_census(ext)
+    finally:
+        await _shut(ctx)
+    assert census is not None
+    read = [t.text for t in snap.texts]
+    texts = [c.text for c in census if not c.box]
+    for value in values:
+        assert sum(value in t for t in read) == (1 if case.endswith("_only") else 2), case
+        assert sum(value in t for t in texts) == (1 if case.endswith("_only") else 2), case
+    for twin in ("Hidden Twin One", "Hidden Twin Two", "Hidden Twin Three"):
+        assert not any(twin in t for t in read) and not any(twin in c.text for c in census)
+
+
+@pytest.mark.parametrize(
+    "case,drawn",
+    [
+        ("alt", "Zebulon Quixotic"),
+        ("alt_only", "Card for zebulon.quixotic@example.org"),
+        ("input_image", "Zebulon Quixotic"),
+        ("optgroup", "Zebulon Quixotic"),
+        ("option_label", "Zebulon Quixotic"),
+        ("placeholder", "zebulon.quixotic@example.org"),
+    ],
+)
+async def test_strings_drawn_from_attributes_are_in_the_census(  # noqa: ANN001
+    chromium, demo_site_url, scan_settings, case: str, drawn: str
+) -> None:
+    """A broken image's and an image button's alt text, an ``<optgroup>`` label and an option's
+    ``label`` in a listbox, and an empty field's placeholder are box items of the census."""
+    ctx, page = await _injected(chromium, demo_site_url, scan_settings, case)
+    try:
+        snap = await extract_page(page, iframes=True, shadow_dom=True, max_fields=400)
+        ext = dom.extraction_of(snap)
+        assert ext is not None
+        census = await dom.render_census(ext)
+        if case == "placeholder":  # a placeholder is only drawn while the field is empty
+            await page.fill("#c-ph", "x")
+            filled = await dom.render_census(ext)
+    finally:
+        await _shut(ctx)
+    assert census is not None
+    assert sum(c.box and c.text == drawn for c in census) == 1  # (the table cell is a text node)
+    if case == "placeholder":
+        assert filled is not None and not any(c.box and c.text == drawn for c in filled)
