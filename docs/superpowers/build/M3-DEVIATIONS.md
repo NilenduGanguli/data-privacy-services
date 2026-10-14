@@ -1544,3 +1544,35 @@ Open (not fixed here):
   target counts on the five smoke/bench targets: 0 survivors in every personal field · stack log
   scan: 0 of 149 484 seeded Oracle/MongoDB values in `docker compose logs app worker`. No frontend
   file changed (no npm gate needed).
+
+## M3 lane verification round 1 fixes (`M3-verify-r1.md` B6, B3-r3)
+
+- **B6 (a query re-mapped another column's values under a kept column's name) — refused on both
+  engines.** `_check_query_outputs` now refuses with `selection_query_alias`, before looking at the
+  select list, any query whose tree holds a column-list alias anywhere (`FROM t AS c(a, b, …)` on
+  any source, `WITH x(a) AS …`), `PIVOT`/`UNPIVOT` or Oracle `MATCH_RECOGNIZE`. Stricter than the
+  finding asked (any column-list alias, not only the object's): a column list is never needed for
+  a masking selection and the rule stays auditable. `ALIAS_REFUSED` gained 11 shapes (both
+  engines) and `ALIAS_REFUSED_ORACLE` 2 (`MATCH_RECOGNIZE`; PostgreSQL does not parse it).
+  - **Found while testing: rendering dropped constructs silently.** sqlglot's PostgreSQL generator
+    drops `UNPIVOT` with a warning, and submit validated the *rendered* (bound) selection, so a
+    PostgreSQL UNPIVOT passed submit as a different query. `_render` now generates with
+    `unsupported_level=RAISE` and refuses `selection_parse_error` ("a construct this engine does
+    not support"), so a stored template / executed statement can never differ from what was
+    validated. `submit._bind` and the count route's `_bind` also validate the text as written
+    (with the shape) before binding. Visible effect: a PostgreSQL `UNPIVOT` is `selection_query_alias`
+    at run submit (shape known) and `selection_parse_error` at discovery submit and the count
+    route's first, shape-free pass.
+  - E2E: `test_run_modes.py::test_a_column_list_alias_or_pivot_cannot_remap_a_column` and
+    `test_oracle_pipeline.py::test_unpivot_pivot_or_match_recognize_cannot_remap_a_column` (422 at
+    submit for every shape, target not created, discovery job fails `selection_query_alias`).
+  - Contract §5.2 amended (2026-10-14).
+- **B3-r3 (PostgreSQL target identity) — normalised per engine.** `consistency.target_key` keys a
+  PostgreSQL object on `targets._owner(obj)` (no owner → `public`), so `{name: T}` and
+  `{owner: public, name: T}` are one target; it case-folds object and path for **Oracle only**
+  (DPS upper-cases Oracle identifiers; PostgreSQL names are quoted as given, MongoDB names are
+  case-sensitive), so `public."Cust"` and `public."cust"` are two targets. Unit test
+  `test_postgres_targets_key_on_the_resolved_schema_and_exact_name`: explicit pairs → 422
+  `member_duplicate` (no connector opened), `derive_members` and the derived check → 409
+  `member_not_ready`; case-distinct PostgreSQL tables stay two members. Limit kept: an Oracle object
+  without an owner is not resolved to the connecting user's schema. Contract §6.5 wording amended.

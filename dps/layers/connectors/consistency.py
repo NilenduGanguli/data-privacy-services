@@ -44,6 +44,7 @@ from dps.jobs_models import ColumnClassification, Selection
 from dps.layers.connectors.base import ColumnInfo, Connector, ObjectRef, Row, TableShape
 from dps.layers.connectors.docpaths import column_values, dotted, row_locator
 from dps.layers.connectors.registry import open_connector
+from dps.layers.connectors.targets import _owner
 from dps.observability import CONSISTENCY_CHECKS, get_logger
 
 if TYPE_CHECKING:
@@ -415,9 +416,13 @@ def target_key(
     The endpoint is the connection's engine, host (case-folded), port (the engine default when
     unset) and database / service name, so two connection records for one database name one
     target. A connection without a host (or not a stored record) is identified by its id.
-    PostgreSQL and Oracle fold unquoted identifiers, so their object and path compare
-    case-insensitively; MongoDB names are case-sensitive. Limit: host aliases (a DNS name and its
-    address, two listeners of one instance) are not resolved and count as different endpoints.
+    The object is normalised as its engine resolves it: a PostgreSQL object without an owner is
+    ``public.<name>`` (:func:`targets._owner`, as the writer resolves it), so ``{name: T}`` and
+    ``{owner: public, name: T}`` are one target. Only Oracle folds case (DPS upper-cases Oracle
+    identifiers); PostgreSQL names are quoted as given and MongoDB names are case-sensitive, so
+    ``public."Cust"`` and ``public."cust"`` are two targets, and so are their paths. Limit: host
+    aliases (a DNS name and its address, two listeners of one instance) are not resolved and count
+    as different endpoints; an Oracle object without an owner is not resolved to the user's schema.
     """
     params = getattr(connection, "params", None)
     engine = getattr(connection, "engine", None)
@@ -433,7 +438,9 @@ def target_key(
             (params.database or "").casefold() or None,
             (params.service_name or "").casefold() or None,
         )
-    fold = engine in ("postgres", "oracle")
+    fold = engine == "oracle"
+    if engine == "postgres":
+        obj = ObjectRef(owner=_owner(obj), name=obj.name)
     name = obj.fqn().casefold() if fold else obj.fqn()
     if path is None:
         return (*endpoint, name)

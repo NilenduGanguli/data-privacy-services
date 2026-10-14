@@ -34,6 +34,7 @@ from dps.layers.connectors.consistency import (
     derive_members,
     detect_form,
     run_consistency_check,
+    target_key,
 )
 from dps.layers.connectors.docpaths import column_values
 
@@ -577,3 +578,62 @@ async def test_two_connection_records_for_one_database_are_one_target() -> None:
     # derived: the two records for crm_uat collapse to the newest; crm_uat2 and Oracle stay
     members = derive_members(jobs, snapshots, connections)
     assert sorted(m.job_id for m in members) == ["j_mdb_b", "j_mdb_c", "j_ora_b"]
+
+
+async def test_postgres_targets_key_on_the_resolved_schema_and_exact_name() -> None:
+    """M3 verify r1 B3-r3: PostgreSQL resolves an object without an owner to ``public``, so
+    ``{name: T}`` and ``{owner: public, name: T}`` are one target: explicit pairs are
+    ``member_duplicate`` and the derived check collapses them (one system: ``member_not_ready``).
+    DPS quotes PostgreSQL names as given, so ``public."Cust"`` and ``public."cust"`` are two
+    tables and stay two members; Oracle still folds case."""
+    w = World(50)
+    snapshots = w.snapshots()
+    bare, public = ObjectRef(name="payments"), ObjectRef(owner="public", name="payments")
+    pg = _connection("c_pg", "postgres", host="pg.uat", port=5432, database="bank")
+    connections = {"c_pg": pg}
+    jobs = [make_job("j_pg", "c_pg", bare, "s_pg"), _rerun("j_pg_rerun", "c_pg", public, "s_pg")]
+    opened: list[str] = []
+
+    async def opener(conn: Connection, settings: Any, **kw: Any) -> FakeConnector:
+        opened.append(conn.id)
+        return w.connectors()["c_pg"]
+
+    async def check(request: ConsistencyCheckRequest, members: list[Job]) -> Any:
+        return await run_consistency_check(
+            group=GROUP, jobs=members, snapshots=snapshots, connections=connections,
+            request=request, settings=None, kek=None, opener=opener,  # type: ignore[arg-type]
+        )  # fmt: skip
+
+    for pairs in (
+        [("j_pg", "$.customer_id"), ("j_pg_rerun", "$.customer_id")],
+        [("j_pg_rerun", "$.customer_id"), ("j_pg", "$.customer_id")],
+    ):
+        request = ConsistencyCheckRequest(pairs=[CheckMember(job_id=j, path=p) for j, p in pairs])
+        with pytest.raises(ConsistencyError) as exc:
+            await check(request, jobs)
+        assert (exc.value.status, exc.value.code) == (422, "member_duplicate")
+    with pytest.raises(ConsistencyError) as exc:
+        derive_members(jobs, snapshots, connections)
+    assert (exc.value.status, exc.value.code) == (409, "member_not_ready")
+    with pytest.raises(ConsistencyError) as exc:
+        await check(ConsistencyCheckRequest(), jobs)
+    assert (exc.value.status, exc.value.code) == (409, "member_not_ready")
+    assert opened == []
+    assert target_key("c_pg", pg, bare, "$.customer_id") == target_key(
+        "c_pg", pg, public, "$.customer_id"
+    )
+
+    # case-distinct quoted PostgreSQL names are different tables (and columns)
+    upper, lower = ObjectRef(owner="public", name="Cust"), ObjectRef(owner="public", name="cust")
+    assert target_key("c_pg", pg, upper) != target_key("c_pg", pg, lower)
+    assert target_key("c_pg", pg, lower, "$.Email") != target_key("c_pg", pg, lower, "$.email")
+    two = [make_job("j_up", "c_pg", upper, "s_pg"), make_job("j_low", "c_pg", lower, "s_pg")]
+    assert sorted(m.job_id for m in derive_members(two, snapshots, connections)) == [
+        "j_low",
+        "j_up",
+    ]
+    # Oracle folds unquoted identifiers: crm.customers is CRM.CUSTOMERS
+    ora = _connection("c_ora", "oracle", host="ora.uat", service_name="UAT")
+    assert target_key("c_ora", ora, ObjectRef(owner="crm", name="customers"), "$.email") == (
+        target_key("c_ora", ora, ObjectRef(owner="CRM", name="CUSTOMERS"), "$.EMAIL")
+    )
