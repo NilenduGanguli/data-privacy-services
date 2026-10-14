@@ -35,6 +35,7 @@ from dps.layers.api.deps import (
     principal_of,
     rejected,
     request_fingerprint,
+    request_fingerprint_alternates,
     require_db,
     tenant_of,
 )
@@ -92,7 +93,12 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
         body.policy = await resolve(request, body.policy)  # M5: @name[:vN] at accept time
         tenant, key = tenant_of(request), idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
-        earlier = await jobs.find_by_idempotency(tenant, key, fingerprint=fp) if key else None
+        alternates = await request_fingerprint_alternates(request) if key else []
+        earlier = (
+            await jobs.find_by_idempotency(tenant, key, fingerprint=fp, alternates=alternates)
+            if key
+            else None
+        )
         if earlier is None:
             job = await submit_discover(
                 body,
@@ -102,6 +108,7 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
                 kek=kek_of(request),
                 idempotency_key=key,
                 idempotency_fp=fp,
+                idempotency_alternates=alternates,
             )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "job.create", exc) from None
@@ -139,8 +146,11 @@ async def run(body: RunSpec, request: Request, response: Response) -> dict[str, 
         key = idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
         earlier = None
+        alternates = await request_fingerprint_alternates(request) if key else []
         if key:  # a key reused with another request is refused before any validation (as on L1)
-            earlier = await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+            earlier = await jobs.find_by_idempotency(
+                tenant_of(request), key, fingerprint=fp, alternates=alternates
+            )
         # M5: an @name[:vN] reference becomes the stored body before validation, so the job
         # records exactly the version it ran
         body.policy = await resolve(request, body.policy)
@@ -157,6 +167,7 @@ async def run(body: RunSpec, request: Request, response: Response) -> dict[str, 
             kek=kek_of(request),
             idempotency_key=key,
             idempotency_fp=fp,
+            idempotency_alternates=alternates,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "job.create", exc) from None

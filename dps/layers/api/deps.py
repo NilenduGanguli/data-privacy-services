@@ -27,12 +27,13 @@ from fastapi import Request
 
 from dps.audit import AuditEvent, AuditUnavailable
 from dps.auth import Principal
+from dps.config import Settings
 from dps.errors import IDEMPOTENCY_KEY_INVALID, IDEMPOTENCY_KEY_INVALID_DETAIL
 from dps.layers.api.common import route_template, trace_id
 from dps.layers.api.errors import DpsHttpError, to_http
 from dps.layers.api.idempotency import IDEMPOTENCY_HEADER, KEY_RE
 from dps.observability import REQUESTS, get_logger
-from dps.secrets import keyed_fingerprint
+from dps.secrets import kek_ring, keyed_fingerprint
 
 logger = get_logger(__name__)
 
@@ -105,6 +106,24 @@ async def request_fingerprint(request: Request) -> str | None:
     body = await request.body()
     return keyed_fingerprint(
         kek, info=IDEMPOTENCY_FP_INFO, salt=route_template(request), data=body, hex_chars=64
+    )
+
+
+def fingerprint_alternates(settings: Settings, *, route: str, body: bytes) -> list[str]:
+    """F-21: the request's fingerprints under ``DPS_JOB_KEK_PREVIOUS`` (empty without one), so a
+    job admitted before a KEK rotation is still found as a replay of the same request."""
+    return [
+        keyed_fingerprint(kek, info=IDEMPOTENCY_FP_INFO, salt=route, data=body, hex_chars=64)
+        for kek in kek_ring(settings)[1:]
+    ]
+
+
+async def request_fingerprint_alternates(request: Request) -> list[str]:
+    """:func:`fingerprint_alternates` for this request (empty without a KEK)."""
+    if kek_of(request) is None:
+        return []
+    return fingerprint_alternates(
+        request.app.state.settings, route=route_template(request), body=await request.body()
     )
 
 

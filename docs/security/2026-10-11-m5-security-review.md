@@ -63,7 +63,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-18 | LOW | Inline-policy deny/allow-list terms stored in clear in `dps_job.spec` and listed by `GET /jobs` | see §3.18 | `tests/api/test_inline_policy_sealed.py` | fixed + test |
 | F-19 | LOW | `external_tokenize` token cache ignored the profile | see §3.19 | `tests/security/test_external_profile_cache.py` | fixed + test |
 | F-20 | LOW | Synthesis seeds never wrapped although a seed de-pseudonymises D-A keys | see §3.20 | `tests/security/test_seed_wrap.py` | fixed + test |
-| F-21 | LOW | KEK rotation: sealed blobs opened with the current KEK only | see §3.21 | — | pending |
+| F-21 | LOW | KEK rotation: sealed blobs opened with the current KEK only | see §3.21 | `tests/security/test_kek_rotation_window.py` | fixed + test |
 | F-22 | LOW | SEC-4 bind tag not injective over (entity type, profile) | see §3.22 | — | pending |
 
 ### 3.1 F-01 — D3 bound to the production credential
@@ -197,6 +197,15 @@ profile.
 any work and wraps its seed (JSON, NDJSON header, documents); `POST /jobs/run` wraps a generated
 seed; `POST /job-groups` takes `wrap_key` (key and seed) and refuses unknown fields. The unwrapped
 seed reproduces the output when presented again.
+
+### 3.21 F-21 — the rotation window works as the contract says
+
+`load_kek` registers `DPS_JOB_KEK_PREVIOUS` as the current KEK's fallback; `open_sealed` tries it
+only when the current KEK fails (still bound to the row's AAD; a third key never opens), so workers,
+discovery and connection credentials keep working until `dps.rekey` runs, which opens strictly
+(`fallback=False`) to tell current blobs from those it must re-seal. Durable idempotency fingerprints
+are also compared under the previous KEK, so a pre-rotation `Idempotency-Key` replay is not refused
+as reused (end-to-end test on a running app).
 
 ## 4. Considered and refuted
 

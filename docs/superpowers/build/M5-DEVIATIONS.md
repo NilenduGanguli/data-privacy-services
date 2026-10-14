@@ -1212,3 +1212,7 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
 - **F-20 (seed wrap):** `TransformResponse.synthesis_seed` is `SynthesisSeed | WrappedSeed | None`;
   `GroupRequest` forbids extra fields (a misspelt `wrap_key` is 422, not ignored). `/schema/synthesize`
   is left as is (its seed keys schema generation only, no pseudonym of a real key).
+- **F-21 (KEK ring):** the previous KEK is a process registry filled by `load_kek` (keyed by the
+  current KEK) rather than a ring threaded through `HandlerContext`, the app state and every opener's
+  signature; `open_sealed(…, fallback=False)` keeps `dps.rekey` strict. The M4 scans route (merging
+  later) should pass `idempotency_alternates` like the job routes.

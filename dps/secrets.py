@@ -184,9 +184,26 @@ def _b64decode(text: str) -> bytes:
     return base64.b64decode(text + pad, altchars=alt, validate=True)
 
 
+#: KEK rotation (contract §6.3, S3 review F-21): the previous KEKs :func:`open_sealed` also tries
+#: for a blob the current KEK does not open — registered by :func:`load_kek` from
+#: ``DPS_JOB_KEK_PREVIOUS``, so every place that opens a blob (job keys and specs, discovery,
+#: inline connection credentials) works during the rotation window, before ``dps.rekey`` ran.
+_PREVIOUS_KEKS: dict[bytes, tuple[bytes, ...]] = {}
+
+
 def load_kek(settings: Settings) -> bytes | None:
-    """The 32-byte job KEK, or ``None`` when unset (settings already validated its length)."""
-    return _b64decode(settings.job_kek) if settings.job_kek else None
+    """The 32-byte job KEK, or ``None`` when unset (settings already validated its length).
+
+    A configured ``DPS_JOB_KEK_PREVIOUS`` is registered as the current KEK's fallback for
+    :func:`open_sealed` (F-21)."""
+    if not settings.job_kek:
+        return None
+    current, *previous = kek_ring(settings)
+    if previous:
+        _PREVIOUS_KEKS[current] = tuple(previous)
+    else:
+        _PREVIOUS_KEKS.pop(current, None)
+    return current
 
 
 def kek_ring(settings: Settings) -> tuple[bytes, ...]:
@@ -202,8 +219,7 @@ def seal(kek: bytes, plaintext: bytes, *, aad: str) -> bytes:
     return _VERSION + nonce + AESGCM(kek).encrypt(nonce, plaintext, aad.encode("utf-8"))
 
 
-def open_sealed(kek: bytes, sealed: bytes, *, aad: str) -> bytes:
-    """Decrypt a blob from :func:`seal`; :class:`SealError` on any failure."""
+def _open_one(kek: bytes, sealed: bytes, aad: str) -> bytes:
     if len(sealed) < 1 + _NONCE + _TAG or sealed[:1] != _VERSION or len(kek) != _KEK_BYTES:
         raise SealError()
     try:
@@ -212,6 +228,26 @@ def open_sealed(kek: bytes, sealed: bytes, *, aad: str) -> bytes:
         )
     except (InvalidTag, ValueError):
         raise SealError() from None
+
+
+def open_sealed(kek: bytes, sealed: bytes, *, aad: str, fallback: bool = True) -> bytes:
+    """Decrypt a blob from :func:`seal`; :class:`SealError` on any failure.
+
+    During a KEK rotation the previous KEK registered for ``kek`` (:func:`load_kek`) is tried
+    when ``kek`` does not open the blob (F-21); ``fallback=False`` opens with ``kek`` only (what
+    ``dps.rekey`` uses to tell current blobs from those it must re-seal).
+    """
+    try:
+        return _open_one(kek, sealed, aad)
+    except SealError:
+        if not fallback:
+            raise
+    for previous in _PREVIOUS_KEKS.get(kek, ()):
+        try:
+            return _open_one(previous, sealed, aad)
+        except SealError:
+            continue
+    raise SealError()
 
 
 def seal_json(kek: bytes, model: BaseModel, *, aad: str) -> bytes:

@@ -562,8 +562,10 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   `dps_connection.secret_enc` per tenant); confirm the printed JSON line has `"unreadable": 0` (exit
   code 3 otherwise — those rows are unchanged; exit 2 = no KEK or no database); remove
   `DPS_JOB_KEK_PREVIOUS_FILE` and roll again. Keep the previous KEK as long as callers may reveal
-  `external_tokenize` tokens bound under it (§8). Until `dps.rekey` has run, jobs sealed under the
-  old KEK cannot be opened by workers that hold only the new one — run it right after the first roll.
+  `external_tokenize` tokens bound under it (§8). While `DPS_JOB_KEK_PREVIOUS(_FILE)` is mounted, the
+  app and workers open blobs sealed under the old KEK too (job keys and specs, inline connection
+  credentials) and an `Idempotency-Key` admitted under it still replays (S3 review F-21) — but a pod
+  that holds only the new KEK cannot, so run `dps.rekey` before removing the previous one.
 - **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
   default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in

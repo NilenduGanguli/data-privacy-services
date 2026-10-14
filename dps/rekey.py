@@ -64,14 +64,14 @@ def _reseal(
     """The blob re-sealed with ``current`` when only a previous KEK opens it, else ``None``."""
     counts.rows += 1
     try:
-        open_sealed(current, blob, aad=aad)
+        open_sealed(current, blob, aad=aad, fallback=False)
         counts.already_current += 1
         return None
     except SealError:
         pass
     for old in previous:
         try:
-            plain = open_sealed(old, blob, aad=aad)
+            plain = open_sealed(old, blob, aad=aad, fallback=False)
         except SealError:
             continue
         return seal(current, plain, aad=aad)

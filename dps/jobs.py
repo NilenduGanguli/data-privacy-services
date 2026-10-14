@@ -21,6 +21,7 @@ import os
 import random
 import socket
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -359,6 +360,7 @@ async def create_job(
     created_by: str | None = None,
     idempotency_key: str | None = None,
     idempotency_fp: str | None = None,
+    idempotency_alternates: Sequence[str] = (),
     priority: int = 100,
     job_id: str | None = None,
 ) -> Job:
@@ -371,10 +373,16 @@ async def create_job(
     tenant (a transaction-scoped advisory lock taken before the count), so concurrent submissions
     cannot all pass the cap on the same count; a replay that waited behind the lock finds the
     original there. ``job_id`` lets a caller that seals with the id in the AAD mint it first.
+    ``idempotency_alternates``: the request's fingerprints under a previous KEK (F-21).
     Raises :class:`QueueFull`, :class:`IdempotencyKeyReused`.
     """
     if idempotency_key is not None:
-        existing = await find_by_idempotency(tenant_id, idempotency_key, fingerprint=idempotency_fp)
+        existing = await find_by_idempotency(
+            tenant_id,
+            idempotency_key,
+            fingerprint=idempotency_fp,
+            alternates=idempotency_alternates,
+        )
         if existing is not None:
             return existing
     settings = db.active_settings()
@@ -394,7 +402,11 @@ async def create_job(
                     idempotency_key,
                 )
                 if winner is not None:
-                    if not _same_request(winner["idempotency_fp"], idempotency_fp):
+                    stored = winner["idempotency_fp"]
+                    if not _same_request(stored, idempotency_fp) and not any(
+                        stored is not None and _same_request(stored, alt)
+                        for alt in idempotency_alternates
+                    ):
                         raise IdempotencyKeyReused()
                     job_id = winner["id"]
                     raise _Replayed()
@@ -467,9 +479,16 @@ async def get_job(tenant_id: str, job_id: str) -> Job | None:
 
 
 async def find_by_idempotency(
-    tenant_id: str, key: str, *, fingerprint: str | None = None
+    tenant_id: str,
+    key: str,
+    *,
+    fingerprint: str | None = None,
+    alternates: Sequence[str] = (),
 ) -> Job | None:
     """The tenant's job created with idempotency key ``key``, or None.
+
+    ``alternates`` are the same request's fingerprints under a previous KEK (F-21): a job admitted
+    before a KEK rotation is still recognised as a replay.
 
     Raises:
         IdempotencyKeyReused: ``fingerprint`` is given and the job was admitted with another
@@ -484,7 +503,10 @@ async def find_by_idempotency(
     if row is None:
         return None
     data = dict(row)
-    if not _same_request(data.pop("idempotency_fp"), fingerprint):
+    stored = data.pop("idempotency_fp")
+    if not _same_request(stored, fingerprint) and not any(
+        stored is not None and _same_request(stored, alt) for alt in alternates
+    ):
         raise IdempotencyKeyReused()
     return _row_job(data)
 

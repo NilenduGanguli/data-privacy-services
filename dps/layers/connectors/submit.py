@@ -16,6 +16,7 @@ passed" is the server's verdict rather than a copy of its rules (M2 verify r2, i
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -116,6 +117,7 @@ async def submit_discover(
     kek: bytes | None,
     idempotency_key: str | None = None,
     idempotency_fp: str | None = None,
+    idempotency_alternates: Sequence[str] = (),
 ) -> Job:
     """Queue a discover job: bind and validate the selection, seal it, store the template.
 
@@ -150,6 +152,7 @@ async def submit_discover(
         created_by=principal.key_id,
         idempotency_key=idempotency_key,
         idempotency_fp=idempotency_fp,
+        idempotency_alternates=idempotency_alternates,
         job_id=job_id,
     )
 
@@ -292,6 +295,7 @@ async def submit_run(
     kek: bytes | None,
     idempotency_key: str | None = None,
     idempotency_fp: str | None = None,
+    idempotency_alternates: Sequence[str] = (),
 ) -> RunSubmission:
     """Validate, seal and queue a run job (module docstring).
 
@@ -344,6 +348,7 @@ async def submit_run(
         created_by=principal.key_id,
         idempotency_key=idempotency_key,
         idempotency_fp=idempotency_fp,
+        idempotency_alternates=idempotency_alternates,
         job_id=job_id,
     )
     replay = job.id != job_id
