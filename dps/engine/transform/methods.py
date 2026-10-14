@@ -621,10 +621,17 @@ def _external(value: str, ctx: TransformContext) -> Outcome:
     reverse_params: dict[str, Any] = {}
     if ctx.mode == "obfuscate":
         reverse_params["bind"] = external_tag(ctx, token)
+        reverse_params["bind_v"] = crypto.BINDING_TAG_VERSION  # F-22: injective v2 tags
     return Outcome(token, "external_tokenize", True, None, reverse_params)
 
 
-def external_tag(ctx: TransformContext, token: str, binding: bytes | None = None) -> str:
+def external_tag(
+    ctx: TransformContext,
+    token: str,
+    binding: bytes | None = None,
+    *,
+    version: int = crypto.BINDING_TAG_VERSION,
+) -> str:
     """The ``bind`` tag of ``token`` under ``ctx.key`` and ``binding`` (default: the context's
     current binding key); see :func:`~dps.engine.transform.crypto.external_binding_tag`."""
     binding = binding if binding is not None else ctx.binding
@@ -643,6 +650,7 @@ def external_tag(ctx: TransformContext, token: str, binding: bytes | None = None
             ctx.entity_type,
             str(profile) if profile is not None else None,
             token,
+            version=version,
         )
     except (KeyError, ValueError):
         raise MethodError("key material dek is malformed") from None

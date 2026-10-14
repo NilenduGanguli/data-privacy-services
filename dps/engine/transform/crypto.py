@@ -23,6 +23,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
 import re
 import secrets
 from datetime import UTC, datetime
@@ -218,20 +219,41 @@ def binding_key_from_kek(kek: bytes) -> bytes:
     return hkdf.derive(kek)
 
 
+#: The current version of the external-token bind tag (S3 review F-22). Version 1 is still
+#: verified for hints issued before it.
+BINDING_TAG_VERSION = 2
+
+
 def external_binding_tag(
-    binding_key: bytes, km: KeyMaterial, entity_type: str, profile: str | None, token: str
+    binding_key: bytes,
+    km: KeyMaterial,
+    entity_type: str,
+    profile: str | None,
+    token: str,
+    *,
+    version: int = BINDING_TAG_VERSION,
 ) -> str:
     """The ``bind`` tag of an external token: proof that DPS produced ``token`` under ``km``.
 
-    ``HMAC(HMAC(binding_key, subkey(km, "external_tokenize|<entity>|<profile>")), token)``,
-    base32, 26 characters. The caller holds its DEK, so a tag under the DEK alone could be
-    computed by anyone holding it; the server-held ``binding_key`` makes the tag unforgeable
-    outside DPS, and the DEK subkey ties it to this caller key, entity type and profile.
+    ``HMAC(HMAC(binding_key, subkey(km, <info>)), token)``, base32, 26 characters. The caller
+    holds its DEK, so a tag under the DEK alone could be computed by anyone holding it; the
+    server-held ``binding_key`` makes the tag unforgeable outside DPS, and the DEK subkey ties it to
+    this caller key, entity type and profile. ``<info>`` is, for version 2,
+    ``external_tokenize.v2|`` + the JSON array ``[entity_type, profile]`` — injective, so a tag
+    binds exactly one (entity type, profile) and ``None`` differs from ``""`` (F-22); version 1
+    (``external_tokenize|<entity>|<profile or ''>``) is kept to verify older hints.
 
     Raises:
-        KeyError: the material is wrapped-only. ValueError: the DEK is malformed.
+        KeyError: the material is wrapped-only. ValueError: the DEK is malformed or the version
+            unknown.
     """
-    sub = subkey(km, f"external_tokenize|{entity_type}|{profile or ''}")
+    if version == 2:
+        info = "external_tokenize.v2|" + json.dumps([entity_type, profile], separators=(",", ":"))
+    elif version == 1:
+        info = f"external_tokenize|{entity_type}|{profile or ''}"
+    else:
+        raise ValueError("unknown bind tag version")
+    sub = subkey(km, info)
     mac_key = hmac.new(binding_key, sub, hashlib.sha256).digest()
     return b32(hmac_bytes(mac_key, token))[:BINDING_TAG_CHARS]
 

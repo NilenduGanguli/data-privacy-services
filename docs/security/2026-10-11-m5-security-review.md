@@ -64,7 +64,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-19 | LOW | `external_tokenize` token cache ignored the profile | see §3.19 | `tests/security/test_external_profile_cache.py` | fixed + test |
 | F-20 | LOW | Synthesis seeds never wrapped although a seed de-pseudonymises D-A keys | see §3.20 | `tests/security/test_seed_wrap.py` | fixed + test |
 | F-21 | LOW | KEK rotation: sealed blobs opened with the current KEK only | see §3.21 | `tests/security/test_kek_rotation_window.py` | fixed + test |
-| F-22 | LOW | SEC-4 bind tag not injective over (entity type, profile) | see §3.22 | — | pending |
+| F-22 | LOW | SEC-4 bind tag not injective over (entity type, profile) | see §3.22 | `tests/security/test_binding_tag_v2.py` | fixed + test |
 
 ### 3.1 F-01 — D3 bound to the production credential
 
@@ -206,6 +206,14 @@ discovery and connection credentials keep working until `dps.rekey` runs, which 
 (`fallback=False`) to tell current blobs from those it must re-seal. Durable idempotency fingerprints
 are also compared under the previous KEK, so a pre-rotation `Idempotency-Key` replay is not refused
 as reused (end-to-end test on a running app).
+
+### 3.22 F-22 — v2 bind tags bind exactly one (entity type, profile)
+
+New external hints carry `bind_v: 2`: the tag's subkey info is `external_tokenize.v2|` + JSON
+`[entity, profile]`, so (`ACCT`, `p|q`) and (`ACCT|p`, `q`) — and `None` vs `""` — get different tags.
+Hints without a version are verified as v1 (issued before); an external hint's entity type must be
+an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguous except for the
+`None`/`""` profile (residual for v1 hints only).
 
 ## 4. Considered and refuted
 

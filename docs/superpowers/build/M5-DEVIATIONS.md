@@ -1216,3 +1216,6 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   current KEK) rather than a ring threaded through `HandlerContext`, the app state and every opener's
   signature; `open_sealed(…, fallback=False)` keeps `dps.rekey` strict. The M4 scans route (merging
   later) should pass `idempotency_alternates` like the job routes.
+- **F-22 (bind tag):** dual verification by an explicit version field (`reverse_params.bind_v`)
+  rather than trying both encodings: a v2 hint can never be checked as v1. The entity-type rule
+  applies to `external_tokenize` hints only (M0 envelope tests use other names for other methods).

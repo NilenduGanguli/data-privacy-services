@@ -31,7 +31,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dps.engine.findings import Plan, PlanEntry
 from dps.engine.jsonpath import flatten, get_path, set_path
@@ -71,6 +71,9 @@ _FLOAT = re.compile(r"-?[0-9]+\.[0-9]+")
 OriginalType = Literal["str", "int", "float"]
 
 
+_ENTITY_TYPE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
 class RevealHint(BaseModel):
     """Where a reversible replacement sits in the output, and how to undo it. No values.
 
@@ -95,6 +98,15 @@ class RevealHint(BaseModel):
     kid: str | None = None
     kcv: str | None = None
     field_scoped: bool = False
+
+    @model_validator(mode="after")
+    def _external_entity_type(self) -> RevealHint:
+        # F-22: an external token's entity type is an identifier — a hint cannot claim "ACCT|p"
+        # to re-split what a v1 bind tag binds, and the detokenize audit names a real type. The
+        # message never quotes the value.
+        if self.method == "external_tokenize" and not _ENTITY_TYPE.fullmatch(self.entity_type):
+            raise ValueError("entity types must match ^[A-Z][A-Z0-9_]{0,63}$")
+        return self
 
 
 class OutputSegment(BaseModel):
@@ -299,9 +311,14 @@ def _is_bound(h: RevealHint, token: str, options: ApplyOptions) -> bool:
     tag = h.reverse_params.get("bind")
     if not isinstance(tag, str) or not tag.isascii():
         return False
+    version = h.reverse_params.get("bind_v", 1)  # F-22: hints issued before v2 carry no version
+    if version not in (1, 2) or isinstance(version, bool):
+        return False
     ctx = _reveal_ctx(h, options)
     return any(
-        hmac.compare_digest(external_tag(ctx, token, binding).encode(), tag.encode())
+        hmac.compare_digest(
+            external_tag(ctx, token, binding, version=version).encode(), tag.encode()
+        )
         for binding in options.binding_keys
     )
 
