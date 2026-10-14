@@ -8,7 +8,8 @@
 Drives /playground/documents (demo KYC scan → Redact → download → reveal → Synthesize) and /policies
 (draft edit, recognizer test on the engine, plan preview) at 1440×900 and 390×844 in dark and light;
 asserts each mockup section is present, no horizontal scroll and no console error; writes app and
-mockup screenshots side by side to docs/superpowers/build/m1-console/. Prints PASS/FAIL lines only.
+mockup screenshots side by side to reports/console/m1-console/ (git-ignored: a run never rewrites a
+committed file; DPS_SHOTS_DIR moves the folder, see tools/shots.py). Prints PASS/FAIL lines only.
 
 The key goes into the tab's ``sessionStorage`` (the console's default, O5), never ``localStorage``.
 
@@ -29,12 +30,16 @@ from pathlib import Path
 from playwright.sync_api import Browser, Error, Page, Playwright, expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))  # `python tools/console_check.py`
+
+from tools.shots import shots_dir  # noqa: E402
+
 BASE = (
     os.environ.get("DPS_TEST_APP_URL")
     or f"http://127.0.0.1:{os.environ.get('DPS_APP_PORT') or '8400'}"
 ).rstrip("/")
 KEY = os.environ.get("DPS_API_KEY", "dps_local_dev_key_change_me")
-OUT = ROOT / "docs" / "superpowers" / "build" / "m1-console"
+OUT = shots_dir("m1-console")
 SIZES = {"desktop": (1440, 900), "phone": (390, 844)}
 MOCKUPS = {"documents": "08-documents.html", "policies": "05-policies.html"}
 DOC_SECTIONS = ("Input", "Findings", "Output · redacted PDF", "Text extraction", "Key material")
@@ -105,7 +110,7 @@ def no_horizontal_scroll(page: Page) -> bool:
 def shoot(page: Page, name: str) -> None:
     """A full-page screenshot from the top: fixed and sticky parts (the header, the sidebar, the
     Policies side column) are drawn where the page is scrolled to, so scroll back first. The key
-    line (kid and the shortened DEK) is masked: screenshots are committed, key material never is."""
+    line (kid and the shortened DEK) is masked: screenshots may be committed, key material never is."""
     page.evaluate("window.scrollTo(0, 0)")
     page.wait_for_timeout(150)
     page.screenshot(path=str(OUT / name), full_page=True, mask=[page.locator(".keycard .mono")])
@@ -213,7 +218,8 @@ def main() -> int:
                 context.close()
         browser.close()
     verdict = "all checks passed" if not failures else f"{len(failures)} failed"
-    print(f"\n{verdict} · screenshots in {OUT.relative_to(ROOT)}")
+    shown = OUT.relative_to(ROOT) if OUT.is_relative_to(ROOT) else OUT
+    print(f"\n{verdict} · screenshots in {shown}")
     return 1 if failures else 0
 
 
