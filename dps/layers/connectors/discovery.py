@@ -312,11 +312,34 @@ def mixed_method(column: ColumnInfo) -> MethodSpec:
     return MethodSpec(method="mask_partial", params={"keep_last": 0})
 
 
+def _leaf_and_parent(column: ColumnInfo) -> tuple[str, tuple[str | None, ...]]:
+    """``(leaf name, parent)`` of a column: a flat column is its own name under the row; a
+    document leaf (``$.contacts[*].value``) is its last named segment under its parent path
+    (array positions generalised), so siblings are the leaves of the same sub-document."""
+    if docpaths.top_level(column):
+        return column.name, ()
+    try:
+        parts = docpaths.path_parts(column.path)
+    except ValueError:
+        return column.name, ()
+    last = max((i for i, p in enumerate(parts) if isinstance(p, str)), default=-1)
+    if last < 0:
+        return column.name, ()
+    parent = tuple(p if isinstance(p, str) else None for p in parts[:last])
+    return str(parts[last]), parent
+
+
 def _mixed_name_score(column: ColumnInfo, shape: TableShape) -> float:
-    """:data:`MIXED_NAME_SCORE` for ``value`` (…) next to a ``channel`` (…) column, else 0."""
-    if normalize_key(column.name) not in MIXED_VALUE_NAMES:
+    """:data:`MIXED_NAME_SCORE` for ``value`` (…) next to a ``channel`` (…) column, else 0.
+    Document leaves (WP-I m3) compare their leaf name with the leaves under the same parent."""
+    leaf, parent = _leaf_and_parent(column)
+    if normalize_key(leaf) not in MIXED_VALUE_NAMES:
         return 0.0
-    siblings = {normalize_key(c.name) for c in shape.columns if c.name != column.name}
+    siblings = {
+        normalize_key(name)
+        for name, at in (_leaf_and_parent(c) for c in shape.columns if c.path != column.path)
+        if at == parent and name != leaf
+    }
     return MIXED_NAME_SCORE if siblings & CHANNEL_NAMES else 0.0
 
 
