@@ -37,14 +37,12 @@ FULL = {"X-API-KEY": "dps_full", "X-DPS-Tenant": "t1"}
 
 def write_m3_refs(secret_dir: Path) -> None:
     """The Oracle and MongoDB ``secret_ref`` folders under ``secret_dir``."""
+    from tests.fixtures.sources import write_ref
+
+    # SEC-2: under each test tenant's folder (refs are tenant-scoped)
     for ref, user in ORACLE_REFS.items():
-        folder = secret_dir / ref
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "username").write_text(user, encoding="utf-8")
-        (folder / "password").write_text(user, encoding="utf-8")
-    folder = secret_dir / MONGO_REF
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "uri").write_text(mongo_uri(), encoding="utf-8")
+        write_ref(secret_dir, ref, {"username": user, "password": user})
+    write_ref(secret_dir, MONGO_REF, {"uri": mongo_uri()})
 
 
 def oracle_params() -> dict[str, Any]:

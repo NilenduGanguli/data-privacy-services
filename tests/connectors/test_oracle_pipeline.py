@@ -35,6 +35,7 @@ from tests.connectors.helpers import db_key_enc, discover_and_accept, drive
 from tests.connectors.oracle_fixtures import create_customers, drop_all
 from tests.connectors.test_run_modes import run_spec
 from tests.fixtures.m3_services import OracleTestSchema
+from tests.fixtures.sources import write_ref
 from tests.services import host_port
 
 pytestmark = [pytest.mark.db, pytest.mark.integration, pytest.mark.oracle]
@@ -54,10 +55,11 @@ def register_oracle(handler_ctx: HandlerContext, oracle_schema: OracleTestSchema
     """``await register_oracle("t1", roles=...)`` stores an Oracle connection as the test owner
     whose ``secret_ref`` holds only a username and password (the DSN comes from the params)."""
     ref = "m3/test-oracle-owner"
-    folder = Path(handler_ctx.settings.secret_dir) / ref
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "username").write_text(oracle_schema.owner + "\n", encoding="utf-8")
-    (folder / "password").write_text(oracle_schema.owner_password + "\n", encoding="utf-8")
+    write_ref(
+        Path(handler_ctx.settings.secret_dir),
+        ref,
+        {"username": oracle_schema.owner + "\n", "password": oracle_schema.owner_password + "\n"},
+    )
     host, port = host_port(oracle_schema.dsn)
     service = oracle_schema.dsn.rsplit("/", 1)[-1]
 

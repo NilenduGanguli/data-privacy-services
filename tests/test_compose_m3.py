@@ -21,6 +21,7 @@ import yaml
 from dps.config import Settings
 from dps.connections import Connection, load_credentials
 from dps.jobs_models import ConnectionParams
+from dps.secrets import SecretUnavailable
 
 ROOT = Path(__file__).resolve().parents[1]
 SECRET_ROOT = "/var/run/secrets/dps"
@@ -115,10 +116,10 @@ def test_demo_secret_refs_resolve_to_credentials(tmp_path: Path) -> None:
     settings = Settings(_env_file=None, secret_dir=str(tmp_path))
     now = datetime.now(UTC)
 
-    def conn(engine: str, ref: str) -> Connection:
+    def conn(engine: str, ref: str, tenant: str = "default") -> Connection:
         return Connection(
             id="c_" + "0" * 26,
-            tenant_id="t1",
+            tenant_id=tenant,
             name="demo",
             engine=engine,  # type: ignore[arg-type]
             params=ConnectionParams(),
@@ -142,5 +143,12 @@ def test_demo_secret_refs_resolve_to_credentials(tmp_path: Path) -> None:
         creds = asyncio.run(load_credentials(conn("mongo", ref), settings=settings, kek=None))
         assert creds.username == "" and set(creds.extra) == {"uri"}, ref
         assert creds.extra["uri"].get_secret_value() == uri, ref
+    # SEC-2 (WP-I): the refs are tenant-scoped — written under the demo tenant ``default`` (the
+    # bootstrap key's tenant), so another tenant naming the same ref resolves nothing
+    for ref in (*ORACLE_REFS, *MONGO_REFS):
+        assert (tmp_path / "default" / ref).is_dir(), ref
+        assert not (tmp_path / ref).exists(), ref
+        with pytest.raises(SecretUnavailable):
+            asyncio.run(load_credentials(conn("oracle", ref, "t1"), settings=settings, kek=None))
     # M2's refs are still written beside them.
-    assert (tmp_path / "dps/src/bank-pg-ro/username").read_text() == "dps_reader"
+    assert (tmp_path / "default/dps/src/bank-pg-ro/username").read_text() == "dps_reader"

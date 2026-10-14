@@ -44,6 +44,7 @@ from tests.connectors.test_resume_after_kill import (
 )
 from tests.fixtures.db import worker_env
 from tests.fixtures.m3_services import OracleTestSchema, mongo_uri
+from tests.fixtures.sources import write_ref
 from tests.services import host_port
 
 pytestmark = [
@@ -112,10 +113,11 @@ def _digest(rows: list[tuple[Any, ...]]) -> tuple[int, str]:
 
 async def _register_oracle(ctx: HandlerContext, schema: OracleTestSchema) -> Connection:
     ref = "m3/resume-oracle-owner"
-    folder = Path(ctx.settings.secret_dir) / ref
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "username").write_text(schema.owner, encoding="utf-8")
-    (folder / "password").write_text(schema.owner_password, encoding="utf-8")
+    write_ref(
+        Path(ctx.settings.secret_dir),
+        ref,
+        {"username": schema.owner, "password": schema.owner_password},
+    )
     host, port = host_port(schema.dsn)
     spec = ConnectionSpec(
         name="resume-oracle",
@@ -226,9 +228,7 @@ async def _mongo_case(ctx: HandlerContext, mode: str, client: Any, database: str
     import bson
 
     ref = "m3/resume-mongo"
-    folder = Path(ctx.settings.secret_dir) / ref
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "uri").write_text(mongo_uri(), encoding="utf-8")
+    write_ref(Path(ctx.settings.secret_dir), ref, {"uri": mongo_uri()})
     spec = ConnectionSpec(
         name="resume-mongo",
         engine="mongo",

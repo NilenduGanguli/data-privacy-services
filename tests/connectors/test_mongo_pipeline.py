@@ -28,6 +28,7 @@ from dps.worker import HandlerContext
 from tests.connectors.helpers import db_key_enc, discover_and_accept, drive
 from tests.connectors.test_run_modes import run_spec
 from tests.fixtures.m3_services import mongo_uri
+from tests.fixtures.sources import write_ref
 
 pytestmark = [pytest.mark.db, pytest.mark.integration, pytest.mark.mongo]
 RegisterMongo = Callable[..., Awaitable[Connection]]
@@ -82,9 +83,7 @@ def register_mongo(handler_ctx: HandlerContext) -> RegisterMongo:
     """``await register_mongo("t1", database=..., roles=..., name=...)``: a MongoDB connection
     whose ``secret_ref`` holds only the URI (the lane's replica set has no auth)."""
     ref = "m3/test-mongo"
-    folder = Path(handler_ctx.settings.secret_dir) / ref
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "uri").write_text(mongo_uri() + "\n", encoding="utf-8")
+    write_ref(Path(handler_ctx.settings.secret_dir), ref, {"uri": mongo_uri() + "\n"})
 
     async def register(tenant: str, *, database: str, roles: set[str], name: str) -> Connection:
         spec = ConnectionSpec(

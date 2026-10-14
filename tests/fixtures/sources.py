@@ -245,6 +245,18 @@ def source_pg_sync() -> Iterator[SourcePgSync]:
 SECRET_TENANTS = ("t1", "t2")
 
 
+def write_ref(
+    root: Path, ref: str, files: dict[str, str], tenants: tuple[str, ...] = SECRET_TENANTS
+) -> None:
+    """One ``secret_ref`` folder (``files``: file name → local demo literal) under each tenant's
+    folder of ``root`` — refs are tenant-scoped (SEC-2): ``<root>/<tenant>/<ref>/<file>``."""
+    for tenant in tenants:
+        folder = root / tenant / ref
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, value in files.items():
+            (folder / name).write_text(value, encoding="utf-8")
+
+
 def write_source_secrets(root: Path, tenants: tuple[str, ...] = SECRET_TENANTS) -> Path:
     """Write the local ``secret_ref`` directories under each tenant's folder of ``root``
     (contract §5.1, refs are tenant-scoped): ``<tenant>/dps/src/test-pg`` = dps_reader,
