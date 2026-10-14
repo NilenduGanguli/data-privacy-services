@@ -1,7 +1,8 @@
 # dps-worker: L2 jobs (discover, run prepare/partitions/finalize, retention; contract §3.5). Claims
 # from the Postgres queue with the worker login; serves /health, /readyz, /metrics on ops (9400).
 # SIGTERM drains (stop claiming, keep leases while in-flight work finishes, release the rest), so the
-# grace period is longer than DPS_JOB_DRAIN_TIMEOUT_SECONDS (30). Same pod security as dps-app.
+# grace period is longer than DPS_JOB_DRAIN_TIMEOUT_SECONDS (30). Same pod security as dps-app, and
+# the same wait for the release's schema (it would exit on MigrationDrift and crash-loop otherwise).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,6 +24,29 @@ spec:
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
+      # dps-app's init container, unchanged (deployment-app.yaml says why; a test keeps them equal)
+      initContainers:
+        - name: wait-for-schema
+          image: data-privacy-services
+          args:
+            - sh
+            - -c
+            - "trap 'exit 143' TERM INT; until python -m dps.migrate --verify; do sleep 5 & wait $!; done"
+          envFrom: [{configMapRef: {name: dps}}]
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: DPS_PG_PASSWORD_FILE, value: /var/run/secrets/dps/pg-app/password}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: ca, mountPath: /etc/dps/ca, readOnly: true}
+            - {name: pg-app, mountPath: /var/run/secrets/dps/pg-app, readOnly: true}
       containers:
         - name: worker
           image: data-privacy-services

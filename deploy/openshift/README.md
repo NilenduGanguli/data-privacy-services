@@ -28,13 +28,24 @@ Render: `kustomize build deploy/openshift/overlays/prod` (kustomize ≥ 5.0; `oc
 
 | Object | Kind | Image / command | Port | Mounts (secrets) |
 |---|---|---|---|---|
-| `dps-app` | Deployment | `data-privacy-services`: `uvicorn dps.app:create_app --factory … --no-access-log` | `http` 8400 | `dps-pg-app`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` (connection tests) |
-| `dps-worker` | Deployment | `data-privacy-services`: `python -m dps.worker` | `ops` 9400 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` |
-| `dps-browser-worker` | Deployment | `data-privacy-services-browser`: `python -m dps.browser_worker` | `ops` 9401 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-s3`, `dps-connector-refs` (LLM, OCR and tokenizer are switched off here) |
+| `dps-app` | Deployment | `data-privacy-services`: `uvicorn dps.app:create_app --factory … --no-access-log`, after init container `wait-for-schema` | `http` 8400 | `dps-pg-app`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` (connection tests) |
+| `dps-worker` | Deployment | `data-privacy-services`: `python -m dps.worker`, after `wait-for-schema` | `ops` 9400 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` |
+| `dps-browser-worker` | Deployment | `data-privacy-services-browser`: `python -m dps.browser_worker`, after `wait-for-schema` | `ops` 9401 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-s3`, `dps-connector-refs` (LLM, OCR and tokenizer are switched off here) |
 | `dps-migrate-<release>` | Job | `data-privacy-services`: `python -m dps.migrate` (`DPS_MIGRATIONS_MODE=auto`) | — | `dps-pg-owner` only |
 | `dps-migrate-maintain` | CronJob, daily 03:17 UTC | `data-privacy-services`: `python -m dps.migrate --maintain` (the migrate Job's pod, §6) | — | `dps-pg-owner` only |
 | `dps-app` | Service + Route | edge TLS, HTTP redirected, router timeout 300 s | 8400 | — |
 | `dps-db` | Service (ExternalName) | the platform PostgreSQL 16 (never deployed by DPS) | 5432 | — |
+
+**Start order.** Compose starts the app and the workers only after its `migrate` one-shot has
+completed; Kubernetes has no such order, and a release applies the migrate Job together with the
+Deployments. So each of `dps-app`, `dps-worker` and `dps-browser-worker` has an init container
+`wait-for-schema` that runs `python -m dps.migrate --verify` every 5 s until it passes: the
+migrations its image ships, read with the app login (`dps-pg-app`; no DDL, no other secret), in the
+pod's own image, security context and `/tmp`. A new pod therefore starts only once the release's Job
+has committed. Without that wait an app pod that started first would keep its job platform down
+until restarted (the app verifies the schema once, at boot: every database route answers 503
+`db_unavailable` while the pod stays Ready), and the workers would exit on `MigrationDrift` and
+crash-loop.
 
 Every pod runs under OpenShift's `restricted-v2` SCC: no `runAsUser` (the namespace's arbitrary UID),
 `runAsNonRoot`, `RuntimeDefault` seccomp, read-only root filesystem, no privilege escalation, all
@@ -58,7 +69,10 @@ overlay derives both from `images:` (§4).
 ## 2. What the platform provides first
 
 1. A namespace (`dps-dev`, `dps-prod`) with **user-workload monitoring** enabled on the cluster (for
-   the PodMonitor and the PrometheusRule).
+   the PodMonitor and the PrometheusRule), and no NetworkPolicy of its own: policies are additive,
+   so one a project template adds (e.g. `allow-from-same-namespace`) re-opens what `default-deny`
+   closes (the browser worker could then reach the app's port 8400). After the install,
+   `oc get networkpolicy` lists only the policies of `components/network-policies`.
 2. The **metadata database**: PostgreSQL 16, database `dps`, roles `dps_owner` (DDL), `dps_app`,
    `dps_worker_login` (contract §2.3; migration 001 also creates them when the owner may), TLS with a
    certificate for the host name DPS dials (`DPS_PG_HOST`, §4).
@@ -123,11 +137,18 @@ secrets store, Vault agent) at the same path.
    posture guard on them; without `dps` importable it warns `settings-skipped`).
 4. Apply: `kustomize build <release-dir> | oc apply -f -`.
 5. Wait for the schema: `oc wait --for=condition=complete job/dps-migrate-<release> --timeout=10m`.
-   Until it completes, the app's `/readyz` shows component `jobs` as `migrations pending or
-   drifted`, and the worker exits at start on the pending migrations (`MigrationDrift`) and
-   restarts (`CrashLoopBackOff`) — expected on a first install and on a release with new migrations;
-   it recovers on its next restart once the Job is complete.
-6. `oc rollout status deploy/dps-app deploy/dps-worker deploy/dps-browser-worker`.
+   Meanwhile every new app, worker and browser-worker pod waits in its init container
+   `wait-for-schema` (`Init:0/1`; `oc logs <pod> -c wait-for-schema` names the pending migration
+   files) and the previous release's pods keep serving (`maxUnavailable: 0`); each new pod starts
+   within about 5 s of the Job's completion. If the Job fails, the new pods keep waiting and the
+   rollout does not progress: read `oc logs job/dps-migrate-<release>`, fix the cause (forward),
+   then delete that Job and apply the release again (a Job does not retry past `backoffLimit`).
+6. `oc rollout status deploy/dps-app deploy/dps-worker deploy/dps-browser-worker`, then check that
+   every app replica has its job platform: component `jobs` `ok` in
+   `oc exec <pod> -c app -- python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8400/readyz').read().decode())"`
+   for each `dps-app` pod. The app verifies the schema only at start; a replica that reports
+   `migrations pending or drifted` does not recover by itself — restart it
+   (`oc rollout restart deploy/dps-app`).
 7. Bootstrap the first database key (printed once):
    `oc exec deploy/dps-app -- python -m dps.keys_cli create --name platform-admin --tenants '*' --scopes '*' --expires-in-days 90`
    and keep it in the secret manager (`DPS_BOOTSTRAP_API_KEY` stays unset everywhere).
@@ -137,7 +158,10 @@ secrets store, Vault agent) at the same path.
 Each release renames the migrate Job (`dps-migrate-<release>`): a Job's pod template is immutable,
 and the completed Job of the previous release stays as its record. The CronJob
 `dps-migrate-maintain` keeps its name (a CronJob's template is mutable): the release updates its
-image like the Job's.
+image like the Job's. Once a release's Job has applied a migration, the previous image cannot run
+against that schema (contract §2.1: migrations are never undone — fix forward): its pods would wait
+in `wait-for-schema` for good (`applied but no longer shipped`), so `oc rollout undo` is only for a
+release with the same migrations.
 
 ## 4. Deploy parameters (every placeholder)
 
@@ -150,7 +174,7 @@ difference, rule `db-host`).
 | app image | `image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services` @ `sha256:0000…0000` | release `images:` (`newName` + `digest`) |
 | browser-worker image | `image-registry.openshift-image-registry.svc:5000/dps-prod/data-privacy-services-browser` @ `sha256:0000…0000` | release `images:` |
 | `DPS_IMAGE_DIGEST` (ConfigMap `dps`) | `sha256:0000…0000` | **derived**: the release overlay's `replacements` copy the app image's digest from `images:` (app, worker, migrate Job and CronJob stamp it into evidence packs) |
-| `DPS_IMAGE_DIGEST` (`dps-browser-worker` env) | `sha256:0000…0000` | **derived** the same way from the browser image's digest (its scan evidence packs); kustomize runs `replacements` after `images` in the same kustomization, so the block stays in the overlay that sets `images:` |
+| `DPS_IMAGE_DIGEST` (`dps-browser-worker` env: its container and its `wait-for-schema`) | `sha256:0000…0000` | **derived** the same way from the browser image's digest (its scan evidence packs); kustomize runs `replacements` after `images` in the same kustomization, so the block stays in the overlay that sets `images:` |
 | `DPS_PG_HOST` | `postgres.example.invalid` | release `configMapGenerator: dps` — the platform PostgreSQL host, **same** as `dps-db`'s externalName |
 | `dps-db` `externalName` | `postgres.example.invalid` | release patch on Service `dps-db` |
 | `DPS_S3_ENDPOINT_URL` | `https://s3.example.invalid` | release `configMapGenerator: dps` |
@@ -181,14 +205,15 @@ reaches the app from the host network: add the peer
 way when the defaults do not fit): replicas, resources, the worker's `/tmp` size (it spools each
 `files`-target partition before the upload), the Route's `haproxy.router.openshift.io/timeout`,
 `DPS_S3_REGION`, `DPS_S3_BUCKET`, `DPS_LLM_MODEL`, `DPS_FPE_ENABLED` (FF1 after the licence review),
-`DPS_RETENTION_DAYS`.
+`DPS_RETENTION_DAYS`, `DPS_AUDIT_RETENTION_MONTHS` (default 13: the daily CronJob drops older audit
+months, so set it to the bank's audit retention period).
 
 ## 5. The release check (`tools/openshift_check.py`)
 
 | Level | Rules |
 |---|---|
 | **warn** (a placeholder or an example value) | `placeholder-digest` (an all-zero digest in an image or a setting), `placeholder-host` (a `.invalid` host anywhere, also inside a list), `placeholder-cidr` (a NetworkPolicy peer in `192.0.2.0/24`), `placeholder-job` (`dps-migrate-0`), `example-value` (the release example's `.example` hosts, TEST-NET-2/3 peers and `1…1`/`2…2` digests), `settings-skipped` |
-| **deny** (always fails) | `pod-security`, `container-security`, `resources`, `probes` (Deployments; not the Job and CronJob), `image-digest`, `image-digest-setting` (a DPS container whose `DPS_IMAGE_DIGEST` is unset, not a literal, or not its own image's digest — the zero placeholder only warns), `literal-secret` (a literal secret variable — the posture guard's secret names or a secret-like name —, a `DPS_*` from a `secretKeyRef`, an `envFrom` secret, a secret-named ConfigMap key), `secret-file` (a `*_FILE` outside a mounted Secret/ConfigMap), `owner-secret` (`dps-pg-owner` outside the migrate Job and CronJob `dps-migrate-maintain`), `service-account`, `default-deny`, `db-host` (`DPS_PG_HOST` not `dps-db`'s externalName), `prod-mocks` (a mock or source system with `DPS_ENV` staging/prod), `posture` (each DPS container's settings, built from the ConfigMap and its env with dummy secret files, fail `Settings` or — staging/prod Deployments — the production posture guard) |
+| **deny** (always fails) | `pod-security`, `container-security`, `resources`, `probes` (Deployments; not the Job and CronJob), `image-digest`, `image-digest-setting` (a DPS container whose `DPS_IMAGE_DIGEST` is unset, not a literal, or not its own image's digest — the zero placeholder only warns), `literal-secret` (a literal secret variable — the posture guard's secret names, a library's credential (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `PGPASSWORD`) or a secret-like name —, a `DPS_*` from a `secretKeyRef`, an `envFrom` secret, a secret-named key in any ConfigMap), `secret-file` (a `*_FILE` outside a mounted Secret/ConfigMap), `owner-secret` (`dps-pg-owner` outside the migrate Job and CronJob `dps-migrate-maintain`), `service-account`, `default-deny`, `db-host` (`DPS_PG_HOST` not `dps-db`'s externalName), `schema-wait` (a Deployment that runs DPS without an init container that runs `python -m dps.migrate --verify` in the DPS container's image with the `dps` ConfigMap), `prod-mocks` (a mock or source system with `DPS_ENV` staging/prod), `posture` (each DPS container's settings — init containers included —, built from the ConfigMap and its env with dummy secret files, fail `Settings` or — the DPS container of a staging/prod Deployment — the production posture guard) |
 
 Exit 0 = pass, 1 = a denial (or a warning with `--fail-on-warn`), 2 = the render failed. The
 committed overlays pass with warnings only; `tests/deploy/test_openshift.py` (`pytest -m deploy`)
@@ -210,9 +235,12 @@ Optional schema check (needs network for the schemas):
   `DPS_AUDIT_RETENTION_MONTHS` (13). Without it every audit write would fail about four months after
   the last release (`audit_flush_failed` in the logs; the audit search and report roll-ups stop).
   One run at a time (`concurrencyPolicy: Forbid`), each bounded to 30 minutes, 3 Jobs of history.
-  `DpsAuditMaintenanceStale` (warning) fires when it has not succeeded for 3 days, or never 3 days
-  after it was created; it reads kube-state-metrics' CronJob series, which a rule in the namespace
-  may query (not with the `leaf-prometheus` evaluation scope). To run it by hand:
+  `DpsAuditMaintenanceStale` (warning) fires when it has not succeeded for 3 days, or when a run
+  has failed and none has ever succeeded; it reads kube-state-metrics' CronJob and Job series, which
+  a rule in the namespace may query (not with the `leaf-prometheus` evaluation scope). OpenShift's
+  kube-state-metrics drops `kube_cronjob_created`, so a CronJob that has never been scheduled is not
+  seen: the day after installing, `oc get cronjob dps-migrate-maintain` shows a `LAST SCHEDULE`. To
+  run it by hand:
   `oc create job --from=cronjob/dps-migrate-maintain dps-migrate-maintain-manual`.
 - **KEK rotation** (HANDOFF §6): mount the new KEK in `dps-job-kek` as `kek` and the old one as
   `kek_previous`, add `DPS_JOB_KEK_PREVIOUS_FILE=/var/run/secrets/dps/kek/kek_previous` to the app and
@@ -228,6 +256,10 @@ Optional schema check (needs network for the schemas):
   value. Restrict them at the router if the Route is reachable beyond the bank's network.
 - The image's entrypoint runs `dps.migrate` only for `DPS_MIGRATIONS_MODE=auto` with `uvicorn`; the
   ConfigMap sets `verify`, so only the Job changes the schema.
+- **A pod in `Init:0/1`** waits for the schema its image needs (§1, start order): `oc logs <pod> -c
+  wait-for-schema` prints one line per check, naming the pending or drifted migration files (names
+  only; `migrations: failed (<error class>)` when the database cannot be reached). It needs the
+  migrate Job of the same release to complete, or (`applied but no longer shipped`) a newer image.
 
 ## 7. dev
 

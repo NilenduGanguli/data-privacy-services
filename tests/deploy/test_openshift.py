@@ -1,7 +1,8 @@
 """OpenShift manifests (M5 Task 25): kustomize base, components, dev and prod overlays.
 
 Renders ``deploy/openshift/overlays/{dev,prod}`` and the worked release example with the
-``kustomize`` binary and checks the objects: every role, pod security for OpenShift's
+``kustomize`` binary and checks the objects: every role, the start order (each DPS Deployment
+waits in an init container for the release's schema), pod security for OpenShift's
 ``restricted-v2`` SCC (arbitrary UID, read-only root), digests, secrets only as mounted files, the
 production posture guard per role, network policies, monitoring, and the Wega placeholder pattern
 (committed overlays carry placeholders that only *warn*; ``tools/openshift_check.py
@@ -37,6 +38,14 @@ RELEASE_EXAMPLE = DEPLOY / "release-example"
 OVERLAYS = ("dev", "prod")
 ROLES = ("dps-app", "dps-worker", "dps-browser-worker")
 MAINTAIN = "dps-migrate-maintain"  # the audit-partition CronJob (S5 review r1, B1)
+SCHEMA_WAIT = "wait-for-schema"  # init container of each DPS Deployment (S5 review r2, B1)
+# Retries the verify until it passes (5 s apart); the trap ends the wait at once on SIGTERM (a shell
+# as PID 1 ignores it otherwise and the pod hangs for its grace period when it is deleted).
+SCHEMA_WAIT_ARGS = [
+    "sh",
+    "-c",
+    "trap 'exit 143' TERM INT; until python -m dps.migrate --verify; do sleep 5 & wait $!; done",
+]
 KUSTOMIZE = oc.find_kustomize()
 
 
@@ -69,8 +78,30 @@ def main_container(pod: dict[str, Any]) -> dict[str, Any]:
     return containers[0]
 
 
+def schema_wait(pod: dict[str, Any]) -> dict[str, Any]:
+    """The pod's only init container, which must be the schema wait."""
+    inits: list[dict[str, Any]] = pod.get("initContainers", [])
+    assert [c["name"] for c in inits] == [SCHEMA_WAIT]
+    return inits[0]
+
+
+def dps_containers(pod: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every container (init containers included) that takes the ``dps`` ConfigMap."""
+    return [c for c in oc.containers(pod) if oc.reads_dps_configmap(c)]
+
+
 def env_of(container: dict[str, Any]) -> dict[str, str]:
     return {e["name"]: e.get("value", "") for e in container.get("env", []) if "value" in e}
+
+
+def quantity(value: str | int) -> float:
+    """A Kubernetes cpu or memory quantity as a number (``500m`` → 0.5, ``2Gi`` → 2 * 1024**3)."""
+    text = str(value)
+    units = {"m": 1e-3, "Ki": 1024.0, "Mi": 1024.0**2, "Gi": 1024.0**3}
+    for suffix, factor in units.items():
+        if text.endswith(suffix):
+            return float(text.removesuffix(suffix)) * factor
+    return float(text)
 
 
 def secret_volumes(pod: dict[str, Any]) -> set[str]:
@@ -109,12 +140,13 @@ def release_overlay(tmp_path: Path, *, derive: bool = True, literals: Sequence[s
 
 
 def stamped_digests(docs: list[dict[str, Any]]) -> dict[str, str]:
-    """``DPS_IMAGE_DIGEST`` each DPS container starts with (ConfigMap, then its own env)."""
+    """``DPS_IMAGE_DIGEST`` each DPS container starts with (ConfigMap, then its own env), keyed
+    ``<workload>/<container>``; init containers included."""
     out: dict[str, str] = {}
     for _, name, pod in oc.workloads(docs):
-        container = oc.dps_container(pod)
-        if container is not None:
-            out[name] = oc.pod_environment(docs, container).get("DPS_IMAGE_DIGEST", "")
+        for container in dps_containers(pod):
+            digest = oc.pod_environment(docs, container).get("DPS_IMAGE_DIGEST", "")
+            out[f"{name}/{container['name']}"] = digest
     return out
 
 
@@ -216,8 +248,12 @@ def test_pod_security_everywhere(overlay: str) -> None:
             mounts = {m["mountPath"] for m in c.get("volumeMounts", [])}
             assert "/tmp" in mounts, (name, c["name"])
             assert env_of(c).get("HOME") == "/tmp", (name, c["name"])
-            if kind == "Deployment":
+            if kind == "Deployment" and c in pod["containers"]:
                 assert c.get("livenessProbe") and c.get("readinessProbe"), (name, c["name"])
+            if c in pod.get("initContainers", []):
+                # the API server refuses probes on an init container (it is not a sidecar)
+                assert not {"livenessProbe", "readinessProbe", "startupProbe"} & set(c), name
+                assert "restartPolicy" not in c, name
         for volume in pod.get("volumes", []):
             if "secret" in volume:
                 assert volume["secret"].get("defaultMode") == 0o440, (name, volume["name"])
@@ -294,6 +330,28 @@ def test_secret_settings_cover_the_posture_guard() -> None:
     assert all(f.level == "deny" for f in denied)
     for name in ("DPS_COIN_CLIENT_ID", "DPS_S3_ACCESS_KEY_ID", "DPS_JOB_KEK_PREVIOUS"):
         assert any(f.message.startswith(name + " ") for f in denied), name
+
+
+def test_the_release_check_denies_library_secrets_in_the_configmap_and_the_env() -> None:
+    """S5 review r2, N2: botocore and libpq read these names from the environment, and the
+    ``dps`` ConfigMap already carries a key that is not ``DPS_*`` (``AWS_CA_BUNDLE``)."""
+    docs = render("prod")
+    assert not [f for f in oc.check(docs, settings=False) if f.rule == "literal-secret"]
+    data = one(docs, "ConfigMap", "dps")["data"]
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "PGPASSWORD"):
+        data[name] = "x"
+    main_container(pod_of(docs, "dps-app"))["env"].append(
+        {"name": "AWS_ACCESS_KEY_ID", "value": "x"}
+    )
+    denied = [f for f in oc.check(docs, settings=False) if f.rule == "literal-secret"]
+    assert all(f.level == "deny" for f in denied)
+    assert sorted((f.resource, f.message.split()[0]) for f in denied) == [
+        ("ConfigMap/dps", "AWS_ACCESS_KEY_ID"),
+        ("ConfigMap/dps", "AWS_SECRET_ACCESS_KEY"),
+        ("ConfigMap/dps", "PGPASSWORD"),
+        ("Deployment/dps-app container app", "AWS_ACCESS_KEY_ID"),
+    ]
+    assert not oc.is_secret_setting("AWS_CA_BUNDLE")  # a CA bundle path, not a secret
 
 
 @pytest.mark.parametrize("overlay", OVERLAYS)
@@ -437,6 +495,95 @@ def test_every_role_has_the_logins_its_process_opens() -> None:
     assert "DPS_PG_WORKER_PASSWORD_FILE" not in env_of(main_container(pod_of(docs, "dps-app")))
 
 
+# --- start order: the release's schema before the processes (S5 review r2, B1) ---------------------
+
+
+@pytest.mark.parametrize("target", [*OVERLAYS, "release-example"])
+def test_every_dps_deployment_waits_for_the_release_schema(target: str) -> None:
+    """S5 review r2, B1: compose starts app and workers only after its ``migrate`` one-shot has
+    completed (``service_completed_successfully``); Kubernetes has no such order, and a release
+    applies the migrate Job and the Deployments together. An app pod that started before the Job
+    committed verified the schema once, kept its job platform down (every ``require_db`` route 503)
+    and stayed Ready; the workers exited on ``MigrationDrift`` and crash-looped. So each Deployment
+    that runs DPS first waits in an init container until ``python -m dps.migrate --verify`` passes,
+    with the image it runs (the migrations that image ships) and the login that check opens.
+    """
+    docs = render(target)
+    deployments = {n: pod for k, n, pod in oc.workloads(docs) if k == "Deployment"}
+    runs_dps = {n for n, pod in deployments.items() if dps_containers(pod)}
+    assert runs_dps == set(ROLES)
+    # the dev mocks are not DPS processes; the migrate Job and CronJob apply what the wait awaits
+    assert {n for n, pod in deployments.items() if pod.get("initContainers")} == runs_dps
+    others = [
+        n for k, n, pod in oc.workloads(docs) if k != "Deployment" and "initContainers" in pod
+    ]
+    assert others == []
+    for name in sorted(runs_dps):
+        pod = deployments[name]
+        main, wait = main_container(pod), schema_wait(pod)
+        # args, not command: the app image's entrypoint stays (in verify mode it only execs them)
+        assert "command" not in wait and wait["args"] == SCHEMA_WAIT_ARGS, name
+        assert wait["image"] == main["image"], name
+        assert wait["envFrom"] == main["envFrom"] == [{"configMapRef": {"name": "dps"}}], name
+        expected = {"HOME": "/tmp", "DPS_PG_PASSWORD_FILE": env_of(main)["DPS_PG_PASSWORD_FILE"]}
+        if "DPS_IMAGE_DIGEST" in env_of(main):  # the browser worker's own image digest
+            expected["DPS_IMAGE_DIGEST"] = env_of(main)["DPS_IMAGE_DIGEST"]
+        assert env_of(wait) == expected and len(wait["env"]) == len(expected), name
+        mounts = {m["name"]: m for m in main["volumeMounts"]}
+        assert wait["volumeMounts"] == [mounts["tmp"], mounts["ca"], mounts["pg-app"]], name
+        assert wait["securityContext"] == main["securityContext"], name
+        # small, and never above the main container's: the pod is scheduled on the larger of the two
+        for part in ("requests", "limits"):
+            for resource in ("cpu", "memory"):
+                small = quantity(wait["resources"][part][resource])
+                assert 0 < small <= quantity(main["resources"][part][resource]), (name, part)
+    # app and worker run one image, so they wait in exactly the same way
+    assert schema_wait(deployments["dps-app"]) == schema_wait(deployments["dps-worker"])
+    assert not [f for f in oc.check(docs, settings=False) if f.rule == "schema-wait"]
+
+
+def test_the_schema_wait_holds_only_the_login_its_check_opens() -> None:
+    """``python -m dps.migrate --verify`` reads the ledger through ``db.verify_migrations``, which
+    opens the API pool (the app login): the wait mounts that Secret and no other — no KEK, no API
+    keys, never the owner login (the Task 25 runtime proof: ``--verify`` cannot run in the Job's pod).
+    """
+    from dps import db, migrate
+
+    assert "db.verify_migrations(" in inspect.getsource(migrate._run)
+    assert _opens(db.verify_migrations) == {"app"}
+    docs = render("prod")
+    for role in ROLES:
+        pod = pod_of(docs, role)
+        volumes = {v["name"]: v for v in pod["volumes"]}
+        wait = schema_wait(pod)
+        secrets = {
+            volumes[m["name"]]["secret"]["secretName"]
+            for m in wait["volumeMounts"]
+            if "secret" in volumes[m["name"]]
+        }
+        assert secrets == {"dps-pg-app"}, role
+        assert {k for k in env_of(wait) if k.endswith("_FILE")} == {"DPS_PG_PASSWORD_FILE"}, role
+    readme = README.read_text("utf-8")
+    assert SCHEMA_WAIT in readme and "python -m dps.migrate --verify" in readme
+
+
+def test_the_release_check_denies_a_dps_deployment_that_does_not_wait_for_its_schema() -> None:
+    docs = render("prod")
+    assert not [f for f in oc.check(docs, settings=False) if f.rule == "schema-wait"]
+    del pod_of(docs, "dps-worker")["initContainers"]  # starts at once
+    schema_wait(pod_of(docs, "dps-app"))["args"] = ["sh", "-c", "sleep 30"]  # waits for nothing
+    # verifies the migrations another image ships
+    app_image = main_container(pod_of(docs, "dps-app"))["image"]
+    schema_wait(pod_of(docs, "dps-browser-worker"))["image"] = app_image
+    denied = [f for f in oc.check(docs, settings=False) if f.rule == "schema-wait"]
+    assert all(f.level == "deny" for f in denied)
+    assert sorted(f.resource for f in denied) == [
+        "Deployment/dps-app",
+        "Deployment/dps-browser-worker",
+        "Deployment/dps-worker",
+    ]
+
+
 # --- configuration: Settings and the production posture guard ------------------------------------
 
 
@@ -461,10 +608,26 @@ def test_the_posture_probe_sees_a_weakened_configuration() -> None:
 @pytest.mark.parametrize("overlay", OVERLAYS)
 def test_every_workload_builds_its_settings(overlay: str) -> None:
     docs = render(overlay)
+    checked = 0
     for _, name, pod in oc.workloads(docs):
-        if oc.dps_container(pod) is None:
-            continue  # the dev mocks are not DPS processes
-        assert oc.settings_problems(docs, name, posture=False) == [], name
+        for container in dps_containers(pod):  # the dev mocks are not DPS processes
+            cname = container["name"]
+            assert oc.settings_problems(docs, name, posture=False, container=cname) == [], cname
+            checked += 1
+    assert checked == len(ROLES) * 2 + 2  # each role and its schema wait; the Job; the CronJob
+
+
+def test_the_release_check_builds_the_settings_of_the_schema_wait_too() -> None:
+    """The wait runs DPS code (``dps.migrate`` builds ``Settings``) with its own, shorter env."""
+    docs = render("prod")
+    assert [f for f in oc.configuration_findings(docs) if f.level == "deny"] == []
+    wait = schema_wait(pod_of(docs, "dps-worker"))
+    wait["env"].append({"name": "DPS_MIGRATIONS_MODE", "value": "sometimes"})
+    denied = [f for f in oc.configuration_findings(docs) if f.level == "deny"]
+    assert [(f.rule, f.resource) for f in denied] == [
+        ("posture", f"Deployment/dps-worker container {SCHEMA_WAIT}")
+    ]
+    assert "migrations_mode" in denied[0].message
 
 
 @pytest.mark.parametrize("target", [*OVERLAYS, "release-example"])
@@ -496,14 +659,24 @@ def test_each_container_stamps_its_own_image_digest(target: str) -> None:
     """
     docs = render(target)
     stamped = stamped_digests(docs)
-    assert set(stamped) == {*ROLES, MAINTAIN} | {n for k, n, _ in oc.workloads(docs) if k == "Job"}
+    jobs = {n for k, n, _ in oc.workloads(docs) if k == "Job"}
+    assert set(stamped) == {
+        "dps-app/app",
+        "dps-worker/worker",
+        "dps-browser-worker/browser-worker",
+        *(f"{role}/{SCHEMA_WAIT}" for role in ROLES),  # S5 review r2: the schema waits read it too
+        f"{MAINTAIN}/migrate",
+        *(f"{job}/migrate" for job in jobs),
+    }
     for _, name, pod in oc.workloads(docs):
-        container = oc.dps_container(pod)
-        if container is not None:
-            assert stamped[name] == image_digest(container), name
-    assert "DPS_IMAGE_DIGEST" in env_of(main_container(pod_of(docs, "dps-browser-worker")))
+        for container in dps_containers(pod):
+            key = f"{name}/{container['name']}"
+            assert stamped[key] == image_digest(container), key
+    browser = pod_of(docs, "dps-browser-worker")
+    assert "DPS_IMAGE_DIGEST" in env_of(main_container(browser))
+    assert "DPS_IMAGE_DIGEST" in env_of(schema_wait(browser))  # it runs the browser image too
     if target == "release-example":
-        assert stamped["dps-browser-worker"] != stamped["dps-app"]
+        assert stamped["dps-browser-worker/browser-worker"] != stamped["dps-app/app"]
     assert not [f for f in oc.check(docs, settings=False) if f.rule == "image-digest-setting"]
 
 
@@ -518,7 +691,11 @@ def test_a_release_that_sets_every_parameter_passes_the_gate(tmp_path: Path) -> 
     assert oc.check(docs) == []  # with the Settings and posture probe of every role
     assert oc.main([str(release), "--settings", "off", "--fail-on-warn"]) == 0
     stamped = stamped_digests(docs)
-    assert stamped.pop("dps-browser-worker") == "sha256:" + "b" * 64
+    browser = {k: stamped.pop(k) for k in sorted(stamped) if k.startswith("dps-browser-worker/")}
+    assert browser == {
+        "dps-browser-worker/browser-worker": "sha256:" + "b" * 64,
+        f"dps-browser-worker/{SCHEMA_WAIT}": "sha256:" + "b" * 64,
+    }
     assert set(stamped.values()) == {"sha256:" + "a" * 64}
 
 
@@ -537,26 +714,33 @@ def test_the_release_check_denies_a_stale_digest_setting(tmp_path: Path) -> None
     assert sorted(f.resource for f in denied) == [
         f"CronJob/{MAINTAIN} container migrate",
         "Deployment/dps-app container app",
+        f"Deployment/dps-app container {SCHEMA_WAIT}",
+        f"Deployment/dps-worker container {SCHEMA_WAIT}",
         "Deployment/dps-worker container worker",
         "Job/dps-migrate-1-0-0 container migrate",
     ]
-    # the browser worker's own entry is still the zero placeholder: a warning (the gate refuses it
-    # with --fail-on-warn), not this denial
+    # the browser worker's own entries (its two containers) are still the zero placeholder: a
+    # warning each (the gate refuses them with --fail-on-warn), not this denial
     zero = [f.resource for f in findings if f.rule == "placeholder-digest"]
-    assert zero == ["Deployment/dps-browser-worker"]
+    assert zero == ["Deployment/dps-browser-worker"] * 2
     assert oc.main([str(release), "--settings", "off"]) == 1
 
 
-def test_the_release_check_denies_the_app_digest_in_the_browser_worker(tmp_path: Path) -> None:
-    """Without its own entry the browser worker inherits the ConfigMap's value: the app image's."""
+@pytest.mark.parametrize("container", ["browser-worker", SCHEMA_WAIT])
+def test_the_release_check_denies_the_app_digest_in_the_browser_worker(
+    tmp_path: Path, container: str
+) -> None:
+    """Without its own entry a browser-worker container inherits the ConfigMap's value: the app
+    image's. Its schema wait runs the browser image as well."""
     if KUSTOMIZE is None:
         pytest.skip("needs the kustomize binary (marker deploy)")
     docs = oc.render(release_overlay(tmp_path), KUSTOMIZE)
-    browser = main_container(pod_of(docs, "dps-browser-worker"))
-    browser["env"] = [e for e in browser["env"] if e["name"] != "DPS_IMAGE_DIGEST"]
+    pod = pod_of(docs, "dps-browser-worker")
+    target = next(c for c in oc.containers(pod) if c["name"] == container)
+    target["env"] = [e for e in target["env"] if e["name"] != "DPS_IMAGE_DIGEST"]
     denied = [f for f in oc.check(docs, settings=False) if f.rule == "image-digest-setting"]
     assert [(f.level, f.resource) for f in denied] == [
-        ("deny", "Deployment/dps-browser-worker container browser-worker")
+        ("deny", f"Deployment/dps-browser-worker container {container}")
     ]
 
 
@@ -570,12 +754,14 @@ def test_the_digest_setting_must_be_a_literal_the_check_can_compare() -> None:
         if e["name"] != "DPS_IMAGE_DIGEST"
     ] + [{"name": "DPS_IMAGE_DIGEST", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}]
     findings = [f for f in oc.check(docs, settings=False) if f.rule == "image-digest-setting"]
-    assert len(findings) == 5 and all(f.level == "deny" for f in findings)
+    assert len(findings) == 7 and all(f.level == "deny" for f in findings)
     denied = {f.resource: f.message for f in findings}
     unset = [r for r, m in denied.items() if "DPS_IMAGE_DIGEST is not set" in m]
     assert sorted(unset) == [
         f"CronJob/{MAINTAIN} container migrate",
         "Deployment/dps-app container app",
+        f"Deployment/dps-app container {SCHEMA_WAIT}",
+        f"Deployment/dps-worker container {SCHEMA_WAIT}",
         "Deployment/dps-worker container worker",
         "Job/dps-migrate-0 container migrate",
     ]
@@ -750,11 +936,14 @@ def test_metrics_are_scraped_and_the_alerts_exist() -> None:
     # only the app loads DB keys: the gauge reads 0 in every worker
     assert 'app_kubernetes_io_component="app"' in rules["DpsNoDbKeysLoaded"]["expr"]
     assert 'app_kubernetes_io_component="worker"' in rules["DpsWorkersAbsent"]["expr"]
-    # the audit-partition CronJob (B1) has not succeeded for days, or never since it was created:
-    # kube-state-metrics series, which rules in a user namespace may read for that namespace
+    # the audit-partition CronJob (r1 B1) has not succeeded for days, or its runs fail and it has
+    # never succeeded: kube-state-metrics series, which rules in a user namespace may read for that
+    # namespace. Not kube_cronjob_created: OpenShift's kube-state-metrics drops every *_created
+    # series, so a "never since creation" branch could not fire there (S5 review r2, N1).
     stale = rules["DpsAuditMaintenanceStale"]["expr"]
     assert f'kube_cronjob_status_last_successful_time{{cronjob="{MAINTAIN}"}}' in stale
-    assert f'kube_cronjob_created{{cronjob="{MAINTAIN}"}}' in stale
+    assert f'kube_job_status_failed{{job_name=~"{MAINTAIN}-.*"}}' in stale
+    assert not re.search(r"kube_\w+_created\b", stale)
     for name, r in rules.items():
         assert r["annotations"]["summary"], name
 

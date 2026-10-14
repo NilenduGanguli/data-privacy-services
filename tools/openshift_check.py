@@ -18,9 +18,12 @@ images, secrets only as mounted files, the owner (DDL) login only in the migrate
 audit-maintenance CronJob, a ``default-deny`` NetworkPolicy, and no mocks or source systems in
 staging/prod. Two consistency rules deny as well: each DPS container's ``DPS_IMAGE_DIGEST`` (stamped
 into every evidence pack) is the digest of the image that container runs, and ``DPS_PG_HOST`` is the
-``dps-db`` Service's externalName. With the ``dps`` package importable, each DPS container's
-settings are built from the ConfigMap and its env (every ``*_FILE`` pointed at a dummy file) in a
-clean subprocess and, in staging/prod, run through the production posture guard
+``dps-db`` Service's externalName. So does the start order: every Deployment that runs DPS waits in
+an init container until ``python -m dps.migrate --verify`` passes, in the image it runs
+(``schema-wait``; Kubernetes applies the migrate Job and the Deployments together). With the ``dps``
+package importable, each DPS container's settings (init containers included) are built from the
+ConfigMap and its env (every ``*_FILE`` pointed at a dummy file) in a clean subprocess and, for the
+Deployments' DPS containers in staging/prod, run through the production posture guard
 (``dps.posture.posture_problems``).
 
 Usage::
@@ -78,6 +81,11 @@ SECRET_SETTINGS = frozenset(
         "DPS_S3_SECRET_ACCESS_KEY",
     }
 )
+#: Credentials the libraries in the images read from the environment (botocore, libpq): never a
+#: literal either, in a ConfigMap or an env entry (``AWS_ACCESS_KEY_ID`` ends in neither suffix).
+LIBRARY_SECRETS = frozenset(
+    {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "PGPASSWORD"}
+)
 PROD_FORBIDDEN = re.compile(r"mock|oracle|mongo|minio|source-pg")
 WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 RUN_TO_COMPLETION = ("Job", "CronJob")  # no liveness/readiness probes
@@ -87,6 +95,7 @@ MAINTAIN_CRONJOB = "dps-migrate-maintain"  # python -m dps.migrate --maintain, d
 DPS_CONFIGMAP = "dps"
 DIGEST_SETTING = "DPS_IMAGE_DIGEST"
 DB_SERVICE = "dps-db"
+SCHEMA_VERIFY = "python -m dps.migrate --verify"  # what a DPS Deployment's init container waits on
 
 
 class RenderError(RuntimeError):
@@ -158,8 +167,9 @@ def objects(docs: Sequence[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
 
 
 def is_secret_setting(name: str) -> bool:
-    """A variable that must never carry a literal: the guard's secrets, or a secret-like name."""
-    return name in SECRET_SETTINGS or bool(SECRET_NAME.search(name))
+    """A variable that must never carry a literal: the guard's secrets, a library's credential, or
+    a secret-like name."""
+    return name in SECRET_SETTINGS or name in LIBRARY_SECRETS or bool(SECRET_NAME.search(name))
 
 
 def is_migrate_workload(kind: str, name: str) -> bool:
@@ -425,8 +435,9 @@ def hardening_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
                 )
             )
     for cm in objects(docs, "ConfigMap"):
+        # every key, not only DPS_*: a ConfigMap taken as envFrom feeds the libraries too
         for key in cm.get("data") or {}:
-            if str(key).startswith("DPS_") and is_secret_setting(str(key)):
+            if is_secret_setting(str(key)):
                 out.append(Finding("deny", "literal-secret", ref(cm), f"{key} is a secret setting"))
     policies = objects(docs, "NetworkPolicy")
     if not any(
@@ -507,6 +518,47 @@ def image_digest_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
     return out
 
 
+def _command_line(container: dict[str, Any]) -> str:
+    return " ".join(
+        str(p) for p in [*(container.get("command") or []), *(container.get("args") or [])]
+    )
+
+
+def schema_wait_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
+    """A ``deny`` per long-running DPS workload that can start before its release's schema.
+
+    Compose starts the app and the workers after its ``migrate`` one-shot completed; Kubernetes
+    applies the migrate Job and the Deployments together. The app verifies the schema once at boot
+    (one that starts too early keeps its job platform down and stays Ready) and the workers exit on
+    drift, so each such pod waits in an init container that runs ``python -m dps.migrate --verify``
+    until it passes, with the image of its DPS container and the ``dps`` ConfigMap: the migrations
+    that image ships, checked against the database it uses.
+    """
+    out: list[Finding] = []
+    for kind, name, pod in workloads(docs):
+        main = dps_container(pod)
+        if kind in RUN_TO_COMPLETION or main is None:
+            continue  # the migrate Job and CronJob apply the schema; mocks are not DPS
+        waits = [
+            c for c in pod.get("initContainers", []) or [] if SCHEMA_VERIFY in _command_line(c)
+        ]
+        if not waits:
+            message = (
+                f"no init container runs `{SCHEMA_VERIFY}` until it passes: a pod that starts "
+                "before the release's migrate Job has committed keeps its job platform down (app) "
+                "or crash-loops (workers)"
+            )
+        elif not any(c.get("image") == main.get("image") and reads_dps_configmap(c) for c in waits):
+            message = (
+                f"the schema wait must run {main.get('name')}'s image with the {DPS_CONFIGMAP} "
+                "ConfigMap (the migrations that image ships, against the database it uses)"
+            )
+        else:
+            continue
+        out.append(Finding("deny", "schema-wait", f"{kind}/{name}", message))
+    return out
+
+
 def database_host_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
     """A ``deny`` when ``DPS_PG_HOST`` is not the ``dps-db`` Service's externalName.
 
@@ -564,20 +616,32 @@ def _dummy_secret(env_name: str) -> str:
 
 
 def settings_problems(
-    docs: Sequence[dict[str, Any]], workload: str, *, posture: bool
+    docs: Sequence[dict[str, Any]],
+    workload: str,
+    *,
+    posture: bool,
+    container: str | None = None,
 ) -> list[str] | None:
-    """Build the DPS container's Settings in a clean subprocess; with ``posture``, also the guard.
+    """Build a DPS container's Settings in a clean subprocess; with ``posture``, also the guard.
 
-    The environment is the ConfigMap plus the container's literal env (nothing from the caller's
-    environment); every ``*_FILE`` points at a dummy file. ``None`` when ``dps`` is not importable.
+    ``container`` names one of the pod's containers or init containers (default: its DPS
+    container). The environment is the ConfigMap plus that container's literal env (nothing from
+    the caller's environment); every ``*_FILE`` points at a dummy file. ``None`` when ``dps`` is not
+    importable.
     """
     pod = next((p for _, n, p in workloads(docs) if n == workload), None)
     if pod is None:
         raise KeyError(workload)
-    container = dps_container(pod)
     if container is None:
-        return []
-    env = pod_environment(docs, container)
+        target = dps_container(pod)
+        if target is None:
+            return []
+    else:
+        found = [c for c in containers(pod) if c.get("name") == container]
+        if not found:
+            raise KeyError(f"{workload}/{container}")
+        target = found[0]
+    env = pod_environment(docs, target)
     with tempfile.TemporaryDirectory(prefix="dps-openshift-check-") as tmp:
         for key in [k for k in env if k.endswith("_FILE")]:
             dummy = Path(tmp) / key.lower()
@@ -604,30 +668,37 @@ def settings_problems(
 
 
 def configuration_findings(docs: Sequence[dict[str, Any]]) -> list[Finding]:
-    """Settings for every DPS workload; the posture guard for Deployments in staging/prod."""
+    """Settings for every DPS container, init containers included (the schema wait runs
+    ``dps.migrate``, which builds them from its own env); the posture guard for the DPS container
+    of each Deployment in staging/prod (the process that serves or works)."""
     out: list[Finding] = []
     production = configmap_data(docs).get("DPS_ENV", "") in ("staging", "prod")
     for kind, name, pod in workloads(docs):
-        if dps_container(pod) is None:
-            continue
-        problems = settings_problems(docs, name, posture=production and kind == "Deployment")
-        if problems is None:
-            return [
-                Finding(
-                    "warn",
-                    "settings-skipped",
-                    "-",
-                    "dps is not importable here: run from the repository's venv to check "
-                    "Settings and the posture guard",
-                )
-            ]
-        out.extend(Finding("deny", "posture", f"{kind}/{name}", p) for p in problems)
+        main = dps_container(pod)
+        for c in containers(pod):
+            if not reads_dps_configmap(c):
+                continue
+            guarded = production and kind == "Deployment" and c is main
+            problems = settings_problems(docs, name, posture=guarded, container=str(c.get("name")))
+            if problems is None:
+                return [
+                    Finding(
+                        "warn",
+                        "settings-skipped",
+                        "-",
+                        "dps is not importable here: run from the repository's venv to check "
+                        "Settings and the posture guard",
+                    )
+                ]
+            where = f"{kind}/{name}" if c is main else f"{kind}/{name} container {c.get('name')}"
+            out.extend(Finding("deny", "posture", where, p) for p in problems)
     return out
 
 
 def check(docs: Sequence[dict[str, Any]], *, settings: bool = True) -> list[Finding]:
     """Every finding for a render: hardening and configuration denials, placeholder warnings."""
     findings = hardening_findings(docs) + image_digest_findings(docs) + database_host_findings(docs)
+    findings += schema_wait_findings(docs)
     findings += placeholder_findings(docs)
     if settings:
         findings += configuration_findings(docs)

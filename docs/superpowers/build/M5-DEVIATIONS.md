@@ -1225,6 +1225,54 @@ Finish stage, branch `fos`, review `S5-review-r1.md` (2 blocking findings), fixe
   really validated); the CronJob's rendered prod pod spec under the arbitrary-UID, read-only Docker
   emulation against a TLS PostgreSQL 16, with the clock moved (HANDOFF §15).
 
+## S5 review r2 fix — the release's schema before the pods (B1); N1, N2, N4–N6
+
+Finish stage, branch `fos`, review `S5-review-r2.md` (1 blocking finding), fixed test-first.
+
+- **B1:** compose orders `migrate` → app/worker (`service_completed_successfully`); the manifests had
+  no such order and README §3 applies the Job with the Deployments. The app verifies the schema
+  once at boot (`dps/app.py` `_JobPlatform._connect` sets `db_state=down` on pending migrations and
+  starts no retry), so an app pod that won the race kept every `require_db` route at 503 while it
+  stayed Ready, until restarted (the review's proof; reproduced here in containers). Each of
+  `dps-app`, `dps-worker` and `dps-browser-worker` now has the init container `wait-for-schema`:
+  the pod's image, `args` (not `command`: the app image's entrypoint stays)
+  `sh -c "trap 'exit 143' TERM INT; until python -m dps.migrate --verify; do sleep 5 & wait $!; done"`,
+  `envFrom` the `dps` ConfigMap, env `HOME=/tmp` and `DPS_PG_PASSWORD_FILE` (`--verify` opens the
+  API pool, i.e. the app login, which all three pods mount) — the browser worker's also its own
+  `DPS_IMAGE_DIGEST`, derived like its container's by the release example's `replacements` —,
+  mounts `tmp`, `ca`, `pg-app`, the main container's security context, requests 50m/64Mi and
+  limits 500m/256Mi. Differences from the review's text: the `trap` and `sleep 5 & wait $!` (a
+  shell as PID 1 ignores SIGTERM, so a deleted waiting pod hung for its grace period: measured 20 s
+  to SIGKILL without, under 1 s with); the review's wording otherwise as given.
+- Checker: deny rule `schema-wait` — a Deployment (any non-Job workload) whose DPS container reads
+  the `dps` ConfigMap needs an init container whose command line contains
+  `python -m dps.migrate --verify`, in the DPS container's image, reading the ConfigMap (a plain
+  `--verify` without the loop also passes: the kubelet retries a failed init container).
+  `configuration_findings` now builds `Settings` for every DPS container, init containers included
+  (`settings_problems(..., container=...)`); the posture guard still runs only on the Deployments'
+  DPS containers. `image-digest-setting` already covered init containers.
+- Docs: README §1 "Start order", §3 steps 5–6 (the pods wait in `Init:0/1`; the app does not
+  recover by itself, so step 6 checks component `jobs` on every app replica — the review's
+  fallback, kept as a check), the rollback note (an older image waits for good once a migration is
+  applied: fix forward), §4 digest row, §5 rules, §6 `Init:0/1`; HANDOFF §1/§15; contract §11.1.
+- Non-blocking items fixed (same files): **N1** `DpsAuditMaintenanceStale`'s second branch read
+  `kube_cronjob_created`, which OpenShift's kube-state-metrics drops: now a failed run
+  (`kube_job_status_failed{job_name=~"dps-migrate-maintain-.*"} > 0`) with no success ever (promtool:
+  six cases); a CronJob never scheduled at all stays uncovered (README says how to check). **N2**
+  `literal-secret` checks every key of every ConfigMap and the libraries' credentials
+  (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `PGPASSWORD`), in env entries
+  too. **N4** closed by B1 (the browser worker waits). **N5** README §2: the namespaces carry no
+  NetworkPolicy of their own. **N6** README §4 names `DPS_AUDIT_RETENTION_MONTHS`.
+- Carried: N3 (`DPS_IMAGE_DIGEST` of the app-image containers comes from the shared ConfigMap, so
+  a rollback to an older ReplicaSet stamps the newer digest — a per-container env entry derived by
+  `replacements` would fix it; now also relevant to the app-image waits), N7–N11 as in r1, and for
+  main (F1/F4) the app's single verify at boot (contract §2.1: verify mode should keep re-verifying,
+  or exit).
+- Tests: 5 new (8 cases) and 8 changed; 60 deploy tests pass, 1 skips (`dps.browser_worker`). Proofs: kubeconform `-strict` with the OpenShift
+  4.14/4.16/4.19 strict catalogs and the Kubernetes 1.27/1.29 schemas (0 skipped; an unknown field
+  in an init container is refused); the release race in containers, with and without the wait
+  (HANDOFF §15); promtool tests of the alert.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

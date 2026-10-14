@@ -75,20 +75,23 @@ spec:
             description: >-
               No dps-worker pod has answered its /metrics scrape for 10 minutes.
         # kube-state-metrics series (platform monitoring): a rule in a user namespace may read them
-        # for its own namespace (not with the leaf-prometheus evaluation scope). The second branch
-        # covers a CronJob that has never succeeded since it was created.
+        # for its own namespace (not with the leaf-prometheus evaluation scope). The first branch:
+        # no success for 3 days. The second: a run has failed (its Job carries the Failed condition)
+        # and none has ever succeeded, which last_successful_time cannot show (it exists only after
+        # a first success). Not kube_cronjob_created: OpenShift's kube-state-metrics drops every
+        # *_created series. A CronJob that is never scheduled at all is not covered.
         - alert: DpsAuditMaintenanceStale
           expr: >-
             time() - max by (namespace)
             (kube_cronjob_status_last_successful_time{cronjob="dps-migrate-maintain"}) > 3 * 86400
-            or (time() - max by (namespace)
-            (kube_cronjob_created{cronjob="dps-migrate-maintain"}) > 3 * 86400
+            or (max by (namespace)
+            (kube_job_status_failed{job_name=~"dps-migrate-maintain-.*"}) > 0
             unless on (namespace)
             kube_cronjob_status_last_successful_time{cronjob="dps-migrate-maintain"})
           for: 1h
           labels: {severity: warning}
           annotations:
-            summary: "The audit-log partition maintenance has not succeeded for 3 days"
+            summary: "The audit-log partition maintenance is not succeeding (none for 3 days, or never)"
             description: >-
               CronJob dps-migrate-maintain (python -m dps.migrate --maintain, daily) creates the next
               months' dps_audit_log partitions; the table has no DEFAULT partition, so once the

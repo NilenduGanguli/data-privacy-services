@@ -2,6 +2,7 @@
 # reports; opens source connections only to test and browse them (the worker does the jobs).
 # Runs under OpenShift's arbitrary UID (restricted-v2): no runAsUser, a read-only root, /tmp an
 # emptyDir and HOME=/tmp. Every secret is a mounted file named by a *_FILE variable (posture guard).
+# Starts only once the release's schema is in place (init container wait-for-schema, below).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,6 +24,35 @@ spec:
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
+      # The release's schema first. Compose starts the app and the workers only after its migrate
+      # one-shot completed; Kubernetes has no such order, and a release applies the migrate Job with
+      # the Deployments. The app verifies the schema once at boot: started before the Job committed,
+      # it kept its job platform down (503 on every database route) while staying Ready. So the pod
+      # waits until `python -m dps.migrate --verify` passes: the migrations this image ships, read
+      # with the app login (no DDL). Same image, the ConfigMap, the app login only; `args` keep the
+      # image's entrypoint; the trap ends the wait at once on SIGTERM (a deleted pod).
+      initContainers:
+        - name: wait-for-schema
+          image: data-privacy-services
+          args:
+            - sh
+            - -c
+            - "trap 'exit 143' TERM INT; until python -m dps.migrate --verify; do sleep 5 & wait $!; done"
+          envFrom: [{configMapRef: {name: dps}}]
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: DPS_PG_PASSWORD_FILE, value: /var/run/secrets/dps/pg-app/password}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: ca, mountPath: /etc/dps/ca, readOnly: true}
+            - {name: pg-app, mountPath: /var/run/secrets/dps/pg-app, readOnly: true}
       containers:
         - name: app
           image: data-privacy-services
