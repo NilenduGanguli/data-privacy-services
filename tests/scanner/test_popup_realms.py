@@ -149,7 +149,11 @@ async def test_positive_control_unguarded_popup_realms_deliver_every_hostile_req
         await page.goto(f"{url}/apply")
         await page.fill("#nm", value)
         wanted = tuple(w.split(" ")[1] for w in _AT_LOAD)
-        await _until(page, seen, (*wanted, "/hostile-get-fetch", "/hostile-fill-post"), timeout_s=8)
+        # a positive control: waiting longer never weakens a guarded assertion, and a loaded host
+        # (several stacks on one Mac) can take more than 8 s to deliver the last popup request
+        await _until(
+            page, seen, (*wanted, "/hostile-get-fetch", "/hostile-fill-post"), timeout_s=30
+        )
     finally:
         await ctx.close()
     got = _hostile(seen.paths())
@@ -285,7 +289,7 @@ async def test_an_inert_popup_document_loads_nothing_even_after_document_open(
             await page.wait_for_timeout(1500)
             await _until(page, seen, ("/popup-nav",), timeout_s=5)
         else:
-            await _until(page, seen, _INERT_WANTED, timeout_s=8)
+            await _until(page, seen, _INERT_WANTED, timeout_s=30)  # the positive control
         counted = guard.drain_counts()
     finally:
         if guarded:

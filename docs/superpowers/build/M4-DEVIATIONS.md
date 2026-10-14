@@ -1590,3 +1590,8 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   — hosts written by `POST/PATCH /admin/tenants` (normalised by M5's `normalize_host`) are exactly what
   `POST /scans` accepts for that tenant; while a tenant has none, the local fallback list applies. It
   passed on its first run (M4's `ScanStore.registered_hosts` reads the column M5 manages).
+- **Popup-realm positive controls wait up to 30 s** (`tests/scanner/test_popup_realms.py`): on a
+  loaded host (several lane stacks on one Mac) the *unguarded* control once missed
+  `/hostile-noopener` within 8 s (3/3 passes in isolation). Only the controls' wait changed — they
+  prove the hostile page really sends what the guarded runs must refuse; `_until` returns as soon
+  as every path arrived, and no guarded assertion was touched.
