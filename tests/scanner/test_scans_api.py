@@ -530,6 +530,32 @@ def test_the_overview_counts_the_personal_fields_scans_found(api_client: Any) ->
     assert ui["personal_fields"] == 4 and ui["risk_flags"] == 0
 
 
+@pytest.mark.db
+def test_hosts_registered_on_the_admin_page_decide_what_a_tenant_may_scan(api_client: Any) -> None:
+    """M5 Admin › UI-scanner hosts writes ``dps_tenant.registered_hosts`` (normalised); from then on
+    ``POST /scans`` accepts exactly those hosts for the tenant, and the local fallback list
+    (``DPS_SCAN_REGISTERED_HOSTS``) no longer applies to it; another tenant keeps the fallback."""
+    c = _client(api_client)
+    assert _create(c).status_code == 202  # no hosts registered: the local fallback list applies
+    made = c.post(
+        "/api/v1/admin/tenants",
+        json={"tenant_id": "t2", "registered_hosts": ["HTTPS://UAT.Bank.Example:8443/apply"]},
+        headers=FULL,
+    )
+    assert made.status_code == 201, made.text
+    assert made.json()["effective"]["registered_hosts"] == ["uat.bank.example"]
+    t2 = {"X-DPS-Tenant": "t2"}
+    fallback = _create(c, {"url": URL}, **t2)
+    assert (fallback.status_code, fallback.json()["code"]) == (422, "host_not_registered")
+    registered = _create(c, {"url": "https://uat.bank.example/apply"}, **t2)
+    assert registered.status_code == 202, registered.text
+    assert registered.json()["scan"]["spec"]["url_origin"] == "https://uat.bank.example"
+    assert _create(c).status_code == 202  # t1 is unchanged
+    patched = c.patch("/api/v1/admin/tenants/t2", json={"registered_hosts": []}, headers=FULL)
+    assert patched.status_code == 200, patched.text
+    assert _create(c, {"url": URL}, **t2).status_code == 202  # no hosts: the fallback again
+
+
 def _db_key(c: Any, name: str, tenants: list[str], scopes: list[str]) -> dict[str, Any]:
     """Mint an M5 database key through the admin API (the raw key is in this answer only)."""
     r = c.post(

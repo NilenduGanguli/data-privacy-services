@@ -1585,3 +1585,8 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   `tests/test_retention_m5.py::test_expired_jobs_their_objects_and_scan_rows_are_deleted` inserted a
   `dps_scan_page` row with the contract's abbreviated columns; M4's 030 adds `template NOT NULL`, so
   the row now carries one (`NotNullViolationError` before). Neither changes a rule.
+- **M5 Admin › UI-scanner hosts drive the scanner** (test only):
+  `tests/scanner/test_scans_api.py::test_hosts_registered_on_the_admin_page_decide_what_a_tenant_may_scan`
+  — hosts written by `POST/PATCH /admin/tenants` (normalised by M5's `normalize_host`) are exactly what
+  `POST /scans` accepts for that tenant; while a tenant has none, the local fallback list applies. It
+  passed on its first run (M4's `ScanStore.registered_hosts` reads the column M5 manages).
