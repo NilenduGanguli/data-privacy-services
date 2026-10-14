@@ -1131,9 +1131,36 @@ Finish-stage work (programme plan §2.6 F2, orchestration stream S4), built on `
   UID, and the smoke's `m2 parquet export` died with `storage_error` (`finalize_failed StorageError`
   in the worker log). So also: the image user's primary group is 0 (`useradd --uid 10001 --gid 0`),
   `/app/var` directories are setgid (`find /app/var -type d -exec chmod g+s {} +`), and
-  `docker/entrypoint.sh` sets `umask 0002` — what any UID creates there is `2775`/`664`, group 0.
+  `docker/entrypoint.sh` sets `umask 0002` — directories any UID creates there are `2775`, group 0,
+  and objects are `0660`, group 0 (the store's own mode, see the review fix below).
   Not in the plan's file list: `docker/entrypoint.sh` (one line + comment). OpenShift manifests must
   keep the image `ENTRYPOINT` (`args`, not `command`) — HANDOFF §8.
+- **Review fix (S4 r1 B1, N2, N3) — the store's objects were `0600`.** `LocalObjectStore` spooled
+  every object through `tempfile.mkstemp`, which always creates `0600` whatever the umask, so the
+  objects themselves stayed `600 <uid>:0` and the claim above held for directories only. Measured
+  by the review on the lane stack after a UID change on the same volumes: every earlier artefact
+  answered 500 (`GET /artefacts/{id}`, an unmapped `PermissionError`) and every earlier Evidence
+  pack 502 `storage_error` (`GET /evidence/{id}/html`, the console's Evidence page). The runtime
+  test that pinned the property wrote with `Path.write_bytes` (which honours the umask), never
+  through the store. Fixed test first: `dps/storage.py` creates the spool file — which becomes the
+  object by `os.replace` — with `os.open(…, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0o660)`
+  (`OBJECT_MODE`), so the kernel applies the process umask: `0660` under the image's `0002`, while
+  an operator's stricter umask still narrows it (`0022` → `0640`, `0077` → `0600`) and other users
+  never get access (not even under umask 0). **Deviation from the review's suggested
+  `os.fchmod(fd, 0o660)` after `mkstemp`:** that mode would ignore the umask; creating the file
+  with the mode gives the same `0660` in the image without overriding a stricter umask, and no
+  moment exists where the file has another mode. The spool of an S3 upload (the system temp
+  directory, shared on a host) stays owner-only (`0600`, unit-tested). N2: `LocalObjectStore.stream`
+  (at open and mid-stream) and `exists` now map every `OSError` to `storage_error` (class name only,
+  never the path), as `get` did — an unreadable object is a 502 on `/artefacts/{id}`, not a 500.
+  `tests/test_image_runtime.py::test_a_new_uid_reads_and_replaces_what_the_previous_one_stored`
+  replaces the old `write_bytes` test: through `LocalObjectStore` on an artefact and an export
+  volume, uid 10001 stores an object (`0660` group 0 in `2775` directories), uid 1000770000:0 reads,
+  streams and replaces it and writes and deletes next to it, and uid 10001 reads back what the new
+  UID stored. It failed on the image of `74625d6` (`0o600`; the new UID's `get` raised
+  `storage_error: PermissionError`). Objects stored by earlier images keep `0600`: HANDOFF §8's
+  one-time re-permission (`chmod -R g+rwX`) covers them. N3: HANDOFF §6 now states which compose
+  roles have a `/tmp` tmpfs and that the local `demo-secrets` one-shot runs as root.
 - **`Dockerfile` — console stage on `$BUILDPLATFORM`** (not in the plan): `FROM
   --platform=$BUILDPLATFORM node:22-slim AS frontend`. The dist is platform-free; an amd64 build on
   the arm64 Mac then reuses the native console layers instead of running npm under emulation (the

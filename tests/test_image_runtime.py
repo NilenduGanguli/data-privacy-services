@@ -166,47 +166,97 @@ def test_the_app_serves_health_under_an_arbitrary_uid() -> None:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60, check=False)
 
 
-def test_a_new_uid_keeps_writing_where_the_previous_one_wrote() -> None:
-    """Compose's uid 10001 writes artefacts into a named volume; a later container under an
-    arbitrary UID (a redeploy, an OpenShift namespace UID) writes into the same directories."""
-    volume = f"dps-uid-probe-{uuid.uuid4().hex[:8]}"
-    created = subprocess.run(
-        ["docker", "volume", "create", volume], capture_output=True, text=True, timeout=60
-    )
-    assert created.returncode == 0, created.stderr
-    script = (
-        "import os, pathlib, sys; d = pathlib.Path('/app/var/artefacts/t/default') / sys.argv[1]; "
-        "d.mkdir(parents=True, exist_ok=True); (d / 'a.bin').write_bytes(b'x'); "
-        "pathlib.Path('/app/var/artefacts/t/default/a.json').write_text('{}'); "
-        "print(oct(os.stat(d).st_mode & 0o7777), os.stat(d).st_gid)"
-    )
+STORE_PROBE = r"""
+import asyncio, json, os, sys
+from pathlib import Path
+from dps.storage import LocalObjectStore
+
+def facts(path):
+    st = os.stat(path)
+    return {"mode": oct(st.st_mode & 0o7777), "gid": st.st_gid}
+
+async def main(step):
+    out = {}
+    for volume, prefix in (("artefacts", "t/default"), ("exports", "uat")):
+        root = Path("/app/var") / volume
+        store = LocalObjectStore(root)
+        key = f"{prefix}/job-a/obj.bin"
+        if step == "first":  # the image user stores an object (an artefact, an export part)
+            await store.put(key, b"first", content_type="application/octet-stream")
+            out[volume] = {"file": facts(root / key), "dir": facts((root / key).parent)}
+        elif step == "second":  # a new UID of group 0 on the same volume
+            read = await store.get(key) == b"first"
+            streamed = b"".join([c async for c in store.stream(key)]) == b"first"
+            await store.put(key, b"second", content_type="application/octet-stream")
+            await store.put(f"{prefix}/job-a/other.bin", b"x", content_type="text/plain")
+            await store.delete(f"{prefix}/job-a/other.bin")
+            await store.put(f"{prefix}/job-b/obj.bin", b"new", content_type="text/plain")
+            out[volume] = {
+                "read": read, "streamed": streamed, "file": facts(root / key),
+                "new_dir": facts(root / prefix / "job-b"),
+                "deleted": not await store.exists(f"{prefix}/job-a/other.bin"),
+            }
+        else:  # the first UID again reads what the new one stored
+            out[volume] = {
+                "read": await store.get(key) == b"second",
+                "read_new": await store.get(f"{prefix}/job-b/obj.bin") == b"new",
+            }
+    print(json.dumps(out))
+
+asyncio.run(main(sys.argv[1]))
+"""
+
+
+def test_a_new_uid_reads_and_replaces_what_the_previous_one_stored() -> None:
+    """Compose's uid 10001 stores artefacts and export parts on named volumes; a later container
+    under an arbitrary UID (a redeploy, an OpenShift namespace UID) reads, streams and replaces
+    them and writes next to them through the app's own store, and the first UID reads back what
+    the new one wrote. Objects are 0660 group 0 in setgid 2775 directories: mkstemp's 0600 made
+    every earlier artefact unreadable to the next UID (review S4 r1 B1)."""
+    volumes = {name: f"dps-uid-probe-{name}-{uuid.uuid4().hex[:8]}" for name in ("a", "e")}
+
+    def run(user: str | None, step: str) -> dict[str, dict[str, object]]:
+        cmd = ["docker", "run", "--rm"]
+        if PLATFORM:
+            cmd += ["--platform", PLATFORM]
+        if user:
+            cmd += ["--user", user]
+        cmd += ["--read-only", "--tmpfs", "/tmp:size=64m,mode=1777", "--cap-drop", "ALL"]
+        cmd += ["--security-opt", "no-new-privileges:true"]
+        cmd += [
+            "-v",
+            f"{volumes['a']}:/app/var/artefacts",
+            "-v",
+            f"{volumes['e']}:/app/var/exports",
+        ]
+        cmd += ["--entrypoint", "/usr/local/bin/entrypoint.sh", IMAGE]
+        cmd += ["python", "-c", STORE_PROBE, step]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=False)
+        assert out.returncode == 0, (step, out.stderr[-2000:])
+        return json.loads(out.stdout.strip().splitlines()[-1])  # type: ignore[no-any-return]
+
     try:
-
-        def run(user: str | None, sub: str) -> subprocess.CompletedProcess[str]:
-            cmd = ["docker", "run", "--rm"]
-            if PLATFORM:
-                cmd += ["--platform", PLATFORM]
-            if user:
-                cmd += ["--user", user]
-            cmd += ["--read-only", "--tmpfs", "/tmp", "-v", f"{volume}:/app/var/artefacts"]
-            cmd += [
-                "--entrypoint",
-                "/usr/local/bin/entrypoint.sh",
-                IMAGE,
-                "python",
-                "-c",
-                script,
-                sub,
-            ]
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=False)
-
-        first = run(None, "job-a")  # the image's own user (uid 10001, compose)
-        assert first.returncode == 0, first.stderr[-2000:]
-        mode, gid = first.stdout.split()
-        assert gid == "0" and int(mode, 8) & 0o2070 == 0o2070, (mode, gid)
-        second = run(f"{UID}:0", "job-b")  # a new UID in group 0, same directories
-        assert second.returncode == 0, second.stderr[-2000:]
-        rewrite = run(f"{UID}:0", "job-a")  # and into a directory the first UID created
-        assert rewrite.returncode == 0, rewrite.stderr[-2000:]
+        for volume in volumes.values():
+            created = subprocess.run(
+                ["docker", "volume", "create", volume], capture_output=True, text=True, timeout=60
+            )
+            assert created.returncode == 0, created.stderr
+        first = run(None, "first")  # the image's own user (uid 10001, compose)
+        for volume in ("artefacts", "exports"):
+            assert first[volume]["file"] == {"mode": "0o660", "gid": 0}, first
+            assert first[volume]["dir"] == {"mode": "0o2775", "gid": 0}, first
+        second = run(f"{UID}:0", "second")  # a new UID in group 0, same volumes
+        for volume in ("artefacts", "exports"):
+            facts = second[volume]
+            assert facts["read"] is True and facts["streamed"] is True, second
+            assert facts["file"] == {"mode": "0o660", "gid": 0}, second
+            assert facts["new_dir"] == {"mode": "0o2775", "gid": 0}, second
+            assert facts["deleted"] is True, second
+        third = run(None, "third")  # and back: uid 10001 reads what the new UID stored
+        assert all(third[v] == {"read": True, "read_new": True} for v in third), third
+        assert sorted(third) == ["artefacts", "exports"]
     finally:
-        subprocess.run(["docker", "volume", "rm", "-f", volume], capture_output=True, timeout=60)
+        for volume in volumes.values():
+            subprocess.run(
+                ["docker", "volume", "rm", "-f", volume], capture_output=True, timeout=60
+            )

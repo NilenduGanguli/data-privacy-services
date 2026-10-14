@@ -73,9 +73,10 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 #   files like OpenShift's do;
 # - /app/var (the local artefact and export volumes; named volumes and emptyDirs inherit this
 #   ownership and mode) belongs to uid 10001 and group 0, writable by both, and its directories
-#   are setgid: what any UID creates in them stays group 0. With the entrypoint's umask 0002 it is
-#   also group-writable, so a later UID (a redeploy, another namespace UID) keeps writing where
-#   the previous one wrote;
+#   are setgid: what any UID creates in them stays group 0. With the entrypoint's umask 0002 new
+#   directories are 2775, and the object store creates every artefact and export object 0660
+#   (dps/storage.py OBJECT_MODE: owner and group, never other users), so a later UID (a redeploy,
+#   another namespace UID) reads, replaces and adds to what the previous one stored;
 # - the code under /app is readable by group 0 and writable by nobody but root, whatever the
 #   build context's file modes were (a 664 file would otherwise be writable by every OpenShift
 #   UID);

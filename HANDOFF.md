@@ -104,14 +104,19 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
 - **arbitrary UID, read-only root (M5 Task 24)**: the image user 10001 has group 0 as its primary
   group (`useradd --uid 10001 --gid 0`); `/app` is group 0, readable and never writable by group 0
   (`chmod -R g+rX,g-w /app`, whatever the build context's modes); `/app/var` is group-writable
-  (`chmod -R g=u /app/var`) with setgid directories, and the entrypoint sets `umask 0002`, so
-  everything a process creates on the artefact and export volumes stays writable for the next UID of
-  group 0 (compose's 10001, an OpenShift namespace UID, a redeploy under another UID);
+  (`chmod -R g=u /app/var`) with setgid directories, and the entrypoint sets `umask 0002`, so new
+  directories on the artefact and export volumes are `2775` group 0; the object store creates every
+  artefact and export object with mode `0660` less the umask (`dps/storage.py` `OBJECT_MODE`: owner
+  and group read/write, never other users — `mkstemp`'s fixed `0600` locked every later UID out).
+  So the next UID of group 0 (compose's 10001, an OpenShift namespace UID, a redeploy under another
+  UID) reads, replaces and adds to what an earlier UID stored;
   `ENV HOME=/tmp` (the tmpfs/emptyDir); `PYTHONDONTWRITEBYTECODE=1`. Checked by
   `DPS_TEST_IMAGE=data-privacy-services:<tag> pytest -q tests/test_image_runtime.py`
   (`DPS_TEST_IMAGE_PLATFORM=linux/amd64` for an amd64 build): uid 1000770000:0, `--read-only`,
   `--cap-drop ALL` — the extras import, Tesseract runs, `/app` and site-packages are not writable,
-  `/tmp` and the volumes are, `/health` answers, and a new UID writes where uid 10001 wrote;
+  `/tmp` and the volumes are, `/health` answers, and through the app's own `LocalObjectStore` a new
+  UID reads, streams and replaces the artefact and export objects uid 10001 stored (`0660`, group 0,
+  in `2775` directories) and uid 10001 reads back what the new UID wrote;
 - `USER 10001`, `EXPOSE 8400`, a Python `urllib` `HEALTHCHECK` on `http://127.0.0.1:8400/health`
   (15 s interval, 15 s start period);
 - `ENTRYPOINT docker/entrypoint.sh` (`umask 0002`; runs `python -m dps.migrate` first when `DPS_MIGRATIONS_MODE=auto`,
@@ -595,10 +600,14 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   staging/prod, `DPS_ALLOW_INSECURE_COIN_MINT=true` (record the approval with the deployment).
   Prefer `DPS_COIN_CA_FILE` with the proxy's CA whenever it can be obtained.
 - **Container runtime (M5 Task 24):** the image runs as uid 10001 with group 0 or as any arbitrary
-  UID in group 0 (OpenShift's restricted SCC); compose runs every role with a read-only root, a
-  `/tmp` tmpfs, `cap_drop: [ALL]` and `no-new-privileges`. The process can write `/tmp` (also
-  `HOME`) and the `/app/var` artefact and export volumes only — never the code, site-packages or
-  `/etc` (group 0 reads them; `tests/test_image_runtime.py` checks it on a built image).
+  UID in group 0 (OpenShift's restricted SCC); compose runs every role of the image (app, worker,
+  migrate, tokenizer-mock, seed-sources) with a read-only root, `cap_drop: [ALL]` and
+  `no-new-privileges`, and a `/tmp` tmpfs where the role writes scratch files (app, worker,
+  seed-sources; `migrate` and `tokenizer-mock` write nothing). The exception is the local
+  `demo-secrets` one-shot, which runs as root to write the demo secret files. The process can
+  write `/tmp` (also `HOME`) and the `/app/var` artefact and export volumes only — never the code,
+  site-packages or `/etc` (group 0 reads them; `tests/test_image_runtime.py` checks it on a built
+  image). Objects on those volumes are `0660` group 0 (owner and group, never other users).
 - Every response: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`; HSTS outside `local`. The console HTML carries a strict CSP
   (`script-src 'self'`, `frame-ancestors 'none'`).
@@ -683,10 +692,13 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
   - Never `chmod -R g=u /app` (the plan's wording): the code would be writable by every OpenShift
     UID. Only `/app/var` is group-writable.
   - Volumes written by an image older than this change hold `10001:10001 0755` directories; any
-    other UID then fails with `storage_error` (measured). Re-permission once — `docker compose run
-    --rm --no-deps --user 0 --entrypoint sh worker -c 'chgrp -R 0 /app/var/artefacts
-    /app/var/exports && chmod -R g+rwX /app/var/artefacts /app/var/exports && find /app/var -type
-    d -exec chmod g+s {} +'` — or `down -v` locally.
+    other UID then fails with `storage_error` (measured). Objects stored by any image before the
+    `fimg` review fix (up to `74625d6`) are `0600`: a later UID cannot read them (measured: `GET
+    /artefacts/{id}` and the Evidence page's `GET /evidence/{id}/html` answer 502
+    `storage_error`). Re-permission once — `docker compose run --rm --no-deps --user 0 --entrypoint
+    sh worker -c 'chgrp -R 0 /app/var/artefacts /app/var/exports && chmod -R g+rwX
+    /app/var/artefacts /app/var/exports && find /app/var -type d -exec chmod g+s {} +'` — or `down
+    -v` locally.
   - On OpenShift keep the image `ENTRYPOINT` (set `args`, not `command`): it sets `umask 0002`.
   - `docker compose exec` does not pass through the entrypoint (its shells show umask `0022`); the
     services' own processes run with `0002` (`/proc/1/status`).
@@ -1430,3 +1442,29 @@ and `tools/flow_report.py`.
   `national_id`, `tax_id`, `email`, `mobile` and `notes` (dates and the FF1 customer ids only
   collide with other customers' values at the domain's occupancy rate, e.g. 62.0 % of shifted
   birth dates fall on a day some customer has against 63.7 % of the span's days occupied).
+
+**Review fix r1 (2026-10-14, review S4 r1 B1/N2/N3).** The store wrote every artefact and local
+export object `0600` (`tempfile.mkstemp`), so after a UID change on the same volumes every earlier
+artefact answered 500 and every earlier Evidence page 502 (`storage_error`). Now
+`dps/storage.py` creates each object with mode `0660` less the umask (`OBJECT_MODE`; owner and
+group, never other users; an S3 upload's spool in the temp directory stays `0600`), and
+`LocalObjectStore.stream`/`exists` map every `OSError` to `storage_error` like `get`. Verified:
+
+- `tests/test_image_runtime.py` now goes through `LocalObjectStore` on an artefact and an export
+  volume (uid 10001 stores, uid 1000770000:0 reads, streams, replaces, writes and deletes next to
+  it, uid 10001 reads back). On the image of `74625d6` it fails (objects `0o600`; the new UID's
+  `get` raises `storage_error: PermissionError`); rebuilt, 3 passed on arm64 and on amd64.
+- Live, lane stack `--profile full`: run A as uid 10001 (`smoke_test.py --m3` 48/49, the only
+  failure S11; `flow_report.py` exit 0) left 25 objects, all `660 10001:0` in `2775` directories.
+  With every role of the image as 1000770000:0 on the same volumes, all 25 answered 200 on
+  `GET /artefacts/{id}` and all 8 packs 200 on `GET /evidence/{id}/html` and `/pdf` (before the
+  fix: 500 and 502). Run B as the new UID: smoke `--m3` 48/49 (S11), flow exit 0; back as uid
+  10001, all 43 artefacts and 16 packs answered 200. A `pvc` CSV export as uid 10001 and another as
+  the new UID into the same `base_path` both succeeded with a verified pack. At the end, as the new
+  UID, all 56 artefacts and 18 packs answered 200; the volumes held only `2775` directories (28)
+  and `660` files (62), group 0, of both UIDs.
+- `DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"` 341 passed; `-m "docs or ocr
+  or oracle or mongo"` 301 passed, 3 skipped (the M3 screenshots they rewrite were restored from
+  git). A scan of the stack's current container logs and of the saved smoke, flow and export
+  outputs (1.08 MB) found 0 of the usual needles and no `PermissionError`, `StorageError` or
+  traceback.
