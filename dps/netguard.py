@@ -65,6 +65,25 @@ class _Endpoint(Protocol):
     def params(self) -> ConnectionParams: ...
 
 
+#: ``(PROTOCOL = TCPS)`` inside an Oracle connect descriptor (any case, any spacing).
+_ORACLE_PROTOCOL = re.compile(r"\(\s*protocol\s*=\s*([a-z0-9]+)\s*\)", re.IGNORECASE)
+
+
+def _oracle_tls(options: Mapping[str, str], dsn: str) -> bool:
+    """Whether an Oracle connection dials TCPS (WP-I m3). A secret ``dsn`` overrides the params
+    at connect time (``OracleConnector.from_secret``), so it decides when present: an Easy
+    Connect ``tcps://`` address, or a descriptor whose every ``PROTOCOL`` is ``TCPS`` (never a
+    substring of a host name). Without one, ``options.protocol = tcps`` (``easy_connect`` dials
+    ``tcps://``)."""
+    dsn = dsn.strip()
+    if dsn:
+        if dsn.startswith("("):
+            protocols = [p.lower() for p in _ORACLE_PROTOCOL.findall(dsn)]
+            return bool(protocols) and all(p == "tcps" for p in protocols)
+        return dsn.lower().startswith("tcps://")
+    return options.get("protocol", "").strip().lower() == "tcps"
+
+
 def require_tls_connection(
     spec: _Endpoint, settings: Settings, *, secret: Mapping[str, str] | None = None
 ) -> None:
@@ -86,8 +105,7 @@ def require_tls_connection(
     ok = {
         "postgres": opts.get("sslmode") in ("verify-full", "verify-ca"),
         "mongo": opts.get("tls", "").lower() == "true",
-        "oracle": opts.get("protocol", "").lower() == "tcps"
-        or "tcps" in (secret or {}).get("dsn", "").lower(),
+        "oracle": _oracle_tls(opts, (secret or {}).get("dsn", "")),
         "s3": not endpoint or urlsplit(endpoint).scheme == "https",
         "pvc": True,
     }.get(spec.engine, False)

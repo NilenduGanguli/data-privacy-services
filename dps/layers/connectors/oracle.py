@@ -168,16 +168,25 @@ def output_type_handler(cursor: oracledb.Cursor, metadata: oracledb.FetchInfo) -
 
 
 def easy_connect(params: ConnectionParams) -> str:
-    """``host:port/service`` from validated parameters (a ``dsn`` secret file overrides it).
+    """``host:port/service`` from validated parameters (a ``dsn`` secret file overrides it);
+    ``tcps://host:port/service`` when ``options.protocol`` is ``tcps``.
 
     Raises:
         ConnectorError: ``connection_invalid`` — a host or service that is not a plain name (an
-            Easy Connect string or a descriptor fragment could otherwise be smuggled in).
+            Easy Connect string or a descriptor fragment could otherwise be smuggled in), or an
+            ``options.protocol`` other than ``tcp``/``tcps``.
     """
     host, service = params.host or "", params.service_name or ""
     if not _HOST.fullmatch(host) or not _SERVICE.fullmatch(service):
         raise ConnectorError("connection_invalid", "host and service_name must be plain names")
-    return f"{host}:{params.port or 1521}/{service}"
+    address = f"{host}:{params.port or 1521}/{service}"
+    protocol = (params.options or {}).get("protocol")
+    if protocol is None or protocol.strip().lower() == "tcp":
+        return address
+    if protocol.strip().lower() == "tcps":
+        # WP-I (m3 merge): the TLS-only egress rule approves ``protocol = tcps``; dial it
+        return f"tcps://{address}"
+    raise ConnectorError("connection_invalid", "options.protocol must be tcp or tcps")
 
 
 def _init_session(conn: oracledb.Connection, requested_tag: str | None) -> None:
