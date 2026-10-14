@@ -1467,3 +1467,16 @@ there) and passes now.
   received `POST /hostile-beacon`, `POST /hostile-keepalive` and more, and the inert test leaked; a
   run with the CSP disabled leaked frame/ping/subresources, so the CSP is load-bearing.
   `test_guard.py` updated where the counted reason moved (see above).
+
+## M4 pre-merge — main (M5 + M3) merged into `m4` (WP-I, 2026-10-14)
+
+`b34dd07` merges main `6fa2da5` into the lane (23 conflicted files, both sides kept; `4e55da3` adds
+main's two later docs commits). The lane then adopts main's newer behaviour, each change test-first:
+
+- **Migration 031 on a database that already ran M5's 040** (`dps/migrations/031_tenant_hosts.sql`):
+  M5's 040 adds `dps_tenant.registered_hosts` `IF NOT EXISTS` (so its admin API works without M4),
+  and main's databases have applied 040–045 before 030/031 ship; the runner applies pending files
+  out of number order, so 031 now adds the column `IF NOT EXISTS` too. On a fresh database 031 still
+  creates it (030/031 run before 040). Test: `tests/db/test_migrations.py::
+  test_m4_files_apply_after_m3_and_m5_on_an_existing_database` (fails with the old 031:
+  duplicate column).

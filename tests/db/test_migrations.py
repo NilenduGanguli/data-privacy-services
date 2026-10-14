@@ -71,6 +71,26 @@ async def test_fresh_database_applies_every_file_once(fresh_db) -> None:  # noqa
         await conn.close()
 
 
+async def test_m4_files_apply_after_m3_and_m5_on_an_existing_database(
+    fresh_db,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP-I (M4 merge): main's databases already ran 020 and 040–045 when 030/031 ship; the runner
+    applies pending files out of number order, and 040 already added ``registered_hosts``."""
+    s = await fresh_db("m4late")
+    shipped = db.migration_files
+    m4 = {"030_scans.sql", "031_tenant_hosts.sql"}
+    monkeypatch.setattr(db, "migration_files", lambda: [p for p in shipped() if p.name not in m4])
+    assert set(await db.run_migrations(s)) == set(FILES) - m4
+    monkeypatch.setattr(db, "migration_files", shipped)
+    assert await db.run_migrations(s) == ["030_scans.sql", "031_tenant_hosts.sql"]
+    conn = await _owner(s)
+    try:
+        assert await conn.fetchval("SELECT to_regclass('\"dps\".dps_scan_event') IS NOT NULL")
+    finally:
+        await conn.close()
+
+
 async def test_concurrent_runners_apply_each_file_exactly_once(fresh_db) -> None:  # noqa: ANN001
     s = await fresh_db("race")
     a, b = await asyncio.gather(db.run_migrations(s), db.run_migrations(s))
