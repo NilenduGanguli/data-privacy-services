@@ -145,6 +145,7 @@ async def create(body: ConnectionSpec, request: Request) -> dict[str, Any]:
             settings=_settings(request),
             kek=kek_of(request),
             created_by=principal_of(request).key_id,
+            admin=principal_of(request).has_scope("admin"),
         )
         return _dump(conn)
 

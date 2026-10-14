@@ -43,7 +43,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 
 | Id | Sev | Finding | Fix | Test | Status |
 |---|---|---|---|---|---|
-| F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 | `tests/api/test_production_resource_gate.py` | pending |
+| F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 | `tests/api/test_production_resource_gate.py` | fixed + test |
 | F-02 | HIGH | ReDoS via policy-supplied recognizer regex | S3 | `tests/security/test_regex_guard.py` | fixed |
 | F-03 | HIGH | S5 scanner SSRF guard missing | S5 (wiring at the M4 merge: a blocking item of that merge) | `tests/security/test_netguard.py` | functions fixed; wiring pending M4 |
 | F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | — | pending |
@@ -65,6 +65,20 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-20 | LOW | Synthesis seeds never wrapped although a seed de-pseudonymises D-A keys | see §3.20 | — | pending |
 | F-21 | LOW | KEK rotation: sealed blobs opened with the current KEK only | see §3.21 | — | pending |
 | F-22 | LOW | SEC-4 bind tag not injective over (entity type, profile) | see §3.22 | — | pending |
+
+### 3.1 F-01 — D3 bound to the production credential
+
+A `secret_ref` held by a `production`-tagged connection is a **production credential**
+(`dps.connections.production_refs`). Without `admin`: creating a connection that names it, or
+patching another connection onto it, is 403 `admin_scope_required`; `validate_run` treats an
+`in_place`/`append` through **any** connection holding it like the tagged one (403
+`admin_scope_required`, also on `POST /jobs/run/validate`); and `POST /jobs/{id}/retry` of an
+`in_place`/`append` job re-checks the rule (`targets.check_retry_scope`) — a retry restarts the
+writes, and before this a `jobs` key could restart an admin-approved production write. The
+connection's `secret_ref` name stays visible to `jobs` keys (it is a name, not a secret). Inline
+credentials need the password itself; the endpoint alone was not made a production marker (UAT and
+production schemas can share a database). Test: `tests/api/test_production_resource_gate.py`
+(the clone, the patch, an admin-made untagged holder, the retry rule).
 
 ## 4. Considered and refuted
 

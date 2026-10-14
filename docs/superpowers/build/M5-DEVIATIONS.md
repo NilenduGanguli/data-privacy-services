@@ -1161,3 +1161,14 @@ every confirmed finding (F-01…F-22) and the refuted candidates. Differences fr
   (structlog keeps the configured level) and caps the Presidio and spaCy loggers.
 - **S7:** `test_cross_tenant.py` stores the evidence pack through its own connection (the app's pools
   belong to the test client's loop).
+
+## Security review fixes F-01…F-22 (finish stage, `fsec`)
+
+Each confirmed finding of the review (`docs/security/2026-10-11-m5-security-review.md` §3) is fixed
+test-first in its own commit; S-items folded into Task 17 are listed there.
+- **F-01 (D3 clone bypass):** the production designation follows the credential (`secret_ref`), not
+  only the row's tag — create/patch refuse a production credential without `admin`, `validate_run`
+  takes `production_refs` (defaulted, additive), and the retry route re-checks `admin` for
+  `in_place`/`append` (`targets.check_retry_scope`; the retry gap was noted by the crypto finder).
+  `tests/test_egress_tls.py`'s production connection uses its own credential (`test-pg-admin`), since
+  the jobs key's later TLS connection named the same `secret_ref`. The endpoint is not a marker.

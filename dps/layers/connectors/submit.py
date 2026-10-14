@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict
 
 from dps.auth import Principal
 from dps.config import Settings
-from dps.connections import Connection, get_connection
+from dps.connections import Connection, get_connection, production_refs
 from dps.engine.synth.surrogates import (
     SynthesisSeed,
     generate_synthesis_seed,
@@ -224,6 +224,7 @@ async def _validate_run(
         kek=kek,
         group=(group.kid, group.seed_fingerprint) if group else None,
         child_snapshot=child_snapshot,
+        production_refs=await production_refs(tenant_id),
     )
     engine = cast(Engine, source.engine)
     selection = _bind(spec.source.selection, engine, snapshot.shape if snapshot else None)

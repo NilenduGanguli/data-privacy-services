@@ -9,6 +9,13 @@ production path) or inline credentials (dev only,
 targets take neither. Credentials are only ever opened by :func:`load_credentials`; the public
 :class:`Connection` carries ``has_secret`` and never ``secret_enc``.
 
+**Production credentials** (S3 security review, D3 bound to the resource): a ``secret_ref`` that a
+``production``-tagged connection holds is a production credential. Without ``admin`` no other
+connection may name it (create or patch: 403 ``admin_scope_required``), and ``in_place``/``append``
+through any connection that holds it needs ``admin`` (:func:`production_refs`, used by
+``validate_run`` and the retry check) — a ``jobs`` key cannot clone the production connection
+without its tag and rewrite production data in place.
+
 **Who may change a connection** (security review SEC-3). Any mutation of a connection that is or
 becomes tagged ``production`` (update, delete, credential rotation) needs the ``admin`` scope. On a
 connection that holds credentials (a sealed secret or a ``secret_ref``), a change to a param that
@@ -33,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from dps import db
 from dps.config import Settings
+from dps.errors import safe_error_message
 from dps.ids import PREFIX_CONNECTION, new_id
 from dps.jobs import ACTIVE_JOB_STATES, decode_cursor, encode_cursor
 from dps.jobs_models import ConnectionParams, ConnectionSpec, ConnRole, InlineCredentials
@@ -148,6 +156,33 @@ def changed_fields(current: Connection, patch: ConnectionPatch) -> list[str]:
             if opts_a.get(key) != opts_b.get(key):
                 out.add(f"params.options.{key}")
     return sorted(out)
+
+
+async def production_refs(
+    tenant_id: str, *, conn: asyncpg.Connection | None = None
+) -> frozenset[str]:
+    """The ``secret_ref`` names the tenant's ``production``-tagged connections hold (module
+    docstring: production credentials)."""
+    async with _using(tenant_id, conn) as c:
+        rows = await c.fetch(
+            f"SELECT DISTINCT secret_ref FROM {db.schema_ident()}.dps_connection "
+            "WHERE tenant_id = $1 AND 'production' = ANY(tags) AND secret_ref IS NOT NULL",
+            tenant_id,
+        )
+    return frozenset(str(r["secret_ref"]) for r in rows)
+
+
+def holds_production_credentials(c: Connection, refs: frozenset[str]) -> bool:
+    """True when ``c`` is tagged ``production`` or holds a production credential (``refs``)."""
+    return c.production or (c.secret_ref is not None and c.secret_ref in refs)
+
+
+def _production_credential_refused() -> ConnectionStoreError:
+    return ConnectionStoreError(
+        "admin_scope_required",
+        403,
+        "this secret_ref is a production credential: naming it needs the admin scope",
+    )
 
 
 def _admin_required() -> ConnectionStoreError:
@@ -294,10 +329,12 @@ async def create_connection(
     settings: Settings,
     kek: bytes | None,
     created_by: str | None,
+    admin: bool = False,
 ) -> Connection:
     """Insert a connection (inline credentials sealed). Raises :class:`ConnectionStoreError`:
     ``inline_secrets_disabled`` 422, ``kek_unconfigured`` 503, ``connection_name_taken`` 409,
-    ``secret_ref_invalid`` 422, ``secret_ref_foreign_tenant`` / ``secret_ref_not_shared`` 403."""
+    ``secret_ref_invalid`` 422, ``secret_ref_foreign_tenant`` / ``secret_ref_not_shared`` 403,
+    ``admin_scope_required`` 403 (``admin`` false and ``secret_ref`` a production credential)."""
     _check_refs(tenant_id, spec.secret_ref, spec.params, settings)
     sealing_kek = _require_inline_allowed(settings, kek) if spec.credentials is not None else None
     conn_id = new_id(PREFIX_CONNECTION)
@@ -306,6 +343,12 @@ async def create_connection(
     if spec.credentials is not None and sealing_kek is not None:
         sealed, expires = _seal(sealing_kek, spec.credentials, conn_id, settings)
     async with db.acquire(tenant_id) as conn, conn.transaction():
+        if (
+            not admin
+            and spec.secret_ref is not None
+            and spec.secret_ref in await production_refs(tenant_id, conn=conn)
+        ):
+            raise _production_credential_refused()
         await touch_tenant(tenant_id, conn=conn)
         try:
             await conn.execute(
@@ -411,6 +454,13 @@ async def update_connection(
         becomes_production = patch.tags is not None and "production" in patch.tags
         if not admin and (current.production or becomes_production):
             raise _admin_required()
+        if (
+            not admin
+            and patch.secret_ref is not None
+            and patch.secret_ref != current.secret_ref
+            and patch.secret_ref in await production_refs(tenant_id, conn=conn)
+        ):
+            raise _production_credential_refused()
         holds_credentials = sealed is not None or current.secret_ref is not None
         resupplied = patch.credentials is not None or patch.secret_ref is not None
         if (
@@ -450,8 +500,9 @@ async def update_connection(
         try:
             spec = ConnectionSpec.model_validate(merged)
         except ValidationError as exc:
-            first = exc.errors()[0].get("msg", "invalid") if exc.errors() else "invalid"
-            raise ConnectionStoreError("connection_invalid", 422, str(first)) from None
+            errors = exc.errors()
+            first = safe_error_message(errors[0]) if errors else "invalid"  # S1: no echo
+            raise ConnectionStoreError("connection_invalid", 422, first) from None
         if patch.secret_ref is not None or patch.params is not None:
             _check_refs(tenant_id, secret_ref, spec.params, settings)
         stale = secret_changed or patch.params is not None

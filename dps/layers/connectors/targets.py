@@ -47,12 +47,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dps.auth import Principal
 from dps.config import Settings
-from dps.connections import Connection
+from dps.connections import Connection, holds_production_credentials
 from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
 from dps.engine.policy import MethodSpec, resolve_policy
 from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSEUDONYM_LIMIT
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform.methods import METHODS
+from dps.jobs import Job
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
 from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
@@ -430,6 +431,33 @@ def _written_connection(
     return target_conn
 
 
+def check_retry_scope(
+    job: Job,
+    written: Connection | None,
+    *,
+    principal: Principal,
+    production_refs: frozenset[str],
+) -> None:
+    """A retry restarts the job's writes: an ``in_place``/``append`` job writing a production
+    connection (tag or credentials) needs ``admin`` again, as :func:`validate_run` did.
+
+    Raises:
+        SpecError: ``admin_scope_required`` (403).
+    """
+    mode = str(((job.spec or {}).get("target") or {}).get("write_mode") or "")
+    if (
+        mode in _DATABASE_WRITES
+        and written is not None
+        and holds_production_credentials(written, production_refs)
+        and not principal.has_scope("admin")
+    ):
+        raise _fail(
+            "admin_scope_required",
+            403,
+            f"retrying {mode} on a production connection needs the admin scope",
+        )
+
+
 def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
     if spec.group_id is None:
         return
@@ -614,10 +642,14 @@ def validate_run(
     kek: bytes | None = None,
     group: GroupKeys | None = None,
     child_snapshot: ClassificationSnapshot | None = None,
+    production_refs: frozenset[str] = frozenset(),
 ) -> None:
     """Refuse a run DPS must not start (module docstring for the order and codes).
 
     ``child_snapshot`` is the accepted snapshot a linked generation names (M5 Task 7B).
+    ``production_refs``: the tenant's production credentials (``dps.connections.production_refs``);
+    an ``in_place``/``append`` through a connection holding one needs ``admin`` like a
+    production-tagged connection (D3 bound to the credentials, S3 security review).
 
     Raises:
         SpecError: the first rule the spec breaks, with its code and HTTP status.
@@ -654,11 +686,15 @@ def validate_run(
     if mode in _DATABASE_WRITES:
         if not target.confirm_write:
             raise _fail("confirm_write_required", 422, f"{mode} writes need confirm_write: true")
-        if written is not None and written.production and not principal.has_scope("admin"):
+        if (
+            written is not None
+            and holds_production_credentials(written, production_refs)
+            and not principal.has_scope("admin")
+        ):
             raise _fail(
                 "admin_scope_required",
                 403,
-                f"{mode} on a production-tagged connection needs the admin scope",
+                f"{mode} on a production connection (its tag or credentials) needs the admin scope",
             )
     keys = _key_columns(snapshot)
     if spec.mode == "synthesize":
