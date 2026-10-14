@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import phonenumbers
 
 from dps.engine.detect.checksums import validate
+from dps.engine.taxonomy import entity_info
 
 CONTEXT_WINDOW = 40
 CONTEXT_BONUS = 0.1
@@ -410,8 +411,37 @@ def _context(text: str, start: int, end: int, key_hint: str | None) -> str:
     return f"{before} {after} {key_hint or ''}".lower()
 
 
+#: The detector prefix of NER (T2) hits.
+NER_DETECTOR_PREFIX = "ner:"
+
+
+def _typed_beats_ner(hits: list[Hit]) -> list[Hit]:
+    """Drop every NER hit that overlaps a typed hit (pattern, checksum, name cue, custom) of a
+    higher sensitivity tier: a stronger detector must never weaken protection. Presidio reads a
+    date of birth as ``DATE_TIME`` (→ ``DATE``, LOW, kept) with a higher score and a longer span
+    than the pattern tier's ``DATE_OF_BIRTH`` (S3 review F-04)."""
+    typed = [h for h in hits if not h.detector.startswith(NER_DETECTOR_PREFIX)]
+    if len(typed) == len(hits) or not typed:
+        return hits
+    out: list[Hit] = []
+    for hit in hits:
+        if hit.detector.startswith(NER_DETECTOR_PREFIX):
+            rank = entity_info(hit.entity_type).sensitivity.rank
+            if any(
+                t.start < hit.end
+                and hit.start < t.end
+                and entity_info(t.entity_type).sensitivity.rank > rank
+                for t in typed
+            ):
+                continue
+        out.append(hit)
+    return out
+
+
 def resolve_overlaps(hits: list[Hit]) -> list[Hit]:
-    """Keep the best hit per overlapping region: validated, then score, then length."""
+    """Keep the best hit per overlapping region: validated, then score, then length — after an
+    NER hit has given way to any overlapping typed hit of a higher tier (:func:`_typed_beats_ner`)."""
+    hits = _typed_beats_ner(hits)
     ranked = sorted(hits, key=lambda h: (not h.validated, -h.score, -(h.end - h.start), h.start))
     kept: list[Hit] = []
     for hit in ranked:

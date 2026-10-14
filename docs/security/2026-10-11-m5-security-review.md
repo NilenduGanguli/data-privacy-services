@@ -46,7 +46,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 | `tests/api/test_production_resource_gate.py` | fixed + test |
 | F-02 | HIGH | ReDoS via policy-supplied recognizer regex | S3 | `tests/security/test_regex_guard.py` | fixed |
 | F-03 | HIGH | S5 scanner SSRF guard missing | S5 (wiring at the M4 merge: a blocking item of that merge) | `tests/security/test_netguard.py` | functions fixed; wiring pending M4 |
-| F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | — | pending |
+| F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | `tests/test_ner_dob_precedence.py` | fixed + test |
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
 | F-06 | MED | RLS posture blind to `owner_directory`'s role: with the migration login unset, the API role read every tenant's jobs/connections/policies | see §3.6 | `tests/test_rls_posture_unit.py::test_a_policy_open_to_the_runtime_role_is_named`, `tests/db/test_rls.py::test_migrating_as_the_runtime_role_is_refused_in_every_environment` | fixed + test |
 | F-07 | MED | CSV formula injection in the L2 `files` export | see §3.7 | `tests/connectors/test_files.py::test_csv_cells_a_spreadsheet_would_evaluate_are_neutralised` | fixed + test |
@@ -79,6 +79,16 @@ connection's `secret_ref` name stays visible to `jobs` keys (it is a name, not a
 credentials need the password itself; the endpoint alone was not made a production marker (UAT and
 production schemas can share a database). Test: `tests/api/test_production_resource_gate.py`
 (the clone, the patch, an admin-made untagged holder, the retry rule).
+
+### 3.4 F-04 — a stronger detector never weakens protection
+
+`patterns.resolve_overlaps` first drops every NER hit (`ner:*`) that overlaps a typed hit (pattern,
+checksum, name cue, custom recognizer) of a **higher sensitivity tier**, then ranks the rest as
+before (validated, score, length). Presidio's `DATE_TIME` → `DATE` (LOW, kept) no longer beats the
+pattern tier's `DATE_OF_BIRTH` (MEDIUM). Proof with the real Presidio model (the finder's p06, re-run
+after the fix): the birth date is transformed in all four phrasings with NER on and off
+(`dob_in_clear=False` 8/8). Test: a Presidio-like adapter (higher score, longer span) through the
+whole engine, with a source-vs-output check.
 
 ### 3.6 F-06 — no tenant policy may apply to the runtime login
 

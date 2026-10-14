@@ -1183,3 +1183,6 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   resolve a database the workers reach; the driver cannot dial it either) — the scanner guard refuses
   it instead (`strict_dns`). Hosts with underscores (`source_pg`) are tolerated for databases. A
   `host_forbidden` at use is re-raised by the connection test (not reported as `connection_failed`).
+- **F-04 (NER DOB):** the targeted rule (NER yields to an overlapping typed hit of a higher tier)
+  instead of ranking every overlap by tier first: a global tier-first ranking would also reorder
+  pattern-vs-pattern overlaps (CARD_PAN vs AADHAAR etc.) the M0/M1 suites settle deliberately.
