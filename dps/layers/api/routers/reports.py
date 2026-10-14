@@ -96,8 +96,13 @@ async def api_rollups(request: Request, days: Days = 14) -> dict[str, Any]:
 
 
 async def rollup_document(request: Request, day: date, action: str) -> dict[str, Any]:
-    """The roll-up document of one day × action (404 ``rollup_not_found``)."""
+    """The roll-up document of one day × action (404 ``rollup_not_found``).
+
+    A day after today (UTC) has no roll-up and is never refreshed: a refresh would leave a marker
+    row that no retention run ages out (M5 G3 review N2)."""
     tenant = tenant_of(request)
+    if day > reports.utc_today():
+        raise DpsHttpError(404, "rollup_not_found", "no API roll-up for that day and action")
     await guarded(reports.ensure_fresh(tenant, day, day, settings=_settings(request)))
     try:
         return await reports.api_rollup_doc(tenant, day, action)
