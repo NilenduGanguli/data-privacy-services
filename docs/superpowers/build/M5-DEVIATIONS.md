@@ -1198,3 +1198,6 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   is bound by `begin_call` through a context variable (`external.TOKENIZE_AUDIT`), so every route
   (JSON, NDJSON, documents) is covered without new engine call parameters. `tests/test_posture_m5.py`'s
   production settings gained an allow-list.
+- **F-19 (profile-keyed caches):** `ApplyOptions.external_cache`, `TransformContext.external` and
+  `external_reveal_cache` changed key type to `methods.ExternalKey` (a three-tuple); callers outside
+  the engine (`tools/reveal_rows.py`) pass the cache through unchanged.

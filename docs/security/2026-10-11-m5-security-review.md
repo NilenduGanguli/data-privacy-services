@@ -61,7 +61,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-16 | LOW | S2 secret reprs | S2 | `tests/security/test_secrets_hygiene.py` | fixed |
 | F-17 | LOW | S1 residual echo in 422/400 bodies | S1 | `tests/security/test_validation_errors.py` | fixed |
 | F-18 | LOW | Inline-policy deny/allow-list terms stored in clear in `dps_job.spec` and listed by `GET /jobs` | see §3.18 | — | pending |
-| F-19 | LOW | `external_tokenize` token cache ignored the profile | see §3.19 | — | pending |
+| F-19 | LOW | `external_tokenize` token cache ignored the profile | see §3.19 | `tests/security/test_external_profile_cache.py` | fixed + test |
 | F-20 | LOW | Synthesis seeds never wrapped although a seed de-pseudonymises D-A keys | see §3.20 | — | pending |
 | F-21 | LOW | KEK rotation: sealed blobs opened with the current KEK only | see §3.21 | — | pending |
 | F-22 | LOW | SEC-4 bind tag not injective over (entity type, profile) | see §3.22 | — | pending |
@@ -154,6 +154,14 @@ tokenizer (or any keyed method) is refused when validated; `build_plan` raises 4
 `synthesize_method_invalid` as the backstop for a policy built around validation. The test drives
 the three L1 routes with a counting tokenizer: zero calls. M0's planner test used an FPE synthesize
 override to exercise the planner's fallback; it now asserts the refusal.
+
+### 3.19 F-19 — token caches keyed by profile
+
+Every `external_tokenize` cache — L1's tokenize and detokenize pre-passes, the L2 batch pre-pass,
+the L2 reveal cache (`external_reveal_cache`) and the method's lookups — is keyed by
+`(entity type, profile, value or token)` (`methods.ExternalKey`, `external_key`), so two columns of
+one entity type under two data elements are each tokenized, written and revealed under their own
+profile.
 
 ## 4. Considered and refuted
 

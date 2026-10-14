@@ -44,8 +44,9 @@ from dps.secrets import kek_ring
 logger = get_logger(__name__)
 MAX_TOKEN_CHARS = 512
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
-#: ``(entity_type, plaintext) → token`` (tokenize) or ``(entity_type, token) → plaintext``.
-ExternalCache = dict[tuple[str, str], str]
+#: ``(entity_type, profile, plaintext) → token`` (tokenize) or ``(…, token) → plaintext`` (the
+#: profile is part of the key, S3 review F-19; ``dps.engine.transform.methods.ExternalKey``).
+ExternalCache = dict[tuple[str, str | None, str], str]
 
 
 #: F-11: the audit hook of the current Layer 1 call, ``(entity_type, profile, count)``, called once

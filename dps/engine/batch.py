@@ -94,7 +94,14 @@ from dps.engine.transform.apply import (
     reveal,
 )
 from dps.engine.transform.crypto import KeyMaterial, key_check_value
-from dps.engine.transform.methods import ISO_DATE, ISO_DATETIME, METHODS, MethodError
+from dps.engine.transform.methods import (
+    ISO_DATE,
+    ISO_DATETIME,
+    METHODS,
+    ExternalKey,
+    MethodError,
+    external_key,
+)
 from dps.engine.verify import NAME_ENTITY, Verification, name_parts, normalise
 from dps.layers.connectors.base import (
     ColumnInfo,
@@ -959,7 +966,7 @@ class BatchTransformer:
                 hits.append({"path": p.path, "entity_type": p.entity_type, "rule": "fixed_point"})
         return checked
 
-    def _pretokenize(self, rows: list[Row]) -> dict[tuple[str, str], str] | None:
+    def _pretokenize(self, rows: list[Row]) -> dict[ExternalKey, str] | None:
         """M5 ``external_tokenize``: one call per entity type and profile for the batch's whole
         values (spans in free text still go through ``apply``'s per-row pre-pass).
 
@@ -985,11 +992,13 @@ class BatchTransformer:
                 tenant, col.entity_type, str(profile) if profile is not None else None
             ):
                 raise TokenizerProfileRefused(col.path)
-        cache: dict[tuple[str, str], str] = {}
+        cache: dict[ExternalKey, str] = {}
         for (entity, profile), values in groups.items():
             ordered = sorted(values)
             tokens = tokenizer.tokenize(entity, ordered, profile=profile)
-            cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
+            cache.update(
+                {external_key(entity, profile, v): t for v, t in zip(ordered, tokens, strict=True)}
+            )
         return cache
 
     def _key_int(self, row: Row) -> int | None:
@@ -1142,8 +1151,9 @@ def external_reveal_cache(
     reveal_map: list[dict[str, Any]],
     shape: TableShape,
     tokenizer: ExternalTokenizer,
-) -> dict[tuple[str, str], str]:
-    """L2 reveal of ``external_tokenize`` columns: ``(entity type, token) → value`` for ``rows``.
+) -> dict[ExternalKey, str]:
+    """L2 reveal of ``external_tokenize`` columns: ``(entity type, profile, token) → value`` for
+    ``rows`` (the profile is part of the key, F-19).
 
     Runs where :func:`reveal_row` runs — on the key holder's side (``tools/reveal_rows.py``),
     with the **key holder's own** tokenization-service client: DPS's credentials never detokenize
@@ -1163,7 +1173,7 @@ def external_reveal_cache(
             token = to_engine_text(row.get(column.name), column)
             if token:
                 groups.setdefault(group, set()).add(token)
-    cache: dict[tuple[str, str], str] = {}
+    cache: dict[ExternalKey, str] = {}
     for (entity, profile), tokens in groups.items():
         ordered = sorted(tokens)
         values = tokenizer.detokenize(entity, ordered, profile=profile)
@@ -1172,7 +1182,9 @@ def external_reveal_cache(
                 f"external_tokenize ({entity}): a detokenized value does not tokenize back to its "
                 "token; nothing was revealed"
             )
-        cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
+        cache.update(
+            {external_key(entity, profile, t): v for t, v in zip(ordered, values, strict=True)}
+        )
     return cache
 
 
@@ -1185,7 +1197,7 @@ def _reveal_value(
     options: ApplyOptions,
     raw_anchor: str,
     field_scoped: bool,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> Any:
     token = to_engine_text(value, column)
     if not token:
@@ -1196,7 +1208,8 @@ def _reveal_value(
                 f"the external_tokenize column {column.path} needs the bank tokenization service "
                 "(pass --tokenizer-url and the key holder's --tokenizer-token-file)"
             )
-        plain = external.get((str(entry["entity_type"]), token))
+        profile = (entry.get("params") or {}).get("profile")
+        plain = external.get(external_key(str(entry["entity_type"]), profile, token))
         if plain is None:
             raise MethodError(f"the value at {column.path} could not be detokenized")
         return from_engine_text(plain, column)
@@ -1238,7 +1251,7 @@ def reveal_row(
     policy: Policy,
     anchor: tuple[str, str] | None,
     kid: str | None = None,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> Row:
     """Reveal one L2 output row with the caller's key and an evidence pack's ``reveal_map``.
 

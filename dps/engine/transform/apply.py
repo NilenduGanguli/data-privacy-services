@@ -40,11 +40,13 @@ from dps.engine.transform import crypto
 from dps.engine.transform.crypto import KeyMaterial
 from dps.engine.transform.methods import (
     CipherFactory,
+    ExternalKey,
     MethodError,
     SurrogateProvider,
     TokenNotBound,
     TransformContext,
     declare_record,
+    external_key,
     external_tag,
     reverse_method,
     run_method,
@@ -137,7 +139,7 @@ class ApplyOptions:
     #: M5 ``external_tokenize``: the bank tokenization adapter (``None`` = not configured) and
     #: tokens the caller already fetched for this batch (``(entity_type, value) → token``).
     tokenizer: ExternalTokenizer | None = None
-    external_cache: dict[tuple[str, str], str] | None = field(default=None, repr=False)
+    external_cache: dict[ExternalKey, str] | None = field(default=None, repr=False)
     #: SEC-4: the server-held binding keys (current first; :func:`~dps.engine.transform.
     #: external.binding_keys`) and the audit hook called once per detokenization batch,
     #: ``(entity_type, profile, count)``, **before** the service is called (it may raise).
@@ -179,7 +181,7 @@ def _ctx(
     options: ApplyOptions,
     anchor: str,
     mode: str,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> TransformContext:
     return TransformContext(
         entity_type=entry.finding.entity_type,
@@ -253,7 +255,7 @@ def _record_originals(document: Any, plan: Plan) -> list[tuple[str, str]]:
 
 def _tokenize_prepass(
     plan: Plan, document: Any, options: ApplyOptions
-) -> dict[tuple[str, str], str] | None:
+) -> dict[ExternalKey, str] | None:
     """One tokenization call per (entity type, profile) for the values the batch cache lacks;
     ``None`` when no adapter is configured (``external_tokenize`` then fails closed)."""
     if options.tokenizer is None:
@@ -269,8 +271,8 @@ def _tokenize_prepass(
         except MethodError:
             continue  # the transform loop reports a plan that does not fit
         value = current if loc.whole else current[loc.start or 0 : loc.end]
-        if (entry.finding.entity_type, value) not in cache:
-            profile = entry.params.get("profile")
+        profile = entry.params.get("profile")
+        if external_key(entry.finding.entity_type, profile, value) not in cache:  # F-19
             key = (entry.finding.entity_type, str(profile) if profile is not None else None)
             groups.setdefault(key, set()).add(value)
     for entity, profile in groups:  # every batch is checked before the first call (F-11)
@@ -285,7 +287,9 @@ def _tokenize_prepass(
         if options.on_tokenize is not None:
             options.on_tokenize(entity, profile, len(ordered))
         tokens = options.tokenizer.tokenize(entity, ordered, profile=profile)
-        cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
+        cache.update(
+            {external_key(entity, profile, v): t for v, t in zip(ordered, tokens, strict=True)}
+        )
     return cache
 
 
@@ -304,7 +308,7 @@ def _is_bound(h: RevealHint, token: str, options: ApplyOptions) -> bool:
 
 def _detokenize_prepass(
     output: Any, hints: list[RevealHint], options: ApplyOptions
-) -> dict[tuple[str, str], str] | None:
+) -> dict[ExternalKey, str] | None:
     """One detokenization call per (entity type, profile) for the hints' external tokens.
 
     Every external hint's ``bind`` tag is checked first (SEC-4): one token that DPS did not
@@ -331,13 +335,15 @@ def _detokenize_prepass(
         groups.setdefault(key, set()).add(token)
     if options.tokenizer is None:
         return None
-    cache: dict[tuple[str, str], str] = {}
+    cache: dict[ExternalKey, str] = {}
     for (entity, profile), tokens in groups.items():
         ordered = sorted(tokens)
         if options.on_detokenize is not None:
             options.on_detokenize(entity, profile, len(ordered))
         values = options.tokenizer.detokenize(entity, ordered, profile=profile)
-        cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
+        cache.update(
+            {external_key(entity, profile, t): v for t, v in zip(ordered, values, strict=True)}
+        )
     return cache
 
 
@@ -503,7 +509,7 @@ def apply_plan(
 def _reveal_ctx(
     hint: RevealHint,
     options: ApplyOptions,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> TransformContext:
     return TransformContext(
         entity_type=hint.entity_type,
