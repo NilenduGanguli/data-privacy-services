@@ -16,7 +16,7 @@
  */
 import { useReducer } from 'react';
 import {
-  canConfirmWrite, confirmationKey, countKey, emptyDraft, fqn, inPlaceKeyRewrites, isWriteConfirmed, keyMethodsOf, needsConfirmation, writtenObject,
+  canConfirmWrite, confirmationKey, countKey, emptyDraft, fqn, inPlaceKeyRewrites, isWriteConfirmed, keyMethodsOf, needsConfirmation, parseCount, writtenObject,
   type Step, type WizardDraft,
 } from '../../lib/jobs';
 import { defaultPort, needsTransactions, type SourceEngine } from '../../lib/engines';
@@ -224,10 +224,34 @@ export function targetReady(d: WizardDraft): boolean {
   switch (d.writeMode) {
     case 'table': return !!d.targetConnectionId && !!d.targetTable.trim();
     case 'files': return !!d.filesConnectionId;
-    case 'append': return d.appendTarget === 'same' ? true : !!d.targetTable.trim();
+    case 'append': return offsetProblem(d) === null && (d.appendTarget === 'same' ? true : !!d.targetTable.trim());
     case 'in_place': return d.connectionRoles.includes('target') && keysKeptInPlace(d);
     default: return false;
   }
+}
+
+/** The table's key is text (a prefix shifts it) rather than an integer (an offset shifts it). */
+export function textKeyed(d: Pick<WizardDraft, 'shape'>): boolean {
+  return (d.shape?.key ?? []).some((k) => {
+    const kind = d.shape?.columns.find((c) => c.name === k)?.kind;
+    return kind === 'text' || kind === 'char';
+  });
+}
+
+/**
+ * Append with the Offset strategy, said where it is typed (H2 verification, F4 polish): the server
+ * takes exactly one of a whole-number offset above 0 or a 1-16 character prefix of letters, digits,
+ * `_` and `-` (`PkOffset`). `null` when the draft's key strategy is fine.
+ */
+export function offsetProblem(d: Pick<WizardDraft, 'writeMode' | 'pkKind' | 'pkOffset' | 'pkPrefix' | 'shape'>): string | null {
+  if (d.writeMode !== 'append' || d.pkKind !== 'offset') return null;
+  const prefix = d.pkPrefix.trim();
+  if (prefix || textKeyed(d)) {
+    if (!prefix) return 'Enter the key prefix the new rows get (for example SYN-).';
+    return /^[A-Za-z0-9_-]{1,16}$/.test(prefix) ? null : 'The key prefix is 1 to 16 letters, digits, "_" or "-".';
+  }
+  if (!d.pkOffset.trim()) return 'Enter the key offset: a whole number above 0 that lifts every new key above the highest key in the table.';
+  return parseCount(d.pkOffset) === null ? 'The key offset must be a whole number above 0 (for example 900000000).' : null;
 }
 
 /** The accepted snapshot keeps every key column in the run's mode, as In place requires. */
