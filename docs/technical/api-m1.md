@@ -165,15 +165,17 @@ one.
 ## Taxonomy and recognizer test
 
 **`GET /entities`** → `{items: [{name, family, sensitivity, description, jurisdictions, builtin}],
-families}`: the built-in types only, sorted by family then name. Custom types registered by any
-tenant's inline policy are never listed (the registry is process-wide).
+families}`: the built-in types only, sorted by family then name. Custom types are never listed: a
+policy's custom tiers belong to the request (or job) that uses it (S3 review round 1).
 
 **`POST /policies/test-recognizer`** `{recognizer, text}` → `{matches: [{start, end, entity_type,
 score, evidence, context}], count, yaml}`. `recognizer` is a custom-recognizer spec (Presidio
 fields `name`, `supported_entity`, `patterns[{name, regex, score}]`, `context`, `deny_list`,
 plus the DPS extension `allow_list`: exact values that never match). Limits: text 20,000
 characters, 50 patterns of ≤ 500 characters (422 `invalid_recognizer`, also for a regex that does
-not compile). The text is neither stored nor echoed; nothing is registered.
+not compile or that the static ReDoS filter refuses). The text is neither stored nor echoed;
+nothing is registered. Patterns run under the request's CPU budget like every policy pattern
+(below): one that runs past it answers 422 `custom_pattern_too_slow`.
 
 ## Error codes
 
@@ -198,6 +200,7 @@ not compile). The text is neither stored nor echoed; nothing is registered.
 | `ddl_too_large` · `sample_too_large` · `too_many_rows` | 413 | schema limits (above) |
 | `invalid_seed` · `invalid_rows` · `unique_exhausted` | 422 | a bad `seed`, `rows < 1`, or a `unique` field that ran out of values |
 | `invalid_recognizer` | 422 | the recognizer test (above) |
+| `custom_pattern_too_slow` | 422 | a policy pattern (custom recognizer or deny list) ran past the call's CPU budget — 1 s plus 50 µs per pattern run plus 1 µs per character per pattern scanned (S3 review round 1): every engine route, NDJSON item, document and the recognizer test; an L2 job (or partition) fails with this code, without retries |
 | `ndjson_invalid` | 400 / 422 | an NDJSON envelope or line that is not valid (400), or nesting deeper than 100 (422) |
 | `ndjson_too_large` | 413 | more than `DPS_NDJSON_MAX_ITEMS` items |
 | `idempotency_key_invalid` | 422 | the header does not match `[A-Za-z0-9_.:-]{1,128}` |

@@ -583,6 +583,26 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   Idempotency-Key` (keys travel in headers, not cookies).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a
   500 `internal error` with only the exception class logged.
+- **Policy patterns cannot pin a CPU** (S3 review F-02/S3, round 1 B1). Custom-recognizer patterns
+  and deny lists run on the `regex` package (a core dependency since round 1; `VERSION0` = the `re`
+  syntax and semantics, plus a matching timeout), never on `re`. Every call — an HTTP request
+  (`dps.app._CallScope`) or a worker handler task (`Consumer._guard`) — gets one CPU budget for its
+  policy patterns: 1 s, plus 50 µs per pattern run and 1 µs per character per pattern scanned
+  (`dps/engine/detect/regex_guard.py`, `BUDGET_*`). A pattern that runs past it is stopped and the
+  call refused: 422 `custom_pattern_too_slow` (engine routes, NDJSON items, documents, the recognizer
+  test); an L2 job or partition fails with that code and is not retried; a post-write sample records
+  it as its `error`. The static filter (`check_pattern`: no nested repeats, backreferences, bounds
+  over 1000, patterns over 512 characters) still refuses the classic shapes when a policy is
+  validated. Declared-field globs are matched without a regex (`custom.PathGlob`, linear). A bank
+  recognizer that is quadratic on long tokens (`\w+@\w+` on a base64 blob) can be refused on large
+  inputs — rewrite it with bounded repeats.
+- **Custom entity tiers are per call** (S3 review F-10, round 1 B3): the tiers a policy declares
+  (`sensitivity` on a custom recognizer or declared field) live in the request's or job handler's
+  own registry (`dps.engine.call_scope`), never in a process-wide one, so no tenant can fill a
+  registry other tenants need, and a request that names a custom type without a tier reads the
+  MEDIUM default whatever another request declared. Any new entry point that runs the engine must
+  run inside an HTTP request or a `Consumer` handler task (both bind the scope) — the M4 merge's
+  `POST /scans` and browser-worker handlers do.
 
 ## 7. Secrets (names only)
 
@@ -619,9 +639,15 @@ as another tenant's. Inline credentials (dev only) are sealed with `DPS_JOB_KEK`
 
 Who may change a connection (security fix SEC-3): **any** `PATCH` or `DELETE` of a connection that
 is or becomes tagged `production` (a rename, roles, tags, a credential rotation) needs the `admin`
-scope (403 `admin_scope_required`). On a connection that holds credentials (a sealed secret or a
-`secret_ref`), changing a param that decides where the credentials are sent needs the credentials
-again in the same request (new `credentials`, or the `secret_ref` restated) or `admin`; otherwise 403
+scope (403 `admin_scope_required`). **Production credentials** (S3 review F-01, completed in round
+1 B2): a `secret_ref` that a `production`-tagged connection holds is a production credential —
+naming it in another connection (create or patch) needs `admin`, a connection that already holds it
+(an admin made it, or a `jobs` key made it before the production connection was tagged) is changed
+or deleted like the tagged one (**any** `PATCH`, any `DELETE`: `admin`), and an `in_place`/`append`
+run or retry through any holder needs `admin` (`dps.connections.production_refs`). On a
+connection that holds credentials (a sealed secret or a `secret_ref`), changing a param that
+decides where the credentials are sent needs the credentials again in the same request (new
+`credentials`, or the `secret_ref` restated) or `admin`; otherwise 403
 `connection_endpoint_change_requires_credentials` and nothing changes. The list is one engine-keyed
 table, `dps.connections.ENDPOINT_PARAMS`: postgres `host port database dbname options.sslmode
 options.sslrootcert_ref`; oracle `host port service_name sid dsn` (+ TLS options); mongo `uri host
@@ -631,7 +657,9 @@ port replica_set database options.replicaSet options.directConnection options.tl
 `connection.update` audit event names the changed fields (`counts["field.params.host"]`, …), never a
 value. `POST /connections/{id}/test` takes no param overrides, so it always tests the stored
 endpoint. Residual: a `jobs` key may still *create* a connection that names any of its own tenant's
-`secret_ref`s with an endpoint of its choice; restrict the key or mount fewer refs per tenant.
+**non-production** `secret_ref`s with an endpoint of its choice (production credentials need
+`admin` wherever they are named, changed or deleted); restrict the key or mount fewer refs per
+tenant.
 
 ## 8. Traps
 

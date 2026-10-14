@@ -1217,5 +1217,47 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   signature; `open_sealed(…, fallback=False)` keeps `dps.rekey` strict. The M4 scans route (merging
   later) should pass `idempotency_alternates` like the job routes.
 - **F-22 (bind tag):** dual verification by an explicit version field (`reverse_params.bind_v`)
-  rather than trying both encodings: a v2 hint can never be checked as v1. The entity-type rule
-  applies to `external_tokenize` hints only (M0 envelope tests use other names for other methods).
+  rather than trying both encodings. `bind_v` is caller-supplied, so a v2 hint *can* be presented
+  as v1; that is harmless because the entity-type rule leaves only the documented `None`/`""` v1
+  ambiguity (review round 1 N7). The entity-type rule applies to `external_tokenize` hints only (M0
+  envelope tests use other names for other methods).
+
+## Security review round 1 fixes B1–B3 (finish stage, `fsec`)
+
+The independent review of the fixes above (`~/.cache/dps-build/reports/S3-review-r1.md`) found three
+blocking defects; each is fixed test-first (`docs/security/2026-10-11-m5-security-review.md` §3.1,
+§3.2, §3.10). Differences from the first round and from the plans:
+- **B1 (F-02/S3, ReDoS):** the static filter alone was not a bound. Policy patterns and deny lists
+  now run on the **`regex` package** (new core dependency in `pyproject.toml`, `VERSION0`) with a
+  matching timeout under a per-call CPU budget (`regex_guard.PatternBudget`: 1 s + 50 µs per pattern
+  run + 1 µs per character per pattern, CPU time of the calling thread; the matcher releases the
+  GIL). Refusal is a `CodedError` (`custom_pattern_too_slow`, 422) mapped by `run_engine`, NDJSON and
+  the recognizer test; the L2 prepare, partition and discover handlers fail the job/partition with
+  it (no retry) and the finalize `_best_effort` steps record it. `check_pattern` stays as the first
+  filter and also refuses a pattern the `regex` module cannot compile. Declared-field globs:
+  `path_glob` now returns a `PathGlob` (no regex; `fullmatch(path) -> bool`, `match_parts`), which
+  replaces the first round's "adjacent `*` collapse"; `tests/security/test_regex_guard.py::
+  test_stacked_glob_stars_collapse` (asserted the compiled regex's text) became
+  `test_stacked_glob_stars_mean_one_star`. The timing tests run in a child process with a hard
+  limit, so a regression fails instead of hanging the suite.
+- **B2 (F-01):** a connection that already holds a production credential is changed or deleted
+  only with `admin` (`update_connection`, `delete_connection` load `production_refs`); the `PATCH`
+  route checks it before the TLS and SSRF checks of an endpoint change, as for a tagged connection.
+- **B3 (F-10):** supersedes "custom tiers stay process-global". Custom tiers live in a per-call
+  registry (`taxonomy.CustomEntities` in a context variable) bound by a new pure-ASGI middleware
+  (`dps.app._CallScope`, every HTTP route) and by `Consumer._guard` (every handler task), through
+  `dps.engine.call_scope` — `entity_info` and `register_entity` consult it transparently, so no
+  engine path changed signature. `custom.CustomTiers` registers a policy's tiers in each call that
+  uses a detector or a `BatchTransformer` built in another call (the worker's `RuntimeCache` shares
+  a job's transformer between partition handler tasks). The process-global `TAXONOMY` remains for
+  code outside a request or a job. Semantics change: a tier no longer leaks from one call into
+  another (a request naming a custom type without a tier reads MEDIUM). `tests/test_api_entities.py::
+  test_entities_never_list_custom_types_any_tenant_registered` asserted the process-wide
+  registration as its precondition; it now asserts the request's finding tier and that nothing
+  reached the process registry.
+- **Docs:** the review document's §4 "refuted" glob candidate is corrected (it was real), the
+  residual "length caps bound the work" is replaced by the budget arithmetic, and the non-blocking
+  wording items N2 (F-11 codebook residual), N3 (F-14 claim window) and N7 (above) are recorded.
+  Open from that review: N1 (Oracle `https_proxy` in a DSN), N4 (L2 `ApplyOptions` without
+  `tokenize_allowed`, not exploitable today), N5 (option keys echoed), N6 (the header test's name),
+  N8 (T8B, the D4 sweep lens, the SEC-2..5 record: F1 stream items outside this round).

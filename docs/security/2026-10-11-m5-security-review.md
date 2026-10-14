@@ -25,7 +25,7 @@ credentials or raw DPS keys tracked; no `.env` tracked; no `dangerouslySetInnerH
 |---|---|---|---|---|---|
 | S1 | logs/errors | 422 bodies echoed input; pydantic's `union_tag_invalid` and value-quoting validators still echoed it after M0's handler (finder F5: an SSN as `pk_strategy.kind`, as `supported_entity`, as a method) | `dps/layers/api/validation.py`: `{"detail": [{"loc","msg","type"}], "code": "invalid_request"}`; quoting messages replaced (`dps.errors.safe_error_items`); non-identifier `loc` parts shown as `<key>`; the engine's 400 `invalid policy`, the policy store's `invalid_policy`, the recognizer test and connection validation use the same scrubbing; `custom.py`, `policy.py`, `jsonpath.py` validators name the rule, never the value | `tests/security/test_validation_errors.py` | fixed + test |
 | S2 | secrets | `repr(Settings)` printed 12 secrets; `ApplyOptions`/`TransformContext` printed the SEC-4 binding key and the token cache | every secret setting `Field(default="", repr=False)`; `binding_keys`, `binding`, `external_cache`, `external` `field(repr=False)` | `tests/security/test_secrets_hygiene.py::test_settings_repr_hides_secrets`, `::test_engine_dataclasses_hide_binding_keys_and_token_maps` | fixed + test |
-| S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | `dps/engine/detect/regex_guard.py::check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies); stacked `*` in declared-field globs collapse | `tests/security/test_regex_guard.py` | fixed + test |
+| S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | two layers (§3.2): the static first filter `regex_guard.check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies), and — review round 1 B1 — the bound: patterns and deny lists run on the `regex` module under a per-call CPU budget linear in what they scan (422 `custom_pattern_too_slow` past it); declared-field globs are matched without a regex (`custom.PathGlob`), linear in the path | `tests/security/test_regex_guard.py` | fixed + test (round 1) |
 | S4 | injection (selections) | `validate_selection` / the MongoDB allow-list are the only barrier before SQL/BSON | none needed: the adversarial corpus is refused on both dialects; comments are stripped (M2 design), never reach the statement | `tests/security/test_selection_injection.py` | accepted (control holds) + test |
 | S5 | SSRF (scanner) | no `check_scan_url`: numeric encodings, IPv4-mapped IPv6, metadata IPs and DNS that resolves to link-local were not refused; Chromium resolved any name | `dps.netguard.check_scan_url`, `forbidden_ip_reason` (IPv4-mapped/NAT64/6to4 unwrapped), `check_resolved_host`, `chromium_resolver_rules`; wiring into `POST /scans` and the crawler's launch flags lands **with the M4 merge** (no scanner on this branch yet) | `tests/security/test_netguard.py` | functions + test; wiring at M4 merge |
 | S6 | auth | a route added without `require_scope` would be public | `require_scope`/`require_any_scope` tag their dependency (`__dps_scope__`); the walk uses `iter_route_contexts` (FastAPI 0.143 nests included routers, so the plan's `app.routes` walk saw 2 routes) | `tests/security/test_route_auth.py` | fixed + test |
@@ -43,8 +43,8 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 
 | Id | Sev | Finding | Fix | Test | Status |
 |---|---|---|---|---|---|
-| F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 | `tests/api/test_production_resource_gate.py` | fixed + test |
-| F-02 | HIGH | ReDoS via policy-supplied recognizer regex | S3 | `tests/security/test_regex_guard.py` | fixed |
+| F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 (completed in review round 1, B2) | `tests/api/test_production_resource_gate.py` | fixed + test |
+| F-02 | HIGH | ReDoS via policy-supplied recognizer regex (and, review round 1 B1, via stacked repeats and separated-star declared-field globs) | S3, §3.2 | `tests/security/test_regex_guard.py` | fixed + test (round 1) |
 | F-03 | HIGH | S5 scanner SSRF guard missing | S5 (wiring at the M4 merge: a blocking item of that merge) | `tests/security/test_netguard.py` | functions fixed; wiring pending M4 |
 | F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | `tests/test_ner_dob_precedence.py` | fixed + test |
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
@@ -52,7 +52,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-07 | MED | CSV formula injection in the L2 `files` export | see §3.7 | `tests/connectors/test_files.py::test_csv_cells_a_spreadsheet_would_evaluate_are_neutralised` | fixed + test |
 | F-08 | MED | No SSRF guard on tenant-controlled connection endpoints (S3 `endpoint_url`, DB hosts) | see §3.8 | `tests/security/test_connection_ssrf.py`, `tests/api/test_connection_ssrf_api.py` | fixed + test |
 | F-09 | MED | Presidio wrote customer text to the logs at `DEBUG` | S13 | `tests/test_observability.py::test_third_party_loggers_are_capped`, `tests/test_no_values_in_logs_m5.py` | fixed |
-| F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 | `tests/security/test_custom_entity_bounds.py` | fixed + test |
+| F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 (registry per call since review round 1, B3) | `tests/security/test_custom_entity_bounds.py` | fixed + test |
 | F-11 | MED | Tokenization oracle under DPS's bank credentials (any profile string, any caller with `obfuscate`) | see §3.11 | `tests/security/test_tokenizer_profiles.py` | fixed + test |
 | F-12 | MED | Synthesize mode emitted the bank's real tokens as "synthetic" values | see §3.12 | `tests/security/test_synthesize_keyless.py` | fixed + test |
 | F-13 | MED | Retry and job-group admission bound only the public `kid`, not the DEK | see §3.13 | `tests/security/test_key_binding.py` | fixed + test |
@@ -77,8 +77,54 @@ patching another connection onto it, is 403 `admin_scope_required`; `validate_ru
 writes, and before this a `jobs` key could restart an admin-approved production write. The
 connection's `secret_ref` name stays visible to `jobs` keys (it is a name, not a secret). Inline
 credentials need the password itself; the endpoint alone was not made a production marker (UAT and
-production schemas can share a database). Test: `tests/api/test_production_resource_gate.py`
-(the clone, the patch, an admin-made untagged holder, the retry rule).
+production schemas can share a database).
+
+**Review round 1 (B2).** The first fix gated only a patch that *switched to* a production
+credential, and SEC-3 accepts the same `secret_ref` restated as "credentials". So a `jobs` key
+re-pointed an untagged connection that already held the production credential (`PATCH {params:
+{host, port}, secret_ref: <the same ref>}` → 200), and the next `/test` sent the production login
+and password to a fake PostgreSQL server of its choice; it could also delete that connection (204).
+Such a holder exists when an admin made it, or when a `jobs` key made it before the production
+connection was tagged. Rule as built: a connection that **holds** a production credential
+(`connections.holds_production_credentials`) is treated like the tagged one — **any** `PATCH`
+(endpoint, secret, roles, name, tags) and any `DELETE` needs `admin` (403
+`admin_scope_required`), checked under the row lock (and, for an endpoint change, before the TLS and
+SSRF checks). Test: `tests/api/test_production_resource_gate.py` (the clone, the patch, an
+admin-made untagged holder, the retry rule, and the reviewer's re-point/delete probe in both
+cases: every patch and the delete are 403, nothing changes, and a counting listener at the
+requested endpoint receives no connection).
+
+### 3.2 F-02 / S3 — policy patterns cannot pin a CPU (review round 1, B1)
+
+The first fix was the static filter alone. It refuses only nested repeats, so stacked repeats over
+the same characters still backtracked polynomially (`\w*\w*\w*\w*\w*!` and `.*a.*a.*a.*b` > 20 s on
+500 characters; through `/policies/test-recognizer`, `/detect` and `/obfuscate`, no answer within
+45 s on 400 characters), and a declared-field glob with separated stars (`$.*a*a*a*a*a*a*a*a*a*b`,
+compiled to a regex the filter never saw) took > 20 s on a 63-character name. Fix as built:
+
+- **Matching under a budget.** Policy patterns and deny lists run on the `regex` module in
+  `VERSION0` (the `re` syntax and semantics; spans are identical, test
+  `test_policy_patterns_match_exactly_like_re`) with a matching `timeout`, never on `re`, which
+  cannot be interrupted. Each call — an API request (the app's `_CallScope` middleware) or a worker
+  handler task — owns one `PatternBudget` (`dps.engine.call_scope`) shared by all its detectors:
+  1 s of CPU, plus 50 µs per pattern run and 1 µs per character per pattern scanned (a linear
+  pattern runs one to two orders of magnitude under that rate). A pattern that runs past what is
+  left is stopped and the call is refused: 422 `custom_pattern_too_slow` on every engine route,
+  NDJSON item, document and the recognizer test; a job fails (or a partition, or the post-write
+  sample records the code) with it, without retries. Nothing is skipped silently.
+- **The static filter stays** as the first layer: it refuses the classic shapes when a policy is
+  validated, with a clear message (and now also a pattern the `regex` module cannot compile).
+- **Globs without a regex.** `custom.PathGlob` cuts the glob and the path at `.`, `[` and `]` and
+  matches each name by finding its literal pieces in order (leftmost placement is optimal for `*`):
+  linear in the path whatever the stars. A differential test checks it against the old regex
+  semantics on 6000 random globs and paths.
+
+Proof: `tests/security/test_regex_guard.py` runs the four stacked patterns of the review and two
+the `regex` module's literal pre-checks cannot skip, the separated-star glob, and the reviewer's
+route probe in a child process with a hard time limit (a regression to a backtracking matcher fails
+instead of hanging). Probes (`~/.cache/dps-build/reports/S3-fix-r1/probes/`): the review's route
+probe answers in 0.01 s on all three routes; `\d+\d+\d+[x!]` on 2000 characters answers 422
+`custom_pattern_too_slow` in 1.01 s on each route; the 63-character glob matches in < 1 ms.
 
 ### 3.4 F-04 — a stronger detector never weakens protection
 
@@ -122,16 +168,37 @@ stays allowed. Residual: the driver resolves the name again (rebinding window) �
 NetworkPolicy of the OpenShift manifests is the network-level backstop; SRV targets of a
 `mongodb+srv://` URI are not resolved by the guard.
 
-### 3.10 F-10 — bounded labels and a bounded registry
+### 3.10 F-10 — bounded labels and a registry per call
 
 `dps_findings_total` labels a custom type `custom` (L1 and L2), so neither a flood of names nor a
-tenant's project names reach the keyless `/metrics`. The process-global registry stores a custom
-name only when it raises the tier above the MEDIUM default (what an unregistered name already reads
-as) and holds at most 5000 names; a new name past the cap fails the request closed (400) instead of
-being stored or downgraded. Policies are capped at 50 recognizers (20 patterns, 50 context words,
-1000 deny/allow terms each) and 500 declared fields, inline or stored. Residual: `/metrics` stays
-keyless by design (ops scrape); per-tenant LLM counters carry tenant ids — restrict the ops port with
-the OpenShift NetworkPolicy (Task 25).
+tenant's project names reach the keyless `/metrics`. Policies are capped at 50 recognizers (20
+patterns, 50 context words, 1000 deny/allow terms each) and 500 declared fields, inline or stored.
+
+**Review round 1 (B3).** The first fix kept the registry process-global, capped at 5000 names and
+fail-closed. One tenant's `detect` key then filled it in 10 requests (50 HIGH recognizers and 500
+HIGH declared fields each), and every other tenant's next new HIGH custom type answered 400 on
+`/detect` and `/obfuscate` until the process restarted — on a fresh replica, an attacker who filled
+it first broke other tenants' stored policies. Rule as built: custom tiers belong to the **call**
+that declared them. Every API request (the app's `_CallScope` middleware, so every route) and every
+worker handler task (`Consumer._guard`) binds its own `taxonomy.CustomEntities`
+(`dps.engine.call_scope`), which `register_entity` fills and `entity_info` reads first; it is never
+shared with another call, so no tenant can fill a registry another tenant (or another request)
+needs, and a tier no longer leaks between calls (a request naming a custom type without a tier
+reads the MEDIUM default, whatever earlier requests declared). A detector or batch transformer
+built in one call and used in another (a worker caches a job's transformer across its partition
+handlers) registers its policy's tiers again in each call that uses it (`custom.CustomTiers`). A
+registration still only raises protection (never below what the name already reads as; built-in
+names refused), at most 5000 names per registry (a policy declares at most 550). The
+process-global registry remains only for code outside a request or a job (tools, tests). Tests:
+`tests/security/test_custom_entity_bounds.py`
+(the reviewer's two-tenant probe as a test: 12 filling requests all answer 200, nothing reaches the
+process registry, and the victim's new HIGH names answer 200 with tier HIGH on `/detect` and
+`/obfuscate`; a call's registry is its own and capped; no tier leaks between requests; two worker
+handler tasks see only their own tiers and budgets; a reused detector and a cached transformer
+register their policy's tiers in each later call).
+
+Residual: `/metrics` stays keyless by design (ops scrape); per-tenant LLM counters carry tenant
+ids — restrict the ops port with the OpenShift NetworkPolicy (Task 25).
 
 ### 3.11 F-11 — a tenant tokenizes only its allowed data elements
 
@@ -143,7 +210,11 @@ tenant bound to the call (`CURRENT_TENANT`) **before** the first call: 403
 audited before the call (`external.tokenize`, like SEC-4's detokenize audit), with the profile label
 when an allow-list is set. Production refuses to boot with a tokenizer and no allow-list; HANDOFF tells
 the bank to give DPS its own data elements, so DPS tokens never equal the tokens bank systems store.
-Not done (optional in the finding): a low-entropy entity refusal — the allow-list covers it.
+Not done (optional in the finding): a low-entropy entity refusal. Residual (review round 1 N2):
+within an allowed (entity type, profile), any `obfuscate` caller of that tenant can still tokenize a
+whole small domain (every date of birth, say) and so build a codebook that inverts that data
+element's tokens — those an L2 job wrote included — without the `reveal` scope. Allow-list only
+data elements whose domain is too large to enumerate, or give low-entropy types no profile.
 
 ### 3.12 F-12 — synthesize mode is key-less
 
@@ -173,7 +244,10 @@ it — a retry with the same key creates a fresh job and returns its key) or can
 (the cancel-finalize purges the key); `groups.discard_group` deletes the new group. A best-effort
 `error` audit records the rollback when the sink takes it. Residual: a response lost in transit is
 invisible to the server — callers who cannot afford a lost key pass their own key material or seed
-(documented in the contract); a two-phase start was not added.
+(documented in the contract); a two-phase start was not added. Residual (review round 1 N3): if a
+worker claims the job between the commit and the refused creation audit, an `in_place` run may
+write partitions before the cancel lands; those rows are then under a key nobody holds (a small
+window; the same callers' remedy applies).
 
 ### 3.18 F-18 — policy bodies sealed in the job row
 
@@ -236,6 +310,9 @@ an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguou
 | `da904a9` | F-20 |
 | `d2bada1` | F-21 |
 | `0c63e01` | F-22 |
+| `4d2b234` | this review document (round 0) |
+| `be2b326` | review round 1 B2: F-01 completed — holders of a production credential |
+| `e7882af` | review round 1 B1 + B3: F-02/S3 per-call pattern budget and the glob matcher; F-10 registry per call |
 
 Proof beyond the tests: the finders' probes re-run on the fixed branch
 (`~/.cache/dps-build/reports/S3-impl/probes/*.after.out`) — the D3 clone is refused (403, 0 rows
@@ -252,16 +329,34 @@ Presidio model a birth date is transformed in 8/8 runs.
   overwrite each other; file stores are target-only and no route reads them back (artefact reads are
   RLS-scoped and tenant-keyed). Reading another tenant's export needs the shared volume itself, which
   only the operator or the downstream consumer holds. Defence-in-depth note only.
-- **ReDoS via a declared-field path glob** — reproduces, but it is a weaker special case of the
-  recognizer-regex ReDoS (same principal, any length), fixed by S3; adjacent `*` now collapse anyway.
+- ~~ReDoS via a declared-field path glob~~ — **not refuted** (review round 1 B1): the glob was
+  compiled to a regex the S3 filter never saw, and collapsing *adjacent* stars left separated stars
+  backtracking (`$.*a*a*a*a*a*a*a*a*a*b`: > 20 s on a 63-character name). Fixed in §3.2: globs are
+  matched without a regex, linear in the path.
 - **Unbounded key custody for paused or stalled run jobs** — contract §6.1 defines custody as "the
   job's lifetime", paused/waiting are live states, resume needs the key, and the owner ends custody by
   canceling (which purges it). A maximum pause duration would be a policy, not a D2 fix.
 
 ## 5. Residual risks
 
-- Python `re` has no timeout: the static guard is heuristic (other ambiguous alternations can still
-  backtrack); input length caps (`max_text_chars`, document limits) bound the work.
+- Policy patterns (review round 1 B1): the static filter is a heuristic; the bound is the per-call
+  CPU budget (1 s + 50 µs per pattern run + 1 µs per character per pattern). The custom-pattern CPU
+  of one call is therefore linear in what it scans times the number of patterns — up to about 1000
+  CPU-seconds for a 1,000,000-character text against a policy's 1000 patterns, the same order as
+  the legitimate work of such a request — and is then refused. Input length caps alone do **not**
+  bound it (the earlier text said they did: `max_text_chars` is 1,000,000). A legitimate pattern
+  that is quadratic on long tokens (`\w+@\w+` over a long base64 blob, say) can be refused on large
+  inputs; the error tells the owner to simplify it. Rate limits bound how many such calls arrive.
+- Connections (review round 1 B2): a production credential needs `admin` wherever it is named,
+  changed or deleted, but a `jobs` key may still name any of its tenant's **non-production**
+  `secret_ref`s in a new connection with an endpoint of its choice (that login then reaches that
+  endpoint, inside the egress rules). Restrict `jobs` keys or mount fewer refs per tenant.
+- F-08 (review round 1 N1, open): python-oracledb honours `https_proxy` in an Easy Connect string
+  or descriptor and dials the proxy first; `netguard` checks only the `HOST=` / Easy Connect host,
+  so an inline `dsn` naming a metadata address as proxy passes (reachable only with inline
+  credentials, which the production posture forbids, or operator secret files). Server-directed
+  hops (MongoDB members a seed advertises, Oracle listener redirects) are not checked either; the
+  egress NetworkPolicy is the backstop.
 - Private (RFC 1918) targets are allowed by design for internal UAT sites and databases.
 - DNS can change between DPS's check and the client's own resolution (rebinding window); the
   OpenShift egress NetworkPolicy (Task 25) is the network-level backstop.
@@ -286,4 +381,12 @@ DPS_TEST_REQUIRE_SERVICES=1 ./lane.sh pytest -q -m db tests/security/test_cross_
   tests/api/test_production_resource_gate.py
 ./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-<lens>/<probe>.py   # the finders' probes
 ./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-impl/probes/<probe>.py  # re-run copies
+# review round 1 (B1-B3): the reviewer's probes and the bounded re-runs
+./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-review-r1/probes/probe_redos_api.py
+./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-review-r1/probes/probe_glob_redos.py
+./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-fix-r1/probes/redos_dps_matcher.py
+./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-fix-r1/probes/probe_f10_registry_exhaustion_after.py
+PYTHONPATH=. DPS_TEST_REQUIRE_SERVICES=1 ./lane.sh pytest -q -s -p tests.fixtures.services \
+  -p tests.fixtures.db -p tests.fixtures.sources -c pyproject.toml --rootdir=. \
+  /Users/neelu/.cache/dps-build/reports/S3-review-r1/probes/test_probe_f01_repoint.py
 ```
