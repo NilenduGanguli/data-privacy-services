@@ -56,6 +56,7 @@ from dps.layers.scanner.capture import (
 )
 from dps.layers.scanner.classify import (
     classify_field,
+    classify_fields,
     classify_rendered,
     redact_text,
     sensitive_prefilled,
@@ -551,11 +552,10 @@ class ScanRunner:
         return snap, await frame_map(page, iframes=scope.iframes)
 
     def _classify(self, snap: PageSnapshot) -> dict[str, FieldClassification]:
-        min_score = self.rt.policy.detect.min_score
-        return {
-            f.key: classify_field(f, detector=self.detector, min_score=min_score)
-            for f in snap.fields
-        }
+        """Every field of the page, with main's mixed-PII rules (``classify_fields``)."""
+        return classify_fields(
+            snap.fields, detector=self.detector, min_score=self.rt.policy.detect.min_score
+        )
 
     async def _pipeline(
         self, t: Target, page: Page, response: Response | None, record: PageRecord

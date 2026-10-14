@@ -526,3 +526,56 @@ async def test_a_replay_click_that_lands_on_a_denied_route_stops_that_tab(
         reached = [e for e in sink.events if e.kind == "spa" and e.result == "reached"]
         assert reached and outcome.scope_routes_reached == len(reached)
         assert {e.page_no for e in reached} >= {replays[0].page_no}
+
+
+# --- main's mixed-PII rules on a live page (pre-merge of M4, 2026-10-14) --------------------------
+CONTACT_HOME = b"""<!doctype html><html><head><title>Contact preferences</title></head><body>
+<h1>Contact preferences</h1>
+<form method="post" action="/save">
+<label for="m">Preferred contact method</label>
+<select id="m" name="channel"><option value="email" selected>E-mail</option>
+<option value="mobile">Mobile</option></select>
+<label for="v">Contact value</label><input id="v" name="value" type="text">
+<label for="n">Notes</label>
+<textarea id="n" name="notes">Please call me on +91 98451 20377 after six</textarea>
+<label for="r">Reference</label><input id="r" name="ref" type="text" value="Deliver after six">
+</form></body></html>"""
+
+
+@pytest.fixture
+def contact_site() -> Iterator[tuple[str, Counter[str]]]:
+    yield from _serve(CONTACT_HOME)
+
+
+@pytest.mark.browser
+async def test_the_crawler_never_presents_mixed_pii_fields_as_not_personal(
+    chromium: Any,
+    scan_settings: Settings,
+    scan_engine: PrivacyEngine,
+    contact_site: tuple[str, Counter[str]],
+) -> None:
+    """A contact value next to a channel select is ``MIXED_PII`` (by name, while empty) and a
+    textarea showing a phone number inside its text is ``FREE_TEXT``; both are filled with neutral
+    values in the parallel view, and no stored row holds the shown number."""
+    from dps.layers.scanner.crawler import ScanRunner
+
+    base, hits = contact_site
+    sink = MemoryScanSink()
+    rt = make_runtime(
+        base, scan_settings, scan_engine, path="/", cookies=False, screenshots=False, max_depth=0
+    )
+    await ScanRunner(
+        settings=scan_settings, engine=scan_engine, sink=sink, browser=chromium, runtime=rt
+    ).run()
+    assert sink.pages[1].status == "done" and hits["/save"] == 0
+    by_name = {f.name_attr: f for f in sink.fields[1]}
+    assert by_name["value"].entity_type == "MIXED_PII"
+    assert by_name["value"].evidence == ["mixed:value_next_to_channel"]
+    assert by_name["notes"].entity_type == "FREE_TEXT"
+    assert by_name["notes"].evidence == ["value_span:PHONE"]
+    assert by_name["channel"].entity_type is None and by_name["ref"].entity_type is None
+    assert sink.pages[1].personal_field_count == 2
+    for f in (by_name["value"], by_name["notes"]):
+        assert f.fill_status == "neutral" and f.persona_attr is None
+    stored = " ".join(f.model_dump_json() for f in sink.fields[1])
+    assert "98451" not in stored and "20377" not in stored

@@ -275,6 +275,20 @@ _COMPILED: tuple[tuple[re.Pattern[str], str, float, str], ...] = tuple(
 )
 
 
+# -- a polymorphic contact value (integrated verify r1, B1): shared by L2 discovery and L3 ---------
+#: Names of a column / form field holding a contact value of whichever channel its row or form names
+#: (``contacts(channel, value)``): an e-mail on one record, a mobile number on the next.
+MIXED_VALUE_NAMES = frozenset(
+    {"value", "val", "contact", "contact value", "contact detail", "contact details", "detail"}
+)
+#: Names of the column / field that says which channel that value is.
+CHANNEL_NAMES = frozenset(
+    {"channel", "contact channel", "contact type", "contact method", "medium", "channel type"}
+)
+#: The name evidence of such a value (discovery combines it with the values; the scanner alone).
+MIXED_NAME_SCORE = 0.7
+
+
 def structural_entities() -> frozenset[str]:
     """Every entity type a field name can suggest (the rules above)."""
     return frozenset(entity for _, entity, _ in _RULES)

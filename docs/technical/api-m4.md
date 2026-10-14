@@ -266,6 +266,18 @@ route that lands there is `failed` with `scope_reached`.
 `entity_type`, `sensitivity`, `confidence`, `detectors`, `risk_codes`, `fill_status`,
 `persona_attr`, `obfuscate_method`. No value of any kind.
 
+**Classification follows main's discovery rules** (`classify.classify_fields`; integrated verify
+r1, B1): the label dictionary is the one discovery uses (role names such as "Nominee name" or
+"Account holder", numbered address lines, document numbers), and no field is left "not personal"
+while its form or what it shows says otherwise — a contact value (`value`, `contact value`,
+`contact details` …) in the same form as a channel field (`channel`, `contact method` …) is
+`MIXED_PII` (confidence 0.7, detector `name`, evidence `mixed:value_next_to_channel`) even while it
+is empty; a field whose shown value (input/textarea value, a select's selected option) carries
+MEDIUM+ findings is classified by them — a whole value by its entity (`value:<ENTITY>`), findings
+inside longer text as `FREE_TEXT` (`value_span:<ENTITY>`, the highest sensitivity of what was
+found). Both fill with neutral values in the parallel view; password, hidden and file inputs are
+never read.
+
 ### Risk flags
 
 | `flag` | Severity | Raised when |

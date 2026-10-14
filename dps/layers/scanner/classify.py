@@ -27,9 +27,18 @@ from functools import lru_cache
 from typing import Any, Literal
 
 from dps.engine.detect.ensemble import Detector
-from dps.engine.detect.structural import KeyCandidate, classify_key
-from dps.engine.taxonomy import entity_info
+from dps.engine.detect.structural import (
+    CHANNEL_NAMES,
+    MIXED_NAME_SCORE,
+    MIXED_VALUE_NAMES,
+    KeyCandidate,
+    classify_key,
+    normalize_key,
+)
+from dps.engine.findings import Finding
+from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.layers.scanner.models import FieldClassification, FieldFacts, RenderedFinding, TextFacts
+from dps.snapshots import FREE_TEXT, MIXED_PII
 
 AutocompleteState = Literal["absent", "on", "off", "named", "unknown"]
 
@@ -333,6 +342,128 @@ def classify_field(
     )
 
 
+#: Field types whose value is never read to classify them (a password is never read at all).
+_UNREAD_TYPES = frozenset({"password", "hidden", "file"})
+
+
+def _names(facts: FieldFacts) -> set[str]:
+    """The field's own names — label, aria-label, ``name`` and ``id`` — normalised as the structural
+    dictionary reads them (page text, never stored)."""
+    out: set[str] = set()
+    for text in (facts.label, facts.aria_label, facts.name, facts.id):
+        if text:
+            norm = normalize_key(_PATH_CHARS.sub(" ", text[:_MAX_KEY_TEXT]).strip())
+            if norm:
+                out.add(norm)
+    return out
+
+
+def _named(names: set[str], phrases: frozenset[str]) -> bool:
+    """Whether one of ``names`` is one of ``phrases``: a one-word phrase must be the whole name, a
+    longer one may end it ("preferred contact method") — so "loan value" is no contact value."""
+    return any(
+        name == phrase or (" " in phrase and name.endswith(" " + phrase))
+        for name in names
+        for phrase in phrases
+    )
+
+
+def shown_text(facts: FieldFacts) -> str:
+    """What a field shows: an input's or a textarea's value, a select's selected option text."""
+    if facts.tag == "select":
+        chosen = [o for o in facts.options if o.selected and o.value.strip()]
+        return chosen[0].text if chosen else ""
+    return facts.value or ""
+
+
+def _sensitive(entity: str) -> bool:
+    return entity_info(entity).sensitivity.rank >= Sensitivity.MEDIUM.rank
+
+
+def _shown_classification(
+    detector: Detector, shown: str, min_score: float
+) -> FieldClassification | None:
+    """The classification of what a field shows (MEDIUM+ findings at the bar): a whole-value
+    finding gives its entity, findings inside longer text ``FREE_TEXT``; ``None`` without any."""
+    lead, tail = len(shown) - len(shown.lstrip()), len(shown.rstrip())
+    whole: list[Finding] = []
+    spans: list[Finding] = []
+    for x in detector.detect(text=shown).findings:
+        if x.score < min_score or not _sensitive(x.entity_type):
+            continue
+        start = x.locator.start if x.locator.start is not None else 0
+        end = x.locator.end if x.locator.end is not None else len(shown)
+        (whole if start <= lead and end >= tail else spans).append(x)
+    if whole:
+        best = max(whole, key=lambda x: x.score)
+        return FieldClassification(
+            entity_type=best.entity_type,
+            sensitivity=str(entity_info(best.entity_type).sensitivity),
+            confidence=min(0.99, math.floor(best.score * 100) / 100),
+            detectors=["value"],
+            evidence=[f"value:{best.entity_type}"],
+        )
+    if not spans:
+        return None
+    types = sorted({x.entity_type for x in spans})
+    return FieldClassification(
+        entity_type=FREE_TEXT,
+        sensitivity=str(Sensitivity.max_of(entity_info(t).sensitivity for t in types)),
+        confidence=min(0.99, math.floor(max(x.score for x in spans) * 100) / 100),
+        detectors=["value"],
+        evidence=[f"value_span:{t}" for t in types],
+    )
+
+
+def classify_fields(
+    fields: list[FieldFacts], *, detector: Detector, min_score: float
+) -> dict[str, FieldClassification]:
+    """:func:`classify_field` for every field of a page, then main's mixed-PII rules (L2 discovery,
+    integrated verify r1 B1) for the fields it leaves unclassified, so that no field is presented
+    as "not personal" while its form or what it shows says otherwise:
+
+    - a contact value (``value``, ``contact value``, ``contact details`` …) in the same form (and
+      frame) as a channel field (``channel``, ``contact method`` …) is ``MIXED_PII`` by its name,
+      at :data:`~dps.engine.detect.structural.MIXED_NAME_SCORE` when that reaches ``min_score`` — an
+      e-mail on one record, a mobile number on the next — even while it is empty;
+    - a field whose shown value (:func:`shown_text`) carries MEDIUM+ findings at the bar is
+      classified by them: a whole-value finding gives its entity (a selected option that is an
+      e-mail address), findings inside longer text make it ``FREE_TEXT``.
+
+    Password, hidden and file inputs are never read. Evidence names dictionary phrases and entity
+    types only.
+    """
+    classes = {f.key: classify_field(f, detector=detector, min_score=min_score) for f in fields}
+    names = {f.key: _names(f) for f in fields}
+    channel_forms = {
+        (f.frame_index, f.form_index) for f in fields if _named(names[f.key], CHANNEL_NAMES)
+    }
+    for f in fields:
+        if classes[f.key].entity_type is not None or f.input_type in _UNREAD_TYPES:
+            continue
+        own = names[f.key]
+        if (
+            MIXED_NAME_SCORE >= min_score
+            and (f.frame_index, f.form_index) in channel_forms
+            and _named(own, MIXED_VALUE_NAMES)
+            and not _named(own, CHANNEL_NAMES)
+        ):
+            classes[f.key] = FieldClassification(
+                entity_type=MIXED_PII,
+                sensitivity=str(entity_info(MIXED_PII).sensitivity),
+                confidence=MIXED_NAME_SCORE,
+                detectors=["name"],
+                evidence=["mixed:value_next_to_channel"],
+            )
+            continue
+        shown = shown_text(f)
+        if shown.strip():
+            found = _shown_classification(detector, shown, min_score)
+            if found is not None:
+                classes[f.key] = found
+    return classes
+
+
 _T_PATH = re.compile(r"^\$\.t\[(\d+)\]$")
 
 
@@ -447,11 +578,7 @@ def sensitive_prefilled(
     for f in fields:
         if not f.visible:
             continue
-        if f.tag == "select":
-            chosen = [o for o in f.options if o.selected and o.value.strip()]
-            shown = chosen[0].text if chosen else ""
-        else:
-            shown = f.value or ""
+        shown = shown_text(f)
         if not shown.strip():
             continue
         cls = classes.get(f.key)

@@ -1547,3 +1547,26 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   passes the role and still fails the app's rules; 15 single-rule violations refused by name and
   value-free; a literal secret env var refused; `amain` checks the role before the database) —
   every case failed before (`role` unknown; `amain` refused for the OCR key).
+- **Main's discovery semantics in scanner classification** (`dps/layers/scanner/classify.py`
+  `classify_fields`, `crawler.py` `_classify`; `dps/engine/detect/structural.py`): main's fix
+  "mixed-PII columns never kept as not personal" (`89a9e98`) has three parts, and the scanner now
+  applies each to form fields. (1) The shared label dictionary gained role names ("Nominee name",
+  "Account holder", "Beneficiary name"), numbered address lines and document numbers — inherited
+  through `classify_key`; the M4 test that used "Nominee name" as a *below-threshold* label now uses
+  a bare "Name" (0.55), and the new names are asserted as personal. (2) Mixed by name: a contact value
+  next to a channel field of the same form (and frame) is `MIXED_PII` at `MIXED_NAME_SCORE` 0.7 when
+  that reaches the policy's bar — `MIXED_VALUE_NAMES`, `CHANNEL_NAMES` and `MIXED_NAME_SCORE` moved
+  from `discovery.py` into the structural module so L2 and L3 share one rule (discovery imports
+  them; behaviour unchanged). Page labels are longer than column names, so a multi-word phrase may
+  end a label ("Preferred contact method", "Your contact details") while a one-word phrase must be
+  the whole name ("Loan value" is no contact value). (3) Kept with hits: a field left unclassified
+  whose shown value carries MEDIUM+ findings at the bar is classified by them — a whole value by its
+  entity (a select whose chosen option is an e-mail), findings inside longer text as `FREE_TEXT` with
+  the highest sensitivity found — instead of "not personal". Main's "post-write kept hits → review
+  required" has no scan counterpart to add: a scan writes nothing back, its kept fields are filled
+  with neutral values, and every shown value with a detector hit is masked in every capture
+  (`sensitive_prefilled`) and swept from the filled screens. Tests: `tests/scanner/test_classify.py`
+  (new rules, 13 cases; collection failed before: `classify_fields` missing),
+  `tests/scanner/test_scope_rail.py::test_the_crawler_never_presents_mixed_pii_fields_as_not_personal`
+  (live crawl of a contact-preferences page: `MIXED_PII` + `FREE_TEXT`, neutral fills, no stored
+  value, 0 submissions).
