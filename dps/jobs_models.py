@@ -7,6 +7,8 @@ default error text would quote them. Rule messages name fields and codes only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
 from typing import Any, Literal
@@ -295,13 +297,39 @@ class JobSecret(BaseModel):
 
 
 class SealedSelection(BaseModel):
-    """What ``spec_enc`` seals (AAD ``dps_job.spec:<id>``): the full selection, kept for retries."""
+    """What ``spec_enc`` seals (AAD ``dps_job.spec:<id>``): the full selection, kept for retries,
+    and (S3 review F-18) the body of an inline or stored-version policy — deny/allow-list terms
+    are often the sensitive terms themselves, so ``dps_job.spec`` keeps only
+    :func:`policy_label`."""
 
     model_config = _HIDDEN
     where: str | None = None
     query: str | None = None
     params: dict[str, JsonScalar] = Field(default_factory=dict)
     mongo_filter: dict[str, Any] | None = None
+    policy: dict[str, Any] | None = Field(default=None, repr=False)
+
+
+def policy_label(body: dict[str, Any]) -> dict[str, Any]:
+    """The value-free stand-in ``dps_job.spec`` stores for a policy body (F-18): ``sealed``, the
+    policy's ``name`` and ``version`` labels (the policy store counts pinned jobs by them) and a
+    sha256 of the body. The body itself travels sealed in ``spec_enc``."""
+    canon = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+    label: dict[str, Any] = {
+        "sealed": True,
+        "sha256": hashlib.sha256(canon.encode("utf-8")).hexdigest(),
+    }
+    name, version = body.get("name"), body.get("version")
+    if isinstance(name, str):
+        label["name"] = name
+    if isinstance(version, int) and not isinstance(version, bool):
+        label["version"] = version
+    return label
+
+
+def is_policy_label(policy: object) -> bool:
+    """True for the stand-in :func:`policy_label` puts in a stored spec."""
+    return isinstance(policy, dict) and policy.get("sealed") is True and "sha256" in policy
 
 
 class JobProgress(BaseModel):
@@ -403,7 +431,8 @@ def redact_spec(spec: RunSpec | DiscoverSpec, *, engine: Engine) -> dict[str, An
     Selection text becomes a template (literal values → ``:lN``), every bound parameter becomes
     ``"<bound>"``, a Mongo filter keeps its structure with ``"?"`` for values, and consistency keeps
     identifiers only (``kid``, a seed fingerprint, flags) — never key material, a seed or a wrap
-    key. The full selection travels sealed in ``spec_enc`` (:class:`SealedSelection`).
+    key. A policy body becomes :func:`policy_label` (F-18). The full selection and the policy body
+    travel sealed in ``spec_enc`` (:class:`SealedSelection`).
     """
     from dps.layers.connectors.selection import (
         mongo_filter_template,
@@ -413,6 +442,8 @@ def redact_spec(spec: RunSpec | DiscoverSpec, *, engine: Engine) -> dict[str, An
     from dps.secrets import seed_fingerprint
 
     data = spec.model_dump(mode="json")
+    if isinstance(data.get("policy"), dict):  # F-18: the body travels sealed in spec_enc
+        data["policy"] = policy_label(data["policy"])
     sel = (data["source"] if isinstance(spec, RunSpec) else data)["selection"]
     if sel.get("where"):
         sel["where"] = where_template(sel["where"], engine)

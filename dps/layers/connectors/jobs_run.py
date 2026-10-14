@@ -92,6 +92,7 @@ from dps.jobs_models import (
     SealedSelection,
     Selection,
     SpecError,
+    is_policy_label,
 )
 from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
@@ -238,15 +239,18 @@ def _spec(ctx: HandlerContext, job: JobInternal) -> RunSpec:
     except ValidationError:
         raise PrepareFailure("spec_invalid", "the stored run spec is not valid") from None
     if job.spec_enc is None:
-        if _has_selection(spec.source.selection):
+        if _has_selection(spec.source.selection) or is_policy_label(spec.policy):
             raise SecretUnavailable()
         sealed = SealedSelection()
     else:
         sealed = open_json(ctx.kek, job.spec_enc, SealedSelection, aad=f"dps_job.spec:{job.id}")
-    selection = spec.source.selection.model_copy(update=sealed.model_dump())
-    return spec.model_copy(
-        update={"source": spec.source.model_copy(update={"selection": selection})}
-    )
+    selection = spec.source.selection.model_copy(update=sealed.model_dump(exclude={"policy"}))
+    update: dict[str, Any] = {"source": spec.source.model_copy(update={"selection": selection})}
+    if sealed.policy is not None:  # F-18: the policy body was sealed, the row holds its label
+        update["policy"] = sealed.policy
+    elif is_policy_label(spec.policy):
+        raise SecretUnavailable()
+    return spec.model_copy(update=update)
 
 
 async def _connections(job: JobInternal, spec: RunSpec) -> tuple[Connection, Connection | None]:

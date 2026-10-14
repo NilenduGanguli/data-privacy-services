@@ -1207,3 +1207,5 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
   cancel) rather than auditing inside the committing transaction — the audit sink is a batched
   background writer, so its refusal is only known when `write` is called. The group create route no
   longer uses `deps.audited` (it needs the group id to roll back).
+- **F-18 (policy in job rows):** sealed in the existing `spec_enc` blob (`SealedSelection.policy`)
+  instead of a new column: the blob is already per job, AAD-bound and re-sealed by `dps.rekey`.

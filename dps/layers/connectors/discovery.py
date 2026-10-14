@@ -69,6 +69,7 @@ from dps.jobs_models import (
     DiscoverSpec,
     SealedSelection,
     Selection,
+    is_policy_label,
 )
 from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
@@ -528,7 +529,7 @@ async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
     except ValidationError:
         await _fail(ctx, job, "spec_invalid", "the stored discover spec is not valid")
         return
-    if job.spec_enc is None and _has_selection(spec.selection):
+    if job.spec_enc is None and (_has_selection(spec.selection) or is_policy_label(spec.policy)):
         await _fail(ctx, job, "secret_unavailable", "the sealed selection is missing")
         return
     try:
@@ -540,7 +541,12 @@ async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
     except SealError:
         await _fail(ctx, job, "secret_unavailable", "the sealed selection could not be opened")
         return
-    selection = spec.selection.model_copy(update=sealed.model_dump())
+    selection = spec.selection.model_copy(update=sealed.model_dump(exclude={"policy"}))
+    if sealed.policy is not None:  # F-18: the policy body was sealed, the row holds its label
+        spec = spec.model_copy(update={"policy": sealed.policy})
+    elif is_policy_label(spec.policy):
+        await _fail(ctx, job, "secret_unavailable", "the sealed policy is missing")
+        return
     try:
         async with db.acquire_queue(job.tenant_id) as conn:
             connection = await get_connection(job.tenant_id, spec.connection_id, conn=conn)

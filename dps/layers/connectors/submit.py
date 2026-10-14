@@ -88,9 +88,13 @@ def _bind(sel: Selection, engine: Engine, shape: Any) -> Selection:
     return bound
 
 
-def _sealed_selection(sel: Selection) -> SealedSelection:
+def _sealed_selection(sel: Selection, policy: object = None) -> SealedSelection:
     return SealedSelection(
-        where=sel.where, query=sel.query, params=sel.params, mongo_filter=sel.mongo_filter
+        where=sel.where,
+        query=sel.query,
+        params=sel.params,
+        mongo_filter=sel.mongo_filter,
+        policy=policy if isinstance(policy, dict) else None,  # F-18: sealed, never in spec
     )
 
 
@@ -126,10 +130,12 @@ async def submit_discover(
     selection = _bind(spec.selection, engine, None)
     job_id = new_id(PREFIX_JOB)
     sealed: bytes | None = None
-    if _has_selection(selection):
+    if _has_selection(selection) or isinstance(spec.policy, dict):
         if kek is None:
             raise SpecError("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
-        sealed = seal_json(kek, _sealed_selection(selection), aad=f"dps_job.spec:{job_id}")
+        sealed = seal_json(
+            kek, _sealed_selection(selection, spec.policy), aad=f"dps_job.spec:{job_id}"
+        )
     stored = spec.model_copy(update={"selection": selection})
     return await create_job(
         tenant_id=tenant_id,
@@ -286,7 +292,9 @@ async def submit_run(
         synthesis_seed=seed.model_dump(mode="json") if seed else None,
     )
     sealed_secret = seal_json(kek, secret, aad=f"dps_job.key:{job_id}")
-    sealed_selection = seal_json(kek, _sealed_selection(selection), aad=f"dps_job.spec:{job_id}")
+    sealed_selection = seal_json(
+        kek, _sealed_selection(selection, spec.policy), aad=f"dps_job.spec:{job_id}"
+    )
     stored = spec.model_copy(
         update={"source": spec.source.model_copy(update={"selection": selection})}
     )

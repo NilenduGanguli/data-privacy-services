@@ -60,7 +60,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-15 | LOW | S13 log-scan test missing | S13 | `tests/test_no_values_in_logs_m5.py` | fixed |
 | F-16 | LOW | S2 secret reprs | S2 | `tests/security/test_secrets_hygiene.py` | fixed |
 | F-17 | LOW | S1 residual echo in 422/400 bodies | S1 | `tests/security/test_validation_errors.py` | fixed |
-| F-18 | LOW | Inline-policy deny/allow-list terms stored in clear in `dps_job.spec` and listed by `GET /jobs` | see §3.18 | — | pending |
+| F-18 | LOW | Inline-policy deny/allow-list terms stored in clear in `dps_job.spec` and listed by `GET /jobs` | see §3.18 | `tests/api/test_inline_policy_sealed.py` | fixed + test |
 | F-19 | LOW | `external_tokenize` token cache ignored the profile | see §3.19 | `tests/security/test_external_profile_cache.py` | fixed + test |
 | F-20 | LOW | Synthesis seeds never wrapped although a seed de-pseudonymises D-A keys | see §3.20 | — | pending |
 | F-21 | LOW | KEK rotation: sealed blobs opened with the current KEK only | see §3.21 | — | pending |
@@ -174,6 +174,13 @@ it — a retry with the same key creates a fresh job and returns its key) or can
 `error` audit records the rollback when the sink takes it. Residual: a response lost in transit is
 invisible to the server — callers who cannot afford a lost key pass their own key material or seed
 (documented in the contract); a two-phase start was not added.
+
+### 3.18 F-18 — policy bodies sealed in the job row
+
+`redact_spec` replaces a policy body with `policy_label` (`sealed`, `name`, `version`, `sha256`) and
+`submit_run`/`submit_discover` seal the body with the selection in `spec_enc` (a discover with an
+inline policy now always seals, and needs the KEK). The run and discover workers reopen it; the
+policy store's pinned-job counts keep working from the label's name and version.
 
 ### 3.19 F-19 — token caches keyed by profile
 
