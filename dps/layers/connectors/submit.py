@@ -32,6 +32,8 @@ from dps.engine.synth.surrogates import (
 from dps.engine.transform.crypto import (
     KeyMaterial,
     generate_key_material,
+    kcv_matches,
+    key_check_value,
     key_material_from_caller,
     wrap_key_material,
 )
@@ -222,7 +224,7 @@ async def _validate_run(
         snapshot=snapshot,
         settings=settings,
         kek=kek,
-        group=(group.kid, group.seed_fingerprint) if group else None,
+        group=(group.kid, group.seed_fingerprint, group.kcv) if group else None,
         child_snapshot=child_snapshot,
         production_refs=await production_refs(tenant_id),
     )
@@ -290,6 +292,8 @@ async def submit_run(
     )
     redacted = redact_spec(stored, engine=engine)
     redacted["consistency"]["kid"] = km.kid if km else None
+    # F-13: the public key check value binds the job's DEK to its kid (retry compares it)
+    redacted["consistency"]["kcv"] = key_check_value(km) if km else None
     redacted["consistency"]["seed_fingerprint"] = seed_fingerprint(seed.seed) if seed else None
     redacted["consistency"]["caller_seed"] = spec.consistency.synthesis_seed is not None
     job = await create_job(
@@ -335,6 +339,9 @@ async def seal_retry_secret(job: Job, consistency: ConsistencySpec, *, kek: byte
                 raise SpecError("key_material_required", 409, "the retry needs the job's key")
             km = key_material_from_caller(consistency.key_material)
             if km.kid != job.kid:
+                raise SpecError("key_material_mismatch", 409, "the key is not the job's key")
+            stored = (job.spec.get("consistency") or {}).get("kcv")
+            if isinstance(stored, str) and not kcv_matches(km, stored):  # F-13: the DEK too
                 raise SpecError("key_material_mismatch", 409, "the key is not the job's key")
             secret = JobSecret(key_material=km.model_dump(mode="json"))
         else:

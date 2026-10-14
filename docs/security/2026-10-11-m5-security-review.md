@@ -55,7 +55,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | F-10 | MED | Caller-chosen custom entity names: unbounded `/metrics` label values (readable without a key) and process-global taxonomy entries | see §3.10 | `tests/security/test_custom_entity_bounds.py` | fixed + test |
 | F-11 | MED | Tokenization oracle under DPS's bank credentials (any profile string, any caller with `obfuscate`) | see §3.11 | `tests/security/test_tokenizer_profiles.py` | fixed + test |
 | F-12 | MED | Synthesize mode emitted the bank's real tokens as "synthetic" values | see §3.12 | `tests/security/test_synthesize_keyless.py` | fixed + test |
-| F-13 | MED | Retry and job-group admission bound only the public `kid`, not the DEK | see §3.13 | — | pending |
+| F-13 | MED | Retry and job-group admission bound only the public `kid`, not the DEK | see §3.13 | `tests/security/test_key_binding.py` | fixed + test |
 | F-14 | MED | The once-only job/group key was lost when the answer failed after commit (strict audit refusal) | see §3.14 | — | pending |
 | F-15 | LOW | S13 log-scan test missing | S13 | `tests/test_no_values_in_logs_m5.py` | fixed |
 | F-16 | LOW | S2 secret reprs | S2 | `tests/security/test_secrets_hygiene.py` | fixed |
@@ -154,6 +154,15 @@ tokenizer (or any keyed method) is refused when validated; `build_plan` raises 4
 `synthesize_method_invalid` as the backstop for a policy built around validation. The test drives
 the three L1 routes with a counting tokenizer: zero calls. M0's planner test used an FPE synthesize
 override to exercise the planner's fallback; it now asserts the refusal.
+
+### 3.13 F-13 — retry and group admission bind the DEK
+
+`submit_run` stores the key check value (public: HKDF of the DEK salted by the kid) in the redacted
+spec (`consistency.kcv`); `seal_retry_secret` refuses key material whose DEK does not match it (409
+`key_material_mismatch`), so a `jobs` caller cannot re-seal its own DEK under the owner's kid.
+`create_group` stores the group key's kcv (migration 046) and `_check_group` compares it in constant
+time (409 `group_key_mismatch`). Jobs and groups created before keep the kid-only rule. With F-01, a
+retry of a production `in_place`/`append` job also needs `admin` again.
 
 ### 3.19 F-19 — token caches keyed by profile
 

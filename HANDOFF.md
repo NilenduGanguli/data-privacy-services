@@ -248,7 +248,9 @@ body is 422 `idempotency_key_reused` on the job routes, as on Layer 1 (contract 
 picks it up when the `migrate` one-shot runs again (`docker compose up -d` recreates it). M3 adds
 `020_job_group_last_check.sql`: `dps_job_group.last_check` / `last_check_at` hold the latest result of
 `POST /api/v1/job-groups/{id}/consistency-check` (counts and codes only; returned by `GET /job-groups`
-and `GET /job-groups/{id}`); a stack on an older schema needs the `migrate` one-shot again. Against the compose database:
+and `GET /job-groups/{id}`); a stack on an older schema needs the `migrate` one-shot again. The security
+review adds `046_job_group_kcv.sql` (`dps_job_group.kcv`, the group key's public key check value: a group
+run must carry the group's DEK, not only its kid; F-13) — run the `migrate` one-shot again. Against the compose database:
 `DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
 **Run migrations as their own owner (S3 security review F-06).** `DPS_PG_MIGRATION_USER` falls back
 to the API login when unset; migrations run that way give the API login the M5 `owner_directory`

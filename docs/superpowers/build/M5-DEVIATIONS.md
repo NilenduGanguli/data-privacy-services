@@ -1201,3 +1201,5 @@ test-first in its own commit; S-items folded into Task 17 are listed there.
 - **F-19 (profile-keyed caches):** `ApplyOptions.external_cache`, `TransformContext.external` and
   `external_reveal_cache` changed key type to `methods.ExternalKey` (a three-tuple); callers outside
   the engine (`tools/reveal_rows.py`) pass the cache through unchanged.
+- **F-13 (kcv binding):** `targets.GroupKeys` became `(kid, seed fingerprint, kcv | None)`;
+  migration `046_job_group_kcv.sql` (M5 range). `tests/db/test_groups.py` lists the new column.

@@ -52,6 +52,7 @@ from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
 from dps.engine.policy import MethodSpec, resolve_policy
 from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSEUDONYM_LIMIT
 from dps.engine.taxonomy import Sensitivity, entity_info
+from dps.engine.transform.crypto import kcv_matches, key_material_from_caller
 from dps.engine.transform.methods import METHODS
 from dps.jobs import Job
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
@@ -80,7 +81,8 @@ TYPE_RE = re.compile(r'^[a-z][a-z0-9 _(),\[\]".]*$')
 ORACLE_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9 _(),]*$")
 _CREATED_TYPE_RE = {"postgres": TYPE_RE, "oracle": ORACLE_TYPE_RE}
 #: ``(kid, seed_fingerprint)`` of a job group.
-GroupKeys = tuple[str, str]
+#: A job group's public identifiers: ``(kid, seed fingerprint, key check value or None)``.
+GroupKeys = tuple[str, str, str | None]
 FREE_TEXT_METHOD = "det_token"
 #: Source kinds whose planned output is created as ``text``.
 _TEXT_OUTPUT_KINDS = frozenset({"text", "char", "lob_text", "json", "other"})
@@ -463,7 +465,7 @@ def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
         return
     if group is None:
         raise _fail("group_not_found", 404, "job group not found")
-    kid, fingerprint = group
+    kid, fingerprint, kcv = group
     consistency = spec.consistency
     mismatch = _fail(
         "group_key_mismatch", 409, "the run must carry the job group's key material and seed"
@@ -474,6 +476,8 @@ def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
         km = consistency.key_material
         if not isinstance(km, dict) or km.get("kid") != kid:
             raise mismatch
+        if kcv is not None and not dek_matches(km, kcv):  # F-13: the DEK, not only the kid
+            raise mismatch
     else:
         seed = consistency.synthesis_seed
         text = seed.get("seed") if isinstance(seed, dict) else None
@@ -483,6 +487,16 @@ def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
             matches = False
         if not matches:
             raise mismatch
+
+
+def dek_matches(material: dict[str, Any], kcv: str) -> bool:
+    """F-13: caller key material whose DEK matches the stored key check value (constant time);
+    material that does not parse never matches."""
+    try:
+        km = key_material_from_caller(material)
+        return kcv_matches(km, kcv)
+    except (ValueError, KeyError):
+        return False
 
 
 def _check_append(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
