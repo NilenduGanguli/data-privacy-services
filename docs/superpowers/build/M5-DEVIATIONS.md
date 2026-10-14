@@ -1102,6 +1102,13 @@ from main `64c46e3`, M3 merged, M4 not yet). The plan's layout and test list as 
 - Worker: mounts `dps-api-keys` (the plan: not needed for jobs). `dps.worker.main` runs
   `assert_production_posture`, which requires `DPS_API_KEYS(_FILE)`; the probe shows the prod worker
   without it (and the KEK) failing three posture rules. COIN, OCR and tokenizer stay (the engine).
+  It also holds the **app login** (`dps-pg-app`, `DPS_PG_PASSWORD_FILE`; the plan: the worker login
+  instead of the app's): `dps/worker.py::_amain` opens `db.init_pool` (the API pool) before
+  `db.init_worker_pool`, and M4's `browser_worker.amain` does the same. Found by the runtime proof (the
+  worker exited with `password authentication failed for user "dps_app"`); the test
+  `test_every_role_has_the_logins_its_process_opens` reads both start-up functions and requires a
+  login file for each pool they open. Each login has its own mount (`pg-app`, `pg-worker`,
+  `pg-owner`). `dps_worker_login` is already a member of `dps_app_rw`, so this grants nothing new.
   Both workers get `terminationGracePeriodSeconds: 60` (drain of `DPS_JOB_DRAIN_TIMEOUT_SECONDS=30` plus
   margin; the plan's "follow the app" gave the browser worker 30); the worker's `/tmp` is 4Gi
   (`files` targets spool a partition there before the upload).
@@ -1147,11 +1154,20 @@ from main `64c46e3`, M3 merged, M4 not yet). The plan's layout and test list as 
   `--fail-on-warn` is the release gate — and `deploy/openshift/release-example/`, a release overlay
   with every parameter set (documentation values that themselves warn as `example-value`), whose
   clean result proves the parameter list complete.
-- Tests (`tests/deploy/test_openshift.py`): 36 (plan 13) — the plan's nine (the posture test runs per
+- Tests (`tests/deploy/test_openshift.py`): 37 (plan 13) — the plan's nine (the posture test runs per
   role) plus Settings for every workload, every `DPS_*` name a setting, the DB host, secrets per role,
+  the logins each process opens,
   the dev mocks, network policies per role, monitoring, placeholders only warn, the release example,
   a leftover placeholder, exit codes, the deny rules, the JSON6902 guard and the role modules (the
   `dps.browser_worker` part skips until the M4 merge).
+- Runtime proof (no cluster): every role's rendered prod pod spec under Docker with the pod's
+  security settings (UID 1000680000:0 + fsGroup, read-only root, caps dropped, no-new-privileges,
+  tmpfs `/tmp`), files-only secrets (root:fsGroup 0440) and verify-full TLS to a scratch PostgreSQL
+  whose certificate names `dps-db`: migrate applied 17 migrations; worker, app and browser worker
+  (Chromium 140, `m4` image) ready; the app's posture report 11/11 enforced; another alias for the
+  same server fails `SSLCertVerificationError`; log scan 0 hits (API key, KEK, request e-mail).
+  Side finding: `python -m dps.migrate --verify` authenticates with the app login, so it cannot run
+  in the migrate Job's pod (the Job runs the apply mode, which uses the owner login).
 - Verification: `kubeconform -strict` needs the OpenShift Route schema (not in its default catalog):
   the run used `melmorabity/openshift-json-schemas` `v4.14-standalone-strict` for Route and the datree
   CRD catalog for PodMonitor/PrometheusRule (dev 32/32, prod 25/25, release example 25/25 valid);

@@ -28,8 +28,8 @@ Render: `kustomize build deploy/openshift/overlays/prod` (kustomize ≥ 5.0; `oc
 | Object | Kind | Image / command | Port | Mounts (secrets) |
 |---|---|---|---|---|
 | `dps-app` | Deployment | `data-privacy-services`: `uvicorn dps.app:create_app --factory … --no-access-log` | `http` 8400 | `dps-pg-app`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` (connection tests) |
-| `dps-worker` | Deployment | `data-privacy-services`: `python -m dps.worker` | `ops` 9400 | `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` |
-| `dps-browser-worker` | Deployment | `data-privacy-services-browser`: `python -m dps.browser_worker` | `ops` 9401 | `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-s3`, `dps-connector-refs` (LLM, OCR and tokenizer are switched off here) |
+| `dps-worker` | Deployment | `data-privacy-services`: `python -m dps.worker` | `ops` 9400 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3`, `dps-connector-refs`; PVC `dps-exports` |
+| `dps-browser-worker` | Deployment | `data-privacy-services-browser`: `python -m dps.browser_worker` | `ops` 9401 | `dps-pg-app`, `dps-pg-worker`, `dps-job-kek`, `dps-api-keys`, `dps-s3`, `dps-connector-refs` (LLM, OCR and tokenizer are switched off here) |
 | `dps-migrate-<release>` | Job | `data-privacy-services`: `python -m dps.migrate` (`DPS_MIGRATIONS_MODE=auto`) | — | `dps-pg-owner` only |
 | `dps-app` | Service + Route | edge TLS, HTTP redirected, router timeout 300 s | 8400 | — |
 | `dps-db` | Service (ExternalName) | the platform PostgreSQL 16 (never deployed by DPS) | 5432 | — |
@@ -42,7 +42,9 @@ assigns. Every secret is a **file** named by a `DPS_*_FILE` variable — the pro
 refuses a literal secret environment variable — and every image is pinned by digest.
 
 The app and both workers boot through the same posture guard (`dps/posture.py`), so each needs the
-static API key file (`DPS_API_KEYS_FILE`; sha256 entries are enough) and the job KEK. The browser
+static API key file (`DPS_API_KEYS_FILE`; sha256 entries are enough) and the job KEK; both workers
+open the API pool as well as the worker pool at start (`dps/worker.py`, `dps/browser_worker.py`), so
+they hold the app login and the worker login, each in its own file. The browser
 worker sets `DPS_LLM_PROVIDER=""`, `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`: the scanner
 calls none of them and holds none of their credentials.
 
@@ -67,8 +69,8 @@ calls none of them and holds none of their credentials.
 
 | Secret | Keys | Mounted by | Notes |
 |---|---|---|---|
-| `dps-pg-app` | `password` | app | the `dps_app` login (`DPS_PG_PASSWORD_FILE`) |
-| `dps-pg-worker` | `password` | worker, browser-worker | the `dps_worker_login` login |
+| `dps-pg-app` | `password` | app, worker, browser-worker | the `dps_app` login (`DPS_PG_PASSWORD_FILE`): both workers open the API pool at start too |
+| `dps-pg-worker` | `password` | worker, browser-worker | the `dps_worker_login` login (`DPS_PG_WORKER_PASSWORD_FILE`) |
 | `dps-pg-owner` | `password` | the migrate Job only | the `dps_owner` (DDL) login |
 | `dps-job-kek` | `kek` | app, worker, browser-worker | base64 of 32 random bytes; seals job keys and inline secrets |
 | `dps-api-keys` | `api_keys.json` | app, worker, browser-worker | static keys, e.g. `[{"name":"ops","key_sha256":"<64 hex>","tenant_ids":["*"],"scopes":["admin"]}]`; day-to-day keys live in the database (§5) |
@@ -178,8 +180,8 @@ Optional schema check (needs network for the schemas):
 - **KEK rotation** (HANDOFF §6): mount the new KEK in `dps-job-kek` as `kek` and the old one as
   `kek_previous`, add `DPS_JOB_KEK_PREVIOUS_FILE=/var/run/secrets/dps/kek/kek_previous` to the app and
   both workers (release patch, JSON6902 `add` to `/spec/template/spec/containers/0/env/-`), roll,
-  then run `python -m dps.rekey` once from a one-off pod that mounts **both** `dps-pg-app` and
-  `dps-pg-worker` (it re-seals through both pools); `"unreadable": 0` → remove the previous KEK and roll.
+  then run `python -m dps.rekey` once (it re-seals through both pools, so it needs both logins: e.g.
+  `oc exec deploy/dps-worker -- python -m dps.rekey`); `"unreadable": 0` → remove the previous KEK and roll.
 - **Scaling:** workers scale horizontally (the queue is SKIP LOCKED with leases; every worker runs
   the reaper; retention is scheduled at most once per interval across replicas).
 - **Probe and metrics endpoints** (`/health`, `/readyz`, `/metrics`) answer without a key on the app

@@ -1332,8 +1332,10 @@ app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
   `HOME=/tmp` in the pod env (so the manifests do not depend on the image's `HOME`), secret files
   mode `0440` read through the SCC-assigned `fsGroup`, images pinned by digest.
 - **Secrets are files only** (`DPS_*_FILE`, the M5 posture rule). The app and both workers pass the
-  production posture guard at boot, so each mounts `dps-api-keys` and `dps-job-kek`; the worker
-  logs in as `dps_worker_login` (no app login); only the migrate Job mounts `dps-pg-owner`. The
+  production posture guard at boot, so each mounts `dps-api-keys` and `dps-job-kek`; both workers
+  open the API pool and the worker pool at start, so they hold both logins (`dps-pg-app`,
+  `dps-pg-worker`; the runtime proof below failed without the first); only the migrate Job mounts
+  `dps-pg-owner`. The
   browser worker runs with `DPS_LLM_PROVIDER=""`, `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`
   and mounts none of their secrets.
 - **Metadata DB host:** `DPS_PG_HOST` is the platform host itself (equal to `dps-db`'s
@@ -1351,9 +1353,22 @@ app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
   `org-ca.pem`); RWX PVC `dps-exports` (the worker writes `pvc` targets, the app's connection test
   probes it); the secrets above; network paths for every peer. Connector `secret_ref` folders come
   from `dps-connector-refs` with an `items` layout (or a CSI/Vault mount) at `DPS_SECRET_DIR`.
-- **Verified 2026-10-14 (`fos`):** `pytest -m deploy tests/deploy/test_openshift.py` 35 passed, 1
+- **Verified 2026-10-14 (`fos`):** `pytest -m deploy tests/deploy/test_openshift.py` 36 passed, 1
   skipped (`dps.browser_worker` arrives with the M4 merge); `kustomize build` (v5.8.1) of dev, prod
   and the release example; `kubeconform -strict` (Kubernetes 1.29 schemas, the OpenShift 4.14 Route
   schema, the datree CRD catalog for PodMonitor/PrometheusRule): dev 32/32, prod 25/25, release
-  example 25/25 valid; `promtool check rules` on the PrometheusRule: 7 rules, SUCCESS. Not done here:
-  a live cluster apply (none available) and running the images under an arbitrary UID (Task 24).
+  example 25/25 valid; `promtool check rules` on the PrometheusRule: 7 rules, SUCCESS.
+- **Runtime proof (no cluster available):** each role's rendered prod pod spec run with Docker —
+  the ConfigMap + container env (`DPS_ENV=prod`), every secret a `root:<fsGroup>` 0440 file at its
+  mount path, UID 1000680000 with group 0 and the fsGroup, `--read-only`, `--cap-drop ALL`,
+  no-new-privileges, `/tmp` (and `/dev/shm`) tmpfs — against a scratch PostgreSQL with TLS whose
+  certificate names only `dps-db` (image `data-privacy-services:fimg`, browser image from the `m4`
+  lane): the migrate Job applied all 17 migrations; the worker `/readyz` 200 (db, migrations, kek,
+  queue); the app `/readyz` 200 (db, jobs, keys `db+static`), detect 200 with the static key, 401
+  without, `/api/v1/openapi.json` 404, `GET /admin/posture` **11/11 passed, enforced**; the browser
+  worker ready with Chromium 140; the exports volume writable through the fsGroup, the root
+  read-only (EROFS); dialling the same server as `dps-db-other` fails `SSLCertVerificationError`
+  (why `DPS_PG_HOST` is the certificate's name); 0 hits of the API key, the KEK or the request's
+  e-mail in any container log. The first worker run failed — `password authentication failed for
+  user dps_app` — because the worker opens the API pool too: fixed (both workers hold both logins).
+  Not done: a live cluster apply.

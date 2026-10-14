@@ -1,7 +1,8 @@
 # dps-browser-worker: L3 scan jobs (M4, contract §3.5) in the browser image (Playwright 1.55.0,
 # Chromium). The scanner never submits anything (D4); its network policy allows the registered scan
 # targets only. It never calls the LLM, OCR or the tokenizer, so those are switched off here and their
-# secrets are not mounted (a role without the credential has the feature off, not failing).
+# secrets are not mounted (a role without the credential has the feature off, not failing). Like
+# the worker it opens both database pools at start (the app and the worker login).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,7 +35,8 @@ spec:
             - {name: DPS_LLM_PROVIDER, value: ""}
             - {name: DPS_OCR_PROVIDER, value: "off"}
             - {name: DPS_TOKENIZER_PROVIDER, value: ""}
-            - {name: DPS_PG_WORKER_PASSWORD_FILE, value: /var/run/secrets/dps/pg/password}
+            - {name: DPS_PG_PASSWORD_FILE, value: /var/run/secrets/dps/pg-app/password}
+            - {name: DPS_PG_WORKER_PASSWORD_FILE, value: /var/run/secrets/dps/pg-worker/password}
             - {name: DPS_JOB_KEK_FILE, value: /var/run/secrets/dps/kek/kek}
             - {name: DPS_API_KEYS_FILE, value: /var/run/secrets/dps/api-keys/api_keys.json}
             - {name: DPS_S3_ACCESS_KEY_ID_FILE, value: /var/run/secrets/dps/s3/access_key_id}
@@ -53,7 +55,8 @@ spec:
             - {name: tmp, mountPath: /tmp}
             - {name: dshm, mountPath: /dev/shm}
             - {name: ca, mountPath: /etc/dps/ca, readOnly: true}
-            - {name: pg, mountPath: /var/run/secrets/dps/pg, readOnly: true}
+            - {name: pg-app, mountPath: /var/run/secrets/dps/pg-app, readOnly: true}
+            - {name: pg-worker, mountPath: /var/run/secrets/dps/pg-worker, readOnly: true}
             - {name: kek, mountPath: /var/run/secrets/dps/kek, readOnly: true}
             - {name: api-keys, mountPath: /var/run/secrets/dps/api-keys, readOnly: true}
             - {name: s3, mountPath: /var/run/secrets/dps/s3, readOnly: true}
@@ -63,7 +66,8 @@ spec:
         # Chromium's shared memory (the container default of 64 MiB crashes renderers)
         - {name: dshm, emptyDir: {medium: Memory, sizeLimit: 512Mi}}
         - {name: ca, configMap: {name: dps-ca-bundle}}
-        - {name: pg, secret: {secretName: dps-pg-worker, defaultMode: 288}}
+        - {name: pg-app, secret: {secretName: dps-pg-app, defaultMode: 288}}
+        - {name: pg-worker, secret: {secretName: dps-pg-worker, defaultMode: 288}}
         - {name: kek, secret: {secretName: dps-job-kek, defaultMode: 288}}
         - {name: api-keys, secret: {secretName: dps-api-keys, defaultMode: 288}}
         - {name: s3, secret: {secretName: dps-s3, defaultMode: 288}}

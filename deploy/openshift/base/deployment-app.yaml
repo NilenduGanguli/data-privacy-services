@@ -35,7 +35,7 @@ spec:
           envFrom: [{configMapRef: {name: dps}}]
           env:
             - {name: HOME, value: /tmp}
-            - {name: DPS_PG_PASSWORD_FILE, value: /var/run/secrets/dps/pg/password}
+            - {name: DPS_PG_PASSWORD_FILE, value: /var/run/secrets/dps/pg-app/password}
             - {name: DPS_JOB_KEK_FILE, value: /var/run/secrets/dps/kek/kek}
             - {name: DPS_API_KEYS_FILE, value: /var/run/secrets/dps/api-keys/api_keys.json}
             - {name: DPS_COIN_CLIENT_ID_FILE, value: /var/run/secrets/dps/coin/client_id}
@@ -58,7 +58,7 @@ spec:
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
             - {name: ca, mountPath: /etc/dps/ca, readOnly: true}
-            - {name: pg, mountPath: /var/run/secrets/dps/pg, readOnly: true}
+            - {name: pg-app, mountPath: /var/run/secrets/dps/pg-app, readOnly: true}
             - {name: kek, mountPath: /var/run/secrets/dps/kek, readOnly: true}
             - {name: api-keys, mountPath: /var/run/secrets/dps/api-keys, readOnly: true}
             - {name: coin, mountPath: /var/run/secrets/dps/coin, readOnly: true}
@@ -73,7 +73,7 @@ spec:
       volumes:
         - {name: tmp, emptyDir: {sizeLimit: 1Gi}}
         - {name: ca, configMap: {name: dps-ca-bundle}}
-        - {name: pg, secret: {secretName: dps-pg-app, defaultMode: 288}}
+        - {name: pg-app, secret: {secretName: dps-pg-app, defaultMode: 288}}
         - {name: kek, secret: {secretName: dps-job-kek, defaultMode: 288}}
         - {name: api-keys, secret: {secretName: dps-api-keys, defaultMode: 288}}
         - {name: coin, secret: {secretName: dps-coin, defaultMode: 288}}

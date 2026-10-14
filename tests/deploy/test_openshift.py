@@ -11,7 +11,9 @@ production posture guard per role, network policies, monitoring, and the Wega pl
 from __future__ import annotations
 
 import copy
+import importlib
 import importlib.util
+import inspect
 import ipaddress
 import os
 import re
@@ -247,9 +249,9 @@ def test_only_the_migrate_job_mounts_the_owner_secret() -> None:
 
 def test_each_role_mounts_only_the_secrets_it_uses() -> None:
     docs = render("prod")
-    common = {"dps-job-kek", "dps-api-keys", "dps-s3", "dps-connector-refs"}
+    common = {"dps-job-kek", "dps-api-keys", "dps-s3", "dps-connector-refs", "dps-pg-app"}
     engine = {"dps-coin", "dps-tokenizer", "dps-ocr"}
-    assert secret_volumes(pod_of(docs, "dps-app")) == common | engine | {"dps-pg-app"}
+    assert secret_volumes(pod_of(docs, "dps-app")) == common | engine
     assert secret_volumes(pod_of(docs, "dps-worker")) == common | engine | {"dps-pg-worker"}
     # the scanner never calls the LLM, OCR or the tokenizer: those are switched off, not mounted
     browser = pod_of(docs, "dps-browser-worker")
@@ -276,6 +278,34 @@ def test_each_role_mounts_only_the_secrets_it_uses() -> None:
             m["name"]: m["mountPath"] for m in main_container(pod_of(docs, name))["volumeMounts"]
         }
         assert mounts["exports"] == oc.configmap_data(docs, "dps")["DPS_EXPORT_ROOT"]
+
+
+def _opens(function: object) -> set[str]:
+    """The metadata-DB logins a process start-up opens: ``app`` (db.init_pool), ``worker``."""
+    source = inspect.getsource(function)  # type: ignore[arg-type]
+    opened = {"app"} if re.search(r"\binit_pool\(", source) else set()
+    return opened | ({"worker"} if "init_worker_pool(" in source else set())
+
+
+def test_every_role_has_the_logins_its_process_opens() -> None:
+    """Both workers open the API pool too (``db.init_pool``, found by the runtime proof of S5)."""
+    from dps import worker
+
+    docs = render("prod")
+    starts: dict[str, object] = {"dps-worker": worker._amain}
+    if importlib.util.find_spec("dps.browser_worker") is not None:
+        browser_worker = importlib.import_module("dps.browser_worker")
+        starts["dps-browser-worker"] = browser_worker.amain
+    files = {"app": "DPS_PG_PASSWORD_FILE", "worker": "DPS_PG_WORKER_PASSWORD_FILE"}
+    for role, start in starts.items():
+        opened = _opens(start)
+        assert opened, role
+        env = env_of(main_container(pod_of(docs, role)))
+        for login in opened:
+            assert files[login] in env, (role, login)
+    assert "DPS_PG_PASSWORD_FILE" in env_of(main_container(pod_of(docs, "dps-app")))
+    # each login is its own file: the app never holds the worker's, nobody but migrate the owner's
+    assert "DPS_PG_WORKER_PASSWORD_FILE" not in env_of(main_container(pod_of(docs, "dps-app")))
 
 
 # --- configuration: Settings and the production posture guard ------------------------------------

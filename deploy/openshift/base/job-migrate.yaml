@@ -28,7 +28,7 @@ spec:
           env:
             - {name: HOME, value: /tmp}
             - {name: DPS_MIGRATIONS_MODE, value: auto}
-            - {name: DPS_PG_MIGRATION_PASSWORD_FILE, value: /var/run/secrets/dps/pg/password}
+            - {name: DPS_PG_MIGRATION_PASSWORD_FILE, value: /var/run/secrets/dps/pg-owner/password}
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {cpu: 500m, memory: 512Mi}
@@ -39,8 +39,8 @@ spec:
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
             - {name: ca, mountPath: /etc/dps/ca, readOnly: true}
-            - {name: pg, mountPath: /var/run/secrets/dps/pg, readOnly: true}
+            - {name: pg-owner, mountPath: /var/run/secrets/dps/pg-owner, readOnly: true}
       volumes:
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
         - {name: ca, configMap: {name: dps-ca-bundle}}
-        - {name: pg, secret: {secretName: dps-pg-owner, defaultMode: 288}}
+        - {name: pg-owner, secret: {secretName: dps-pg-owner, defaultMode: 288}}
