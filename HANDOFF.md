@@ -1477,3 +1477,69 @@ checks, as before. A scan of the compose logs (app, worker, browser-worker) and 
 for the demo site's ten customer values other than the birth date, the name's parts, their digits-only forms and the
 demo session cookie found 0 hits.
 
+
+## 16. M4 pre-merge — main (M5 + M3) merged into lane `m4` (2026-10-14, WP-I)
+
+`git merge main` into `m4` (`b34dd07`, main `6fa2da5`; `4e55da3` adds main's two later docs commits):
+23 files conflicted; both sides kept. Migrations: M2 001–010, M3 020, M4 030–031, M5 040–045 (each
+number once). Compose: one file with profiles `docs`, `sources`, `oracle`, `scanner`, `tokenizer`, `full`
+(browser-worker, demo-site, tokenizer-mock, Oracle, MongoDB beside M2's services); every host port a
+defaulted variable. Console: the scanner pages (`/scanner`, `/scanner/new`, `/scanner/scans/:id`) beside
+M5's Admin, Policies, Reports and Evidence pages; `npm run dev:fixtures` installs M5's fixture server and
+the scanner fixtures on top of it. App: the scans router sits beside admin/reports/policy-store, the
+lifespan runs the browser readiness probe and M5's key refresher.
+
+**Adaptations** (each test-first; commits `fix(integrate): …` / `test(integrate): …`, details in
+`docs/superpowers/build/M4-DEVIATIONS.md` "M4 pre-merge"):
+
+- Migration 031 adds `registered_hosts` `IF NOT EXISTS`: main's databases ran M5's 040 (which adds it
+  too) before 030/031 ship, and the runner applies pending files out of number order.
+- **SEC-5:** a scan's `storage_state_ref` is resolved by main's `resolve_secret_ref(tenant_id, ref,
+  settings)` and checked at `POST /scans` with a connection `secret_ref`'s rule: another tenant's
+  folder 403 `secret_ref_foreign_tenant`, an unlisted `_shared/` one 403 `secret_ref_not_shared`, a
+  hidden or reserved segment 422 `secret_ref_invalid`; `_shared/<ref>` sessions work.
+- **SEC-2:** the browser-worker reads the stack's `dps-secrets` volume (the tree the app checks refs
+  against); `demo-secrets` (now also in profile `scanner`) copies the committed demo session into it
+  under `default/`.
+- **M5 keys:** database keys with scope `scan` drive every scans route (test only; no change needed).
+- **M5 posture:** the browser-worker checks `assert_production_posture(settings, role="browser-worker")`
+  — every M2/M4/M5 rule except the API keys, CORS, OCR and tokenizer-token rules of components it does
+  not run (§6).
+- **M5 policy store:** `policy: "@name[:vN]"` on `POST /scans` resolves at accept; the stored spec pins
+  the body the browser-worker runs; the scan evidence's `policy.version` names it; a relaxed body is
+  `verify_warn_disallowed` (accept and run).
+- **Main's discovery rules in scanner classification:** the shared label dictionary (role names,
+  address lines, document numbers); a contact value next to a channel field is `MIXED_PII`; a field
+  whose shown value carries MEDIUM+ findings is classified by them (`FREE_TEXT` for findings inside
+  text) — never "not personal".
+- **Overview:** the "Layer 3 · UI scanner" card counts personal fields (`layers.ui.personal_fields`),
+  not every field inventoried.
+
+**Traps.** (1) A lane that runs the scanner and the tokenizer needs its own `DPS_TOKENIZER_MOCK_PORT`:
+both default to host port 8420 on `dps-wt-m4` (`.env` sets 8424). (2) `--profile scanner` now runs
+`demo-secrets` too; its storage state lands in the volume, so an edit to the committed demo session
+needs `docker compose up -d demo-secrets` (or `down -v`). (3) A top-level folder in `DPS_SECRET_DIR` that
+is not the tenant's (e.g. an old `dps/` from before SEC-2) makes every ref starting with that segment
+`secret_ref_foreign_tenant`/`secret_unavailable` — remove it. (4) `tests/console/test_console_m2.py`
+needs the connections the smoke test creates (`bank-restore-rw` too): run the smoke test first.
+
+**Verified 2026-10-14 on this lane** (`dps-wt-m4`, `DPS_IMAGE_TAG=m4`, app 8414, demo-site 8420,
+tokenizer-mock 8424; `docker compose --profile full up -d --build`): ruff format/check and mypy clean;
+`pytest -q` with every service up 3413 passed (2 merged tests adapted afterwards); with
+`DPS_TEST_REQUIRE_SERVICES=1`: `docs or ocr` 139 passed (2 need a host tesseract), `oracle or mongo` 162
+passed (1 by design), `browser` 166 passed (27 OCR capture tests need tesseract: 27/27 passed with
+`DPS_TEST_TESSERACT_CMD` running the app image's tesseract), the whole non-browser suite 3254 passed;
+frontend 42 node + 356 Vitest tests and the build; smoke **52/52** (`DPS_SMOKE_SCANNER=1
+DPS_SMOKE_REQUIRE_OCR=1 … --m3`: Layer 1, documents and OCR, the M2 job checks, the three-engine group
+3/3 consistent, the scanner's 11). D4: two more scans of the demo site (synthesize and obfuscate, 21
+pages and 63 fields each, 60 POST + 1 GET blocked) left `/__received` at +0 with `non_get_allowed` 0 and
+`scan.submissions` 0; OCR of every stored screen found no demo value on the filled screens
+(`application_ref` stays readable on `/apply/review`, M4's open N9); the logs of all 15 containers hold
+none of the demo values, the session cookie, the scans' keys or seeds; a console walk of every M1–M5
+page (light/dark, 1440/390 px) had 0 console errors, 0 5xx and no horizontal scroll at 390 px.
+Known flake (main's code): `tests/connectors/test_synthesize_copula.py::
+test_surrogate_job_on_the_seeded_demo_customers` failed once in ~8 runs with one synthetic
+`national_id` equal to a demo-source one — the demo seed (`tools/seed_model.py`) draws its SSNs and
+Aadhaars from the same never-issued ranges the D-A surrogates use; the run's own identifier check
+compares with the source, so such a run is review-required, never silently written. Reports:
+`~/.cache/dps-build/reports/S2-premerge.md`.
