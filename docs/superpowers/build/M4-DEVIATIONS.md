@@ -1578,3 +1578,10 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   risk flags in one query — and the card shows it (falling back to `fields` for an older server).
   Tests: `tests/scanner/test_scans_api.py::test_the_overview_counts_the_personal_fields_scans_found`
   (`KeyError` before), `frontend/src/pages/Overview.test.tsx` (the card printed 140, not 81).
+- **Two merged tests adapted to M4 as built:** `tests/test_compose_m3.py::
+  test_demo_secret_refs_resolve_to_credentials` runs the `demo-secrets` command on the host; it now
+  maps the one-shot's `/seed/ui` mount to the repo's demo-session folder and checks the session lands
+  under `default/` (it failed after the SEC-2 compose change: `cp` from a missing `/seed`).
+  `tests/test_retention_m5.py::test_expired_jobs_their_objects_and_scan_rows_are_deleted` inserted a
+  `dps_scan_page` row with the contract's abbreviated columns; M4's 030 adds `template NOT NULL`, so
+  the row now carries one (`NotNullViolationError` before). Neither changes a rule.
