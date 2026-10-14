@@ -280,8 +280,6 @@ class DiscoverSpec(BaseModel):
 
 #: A path glob of a scan scope (``/apply/*``); checked again by ``urls.validate_glob``.
 PATH_GLOB = r"^/[A-Za-z0-9._~\-/*{}]*$"
-#: A ``secret_ref`` (``DPS_SECRET_DIR/<ref>/…``); ``..`` segments are refused by the validators.
-SECRET_REF = r"^[a-z0-9][a-z0-9/_.-]{0,200}$"
 _SCAN = ConfigDict(extra="forbid", hide_input_in_errors=True)
 PathGlob = Annotated[str, Field(pattern=PATH_GLOB, max_length=200)]
 
@@ -301,12 +299,16 @@ class ScanScope(BaseModel):
 
 
 class ScanAuth(BaseModel):
-    """A logged-in session for the scan: a mounted ``storage_state.json`` reference (resolved under
-    the tenant's secrets) or, in dev only, an inline storage state that is sealed into ``key_enc``
-    and never stored in the spec row."""
+    """A logged-in session for the scan: a mounted ``storage_state.json`` reference or, in dev
+    only, an inline storage state that is sealed into ``key_enc`` and never stored in the spec row.
+
+    The reference is a connection ``secret_ref`` (SEC-2/SEC-5): tenant-relative
+    (``DPS_SECRET_DIR/<tenant>/<ref>/``) or ``_shared/<ref>``, checked for the caller's tenant at
+    accept (``dps.secrets.check_secret_ref``) and resolved by ``dps.secrets.resolve_secret_ref``.
+    """
 
     model_config = _SCAN
-    storage_state_ref: str | None = Field(default=None, pattern=SECRET_REF)
+    storage_state_ref: str | None = Field(default=None, pattern=SECRET_REF_PATTERN)
     storage_state: dict[str, Any] | None = None
 
     @model_validator(mode="after")

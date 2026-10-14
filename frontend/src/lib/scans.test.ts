@@ -101,12 +101,16 @@ describe('form checks', () => {
   it('words every refusal code the scans API as built returns (never the raw code)', () => {
     // dps/layers/scanner/models.py::validate_scan and dps/layers/api/routers/scans.py::create_scan
     for (const code of ['url_invalid', 'host_not_registered', 'scope_invalid', 'start_url_denied', 'inline_auth_forbidden', 'auth_invalid',
-      'har_not_supported', 'fill_invalid', 'policy_invalid', 'key_material_invalid', 'wrap_key_invalid', 'kek_unconfigured']) {
+      'har_not_supported', 'fill_invalid', 'policy_invalid', 'key_material_invalid', 'wrap_key_invalid', 'kek_unconfigured',
+      // SEC-5: the stored session reference gets a connection secret_ref's rule (contract §5.1)
+      'secret_ref_foreign_tenant', 'secret_ref_not_shared', 'secret_ref_invalid']) {
       const text = createErrorText(new ApiError(422, `the scan was refused: ${code}`, code));
       expect(text, code).not.toContain(code);
       expect(text, code).not.toMatch(/^422/);
     }
     expect(createErrorText(new ApiError(422, 'x', 'start_url_denied'))).toMatch(/never-visit list/);
+    expect(createErrorText(new ApiError(403, 'x', 'secret_ref_foreign_tenant'))).toMatch(/another tenant/);
+    expect(createErrorText(new ApiError(403, 'x', 'secret_ref_not_shared'))).toMatch(/does not list this tenant/);
     // the per-scan page cap is a server setting (DPS_SCAN_MAX_PAGES, 50 by default), not the console's 500
     expect(createErrorText(new ApiError(422, 'x', 'scope_invalid'))).toMatch(/50 by default/);
   });

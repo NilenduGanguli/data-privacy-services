@@ -118,6 +118,29 @@ def test_create_validation_and_scope(api_client: Any) -> None:
     assert c.get("/api/v1/scans", headers=JOBS).status_code == 403
 
 
+@pytest.mark.db
+def test_storage_state_refs_get_the_connection_rule_at_accept(api_client: Any) -> None:
+    """SEC-5: ``auth.storage_state_ref`` is checked for the caller's tenant when the scan is
+    accepted, with a connection ``secret_ref``'s rule and codes (contract §5.1): another tenant's
+    folder (the fixture wrote ``t2/…``), an unlisted shared folder and a hidden segment are refused,
+    audited, never echoed and never queued; the tenant's own reference is accepted."""
+    c, sink = api_client
+    for ref, status, code in (
+        ("t2/dps/src/test-pg", 403, "secret_ref_foreign_tenant"),
+        ("_shared/ui/demo-onboarding", 403, "secret_ref_not_shared"),
+        ("dps/.hidden/demo", 422, "secret_ref_invalid"),
+    ):
+        r = _create(c, {"url": URL, "auth": {"storage_state_ref": ref}})
+        assert (r.status_code, r.json().get("code")) == (status, code), r.text
+        assert ref not in r.text and "t2" not in r.text and "ananya" not in r.text
+    assert c.get("/api/v1/scans", headers=FULL).json()["items"] == []
+    refused = [(e.outcome, e.status) for e in sink.events if e.action == "scan.create"]
+    assert refused == [("rejected", 403), ("rejected", 403), ("rejected", 422)]
+    ok = _create(c, {"url": URL, "auth": {"storage_state_ref": "dps/ui/demo-onboarding"}})
+    assert ok.status_code == 202, ok.text
+    assert ok.json()["scan"]["spec"]["auth"]["storage_state_ref"] == "dps/ui/demo-onboarding"
+
+
 #: Bodies the ScanSpec model refuses before validate_scan runs: POST /scans still answers the
 #: contract §9 code (value-free), mapped by the refused field's location.
 MODEL_REFUSALS: list[tuple[dict[str, Any], str]] = [

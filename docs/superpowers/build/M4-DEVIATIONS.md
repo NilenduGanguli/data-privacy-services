@@ -1480,3 +1480,22 @@ main's two later docs commits). The lane then adopts main's newer behaviour, eac
   creates it (030/031 run before 040). Test: `tests/db/test_migrations.py::
   test_m4_files_apply_after_m3_and_m5_on_an_existing_database` (fails with the old 031:
   duplicate column).
+- **SEC-5 — scanner storage states through main's resolver** (`dps/layers/scanner/__init__.py`
+  `_storage_state`, `dps/layers/scanner/models.py` `validate_scan`, `dps/jobs_models.py` `ScanAuth`,
+  `dps/layers/api/routers/scans.py`): the worker calls `resolve_secret_ref(tenant_id, ref, settings)`
+  (main's SEC-2 signature; containment inside the tenant folder, shared allow-lists, symlinks that
+  leave the folder refused) instead of its own `f"{tenant}/{ref}"` scoping into the pre-SEC-2
+  resolver, whose call no longer type-checked after the merge. `validate_scan` takes a required
+  `tenant_id` and runs `check_secret_ref` for a `storage_state_ref`, so `POST /scans` answers a
+  connection `secret_ref`'s codes: 403 `secret_ref_foreign_tenant`, 403 `secret_ref_not_shared`,
+  422 `secret_ref_invalid` (audited `scan.create` rejected; nothing queued; the reference is never
+  echoed). `ScanAuth.storage_state_ref` takes `SECRET_REF_PATTERN` (so `_shared/<ref>` sessions
+  work); `..` stays `auth_invalid`. **Deviation:** main's rule also refuses a reference whose first
+  segment names a top-level folder other than the tenant's (the pre-scoping layout), so the old e2e
+  test that kept a `DPS_SECRET_DIR/dps/…` copy beside the tenant's own now expects a refusal until
+  that folder is removed. Tests: `tests/scanner/test_scan_secret_refs.py` (worker resolution,
+  cross-tenant, shared, symlinks, malformed refs, accept-time codes — 19 of 22 failed before the
+  change), `tests/scanner/test_scans_api.py::test_storage_state_refs_get_the_connection_rule_at_accept`,
+  `tests/scanner/test_scan_job_e2e.py::test_storage_state_ref_resolves_under_the_tenant_folder_only`
+  (a ref naming another tenant's folder: 403 at accept, `secret_unavailable` at load). Console:
+  the three codes are worded on the New-scan page (`frontend/src/lib/scans.ts`).

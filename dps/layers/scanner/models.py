@@ -46,6 +46,7 @@ from dps.layers.scanner.urls import (
     url_path_verdict,
     validate_glob,
 )
+from dps.secrets import SecretRefRefused, check_secret_ref
 
 _HIDDEN = ConfigDict(hide_input_in_errors=True)
 _STRICT = ConfigDict(extra="forbid", hide_input_in_errors=True)
@@ -550,8 +551,11 @@ class ValidatedScan:
 _MAX_DEPTH = 5
 
 
-def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) -> ValidatedScan:
-    """Check ``spec`` against the settings and the tenant's registered ``hosts``.
+def validate_scan(
+    spec: ScanSpec, *, settings: Settings, hosts: frozenset[str], tenant_id: str
+) -> ValidatedScan:
+    """Check ``spec`` against the settings, the tenant's registered ``hosts`` and, for a
+    ``storage_state_ref``, the tenant's secret folder (SEC-5).
 
     Raises :class:`ScanSpecError` (422) with ``url_invalid`` (not an http(s) URL, or carrying
     userinfo), ``host_not_registered``, ``scope_invalid`` (more pages than ``scan_max_pages``, a
@@ -559,7 +563,11 @@ def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) 
     denied, or the path is outside a non-empty allow list), ``inline_auth_forbidden`` (inline storage state where inline secrets are
     not allowed), ``auth_invalid``, ``har_not_supported`` or ``fill_invalid``. The model refuses
     most of these already (``POST /scans`` answers those refusals with the same codes, see
-    :func:`spec_refusal_code`); the re-check covers programmatic construction.
+    :func:`spec_refusal_code`); the re-check covers programmatic construction. A
+    ``storage_state_ref`` gets a connection ``secret_ref``'s rule for ``tenant_id``
+    (:func:`dps.secrets.check_secret_ref`, contract §5.1): 403 ``secret_ref_foreign_tenant`` (its
+    first segment names another tenant's folder), 403 ``secret_ref_not_shared`` (a shared folder
+    that does not list the tenant), 422 ``secret_ref_invalid`` (a hidden or reserved segment).
     """
     raw = spec.url.strip()
     if "@" in urlsplit(raw).netloc:
@@ -596,8 +604,13 @@ def validate_scan(spec: ScanSpec, *, settings: Settings, hosts: frozenset[str]) 
             raise ScanSpecError("auth_invalid")
         if not settings.inline_secrets_allowed:
             raise ScanSpecError("inline_auth_forbidden")
-    if auth.storage_state_ref is not None and ".." in auth.storage_state_ref.split("/"):
-        raise ScanSpecError("auth_invalid")
+    if auth.storage_state_ref is not None:
+        if ".." in auth.storage_state_ref.split("/"):
+            raise ScanSpecError("auth_invalid")
+        try:  # SEC-5: the connection rule, for the caller's tenant (no secret is read)
+            check_secret_ref(tenant_id, auth.storage_state_ref, settings)
+        except SecretRefRefused as exc:
+            raise ScanSpecError(exc.code, exc.status) from None
     if spec.capture.har:
         raise ScanSpecError("har_not_supported")
     fill = spec.fill

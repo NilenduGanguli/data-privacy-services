@@ -224,7 +224,9 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
         if kek is None:
             raise DpsHttpError(503, "kek_unconfigured", "scans need DPS_JOB_KEK to seal the scan")
         try:
-            validated = validate_scan(body, settings=settings, hosts=await _hosts(request, tenant))
+            validated = validate_scan(
+                body, settings=settings, hosts=await _hosts(request, tenant), tenant_id=tenant
+            )
         except ScanSpecError as exc:
             raise DpsHttpError(exc.status, exc.code, f"the scan was refused: {exc.code}") from None
         try:

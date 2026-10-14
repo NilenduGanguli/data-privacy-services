@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -60,8 +59,6 @@ __all__ = [
 ]
 
 logger = get_logger(__name__)
-#: Tenant folder names under ``DPS_SECRET_DIR`` (SEC-2's rule: lower-case, never ``_``-first).
-_TENANT_FOLDER = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 #: Keys DPS adds to the stored spec's ``consistency`` that ``ScanSpec`` does not know.
 _ADDED_CONSISTENCY = ("key_wrapped", "wrapped", "caller_key", "caller_seed")
 
@@ -75,16 +72,15 @@ class ScanSetupError(Exception):
 
 
 def _storage_state(tenant_id: str, ref: str, ctx: HandlerContext) -> dict[str, Any]:
-    """The scan's storage state from ``DPS_SECRET_DIR/<tenant_id>/<ref>/storage_state.json``.
+    """The scan's storage state from ``DPS_SECRET_DIR/<tenant_id>/<ref>/storage_state.json`` (or
+    an allow-listed ``_shared/<ref>/``).
 
-    Tenant-scoped (security review SEC-2): a scan resolves its reference under its own tenant's
-    folder only, never in the global namespace. (Integration onto main replaces this with SEC-2's
-    ``resolve_secret_ref(tenant_id, ref, settings)``, which applies the same layout.)
+    SEC-5: resolved by SEC-2's ``resolve_secret_ref(tenant_id, ref, settings)`` — the scan's own
+    tenant folder only, containment checked inside it, another tenant's folder refused — never by
+    a tenant scoping of the scanner's own. Every refusal is ``secret_unavailable``.
     """
-    if not _TENANT_FOLDER.fullmatch(tenant_id) or ref.startswith(("/", "_")):
-        raise ScanSetupError("secret_unavailable")
     try:
-        files = resolve_secret_ref(f"{tenant_id}/{ref}", ctx.settings)
+        files = resolve_secret_ref(tenant_id, ref, ctx.settings)
         state = json.loads(files["storage_state.json"])
     except (SecretUnavailable, KeyError, ValueError):
         raise ScanSetupError("secret_unavailable") from None

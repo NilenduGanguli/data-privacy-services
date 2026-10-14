@@ -629,8 +629,11 @@ directories under each tenant's folder `DPS_SECRET_DIR/<tenant_id>/`: `dps/src/*
 `dps/src/mongo-crm`, `dps/tgt/mongo-crm-uat` under the demo tenant `default/`; an Oracle ref adds a
 `dsn` file, a Mongo ref a `uri` file), and `DPS_SECRET_DIR/_shared/*` for a secret
 several tenants may use. M4 adds the scanner's sessions: `auth.storage_state_ref` names a Playwright
-`storage_state.json` mounted at `DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json` — **tenant-scoped**
-(another tenant's ref fails the scan closed with `secret_unavailable`); refs follow `dps/ui/<name>`
+`storage_state.json` mounted at `DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json` (or a listed
+`_shared/<ref>/`) — **tenant-scoped** like a connection `secret_ref` (SEC-5: `POST /scans` refuses another
+tenant's folder with 403 `secret_ref_foreign_tenant`, an unlisted shared one with 403 `secret_ref_not_shared`;
+the browser-worker resolves it with `dps.secrets.resolve_secret_ref(tenant_id, ref, settings)` and fails
+the scan closed with `secret_unavailable` otherwise); refs follow `dps/ui/<name>`
 (the local demo session is `dps/ui/demo-onboarding`, a committed demo literal for the demo site
 only). The browser-worker needs `DPS_JOB_KEK` (it opens the scan's sealed key, seed, start URL and
 any inline dev storage state, and purges them at the end). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be

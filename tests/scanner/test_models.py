@@ -197,7 +197,7 @@ def test_validation_errors_never_echo_the_url() -> None:
 )
 def test_validate_scan_codes(payload: dict[str, Any], code: str) -> None:
     with pytest.raises(ScanSpecError) as err:
-        validate_scan(ScanSpec.model_validate(payload), settings=S, hosts=HOSTS)
+        validate_scan(ScanSpec.model_validate(payload), settings=S, hosts=HOSTS, tenant_id="t1")
     assert str(err.value) == code and err.value.code == code and err.value.status == 422
 
 
@@ -206,12 +206,12 @@ def test_programmatic_specs_are_rechecked() -> None:
         update={"fill": FillSpec.model_construct(personas=1, locale="en_US", display_persona=2)}
     )
     with pytest.raises(ScanSpecError, match="fill_invalid"):
-        validate_scan(bad_fill, settings=S, hosts=HOSTS)
+        validate_scan(bad_fill, settings=S, hosts=HOSTS, tenant_id="t1")
     bad_glob = ScanSpec(url="http://demo-site:8410/apply").model_copy(
         update={"scope": ScanScope.model_construct(deny=["no-slash"], allow=[], max_pages=None)}
     )
     with pytest.raises(ScanSpecError, match="scope_invalid"):
-        validate_scan(bad_glob, settings=S, hosts=HOSTS)
+        validate_scan(bad_glob, settings=S, hosts=HOSTS, tenant_id="t1")
 
 
 def test_inline_auth_is_accepted_where_inline_secrets_are_allowed() -> None:
@@ -219,7 +219,7 @@ def test_inline_auth_is_accepted_where_inline_secrets_are_allowed() -> None:
     spec = ScanSpec.model_validate(
         {"url": "http://demo-site:8410/apply", "auth": {"storage_state": {"cookies": []}}}
     )
-    v = validate_scan(spec, settings=local, hosts=HOSTS)
+    v = validate_scan(spec, settings=local, hosts=HOSTS, tenant_id="t1")
     stored = redact_scan_spec(v, "http://demo-site:8410/apply")
     assert stored["auth"]["storage_state"] == {"inline": True}
 
@@ -235,7 +235,7 @@ def test_validated_scan_defaults_and_redacted_spec_has_no_secrets() -> None:
             },
         }
     )
-    v = validate_scan(spec, settings=S, hosts=HOSTS)
+    v = validate_scan(spec, settings=S, hosts=HOSTS, tenant_id="t1")
     assert (v.max_pages, v.max_depth) == (50, 3) and v.origin.host == "demo-site"
     assert v.start_url == "http://demo-site:8410/apply?email=ananya.k%40x.in"
     assert v.hosts == HOSTS
@@ -255,7 +255,7 @@ def test_scope_limits_resolve_against_the_settings() -> None:
     spec = ScanSpec.model_validate(
         {"url": "http://127.0.0.1:8410/", "scope": {"max_pages": 7, "max_depth": 0}}
     )
-    v = validate_scan(spec, settings=S, hosts=HOSTS)
+    v = validate_scan(spec, settings=S, hosts=HOSTS, tenant_id="t1")
     assert (v.max_pages, v.max_depth) == (7, 0)
     unwrapped = redact_scan_spec(v, "http://127.0.0.1:8410/")["consistency"]
     assert unwrapped["key_wrapped"] is False and unwrapped["wrapped"] is False

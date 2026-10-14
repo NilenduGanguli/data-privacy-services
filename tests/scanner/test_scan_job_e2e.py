@@ -67,8 +67,11 @@ async def _submit(
     mode: str = "obfuscate",
     auth: dict[str, Any] | None = None,
     max_pages: int = 30,
+    accept_as: str = TENANT,
 ) -> Job:
-    """Create the job the way the API does (Task 18 reuses the same steps)."""
+    """Create the job the way the API does (Task 18 reuses the same steps). ``accept_as``: the
+    tenant the accept-time checks run for (another one only to write a row the API would refuse,
+    as an old row or a direct insert could hold); the job is always the test tenant's."""
     body: dict[str, Any] = {
         "url": url,
         "mode": mode,
@@ -79,7 +82,10 @@ async def _submit(
         body["auth"] = auth
     spec = ScanSpec.model_validate(body)
     validated = validate_scan(
-        spec, settings=ctx.settings, hosts=frozenset(ctx.settings.scan_registered_hosts_list)
+        spec,
+        settings=ctx.settings,
+        hosts=frozenset(ctx.settings.scan_registered_hosts_list),
+        tenant_id=accept_as,
     )
     detector = ctx.engine.detector(ctx.engine.policy(None), "en_IN")
     key, seed = generate_key_material("key"), generate_synthesis_seed()
@@ -294,30 +300,55 @@ async def test_missing_storage_state_secret_fails_the_job(
 async def test_storage_state_ref_resolves_under_the_tenant_folder_only(
     migrated_db: Any, scan_ctx: HandlerContext, kek: bytes, demo_site_url: str
 ) -> None:
-    """SEC-2 layout: ``DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json``; the same reference in
-    the global namespace (or under another tenant) is not read."""
+    """SEC-2/SEC-5: the browser-worker reads ``DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json``
+    through main's ``resolve_secret_ref(tenant_id, ref, settings)``. Another tenant's copy of the
+    same reference is never read; a top-level folder of the pre-scoping layout that is not the
+    tenant's makes the reference refused; a reference that names another tenant's folder is refused
+    when the scan is accepted and again when the worker loads it (cross-tenant)."""
+    import shutil
     from pathlib import Path
 
     from dps.layers.scanner import ScanSetupError, open_runtime
+    from dps.layers.scanner.models import ScanSpecError
     from dps.layers.scanner.store import ScanStore
 
     root = Path(scan_ctx.settings.secret_dir)
     state = json.dumps(demo_cookie_state("127.0.0.1"))
-    for folder in (root / "dps/ui/demo", root / "t-other/dps/ui/demo"):
+    store = ScanStore(scan_ctx.settings.pg_schema)
+
+    def put(rel: str) -> None:
+        folder = root / rel
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "storage_state.json").write_text(state, encoding="utf-8")
+
+    async def refused(claimed: ClaimedJob) -> str:
+        with pytest.raises(ScanSetupError) as err:
+            await open_runtime(scan_ctx, claimed, store)
+        return str(err.value)
+
+    put("t-other/dps/ui/demo")
     job = await _submit(
         scan_ctx, kek, f"{demo_site_url}/profile", auth={"storage_state_ref": "dps/ui/demo"}
     )
     claimed = await _claim(scan_ctx)
-    store = ScanStore(scan_ctx.settings.pg_schema)
-    with pytest.raises(ScanSetupError) as err:
-        await open_runtime(scan_ctx, claimed, store)
-    assert str(err.value) == "secret_unavailable"
-    own = root / TENANT / "dps/ui/demo"
-    own.mkdir(parents=True, exist_ok=True)
-    (own / "storage_state.json").write_text(state, encoding="utf-8")
+    assert claimed.id == job.id
+    assert await refused(claimed) == "secret_unavailable"  # only another tenant has it
+    put("dps/ui/demo")  # the pre-scoping layout: a top-level folder named like the first segment
+    put(f"{TENANT}/dps/ui/demo")
+    assert await refused(claimed) == "secret_unavailable"
+    shutil.rmtree(root / "dps")
     runtime = await open_runtime(scan_ctx, claimed, store)
     assert runtime.storage_state == demo_cookie_state("127.0.0.1")
-    assert runtime.start_url.endswith("/profile") and job.id == claimed.id
+    assert runtime.start_url.endswith("/profile")
     assert "demo-valid" not in repr(runtime)
+
+    foreign = {"storage_state_ref": "t-other/dps/ui/demo"}
+    with pytest.raises(ScanSpecError) as err:  # what POST /scans answers for the test tenant
+        await _submit(scan_ctx, kek, f"{demo_site_url}/profile", auth=foreign)
+    assert (err.value.code, err.value.status) == ("secret_ref_foreign_tenant", 403)
+    other = await _submit(
+        scan_ctx, kek, f"{demo_site_url}/profile", auth=foreign, accept_as="t-other"
+    )
+    claimed_other = await _claim(scan_ctx)
+    assert claimed_other.id == other.id and claimed_other.tenant_id == TENANT
+    assert await refused(claimed_other) == "secret_unavailable"

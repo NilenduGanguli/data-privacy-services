@@ -61,7 +61,7 @@ There is **no route** that submits a form, writes to a scanned site, or returns 
 | `scope.max_depth` | `DPS_SCAN_MAX_DEPTH` (3) | 0 … 5 |
 | `scope.allow` / `scope.deny` | `[]` | path globs (≤ 50 / ≤ 100); deny wins and holds for **every request** of the scan; a non-empty allow list holds for every navigation |
 | `scope.iframes` / `scope.shadow_dom` / `scope.spa_clicks` | `true` | read same-origin iframes / open shadow roots; click in-scope elements without a plain `href` to find SPA routes |
-| `auth.storage_state_ref` | — | a mounted Playwright `storage_state.json`: `DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json` (tenant-scoped; `..` refused). The demo session is `dps/ui/demo-onboarding` |
+| `auth.storage_state_ref` | — | a mounted Playwright `storage_state.json`: `DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json`, or `DPS_SECRET_DIR/_shared/<ref>/` when its `tenants` file lists the tenant — a connection `secret_ref` (SEC-2/SEC-5: checked for the caller's tenant at accept, resolved by `dps.secrets.resolve_secret_ref`; `..` refused). The demo session is `dps/ui/demo-onboarding` |
 | `auth.storage_state` | — | inline storage state, dev only (`DPS_INLINE_SECRETS_ALLOWED`); sealed with the key, never stored in the spec (`{"inline": true}` there). Not together with the ref |
 | `mode` | `synthesize` | `synthesize` \| `obfuscate`: how the masked captures replace rendered data (persona surrogates, or tokens with a reversible map), the parallel view's default side and the evidence label |
 | `fill.personas` | 1 | 1–50 personas generated (the export carries all of them) |
@@ -125,6 +125,9 @@ Refused at `POST /scans` (nothing is queued; the refusal is audited without the 
 | `start_url_denied` | 422 | the start path (or its hash route) matches the deny list, or is outside a non-empty allow list |
 | `inline_auth_forbidden` | 422 | inline `auth.storage_state` where inline secrets are not allowed (staging/prod) |
 | `auth_invalid` | 422 | both a ref and an inline state, a ref containing `..` or outside the ref pattern, any other refused `auth` field |
+| `secret_ref_foreign_tenant` | 403 | `auth.storage_state_ref`'s first segment names another tenant's secret folder (SEC-5: a connection `secret_ref`'s rule, contract §5.1) |
+| `secret_ref_not_shared` | 403 | a `_shared/<ref>` session whose folder does not exist or whose `tenants` file does not list the tenant |
+| `secret_ref_invalid` | 422 | a `storage_state_ref` segment that starts with `.` or `_` (hidden or reserved) |
 | `har_not_supported` | 422 | `capture.har: true` |
 | `fill_invalid` | 422 | personas outside 1–50, `display_persona` outside 1 … `personas`, an unsupported locale, any other refused `fill` field |
 | `policy_invalid` | 422 | the policy does not resolve |

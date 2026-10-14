@@ -168,7 +168,9 @@ async def test_process_runs_a_scan_and_drains_on_sigterm(
             "auth": {"storage_state": demo_cookie_state("127.0.0.1")},
         }
     )
-    validated = validate_scan(spec, settings=migrated_db, hosts=frozenset({"127.0.0.1"}))
+    validated = validate_scan(
+        spec, settings=migrated_db, hosts=frozenset({"127.0.0.1"}), tenant_id="t-bw"
+    )
     key, seed, job_id = generate_key_material("key"), generate_synthesis_seed(), new_id("s")
     secret = JobSecret(
         key_material=key.model_dump(mode="json"),
