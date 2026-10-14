@@ -1,6 +1,7 @@
 /* Jobs page (mockup 07-jobs.html). Nested under the page root so nothing leaks to other pages.
-   The job-group rules of the mockup (.ghead .keynode .wires .sys3 .sys .flds .gsplit .verdict .pair
-   .jwrap .join .yes) arrive with M3; .eb, .sm, .rowx and the violet bar are shared (components.css). */
+   The job-group rules (.ghead .keynode .wires .sys3 .sys .flds .gsplit .verdict .pair .jwrap .join
+   .yes) are ported from the mockup by M3 (Task 18); .eb, .sm, .rowx and the violet bar are shared
+   (components.css). Vault tokens only. */
 .jobs-page {
   /* health strip */
   .hgrid { display: grid; grid-template-columns: 1.05fr 1.5fr .85fr 1.5fr 1fr 1.15fr; }
@@ -23,6 +24,56 @@
   .cap { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin-top: 6px; display: flex; gap: 2px; }
   .cap i { display: block; height: 100%; background: var(--ink-3); border-radius: 999px; flex: 1; }
   .cap i.free { background: transparent; }
+
+  /* job group (mockup 07 "JOB GROUP"; M3 Task 18) */
+  .groups .gbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .groups .gbar .sel select { min-width: 200px; }
+  .grp svg { width: 11px; height: 11px; color: var(--teal); }
+  a.grp:hover { color: var(--teal); text-decoration: underline; }
+  .ghead { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 14px; }
+  .ghead h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  .ghead p { margin: 3px 0 0; color: var(--ink-2); font-size: 12.5px; }
+  .keynode { display: flex; align-items: center; gap: 12px; margin: 0 auto; width: fit-content; max-width: 100%; padding: 10px 16px; border-radius: var(--r-lg); border: 1px solid var(--teal-border); background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--teal) 12%, var(--surface))); flex-wrap: wrap; justify-content: center; }
+  .keynode .ki { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: var(--teal-soft); color: var(--teal); border: 1px solid var(--teal-border); flex: none; }
+  .keynode .ki svg { width: 17px; height: 17px; }
+  .keynode .kt { font-weight: 700; font-size: 13px; }
+  .keynode .chip { white-space: normal; text-align: left; line-height: 1.35; padding: 3px 9px; }
+  .keynode .ks { font-size: 11.5px; color: var(--ink-3); }
+  .wires { display: block; width: 100%; height: 26px; }
+  .sys3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .sys3.nowires { margin-top: 14px; }
+  .sys { border: 1px solid var(--border); background: var(--surface-2); border-radius: var(--r-lg); padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .sys .hd { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .sys .hd b { font-size: 13px; }
+  .sys .sm a { color: var(--ink-2); } .sys .sm a:hover { color: var(--teal); }
+  .flds { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .fl { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border-strong); color: var(--ink-2); background: var(--surface); overflow-wrap: anywhere; }
+  .gsplit { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, 2fr); gap: 16px; margin-top: 16px; align-items: start; }
+  .verdict { border: 1px solid var(--emerald-border); background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--emerald) 9%, var(--surface))); border-radius: var(--r-lg); padding: 14px 16px; min-width: 0; }
+  .verdict.failed { border-color: var(--rose-border); background: linear-gradient(160deg, var(--surface), color-mix(in srgb, var(--rose) 9%, var(--surface))); }
+  .verdict.muted-verdict { border-color: var(--border); background: var(--surface-2); }
+  .verdict .vlabel { font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .verdict .big { font-size: 34px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; margin-top: 6px; }
+  .verdict .big span { font-size: 15px; font-weight: 700; color: var(--emerald); letter-spacing: 0; margin-left: 4px; }
+  .verdict.failed .big span { color: var(--rose); }
+  .verdict.muted-verdict .big span { color: var(--ink-3); }
+  .pair { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .pair:last-of-type { border-bottom: 0; }
+  .pair .on { color: var(--ink-3); font-family: var(--mono); font-size: 11px; grid-column: 1; overflow-wrap: anywhere; }
+  .pair .ok { grid-row: 1 / span 2; grid-column: 2; align-self: center; display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink); }
+  .pair .ok i { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; background: var(--emerald-soft); color: var(--emerald); border: 1px solid var(--emerald-border); font-style: normal; font-size: 11px; font-weight: 800; }
+  .pair .ok.bad i { background: var(--rose-soft); color: var(--rose); border-color: var(--rose-border); }
+  .jwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-lg); }
+  .join { min-width: 560px; }
+  .join th { background: var(--surface-2); }
+  .join .eb { display: inline-block; margin-right: 6px; vertical-align: 1px; }
+  .join td { vertical-align: top; }
+  .join .stack { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+  .join .stack .k { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+  .join th:last-child, .join td:last-child { white-space: nowrap; }
+  .yes { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; white-space: nowrap; font-family: var(--mono); }
+  .yes i { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; background: var(--emerald-soft); color: var(--emerald); border: 1px solid var(--emerald-border); font-style: normal; font-size: 11px; font-weight: 800; }
+  .yes.no i { background: var(--rose-soft); color: var(--rose); border-color: var(--rose-border); }
 
   /* filters */
   .filters { display: grid; grid-template-columns: minmax(170px, 1.4fr) repeat(5, minmax(0, 1fr)) auto; gap: 8px; align-items: center; margin-bottom: 12px; }
@@ -85,7 +136,13 @@
     .jobs tr.err, .jobs tr.err td, .jobs tr.emptyrow, .jobs tr.emptyrow td { display: block; padding: 0 !important; border: 0; }
     .jobs tr.err { margin-top: -6px; }
   }
+  @media (max-width: 1200px) { .gsplit { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 980px) {
+    .sys3 { grid-template-columns: minmax(0, 1fr); } .wires { display: none; }
+    .keynode { margin-bottom: 12px; }
+  }
   @media (max-width: 760px) {
+    .keynode { justify-content: flex-start; }
     .hgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; }
     .ht, .ht:nth-child(3n+1), .ht:nth-child(3n) { border-left: 0; padding: 0; }
     .ht.wide { grid-column: 1 / -1; }

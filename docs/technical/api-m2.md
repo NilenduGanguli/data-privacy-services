@@ -34,14 +34,15 @@ Scope `jobs` unless stated. "prod" = the connection carries the tag `production`
 | `POST /connections` | jobs (+`admin` to tag prod) | `ConnectionSpec` → 201 connection | `connection_invalid` 422, `inline_secrets_disabled` 422, `connection_name_taken` 409, `admin_scope_required` 403, `kek_unconfigured` 503 |
 | `GET /connections` | jobs | `?limit&cursor` → page of connections | `cursor_invalid` 400 |
 | `GET /connections/{id}` | jobs | → connection | `connection_not_found` 404 |
-| `PATCH /connections/{id}` | jobs (+`admin` to add or remove prod) | `ConnectionPatch` → connection | as `POST`, `connection_not_found` 404 |
-| `DELETE /connections/{id}` | jobs | → 204 | `connection_in_use` 409 (a non-terminal job uses it) |
+| `PATCH /connections/{id}` | jobs (+`admin` for any change of a connection that is or becomes production-tagged) | `ConnectionPatch` → connection | as `POST`, `connection_not_found` 404, `connection_endpoint_change_requires_credentials` 403 (an endpoint param of a connection holding credentials changes without `credentials` / `secret_ref` in the same body, and the key lacks `admin`) |
+| `DELETE /connections/{id}` | jobs (+`admin` for a production-tagged connection) | → 204 | `connection_in_use` 409 (a non-terminal job uses it), `admin_scope_required` 403 |
 | `POST /connections/{id}/test` | jobs | `{role: source\|target, object?, write_mode?}` → `ConnectionTestResult` `{ok, engine, server_version, checks: [{name, ok, severity, detail?}], capabilities, error_code}` (stored as `last_test`); a failed test is a 200 with `ok: false` and an `error_code` such as `secret_unavailable` or `connection_failed` | `connection_not_found` 404, `engine_unavailable` 422 |
 | `GET /connections/{id}/objects` | jobs | `?owner=` → `{items: [ObjectRef], next_cursor: null}` | `connection_failed` 502 |
 | `GET /connections/{id}/describe` | jobs | `?object=OWNER.NAME` → `TableShape` | `object_invalid` 422, `object_not_found` 422 |
 | `POST /connections/{id}/count` | jobs | `{object, selection}` → `{rows, checks, runs_as, binds}` | `selection_*` 422 (with `checks`; no query runs), `statement_timeout` 502, `connection_role` 422 |
 | `POST /jobs/discover` | jobs | `DiscoverSpec` → 202 `{job}` | `connection_not_found` 404, `connection_role` 422, `selection_*` 422, `queue_full` 429 |
 | `POST /jobs/run` | jobs (+`admin` for in place / append on prod) | `RunSpec` → 202 `{job, key_material?, synthesis_seed?}`, `Cache-Control: no-store` | the run-validation table below, `queue_full` 429 |
+| `POST /jobs/run/validate` | jobs | `RunSpec` → 200 `{ok: true}`, `Cache-Control: no-store`; creates no job, seals nothing, returns no key | exactly what `POST /jobs/run` would answer before queueing (the run-validation table, 422 request validation such as an offset strategy with neither offset nor prefix); the console's step 5 asks it before it says "all checks passed" |
 | `GET /jobs` | jobs | `?kind&state&group_id&limit&cursor` → page of jobs | `cursor_invalid` 400 |
 | `GET /jobs/stats` | jobs | → `JobStats` | — |
 | `GET /jobs/{id}` | jobs | → job (progress merged from its partitions; the console polls every 2 s) | `job_not_found` 404 |
@@ -60,6 +61,22 @@ Scope `jobs` unless stated. "prod" = the connection carries the tag `production`
 | `GET /evidence/{id}/html` | jobs (scan for scan packs) | → the printable pack (`text/html`, CSP `default-src 'none'; style-src 'unsafe-inline'`) | as above |
 | `GET /artefacts/{id}` | jobs or scan (by the owning job's kind) | → the bytes, streamed; `Content-Disposition` uses the artefact id | `artefact_not_found` 404, `storage_not_found` 404 |
 
+**Discovery classification** (per column of a snapshot): `entity_type` is the best entity whose
+`noisy_or(name score, hit rate × mean score)` reaches the policy's `min_score`. When none does,
+the rows with *any* whole-value finding of MEDIUM or higher sensitivity count together: at or above
+`min_score` the column is `MIXED_PII` (values of several types — an e-mail in one row, a phone in
+the next; `type_note: "mixed_entities"`), and every value is replaced whole: `det_token` on an
+unbounded column, `hmac_pseudonym` (16 characters) on a bounded one where a token could overflow,
+`mask_partial` below 16 characters; `surrogate` in synthesize mode. A column called `value`
+(`contact`, `detail`, …) beside a `channel` / `contact_type` column is a mixed contact value by its
+name. Otherwise a text column with span findings in 5 % of the rows is `FREE_TEXT`. A column kept
+with no entity whose values still carry MEDIUM+ findings in 5 % or more of the sampled rows keeps
+`value_hit_rate`, `value_entities` (type names) and `type_note: "kept_with_hits"` — the console
+lists it under *Needs a decision* and never as "not personal". `value_entities` names the MEDIUM+
+types found in the sample for every column. Name cues include `*holder_name`, `<role>_name`
+(payee, counterparty, beneficiary, …), `line1` / `address_line*`, and `doc_number` /
+`document_number` (`NATIONAL_ID`).
+
 Probes: `/readyz` gains `db` (`up` / `down` / `unconfigured`, `migrations: verified`) and `jobs` (ok
 when the database is up, the migrations verify and the KEK is loaded); only `api-core` is required.
 The worker serves `/health`, `/readyz` and `/metrics` on `DPS_WORKER_METRICS_PORT` (9400).
@@ -67,8 +84,13 @@ The worker serves `/health`, `/readyz` and `/metrics` on `DPS_WORKER_METRICS_POR
 ## Request bodies
 
 ```json
-// POST /connections (ConnectionSpec): secret_ref names a directory under DPS_SECRET_DIR; inline
-// credentials (dev only) are sealed with DPS_JOB_KEK and expire after DPS_INLINE_SECRET_TTL_HOURS.
+// POST /connections (ConnectionSpec): secret_ref names a directory under the caller's tenant
+// folder, DPS_SECRET_DIR/<tenant_id>/<ref>/ (here the demo tenant `default`:
+// /var/run/secrets/dps/default/dps/src/bank-pg-ro/), or _shared/<ref> for a folder whose
+// `tenants` file lists the tenant. A ref whose first segment names another tenant's folder is 403
+// secret_ref_foreign_tenant; an unlisted shared ref 403 secret_ref_not_shared; a malformed one 422
+// secret_ref_invalid. Inline credentials (dev only) are sealed with DPS_JOB_KEK and expire after
+// DPS_INLINE_SECRET_TTL_HOURS.
 {"name": "bank-pg-ro", "engine": "postgres",
  "params": {"host": "source-pg", "port": 5432, "database": "bank"},
  "secret_ref": "dps/src/bank-pg-ro", "roles": ["source"], "tags": ["production"]}
@@ -127,6 +149,7 @@ The worker serves `/health`, `/readyz` and `/metrics` on `DPS_WORKER_METRICS_POR
 | `connection_role` 422 | the source lacks `source`, the target lacks `target` |
 | `group_key_mismatch` 409 · `group_not_found` 404 | the key's `kid` is not the group's, or `field_scoped` with a group; unknown group |
 | `tabular_invalid` 422 · `engine_not_tabular` 422 | `options.tabular` other than `none` (M5) |
+| `length_overflow` 422 | in place or append to the same table: a planned column whose output cannot fit the column it is written back into (the static worst case of `det_token` / `hmac_pseudonym`, or a discovery `length_overflow` suggestion the reviewer kept, e.g. PAN `fpe_text` that runs as a token); the detail names every such column, method, length and type |
 | `key_method_not_injective`, `method_needs_key`, `text_method_invalid`, `engine_unavailable`, `wrap_key_invalid`, `key_material_invalid` 422 | a reviewed method that cannot run here (a non-injective method on a key, a keyed method without a key, a text method on a non-text column, a missing engine), a bad wrap key, bad key material |
 | `kek_unconfigured` 503 | sealing needed and `DPS_JOB_KEK` unset |
 | `queue_full` 429 | the tenant's queued jobs reached `DPS_JOB_TENANT_MAX_QUEUED` |
@@ -184,10 +207,30 @@ overrides}, consistency {scope, field_scoped, kid, seed_fingerprint, key_custody
 purged_at}}, columns [{path, entity_type, method, reversible, values, fallbacks}], reveal_map [{path,
 entity_type, method, params, anchor_path, reveal}], counts {rows_estimated, rows_read, rows_written,
 rows_skipped, partitions, batches, resumed_partitions}, verification {mode, batches, values_checked,
-hits, passed, post_sample {rows, detector_hits, kept_column_hits}}, fidelity/privacy/utility (M5),
+hits, passed, status (passed|review_required|failed|incomplete), review_required, post_sample {rows,
+detector_hits, kept_column_hits, kept_columns, declared_kept_hits}}, fidelity/privacy/utility (M5),
 scan (M4), timings {started_at, finished_at, duration_s, rows_per_s}, partitions [{no, rows, attempts,
 resumed, state}], errors [{code, where}], config_hash` (sha256 of policy hash + snapshot hash +
 redacted spec).
+
+**Post-write sample.** Finalize re-reads up to 200 written rows and runs the detectors over every
+output column. `detector_hits` counts cells of transformed columns with a finding (expected:
+format-preserving output still looks like its type); `kept_column_hits` counts cells with a MEDIUM+
+finding in columns the accepted snapshot kept **as not personal** (no entity), and `kept_columns`
+names them; `declared_kept_hits` counts those in columns classified but kept on purpose (a key kept
+in place, `CITY: keep`). Any `kept_column_hits` make the verification `review_required` with
+`passed: false` in either verify mode — personal data reached the target untransformed — and the
+job's `progress.verification.kept_hits` carries the count to the job page; `failed` (sweep hits or a
+leakage refusal) wins over it. `GET /evidence` rows carry `review_required`; the console shows
+"review required" (amber), never "verified · 0 leaks".
+
+**A run that did not finish is never verified** (verify r2, N3). A job that ends `failed` or
+`canceled` without a sweep hit (e.g. refused at prepare with `length_overflow`, 0 rows) gets
+`verification.status: incomplete`, `passed: false`: its sweep saw only what was written before it
+stopped. `GET /evidence` rows answer `passed: false` for any pack whose `outcome` is not
+`succeeded`/`dry_run` (packs stored before this rule said `passed: true`) and carry `error_code`,
+the pack's first error code; the console shows "not verified · job failed (length_overflow)" (a
+preflight leak stays "failed closed"), and the printable page "not verified · job failed".
 
 `pack_sha256` = sha256 of the canonical JSON (sorted keys, compact separators). Each pack is stored
 with a JSON and a printable HTML artefact (the console's Print / save as PDF uses the browser; the PDF

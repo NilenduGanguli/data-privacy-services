@@ -5,6 +5,15 @@ its row (``"dps_job.key:<job id>"``, ``"dps_job.spec:<job id>"``, ``"dps_connect
 so a sealed blob copied into another row does not open. This module and
 ``dps/engine/transform/crypto.py`` are the only modules that touch key bytes; neither logs, and
 every error here is detail-free.
+
+**Secret references are tenant-scoped** (security review SEC-2). A connection's ``secret_ref``
+names a folder under the *caller's* tenant folder, ``DPS_SECRET_DIR/<tenant_id>/<ref>/``; the
+tenant comes from the authenticated request, never from the reference. A reference whose first
+segment names another top-level folder (another tenant's) is refused, and a symlink that leaves
+the tenant's folder does not resolve. ``_shared/<ref>`` names ``DPS_SECRET_DIR/_shared/<ref>/``,
+usable only by the tenants its ``tenants`` file lists (one id per line, ``#`` comments).
+:func:`check_secret_ref` validates a reference when a connection is created or updated (no
+secret is read); :func:`resolve_secret_ref` applies the same rules again when credentials load.
 """
 
 from __future__ import annotations
@@ -13,6 +22,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
@@ -38,6 +48,18 @@ SECRET_FILES = (
     "storage_state.json",
     "ca.pem",
 )
+#: The top-level folder of secrets several tenants may use (``_`` never starts a tenant id).
+SHARED_DIR = "_shared"
+#: The allow-list file of a shared secret folder: one tenant id per line (never read as a secret).
+SHARED_TENANTS_FILE = "tenants"
+#: What ``ConnectionSpec.secret_ref`` accepts: a tenant-relative path, or ``_shared/<path>``.
+SECRET_REF_PATTERN = r"^(?:_shared/)?[a-z0-9][a-z0-9/_.-]{0,200}$"
+_SECRET_REF = re.compile(SECRET_REF_PATTERN)
+#: A path segment of a reference: lower-case letters, digits, ``_ . -``, never starting with
+#: ``.`` (hidden, ``..``) or ``_`` (reserved, like ``_shared``).
+_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
+#: Tenant folder names: the job platform's tenant ids (``dps_tenant``, lower-case, no ``_`` start).
+_TENANT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
 class SealError(Exception):
@@ -56,6 +78,105 @@ class SecretUnavailable(Exception):
         super().__init__("secret reference could not be resolved")
 
 
+class SecretRefRefused(Exception):
+    """A ``secret_ref`` the caller's tenant may not name (create/update time).
+
+    ``code``: ``secret_ref_invalid`` (422, malformed), ``secret_ref_foreign_tenant`` (403, its
+    first segment names another tenant's folder) or ``secret_ref_not_shared`` (403, a shared
+    reference that does not list the tenant, or does not exist). ``detail`` never repeats the
+    reference or a tenant id.
+    """
+
+    def __init__(self, code: str, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.code, self.status, self.detail = code, status, detail
+
+
+def _invalid() -> SecretRefRefused:
+    return SecretRefRefused(
+        "secret_ref_invalid",
+        422,
+        "secret_ref must be a relative path of lower-case segments ([a-z0-9][a-z0-9_.-]*), "
+        "optionally under _shared/",
+    )
+
+
+def _not_shared() -> SecretRefRefused:
+    return SecretRefRefused(
+        "secret_ref_not_shared", 403, "the shared secret does not list this tenant"
+    )
+
+
+def _inside(path: Path, base: Path) -> bool:
+    return base in path.parents
+
+
+def _shared_tenants(folder: Path, base: Path) -> set[str]:
+    allow = folder / SHARED_TENANTS_FILE
+    try:
+        if not allow.is_file() or not _inside(allow.resolve(), base):
+            return set()
+        lines = allow.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    return {line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")}
+
+
+def _locate(tenant_id: str, ref: str, settings: Settings) -> tuple[Path, Path]:
+    """``(namespace root, secret folder)`` of ``ref`` for ``tenant_id`` (both resolved).
+
+    The folder may not exist. Raises :class:`SecretRefRefused` for every rule in the module
+    docstring; nothing here reads a secret file.
+    """
+    if not _TENANT.fullmatch(tenant_id or ""):
+        raise _invalid()
+    if not ref or not _SECRET_REF.fullmatch(ref):
+        raise _invalid()
+    segments = ref.split("/")
+    shared = segments[0] == SHARED_DIR
+    rest = segments[1:] if shared else segments
+    if not rest or not all(_SEGMENT.fullmatch(seg) for seg in rest):
+        raise _invalid()
+    root = Path(settings.secret_dir).resolve()
+    if shared:
+        base = (root / SHARED_DIR).resolve()
+        folder = base.joinpath(*rest).resolve()
+        if not _inside(base, root) or not _inside(folder, base):
+            raise _not_shared()
+        if tenant_id not in _shared_tenants(folder, base):
+            raise _not_shared()
+        return base, folder
+    first = rest[0]
+    if first != tenant_id and (root / first).is_dir():
+        raise SecretRefRefused(
+            "secret_ref_foreign_tenant",
+            403,
+            "secret_ref is relative to this tenant's secret folder; its first segment names "
+            "another tenant's folder",
+        )
+    base = (root / tenant_id).resolve()
+    folder = base.joinpath(*rest).resolve()
+    if not _inside(base, root) or not _inside(folder, base):
+        raise SecretUnavailable()
+    return base, folder
+
+
+def check_secret_ref(tenant_id: str, ref: str, settings: Settings) -> None:
+    """Validate ``ref`` for ``tenant_id`` without reading a secret (connection create/update).
+
+    A tenant-scoped reference need not exist yet (it may be mounted later; loading it then fails
+    with :class:`SecretUnavailable`); a shared one must list the tenant now.
+
+    Raises:
+        SecretRefRefused: the reference is malformed, names another tenant's folder, or is a
+            shared reference that does not list the tenant.
+    """
+    try:
+        _locate(tenant_id, ref, settings)
+    except SecretUnavailable:
+        raise _invalid() from None
+
+
 def _b64decode(text: str) -> bytes:
     text = text.strip()
     pad = "=" * (-len(text) % 4)
@@ -66,6 +187,11 @@ def _b64decode(text: str) -> bytes:
 def load_kek(settings: Settings) -> bytes | None:
     """The 32-byte job KEK, or ``None`` when unset (settings already validated its length)."""
     return _b64decode(settings.job_kek) if settings.job_kek else None
+
+
+def kek_ring(settings: Settings) -> tuple[bytes, ...]:
+    """The job KEK, then ``DPS_JOB_KEK_PREVIOUS`` while a rotation keeps it (each set one)."""
+    return tuple(_b64decode(v) for v in (settings.job_kek, settings.job_kek_previous) if v)
 
 
 def seal(kek: bytes, plaintext: bytes, *, aad: str) -> bytes:
@@ -101,18 +227,26 @@ def open_json[M: BaseModel](kek: bytes, sealed: bytes, model: type[M], *, aad: s
         raise SealError() from None
 
 
-def resolve_secret_ref(ref: str, settings: Settings) -> dict[str, str]:
-    """Read the allow-listed files under ``DPS_SECRET_DIR/<ref>/`` (trailing newline stripped)."""
-    if not ref or ref.startswith("/") or ".." in ref.split("/"):
-        raise SecretUnavailable()
-    root = Path(settings.secret_dir).resolve()
-    folder = (root / ref).resolve()
-    if root not in folder.parents or not folder.is_dir():
+def resolve_secret_ref(tenant_id: str, ref: str, settings: Settings) -> dict[str, str]:
+    """Read the allow-listed files under ``DPS_SECRET_DIR/<tenant_id>/<ref>/`` (or an
+    allow-listed ``_shared/<ref>/``), trailing newline stripped.
+
+    Raises:
+        SecretUnavailable: any rule of :func:`check_secret_ref` fails, the folder is missing, a
+            file resolves outside the tenant's (or the shared) folder, or no file is readable.
+    """
+    try:
+        base, folder = _locate(tenant_id, ref, settings)
+    except SecretRefRefused:
+        raise SecretUnavailable() from None
+    if not folder.is_dir():
         raise SecretUnavailable()
     out: dict[str, str] = {}
     for name in SECRET_FILES:
         path = folder / name
         if path.is_file():
+            if not _inside(path.resolve(), base):
+                raise SecretUnavailable()
             try:
                 out[name] = path.read_text(encoding="utf-8").rstrip("\r\n")
             except OSError:

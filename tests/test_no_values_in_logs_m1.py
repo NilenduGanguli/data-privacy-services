@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,7 @@ class ConfiguredGateway(LlmGateway):
         temperature: float = 0.2,
         max_tokens: int = 512,
         purpose: str = "rewrite",
+        protected: Sequence[str] = (),  # M5: the gateway's egress-verifier argument
     ) -> LlmResult:
         return LlmResult(text="no json here", provider="stellar", model="test")
 
@@ -103,6 +105,7 @@ class LabellingGateway(ConfiguredGateway):
         temperature: float = 0.2,
         max_tokens: int = 512,
         purpose: str = "rewrite",
+        protected: Sequence[str] = (),  # M5: the gateway's egress-verifier argument
     ) -> LlmResult:
         if purpose != "label":
             return LlmResult(text="no json here", provider="stellar", model="test")

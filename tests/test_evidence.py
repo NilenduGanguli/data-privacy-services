@@ -125,3 +125,96 @@ def test_html_escapes_everything_and_has_no_scripts() -> None:
     synth_page = render_html(synth, sha=pack_sha256(synth))
     assert "synthetic — measured, not claimed anonymous" in synth_page
     assert "<script" not in synth_page
+
+
+def test_a_failed_run_never_reads_as_verified() -> None:
+    """N3: a failed job with 0 rows is "not verified · job failed", even when the counters it
+    reached held no hit, and an older pack that recorded passed: true renders the same."""
+    inputs = evidence_inputs(mode="obfuscate", outcome="failed")
+    inputs.plan = None
+    inputs.errors = [{"code": "length_overflow", "where": "prepare"}]
+    inputs.verification = {"mode": "strict", "hits": 0, "passed": True, "status": "passed"}
+    pack = build_pack(inputs)
+    assert pack.verification["passed"] is False and pack.verification["status"] == "incomplete"
+    page = render_html(pack, sha=pack_sha256(pack))
+    assert "not verified · job failed" in page and "verified · 0 leaks" not in page
+    legacy = pack.model_copy(
+        update={"verification": {**pack.verification, "passed": True, "status": "passed"}}
+    )
+    legacy_page = render_html(legacy, sha=pack_sha256(legacy))
+    assert "not verified · job failed" in legacy_page and "verified · 0 leaks" not in legacy_page
+    canceled = build_pack(evidence_inputs(mode="obfuscate", outcome="canceled"))
+    assert canceled.verification["passed"] is False
+    assert "not verified · job canceled" in render_html(canceled, sha=pack_sha256(canceled))
+    done = build_pack(evidence_inputs(mode="obfuscate"))
+    assert done.verification["passed"] is True
+    assert "verified · 0 leaks" in render_html(done, sha=pack_sha256(done))
+
+
+def test_fallback_counters_carry_the_prefix_once() -> None:
+    """M2 verify r2 issue 3: the engine's fallback notes already start with ``fallback:``; the job
+    counters used to read ``fallback:fallback:fpe_domain_too_small``."""
+    from dps.engine.batch import BatchResult
+    from dps.engine.verify import Verification
+    from dps.layers.connectors.evidence import _split_counters
+    from dps.layers.connectors.jobs_run import _counters
+
+    result = BatchResult(
+        rows=[],
+        values_by_method={"det_token": 4, "fpe_text": 2},
+        fallbacks={"fallback:fpe_domain_too_small": 3, "fallback:fpe_unavailable": 1},
+        verification=Verification(passed=True, checked=6),
+        values_by_column={"tax_id": 3},
+    )
+    counters = _counters(result)
+    assert counters == {
+        "det_token": 4,
+        "fpe_text": 2,
+        "fallback:fpe_domain_too_small": 3,
+        "fallback:fpe_unavailable": 1,
+        "col:tax_id": 3,
+    }
+    assert not any(k.startswith("fallback:fallback:") for k in counters)
+    # counters stored before the fix still read as one reason in the pack
+    _, fallbacks, _, _ = _split_counters(
+        {"fallback:fallback:fpe_domain_too_small": 5, "fallback:fpe_domain_too_small": 2}
+    )
+    assert fallbacks == {"fpe_domain_too_small": 7}
+
+
+def test_m5_synthesize_pack_carries_the_measured_blocks() -> None:
+    """M5 Task 6: fidelity/privacy/tabular come from ``progress.metrics``; redraws are summed."""
+    inputs = evidence_inputs(mode="synthesize")
+    inputs.job.spec["options"]["tabular"] = "copula"
+    metrics = {
+        "fidelity": {"score": 0.93, "ks": {"$.balance": 0.02}, "engine": "copula"},
+        "privacy": {"exact_row_matches": 0, "nndr": {"ratio": 1.02, "measured": 1.0}},
+        "tabular": {"engine": "copula", "columns": ["$.balance"], "excluded": []},
+    }
+    inputs.job.progress.metrics = metrics
+    inputs.job.progress.values_by_method |= {"copula": 5000, "copula_resample": 3}
+    inputs.policy_version = "4"
+    pack = build_pack(inputs)
+    assert pack.fidelity == metrics["fidelity"] and pack.tabular == metrics["tabular"]
+    assert pack.privacy is not None and pack.privacy["exact_row_resamples_run"] == 3
+    assert pack.privacy["nndr"]["ratio"] == 1.02 and pack.label == LABEL_SYNTHESIZE
+    assert pack.policy["version"] == "4"
+    # a redraw is a count, never a transformed value
+    assert pack.counts["values_transformed"] == 7400 + 5000
+    by_path = {c["path"]: c for c in pack.columns}
+    assert by_path["$.email"]["data_type"] and by_path["$.email"]["override"] is False
+    assert isinstance(by_path["$.email"]["confidence"], float)
+    html = render_html(pack, sha=pack_sha256(pack))
+    assert "Tabular model" in html and "exact_row_resamples_run" in html
+
+
+def test_m5_synthesize_without_tabular_says_nothing_was_measured() -> None:
+    pack = build_pack(evidence_inputs(mode="synthesize"))
+    assert pack.fidelity is None and pack.tabular is None and pack.utility is None
+    assert pack.privacy == {
+        "engine": "none",
+        "measured": False,
+        "reason": "options.tabular=none: non-sensitive columns were copied from the source",
+    }
+    assert build_pack(evidence_inputs(mode="obfuscate")).privacy is None
+    assert "version" not in build_pack(evidence_inputs(mode="obfuscate")).policy

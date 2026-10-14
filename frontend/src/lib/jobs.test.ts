@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunSpec, canConfirmWrite, draftForStorage, filterJobs, fmtCount, fmtDuration, heatTone, jobStatus, jobsCsv, NO_FILTERS, needsDecision, ownerOf, progressPct, pushSample, sparkPath, splitCounters, statusBucket, writeModeLabel } from './jobs';
-import { evidenceSoFar, methodText, packTargetText, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
+import { evidenceSoFar, methodText, packSelection, packTargetText, recordNoun, shortSha, verificationText, oneWayColumns, overridesFor, partitionPct, planGroups, seedFingerprint, shortType, specPreview, stepperState } from './jobs';
 import { confirmationKey, countKey, fqn, jobHref, keyMethodsOf, runMethodFor, tableJobs, writtenObject, type WizardDraft } from './jobs';
-import { canLeave, reachable, wizardReducer } from '../pages/wizard/state';
+import { decisionReason, keptHitText, keptWithHits, verificationTone } from './jobs';
+import { canLeave, reachable, targetReady, transactionsMissing, wizardReducer } from '../pages/wizard/state';
 import type { ClassificationSnapshot, Connection, CountOut } from './types';
 import { draft, job, column } from './fixtures';
 
@@ -34,6 +35,18 @@ describe('jobs helpers', () => {
     expect(needsDecision(column({ entity_type: 'EMAIL', confidence: 0.99, type_note: null }))).toBe(false);
     expect(heatTone(column({ sensitivity: 'CRITICAL' }))).toBe('crit');
     expect(heatTone(column({ entity_type: null }))).toBe('kept');
+  });
+  it('puts mixed columns and kept columns with detector hits in front of the reviewer', () => {
+    const mixed = column({ entity_type: 'MIXED_PII', confidence: 0.95, type_note: 'mixed_entities', value_entities: ['EMAIL', 'PHONE'] });
+    expect(needsDecision(mixed)).toBe(true);
+    expect(decisionReason(mixed)).toBe('Personal data of several types in one column (EMAIL, PHONE): every value is replaced whole.');
+    const kept = column({ entity_type: null, confidence: 0.36, type_note: 'kept_with_hits', value_entities: ['EMAIL'], value_hit_rate: 0.2 });
+    expect(needsDecision(kept) && keptWithHits(kept)).toBe(true);
+    expect(decisionReason(kept)).toContain('found EMAIL in 20 % of sampled rows');
+    expect(keptHitText(kept)).toBe('20 % hits');
+    const clean = column({ entity_type: null, type_note: null, value_entities: [] });
+    expect(keptWithHits(clean) || needsDecision(clean)).toBe(false);
+    expect(keptHitText(clean)).toBe('—');
   });
   it('never stores secrets, key material or filters in the saved draft', () => {
     const saved = JSON.stringify(draftForStorage(draft({ password: 'pw-123', keyMaterialJson: '{"dek":"x"}', where: "name = 'Ananya'" })));
@@ -112,7 +125,8 @@ describe('job detail helpers', () => {
     const e = evidenceSoFar(job({ progress: { rows_written: 40, partitions_total: 4, partitions_done: 3, partitions_failed: 1,
       values_by_method: { det_token: 30, keep: 50, fpe_digits: 10, 'fallback:fpe_domain_too_small': 4, 'fallback:fpe_disabled': 1, 'col:email': 30, 'verify:hits': 0 },
       verification: { checked: 40, hits: 0 } } }));
-    expect(e).toMatchObject({ rows: 40, values: 40, hits: 0, fallbacks: 5, dominantFallback: 'fpe_domain_too_small', done: 3, total: 4, failed: 1 });
+    expect(e).toMatchObject({ rows: 40, values: 40, hits: 0, keptHits: 0, fallbacks: 5, dominantFallback: 'fpe_domain_too_small', done: 3, total: 4, failed: 1 });
+    expect(evidenceSoFar(job({ progress: { verification: { checked: 40, hits: 0, kept_hits: 186 } } })).keptHits).toBe(186);
   });
 });
 
@@ -251,12 +265,154 @@ describe('evidence pack helpers', () => {
     expect(packTargetText({ write_mode: 'in_place', object: 'bank_restore.contacts' }, { object: 'bank_restore.contacts' })).toBe('bank_restore.contacts (in place)');
     expect(packTargetText({ write_mode: 'files', object: null, files: { format: 'parquet', prefix: 'exports/x' } }, {})).toBe('Parquet files · exports/x');
   });
+  it('states the selection a pack read: SQL template and binds, or the MongoDB filter template and its literals', () => {
+    expect(recordNoun('mongo', 2)).toBe('documents');
+    expect(recordNoun('mongo', 1)).toBe('document');
+    expect(recordNoun('oracle', 2)).toBe('rows');
+    expect(recordNoun('postgres', 1)).toBe('row');
+    expect(packSelection({ where_template: 'region = :r', binds: 1, max_rows: 1000, columns: ['a', 'b'] }, 'postgres'))
+      .toEqual({ scope: 'region = :r', detail: ' · 1 bound parameter · at most 1,000 rows · 2 columns' });
+    expect(packSelection({ query_template: 'select * from t where x = :x', binds: 2 }, 'oracle'))
+      .toEqual({ scope: 'select * from t where x = :x', detail: ' · 2 bound parameters' });
+    expect(packSelection({ binds: 0 }, 'postgres')).toEqual({ scope: 'all rows', detail: ' · 0 bound parameters' });
+    // MongoDB: the '?' template, never "all rows", and every '?' counted as a bound literal
+    const one = packSelection({ where_template: null, query_template: null, mongo_filter_template: { segment: '?' }, binds: 0 }, 'mongo');
+    expect(one).toEqual({ scope: '{"segment":"?"}', detail: ' · 1 bound literal' });
+    expect(one.scope).not.toContain('all rows');
+    expect(packSelection({ mongo_filter_template: { $or: [{ 'profile.tier': { $in: ['?', '?'] } }, { age: { $gte: '?' } }] }, binds: 0, max_rows: 50, columns: ['profile.tier'] }, 'mongo'))
+      .toEqual({ scope: '{"$or":[{"profile.tier":{"$in":["?","?"]}},{"age":{"$gte":"?"}}]}', detail: ' · 3 bound literals · at most 50 documents · 1 field' });
+    expect(packSelection({ mongo_filter_template: null, binds: 0 }, 'mongo')).toEqual({ scope: 'all documents', detail: ' · 0 bound literals' });
+    expect(packSelection({ mongo_filter_template: {}, binds: 0 }, 'mongo')).toEqual({ scope: 'all documents', detail: ' · 0 bound literals' });
+  });
   it('words the verification outcome without claiming leaks it did not count', () => {
     expect(verificationText(true, 0)).toBe('passed · 0 leaks');
     expect(verificationText(false, 2)).toBe('failed · 2 leaks caught');
     expect(verificationText(false, 1)).toBe('failed · 1 leak caught');
     // a run stopped before its counters held a hit (a preflight leak, a fail-closed check)
     expect(verificationText(false, 0)).toBe('failed closed');
+  });
+  it('never words a review-required pack as passed (integrated verify r1, B1)', () => {
+    expect(verificationText(false, 0, true)).toBe('review required');
+    expect(verificationTone(false, 0, true)).toBe('amber');
+    expect(verificationText(false, 3, true)).toBe('failed · 3 leaks caught');
+    expect(verificationTone(false, 3, true)).toBe('rose');
+    expect(verificationTone(true, 0)).toBe('emerald');
+    expect(verificationTone(false, 0)).toBe('rose');
+  });
+});
+
+describe('secret reference codes (SEC-2)', () => {
+  it('explains the tenant-scoped secret_ref refusals in words', async () => {
+    const { errorText } = await import('./jobs');
+    expect(errorText('secret_ref_foreign_tenant')).toMatch(/another tenant/);
+    expect(errorText('secret_ref_not_shared')).toMatch(/does not list this tenant/);
+    expect(errorText('secret_ref_invalid')).toMatch(/not a valid relative path/);
+  });
+});
+
+describe('connection change codes (SEC-3)', () => {
+  it('explains the endpoint-change refusal in words', async () => {
+    const { errorText } = await import('./jobs');
+    expect(errorText('connection_endpoint_change_requires_credentials')).toMatch(/credentials again/);
+    expect(errorText('admin_scope_required')).toMatch(/changing a production-tagged connection/);
+  });
+});
+
+describe('the real outcome of a run that did not finish (N3)', () => {
+  it('never words a failed or canceled run as passed', () => {
+    expect(verificationText(false, 0, false, 'failed', 'length_overflow')).toBe('not verified · job failed (length_overflow)');
+    // a pack stored before the fix said passed: the outcome decides
+    expect(verificationText(true, 0, false, 'failed', 'length_overflow')).toBe('not verified · job failed (length_overflow)');
+    expect(verificationTone(true, 0, false, 'failed')).toBe('rose');
+    expect(verificationText(false, 0, false, 'canceled')).toBe('not verified · job canceled');
+    expect(verificationTone(false, 0, false, 'canceled')).toBe('slate');
+    // a leak caught by the preflight is still "failed closed", and hits still count first
+    expect(verificationText(false, 0, false, 'failed', 'leakage')).toBe('failed closed');
+    expect(verificationText(false, 2, false, 'failed', 'leakage')).toBe('failed · 2 leaks caught');
+    expect(verificationText(true, 0, false, 'succeeded')).toBe('passed · 0 leaks');
+    expect(verificationText(true, 0, false, 'dry_run')).toBe('passed · 0 leaks');
+    expect(verificationTone(true, 0, false, 'succeeded')).toBe('emerald');
+  });
+});
+
+describe('bounded columns at discovery (M2 verify r2, issue 2)', () => {
+  it('puts a method that cannot fit its column under Needs a decision, with the reason', async () => {
+    const { typeNoteShort } = await import('./jobs');
+    const overflow = column({ name: 'national_id', data_type: 'character varying(18)', entity_type: 'NATIONAL_ID', confidence: 0.95, type_note: 'length_overflow' });
+    expect(needsDecision(overflow)).toBe(true);
+    expect(decisionReason(overflow)).toMatch(/character varying\(18\)/);
+    expect(decisionReason(overflow)).toMatch(/In place/);
+    const kept = column({ name: 'national_id', data_type: 'character varying(18)', entity_type: 'NATIONAL_ID', confidence: 0.95, type_note: 'length_kept' });
+    expect(needsDecision(kept)).toBe(true);
+    expect(decisionReason(kept)).toMatch(/keeps the length/);
+    expect(typeNoteShort('length_overflow')).toBe('output too long for the column');
+  });
+});
+
+describe('length_overflow in words', () => {
+  it('explains the refusal on the jobs page and the evidence errors table', async () => {
+    const { errorText } = await import('./jobs');
+    expect(errorText('length_overflow')).toMatch(/longer than the column/);
+  });
+});
+
+describe('Oracle and MongoDB drafts (M3 Task 18b)', () => {
+  const mongo = (over: Partial<WizardDraft> = {}): WizardDraft => draft({
+    engine: 'mongo', owner: '', table: 'profiles', selMode: 'mongo', targetOwner: '', targetTable: 'profiles_console', ...over,
+  });
+  it('sends a MongoDB filter as mongo_filter with no owner, WHERE or query', () => {
+    const spec = buildRunSpec(mongo({ mongoFilterText: '{"segment": "premium"}' }));
+    expect(spec.source.object).toEqual({ owner: null, name: 'profiles' });
+    expect(spec.source.selection.mongo_filter).toEqual({ segment: 'premium' });
+    expect(spec.source.selection).not.toHaveProperty('where');
+    expect(spec.source.selection).not.toHaveProperty('query');
+    expect(spec.target.object).toEqual({ owner: null, name: 'profiles_console' });
+    expect(buildRunSpec(mongo({ mongoFilterText: '' })).source.selection).toEqual({});
+  });
+  it('keeps the Oracle owner exactly as listed', () => {
+    const spec = buildRunSpec(draft({ engine: 'oracle', owner: 'CRM', table: 'CUSTOMERS', where: "SEGMENT = 'RETAIL'", targetOwner: 'CRM_MASKED', targetTable: 'CUSTOMERS_CONSOLE' }));
+    expect(spec.source.object).toEqual({ owner: 'CRM', name: 'CUSTOMERS' });
+    expect(spec.source.selection.where).toBe("SEGMENT = 'RETAIL'");
+    expect(spec.target.object).toEqual({ owner: 'CRM_MASKED', name: 'CUSTOMERS_CONSOLE' });
+  });
+  it('never stores the MongoDB filter and shows its literals as <bound>', () => {
+    const d = mongo({ mongoFilterText: '{"email": "a@x.in"}' });
+    expect(JSON.stringify(draftForStorage(d))).not.toContain('a@x.in');
+    const preview = JSON.stringify(specPreview(d));
+    expect(preview).not.toContain('a@x.in');
+    expect((specPreview(d).source as Record<string, any>).selection.mongo_filter).toEqual({ email: '<bound>' });
+  });
+  it('counts a MongoDB filter: a new filter drops the count, a new engine clears the source', () => {
+    const count: CountOut = { rows: 9, checks: [], runs_as: null, binds: 0 };
+    let d = wizardReducer(mongo({ mongoFilterText: '{"a": 1}' }), { type: 'counted', count, at: 'x', seconds: 0.1, key: countKey(mongo({ mongoFilterText: '{"a": 1}' })) });
+    expect(d.count).toEqual(count);
+    expect(canLeave(2, { ...d, shape: { object: { owner: null, name: 'profiles' }, columns: [], key: ['_id'], key_source: 'primary_key', row_estimate: 10 } })).toBe(true);
+    d = wizardReducer(d, { type: 'filter', text: '{"a": 2}' });
+    expect(d).toMatchObject({ mongoFilterText: '{"a": 2}', count: null });
+    d = wizardReducer(d, { type: 'engine', engine: 'oracle' });
+    expect(d).toMatchObject({ engine: 'oracle', connectionId: null, table: '', mongoFilterText: '', selMode: 'where', port: '1521' });
+    expect(wizardReducer(d, { type: 'engine', engine: 'mongo' })).toMatchObject({ selMode: 'mongo', port: '27017' });
+  });
+  it('follows the engine of a saved connection', () => {
+    const conn = { id: 'c_m', tenant_id: 'default', name: 'crm-mongo', engine: 'mongo' as const, params: { database: 'crm' }, secret_ref: 'x', has_secret: true,
+      secret_expires_at: null, roles: ['source' as const], tags: [], capabilities: { transactions: true }, last_test: null, created_by: null,
+      created_at: 'x', updated_at: 'x' };
+    const d = wizardReducer(draft({ engine: 'mongo', connectionId: null }), { type: 'useSaved', connection: conn });
+    expect(d).toMatchObject({ engine: 'mongo', selMode: 'mongo', connectionId: 'c_m' });
+  });
+});
+
+describe('MongoDB write modes need transactions (M3 Task 18b)', () => {
+  it('blocks In place and Append on a MongoDB connection without transactions', () => {
+    const noTx = { ok: true, engine: 'mongo' as const, server_version: '7.0', checks: [], capabilities: { transactions: false }, error_code: null };
+    const tx = { ...noTx, capabilities: { transactions: true } };
+    const base = { engine: 'mongo' as const, owner: '', table: 'profiles', selMode: 'mongo' as const, connectionRoles: ['source', 'target'] as ('source' | 'target')[] };
+    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'in_place' }))).toBe(false);
+    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'append', appendTarget: 'same' }))).toBe(false);
+    expect(targetReady(draft({ ...base, test: tx, writeMode: 'append', appendTarget: 'same' }))).toBe(true);
+    expect(targetReady(draft({ ...base, test: noTx, writeMode: 'table', targetTable: 'profiles_uat' }))).toBe(true);
+    expect(transactionsMissing(draft({ ...base, test: noTx, writeMode: 'in_place' }))).toBe(true);
+    expect(transactionsMissing(draft({ test: noTx, writeMode: 'in_place' }))).toBe(false);   // PostgreSQL: not a MongoDB rule
   });
 });
 

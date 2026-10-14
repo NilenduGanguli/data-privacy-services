@@ -9,6 +9,7 @@ import './styles/jobs.css';
 import './styles/wizard.css';
 import './styles/job-detail.css';
 import './styles/evidence.css';
+import './styles/m5.css';
 import './styles/scanner.css';
 
 function render(): void {
@@ -23,11 +24,17 @@ function render(): void {
   );
 }
 
-// Dev-only fixture mode for the UI-scanner pages (VITE_DPS_FIXTURES=1 npm run dev). `import.meta.env.DEV`
-// is false in a production build, so the branch and its dynamic import are dropped from the bundle;
-// scripts/check-bundle.mjs fails the build if fixture code ever reaches dist.
+// Dev-only fixture mode (`npm run dev:fixtures`): `import.meta.env.DEV` is the constant `false` in
+// a production build, so this branch and the fixture modules are dropped from the bundle;
+// scripts/check-bundle.mjs fails the build if fixture code ever reaches dist. The M5 fixture server
+// (Admin, Policies, Reports…) is installed first; the UI-scanner fixtures wrap it, answer the scans
+// and artefacts routes and hand every other request on.
 if (import.meta.env.DEV && import.meta.env.VITE_DPS_FIXTURES === '1') {
-  void import('./dev/fixtureMode').then((m) => { m.installFixtureMode(); render(); });
+  void Promise.all([import('./dev/fixtureServer'), import('./dev/fixtureMode')]).then(([server, scanner]) => {
+    server.installFixtureServer();
+    scanner.installFixtureMode();
+    render();
+  });
 } else {
   render();
 }

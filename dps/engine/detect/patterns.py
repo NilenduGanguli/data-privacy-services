@@ -4,6 +4,14 @@ Each :class:`PatternSpec` names an entity, a compiled regex (group 1 = the value
 an optional validator (by entity key in :mod:`.checksums`), context words that raise the score,
 and whether the pattern is too generic to fire without context. ``scan_text`` returns
 non-overlapping :class:`Hit` objects; phones are matched by ``phonenumbers`` in ``scan_phones``.
+
+**Labelled identifiers.** An account number or a customer id has no checksum and no shape of its
+own; in free text only its label says what it is (``Account no.: …``, ``A/c …``, ``Acct# …``,
+``Customer ID: …``, ``CIF …``). A ``labelled`` pattern matches the label and the value together
+(group 1 is the value only) and is decisive: its hit counts as validated (evidence
+``label:<name>``) and any other hit overlapping it is dropped, so a Luhn-valid account number is
+not taken for a card, nor twelve of its digits for an Aadhaar. Without its label a number is not
+reported as an account. A line that starts ``Address:`` labels a postal address the same way.
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ class PatternSpec:
     promote_to: str | None = None
     promote_context: tuple[str, ...] = ()
     overlapping: bool = False  # try every start, so a number just before cannot shadow a match
+    labelled: bool = False  # the regex includes the value's label: the hit is decisive
 
 
 def _p(entity: str, name: str, pattern: str, base: float, **kw: object) -> PatternSpec:
@@ -57,6 +66,41 @@ def _p(entity: str, name: str, pattern: str, base: float, **kw: object) -> Patte
 
 
 _DOB_CTX = ("dob", "birth", "born", "nacimiento", "fecha de nac", "birthday", "janm")
+#: The label of an account number: ``A/c``, ``Acct``, ``Account`` (``cuenta``, ``cta``) with an
+#: optional ``no``, ``num``, ``number`` or ``#``, then an optional ``.``/``:``/``#``/``-``
+#: (case-insensitive).
+_ACCOUNT_LABEL = (
+    r"(?i:\b(?:a/c|acct|account|cuenta|cta)(?![a-z])\.?(?:\s*(?:no|num|number|#)(?![a-z]))?"
+    r"\.?\s*[:#\-]?\s*)"
+)
+#: The label of a customer id: ``Customer``/``Cust``/``Client`` with ``id``, ``no``, ``number``,
+#: ``ref`` or ``#`` (a bare "customer 2023" is not a label), or ``CIF`` on its own.
+_CUSTOMER_LABEL = (
+    r"(?i:\b(?:(?:customer|cust|client)\.?\s*(?:id|no|number|ref|#)(?![a-z])|cif(?![a-z]))"
+    r"\.?\s*[:#\-]?\s*)"
+)
+#: The label of a postal address at the start of a line (``Address:``, ``Residential address -``,
+#: ``Dirección:``); the value runs to a postal-code cue (``PIN code``, ``Postcode``, ``ZIP``) or to
+#: the end of the line. ``Email address: …`` does not start a line with the label.
+_ADDRESS_LABEL = (
+    r"(?im:^[ \t]*(?:(?:residential|permanent|postal|home|mailing|correspondence|current|billing"
+    r"|registered)[ \t]+)?(?:address|addr\.?|direcci[oó]n|domicilio)[ \t]*[:\-][ \t]*)"
+)
+_POSTAL_CUE = (
+    r"(?:\b(?:PIN|Pin|pin)(?:[ \t]*code)?\b|\b[Pp]in[Cc]ode\b|\b[Pp]ost[ \t]*[Cc]ode\b"
+    r"|\b(?:ZIP|Zip|zip)\b)"
+)
+#: The value starts with a non-space that is not a postal cue (an OCR re-read of a redacted line
+#: reads ``Address: PIN code``), holds a letter and a digit or a comma, and stops before a postal
+#: cue or at the end of the line.
+_ADDRESS_VALUE = (
+    rf"((?!{_POSTAL_CUE})(?=[^\n]*[A-Za-z])(?=[^\n]*[\d,])\S[^\n]*?)"
+    rf"(?m:(?=[ \t]*[,;]?[ \t]*{_POSTAL_CUE}|[ \t]*$))"
+)
+LABEL_SCORE = 0.95
+#: Types free text shows only next to their label (an account number alone is just a number; a
+#: customer id also by its ``CUST-``/``CIF`` prefix): the coverage gaps name them.
+LABEL_ONLY_TEXT_ENTITIES = frozenset({"ACCOUNT_NUMBER", "CUSTOMER_ID", "STREET_ADDRESS"})
 
 CATALOGUE: tuple[PatternSpec, ...] = (
     _p(
@@ -202,6 +246,37 @@ CATALOGUE: tuple[PatternSpec, ...] = (
         context=("routing", "aba"),
     ),
     _p("IFSC", "ifsc", r"\b([A-Z]{4}0[A-Z0-9]{6})\b", 0.6, needs_context=True, context=("ifsc",)),
+    _p(
+        "ACCOUNT_NUMBER",
+        "account_number",
+        # 8-18 digits, single spaces or hyphens between them, an optional 1-4 letter prefix
+        _ACCOUNT_LABEL + r"((?:[A-Z]{1,4})?\d(?:[ -]?\d){7,17})(?!\d)",
+        LABEL_SCORE,
+        labelled=True,
+    ),
+    _p(
+        "CUSTOMER_ID",
+        "customer_id",
+        # an optional letter prefix (CUST-, C-), then a digit and 3-19 more digits or capitals
+        _CUSTOMER_LABEL
+        + r"((?:[A-Z]{1,6}[-/]?)?\d[0-9A-Z]{3,19}(?:-[0-9A-Z]{1,10})?)(?![0-9A-Za-z])",
+        LABEL_SCORE,
+        labelled=True,
+    ),
+    _p(
+        "STREET_ADDRESS",
+        "street_address",
+        _ADDRESS_LABEL + _ADDRESS_VALUE,
+        LABEL_SCORE,
+        labelled=True,
+    ),
+    _p(
+        "CUSTOMER_ID",
+        "customer_id_prefix",
+        r"\b((?:CUST|CIF)[-/]?\d{4,14})\b",
+        0.7,
+        context=("customer", "cust", "cif", "client"),
+    ),
     _p(
         "SORT_CODE",
         "sort_code",
@@ -390,6 +465,18 @@ def _settle_aadhaar_vs_card(text: str, hits: list[Hit]) -> list[Hit]:
     return [h for h in hits if h not in losers]
 
 
+def _settle_labelled(hits: list[Hit]) -> list[Hit]:
+    """Drop every hit that overlaps a labelled one (its label decides what the value is)."""
+    labelled = [h for h in hits if h.evidence.startswith("label:")]
+    if not labelled:
+        return hits
+    return [
+        h
+        for h in hits
+        if h in labelled or all(h.end <= lab.start or h.start >= lab.end for lab in labelled)
+    ]
+
+
 def _matches(spec: PatternSpec, text: str) -> Iterator[re.Match[str]]:
     """``finditer``, or with ``overlapping`` a search from every start after the last match's."""
     if not spec.overlapping:
@@ -413,6 +500,8 @@ def scan_text(text: str, *, key_hint: str | None = None) -> list[Hit]:
             if spec.needs_context and not has_ctx:
                 continue
             score, validated, evidence = spec.base_score, False, f"pattern:{spec.name}"
+            if spec.labelled:
+                validated, evidence = True, f"label:{spec.name}"
             if spec.validator:
                 ok = validate(spec.validator, value)
                 if ok:
@@ -433,7 +522,7 @@ def scan_text(text: str, *, key_hint: str | None = None) -> list[Hit]:
                     entity, start, end, round(score, 3), f"pattern:{spec.name}", evidence, validated
                 )
             )
-    return resolve_overlaps(_settle_aadhaar_vs_card(text, hits))
+    return resolve_overlaps(_settle_labelled(_settle_aadhaar_vs_card(text, hits)))
 
 
 def scan_phones(text: str, *, region: str = "US") -> list[Hit]:

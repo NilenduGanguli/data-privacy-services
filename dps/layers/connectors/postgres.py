@@ -43,7 +43,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 from uuid import UUID
 
 import asyncpg
@@ -72,7 +72,12 @@ from dps.layers.connectors.base import (
     WriteMode,
     decode_key,
 )
-from dps.layers.connectors.selection import compile_query, compile_where, quote_ident
+from dps.layers.connectors.selection import (
+    compile_query,
+    compile_where,
+    quote_ident,
+    read_projection,
+)
 from dps.layers.connectors.targets import TYPE_RE, PrepareFailure
 from dps.secrets import SecretUnavailable, resolve_secret_ref
 
@@ -236,7 +241,16 @@ def select_sql(
     return sql, binds.args
 
 
-def _typmod_fields(typname: str, typmod: int) -> dict[str, int | None]:
+class _TypmodFields(TypedDict, total=False):
+    """The ``ColumnInfo`` fields a PostgreSQL type modifier sets (typed for ``**`` unpacking)."""
+
+    length: int
+    precision: int
+    scale: int
+    ts_precision: int
+
+
+def _typmod_fields(typname: str, typmod: int) -> _TypmodFields:
     if typname in ("varchar", "bpchar") and typmod > 4:
         return {"length": typmod - 4}
     if typname == "numeric" and typmod >= 4:
@@ -285,7 +299,11 @@ class PostgresConnector:
         if mode in ("verify-ca", "verify-full"):
             ref = self.conn.params.options.get("sslrootcert_ref")
             try:
-                cadata = resolve_secret_ref(ref, self.settings).get("ca.pem") if ref else None
+                cadata = (
+                    resolve_secret_ref(self.conn.tenant_id, ref, self.settings).get("ca.pem")
+                    if ref
+                    else None
+                )
             except SecretUnavailable:
                 raise ConnectorError(
                     "secret_unavailable", "the CA bundle reference does not resolve"
@@ -455,6 +473,24 @@ class PostgresConnector:
                 key = list(r["cols"])
                 source = "primary_key" if r["indisprimary"] else "unique_index"
                 break
+        # D-A: declared single-column foreign keys (a synthesize run pseudonymises them under
+        # the label of the key they reference); multi-column foreign keys are not named
+        fks = await self.fetch_internal(
+            "SELECT a.attname AS col, rn.nspname AS ref_owner, rc.relname AS ref_table, "
+            "ra.attname AS ref_col FROM pg_constraint k "
+            "JOIN pg_class c ON c.oid = k.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_class rc ON rc.oid = k.confrelid "
+            "JOIN pg_namespace rn ON rn.oid = rc.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = k.conkey[1] "
+            "JOIN pg_attribute ra ON ra.attrelid = k.confrelid AND ra.attnum = k.confkey[1] "
+            "WHERE k.contype = 'f' AND n.nspname = $1 AND c.relname = $2 "
+            "AND cardinality(k.conkey) = 1 ORDER BY k.conname",
+            [owner, obj.name],
+        )
+        references: dict[str, str] = {}
+        for r in fks:
+            references.setdefault(r["col"], f"{r['ref_owner']}.{r['ref_table']}.{r['ref_col']}")
         estimate = await self.fetch_internal(
             "SELECT c.reltuples::bigint AS n FROM pg_class c "
             "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2",
@@ -470,6 +506,7 @@ class PostgresConnector:
                 is_key=r["attname"] in key,
                 has_default=r["atthasdef"],
                 is_identity=r["is_identity"],
+                references=references.get(r["attname"]),
                 **_typmod_fields(r["typname"], r["atttypmod"]),
             )
             for r in cols
@@ -495,10 +532,8 @@ class PostgresConnector:
         return body, [params[n] for n in names]
 
     def _projection(self, shape: TableShape, sel: Selection) -> list[ColumnInfo]:
-        if not sel.columns:
-            return shape.columns
-        wanted = set(sel.columns) | set(shape.key)
-        return [c for c in shape.columns if c.name in wanted]
+        """Columns a read yields: :func:`read_projection`, the list the run handler writes."""
+        return read_projection(shape, sel, "postgres")
 
     async def count(
         self, shape: TableShape, selection: Selection, params: dict[str, JsonScalar]
@@ -791,6 +826,19 @@ class PostgresConnector:
                 "copy": True,
             },
         )
+
+    async def lookup_values(
+        self, shape: TableShape, join: ColumnInfo, values: list[Any], attributes: list[ColumnInfo]
+    ) -> list[Row]:
+        """Rows whose ``join`` value is in ``values`` (``= ANY($1)``; consistency check), with
+        ``join`` and the ``attributes`` read, inside the read-only, time-limited transaction."""
+        cols = list({c.name: c for c in [join, *attributes]}.values())
+        select = ", ".join(f"t.{_q(c.name)}" for c in cols)
+        table = f"{_q(shape.object.owner or 'public')}.{_q(shape.object.name)}"
+        sql = f"SELECT {select} FROM {table} AS t WHERE t.{_q(join.name)} = ANY($1)"  # noqa: S608
+        if not values:
+            return []
+        return [dict(r) for r in await self.fetch_internal(sql, [list(values)])]
 
     # -- write side ----------------------------------------------------------------------------
     async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> BatchWriter:

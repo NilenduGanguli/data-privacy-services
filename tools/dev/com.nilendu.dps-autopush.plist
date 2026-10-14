@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Optional macOS LaunchAgent: runs tools/dev/autopush.sh every 10 minutes, independent of any chat.
+     Install (owner only):  cp tools/dev/com.nilendu.dps-autopush.plist ~/Library/LaunchAgents/ &&
+                            launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nilendu.dps-autopush.plist
+     Remove:                launchctl bootout gui/$(id -u)/com.nilendu.dps-autopush &&
+                            rm ~/Library/LaunchAgents/com.nilendu.dps-autopush.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nilendu.dps-autopush</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/neelu/document_intelligence/data-privacy-services/tools/dev/autopush.sh</string>
+  </array>
+  <key>StartInterval</key><integer>600</integer>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/neelu/.cache/dps-build/autopush.launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/neelu/.cache/dps-build/autopush.launchd.log</string>
+</dict>
+</plist>

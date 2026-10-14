@@ -25,21 +25,32 @@ Rejection codes: ``selection_parse_error``, ``selection_multiple_statements``,
 ``selection_function_denied``, ``selection_identifier_invalid``, ``selection_positional_param``,
 ``selection_param_missing``, ``selection_unknown_column``, ``selection_query_missing_key``,
 ``selection_not_parameterized``, ``selection_literal_unsupported``, ``selection_operator_denied``,
-``selection_engine_mismatch``.
+``selection_engine_mismatch``, ``selection_query_alias``; MongoDB filters also
+``selection_invalid``, ``selection_too_complex``, ``selection_regex_too_long``
+(:func:`validate_mongo_filter`).
+
+Given the object's shape, a query's outputs are bound to the object's columns by name (the read
+projection, :func:`read_projection`), so an output that carries a column's name must be that
+column itself (M3 G2 B5, :func:`_check_query_outputs`): otherwise the reviewed method of one
+column would be applied to another column's, an expression's or another table's values. A query
+that renames columns by position (a column-list alias) or re-shapes rows (``PIVOT``,
+``UNPIVOT``, ``MATCH_RECOGNIZE``) is refused for the same reason (M3 verify r1 B6).
 """
 
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import SqlglotError
+from sqlglot.errors import ErrorLevel, SqlglotError, UnsupportedError
 from sqlglot.tokens import TokenType
 
 from dps.jobs_models import SampleSpec, Selection  # noqa: F401 - re-exported (contract §5.2)
-from dps.layers.connectors.base import Engine, JsonScalar, TableShape
+from dps.layers.connectors.base import ColumnInfo, Engine, JsonScalar, TableShape
 
 ORACLE_IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]{0,127}$")
 PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")
@@ -183,6 +194,10 @@ _DML = _node_types(
     "Describe",
 )
 _INTO = _node_types("Into")
+#: Clauses that re-shape rows so one column's values can come out under another column's name
+#: (Oracle/PostgreSQL ``PIVOT``/``UNPIVOT``, Oracle ``MATCH_RECOGNIZE … MEASURES``): refused
+#: in a query given the object's shape (M3 verify r1 B6).
+_REMAP = _node_types("Pivot", "MatchRecognize")
 _LOCK = _node_types("Lock")
 #: String literals whose text is the value as written (bound like plain strings).
 _PLAIN_STRINGS = _node_types("RawString", "National")
@@ -462,9 +477,17 @@ def _bind_literals(
 def _render(node: exp.Expression, engine: Engine, *, style: str, order: list[str]) -> str:
     """SQL text with sentinels swapped for ``$n`` (PG exec) or ``:name`` (Oracle, templates).
 
-    ``order`` receives the bind names in order of first appearance.
+    ``order`` receives the bind names in order of first appearance. Fails closed: a construct
+    the engine's generator cannot express (PostgreSQL ``UNPIVOT``…) would otherwise be dropped
+    from the text with a warning, so the stored template and the executed SQL would differ from
+    what was validated (M3 verify r1 B6); it is refused as ``selection_parse_error`` instead.
     """
-    sql = node.sql(dialect=_DIALECT[engine])
+    try:
+        sql = node.sql(dialect=_DIALECT[engine], unsupported_level=ErrorLevel.RAISE)
+    except UnsupportedError:
+        raise SelectionError(
+            "selection_parse_error", "the statement uses a construct this engine does not support"
+        ) from None
 
     def repl(match: re.Match[str]) -> str:
         name = match.group(1).lower()
@@ -574,10 +597,11 @@ def referenced_columns(sel: Selection, engine: Engine) -> set[str]:
     }
 
 
-def query_projects_keys(sel: Selection, engine: Engine, key: list[str]) -> bool:
-    """True when the query's projection includes ``*`` or every key column."""
+def query_columns(sel: Selection, engine: Engine) -> set[str] | None:
+    """The folded output names of ``sel.query``; None without a query or when it projects ``*``
+    (bare or qualified)."""
     if sel.query is None:
-        return True
+        return None
     stmt = _parse(sel.query, engine, wrap_where=False)
     _fold(stmt, engine)
     names: set[str] = set()
@@ -585,16 +609,154 @@ def query_projects_keys(sel: Selection, engine: Engine, key: list[str]) -> bool:
         if isinstance(proj, exp.Star) or (
             isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star)
         ):
-            return True
+            return None
         names.add(proj.alias_or_name)
+    return names
+
+
+def query_projects_keys(sel: Selection, engine: Engine, key: list[str]) -> bool:
+    """True when the query's projection includes ``*`` or every key column."""
+    names = query_columns(sel, engine)
+    if names is None:
+        return True
     folded = {k.upper() if engine == "oracle" else k for k in key}
     return folded <= names
+
+
+def _fold_column(name: str, engine: Engine) -> str:
+    """A ``columns`` entry as the column name a read yields (Oracle upper case; MongoDB the
+    top-level field of a dotted path)."""
+    if engine == "oracle":
+        return name.upper()
+    if engine == "mongo":
+        return name.split(".", 1)[0]
+    return name
+
+
+def read_projection(shape: TableShape, sel: Selection, engine: Engine) -> list[ColumnInfo]:
+    """The columns a read of ``sel`` yields, in table order — and so what a run writes.
+
+    Every column of ``shape``, narrowed by a query's own select list (a query that names its
+    columns yields only those) and by ``columns``; the key columns always. Connectors read and
+    the run handler plans, creates and writes exactly this list, so a column outside it is
+    never read, created or NULL-filled (M3 G2 B1). Oracle folds ``columns`` to upper case;
+    MongoDB folds a dotted path to its top-level field (``profile.fullName`` → ``profile``: the
+    connector reads whole top-level fields, so array positions stay exact, M3 G3 r2 B1).
+    """
+    names = query_columns(sel, engine)
+    if sel.columns:
+        wanted = {_fold_column(n, engine) for n in sel.columns}
+        names = wanted if names is None else names & wanted
+    if names is None:
+        return list(shape.columns)
+    names |= set(shape.key)
+    return [c for c in shape.columns if c.name in names]
+
+
+def _object_name(shape: TableShape, engine: Engine) -> tuple[str | None, str]:
+    """The object's ``(owner, name)`` as folded query identifiers (Oracle upper case; a
+    PostgreSQL object without an owner lives in ``public``)."""
+    owner, name = shape.object.owner, shape.object.name
+    if engine == "oracle":
+        return (owner.upper() if owner else None), name.upper()
+    return owner or "public", name
+
+
+def _query_sources(stmt: exp.Select, shape: TableShape, engine: Engine) -> tuple[set[str], bool]:
+    """``(qualifiers, only)``: the names that qualify the object's columns in the query's own
+    ``FROM`` (the table alias, else the table name), and whether the object is its only source.
+
+    A source is the object when it is a plain table with the object's name (and, when
+    qualified, its owner); an unqualified name that a ``WITH`` clause defines is that CTE, not
+    the object. Derived tables, table functions, laterals and other tables are other sources.
+    """
+    owner, name = _object_name(shape, engine)
+    with_ = stmt.args.get("with_") or stmt.args.get("with")
+    ctes = {cte.alias_or_name for cte in with_.expressions} if with_ is not None else set()
+    from_ = stmt.args.get("from_") or stmt.args.get("from")
+    sources = [from_.this] if from_ is not None else []
+    sources += [join.this for join in stmt.args.get("joins") or []]
+    qualifiers: set[str] = set()
+    found = 0
+    for src in sources:
+        if not isinstance(src, exp.Table) or src.args.get("catalog") is not None:
+            continue
+        if not isinstance(src.this, exp.Identifier) or src.name != name:
+            continue
+        if src.args.get("db") is None:
+            if src.name in ctes:
+                continue
+        elif src.db != owner:
+            continue
+        qualifiers.add(src.alias_or_name)
+        found += 1
+    return qualifiers, found == 1 and len(sources) == 1
+
+
+def _own_column(node: exp.Expression, name: str, qualifiers: set[str], only: bool) -> bool:
+    """True when ``node`` is a plain reference to the object's column ``name``."""
+    if not isinstance(node, exp.Column) or isinstance(node.this, exp.Star) or node.name != name:
+        return False
+    if node.args.get("catalog") is not None or node.args.get("db") is not None:
+        return False
+    if node.args.get("table") is None:
+        return only  # unqualified: the object must be the only source it can come from
+    return node.table in qualifiers
+
+
+def _check_query_outputs(sel: Selection, engine: Engine, shape: TableShape) -> None:
+    """Refuse a query output that carries a column's name without being that column (B5).
+
+    Methods are reviewed per column of the object, and the read takes each output by name, so
+    ``email AS channel`` would give e-mail addresses CHANNEL's method (perhaps ``keep``). An
+    output named like a column must be that column: unaliased or aliased to itself, qualified
+    only by the object or its own alias (unqualified only when the object is the sole source).
+    ``*`` needs the object as the sole source and ``t.*`` the object's qualifier. Outputs with
+    other names are not columns of the object and are not read (:func:`read_projection`).
+    A query that renames or re-shapes columns anywhere (a column-list alias ``AS c(a, b)``,
+    ``PIVOT``/``UNPIVOT``, ``MATCH_RECOGNIZE``) is refused outright (M3 verify r1 B6).
+    """
+    if sel.query is None:
+        return
+    stmt = _parse(sel.query, engine, wrap_where=False)
+    _fold(stmt, engine)
+    refused = SelectionError(
+        "selection_query_alias",
+        "a query output named like a column of the object must be that column itself "
+        "(no alias, expression or other source)",
+    )
+    for node in _walk(stmt):
+        # B6: a column-list alias (``AS c(a, b)``, also on a CTE) renames columns by position,
+        # and PIVOT/UNPIVOT/MATCH_RECOGNIZE re-shape rows: either can put another column's
+        # values under a column's name, whatever the select list says. Refused anywhere.
+        if _REMAP and isinstance(node, _REMAP):
+            raise refused
+        if isinstance(node, exp.TableAlias) and node.args.get("columns"):
+            raise refused
+    qualifiers, only = _query_sources(stmt, shape, engine)
+    known = {c.name for c in shape.columns}
+    for proj in stmt.expressions:
+        if isinstance(proj, exp.Star):
+            if not only:
+                raise refused
+            continue
+        if isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star):
+            if proj.args.get("db") is not None or proj.table not in qualifiers:
+                raise refused
+            continue
+        name = proj.alias_or_name
+        if name not in known:
+            continue
+        inner = proj.this if isinstance(proj, exp.Alias) else proj
+        if not _own_column(inner, name, qualifiers, only):
+            raise refused
 
 
 def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None) -> None:
     """Raise the first :class:`SelectionError`; ``shape`` (when given) enables column/key checks."""
     if engine == "mongo":
-        if sel.where is not None or sel.query is not None:
+        if sel.where is not None or sel.query is not None or sel.params:
+            # MongoDB literals live in the filter; SQL text and bind values do not apply
             raise SelectionError("selection_engine_mismatch", "MongoDB selections use mongo_filter")
         if sel.mongo_filter is not None:
             validate_mongo_filter(sel.mongo_filter)
@@ -621,6 +783,7 @@ def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None)
                 raise SelectionError(
                     "selection_unknown_column", "a projected column does not exist"
                 )
+        _check_query_outputs(sel, engine, shape)
         if not query_projects_keys(sel, engine, shape.key):
             raise SelectionError(
                 "selection_query_missing_key", "the query must project every key column"
@@ -628,7 +791,16 @@ def validate_selection(sel: Selection, engine: Engine, shape: TableShape | None)
 
 
 _CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("one_statement", ("selection_multiple_statements", "selection_parse_error")),
+    (
+        "one_statement",
+        (
+            "selection_multiple_statements",
+            "selection_parse_error",
+            "selection_invalid",
+            "selection_too_complex",
+            "selection_regex_too_long",
+        ),
+    ),
     ("select_only", ("selection_not_select", "selection_dml", "selection_engine_mismatch")),
     (
         "no_into_lock_procs",
@@ -640,7 +812,10 @@ _CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "selection_operator_denied",
         ),
     ),
-    ("identifiers_validated", ("selection_identifier_invalid", "selection_unknown_column")),
+    (
+        "identifiers_validated",
+        ("selection_identifier_invalid", "selection_unknown_column", "selection_query_alias"),
+    ),
     (
         "literals_bound",
         ("selection_param_missing", "selection_not_parameterized", "selection_literal_unsupported"),
@@ -706,23 +881,256 @@ def selection_checks(
     return out
 
 
-def validate_mongo_filter(flt: dict[str, Any], _depth: int = 0) -> None:
-    """Operator allow-list (``$where``, ``$expr``, ``$function`` … refused) and field-path rules."""
-    if _depth > 20:
-        raise SelectionError("selection_operator_denied", "filter nesting is too deep")
-    for key, value in flt.items():
+# --- MongoDB filters (contract §5.2; M3 Task 10) ----------------------------------------------
+
+#: Extended-JSON literal wrappers, accepted in value positions only (``{"$oid": "…"}``).
+EJSON_WRAPPERS = frozenset({"$date", "$oid", "$numberLong", "$numberDecimal"})
+MAX_FILTER_DEPTH = 8
+MAX_FILTER_NODES = 500
+MAX_REGEX_LEN = 256
+MAX_IN_ITEMS = 1000
+_LOGICAL = frozenset({"$and", "$or", "$nor"})
+_OID_TEXT = re.compile(r"[0-9A-Fa-f]{24}")
+_LONG_TEXT = re.compile(r"-?[0-9]{1,19}")
+_INT64 = range(-(2**63), 2**63)
+
+
+def _deny(code: str) -> SelectionError:
+    """A value-free :class:`SelectionError`: the message names the rule, never the filter."""
+    return SelectionError(code, f"the MongoDB filter breaks rule {code}")
+
+
+class _Budget:
+    """Counts operator and document nodes; scalars (``$in`` items) cost nothing."""
+
+    def __init__(self) -> None:
+        self.left = MAX_FILTER_NODES
+
+    def take(self) -> None:
+        self.left -= 1
+        if self.left < 0:
+            raise _deny("selection_too_complex")
+
+
+def _is_wrapper(value: Any) -> bool:
+    return isinstance(value, dict) and len(value) == 1 and next(iter(value)) in EJSON_WRAPPERS
+
+
+def _is_operator_doc(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and all(isinstance(k, str) and k.startswith("$") for k in value)
+    )
+
+
+def _parse_date(raw: Any) -> datetime:
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return datetime.fromtimestamp(raw / 1000, tz=UTC)
+    if not isinstance(raw, str):
+        raise ValueError("not a date")
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _wrapped(tag: str, raw: Any) -> Any:
+    """The checked literal of one wrapper: ``datetime``, hex text, ``int`` or ``Decimal``.
+
+    Raises ``ValueError`` / ``ArithmeticError`` / ``OverflowError`` when it does not parse.
+    """
+    if tag == "$date":
+        return _parse_date(raw)
+    if isinstance(raw, bool) or not isinstance(raw, str | int):
+        raise ValueError("not a literal")
+    text = str(raw)
+    if tag == "$oid":
+        if not _OID_TEXT.fullmatch(text):
+            raise ValueError("not an ObjectId")
+        return text
+    if tag == "$numberLong":
+        if not _LONG_TEXT.fullmatch(text) or int(text) not in _INT64:
+            raise ValueError("not a 64-bit integer")
+        return int(text)
+    number = Decimal(text)
+    if not number.is_finite():
+        raise ValueError("not a finite decimal")
+    return number
+
+
+def _check_wrapper(value: dict[str, Any]) -> None:
+    ((tag, raw),) = value.items()
+    try:
+        _wrapped(tag, raw)
+    except (ValueError, ArithmeticError, OverflowError):
+        raise _deny("selection_invalid") from None
+
+
+def _literal(value: Any, budget: _Budget, depth: int) -> None:
+    """A value compared with (a scalar, an embedded document or an array, never an operator)."""
+    if value is None or isinstance(value, str | int | float | bool):
+        return
+    if _is_wrapper(value):
+        _check_wrapper(value)
+        return
+    budget.take()
+    if depth > MAX_FILTER_DEPTH:
+        raise _deny("selection_too_complex")
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str) or k.startswith("$"):
+                raise _deny("selection_operator_denied")
+            _literal(v, budget, depth + 1)
+    elif isinstance(value, list):
+        if len(value) > MAX_IN_ITEMS:
+            raise _deny("selection_too_complex")
+        for v in value:
+            _literal(v, budget, depth + 1)
+    else:
+        raise _deny("selection_invalid")
+
+
+def _operator(op: str, arg: Any, budget: _Budget, depth: int) -> None:
+    budget.take()
+    if op not in MONGO_OPERATORS:
+        raise _deny("selection_operator_denied")
+    if op in _LOGICAL:
+        raise _deny("selection_invalid")  # $and/$or/$nor belong at document level
+    if op in ("$in", "$nin", "$all"):
+        if not isinstance(arg, list):
+            raise _deny("selection_invalid")
+        if len(arg) > MAX_IN_ITEMS:
+            raise _deny("selection_too_complex")
+        for item in arg:
+            _literal(item, budget, depth + 1)
+    elif op == "$not":
+        if not _is_operator_doc(arg) or _is_wrapper(arg):
+            raise _deny("selection_invalid")
+        _condition(arg, budget, depth + 1)
+    elif op == "$elemMatch":
+        if not isinstance(arg, dict) or not arg:
+            raise _deny("selection_invalid")
+        if _is_operator_doc(arg):
+            _condition(arg, budget, depth + 1)
+        else:
+            _document(arg, budget, depth + 1)
+    elif op == "$regex":
+        if not isinstance(arg, str):
+            raise _deny("selection_invalid")
+        if len(arg) > MAX_REGEX_LEN:
+            raise _deny("selection_regex_too_long")
+    elif op == "$exists":
+        if not isinstance(arg, bool):
+            raise _deny("selection_invalid")
+    elif op == "$size":
+        if not isinstance(arg, int) or isinstance(arg, bool) or arg < 0:
+            raise _deny("selection_invalid")
+    elif op == "$type":
+        items = arg if isinstance(arg, list) else [arg]
+        if not items or not all(
+            isinstance(t, str | int) and not isinstance(t, bool) for t in items
+        ):
+            raise _deny("selection_invalid")
+    else:  # $eq $ne $gt $gte $lt $lte
+        _literal(arg, budget, depth + 1)
+
+
+def _condition(value: Any, budget: _Budget, depth: int) -> None:
+    """The condition on one field: an operator document or a literal (implicit ``$eq``)."""
+    if depth > MAX_FILTER_DEPTH:
+        raise _deny("selection_too_complex")
+    if _is_wrapper(value) or not _is_operator_doc(value):
+        if isinstance(value, dict) and not _is_wrapper(value):
+            if any(isinstance(k, str) and k.startswith("$") for k in value):
+                raise _deny("selection_invalid")  # operators mixed with plain keys
+        _literal(value, budget, depth)
+        return
+    for op, arg in value.items():
+        _operator(op, arg, budget, depth)
+
+
+def _document(doc: Any, budget: _Budget, depth: int) -> None:
+    """A filter document: field conditions and the logical operators over sub-documents."""
+    if not isinstance(doc, dict):
+        raise _deny("selection_invalid")
+    if depth > MAX_FILTER_DEPTH:
+        raise _deny("selection_too_complex")
+    for key, value in doc.items():
+        budget.take()
         if not isinstance(key, str):
-            raise SelectionError("selection_identifier_invalid", "filter keys must be strings")
+            raise _deny("selection_invalid")
         if key.startswith("$"):
-            if key not in MONGO_OPERATORS:
-                raise SelectionError(
-                    "selection_operator_denied", "a MongoDB operator outside the allow-list is used"
-                )
-        elif not MONGO_PATH.fullmatch(key):
-            raise SelectionError("selection_identifier_invalid", "not a valid MongoDB field path")
-        for item in value if isinstance(value, list) else [value]:
-            if isinstance(item, dict):
-                validate_mongo_filter(item, _depth + 1)
+            if key in _LOGICAL:
+                if not isinstance(value, list) or not value:
+                    raise _deny("selection_invalid")
+                for sub in value:
+                    _document(sub, budget, depth + 1)
+            elif key in MONGO_OPERATORS:
+                raise _deny("selection_invalid")  # e.g. a top-level $eq
+            else:
+                raise _deny("selection_operator_denied")
+        else:
+            if not MONGO_PATH.fullmatch(key):
+                raise _deny("selection_identifier_invalid")
+            _condition(value, budget, depth)
+
+
+def validate_mongo_filter(flt: dict[str, Any]) -> None:
+    """Allow-list validation of a MongoDB filter document (contract §5.2).
+
+    Any operator outside :data:`MONGO_OPERATORS` (``$where``, ``$expr``, ``$function``,
+    ``$accumulator``, ``$jsonSchema``, ``$text``, ``$near``, ``$options`` …) anywhere in the tree —
+    top level, inside ``$and``/``$or``/``$nor``, a field condition, ``$not``, ``$elemMatch``, an
+    ``$in`` item or a literal embedded document — is ``selection_operator_denied``; field names
+    follow :data:`MONGO_PATH` (``selection_identifier_invalid``); malformed operator arguments and
+    Extended-JSON literals are ``selection_invalid``; more than :data:`MAX_FILTER_DEPTH` levels,
+    :data:`MAX_FILTER_NODES` nodes or :data:`MAX_IN_ITEMS` array items are
+    ``selection_too_complex``; a ``$regex`` over :data:`MAX_REGEX_LEN` characters is
+    ``selection_regex_too_long`` (case-insensitive matching uses the inline ``(?i)`` flag).
+
+    Raises:
+        SelectionError: the first rule broken (value-free message).
+    """
+    _document(flt, _Budget(), 0)
+
+
+def _ejson(value: Any) -> Any:
+    from bson import Decimal128, Int64, ObjectId  # the connectors extra ships bson (pymongo)
+
+    if isinstance(value, dict):
+        if _is_wrapper(value):
+            ((tag, raw),) = value.items()
+            try:
+                literal = _wrapped(tag, raw)
+            except (ValueError, ArithmeticError, OverflowError):
+                raise _deny("selection_invalid") from None
+            if tag == "$oid":
+                return ObjectId(literal)
+            if tag == "$numberLong":
+                return Int64(literal)
+            if tag == "$numberDecimal":
+                return Decimal128(literal)
+            return literal
+        return {k: _ejson(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_ejson(v) for v in value]
+    return value
+
+
+def compile_mongo_filter(flt: dict[str, Any] | None) -> dict[str, Any]:
+    """A validated filter as a new dict with Extended-JSON literals turned into BSON values
+    (``$date`` → aware ``datetime`` (UTC when no offset), ``$oid`` → ``ObjectId``,
+    ``$numberLong`` → ``Int64``, ``$numberDecimal`` → ``Decimal128``); the input is unchanged.
+
+    Raises:
+        SelectionError: as :func:`validate_mongo_filter`.
+    """
+    if not flt:
+        return {}
+    validate_mongo_filter(flt)
+    out = _ejson(flt)
+    if not isinstance(out, dict):  # pragma: no cover - a dict in is a dict out
+        raise _deny("selection_invalid")
+    return out
 
 
 def mongo_filter_template(flt: dict[str, Any]) -> dict[str, Any]:

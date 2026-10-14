@@ -196,3 +196,31 @@ def test_real_ff1_preserve_leading_zero_on_eight_digit_ids() -> None:
     assert [fpe_digits_decrypt(cipher, c, preserve_leading_zero=True) for c in coded if c] == (
         zero_led
     )
+
+
+def test_domain_predicates_agree_with_encryption() -> None:
+    """Discovery predicts FPE fallbacks with these (no key needed); they must match encrypt."""
+    from dps.engine.transform.fpe import digits_domain_ok, text_domain_ok
+
+    cipher = RotCipher()
+    for value in (
+        "ABCDE1234F",
+        "Ananya Krishnan",
+        "Li Wu",
+        "abcde",
+        "abcd",
+        "12345",
+        "123456",
+        "x1",
+        "Ravi 12",
+        "ABCDEF123456",
+        "",
+        "-",
+        "+91 98765 43210",
+    ):
+        assert text_domain_ok(value) == (fpe_text_encrypt(cipher, value) is not None), value
+        for prefix, suffix in ((0, 0), (0, 4), (2, 0), (3, 3)):
+            got = fpe_digits_encrypt(cipher, value, keep_prefix=prefix, keep_suffix=suffix)
+            assert digits_domain_ok(value, keep_prefix=prefix, keep_suffix=suffix) == (
+                got is not None
+            ), (value, prefix, suffix)

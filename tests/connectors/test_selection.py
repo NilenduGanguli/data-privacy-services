@@ -18,6 +18,7 @@ from dps.layers.connectors.selection import (
     query_projects_keys,
     query_template,
     quote_ident,
+    read_projection,
     referenced_columns,
     selection_checks,
     validate_mongo_filter,
@@ -598,3 +599,200 @@ def test_unqualified_columns_named_like_denied_functions_are_not_calls() -> None
     for where in ("pg_sleep > :a", "ts_status = :a", "lo_limit > :a", "crosstab_ref = :a"):
         sel = parameterize_literals(Selection(where=where, params={"a": 1}), "postgres")
         assert compile_where(sel, "postgres")[0].endswith("$1")
+
+
+ORA_SHAPE = TableShape(
+    object=ObjectRef(owner="CRM", name="CUSTOMERS"),
+    key=["CUSTOMER_ID"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=f"$.{n}", name=n, data_type="VARCHAR2", kind="text")
+        for n in ("CUSTOMER_ID", "FULL_NAME", "EMAIL", "SEGMENT", "NOTES")
+    ],
+)
+
+
+def _names(cols: list[ColumnInfo]) -> list[str]:
+    return [c.name for c in cols]
+
+
+def test_read_projection_is_the_query_select_list_on_both_engines() -> None:
+    """M3 G2 B1: a query that names its columns narrows the read (and so the write) to them;
+    every other column is neither read nor written, on PostgreSQL and Oracle alike."""
+    pg = Selection(query="SELECT customer_id, Full_Name AS full_name FROM bank.customers")
+    assert _names(read_projection(SHAPE, pg, "postgres")) == ["customer_id", "full_name"]
+    ora = Selection(query='SELECT customer_id, "EMAIL", segment FROM crm.customers')
+    assert _names(read_projection(ORA_SHAPE, ora, "oracle")) == [
+        "CUSTOMER_ID",
+        "EMAIL",
+        "SEGMENT",
+    ]
+    # names the table does not have (expressions, other aliases) are not columns of the read
+    odd = Selection(query="SELECT customer_id, upper(email) AS shout, 1 AS one FROM crm.customers")
+    assert _names(read_projection(ORA_SHAPE, odd, "oracle")) == ["CUSTOMER_ID"]
+    # ``columns`` narrows further; keys are always read
+    both = Selection(query=ora.query, columns=["email", "notes"])
+    assert _names(read_projection(ORA_SHAPE, both, "oracle")) == ["CUSTOMER_ID", "EMAIL"]
+    assert _names(read_projection(ORA_SHAPE, Selection(columns=["segment"]), "oracle")) == [
+        "CUSTOMER_ID",
+        "SEGMENT",
+    ]
+    # ``*`` (bare or qualified) and no query read every column
+    for sel in (
+        Selection(),
+        Selection(query="SELECT * FROM crm.customers"),
+        Selection(query="SELECT c.* FROM crm.customers c"),
+    ):
+        assert _names(read_projection(ORA_SHAPE, sel, "oracle")) == _names(ORA_SHAPE.columns)
+    assert _names(read_projection(SHAPE, Selection(columns=["risk_score"]), "postgres")) == [
+        "customer_id",
+        "risk_score",
+    ]
+
+
+MONGO_SHAPE = TableShape(
+    object=ObjectRef(name="profiles"),
+    key=["_id"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=p, name=p[2:].split(".")[0].split("[")[0], data_type="string", kind="text")
+        for p in ("$._id", "$.accounts[*].iban", "$.name", "$.profile.dob", "$.profile.fullName")
+    ],
+)
+
+
+def test_read_projection_folds_mongo_paths_to_top_level_fields() -> None:
+    """M3 G3 r2 B1/N1: the connector reads whole top-level fields, so a dotted ``columns`` entry
+    plans every leaf of its top-level field (the read and the plan agree)."""
+    paths = [
+        c.path
+        for c in read_projection(
+            MONGO_SHAPE, Selection(columns=["profile.fullName", "accounts.iban"]), "mongo"
+        )
+    ]
+    assert paths == ["$._id", "$.accounts[*].iban", "$.profile.dob", "$.profile.fullName"]
+    assert _names(read_projection(MONGO_SHAPE, Selection(columns=["name"]), "mongo")) == [
+        "_id",
+        "name",
+    ]
+    assert read_projection(MONGO_SHAPE, Selection(), "mongo") == MONGO_SHAPE.columns
+
+
+PG_CONTACTS = TableShape(
+    object=ObjectRef(owner="crm", name="contacts"),
+    key=["contact_id"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=f"$.{n}", name=n, data_type="text", kind="text")
+        for n in ("contact_id", "email", "channel")
+    ],
+)
+ORA_CONTACTS = TableShape(
+    object=ObjectRef(owner="CRM", name="CONTACTS"),
+    key=["CONTACT_ID"],
+    key_source="primary_key",
+    columns=[
+        ColumnInfo(path=f"$.{n}", name=n, data_type="VARCHAR2", kind="text")
+        for n in ("CONTACT_ID", "EMAIL", "CHANNEL")
+    ],
+)
+#: Queries that put something other than the object's own column under a column's name: the
+#: run would apply that column's reviewed method (``keep`` for CHANNEL) to other values.
+ALIAS_REFUSED = [
+    "SELECT contact_id, email AS channel FROM crm.contacts",
+    "SELECT contact_id, upper(channel) AS channel FROM crm.contacts",
+    "SELECT contact_id, email || '' AS channel FROM crm.contacts",
+    "SELECT c.contact_id, c.email AS channel FROM crm.contacts c",
+    "SELECT contact_id, (SELECT max(email) FROM crm.contacts) AS channel FROM crm.contacts",
+    # another source's column under the object's column name
+    "SELECT c.contact_id, o.channel FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT c.contact_id, channel FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT contacts.contact_id, contacts.channel FROM crm.other contacts",
+    "SELECT contact_id, channel FROM crm.other",
+    "SELECT contact_id, channel FROM other.contacts",
+    # a derived table or a CTE that shadows the object
+    "SELECT * FROM (SELECT contact_id, email AS channel FROM crm.contacts) x",
+    "SELECT x.contact_id, x.channel FROM (SELECT contact_id, email AS channel FROM crm.contacts) x",
+    "WITH contacts AS (SELECT contact_id, email AS channel FROM crm.contacts) "
+    "SELECT contact_id, channel FROM contacts",
+    "SELECT * FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT o.* FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    # M3 verify r1 B6: a column-list alias renames the object's columns by position
+    "SELECT c.contact_id, c.channel FROM crm.contacts AS c(contact_id, channel, email)",
+    "SELECT * FROM crm.contacts AS c(contact_id, channel, email)",
+    "SELECT contact_id, channel FROM crm.contacts c(contact_id, channel, email)",
+    "SELECT contact_id, channel FROM crm.contacts AS c(contact_id)",
+    "SELECT c.contact_id, c.channel FROM crm.contacts c JOIN crm.other AS o(id, x) ON o.id = c.contact_id",
+    "WITH x(a) AS (SELECT email FROM crm.contacts) SELECT contact_id, channel FROM crm.contacts",
+    # ... and PIVOT / UNPIVOT re-shape rows so another column's values land under a column's name
+    "SELECT contact_id, channel FROM crm.contacts UNPIVOT (channel FOR src IN (email, channel)) "
+    "WHERE src = 'x'",
+    "SELECT * FROM crm.contacts UNPIVOT (channel FOR src IN (email, channel))",
+    "SELECT contact_id, channel FROM crm.contacts PIVOT (max(email) FOR channel IN ('x' AS channel))",
+    "SELECT contact_id, channel FROM (crm.contacts) UNPIVOT (channel FOR src IN (email, channel))",
+    "SELECT c.contact_id, c.channel FROM crm.contacts c JOIN crm.other UNPIVOT (v FOR k IN (a, b)) "
+    "ON 1 = 1",
+]
+#: Oracle-only re-mapping shapes (PostgreSQL does not parse them: refused as a parse error).
+ALIAS_REFUSED_ORACLE = [
+    "SELECT contact_id, channel FROM crm.contacts MATCH_RECOGNIZE (PARTITION BY contact_id "
+    "ORDER BY contact_id MEASURES email AS channel ONE ROW PER MATCH PATTERN (a) DEFINE a AS 1=1)",
+    "SELECT * FROM crm.contacts MATCH_RECOGNIZE (PARTITION BY contact_id ORDER BY contact_id "
+    "MEASURES email AS channel ALL ROWS PER MATCH PATTERN (a) DEFINE a AS 1=1)",
+]
+ALIAS_ALLOWED = [
+    "SELECT contact_id, channel FROM crm.contacts",
+    "SELECT contact_id, channel AS channel FROM crm.contacts",
+    "SELECT c.contact_id, c.channel FROM crm.contacts c",
+    "SELECT contacts.contact_id, contacts.channel FROM crm.contacts",
+    "SELECT contact_id, channel FROM contacts",
+    "SELECT * FROM crm.contacts",
+    "SELECT c.* FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    "SELECT c.contact_id, c.channel, o.x FROM crm.contacts c JOIN crm.other o ON o.id = c.contact_id",
+    # outputs that are not columns of the object are dropped from the read, not refused
+    "SELECT contact_id, upper(email) AS shout FROM crm.contacts",
+]
+
+
+@pytest.mark.parametrize("engine,shape", [("postgres", PG_CONTACTS), ("oracle", ORA_CONTACTS)])
+def test_a_query_output_named_like_a_column_must_be_that_column(
+    engine: Any, shape: TableShape
+) -> None:
+    """M3 G2 B5: the reviewed snapshot binds methods to the object's columns, so a query output
+    under a column's name must be that very column (unaliased or aliased to itself, qualified
+    only by the object or its own alias); anything else is refused at submit and discovery."""
+    for query in ALIAS_REFUSED + (ALIAS_REFUSED_ORACLE if engine == "oracle" else []):
+        with pytest.raises(SelectionError) as err:
+            validate_selection(Selection(query=query), engine, shape)
+        assert err.value.code == "selection_query_alias", query
+        checks = {c["name"]: c for c in selection_checks(Selection(query=query), engine, shape)}
+        assert checks["identifiers_validated"] == {
+            "name": "identifiers_validated",
+            "ok": False,
+            "code": "selection_query_alias",
+            "count": 0,
+        }, query
+        validate_selection(Selection(query=query), engine, None)  # no shape: no column check
+    for query in ALIAS_ALLOWED:
+        validate_selection(Selection(query=query), engine, shape)
+
+
+def test_rendering_fails_closed_on_a_construct_the_engine_cannot_express() -> None:
+    """M3 verify r1 B6: sqlglot's PostgreSQL generator drops ``UNPIVOT`` with a warning, so the
+    bound text (stored, validated again and executed) would silently differ from the text as
+    written. Every rendering refuses it instead, shape or no shape."""
+    query = (
+        "SELECT contact_id, channel FROM crm.contacts UNPIVOT (channel FOR s IN (email, channel))"
+    )
+    sel = Selection(query=query)
+    for render in (
+        lambda: parameterize_literals(sel, "postgres"),
+        lambda: query_template(query, "postgres"),
+        lambda: compile_query(sel, "postgres"),
+    ):
+        with pytest.raises(SelectionError) as err:
+            render()
+        assert err.value.code == "selection_parse_error"
+        assert "contact" not in str(err.value) and "UNPIVOT" not in str(err.value)
+    # Oracle expresses it, so the shape-aware alias check is what refuses it there
+    assert "UNPIVOT" in parameterize_literals(sel, "oracle").query.upper()  # type: ignore[union-attr]

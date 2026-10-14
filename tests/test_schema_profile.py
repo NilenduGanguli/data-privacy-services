@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -112,6 +113,7 @@ class RecordingGateway(LlmGateway):
         temperature: float = 0.2,
         max_tokens: int = 512,
         purpose: str = "rewrite",
+        protected: Sequence[str] = (),  # M5: the gateway's egress-verifier argument
     ) -> LlmResult:
         self.messages.append(messages)
         return LlmResult(text=self.reply, provider="stellar", model="test")

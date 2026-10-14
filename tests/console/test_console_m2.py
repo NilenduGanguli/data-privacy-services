@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -247,6 +248,24 @@ def test_wizard_to_evidence(page: Any, app_url: str, customer_values: list[str])
     assert write.is_disabled(), "in place on a connection without the target role stays blocked"
     shoot(page, "06-wizard-4-confirm")
     dialog.get_by_role("button", name="Choose another write mode").click()
+    # M2 verify r2 issue 1: an append through the read-only source, confirmed in step 4, is
+    # refused in step 5 by the server's own check, never "all checks passed"
+    page.get_by_label(re.compile("Append new rows")).check()
+    page.get_by_label("Key offset").fill("900000000")
+    page.get_by_role("button", name="Confirm", exact=True).click()
+    dialog = page.get_by_role("dialog")
+    dialog.get_by_label(re.compile("Type .* to confirm")).fill("bank.customers")
+    dialog.get_by_role("button", name=re.compile(r"Append .* rows")).click()
+    page.get_by_text(re.compile(r"Confirmed at")).wait_for()
+    page.get_by_role("button", name="Next: Review and run").click()
+    page.get_by_label("Ticket").fill("CHG-12345")
+    readiness = page.get_by_test_id("run-readiness")
+    page.get_by_text(re.compile(r"DPS refuses this run: .*connection_role")).wait_for(
+        timeout=15_000
+    )
+    assert readiness.inner_text() != "all checks passed"
+    assert page.get_by_role("button", name="Run job").is_disabled()
+    page.get_by_role("button", name="Back", exact=True).click()
     page.get_by_label(re.compile("Copy to a table")).check()
     page.get_by_label("Target connection").select_option(label="bank-uat")
     page.get_by_label("Destination schema").fill("bank_uat")
@@ -353,6 +372,19 @@ def test_in_place_on_a_table_with_an_entity_typed_key(
     method.select_option("keep")
     page.get_by_text(re.compile(r"saved · \d+ overrides")).wait_for(timeout=15_000)
     assert row.get_by_text("keep it to write in place").count() == 0
+    # M2 verify r2 issue 2: a token cannot fit national_id varchar(18), and PAN's fpe_text runs as
+    # a token on these values: both are decisions with the reason, and both are changed to
+    # methods that keep the length before writing in place
+    decisions = page.locator(".decide")
+    decisions.filter(has_text="national_id").get_by_text(
+        re.compile(r"longer than character varying\(18\)")
+    ).wait_for()
+    decisions.filter(has_text="tax_id").get_by_text(
+        re.compile(r"longer than character\(10\)")
+    ).wait_for()
+    page.get_by_label("Method of national_id").select_option("fpe_digits")
+    page.get_by_label("Method of tax_id").select_option("mask_partial")
+    page.get_by_text(re.compile(r"saved · 3 overrides")).wait_for(timeout=15_000)
     page.get_by_role("button", name="Accept snapshot").click()
     page.get_by_text(re.compile(r"classification snapshot snap_")).wait_for()
     # 4 again: the key is kept, the write is confirmed for the counted rows
@@ -375,5 +407,18 @@ def test_in_place_on_a_table_with_an_entity_typed_key(
         page.get_by_role("button", name="Dry run (no writes)").click()
     assert answer.value.status < 400, f"POST /jobs/run answered {answer.value.status}"
     page.wait_for_url(re.compile(r"/data-sources/jobs/j_"), timeout=30_000)
+    # the dry run itself must succeed (verify r2: the old test only saw POST /jobs/run < 400)
+    found = re.search(r"/data-sources/jobs/(j_[0-9A-Za-z]+)", page.url)
+    assert found, page.url
+    deadline = time.monotonic() + 180
+    with httpx.Client(base_url=app_url, headers={"X-API-KEY": KEY}, timeout=15.0) as client:
+        while True:
+            job = client.get(f"/api/v1/jobs/{found.group(1)}").json()
+            if job["state"] in ("succeeded", "failed", "dead", "canceled"):
+                break
+            assert time.monotonic() < deadline, f"dry run still {job['state']}"
+            time.sleep(1)
+    assert job["state"] == "succeeded", job.get("error_code")
+    assert job["progress"]["outcome"] == "dry_run"
     no_values(page, customer_values)
     no_page_errors(page)

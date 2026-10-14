@@ -26,14 +26,14 @@ import binascii
 import os
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field
 
 from dps.config import Settings
-from dps.observability import LLM_CALLS, get_logger
+from dps.observability import LLM_CALLS, get_logger, record_llm
 
 logger = get_logger(__name__)
 
@@ -152,18 +152,39 @@ class LlmGateway:
         temperature: float = 0.2,
         max_tokens: int = 512,
         purpose: str = "rewrite",
+        protected: Sequence[str] = (),
     ) -> LlmResult:
         """One chat completion. ``messages`` must already be free of raw sensitive values.
 
+        M5: the egress verifier (:mod:`dps.llm.egress`) checks ``messages`` first, against the
+        caller's ``protected`` originals and the self-identifying T1 patterns. Under
+        ``DPS_LLM_EGRESS_CHECK=strict`` a prompt with a raw value is never sent
+        (:class:`~dps.llm.egress.LlmEgressBlocked`); under ``warn`` it is sent and counted on the
+        alarm counters. Every decision is counted per tenant (``dps.observability.record_llm``).
+
         Raises:
             LlmUnavailable: no provider is configured or its prerequisites are missing.
+            LlmEgressBlocked: the prompt holds a raw sensitive value (strict; nothing sent).
             LlmCallError: the call failed or the response was malformed (no content in the
                 message).
         """
+        from dps.llm.egress import LlmEgressBlocked, residual_values  # imports this module
+
         provider = self.provider or "none"
         if not self.available():
             LLM_CALLS.labels(provider, purpose, "unavailable").inc()
             raise LlmUnavailable(f"llm provider {provider!r} is not configured")
+        residual = residual_values(messages, protected=protected)
+        if residual and self._s.llm_egress_check == "strict":
+            record_llm(purpose=purpose, blocked=True)
+            LLM_CALLS.labels(provider, purpose, "blocked").inc()
+            logger.warning("llm_egress_blocked", purpose=purpose, count=residual)
+            raise LlmEgressBlocked(
+                f"llm {purpose} prompt blocked: it holds {residual} raw sensitive value(s)"
+            )
+        record_llm(purpose=purpose, raw_values=residual)
+        if residual:
+            logger.error("llm_egress_raw_values_sent", purpose=purpose, count=residual)
         started = time.perf_counter()
         try:
             if self.provider == "stub":
@@ -285,7 +306,9 @@ class LlmGateway:
         from google.genai import types
 
         system = "\n".join(m["content"] for m in messages if m.get("role") == "system") or None
-        contents = [m["content"] for m in messages if m.get("role") != "system"]
+        contents: list[types.PartUnionDict] = [
+            m["content"] for m in messages if m.get("role") != "system"
+        ]
         try:
             client = genai.Client(
                 vertexai=True,

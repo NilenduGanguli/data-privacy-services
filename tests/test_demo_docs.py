@@ -169,6 +169,40 @@ async def test_the_engine_finds_what_the_demo_shows(name: str) -> None:
     assert expected <= found, sorted(expected - found)
 
 
+async def test_the_statement_page_keeps_nothing_readable() -> None:
+    """Page 2's account number, customer id and NEFT payee — and page 1's labelled address — are
+    found and replaced, not only the checksum types (integrated verify r1, B2)."""
+    from dps.engine.verify import normalise
+
+    settings = _settings()
+    pipeline = DocumentPipeline(
+        PrivacyEngine(settings, gateway=LlmGateway(settings)), settings, NullOcrClient()
+    )
+    out = await pipeline.run(
+        mode="obfuscate",
+        content=generated()["kyc-text.pdf"],
+        filename="kyc-text.pdf",
+        content_type=None,
+        request=DocumentRequest.model_validate({"options": {"ocr": "never"}}),
+    )
+    page2 = {f.entity_type for f in out.pages[1].findings}
+    expected = {"ACCOUNT_NUMBER", "CUSTOMER_ID", "PERSON_NAME", "EMAIL", "PHONE", "PAN_IN"}
+    assert expected | {"CARD_PAN"} <= page2, sorted(expected - page2)
+    assert "STREET_ADDRESS" in {f.entity_type for f in out.pages[0].findings}
+    assert out.transform is not None
+    text = normalise(str(out.transform.result))
+    v = tool()._values()
+    originals = [
+        v["account"],
+        "CUST-884120",
+        *v["payee"].split(),
+        *v["name"].split(),
+        v["street"],
+        v["city"],
+    ]
+    assert not [i for i, value in enumerate(originals) if normalise(value) in text]
+
+
 async def test_without_ocr_the_scanned_twin_reads_as_unreadable_pages() -> None:
     out = await _detect("kyc-scanned.pdf", generated()["kyc-scanned.pdf"])
     assert out.document.unreadable_pages == [1, 2]

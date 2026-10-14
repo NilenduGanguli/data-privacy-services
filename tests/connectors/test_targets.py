@@ -12,16 +12,18 @@ from dps.engine.policy import MethodSpec
 from dps.engine.synth.surrogates import generate_synthesis_seed
 from dps.engine.transform.crypto import generate_key_material
 from dps.jobs_models import RunSpec, SpecError
-from dps.layers.connectors.base import ColumnInfo, PkGenerate, PkOffset
+from dps.layers.connectors.base import ColumnInfo, ObjectRef, PkGenerate, PkOffset
 from dps.layers.connectors.targets import (
     TYPE_RE,
     PrepareFailure,
     RunPlan,
     apply_pk_strategy,
     build_column_plans,
+    check_projected_methods,
     created_column_type,
     is_same_table,
     method_for_column,
+    pseudonym_columns,
     resolve_target,
     validate_run,
     worst_case_length,
@@ -224,8 +226,9 @@ def test_kek_snapshot_key_and_text_rules(settings: Settings) -> None:
 
 
 def test_engine_roles_and_in_place_key_rules(settings: Settings) -> None:
-    mongo = make_connection("c_src", engine="mongo", roles=["source"], params={})
-    assert _code(spec(**UAT_TABLE), settings, source_conn=mongo) == ("engine_unavailable", 422)
+    # M3 Task 19: every database engine runs; a file store is never a run source
+    store = make_connection("c_src", engine="s3", roles=["source"], params={"bucket": "dps-in"})
+    assert _code(spec(**UAT_TABLE), settings, source_conn=store) == ("engine_unavailable", 422)
     target_only = make_connection("c_src", roles=["target"])
     assert _code(spec(**UAT_TABLE), settings, source_conn=target_only) == ("connection_role", 422)
     reader = make_connection("c_uat", roles=["source"])
@@ -281,7 +284,9 @@ def test_append_rules(settings: Settings) -> None:
     assert _code(offset, settings, text_key) == ("pk_strategy_invalid", 422)
 
 
-def test_files_synthesize_group_and_tabular_rules(settings: Settings) -> None:
+def test_files_synthesize_group_and_tabular_rules(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     files = dict(write_mode="files", connection_id="c_pvc", files={"format": "csv"})
     _check(spec(**files), settings=settings, target_conn=PVC)
     assert _code(spec(write_mode="files", connection_id="c_pvc"), settings, target_conn=PVC) == (
@@ -328,8 +333,35 @@ def test_files_synthesize_group_and_tabular_rules(settings: Settings) -> None:
         "group_not_found",
         404,
     )
-    tabular = spec(**UAT_TABLE, mode="synthesize", options={"tabular": "copula"})
-    assert _code(tabular, settings) == ("tabular_invalid", 422)
+    # M5 Task 6: copula synthesis into a table or files target is accepted ...
+    copula = {"tabular": "copula"}
+    _check(spec(**UAT_TABLE, mode="synthesize", options=copula), settings=settings)
+    _check(spec(**files, mode="synthesize", options=copula), settings=settings, target_conn=PVC)
+    # ... but not in obfuscate mode, not into a database write, not with the engine switched off
+    assert _code(spec(**UAT_TABLE, options=copula), settings) == ("tabular_invalid", 422)
+    append = dict(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    assert _code(spec(**append, mode="synthesize", options=copula), settings) == (
+        "tabular_invalid",
+        422,
+    )
+    off = settings.model_copy(update={"synth_tabular_engine": ""})
+    assert _code(spec(**UAT_TABLE, mode="synthesize", options=copula), off) == (
+        "tabular_invalid",
+        422,
+    )
+    mostly = spec(**UAT_TABLE, mode="synthesize", options={"tabular": "mostly"})
+    assert _code(mostly, settings) == ("tabular_invalid", 422)  # not enabled
+    with_mostly = settings.model_copy(update={"synth_tabular_engine": "copula,mostly"})
+    # Whether the synth-ml extra is installed is pinned both ways, so the result does not
+    # depend on which extras this environment has.
+    import dps.engine.synth.mostly as mostly_module
+
+    monkeypatch.setattr(mostly_module, "mostly_available", lambda: False)
+    assert _code(mostly, with_mostly) == ("tabular_invalid", 422)  # the extra is not installed
+    assert _code(mostly, settings) == ("tabular_invalid", 422)  # still not enabled
+    monkeypatch.setattr(mostly_module, "mostly_available", lambda: True)
+    _check(mostly, settings=with_mostly)  # enabled and installed: accepted
+    assert _code(mostly, settings) == ("tabular_invalid", 422)  # installed but not enabled
 
 
 def test_column_plans_per_write_mode() -> None:
@@ -579,3 +611,607 @@ def test_same_table_and_run_plan_round_trip() -> None:
     )
     again = RunPlan.model_validate(plan.model_dump(mode="json"))
     assert again == plan and again.prepare == {}
+
+
+def _with(snap: Any, name: str, **update: Any) -> Any:
+    """``snap`` with column ``name`` of its classification changed."""
+    return snap.model_copy(
+        update={
+            "columns": [c.model_copy(update=update) if c.name == name else c for c in snap.columns]
+        }
+    )
+
+
+def test_an_oracle_source_passes_the_engine_gate(settings: Settings) -> None:
+    """M3 wires the Oracle connector into runs (the M2 gate admitted PostgreSQL only)."""
+    ora = make_connection(
+        "c_src",
+        engine="oracle",
+        roles=["source", "target"],
+        params={"host": "oracle", "port": 1521, "service_name": "FREEPDB1"},
+    )
+    _check(spec(**UAT_TABLE), settings=settings, source_conn=ora)  # raises nothing
+
+
+def test_created_column_types_follow_the_target_engine() -> None:
+    """M2 validated every created type with PostgreSQL's catalogue pattern, so an Oracle target
+    (``NUMBER(12)``) failed ``target_invalid``; the Oracle writer derives its DDL from the closed
+    type table and reads only the ``text`` marker (open question 14)."""
+    num = ColumnInfo(path="$.CUSTOMER_ID", name="CUSTOMER_ID", data_type="NUMBER(12)", kind="int")
+    name = ColumnInfo(
+        path="$.FULL_NAME",
+        name="FULL_NAME",
+        data_type="VARCHAR2(120 CHAR)",
+        kind="text",
+        length=120,
+    )
+    zoned = ColumnInfo(
+        path="$.AT", name="AT", data_type="TIMESTAMP(6) WITH TIME ZONE", kind="timestamp"
+    )
+    snap = accepted_snapshot("c_src", "bank.customers")
+    plan = next(
+        p
+        for p in build_column_plans(
+            snap,
+            mode="obfuscate",
+            write_mode="table",
+            pk_strategy=None,
+            projection=[c.name for c in snap.shape.columns],
+        )
+        if p.name == "full_name"
+    )
+    assert created_column_type(num, None, engine="oracle") == "NUMBER(12)"
+    assert created_column_type(zoned, None, engine="oracle") == "TIMESTAMP(6) WITH TIME ZONE"
+    assert created_column_type(name, plan, engine="oracle") == "text"
+    for bad in ('NUMBER(12); DROP TABLE "X"', "number(12)", "VARCHAR2(10) -- x"):
+        with pytest.raises(PrepareFailure) as err:
+            created_column_type(num.model_copy(update={"data_type": bad}), None, engine="oracle")
+        assert err.value.code == "target_invalid"
+    with pytest.raises(PrepareFailure):  # PostgreSQL keeps its own (lower-case) pattern
+        created_column_type(num, None)
+
+
+def _oracle(snap: Any) -> Any:
+    """``snap`` as discovery stores an Oracle table: upper-case owner, table and column names."""
+    shape = snap.shape
+    columns = [
+        c.model_copy(update={"name": c.name.upper(), "path": f"$.{c.name.upper()}"})
+        for c in shape.columns
+    ]
+    upper_shape = shape.model_copy(
+        update={
+            "object": ObjectRef(owner="BANK", name="CUSTOMERS"),
+            "columns": columns,
+            "key": [k.upper() for k in shape.key],
+        }
+    )
+    classified = [
+        c.model_copy(update={"name": c.name.upper(), "path": f"$.{c.name.upper()}"})
+        for c in snap.columns
+    ]
+    return snap.model_copy(
+        update={
+            "engine": "oracle",
+            "object_ref": "BANK.CUSTOMERS",
+            "shape": upper_shape,
+            "columns": classified,
+        }
+    )
+
+
+def test_in_place_and_same_table_append_refuse_outputs_that_cannot_fit(
+    settings: Settings,
+) -> None:
+    """M2 verify r2 issue 2: a method whose output cannot fit the column it writes back into is
+    refused when the run is submitted (and by POST /jobs/run/validate), naming every such column,
+    instead of failing the job at prepare with length_overflow."""
+    snap = accepted_snapshot("c_src", "bank.customers")
+    token = MethodSpec(method="det_token")
+    bad = _with(_with(snap, "full_name", method=token), "email", method=token)
+    in_place = spec(write_mode="in_place", confirm_write=True)
+    with pytest.raises(SpecError) as err:
+        _check(in_place, bad, settings=settings, target_conn=None)
+    assert (err.value.code, err.value.status) == ("length_overflow", 422)
+    detail = err.value.detail
+    assert "$.full_name" in detail and "$.email" in detail and "det_token" in detail
+    assert "794" in detail and "character varying(120)" in detail and "step 3" in detail
+    same = spec(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    assert _code(same, settings, bad) == ("length_overflow", 422)
+    # a copy to a new table or files has unbounded text columns: not refused here
+    _check(spec(**UAT_TABLE), bad, settings=settings)
+    # discovery flagged a method that falls back to tokens on these values (PAN fpe_text into
+    # char(10)): refused while the reviewer keeps the suggestion, allowed once it is changed
+    flagged = _with(snap, "full_name", type_note="length_overflow")
+    assert _code(in_place, settings, flagged, target_conn=None) == ("length_overflow", 422)
+    changed = _with(flagged, "full_name", method=MethodSpec(method="mask_partial"))
+    _check(in_place, changed, settings=settings, target_conn=None)
+    # an unbounded column takes any token
+    unbounded = _with(snap, "notes", method=token)
+    _check(in_place, unbounded, settings=settings, target_conn=None)
+
+
+def test_prepare_names_every_column_that_cannot_fit_an_existing_target() -> None:
+    snap = accepted_snapshot("c_src", "bank.customers")
+    token = MethodSpec(method="det_token")
+    bad = _with(_with(snap, "full_name", method=token), "email", method=token)
+    projection = [c.name for c in bad.shape.columns]
+    plans = build_column_plans(
+        bad, mode="obfuscate", write_mode="table", pk_strategy=None, projection=projection
+    )
+    with pytest.raises(PrepareFailure) as err:
+        resolve_target(
+            spec(**UAT_TABLE),
+            job_id="j_1",
+            source_conn=SRC,
+            target_conn=UAT,
+            source_shape=bad.shape,
+            target_shape=bad.shape,
+            plans=plans,
+            projection=projection,
+        )
+    assert err.value.code == "length_overflow"
+    assert "$.full_name" in err.value.detail and "$.email" in err.value.detail
+
+
+# -- D-A: synthetic tables never carry linkable real identifiers ---------------------------------
+
+
+def test_synthesize_pseudonymises_sensitive_keys_and_kept_identifiers() -> None:
+    snap = accepted_snapshot("c_src", "bank.customers")
+    projection = [c.name for c in snap.columns]
+    got = pseudonym_columns(
+        snap, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert [(p.name, p.entity_type, p.kind, p.digits) for p in got] == [
+        ("customer_id", "CUSTOMER_ID", "int", 18)
+    ]
+    # a kept MEDIUM+ column (an owner override to keep) is pseudonymised, a LOW attribute is not
+    keep = MethodSpec(method="keep")
+    kept_email = _with(snap, "email", synthesize_method=keep)
+    names = [
+        p.name
+        for p in pseudonym_columns(
+            kept_email,
+            mode="synthesize",
+            write_mode="files",
+            pk_strategy=None,
+            projection=projection,
+        )
+    ]
+    assert names == ["customer_id", "email"]
+    city = _with(snap, "country_code", entity_type="CITY", synthesize_method=keep)
+    assert [
+        p.name
+        for p in pseudonym_columns(
+            city, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+        )
+    ] == ["customer_id"]
+    # obfuscate runs, keys the target generates and columns outside the projection: none
+    assert not pseudonym_columns(
+        snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert not pseudonym_columns(
+        snap,
+        mode="synthesize",
+        write_mode="append",
+        pk_strategy=PkGenerate(),
+        projection=projection,
+    )
+    assert not pseudonym_columns(
+        snap, mode="synthesize", write_mode="table", pk_strategy=None, projection=["email"]
+    )
+
+
+def test_synthesize_refuses_to_copy_or_shift_a_sensitive_key(settings: Settings) -> None:
+    in_place = dict(write_mode="in_place", confirm_write=True)
+    assert _code(spec(**in_place, mode="synthesize"), settings, target_conn=None) == (
+        "synthesize_in_place_sensitive_key",
+        422,
+    )
+    offset = dict(
+        write_mode="append", confirm_write=True, pk_strategy={"kind": "offset", "offset": 10**8}
+    )
+    assert _code(spec(**offset, mode="synthesize"), settings, target_conn=None) == (
+        "pk_strategy_invalid",
+        422,
+    )
+    generate = dict(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    _check(spec(**generate, mode="synthesize"), settings=settings, target_conn=None)
+    # a key without an entity type is not an identifier of a person: in place stays possible
+    plain = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    _check(spec(**in_place, mode="synthesize"), plain, settings=settings, target_conn=None)
+    # an identifier the pseudonym cannot fit (a smallint key; a float join column)
+    snap = accepted_snapshot("c_src", "bank.customers")
+    small = _with(snap, "customer_id", data_type="smallint")
+    shape = small.shape.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"data_type": "smallint"}) if c.name == "customer_id" else c
+                for c in small.shape.columns
+            ]
+        }
+    )
+    small = small.model_copy(update={"shape": shape})
+    assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, small) == (
+        "synthesize_pseudonym_unsupported",
+        422,
+    )
+    # D-A: a pseudonym of a key below 10^9 lies in [10^9, 2*10^9) — an integer or a numeric of
+    # at least 10 digits holds it, a numeric(9, 0) does not
+    for data_type, precision, fits in (
+        ("integer", None, True),
+        ("numeric(10,0)", 10, True),
+        ("numeric(9,0)", 9, False),
+    ):
+        typed = snap.model_copy(
+            update={
+                "shape": snap.shape.model_copy(
+                    update={
+                        "columns": [
+                            c.model_copy(
+                                update={
+                                    "data_type": data_type,
+                                    "kind": "decimal" if precision else "int",
+                                    "precision": precision,
+                                    "scale": 0 if precision else None,
+                                }
+                            )
+                            if c.name == "customer_id"
+                            else c
+                            for c in snap.shape.columns
+                        ]
+                    }
+                )
+            }
+        )
+        if fits:
+            _check(spec(**UAT_TABLE, mode="synthesize"), typed, settings=settings)
+            got = pseudonym_columns(
+                typed,
+                mode="synthesize",
+                write_mode="table",
+                pk_strategy=None,
+                projection=[c.name for c in typed.columns],
+            )
+            assert got[0].max_magnitude() == (2**31 - 1 if precision is None else 10**10 - 1)
+        else:
+            assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, typed) == (
+                "synthesize_pseudonym_unsupported",
+                422,
+            )
+    dated = _with(snap, "dob", synthesize_method=MethodSpec(method="keep"))
+    assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, dated) == (
+        "synthesize_pseudonym_unsupported",
+        422,
+    )
+
+
+def test_in_place_writes_the_pseudonymised_join_columns() -> None:
+    snap = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    snap = _with(snap, "country_code", entity_type="CUSTOMER_ID", sensitivity="medium")
+    run = spec(write_mode="in_place", confirm_write=True, mode="synthesize")
+    projection = [c.name for c in snap.columns]
+    plans = build_column_plans(
+        snap, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    pseudonyms = pseudonym_columns(
+        snap, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    assert [p.name for p in pseudonyms] == ["country_code"]
+    resolved, _ = resolve_target(
+        run,
+        job_id="job_1",
+        source_conn=SRC,
+        target_conn=None,
+        source_shape=snap.shape,
+        target_shape=snap.shape,
+        plans=plans,
+        projection=projection,
+        pseudonyms=[p.name for p in pseudonyms],
+    )
+    assert "country_code" in resolved.write_columns
+
+
+def _referencing(snap: Any, name: str, references: str) -> Any:
+    """``snap`` whose shape declares ``name`` a foreign key to ``references`` (owner.table.col)."""
+    columns = [
+        c.model_copy(update={"references": references}) if c.name == name else c
+        for c in snap.shape.columns
+    ]
+    return snap.model_copy(update={"shape": snap.shape.model_copy(update={"columns": columns})})
+
+
+def test_synthesize_pseudonymises_every_written_key_and_its_foreign_keys() -> None:
+    """B2 (G2 review r1): an unclassified key is never written with its real value next to a
+    pseudonymised identifier — it gets a pseudonym under a stable per-key label, and a declared
+    foreign key to it gets the same label (so joins inside a job group hold)."""
+    plain = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    projection = [c.name for c in plain.columns]
+    for write_mode in ("table", "files"):
+        got = pseudonym_columns(
+            plain, mode="synthesize", write_mode=write_mode, pk_strategy=None, projection=projection
+        )
+        assert [(p.name, p.entity_type, p.label, p.kind, p.digits) for p in got] == [
+            ("customer_id", "KEY", "KEY|bank.customers.customer_id", "int", 18)
+        ]
+    # a key the target generates is not written; in place the key is the row it rewrites
+    assert not pseudonym_columns(
+        plain,
+        mode="synthesize",
+        write_mode="append",
+        pk_strategy=PkGenerate(),
+        projection=projection,
+    )
+    assert not pseudonym_columns(
+        plain, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    # a declared foreign key (unclassified) is labelled by the key it references
+    fk = _referencing(plain, "country_code", "bank.countries.code")
+    got = pseudonym_columns(
+        fk, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert [(p.name, p.label) for p in got] == [
+        ("customer_id", "KEY|bank.customers.customer_id"),
+        ("country_code", "KEY|bank.countries.code"),
+    ]
+    # the live shape at prepare is what names the foreign keys
+    live = _referencing(plain, "country_code", "bank.countries.code").shape
+    got = pseudonym_columns(
+        plain,
+        mode="synthesize",
+        write_mode="table",
+        pk_strategy=None,
+        projection=projection,
+        shape=live,
+    )
+    assert [p.name for p in got] == ["customer_id", "country_code"]
+    # in place a foreign key keeps pointing at the (real) parent rows of the same database
+    assert not pseudonym_columns(
+        fk, mode="synthesize", write_mode="in_place", pk_strategy=None, projection=projection
+    )
+    # a classified key keeps its entity label (joins with other columns of that entity)
+    snap = accepted_snapshot("c_src", "bank.customers")
+    got = pseudonym_columns(
+        snap, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert [(p.entity_type, p.label) for p in got] == [("CUSTOMER_ID", None)]
+
+
+def test_synthesize_never_shifts_or_copies_any_written_key(settings: Settings) -> None:
+    """B2: an offset append writes ``real key + offset`` — linkable whatever the key's class."""
+    plain = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "customer_id",
+        entity_type=None,
+        sensitivity=None,
+        anchor=False,
+    )
+    offset = dict(
+        write_mode="append", confirm_write=True, pk_strategy={"kind": "offset", "offset": 10**8}
+    )
+    assert _code(spec(**offset, mode="synthesize"), settings, plain, target_conn=None) == (
+        "pk_strategy_invalid",
+        422,
+    )
+    generate = dict(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"})
+    _check(spec(**generate, mode="synthesize"), plain, settings=settings, target_conn=None)
+    # an unclassified key no pseudonym fits is refused for a written key (table), not in place
+    small = plain.model_copy(
+        update={
+            "shape": plain.shape.model_copy(
+                update={
+                    "columns": [
+                        c.model_copy(update={"data_type": "smallint"})
+                        if c.name == "customer_id"
+                        else c
+                        for c in plain.shape.columns
+                    ]
+                }
+            )
+        }
+    )
+    assert _code(spec(**UAT_TABLE, mode="synthesize"), settings, small) == (
+        "synthesize_pseudonym_unsupported",
+        422,
+    )
+    in_place = dict(write_mode="in_place", confirm_write=True)
+    _check(spec(**in_place, mode="synthesize"), small, settings=settings, target_conn=None)
+
+
+def test_synthesize_never_keeps_a_classified_attribute() -> None:
+    """B1 (G2 review r1): a LOW attribute a policy keeps (``keep_non_sensitive``: city, gender,
+    age, postal code, date …) is personal data — a synthesize run plans a surrogate for it (the
+    tabular engine draws it instead when it models the column); obfuscate keeps it."""
+    keep = MethodSpec(method="keep")
+    snap = _with(
+        accepted_snapshot("c_src", "bank.customers"),
+        "country_code",
+        entity_type="CITY",
+        sensitivity="low",
+        synthesize_method=keep,
+    )
+    projection = [c.name for c in snap.columns]
+    for write_mode in ("table", "files", "in_place"):
+        plans = {
+            p.name: p.method.method
+            for p in build_column_plans(
+                snap,
+                mode="synthesize",
+                write_mode=write_mode,  # type: ignore[arg-type]
+                pk_strategy=None,
+                projection=projection,
+            )
+        }
+        assert plans["country_code"] == "surrogate", (write_mode, plans)
+    obfuscate = build_column_plans(
+        snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert "country_code" not in {p.name for p in obfuscate}
+    # a column the owner reviewed as not personal stays kept (the kept review covers it)
+    unclassified = _with(snap, "country_code", entity_type=None, sensitivity=None)
+    plans = build_column_plans(
+        unclassified, mode="synthesize", write_mode="table", pk_strategy=None, projection=projection
+    )
+    assert "country_code" not in {p.name for p in plans}
+
+
+ORA_SRC = make_connection(
+    "c_src",
+    engine="oracle",
+    roles=["source", "target"],
+    params={"host": "oracle", "port": 1521, "service_name": "FREEPDB1"},
+)
+
+
+def _ora_spec(selection: dict[str, Any], **target: Any) -> RunSpec:
+    run = spec(**(target or UAT_TABLE), selection=selection)
+    source = run.source.model_copy(update={"object": ObjectRef(owner="BANK", name="CUSTOMERS")})
+    return run.model_copy(update={"source": source})
+
+
+def test_submit_method_checks_cover_what_the_run_reads(settings: Settings) -> None:
+    """M3 G2 B4: the submit-time method checks run over the projection the run itself reads
+    (``read_projection``): an Oracle ``columns`` entry in lower case folds to the same column,
+    so a kept free-text column cannot pass unchecked."""
+    kept_notes = _oracle(
+        accepted_snapshot("c_src", "BANK.CUSTOMERS", notes_method=MethodSpec(method="keep"))
+    )
+    for columns in (["NOTES"], ["notes"], ["Notes"]):
+        run = _ora_spec({"columns": columns})
+        assert _code(run, settings, kept_notes, source_conn=ORA_SRC) == (
+            "text_method_invalid",
+            422,
+        ), columns
+    # a column outside the projection is not checked (it is neither read nor written)
+    _check(_ora_spec({"columns": ["email"]}), kept_notes, settings=settings, source_conn=ORA_SRC)
+    # synthesize mode: a key-needing method on a lower-case Oracle column is refused too
+    det = _oracle(accepted_snapshot("c_src", "BANK.CUSTOMERS"))
+    needs_key = det.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"synthesize_method": MethodSpec(method="det_token")})
+                if c.name == "FULL_NAME"
+                else c
+                for c in det.columns
+            ]
+        }
+    )
+    for columns in (["FULL_NAME"], ["full_name"]):
+        run = _ora_spec({"columns": columns}, **UAT_TABLE, mode="synthesize")
+        assert _code(run, settings, needs_key, source_conn=ORA_SRC) == (
+            "method_needs_key",
+            422,
+        ), columns
+    # a query's own select list is the projection too (PostgreSQL and Oracle alike)
+    pg_notes = accepted_snapshot("c_src", "bank.customers", notes_method=MethodSpec(method="keep"))
+    with_notes = spec(
+        **UAT_TABLE, selection={"query": "SELECT customer_id, notes FROM bank.customers"}
+    )
+    assert _code(with_notes, settings, pg_notes) == ("text_method_invalid", 422)
+    without = spec(
+        **UAT_TABLE, selection={"query": "SELECT customer_id, email FROM bank.customers"}
+    )
+    _check(without, pg_notes, settings=settings)
+
+
+def test_projected_method_checks_are_shared_with_prepare() -> None:
+    """The same rules ``prepare`` re-applies to its final projection (defence in depth)."""
+    kept_notes = accepted_snapshot(
+        "c_src", "bank.customers", notes_method=MethodSpec(method="keep")
+    )
+    with pytest.raises(SpecError) as err:
+        check_projected_methods(kept_notes, "obfuscate", ["customer_id", "notes"])
+    assert err.value.code == "text_method_invalid"
+    check_projected_methods(kept_notes, "obfuscate", ["customer_id", "email"])
+
+
+def test_a_keyless_upsert_is_refused_at_submit(settings: Settings) -> None:
+    """M3 G2 B3: an upsert needs a key to be idempotent; a key-less (ROWID-paged) source would
+    append on every run. Refused at submit; ``truncate_insert`` stays allowed."""
+    snap = _oracle(accepted_snapshot("c_src", "BANK.CUSTOMERS"))
+    keyless = snap.model_copy(
+        update={"shape": snap.shape.model_copy(update={"key_source": "rowid"})}
+    )
+    upsert = _ora_spec({}, **UAT_TABLE, table_load="upsert")
+    assert _code(upsert, settings, keyless, source_conn=ORA_SRC) == ("no_key", 422)
+    _check(_ora_spec({}), keyless, settings=settings, source_conn=ORA_SRC)
+    _check(upsert, snap, settings=settings, source_conn=ORA_SRC)  # keyed: upsert allowed
+
+
+def test_column_plans_carry_the_timestamp_precision() -> None:
+    """M3: an Oracle TIMESTAMP(9) output keeps its nine fractional digits (FF9 text), so a
+    date shift is written and revealed exactly instead of failing ``incompatible_method``."""
+    snap = accepted_snapshot("c_src", "bank.customers")
+    every = [c.name for c in snap.shape.columns]
+    planned = {
+        p.name
+        for p in build_column_plans(
+            snap, mode="obfuscate", write_mode="table", pk_strategy=None, projection=every
+        )
+    }
+    name = next(
+        c.name for c in snap.shape.columns if c.name in planned and c.kind in ("date", "timestamp")
+    )
+    shape = snap.shape.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"kind": "timestamp", "ts_precision": 9})
+                if c.name == name
+                else c
+                for c in snap.shape.columns
+            ]
+        }
+    )
+    plans = build_column_plans(
+        snap.model_copy(update={"shape": shape}),
+        mode="obfuscate",
+        write_mode="table",
+        pk_strategy=None,
+        projection=every,
+    )
+    plan = next(p for p in plans if p.name == name)
+    assert plan.ts_precision == 9 and plan.output_column().ts_precision == 9
+    assert all(p.ts_precision is None for p in plans if p.name != name)
+
+
+def test_tabular_synthesis_is_refused_for_a_document_source(settings: Settings) -> None:
+    """WP-I (m3 merge): M5's tabular engines (copula, MOSTLY, linked) model the flat columns of
+    one table; a MongoDB document's leaves (nested fields, arrays) have no such column, and a
+    sampled value would replace a whole top-level field. Refused at submit, before any read;
+    surrogate synthesis (``tabular: none``) of MongoDB stays available."""
+    mdb = make_connection(
+        "c_src", engine="mongo", roles=["source", "target"], params={"database": "crm"}
+    )
+    snap = accepted_snapshot("c_src", "profiles").model_copy(
+        update={"engine": "mongo", "object_ref": "profiles"}
+    )
+
+    def run(**options: Any) -> RunSpec:
+        r = spec(**UAT_TABLE, mode="synthesize", options=options)
+        return r.model_copy(
+            update={"source": r.source.model_copy(update={"object": ObjectRef(name="profiles")})}
+        )
+
+    assert _code(run(tabular="copula"), settings, snap, source_conn=mdb, target_conn=mdb) == (
+        "tabular_invalid",
+        422,
+    )
+    _check(run(), snap, settings=settings, source_conn=mdb, target_conn=mdb)

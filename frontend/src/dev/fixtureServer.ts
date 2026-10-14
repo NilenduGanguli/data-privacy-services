@@ -1,288 +1,471 @@
 /**
- * DEV ONLY — a fixture server for the UI-scanner routes (contract §9), so the console pages can be
- * built and checked before the scans API exists (`VITE_DPS_FIXTURES=1 npm run dev`). It is reached
- * only through src/dev/fixtureMode.ts, which main.tsx imports behind `import.meta.env.DEV`; the
- * production build drops it and `npm run build` fails if it ever lands in dist (scripts/check-bundle.mjs).
+ * Dev-only fixture mode for the console (`npm run dev:fixtures`, i.e. `VITE_DPS_FIXTURES=1 vite`).
  *
- * It answers like the real API — the same shapes, the same refusal codes for a few accept-time checks
- * — and plays a created scan over time: pages appear queued, are visited, filled and captured; the
- * scan succeeds with exports and an evidence id, or stops when canceled. Every value is a fixture.
+ * `installFixtureServer()` wraps `window.fetch` so the console's API calls (`/api/v1/…`, `/readyz`,
+ * `/metrics`) are answered from the typed fixtures in ./fixtures.ts, with in-memory state so the
+ * Admin and Policies flows (create, rotate, disable, publish…) can be walked without a backend.
+ * main.tsx imports this module only behind `import.meta.env.DEV`, so a production build contains
+ * none of it (checked after every build: the bundle has no `dps-fixture-server` marker).
+ *
+ * Scenarios (`?fixture=<name>` on any page): `degraded` (no metadata database: reports 503),
+ * `noadmin` (the key lacks the admin scope: admin routes and policy writes 403), `nostore` (an
+ * older backend without the policy store: `/policies` 404), `empty` (a new tenant: no packs, no
+ * audit rows, no jobs).
  */
-import {
-  DEMO_ORIGIN, demoScan, FIXTURE_KEY, FIXTURE_SCAN_ID, FIXTURE_SEED, inventoryRows, personaPreview, scanJob, summarize,
-  type DemoScan,
-} from '../lib/scanFixtures';
 import type {
-  Job, JobState, KeyMaterial, ScanEvent, ScanField, ScanPage, ScanSpecIn, ScanSummary, SynthesisSeed,
+  ApiKeyView, AuditRow, CreatedKey, EvidenceItem, EvidenceOut, PolicyChange, PolicyDoc, PolicyVersionView, PresetView,
+  RecognizerSpec, TenantPolicyDetail, TenantPolicyView, TenantView,
 } from '../lib/types';
+import { toYaml } from '../lib/yaml';
+import * as fx from './fixtures';
 
-export const FIXTURE_MARKER = 'dps-fixture-mode';
+export const FIXTURE_MARKER = 'dps-fixture-server';
+const DAY = 86_400_000;
 
-export interface ArtefactInfo { id: string; kind: string; page: ScanPage | null; fields: ScanField[] }
-export interface FixtureServerOptions {
-  now?: () => number;
-  /** How long a created scan takes to crawl the whole demo site. */
-  durationMs?: number;
-  /** Paints a screenshot artefact (the browser fixture mode draws one on a canvas). */
-  png?: (info: ArtefactInfo) => Promise<Blob>;
+interface StoredPolicy { detail: TenantPolicyDetail; bodies: Record<number, PolicyDoc> }
+export interface FixtureState {
+  now: Date; keys: ApiKeyView[]; tenants: TenantView[]; audit: AuditRow[]; packs: Record<string, EvidenceOut>; items: EvidenceItem[];
+  policies: Map<string, StoredPolicy>; presets: PresetView[]; seq: number;
 }
 
-interface ScanRecord {
-  id: string; spec: ScanSpecIn; createdAt: number; canceledAt: number | null; probe: boolean; full: DemoScan; origin: string;
+export function createFixtureState(now: Date = new Date()): FixtureState {
+  const versions = fx.policyVersions();
+  const gdpr = fx.gdprDetail(now);
+  gdpr.draft_body = fx.gdprDraft() as unknown as Record<string, unknown>;
+  return {
+    now, keys: fx.apiKeys(now), tenants: fx.tenants(now), audit: fx.auditRows(now), packs: fx.evidencePacks(now), items: fx.evidenceItems(now),
+    policies: new Map([['gdpr-pseudonymise', { detail: gdpr, bodies: { 1: versions[0], 2: versions[1], 3: versions[2] } }]]),
+    presets: fx.presetViews(), seq: 0,
+  };
 }
 
-const REGISTERED = new Set(['localhost', '127.0.0.1', 'demo-site']);
-const LOCALES = new Set(['en_US', 'en_IN', 'en_GB', 'en_CA', 'es_MX']);
-const SPEC_KEYS = new Set(['url', 'scope', 'auth', 'mode', 'fill', 'parallel_view', 'capture', 'consistency', 'policy', 'purpose']);
-const QUEUED_MS = 1200;
-// A 1×1 transparent PNG: the default screenshot when no painter is given (tests).
-const PNG_1X1 = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='), (c) => c.charCodeAt(0));
+// ---- helpers ------------------------------------------------------------------------------------
 
-const json = (body: unknown, status = 200): Response =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-const refuse = (status: number, code: string, detail: string): Response => json({ detail, code }, status);
-
-function params(url: string): URLSearchParams { return new URLSearchParams(url.split('?')[1] ?? ''); }
-
-/** The stored start URL as `redact_url` writes it (roughly): numeric path segments `{id}`, query values `<v>`, no fragment. */
-function redactedStart(url: string): string {
-  const [base, query] = url.split('#')[0].split('?');
-  const path = base.replace(/\/\d+(?=\/|$)/g, '/{id}');
-  return query ? `${path}?${query.split('&').map((kv) => `${kv.split('=')[0]}=<v>`).sort().join('&')}` : path;
+function respond(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 }
+const refuse = (status: number, code: string, detail: string): Response => respond(status, { detail, code });
+const file = (body: string, type: string, name: string): Response =>
+  new Response(body, { status: 200, headers: { 'content-type': type, 'content-disposition': `attachment; filename="${name}"` } });
+const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-export class ScanFixtureServer {
-  private readonly now: () => number;
-  private readonly durationMs: number;
-  private readonly png?: (info: ArtefactInfo) => Promise<Blob>;
-  private readonly scans = new Map<string, ScanRecord>();
-  private readonly demo = demoScan();
-  private counter = 0;
+const isMapping = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const byCodepoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-  constructor(opts: FixtureServerOptions = {}) {
-    this.now = opts.now ?? (() => Date.now());
-    this.durationMs = opts.durationMs ?? 45_000;
-    this.png = opts.png;
+/** The backend's `flatten_policy` (M5 plan Task 15, full code there), reproduced exactly so the
+ *  fixture diff has the real shape: dotted leaves in sorted key order; a non-empty list whose items
+ *  are all mappings is keyed per item by its `name`, else its `path`, else its index
+ *  (`declared_fields[LOANS.APPLICANTS.EMPLOYER_NAME].entity_type`); other lists are leaves; an
+ *  empty mapping yields nothing. Python's `or` treats '', 0, null and false as missing. */
+export function flatten(body: Record<string, unknown>, prefix = ''): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(body).sort(byCodepoint)) {
+    const value = body[key];
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (isMapping(value)) Object.assign(out, flatten(value, path));
+    else if (Array.isArray(value) && value.length && value.every(isMapping)) {
+      value.forEach((item, index) => {
+        const label = (item.name || item.path || index) as string | number;
+        Object.assign(out, flatten(item, `${path}[${String(label)}]`));
+      });
+    } else out[path] = value;
   }
+  return out;
+}
 
-  /** The fixture answer for a request, or null when the route is not a scanner route (pass through). */
-  async handle(method: string, url: string, body?: string): Promise<Response | null> {
-    const path = url.replace(/^https?:\/\/[^/]+/, '').split('?')[0];
-    const m = method.toUpperCase();
-    if (path === '/api/v1/scans') return m === 'POST' ? this.create(body) : this.list(url);
-    if (path === '/api/v1/scans/personas/preview' && m === 'POST') {
-      const req = JSON.parse(body || '{}') as { locale?: string; synthesis_seed?: SynthesisSeed | null };
-      if (req.locale && !LOCALES.has(req.locale)) return refuse(422, 'locale_unsupported', 'locale is not supported');
-      return json(personaPreview(req.locale ?? 'en_US', req.synthesis_seed ?? null));
-    }
-    const art = /^\/api\/v1\/artefacts\/([^/]+)$/.exec(path);
-    if (art) return this.artefact(decodeURIComponent(art[1]));
-    const sm = /^\/api\/v1\/scans\/([^/]+)(\/.*)?$/.exec(path);
-    if (!sm) return null;
-    const id = decodeURIComponent(sm[1]);
-    const rest = sm[2] ?? '';
-    const view = this.view(id);
-    if (!view) return refuse(404, 'not_found', 'scan not found');
-    if (rest === '' && m === 'GET') return json({ scan: view.job, summary: view.summary });
-    if (rest === '/cancel' && m === 'POST') return this.cancel(id);
-    if (rest === '/pages') {
-      const q = params(url);
-      const after = Number(q.get('after') ?? 0);
-      const limit = Number(q.get('limit') ?? 200);
-      const items = view.pages.filter((p) => p.page_no > after).slice(0, limit);
-      const more = view.pages.some((p) => p.page_no > (items[items.length - 1]?.page_no ?? Infinity));
-      return json({ items, next_cursor: more ? String(items[items.length - 1].page_no) : null });
-    }
-    const pm = /^\/pages\/(\d+)$/.exec(rest);
-    if (pm) {
-      const pg = view.pages.find((p) => p.page_no === Number(pm[1]));
-      if (!pg) return refuse(404, 'not_found', 'page not found');
-      const done = pg.status === 'done' || pg.status === 'redirected';
-      return json({ page: pg, fields: done ? view.fields[pg.page_no] ?? [] : [], requests: done ? view.full.requests[pg.page_no] ?? [] : [] });
-    }
-    if (rest === '/events') {
-      const q = params(url);
-      const after = Number(q.get('after') ?? 0);
-      const limit = Number(q.get('limit') ?? 200);
-      const items = view.events.filter((e) => e.seq > after).slice(0, limit);
-      const more = view.events.some((e) => e.seq > (items[items.length - 1]?.seq ?? Infinity));
-      return json({ items, next_cursor: more ? String(items[items.length - 1].seq) : null });
-    }
-    if (rest === '/inventory' || rest === '/export') {
-      const format = params(url).get('format') ?? 'json';
-      const items = inventoryRows(view.pages, view.fields);
-      if (rest === '/inventory') {
-        if (format === 'csv') return this.csv(['page_no', 'path', 'form_index', 'field_no', 'label', 'tag', 'input_type', 'entity_type', 'sensitivity', 'confidence', 'detectors', 'risk_codes', 'fill_status'], items as unknown as Record<string, unknown>[]);
-        return json({ items, risk_flags: view.summary.risk_flags });
+/** The backend's `diff_policies`: sorted paths, top-level `name` and `version` ignored. */
+export function diffBodies(before: unknown, after: unknown): PolicyChange[] {
+  const a = flatten(isMapping(before) ? before : {});
+  const b = flatten(isMapping(after) ? after : {});
+  const changes: PolicyChange[] = [];
+  for (const path of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort(byCodepoint)) {
+    if (path === 'name' || path === 'version') continue;
+    const x = a[path];
+    const y = b[path];
+    if (!(path in a)) changes.push({ op: 'add', path, after: y });
+    else if (!(path in b)) changes.push({ op: 'remove', path, before: x });
+    else if (JSON.stringify(x) !== JSON.stringify(y)) changes.push({ op: 'change', path, before: x, after: y });
+  }
+  return changes;
+}
+
+function rawKey(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return `dps_${Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('')}`;
+}
+
+function normalizeHost(value: string): string | null {
+  const v = value.trim().toLowerCase().replace(/^[a-z]+:\/\//, '').split(/[/?#]/)[0].replace(/:\d+$/, '');
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(v) ? v : null;
+}
+
+function tenantView(s: FixtureState, id: string): TenantView | undefined { return s.tenants.find((t) => t.tenant_id === id); }
+
+function policyView(d: TenantPolicyDetail): TenantPolicyView {
+  const { name, base_preset, active_version, active_hash, draft, draft_changes, published_at, published_by, jobs } = d;
+  return { name, base_preset, active_version, active_hash, draft, draft_changes, published_at, published_by, jobs };
+}
+
+function presetBody(name: string): PolicyDoc {
+  const body = fx.gdprBody(1);
+  body.name = name;
+  return body;
+}
+
+function fakeHash(seed: string): string {
+  let h = 2166136261;
+  let out = '';
+  for (let round = 0; out.length < 64; round += 1) {
+    for (const ch of `${seed}:${round}`) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+    out += h.toString(16).padStart(8, '0');
+  }
+  return out.slice(0, 64);
+}
+
+// ---- the plan preview and the recognizer test (approximations of the engine for dev only) -------
+
+const KEY_ENTITY: Record<string, string> = {
+  customer_id: 'CUSTOMER_ID', full_name: 'PERSON_NAME', dob: 'DATE_OF_BIRTH', in_pan: 'PAN_IN', uk_nino: 'NINO', us_ssn: 'SSN', email: 'EMAIL',
+  pan: 'CARD_PAN', cvv: 'CVV', branch_city: 'CITY', phone: 'PHONE',
+};
+const REVERSIBLE = new Set(['det_token', 'fpe_digits', 'fpe_text', 'email', 'phone', 'date_shift', 'external_tokenize']);
+
+function leaves(value: unknown, path: string, out: [string, unknown][]): void {
+  if (Array.isArray(value)) value.forEach((v, i) => leaves(v, `${path}[${i}]`, out));
+  else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) leaves(v, `${path}.${k}`, out);
+  else out.push([path, value]);
+}
+
+function planFor(data: unknown, policy: unknown, fpeOn: boolean): unknown[] {
+  const body = (policy && typeof policy === 'object' ? policy : presetBody(String(policy ?? 'gdpr-pseudonymise'))) as PolicyDoc;
+  const declared = new Map((body.detect?.declared_fields ?? []).map((d) => [d.path, d.entity_type]));
+  const rows: unknown[] = [];
+  const all: [string, unknown][] = [];
+  leaves(data, '$', all);
+  for (const [path, value] of all) {
+    const key = path.replace(/\[\d+\]/g, '').split('.').pop() ?? '';
+    const decl = declared.get(path) ?? declared.get(path.replace(/^\$\./, '$.'));
+    let entity = decl ?? KEY_ENTITY[key];
+    let span: [number, number] | null = null;
+    if (!entity && typeof value === 'string') {
+      for (const rec of body.detect?.custom_recognizers ?? []) {
+        const rx = safeRegex(rec.patterns[0]?.regex ?? '');
+        const hit = rx?.exec(value);
+        if (hit && !(rec.allow_list ?? []).includes(hit[0])) { entity = rec.supported_entity; span = [hit.index, hit.index + hit[0].length]; break; }
       }
-      if (!view.summary.export_artefacts.json) return refuse(409, 'scan_not_finished', 'the export is ready when the scan has finished');
-      const mapping = view.pages.flatMap((p) => (view.fields[p.page_no] ?? []).filter((f) => f.entity_type).map((f) => ({
-        page_no: p.page_no, path: p.template, field_no: f.field_no, entity_type: f.entity_type, persona_attr: f.persona_attr,
-        synthetic_value: f.fill_synthesize, token: f.fill_obfuscate,
-      })));
-      if (format === 'csv') return this.csv(['page_no', 'path', 'field_no', 'entity_type', 'persona_attr', 'synthetic_value', 'token'], mapping);
-      return json({ scan_id: id, personas: [personaPreview(view.summary.locale).personas[0]], mapping });
     }
-    return refuse(404, 'not_found', 'route not found');
+    if (!entity) continue;
+    const spec = body.treat?.[entity] ?? body.treat?.default_sensitive ?? { method: 'det_token', params: {} };
+    let method = spec.method;
+    let reason = decl ? `declared:${path}` : `policy:${entity}`;
+    if (method.startsWith('fpe_') && !fpeOn) { method = 'det_token'; reason += '|fallback:fpe_disabled'; }
+    rows.push({ path, span, entity_type: entity, score: decl ? 1 : 0.85 + (entity.length % 10) / 100, method, params: spec.params ?? {}, reason, reversible: REVERSIBLE.has(method) });
   }
+  return rows;
+}
 
-  private list(url: string): Response {
-    const q = params(url);
-    const state = q.get('state');
-    const limit = Number(q.get('limit') ?? 50);
-    const jobs = [...this.scans.keys()].reverse().map((id) => this.view(id)?.job).filter((j): j is Job => !!j);
-    const items = [...jobs, this.demo.job].filter((j) => !state || j.state === state).slice(0, limit);
-    return json({ items, next_cursor: null });
+function safeRegex(pattern: string): RegExp | null {
+  try { return new RegExp(pattern.replace(/\(\?P</g, '(?<'), 'g'); } catch { return null; }
+}
+
+function testRecognizer(rec: RecognizerSpec, text: string): Response {
+  const pattern = rec.patterns?.[0];
+  if (!pattern?.regex) return refuse(422, 'invalid_recognizer', 'patterns: at least one pattern is required');
+  if (/\((?:[^()]*[+*])\)[+*]/.test(pattern.regex)) return refuse(422, 'unsafe_pattern', 'Nested quantifiers are not allowed: the pattern could take exponential time.');
+  const rx = safeRegex(pattern.regex);
+  if (!rx) return refuse(422, 'invalid_recognizer', 'This pattern does not compile: check for an unclosed group or a stray backslash.');
+  const matches: { start: number; end: number; entity_type: string; score: number; evidence: string; context: boolean }[] = [];
+  const allow = new Set(rec.allow_list ?? []);
+  for (let mt = rx.exec(text); mt !== null; mt = rx.exec(text)) {
+    if (mt[0] === '') { rx.lastIndex += 1; continue; }
+    if (allow.has(mt[0])) continue;
+    const before = text.slice(Math.max(0, mt.index - 40), mt.index).toLowerCase();
+    const context = (rec.context ?? []).some((w) => w && before.includes(w.toLowerCase()));
+    matches.push({ start: mt.index, end: mt.index + mt[0].length, entity_type: rec.supported_entity, score: Math.min(1, pattern.score + (context ? 0.05 : 0)), evidence: `custom-pattern:${pattern.name}`, context });
   }
-
-  private create(body: string | undefined): Response {
-    let spec: ScanSpecIn;
-    try { spec = JSON.parse(body || '{}') as ScanSpecIn; } catch { return refuse(422, 'body_invalid', 'the body is not JSON'); }
-    const extra = Object.keys(spec).filter((k) => !SPEC_KEYS.has(k));
-    if (extra.length) return json({ detail: extra.map((k) => ({ loc: ['body', k], msg: 'Extra inputs are not permitted' })) }, 422);
-    const um = /^(https?):\/\/([^/:?#@]+)(:\d+)?(\/[^?#]*)?/i.exec(spec.url ?? '');
-    if (!um || spec.url.includes('@')) return refuse(422, 'url_invalid', 'the start URL must be http(s) without user information');
-    if (!REGISTERED.has(um[2].toLowerCase())) return refuse(422, 'host_not_registered', 'the host is not registered for this tenant');
-    if (spec.capture?.har) return refuse(422, 'har_not_supported', 'HAR capture is not supported: a HAR holds response bodies');
-    const sc = spec.scope;
-    if (!sc || (sc.max_pages !== null && (sc.max_pages < 1 || sc.max_pages > 500)) || (sc.max_depth !== null && (sc.max_depth < 0 || sc.max_depth > 5))) {
-      return refuse(422, 'scope_invalid', 'max_pages must be 1–500 and max_depth 0–5');
+  for (const word of rec.deny_list ?? []) {
+    for (let i = text.indexOf(word); word && i >= 0; i = text.indexOf(word, i + word.length)) {
+      matches.push({ start: i, end: i + word.length, entity_type: rec.supported_entity, score: 1, evidence: `custom-deny:${rec.name}`, context: false });
     }
-    if (!LOCALES.has(spec.fill?.locale) || spec.fill.personas < 1 || spec.fill.personas > 50 || spec.fill.display_persona > spec.fill.personas) {
-      return json({ detail: [{ loc: ['body', 'fill'], msg: 'personas must be 1–50 and the locale supported' }] }, 422);
+  }
+  matches.sort((a, b) => a.start - b.start);
+  return respond(200, { matches, count: matches.length, yaml: toYaml({ recognizers: [rec] }) });
+}
+
+// ---- the router ---------------------------------------------------------------------------------
+
+function parseBody(body: BodyInit | null | undefined): Record<string, any> {
+  if (typeof body !== 'string' || !body) return {};
+  try { return JSON.parse(body) as Record<string, any>; } catch { return {}; }
+}
+
+/** Answer one request from the fixtures, or `null` to let it through to the network. */
+export function route(s: FixtureState, method: string, url: URL, rawBody: BodyInit | null | undefined, scenario: string): Response | null {
+  const p = url.pathname;
+  const q = url.searchParams;
+  const body = parseBody(rawBody);
+  const empty = scenario === 'empty';
+  const noAdmin = scenario === 'noadmin';
+  const days = Math.min(90, Math.max(1, Number(q.get('days') ?? 14) || 14));
+
+  if (p === '/readyz') return respond(200, fx.readiness());
+  if (p === '/health') return respond(200, { status: 'ok' });
+  if (p === '/metrics') return new Response(fx.METRICS_TEXT, { headers: { 'content-type': 'text/plain' } });
+  if (!p.startsWith('/api/v1/')) return null;
+  const parts = p.slice('/api/v1/'.length).split('/').map(decodeURIComponent);
+
+  // reports
+  if (parts[0] === 'reports') {
+    if (scenario === 'degraded') return refuse(503, 'db_unavailable', 'the metadata database is not configured');
+    if (parts[1] === 'summary') {
+      const sum = fx.summary(s.now, days);
+      if (empty) { sum.recent_jobs = []; sum.findings_by_type = []; }
+      return respond(200, sum);
     }
-    this.counter += 1;
-    const id = `s_01K7ZRFX${String(this.counter).padStart(18, '0')}`;
-    const origin = `${um[1].toLowerCase()}://${um[2].toLowerCase()}${um[3] ?? ''}`;
-    const rec: ScanRecord = { id, spec, createdAt: this.now(), canceledAt: null, probe: sc.max_pages === 1, full: demoScan(id), origin };
-    this.scans.set(id, rec);
-    const wrap = spec.consistency?.wrap_key;
-    const key: KeyMaterial = wrap
-      ? { ...FIXTURE_KEY, kid: `k_fx${this.counter}`, dek: null, wrapped_dek: 'V1JBUFBFRC1GSVhUVVJFLU9OTFk=', wrap: { type: wrap.type, kid: 'caller-key' } }
-      : { ...FIXTURE_KEY, kid: `k_fx${this.counter}` };
-    return json({ scan: this.view(id)?.job, key_material: key, synthesis_seed: spec.consistency?.synthesis_seed ?? FIXTURE_SEED, replay: false }, 202);
-  }
-
-  private cancel(id: string): Response {
-    const rec = this.scans.get(id);
-    const view = this.view(id);
-    if (!rec || !view) return refuse(409, 'job_terminal', 'the scan has finished');
-    if (view.job.state === 'succeeded' || view.job.state === 'canceled') return refuse(409, 'job_terminal', 'the scan has finished');
-    rec.canceledAt = this.now();
-    return json(this.view(id)?.job);
-  }
-
-  private csv(cols: string[], rows: Record<string, unknown>[]): Response {
-    const cell = (v: unknown): string => {
-      const s = Array.isArray(v) ? v.join('|') : v === null || v === undefined ? '' : String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const text = [cols.join(','), ...rows.map((r) => cols.map((c) => cell(r[c])).join(','))].join('\n');
-    return new Response(text, { status: 200, headers: { 'content-type': 'text/csv' } });
-  }
-
-  private async artefact(id: string): Promise<Response> {
-    const m = /^art_(\d+)_(original|annotated|filled_synthesize|filled_obfuscate|masked_capture|capture_json)$/.exec(id);
-    const ex = /^art_(.+)_export_(json|csv)$/.exec(id);
-    if (ex) return this.handle('GET', `/api/v1/scans/${ex[1]}/export?format=${ex[2]}`, undefined) as Promise<Response>;
-    if (!m) return refuse(404, 'not_found', 'artefact not found');
-    const page = this.demo.pages.find((p) => p.page_no === Number(m[1])) ?? null;
-    if (!page || !Object.values(page.artefacts).includes(id)) return refuse(404, 'not_found', 'artefact not found');
-    const fields = this.demo.fields[page.page_no] ?? [];
-    if (m[2] === 'capture_json') {
-      const entries = Object.entries(page.rendered_findings).map(([entity, n], i) => ({ n: i + 1, entity_type: entity, count: n, token: `[[PII:${entity}:fx${i}…]]` }));
-      return json({ page_no: page.page_no, kind: 'reveal_map', entries, note: 'reveal with POST /api/v1/reveal and this scan’s key material' });
+    if (parts[1] === 'jobs') return respond(200, fx.reportsJobs(s.now, Math.min(days, 30)));
+    if (parts[1] === 'api-rollups' && parts.length === 2) return respond(200, { items: empty ? [] : fx.apiRollups(s.now, days) });
+    if (parts[1] === 'api-rollups' && parts[2]) {
+      const action = q.get('action') ?? 'obfuscate';
+      const fmt = q.get('format') ?? 'json';
+      const doc = fx.apiRollups(s.now, 30).find((r) => r.day === parts[2] && r.action === action);
+      if (!doc) return refuse(404, 'rollup_not_found', 'no roll-up for that day and action');
+      return fmt === 'pdf' ? file('%PDF-1.4\n% DPS fixture API roll-up\n', 'application/pdf', `api-rollup-${doc.day}-${action}.pdf`)
+        : file(JSON.stringify({ ...doc, generated_at: s.now.toISOString() }, null, 2), 'application/json', `api-rollup-${doc.day}-${action}.json`);
     }
-    const blob = this.png ? await this.png({ id, kind: m[2], page, fields }) : new Blob([PNG_1X1], { type: 'image/png' });
-    return new Response(blob, { status: 200, headers: { 'content-type': 'image/png' } });
-  }
-
-  /** The scan as the API would show it now. */
-  private view(id: string): { job: Job; pages: ScanPage[]; fields: Record<number, ScanField[]>; events: ScanEvent[]; summary: ScanSummary; full: DemoScan } | null {
-    if (id === FIXTURE_SCAN_ID) return { job: this.demo.job, pages: this.demo.pages, fields: this.demo.fields, events: this.demo.events, summary: this.demo.summary, full: this.demo };
-    const rec = this.scans.get(id);
-    if (!rec) return null;
-    return rec.probe ? this.probeView(rec) : this.crawlView(rec);
-  }
-
-  private jobFor(rec: ScanRecord, state: JobState, s: ScanSummary, endMs: number): Job {
-    const { spec } = rec;
-    const started = state === 'queued' ? null : new Date(rec.createdAt + QUEUED_MS).toISOString();
-    const terminal = state === 'succeeded' || state === 'canceled';
-    return scanJob({
-      id: rec.id, state, mode: spec.mode, created_at: new Date(rec.createdAt).toISOString(), updated_at: new Date(endMs).toISOString(),
-      started_at: started, finished_at: terminal ? new Date(endMs).toISOString() : null,
-      spec: {
-        url: redactedStart(spec.url), url_origin: rec.origin, scope: spec.scope, auth: { storage_state_ref: spec.auth.storage_state_ref },
-        mode: spec.mode, fill: spec.fill, parallel_view: spec.parallel_view, capture: spec.capture,
-        consistency: { scope: spec.consistency?.scope ?? 'request', key_wrapped: !!spec.consistency?.wrap_key }, policy: spec.policy ?? null,
-      },
-      progress: { ...scanJob().progress, outcome: state === 'succeeded' ? 'succeeded' : state === 'canceled' ? 'canceled' : '', evidence_id: s.evidence_id, pages: s.pages_visited, fields: s.fields, blocked_requests: Object.values(s.blocked_requests).reduce((a, b) => a + b, 0) },
-    });
-  }
-
-  private crawlView(rec: ScanRecord): ReturnType<ScanFixtureServer['view']> {
-    const end = rec.canceledAt ?? this.now();
-    const elapsed = end - rec.createdAt;
-    const all = rec.full.pages.map((p) => this.reorigin(p, rec.origin));
-    const n = all.length;
-    const p = Math.max(0, Math.min(1, (elapsed - QUEUED_MS) / this.durationMs));
-    const k = elapsed < QUEUED_MS ? -1 : Math.floor(p * n);
-    const pages: ScanPage[] = [];
-    all.forEach((pg, i) => {
-      if (k < 0) return;
-      if (i < k || (p >= 1)) pages.push(pg);
-      else if (i === k && !rec.canceledAt) pages.push(this.blank(pg, pg.status === 'skipped' ? 'skipped' : 'visiting'));
-      else if (i <= k + 3 && !rec.canceledAt) pages.push(pg.status === 'skipped' ? pg : this.blank(pg, 'queued'));
-      else if (i <= k + 3 && rec.canceledAt) pages.push(this.blank(pg, 'skipped', 'budget'));
-    });
-    const doneNos = new Set(pages.filter((pg) => pg.status === 'done' || pg.status === 'skipped').map((pg) => pg.page_no));
-    const fields: Record<number, ScanField[]> = {};
-    for (const no of doneNos) fields[no] = rec.full.fields[no] ?? [];
-    const visiting = pages.find((pg) => pg.status === 'visiting');
-    const events = rec.full.events
-      .filter((e) => (e.page_no !== null && doneNos.has(e.page_no)) || (visiting && e.page_no === visiting.page_no && e.kind === 'navigate'))
-      .map((e, i) => ({ ...e, seq: i + 1, target: e.target.replace(DEMO_ORIGIN, rec.origin), ts: new Date(rec.createdAt + QUEUED_MS + (e.page_no ?? 1) * (this.durationMs / n)).toISOString() }));
-    const state: JobState = rec.canceledAt ? 'canceled' : k < 0 ? 'queued' : p >= 1 ? 'succeeded' : 'running';
-    const finished = state === 'succeeded';
-    const summary = summarize(pages, fields, events, {
-      mode: rec.spec.mode, locale: rec.spec.fill.locale, personas: rec.spec.fill.personas, display_persona: rec.spec.fill.display_persona,
-      export_artefacts: finished || rec.canceledAt ? rec.full.summary.export_artefacts : {}, evidence_id: finished || rec.canceledAt ? `ev_fx_${rec.id.slice(-6)}` : null,
-      elapsed_s: k < 0 ? null : Math.round((end - rec.createdAt - QUEUED_MS) / 1000),
-    });
-    return { job: this.jobFor(rec, state, summary, end), pages, fields, events, summary, full: rec.full };
-  }
-
-  private probeView(rec: ScanRecord): ReturnType<ScanFixtureServer['view']> {
-    const end = rec.canceledAt ?? this.now();
-    const elapsed = end - rec.createdAt;
-    const path = /^[a-z]+:\/\/[^/]+(\/[^?#]*)?/i.exec(rec.spec.url)?.[1] || '/';
-    const done = elapsed >= QUEUED_MS + 1500;
-    const valid = !!rec.spec.auth.storage_state_ref;
-    const pg = this.blank(this.reorigin(this.demo.pages[0], rec.origin), done ? (valid ? 'done' : 'redirected') : elapsed >= QUEUED_MS ? 'visiting' : 'queued');
-    pg.url_redacted = `${rec.origin}${path}`;
-    pg.template = path;
-    if (done) {
-      pg.http_status = valid ? 200 : 302;
-      pg.final_url_redacted = valid ? null : `${rec.origin}/login`;
+    if (parts[1] === 'evidence') {
+      const since = s.now.getTime() - Math.min(90, Number(q.get('days') ?? 30) || 30) * DAY;
+      const needle = (q.get('q') ?? '').toLowerCase();
+      const outcome = q.get('outcome');
+      let items = (empty ? [] : s.items).filter((i) => new Date(i.created_at).getTime() >= since)
+        .filter((i) => !q.get('layer') || i.layer === q.get('layer'))
+        .filter((i) => !outcome || (outcome === 'ok' ? ['succeeded', 'dry_run'] : ['failed', 'canceled']).includes(i.outcome))
+        .filter((i) => !needle || [i.job_id, i.summary.ticket, i.summary.policy, i.summary.source].some((v) => String(v ?? '').toLowerCase().includes(needle)));
+      const limit = Number(q.get('limit') ?? 50);
+      const start = Number(q.get('cursor') ?? 0);
+      const next = start + limit < items.length ? String(start + limit) : null;
+      items = items.slice(start, start + limit);
+      return respond(200, { items, next_cursor: next });
     }
-    const pages = elapsed >= QUEUED_MS ? [pg] : [];
-    const events: ScanEvent[] = done ? [{ seq: 1, ts: new Date(end).toISOString(), kind: 'navigate', method: 'GET', result: String(pg.http_status), page_no: 1, target: pg.url_redacted, note_code: 'start', counts: {} }] : [];
-    const state: JobState = rec.canceledAt ? 'canceled' : done ? 'succeeded' : elapsed >= QUEUED_MS ? 'running' : 'queued';
-    const summary = summarize(pages, {}, events, { mode: rec.spec.mode, locale: rec.spec.fill.locale, personas: 1, display_persona: 1 });
-    return { job: this.jobFor(rec, state, summary, end), pages, fields: {}, events, summary, full: rec.full };
   }
 
-  private reorigin(p: ScanPage, origin: string): ScanPage {
-    return { ...p, url_redacted: p.url_redacted.replace(DEMO_ORIGIN, origin), final_url_redacted: p.final_url_redacted?.replace(DEMO_ORIGIN, origin) ?? null };
+  // admin
+  if (parts[0] === 'admin') {
+    if (noAdmin) return refuse(403, 'forbidden', 'this key lacks the admin scope');
+    if (parts[1] === 'keys' && parts.length === 2 && method === 'GET') return respond(200, { items: s.keys, next_cursor: null });
+    if (parts[1] === 'keys' && parts.length === 2 && method === 'POST') {
+      const name = String(body.name ?? '');
+      // dps/auth_db.py: names are not unique (a rotation keeps the name); refusals as built
+      if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(name)) return refuse(422, 'invalid_name', 'name must match ^[a-z0-9][a-z0-9-]{1,62}$');
+      const exp = Number(body.expires_in_days);
+      if (!(exp >= 1 && exp <= 365)) return refuse(422, 'invalid_expiry', 'expiry must be 1 to 365 days');
+      if (!Array.isArray(body.scopes) || body.scopes.length === 0 || !Array.isArray(body.tenant_ids) || body.tenant_ids.length === 0) {
+        return refuse(422, 'invalid_grant', 'a key needs at least one tenant and one scope');
+      }
+      const raw = rawKey();
+      s.seq += 1;
+      const record: ApiKeyView = { id: `k_new${s.seq}`, name, key_prefix: raw.slice(0, 8), tenant_ids: body.tenant_ids, scopes: body.scopes, source: 'db', status: 'active',
+        created_by: 'platform-admin', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + exp * DAY).toISOString(), last_used_at: null,
+        disabled_at: null, rotated_from: null, rotated_at: null, age_days: 0 };
+      s.keys = [record, ...s.keys];
+      s.audit = [{ id: (s.audit[0]?.id ?? 0) + 1, ts: new Date().toISOString(), tenant_id: body.tenant_ids?.[0] ?? '*', key_id: 'k_platform', key_name: 'platform-admin', trace_id: null, route: 'POST /api/v1/admin/keys', action: 'admin.key.create', layer: 'admin', mode: null, policy: null, outcome: 'ok', status: 201, job_id: null, findings: null, methods: {} }, ...s.audit];
+      const out: CreatedKey = { key: raw, record };
+      return respond(201, out, { 'cache-control': 'no-store' });
+    }
+    if (parts[1] === 'keys' && parts[2]) {
+      const key = s.keys.find((k) => k.id === parts[2]);
+      if (!key) return refuse(404, 'key_not_found', 'no such key');
+      if (key.source === 'static') return refuse(404, 'key_not_found', 'key not found');
+      if (parts[3] === 'disable') { Object.assign(key, { status: 'disabled', disabled_at: key.disabled_at ?? new Date().toISOString() }); return respond(200, key); }
+      if (parts[3] === 'enable') {
+        if (key.rotated_at) return refuse(409, 'key_rotated', 'a rotated key cannot be re-enabled');
+        if (key.expires_at && Date.parse(key.expires_at) <= Date.now()) return refuse(409, 'key_expired', 'an expired key cannot be re-enabled');
+        Object.assign(key, { status: 'active', disabled_at: null }); return respond(200, key);
+      }
+      if (parts[3] === 'rotate') {
+        if (key.rotated_at) return refuse(409, 'key_rotated', 'key was already rotated');
+        if (key.status !== 'active') return refuse(404, 'key_not_found', 'key not found, disabled or expired');
+        const grace = Number(body.grace_hours ?? 24);
+        if (!(grace >= 0 && grace <= 168)) return refuse(422, 'invalid_grace', 'grace must be 0 to 168 hours');
+        const raw = rawKey();
+        s.seq += 1;
+        const fresh: ApiKeyView = { ...clone(key), id: `k_rot${s.seq}`, key_prefix: raw.slice(0, 8), created_at: new Date().toISOString(), last_used_at: null, rotated_from: key.id,
+          rotated_at: null, age_days: 0, expires_at: key.expires_at ?? new Date(Date.now() + 90 * DAY).toISOString() };
+        // dps/auth_db.py::rotate_key: grace 0 disables the old key now; otherwise it expires after the grace
+        const nowIso = new Date().toISOString();
+        Object.assign(key, grace === 0 ? { rotated_at: nowIso, disabled_at: nowIso, status: 'disabled' } : { rotated_at: nowIso, expires_at: new Date(Date.now() + grace * 3_600_000).toISOString(), status: 'active' });
+        s.keys = [fresh, ...s.keys];
+        return respond(201, { new: { key: raw, record: fresh }, old: key }, { 'cache-control': 'no-store' });
+      }
+    }
+    if (parts[1] === 'tenants' && parts.length === 2 && method === 'GET') return respond(200, { items: s.tenants, next_cursor: null });
+    if (parts[1] === 'tenants' && (method === 'POST' || method === 'PATCH')) {
+      const hosts: string[] = [];
+      for (const h of (body.registered_hosts ?? []) as string[]) {
+        const n = normalizeHost(h);
+        if (!n) return refuse(422, 'invalid_host', 'a registered host is a DNS name such as host.bank.internal');
+        if (!hosts.includes(n)) hosts.push(n);
+      }
+      if (method === 'POST') {
+        const id = String(body.tenant_id ?? '');
+        if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(id)) return refuse(422, 'invalid_tenant', 'tenant ids are lowercase letters, digits, dash and underscore');
+        if (tenantView(s, id)) return refuse(409, 'tenant_exists', 'the tenant exists');
+        const t: TenantView = { tenant_id: id, display_name: body.display_name ?? null, note: body.note ?? null, overrides: {},
+          effective: { tenant_id: id, retention_days: body.retention_days ?? 30, max_running: body.max_running ?? 2, max_queued: body.max_queued ?? 200, daily_row_quota: body.daily_row_quota ?? null, registered_hosts: hosts },
+          usage: { running: 0, queued: 0, rows_today: 0 }, keys: {}, exists: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+        s.tenants = [...s.tenants, t];
+        return respond(201, t);
+      }
+      const t = tenantView(s, parts[2]);
+      if (!t) return refuse(404, 'tenant_not_found', 'no such tenant');
+      if ('display_name' in body) t.display_name = body.display_name;
+      if ('note' in body) t.note = body.note;
+      for (const f of ['retention_days', 'max_running', 'max_queued', 'daily_row_quota'] as const) {
+        if (f in body) { (t.effective as unknown as Record<string, unknown>)[f] = body[f]; t.overrides[f] = body[f]; }
+      }
+      if ('registered_hosts' in body) t.effective.registered_hosts = hosts;
+      t.updated_at = new Date().toISOString();
+      return respond(200, t);
+    }
+    if (parts[1] === 'audit') {
+      const tenantsParam = q.get('tenants');
+      const outcome = q.get('outcome');
+      const needle = (q.get('q') ?? '').toLowerCase();
+      const groups: Record<string, string[]> = { ok: ['ok'], failed: ['error', 'failed', 'verification_failed', 'leakage', 'dead', 'upstream_error'], blocked: ['rejected', 'bad_request', 'denied', 'blocked', 'forbidden', 'canceled'] };
+      const rows = (empty ? [] : s.audit)
+        .filter((r) => tenantsParam === '*' || r.tenant_id === fx.FIXTURE_TENANT)
+        .filter((r) => !q.get('layer') || r.layer === q.get('layer'))
+        .filter((r) => !outcome || (groups[outcome] ?? []).includes(r.outcome))
+        .filter((r) => !needle || [r.route, r.key_name, r.job_id, r.policy].some((v) => String(v ?? '').toLowerCase().includes(needle)));
+      if (q.get('format') === 'csv') {
+        const head = 'ts,tenant_id,key_name,route,action,layer,mode,policy,outcome,status,job_id,findings';
+        const lines = rows.map((r) => [r.ts, r.tenant_id, r.key_name, r.route, r.action, r.layer, r.mode, r.policy, r.outcome, r.status, r.job_id, r.findings].map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','));
+        return file(`${[head, ...lines].join('\n')}\n`, 'text/csv', `dps-audit-${fx.lastDays(s.now, 14)[0]}-${fx.lastDays(s.now, 1)[0]}.csv`);
+      }
+      const limit = Math.min(200, Number(q.get('limit') ?? 50) || 50);
+      const after = q.get('cursor');
+      const start = after ? rows.findIndex((r) => String(r.id) === after) + 1 : 0;
+      const page = rows.slice(start, start + limit);
+      return respond(200, { items: page, next_cursor: start + limit < rows.length ? String(page[page.length - 1].id) : null });
+    }
+    if (parts[1] === 'queue') return respond(200, fx.queue(s.now));
+    if (parts[1] === 'posture') {
+      const report = fx.posture(s.now);
+      const ledger = s.keys.find((k) => k.id === 'k_ledger');
+      if (ledger?.rotated_at || ledger?.status === 'disabled') {
+        report.checks[0] = { ...report.checks[0], ok: true, detail: 'every active key is younger than 90 days or rotated' };
+        report.passed = report.checks.filter((c) => c.ok).length;
+      }
+      return respond(200, report);
+    }
+    if (parts[1] === 'retention' && method === 'POST') return respond(202, { job: { ...fx.evidenceJob(s.now, 'j_retention_fixture'), kind: 'retention', tenant_id: '_system', state: 'queued' } });
   }
 
-  /** A page not yet (fully) processed: no counts, no artefacts. */
-  private blank(p: ScanPage, status: ScanPage['status'], reason: string | null = null): ScanPage {
-    return {
-      ...p, status, status_reason: reason ?? (status === 'skipped' ? p.status_reason : null), http_status: null, form_count: 0, field_count: 0,
-      personal_field_count: 0, critical_field_count: 0, forms: [], artefacts: {}, rendered_findings: {}, risk_flags: [], validation: {},
-      capture_status: null, timings: {},
-    };
+  // M2 connections, evidence, artefacts, jobs, snapshots (the subset the M5 pages read)
+  if (parts[0] === 'connections' && parts.length === 1 && method === 'GET') return respond(200, { items: empty ? [] : fx.connections(s.now), next_cursor: null });
+  if (parts[0] === 'evidence' && parts[1]) {
+    const ev = s.packs[parts[1]];
+    if (!ev) return refuse(404, 'evidence_not_found', 'no such evidence pack');
+    if (parts[2] === 'pdf') return file('%PDF-1.4\n% DPS fixture evidence pack\n', 'application/pdf', `evidence-${ev.id}.pdf`);
+    return respond(200, ev);
   }
+  if (parts[0] === 'evidence') return respond(200, { items: [], next_cursor: null });
+  if (parts[0] === 'artefacts' && parts[1]) {
+    const ev = Object.values(s.packs).find((e) => e.artefacts.some((a) => a.id === parts[1]));
+    if (!ev) return refuse(404, 'artefact_not_found', 'no such artefact');
+    return file(JSON.stringify(ev.pack, null, 2), 'application/json', `${parts[1]}.json`);
+  }
+  if (parts[0] === 'jobs' && parts[1] === 'stats') return respond(200, { workers_online: 7, workers_busy: 6, workers_draining: 1, partitions_waiting: 23, oldest_waiting_s: 41, rows_per_s: 8120, by_state: { running: 4 }, running: 4, tenant_max_running: 6, lease_reclaims_24h: 1 });
+  if (parts[0] === 'jobs' && parts[1]) {
+    const job = fx.evidenceJob(s.now, parts[1]);
+    return job ? respond(200, job) : refuse(404, 'job_not_found', 'no such job');
+  }
+  if (parts[0] === 'jobs') return respond(200, { items: [], next_cursor: null });
+  if (parts[0] === 'snapshots') return refuse(404, 'snapshot_not_found', 'no such snapshot');
+
+  // M1 entities and policy tooling, M5 policy store
+  if (parts[0] === 'entities') return respond(200, { items: fx.ENTITIES, families: [...new Set(fx.ENTITIES.map((e) => e.family))] });
+  if (parts[0] === 'policies') {
+    const fpeOn = true;
+    if (parts[1] === 'presets') return respond(200, s.presets.map(({ name, description, version, hash, mode, reversible }) => ({ name, description, version, hash, mode, reversible })));
+    if (parts[1] === 'validate') return respond(200, presetBody(typeof body.policy === 'string' ? body.policy : 'gdpr-pseudonymise'));
+    if (parts[1] === 'plan') return respond(200, { findings: [], plan: planFor(body.data, body.policy, fpeOn), record_sensitivity: 'CRITICAL', trace_id: 'fixture' });
+    if (parts[1] === 'test-recognizer') return testRecognizer(body.recognizer as RecognizerSpec, String(body.text ?? ''));
+    if (scenario === 'nostore') return refuse(404, 'not_found', 'Not Found');
+    if (parts.length === 1 && method === 'GET') return respond(200, { presets: s.presets, tenant: [...s.policies.values()].map((x) => policyView(x.detail)) });
+    if (parts.length === 1 && method === 'POST') {
+      if (noAdmin) return refuse(403, 'forbidden', 'this key lacks the admin scope');
+      const name = String(body.name ?? '');
+      const base = s.presets.find((x) => x.name === body.base_preset);
+      if (!base) return refuse(404, 'policy_not_found', 'no such preset');
+      if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(name)) return refuse(422, 'invalid_name', 'policy names are lowercase letters, digits and dashes');
+      if (s.policies.has(name)) return refuse(409, 'policy_exists', 'the tenant already has this policy');
+      const v1 = presetBody(base.name);
+      v1.name = name;
+      const detail: TenantPolicyDetail = { name, base_preset: base.name, active_version: 1, active_hash: base.hash, draft: false, draft_changes: 0,
+        published_at: new Date().toISOString(), published_by: 'platform-admin', jobs: 0, active_body: v1 as unknown as Record<string, unknown>, draft_body: null,
+        draft_by: null, draft_updated_at: null, versions: [{ version: 1, hash: base.hash, change_ticket: null, note: 'shipped preset', published_by: 'platform-admin', published_at: new Date().toISOString(), jobs_pinned: 0 }] };
+      s.policies.set(name, { detail, bodies: { 1: v1 } });
+      return respond(201, detail);
+    }
+    const stored = s.policies.get(parts[1]);
+    if (!stored) return refuse(404, 'policy_not_found', 'the tenant has no policy with this name');
+    const d = stored.detail;
+    const active = d.active_version ?? 1;
+    if (parts.length === 2) return respond(200, d);
+    if (parts[2] === 'draft') {
+      if (noAdmin) return refuse(403, 'forbidden', 'this key lacks the admin scope');
+      if (method === 'DELETE') Object.assign(d, { draft: false, draft_changes: 0, draft_body: null, draft_by: null, draft_updated_at: null });
+      else {
+        const next = body.body as Record<string, unknown>;
+        Object.assign(d, { draft: true, draft_body: next, draft_by: 'platform-admin', draft_updated_at: new Date().toISOString(), draft_changes: diffBodies(stored.bodies[active], next).length });
+      }
+      return respond(200, d);
+    }
+    if (parts[2] === 'publish') {
+      if (noAdmin) return refuse(403, 'forbidden', 'this key lacks the admin scope');
+      if (!d.draft_body) return refuse(409, 'no_draft', 'there is no draft to publish');
+      const version = Math.max(...Object.keys(stored.bodies).map(Number)) + 1;
+      const body2 = { ...(d.draft_body as unknown as PolicyDoc), version };
+      const hash = fakeHash(`${d.name}:${version}:${JSON.stringify(body2)}`);
+      stored.bodies[version] = body2;
+      const v: PolicyVersionView = { version, hash, change_ticket: body.change_ticket ?? null, note: body.note ?? null, published_by: 'platform-admin', published_at: new Date().toISOString(), jobs_pinned: 0 };
+      Object.assign(d, { active_version: version, active_hash: hash, active_body: body2, draft: false, draft_changes: 0, draft_body: null, draft_by: null, draft_updated_at: null,
+        published_at: v.published_at, published_by: v.published_by, versions: [v, ...d.versions] });
+      return respond(201, v);
+    }
+    if (parts[2] === 'versions' && parts[3]) {
+      const body2 = stored.bodies[Number(parts[3])];
+      if (!body2) return refuse(404, 'policy_not_found', 'no such version');
+      return q.get('format') === 'yaml' ? file(toYaml(body2), 'text/yaml', `${d.name}-v${parts[3]}.yaml`) : respond(200, body2);
+    }
+    if (parts[2] === 'diff') {
+      const from = stored.bodies[Number(q.get('from'))];
+      const toParam = q.get('to');
+      if (toParam === 'draft' && !d.draft_body) return refuse(409, 'no_draft', 'there is no draft');
+      const to = toParam === 'draft' ? d.draft_body : stored.bodies[Number(toParam)];
+      if (!from || !to) return refuse(404, 'policy_not_found', 'no such version');
+      return respond(200, { from: Number(q.get('from')), to: toParam === 'draft' ? 'draft' : Number(toParam), changes: diffBodies(from, to) });
+    }
+  }
+  return refuse(404, 'not_found', `no fixture for ${method} ${p}`);
+}
+
+/** Patch `window.fetch` to answer from the fixtures (dev server only; see the module comment). */
+export function installFixtureServer(): void {
+  const realFetch = window.fetch.bind(window);
+  const state = createFixtureState(new Date());
+  const scenario = new URLSearchParams(window.location.search).get('fixture') ?? '';
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const url = new URL(href, window.location.origin);
+    const now = new URLSearchParams(window.location.search).get('fixture') ?? scenario;
+    const res = url.origin === window.location.origin ? route(state, (init?.method ?? 'GET').toUpperCase(), url, init?.body, now) : null;
+    if (!res) return realFetch(input, init);
+    await new Promise((r) => window.setTimeout(r, 60));
+    return res;
+  };
+  document.documentElement.setAttribute('data-fixtures', FIXTURE_MARKER);
+  console.info(`[${FIXTURE_MARKER}] fixture mode: API answers come from src/dev/fixtures.ts${scenario ? ` (scenario ${scenario})` : ''}`);
 }

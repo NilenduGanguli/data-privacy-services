@@ -26,8 +26,10 @@ ENVIRONMENTS = ("local", "dev", "staging", "prod")
 LLM_PROVIDERS = ("", "stellar", "vertex", "stub")
 MIGRATIONS_MODES = ("auto", "verify", "off")
 ARTEFACT_STORES = ("local", "s3")
+TABULAR_ENGINES = ("copula", "mostly")
 _SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _KEK_MESSAGE = "job KEK must be base64 of exactly 32 bytes"
+_ORACLE_MODULE = re.compile(r"[A-Za-z0-9_.-]{1,48}")
 
 
 class _FileSecretSource(PydanticBaseSettingsSource):
@@ -228,6 +230,13 @@ class Settings(BaseSettings):
     inline_secrets_allowed: bool = True
     inline_secret_ttl_hours: int = 24
 
+    # --- M3 connectors: Oracle and MongoDB (contract §10). Their credentials never come from
+    # env vars: they come from the connection's secret_ref files (username, password, dsn, uri).
+    oracle_pool_max: int = 4  # sessions per Oracle connection pool
+    oracle_call_timeout_ms: int = 30000  # per round trip (the Wega rule)
+    oracle_module: str = "dps"  # v$session.module of every DPS session
+    mongo_server_selection_timeout_ms: int = 5000
+
     # --- retention and audit ---
     retention_days: int = 30
     retention_interval_hours: int = 6
@@ -270,6 +279,48 @@ class Settings(BaseSettings):
     scan_viewport_width: int = Field(default=1280, ge=1)
     scan_viewport_height: int = Field(default=900, ge=1)
     scan_screenshot_max_height: int = Field(default=12000, ge=1)  # full-page PNGs cropped here
+    # --- M5: tabular synthesis (contract §6.6, §10) ---
+    synth_tabular_engine: str = "copula"  # comma list of enabled engines: copula | mostly; "" = off
+    copula_fit_rows: int = Field(default=100_000, ge=1)  # rows fitted at prepare
+    copula_holdout_rows: int = Field(default=20_000, ge=0)  # held out to measure privacy, unfitted
+    copula_metrics_rows: int = Field(default=5_000, ge=1)  # preview rows run through the batch
+    copula_rare_floor: float = 0.01  # categories below this share are folded away
+    copula_max_resample: int = 8  # exact-row rejections per row before failing closed
+    fidelity_column_limit: float = Field(default=0.05, ge=0.0, le=1.0)  # KS/TVD "within limit"
+    fidelity_corr_limit: float = Field(default=0.10, ge=0.0, le=2.0)  # correlation-delta limit
+    privacy_nndr_target: float = Field(default=0.95, gt=0.0)  # NNDR at/above which privacy passes
+    privacy_nndr_enforce: bool = False  # true: a ratio below target fails prepare (privacy_gate)
+    mostly_pool_rows: int = Field(default=20_000, ge=1)  # rows the MOSTLY engine draws per job
+    mostly_max_training_minutes: int = Field(default=10, ge=1)
+    # --- M5: external tokenization (spec §5.5) ---
+    tokenizer_provider: str = ""  # "" (off) | http
+    tokenizer_url: str = ""
+    tokenizer_token: str = Field(default="", repr=False)  # bearer token; _FILE in production
+    tokenizer_ca_file: str = ""
+    tokenizer_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
+    tokenizer_batch: int = 500
+    tokenizer_retries: int = Field(default=2, ge=0, le=10)
+    # --- M5: keys, reports, posture ---
+    key_cache_seconds: int = 30
+    key_max_ttl_days: int = Field(default=365, ge=1)
+    key_rotation_max_age_days: int = Field(default=90, ge=1)
+    key_rotation_max_grace_hours: int = Field(default=168, ge=0)
+    report_pdf_enabled: bool = True
+    rollup_retention_days: int = Field(default=400, ge=1)
+    egress_tls_required: bool = False  # posture: true in staging/prod
+    cors_origins: str = "*"  # posture: never "*" in staging/prod; "" = same-origin only
+    # --- M5: strict verification and LLM exposure (spec §10, P1) ---
+    verify_warn_allowed: bool = True  # posture: false in staging/prod (callers cannot ask "warn")
+    llm_egress_check: Literal["strict", "warn"] = "strict"  # strict blocks, warn counts
+    # --- M5: utility and membership inference (spec §5.7) ---
+    utility_max_rows: int = Field(default=5_000, ge=1)  # TSTR train/test budget per job
+    mia_min_holdout: int = Field(default=50, ge=1)  # fewer holdout rows: the MIA proxy is "not run"
+    mia_auc_target: float = Field(default=0.60, gt=0.0, le=1.0)  # AUC at/below which it passes
+    # --- M5: MOSTLY differential privacy (spec §5.6) ---
+    mostly_dp_enabled: bool = False
+    mostly_dp_max_epsilon: float = Field(default=5.0, gt=0)
+    mostly_dp_delta: float = Field(default=1e-5, gt=0, lt=1)
+    mostly_linked_child_rows: int = Field(default=200_000, ge=1)  # child rows read for linked fit
 
     @field_validator("env")
     @classmethod
@@ -287,7 +338,7 @@ class Settings(BaseSettings):
             raise ValueError(f"llm_provider must be one of {LLM_PROVIDERS}, got {v!r}")
         return v
 
-    @field_validator("stellar_base_url", "coin_url", "azure_vision_endpoint")
+    @field_validator("stellar_base_url", "coin_url", "azure_vision_endpoint", "tokenizer_url")
     @classmethod
     def _sane_url(cls, v: str) -> str:
         if not v:
@@ -358,6 +409,75 @@ class Settings(BaseSettings):
             raise ValueError(_KEK_MESSAGE) from None
         if len(raw) != 32:
             raise ValueError(_KEK_MESSAGE)
+        return v
+
+    @field_validator("synth_tabular_engine")
+    @classmethod
+    def _valid_tabular(cls, v: str) -> str:
+        engines = [p.strip().lower() for p in v.split(",") if p.strip()]
+        if any(e not in TABULAR_ENGINES for e in engines):
+            raise ValueError("synth_tabular_engine accepts copula and mostly only")
+        return ",".join(dict.fromkeys(engines))
+
+    @field_validator("tokenizer_provider")
+    @classmethod
+    def _valid_tokenizer(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("", "http"):
+            raise ValueError("tokenizer_provider must be '' or 'http'")
+        return v
+
+    @field_validator("copula_rare_floor")
+    @classmethod
+    def _rare_floor(cls, v: float) -> float:
+        if not 0.0 <= v <= 0.2:
+            raise ValueError("copula_rare_floor must be within [0, 0.2]")
+        return v
+
+    @field_validator("copula_max_resample", "tokenizer_batch", "key_cache_seconds")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be at least 1")
+        return v
+
+    @property
+    def tabular_engines(self) -> list[str]:
+        """The enabled tabular synthesis engines (``synth_tabular_engine`` as a list)."""
+        return [p for p in self.synth_tabular_engine.split(",") if p]
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """``cors_origins`` split on commas, trimmed, empties dropped (``[]`` = same-origin)."""
+        return [p.strip() for p in self.cors_origins.split(",") if p.strip()]
+
+    @field_validator("oracle_pool_max")
+    @classmethod
+    def _oracle_pool_max(cls, v: int) -> int:
+        if not 1 <= v <= 64:
+            raise ValueError("oracle_pool_max must be between 1 and 64")
+        return v
+
+    @field_validator("oracle_call_timeout_ms")
+    @classmethod
+    def _oracle_call_timeout(cls, v: int) -> int:
+        if not 1_000 <= v <= 3_600_000:
+            raise ValueError("oracle_call_timeout_ms must be between 1000 and 3600000")
+        return v
+
+    @field_validator("oracle_module")
+    @classmethod
+    def _oracle_module(cls, v: str) -> str:
+        # v$session.module holds 64 bytes; the DBA's audit filters on it, so keep a plain token.
+        if not _ORACLE_MODULE.fullmatch(v):
+            raise ValueError("oracle_module must be 1-48 characters of [A-Za-z0-9_.-]")
+        return v
+
+    @field_validator("mongo_server_selection_timeout_ms")
+    @classmethod
+    def _mongo_selection_timeout(cls, v: int) -> int:
+        if not 500 <= v <= 120_000:
+            raise ValueError("mongo_server_selection_timeout_ms must be between 500 and 120000")
         return v
 
     @property

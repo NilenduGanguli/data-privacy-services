@@ -8,6 +8,13 @@ what reveal needs (``{path, entity_type, method, params, anchor_path, reveal, te
 ``reveal`` is false for ``date_shift`` when the row anchor cannot be recomputed from the output
 (the anchor column transformed one-way, or an append whose keys were replaced) — contract §6.2.
 
+**Synthesize packs** (M5, contract §7.1/§7.2) carry the value-free figures ``prepare`` measured on
+the deterministic preview (``progress.metrics``): ``fidelity``, ``privacy`` (plus the redraws the
+partitions made, ``exact_row_resamples_run``), ``utility`` and ``tabular`` (engine, modelled and
+excluded columns, constraints, fit/holdout/preview sizes). A synthesize run without tabular
+synthesis says so in ``privacy`` (``measured: false``): its non-sensitive columns were copied from
+the source, which is exactly what a reader of the pack must know.
+
 ``pack_sha256 = sha256(canonical JSON, sort_keys, compact separators)``; ``config_hash =
 sha256(policy hash + snapshot hash + sha256(canonical redacted spec))``. The HTML rendering is a
 self-contained page (every interpolation escaped, inline CSS with a print stylesheet, no
@@ -19,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -41,6 +49,8 @@ Outcome = Literal["succeeded", "failed", "canceled", "dry_run"]
 _HIDDEN = ConfigDict(hide_input_in_errors=True)
 _MIN_LIMIT, _MAX_LIMIT = 1, 200
 _REPLACED_KEYS = frozenset({"generate", "offset"})
+#: Outcomes whose verification can pass: a failed or canceled run's output is incomplete.
+FINISHED_OUTCOMES = frozenset({"succeeded", "dry_run"})
 
 
 class EvidencePack(BaseModel):
@@ -73,6 +83,7 @@ class EvidencePack(BaseModel):
     fidelity: dict[str, Any] | None = None
     privacy: dict[str, Any] | None = None
     utility: dict[str, Any] | None = None
+    tabular: dict[str, Any] | None = None
     scan: dict[str, Any] | None = None
     timings: dict[str, Any]
     partitions: list[dict[str, Any]]
@@ -104,6 +115,7 @@ class EvidenceInputs:
     errors: list[dict[str, str]]
     engine_version: str
     image_digest: str | None
+    policy_version: str | None = None  # M5: the resolved policy's version, when known
 
 
 class EvidenceRecord(BaseModel):
@@ -136,9 +148,13 @@ class EvidenceSummary(BaseModel):
     policy: str | None = None
     ticket: str | None = None
     passed: bool
+    #: The post-write sample found personal data in a column the snapshot called not personal.
+    review_required: bool = False
     hits: int
     rows_written: int
     html_artefact_id: str | None = None
+    #: The first error of a failed or canceled run (a code, e.g. ``length_overflow``).
+    error_code: str | None = None
 
 
 def _canon(doc: Any) -> bytes:
@@ -161,24 +177,70 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: Counter keys of tabular redraws (``<engine>_resample``, M5): counted, never a method.
+RESAMPLE_KEYS = frozenset({"copula_resample", "mostly_resample"})
+
+
 def _split_counters(
     counters: dict[str, int],
 ) -> tuple[dict[str, int], dict[str, int], dict[str, int], int]:
-    """``(methods, fallbacks, per column, verification hits)`` from a counter map."""
+    """``(methods, fallbacks, per column, verification hits)`` from a counter map (tabular
+    redraw counters are left out; :func:`_resamples` sums them)."""
     methods: dict[str, int] = {}
     fallbacks: dict[str, int] = {}
     columns: dict[str, int] = {}
     hits = 0
     for key, value in counters.items():
         if key.startswith("fallback:"):
-            fallbacks[key.removeprefix("fallback:")] = int(value)
+            # counters stored before verify r2 issue 3 could read fallback:fallback:<reason>
+            reason = re.sub(r"^(?:fallback:)+", "", key)
+            fallbacks[reason] = fallbacks.get(reason, 0) + int(value)
         elif key.startswith("col:"):
             columns[key.removeprefix("col:")] = int(value)
         elif key == "verify:hits":
             hits = int(value)
-        elif ":" not in key:
+        elif ":" not in key and key not in RESAMPLE_KEYS:
             methods[key] = int(value)
     return methods, fallbacks, columns, hits
+
+
+def _resamples(counters: dict[str, int]) -> int:
+    return sum(int(v) for k, v in counters.items() if k in RESAMPLE_KEYS)
+
+
+def _synthetic_blocks(
+    inputs: EvidenceInputs,
+) -> tuple[
+    dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None
+]:
+    """``(fidelity, privacy, utility, tabular)`` of a synthesize pack (``None`` otherwise)."""
+    if inputs.job.mode != "synthesize":
+        return None, None, None, None
+    options = inputs.spec.get("options") or {}
+    engine = options.get("tabular") or "none"
+    if engine == "none":
+        unmeasured: dict[str, Any] = {
+            "engine": "none",
+            "measured": False,
+            "reason": "options.tabular=none: non-sensitive columns were copied from the source",
+        }
+        return None, unmeasured, None, None
+    metrics = inputs.job.progress.metrics or {}
+    fidelity = metrics.get("fidelity")
+    measured = metrics.get("privacy")
+    privacy: dict[str, Any]
+    if measured is not None:
+        privacy = {
+            **measured,
+            "exact_row_resamples_run": _resamples(inputs.job.progress.values_by_method),
+        }
+    else:
+        privacy = {
+            "engine": engine,
+            "measured": False,
+            "reason": "prepare stopped before the synthetic preview was measured",
+        }
+    return fidelity, privacy, metrics.get("utility"), metrics.get("tabular")
 
 
 def _strategy_kind(plan: RunPlan) -> str | None:
@@ -294,6 +356,10 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
         "name": plan.policy_name if plan else (snapshot.policy_name if snapshot else ""),
         "hash": plan.policy_hash if plan else (snapshot.policy_hash if snapshot else ""),
     }
+    if inputs.policy_version is not None:
+        policy["version"] = inputs.policy_version
+    reviewed = {c.path: c for c in snapshot.columns} if snapshot is not None else {}
+    fidelity, privacy, utility, tabular = _synthetic_blocks(inputs)
     snapshot_hash = plan.snapshot_hash if plan else (snapshot.content_hash if snapshot else "")
     columns: list[dict[str, Any]] = []
     reveal_map: list[dict[str, Any]] = []
@@ -301,10 +367,14 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
         recoverable = anchor_recoverable(plan)
         anchor_path = _anchor_path(plan, snapshot)
         for p in plan.columns:
+            review = reviewed.get(p.path)
             columns.append(
                 {
                     "path": p.path,
                     "entity_type": p.entity_type,
+                    "data_type": review.data_type if review else None,
+                    "confidence": review.confidence if review else None,
+                    "override": review.override if review else False,
                     "method": p.method.method,
                     "params": p.method.params if p.reversible else {},
                     "reversible": p.reversible,
@@ -325,6 +395,23 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
                         "text_column": p.text_column,
                     }
                 )
+        for k in plan.pseudonyms:  # D-A: identifiers replaced by keyed pseudonyms, never copied
+            review = reviewed.get(k.path)
+            columns.append(
+                {
+                    "path": k.path,
+                    "entity_type": k.entity_type,
+                    "data_type": review.data_type if review else None,
+                    "confidence": review.confidence if review else None,
+                    "override": review.override if review else False,
+                    "method": "key_pseudonym",
+                    "params": {},
+                    "reversible": False,
+                    "text_column": False,
+                    "values": per_column.get(k.name),
+                    "fallbacks": None,
+                }
+            )
     progress = job.progress
     rows_written = int(progress.rows_written)
     started = job.started_at or job.created_at
@@ -334,6 +421,10 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
         **inputs.verification,
     }
     verification.setdefault("hits", hits)
+    if inputs.outcome not in FINISHED_OUTCOMES and verification.get("passed"):
+        # N3: a run that did not finish is never "passed" (its output is incomplete, often empty)
+        verification["passed"] = False
+        verification["status"] = "incomplete"
     verification["fallbacks"] = fallbacks
     purpose = spec.get("purpose") or job.purpose or None
     return EvidencePack(
@@ -390,6 +481,10 @@ def build_pack(inputs: EvidenceInputs) -> EvidencePack:
             "values_transformed": sum(v for k, v in methods.items() if k != "keep"),
         },
         verification=verification,
+        fidelity=fidelity,
+        privacy=privacy,
+        utility=utility,
+        tabular=tabular,
         timings={
             "started_at": started.isoformat(),
             "finished_at": now.isoformat(),
@@ -494,11 +589,31 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
     e = _cell
     v = pack.verification
     hits = v.get("hits", 0)
-    passed = bool(v.get("passed"))
-    status = (
-        f"<span class='chip ok'>verified · {e(hits)} leaks</span>"
-        if passed
-        else f"<span class='chip bad'>verification failed · {e(hits)} hits</span>"
+    # packs stored before N3 could say passed for a failed run: the outcome decides
+    passed = bool(v.get("passed")) and pack.outcome in FINISHED_OUTCOMES
+    post = v.get("post_sample") or {}
+    if passed:
+        status = f"<span class='chip ok'>verified · {e(hits)} leaks</span>"
+    elif not hits and pack.outcome not in FINISHED_OUTCOMES:
+        first = pack.errors[0].get("code") if pack.errors else None
+        status = (
+            f"<span class='chip bad'>not verified · job {e(pack.outcome)}"
+            f"{f' ({e(first)})' if first else ''}</span>"
+        )
+    elif v.get("review_required") and not hits:
+        status = (
+            f"<span class='chip warn'>review required · {e(post.get('kept_column_hits', 0))} "
+            "findings in columns kept as not personal</span>"
+        )
+    else:
+        status = f"<span class='chip bad'>verification failed · {e(hits)} hits</span>"
+    sweep_failed = bool(hits) or (not passed and not v.get("review_required"))
+    kept_note = (
+        f"<tr><th>Review required</th><td class=warn>The post-write sample found personal data in "
+        f"{e(', '.join(post.get('kept_columns') or []))}, which the snapshot kept as not "
+        "personal. Reclassify these columns and run again before using the output.</td></tr>"
+        if v.get("review_required")
+        else ""
     )
     sel = pack.source.get("selection") or {}
     cols = (
@@ -545,7 +660,9 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
     fidelity = (
         f"<h2>6 Synthetic fidelity and privacy</h2><table><tr><th>Fidelity</th>"
         f"<td class=mono>{e(pack.fidelity)}</td></tr><tr><th>Privacy</th>"
-        f"<td class=mono>{e(pack.privacy)}</td></tr></table>"
+        f"<td class=mono>{e(pack.privacy)}</td></tr><tr><th>Utility</th>"
+        f"<td class=mono>{e(pack.utility)}</td></tr><tr><th>Tabular model</th>"
+        f"<td class=mono>{e(pack.tabular)}</td></tr></table>"
         if pack.fidelity is not None or pack.privacy is not None
         else ""
     )
@@ -561,7 +678,7 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
 <h2>1 Summary</h2><div class=kpis>
 <div class=kpi>Rows written<b>{e(pack.counts.get("rows_written", 0))}</b><span class=muted>of {e(pack.counts.get("rows_read", 0))} read</span></div>
 <div class=kpi>Columns transformed<b>{len(pack.columns)}</b><span class=muted>{e(pack.counts.get("values_transformed", 0))} values</span></div>
-<div class=kpi>Leakage sweep<b class="{"ok" if passed else "bad"}">{e(hits)} hits</b><span class=muted>{e(v.get("values_checked", 0))} values checked</span></div>
+<div class=kpi>Leakage sweep<b class="{"bad" if sweep_failed else "ok"}">{e(hits)} hits</b><span class=muted>{e(v.get("values_checked", 0))} values checked</span></div>
 <div class=kpi>Raw values to LLM<b class=ok>0</b><span class=muted>{e(pack.timings.get("duration_s"))} s · {e(pack.counts.get("partitions", 0))} partitions</span></div></div>
 <h2>2 Configuration hashes</h2><table>
 <tr><th>Source</th><td>{e(pack.source.get("connection_name"))} · {e(pack.source.get("engine"))} {e(pack.source.get("server_version"))} · {e(pack.source.get("object"))}</td></tr>
@@ -578,7 +695,7 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
 {f"<table><tr><th>Error</th><th>Where</th></tr>{errors}</table>" if errors else ""}
 <h2>5 Verification</h2><table>
 <tr><th>Leakage sweep</th><td>{e(hits)} hits in {e(v.get("values_checked", 0))} values ({e(v.get("mode"))})</td></tr>
-<tr><th>Post-write sample</th><td>{e(v.get("post_sample"))}</td></tr>
+<tr><th>Post-write sample</th><td>{e(v.get("post_sample"))}</td></tr>{kept_note}
 <tr><th>Row counts</th><td>{e(pack.counts.get("rows_read", 0))} read · {e(pack.counts.get("rows_written", 0))} written · {e(pack.counts.get("rows_skipped", 0))} skipped</td></tr>
 <tr><th>Fallbacks</th><td>{e(v.get("fallbacks"))}</td></tr></table>
 {fidelity}
@@ -695,7 +812,12 @@ async def list_evidence(
             "COALESCE(pack->'target'->>'object', pack->'target'->'files'->>'prefix') AS target, "
             "pack->'target'->>'write_mode' AS write_mode, pack->'policy'->>'name' AS policy, "
             "pack->'purpose'->>'ticket' AS ticket, "
-            "COALESCE((pack->'verification'->>'passed')::boolean, false) AS passed, "
+            # a failed or canceled run never passed (packs stored before N3 could say it did)
+            "(COALESCE((pack->'verification'->>'passed')::boolean, false) "
+            "AND pack->>'outcome' IN ('succeeded', 'dry_run')) AS passed, "
+            "pack->'errors'->0->>'code' AS error_code, "
+            "COALESCE((pack->'verification'->>'review_required')::boolean, false) "
+            "AS review_required, "
             "COALESCE((pack->'verification'->>'hits')::int, 0) AS hits, "
             "COALESCE((pack->'counts'->>'rows_written')::bigint, 0) AS rows_written "
             f"FROM {s}.dps_evidence WHERE {' AND '.join(where)} "

@@ -311,8 +311,9 @@ async def case_append_named(
     for label in ("ref", "kill"):
         await pg.table(f"ao_out_{label}", CUSTOMERS_DDL, [])
     rw = await register(TENANT, ref="dps/src/test-pg-rw", roles={"source", "target"}, name="ao-rw")
-    snap = await discover_and_accept(ctx, TENANT, rw.id, src_obj)
-    seed = generate_synthesis_seed().model_dump(mode="json")
+    # an obfuscate append: a synthesize run never shifts a real key (D-A, G2 review r1 B2)
+    snap = await discover_and_accept(ctx, TENANT, rw.id, src_obj, overrides=IN_PLACE_REVIEW)
+    key = generate_key_material("key").model_dump(mode="json")
 
     def spec(label: str) -> RunSpec:
         target = {
@@ -322,7 +323,7 @@ async def case_append_named(
             "confirm_write": True,
             "pk_strategy": {"kind": "offset", "offset": 90_000_000},
         }
-        return run_spec(rw.id, src_obj, snap.id, target, {"synthesis_seed": seed}, "synthesize")
+        return run_spec(rw.id, src_obj, snap.id, target, {"key_material": key}, "obfuscate")
 
     async def digest(label: str, job: Job) -> str:
         return await table_digest(pg, f"ao_out_{label}", columns=COLUMNS)

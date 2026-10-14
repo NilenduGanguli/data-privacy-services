@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { DownloadButton } from '../components/DownloadButton';
+import { FidelityPanel } from '../components/FidelityPanel';
 import { useAuth } from '../hooks/useAuth';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, type Download } from '../lib/api';
 import {
-  engineName, errorText, fmtCount, fmtDuration, fmtUtc, methodText, packTargetText, shortId, shortSha, shortType, typeNoteShort,
-  writeModeLabel, verificationText,
+  engineName, errorText, finishedOutcome, fmtCount, fmtDuration, fmtUtc, methodText, packSelection, packTargetText, recordNoun, shortId, shortSha, shortType,
+  typeNoteShort, writeModeLabel, verificationText, verificationTone,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, EvidenceOut, Job } from '../lib/types';
-import { saveText } from '../lib/download';
-import { canonicalJson, isScanPack, scanPackTitle, ScanPackSections, ScanPackSummary, Sec } from '../components/scanner/ScanEvidence';
+import { isScanPack, scanPackTitle, ScanPackSections, ScanPackSummary, Sec } from '../components/scanner/ScanEvidence';
 
 const LABEL_OBFUSCATE = 'pseudonymised — still personal data';
 
@@ -18,7 +19,8 @@ function apiMessage(e: unknown): string {
 
 const text = (v: unknown): string => (v === null || v === undefined || v === '' ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 
-/** The evidence pack (mockup 10): the sealed, value-free record of one job, printable as the PDF look. */
+/** The evidence pack (mockup 10): the sealed, value-free record of one job, printable as the PDF
+ *  look; Download JSON is the sealed artefact, Download PDF the server-rendered archival copy. */
 export function EvidencePack(): JSX.Element {
   const { evidenceId = '' } = useParams();
   const auth = useAuth();
@@ -26,7 +28,6 @@ export function EvidencePack(): JSX.Element {
   const [job, setJob] = useState<Job | null>(null);
   const [snapshot, setSnapshot] = useState<ClassificationSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -41,17 +42,6 @@ export function EvidencePack(): JSX.Element {
     return () => { live = false; };
   }, [auth, evidenceId]);
 
-  async function download(kind: 'evidence_json' | 'evidence_html'): Promise<void> {
-    const art = ev?.artefacts.find((a) => a.kind === kind);
-    // a scan's finalize stores the HTML rendering only: its JSON is the pack as the API returned it,
-    // in the canonical form whose sha256 is pack_sha256
-    if (ev && !art && kind === 'evidence_json') { saveText(canonicalJson(ev.pack), `dps-evidence-${ev.pack.id}.json`); return; }
-    if (!ev || !art) { setError(`The pack has no ${kind === 'evidence_json' ? 'JSON' : 'HTML'} artefact.`); return; }
-    setBusy(kind);
-    try { await api.artefacts.download(auth, art.id, `dps-evidence-${ev.pack.id}.${kind === 'evidence_json' ? 'json' : 'html'}`); }
-    catch (e) { setError(apiMessage(e)); } finally { setBusy(null); }
-  }
-
   if (!ev) {
     return (
       <main className="page evidence-page">
@@ -61,33 +51,53 @@ export function EvidencePack(): JSX.Element {
     );
   }
 
+  return <EvidenceSheet ev={ev} job={job} snapshot={snapshot} onJson={() => api.evidence.json(auth, ev.id)} onPdf={() => api.evidence.pdf(auth, ev.id)} />;
+}
+
+/** The pack sheet as a pure view (tested): the pack, its job and snapshot when readable. */
+export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
+  ev: EvidenceOut; job: Job | null; snapshot: ClassificationSnapshot | null; onJson: () => Promise<Download>; onPdf: () => Promise<Download>;
+}): JSX.Element {
   const p = ev.pack;
   const v = p.verification ?? {};
   const hits = Number(v.hits ?? 0);
-  const passed = !!v.passed;
+  // a failed or canceled run is never verified, even in a pack stored before that rule (N3)
+  const finished = finishedOutcome(p.outcome);
+  const passed = !!v.passed && finished;
+  const firstError = p.errors[0]?.code ?? null;
+  const unfinished = !finished && hits === 0 && firstError !== 'leakage';
+  const review = !!v.review_required;
   const src = p.source ?? {};
   const tgt = p.target ?? {};
   const files = (tgt.files ?? null) as Record<string, any> | null;
   const sel = (src.selection ?? {}) as Record<string, any>;
+  const selection = packSelection(sel, src.engine);
   const cons = p.consistency ?? {};
   const custody = (cons.key_custody ?? {}) as Record<string, any>;
   const synth = p.mode === 'synthesize';
+  const policyText = p.policy?.name ? `${p.policy.name}${p.policy.version ? ` v${p.policy.version}` : ''}` : '—';
   const targetText = packTargetText(tgt, src);
   const snapCols = snapshot?.columns ?? [];
   const byPath = new Map(snapCols.map((c) => [c.path, c]));
   const overridden = new Set((snapshot?.overrides ?? []).map((o) => o.path));
   const kept = snapCols.filter((c) => !p.columns.some((pc) => pc.path === c.path));
+  // kept as not personal (no entity) vs classified and kept on purpose (CITY: keep, a key in place)
+  const keptNone = kept.filter((c) => !c.entity_type && !c.text_column);
+  const keptByPolicy = kept.filter((c) => c.entity_type || c.text_column);
   const totalCols = snapCols.length || p.columns.length;
   const counts = p.counts ?? {};
   const parts = p.partitions ?? [];
   const retries = parts.reduce((a, x) => a + Math.max(0, Number(x.attempts ?? 1) - 1), 0);
   const resumed = parts.filter((x) => Number(x.resumed ?? 0) > 0);
   const post = (v.post_sample ?? null) as Record<string, any> | null;
+  const keptHits = Number(post?.kept_column_hits ?? 0);
+  const flagged = (post?.kept_columns ?? []) as string[];
   const fallbacks = (v.fallbacks ?? {}) as Record<string, number>;
   const fbTotal = Object.values(fallbacks).reduce((a, b) => a + Number(b), 0);
   const day = new Date(p.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  // a UI scan's pack (M4) has a `scan` block and no columns, partitions or row counts
   const scan = isScanPack(p);
-  const outcomeWords = p.outcome === 'succeeded' ? '' : p.outcome === 'dry_run' ? ' This was a dry run: nothing was written.' : ` The job ended ${p.outcome}.`;
+  const outcomeWords = p.outcome === 'succeeded' || unfinished ? '' : p.outcome === 'dry_run' ? ' This was a dry run: nothing was written.' : ` The job ended ${p.outcome}.`;
 
   return (
     <main className="page evidence-page">
@@ -95,12 +105,11 @@ export function EvidencePack(): JSX.Element {
         <div className="faint sm rowx"><Link to="/reports" style={{ color: 'var(--ink-2)', fontWeight: 600 }}>Reports &amp; audit</Link><span>/</span><span>Evidence pack <span className="mono">{shortId(p.job_id)}</span></span></div>
         <div className="toolbar">
           <Link className="btn btn-sm" to="/reports">Back to reports</Link>
-          <button className="btn btn-sm" type="button" disabled={!!busy} onClick={() => void download('evidence_json')}>Download JSON</button>
-          <button className="btn btn-sm" type="button" disabled={!!busy} onClick={() => void download('evidence_html')}>Open HTML</button>
-          <button className="btn btn-sm btn-primary" type="button" onClick={() => window.print()}>Print or save as PDF</button>
+          <DownloadButton label="Download JSON" ariaLabel={`Download evidence pack ${shortId(p.job_id)} as JSON`} fetcher={onJson} />
+          <DownloadButton label="Download PDF" ariaLabel={`Download evidence pack ${shortId(p.job_id)} as PDF`} fetcher={onPdf} />
+          <button className="btn btn-sm btn-primary" type="button" onClick={() => window.print()}>Print</button>
         </div>
       </div>
-      {error && <div className="err no-print">{error}</div>}
 
       <article className="sheet" aria-labelledby="doc-title">
         <header className="doc-head">
@@ -112,7 +121,7 @@ export function EvidencePack(): JSX.Element {
           <div className="seal">
             {scan
               ? <span className={`chip ${passed && Number(p.scan?.non_get_allowed ?? 0) === 0 ? 'emerald' : 'rose'}`}>{fmtCount(Number(p.scan?.submissions ?? 0))} submissions · {fmtCount(Number(p.scan?.non_get_allowed ?? 0))} non-GET allowed</span>
-              : passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : <span className="chip rose">verification {verificationText(false, hits)}</span>}
+              : passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : unfinished ? <span className={`chip ${verificationTone(false, hits, review, p.outcome)}`}>{verificationText(false, hits, review, p.outcome, firstError)}</span> : <span className={`chip ${verificationTone(false, hits, review)}`}>verification {verificationText(false, hits, review)}</span>}
             <span>Sealed {fmtUtc(p.created_at)}</span>
             <span>Pack <span className="mono">{p.id}</span> · sha256 <span className="mono">{shortSha(ev.pack_sha256)}</span></span>
             <span className={`chip ${synth ? 'violet' : 'teal'}`}>{p.label}</span>
@@ -133,15 +142,15 @@ export function EvidencePack(): JSX.Element {
         {scan ? <><ScanPackSummary p={p} /><ScanPackSections p={p} sha={ev.pack_sha256} /></> : <>
         <Sec n={1} title="Summary">
           <p className="lead">
-            On {day} DPS read {fmtCount(counts.rows_read ?? 0)} rows from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} rows to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
-            {passed ? 'The leakage sweep found no source value in the output.' : hits > 0 ? `The leakage sweep caught ${fmtCount(hits)} source ${hits === 1 ? 'value' : 'values'}; the affected batches were not written.` : 'The run failed closed before its verification counters held a hit; nothing of the failed unit was written.'}{' '}
+            On {day} DPS read {fmtCount(counts.rows_read ?? 0)} {recordNoun(src.engine, Number(counts.rows_read ?? 0))} from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} {recordNoun(src.engine, Number(counts.rows_written ?? 0))} to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
+            {passed ? 'The leakage sweep found no source value in the output.' : unfinished ? `The job ended ${p.outcome}${firstError ? ` (${errorText(firstError)})` : ''} before it finished, so its output is incomplete and is not verified: the leakage sweep checked ${fmtCount(Number(v.values_checked ?? 0))} values written before it stopped.` : hits > 0 ? `The leakage sweep caught ${fmtCount(hits)} source ${hits === 1 ? 'value' : 'values'}; the affected batches were not written.` : review ? `Review required: the output was written, and the post-write sample found personal data in ${flagged.length ? flagged.join(', ') : 'columns'} that the snapshot kept as not personal. Reclassify ${flagged.length === 1 ? 'it' : 'them'} and run again before using the output.` : 'The run failed closed before its verification counters held a hit; nothing of the failed unit was written.'}{' '}
             {synth ? 'The synthetic output has no key; DPS kept no seed.' : custody.returned ? 'The key that reverses the output was returned to the requesting team; DPS kept no copy.' : 'The run used the caller\'s key; DPS kept no copy.'}{outcomeWords}
           </p>
           <div className="stats">
             <div><div className="l">Rows written</div><div className="v">{fmtCount(counts.rows_written ?? 0)}</div><div className="s">{counts.rows_written === counts.rows_read ? '= rows read' : `of ${fmtCount(counts.rows_read ?? 0)} read`}</div></div>
-            <div><div className="l">Columns transformed</div><div className="v">{p.columns.length} of {totalCols}</div><div className="s">{totalCols - p.columns.length} kept, not personal</div></div>
+            <div><div className="l">Columns transformed</div><div className="v">{p.columns.length} of {totalCols}</div><div className="s">{totalCols - p.columns.length} kept{snapshot ? ` · ${keptByPolicy.length} by policy` : ''}{flagged.length ? ` · ${flagged.length} with personal data` : ''}</div></div>
             <div><div className="l">Values transformed</div><div className="v">{fmtCount(counts.values_transformed ?? 0)}</div><div className="s">nulls skipped</div></div>
-            <div><div className="l">Leakage sweep</div><div className={`v ${passed ? 'ok' : 'bad'}`}>{fmtCount(hits)} hits</div><div className="s">{fmtCount(Number(v.values_checked ?? 0))} values checked</div></div>
+            <div><div className="l">Leakage sweep</div><div className={`v ${passed || (review && !hits) ? 'ok' : 'bad'}`}>{fmtCount(hits)} hits</div><div className="s">{fmtCount(Number(v.values_checked ?? 0))} values checked</div></div>
             <div><div className="l">Duration</div><div className="v">{fmtDuration(Number(p.timings?.duration_s ?? 0))}</div><div className="s">{parts.length} {parts.length === 1 ? 'partition' : 'partitions'} · {retries} {retries === 1 ? 'retry' : 'retries'}</div></div>
             <div><div className="l">Raw values to LLM</div><div className="v ok">0</div><div className="s">no LLM call in this job</div></div>
           </div>
@@ -149,14 +158,15 @@ export function EvidencePack(): JSX.Element {
 
         <Sec n={2} title="Configuration hashes" right="hashes identify exactly what ran">
           <dl className="kv">
-            <dt>Policy</dt><dd><b>{p.policy?.name || '—'}</b>{snapshot ? ` + ${snapshot.overrides.length} ${snapshot.overrides.length === 1 ? 'override' : 'overrides'} from the reviewed snapshot` : ''}<span className="s2">Policy hash <span className="mono">sha256:{p.policy?.hash || '—'}</span></span></dd>
+            <dt>Policy</dt><dd><b>{policyText}</b>{snapshot ? ` + ${snapshot.overrides.length} ${snapshot.overrides.length === 1 ? 'override' : 'overrides'} from the reviewed snapshot` : ''}<span className="s2">Policy hash <span className="mono">sha256:{p.policy?.hash || '—'}</span></span></dd>
             <dt>Snapshot</dt><dd><span className="mono">{text(p.snapshot?.id)}</span> · accepted by {text(p.snapshot?.accepted_by)}{p.snapshot?.accepted_at ? ` at ${fmtUtc(p.snapshot.accepted_at, false)}` : ''}<span className="s2">Content hash <span className="mono">sha256:{text(p.snapshot?.content_hash)}</span></span></dd>
             <dt>Configuration hash</dt><dd><span className="mono">sha256:{p.config_hash}</span><span className="s2">policy + reviewed snapshot + job specification, canonical JSON</span></dd>
             <dt>Engine</dt><dd>DPS engine {p.engine_version} · image <span className="mono">{p.image_digest || 'unset (local build)'}</span><span className="s2">{src.server_version ? `Source server ${src.server_version}` : ''}</span></dd>
             <dt>{synth ? 'Seed' : 'Key id'}</dt><dd>{synth ? <>seed fingerprint <span className="mono">{text(cons.seed_fingerprint)}</span></> : <>kid <span className="mono">{text(cons.kid)}</span></>} · consistency scope <b>{text(cons.scope)}</b>
               <span className="s2">{custody.returned ? 'Data key returned at job creation' : 'Key supplied by the caller'}{custody.wrapped ? ', wrapped with the caller\'s public key' : ''}; DPS stored no key. This pack holds the key id only.</span></dd>
+            <dt>Key custody</dt><dd>{synth ? 'Synthesis seed' : 'Data key'} {custody.returned ? 'returned to the requesting team at job creation' : 'supplied by the caller'}{custody.wrapped ? ", wrapped with the caller's public key" : ''}; DPS stored no key<span className="s2">This pack holds the {synth ? 'seed fingerprint' : 'key id'} only.</span></dd>
             <dt>Source</dt><dd>{engineName(src.engine)} · connection <span className="mono">{text(src.connection_name)}</span> · <span className="mono">{text(src.object)}</span>
-              <span className="s2">Selection <span className="mono">{sel.where_template || sel.query_template || 'all rows'}</span> · {fmtCount(Number(sel.binds ?? 0))} bound {Number(sel.binds ?? 0) === 1 ? 'parameter' : 'parameters'}{sel.max_rows ? ` · at most ${fmtCount(sel.max_rows)} rows` : ''}{Array.isArray(sel.columns) ? ` · ${sel.columns.length} columns` : ''}</span></dd>
+              <span className="s2">Selection <span className="mono">{selection.scope}</span>{selection.detail}</span></dd>
             <dt>Target</dt><dd>{engineName(tgt.engine)} · connection <span className="mono">{text(tgt.connection_name)}</span> · <span className="mono">{targetText}</span>
               <span className="s2">write_mode {text(tgt.write_mode)}{tgt.table_load ? ` · ${tgt.table_load}` : ''}{tgt.created ? ' · created from the source definition' : ''}{tgt.truncated ? ' · truncated before loading' : ''}{tgt.pk_strategy ? ` · keys ${text((tgt.pk_strategy as Record<string, unknown>).kind)}` : ''}{tgt.confirm_write ? ` · write confirmed for ${fmtCount(tgt.expected_rows)} rows` : ''}{files ? ` · ${fmtCount(files.objects)} objects, manifest ${text(files.manifest_artefact_id)}` : ''}</span></dd>
           </dl>
@@ -169,18 +179,18 @@ export function EvidencePack(): JSX.Element {
               return (
                 <tr key={String(c.path)}>
                   <td className="m" data-l="Column">{s?.name ?? String(c.path).replace(/^\$\./, '')}</td>
-                  <td className="faint" data-l="Type">{s ? shortType(s.data_type) : '—'}</td>
+                  <td className="faint" data-l="Type">{c.data_type ? shortType(String(c.data_type)) : s ? shortType(s.data_type) : '—'}</td>
                   <td data-l="Entity">{text(c.entity_type)}{c.text_column && c.entity_type !== 'FREE_TEXT' ? ' · free text' : ''}</td>
-                  <td className="num m" data-l="Conf.">{s?.entity_type ? s.confidence.toFixed(2) : '—'}</td>
+                  <td className="num m" data-l="Conf.">{typeof c.confidence === 'number' ? c.confidence.toFixed(2) : s?.entity_type ? s.confidence.toFixed(2) : '—'}</td>
                   <td data-l="Method"><span className="m">{methodText({ method: String(c.method), params: (c.params ?? {}) as Record<string, unknown> })}</span>{!c.reversible && <span className="prm"> · one-way</span>}</td>
-                  <td className="wide" data-l="Decision">{overridden.has(String(c.path)) ? <><b>overridden</b><span className="s2">{typeNoteShort(s?.type_note) ?? 'changed at review'}</span></> : 'accepted'}</td>
+                  <td className="wide" data-l="Decision">{c.override === true || overridden.has(String(c.path)) ? <><b>overridden</b><span className="s2">{typeNoteShort(s?.type_note) ?? 'changed at review'}</span></> : 'accepted'}</td>
                   <td className="num m" data-l="Values">{fmtCount(c.values as number | null)}</td>
                 </tr>
               );
             })}
             {!p.columns.length && <tr><td colSpan={7} className="faint">No column was planned.</td></tr>}
           </tbody></table></div>
-          <p className="note">{kept.length ? `${kept.length} ${kept.length === 1 ? 'column' : 'columns'} kept as not personal: ${kept.map((c) => c.name).join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
+          <p className="note">{keptNone.length ? `${keptNone.length} ${keptNone.length === 1 ? 'column' : 'columns'} kept, no entity: ${keptNone.map((c) => c.name).join(', ')}. ` : ''}{keptByPolicy.length ? `${keptByPolicy.length} classified ${keptByPolicy.length === 1 ? 'column' : 'columns'} kept by the policy or the review: ${keptByPolicy.map((c) => `${c.name} (${c.entity_type})`).join(', ')}. ` : ''}{flagged.length ? `The post-write sample found personal data in ${flagged.join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
         </Sec>
 
         <Sec n={4} title="Execution" right={`${parts.length} ${parts.length === 1 ? 'partition' : 'partitions'}`}>
@@ -188,7 +198,7 @@ export function EvidencePack(): JSX.Element {
             <div><div className="t">{fmtUtc(p.timings?.started_at, true).replace(/^.*, /, '')}</div>Job started</div>
             <div className={resumed.length ? 'warn' : ''}><div className="t">{parts.length} {parts.length === 1 ? 'partition' : 'partitions'}</div>{resumed.length ? `${resumed.map((x) => `p${x.no}`).join(', ')} resumed from the last committed batch` : 'No lease was lost'}</div>
             <div><div className="t">{fmtUtc(p.timings?.finished_at, true).replace(/^.*, /, '')}</div>Last batch committed</div>
-            <div className={passed ? 'ok' : 'bad'}><div className="t">{fmtCount(Number(v.values_checked ?? 0))} values</div>Verification {passed ? 'passed' : 'failed closed'}</div>
+            <div className={passed ? 'ok' : review && !hits && !unfinished ? 'warn' : 'bad'}><div className="t">{fmtCount(Number(v.values_checked ?? 0))} values</div>Verification {passed ? 'passed' : unfinished ? `not verified: the job ${p.outcome}` : review && !hits ? 'needs review: personal data in a kept column' : 'failed closed'}</div>
             <div className="ok"><div className="t">{fmtUtc(p.created_at, true).replace(/^.*, /, '')}</div>Pack sealed and hashed</div>
           </div>
           <div className="tbl-scroll"><table className="tbl doc stack c3" style={{ marginTop: 12 }}><thead><tr><th>Partition</th><th className="num">Rows</th><th className="num">Attempts</th><th className="num">Resumed</th><th>Result</th></tr></thead><tbody>
@@ -209,8 +219,8 @@ export function EvidencePack(): JSX.Element {
 
         <Sec n={5} title="Verification" right={`mode ${text(v.mode)}`} keep>
           <div className="tbl-scroll"><table className="tbl doc stack"><thead><tr><th>Check</th><th>Result</th><th>What was checked</th><th>Status</th></tr></thead><tbody>
-            <tr><td data-l="Check"><b>Leakage sweep</b></td><td className="m" data-l="Result">{fmtCount(hits)} hits</td><td className="wide" data-l="What">Every transformed value compared with the source values of its row before the batch was written ({fmtCount(Number(v.values_checked ?? 0))} values in {fmtCount(Number(v.batches ?? 0))} batches)</td><td data-l="Status"><span className={`chip ${passed ? 'emerald' : 'rose'}`}>{passed ? 'pass' : 'fail'}</span></td></tr>
-            <tr><td data-l="Check"><b>Post-write sample</b></td><td className="m" data-l="Result">{post && post.rows !== undefined ? `${fmtCount(post.kept_column_hits ?? 0)} in kept columns · ${fmtCount(post.detector_hits ?? 0)} in transformed columns` : 'not run'}</td><td className="wide" data-l="What">{post && post.rows !== undefined ? `${fmtCount(post.rows)} written rows read back and rescanned with the detectors. Findings in transformed columns are expected (format-preserving tokens still look like their type); a finding in a kept column deserves a look.` : 'No written rows to sample'}</td><td data-l="Status"><span className={`chip ${!post || post.rows === undefined ? 'slate' : Number(post.kept_column_hits ?? 0) === 0 ? 'emerald' : 'amber'}`}>{!post || post.rows === undefined ? 'skipped' : Number(post.kept_column_hits ?? 0) === 0 ? 'pass' : 'review'}</span></td></tr>
+            <tr><td data-l="Check"><b>Leakage sweep</b></td><td className="m" data-l="Result">{fmtCount(hits)} hits</td><td className="wide" data-l="What">Every transformed value compared with the source values of its row before the batch was written ({fmtCount(Number(v.values_checked ?? 0))} values in {fmtCount(Number(v.batches ?? 0))} batches)</td><td data-l="Status"><span className={`chip ${unfinished ? 'slate' : hits || (!passed && !review) ? 'rose' : 'emerald'}`}>{unfinished ? 'incomplete' : hits || (!passed && !review) ? 'fail' : 'pass'}</span></td></tr>
+            <tr><td data-l="Check"><b>Post-write sample</b></td><td className="m" data-l="Result">{post && post.rows !== undefined ? `${fmtCount(keptHits)} in columns kept as not personal${flagged.length ? ` (${flagged.join(', ')})` : ''} · ${fmtCount(post.detector_hits ?? 0)} in transformed columns` : 'not run'}</td><td className="wide" data-l="What">{post && post.rows !== undefined ? `${fmtCount(post.rows)} written rows read back and rescanned with the detectors. Findings in transformed columns are expected (format-preserving tokens still look like their type). Personal data in a column the snapshot kept as not personal means it reached the target untransformed: verification is not passed until it is reviewed.` : 'No written rows to sample'}</td><td data-l="Status"><span className={`chip ${!post || post.rows === undefined ? 'slate' : keptHits === 0 ? 'emerald' : 'amber'}`}>{!post || post.rows === undefined ? 'skipped' : keptHits === 0 ? 'pass' : 'review required'}</span></td></tr>
             <tr><td data-l="Check"><b>Row counts</b></td><td className="m" data-l="Result">{fmtCount(counts.rows_read ?? 0)} read · {fmtCount(counts.rows_written ?? 0)} written</td><td className="wide" data-l="What">{fmtCount(counts.rows_skipped ?? 0)} rows skipped{counts.rows_estimated ? ` · ${fmtCount(counts.rows_estimated)} estimated at prepare` : ''}</td><td data-l="Status"><span className={`chip ${counts.rows_read === counts.rows_written + (counts.rows_skipped ?? 0) ? 'emerald' : 'amber'}`}>{counts.rows_read === counts.rows_written + (counts.rows_skipped ?? 0) ? 'pass' : 'review'}</span></td></tr>
             <tr><td data-l="Check"><b>FPE fallbacks</b></td><td className="m" data-l="Result">{fmtCount(fbTotal)} values</td><td className="wide" data-l="What">{fbTotal ? Object.entries(fallbacks).map(([k, n]) => `${fmtCount(n)} × ${k.replace(/^(fallback:)+/, '')}`).join(' · ') : 'Every value ran its planned method'}</td><td data-l="Status"><span className="chip slate">recorded</span></td></tr>
             {v.write_ledger_cleared !== undefined && <tr><td data-l="Check"><b>Write ledger</b></td><td className="m" data-l="Result">{v.write_ledger_cleared ? 'cleared' : 'kept'}</td><td className="wide" data-l="What">The per-batch marks DPS keeps in the target to resume without writing twice</td><td data-l="Status"><span className="chip slate">recorded</span></td></tr>}
@@ -220,8 +230,8 @@ export function EvidencePack(): JSX.Element {
         </>}
 
         {(p.fidelity || p.privacy) && (
-          <Sec n={6} title="Synthetic fidelity and privacy">
-            <dl className="kv"><dt>Fidelity</dt><dd className="mono">{text(p.fidelity)}</dd><dt>Privacy</dt><dd className="mono">{text(p.privacy)}</dd></dl>
+          <Sec n={6} title="Synthetic fidelity and privacy" right="measured on the deterministic preview">
+            <FidelityPanel fidelity={p.fidelity ?? null} privacy={p.privacy ?? null} utility={p.utility ?? null} tabular={p.tabular ?? null} rowsWritten={Number(counts.rows_written ?? 0)} />
           </Sec>
         )}
 
@@ -229,7 +239,7 @@ export function EvidencePack(): JSX.Element {
           <div className="reg">
             {p.label === LABEL_OBFUSCATE || !synth
               ? <div className="callout"><b>The output is pseudonymised, and pseudonymised data is still personal data</b> under GDPR Art. 4(5) and India&apos;s Digital Personal Data Protection Act 2023. Hold it under the same controls as the source. Whoever holds key <span className="mono">{text(cons.kid)}</span> can re-identify every row.</div>
-              : <div className="callout violet"><b>The output is synthetic — measured, not claimed anonymous.</b> Treat it as confidential until your data protection officer decides otherwise.</div>}
+              : <div className="callout amber"><b>The synthetic report is a measurement, not a claim.</b> {p.fidelity ? `The fidelity and privacy figures in section 6 describe this run${p.tabular ? ` against a ${fmtCount(p.tabular.holdout_rows)}-row holdout` : ''}. ` : ''}They do not state that the output is anonymous. Treat it as confidential until your data protection officer decides otherwise; the synthesis seed can link rows back if someone also holds candidate originals.</div>}
             <p className="note" style={{ margin: '2px 0 0' }}>DPS stores no customer values and no keys. This pack holds counts, hashes, column names, method names and key ids only. Its hash is written to the append-only audit log, so any later edit to the pack is detectable.</p>
           </div>
         </Sec>

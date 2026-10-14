@@ -4,7 +4,8 @@ Data obfuscation and synthetic data generation for the enterprise — one Privac
 points (API, database connectors, UI scanner), two outcomes (reversible obfuscation, synthetic data),
 measurable privacy, and a hard rule that **no LLM ever sees raw PII**.
 
-**Status:** M0, M1 (v0.2.0) and M2 (`v0.1.0-m2`) integrated on `main`. **Layer 1 is complete**: the
+**Status:** M0, M1 (v0.2.0) and M2 (`v0.1.0-m2`) integrated on `main`; M3 (Oracle, MongoDB,
+cross-system job groups) built on branch `m3`, pending verification and merge. **Layer 1 is complete**: the
 JSON/text API of M0 (`/api/v1/detect`, `/obfuscate`, `/synthesize`, `/reveal`, policy tooling) plus
 **documents** (PDF text layer, scanned pages and images through the Azure Read v3.2 contract or local
 Tesseract, DOCX, TXT, CSV; per-page findings with boxes; a true redacted PDF verified by structure and
@@ -14,8 +15,11 @@ evaluation. **Layer 2 runs on PostgreSQL**: connect a source, discover and revie
 partitioned, checkpointed, resumable masking jobs in four write modes (copy to a table, export files,
 in place, append) that end with a hashed evidence pack. The Privacy Console has the Playground (with
 the **Document** tab), **Policies**, and the **Data sources & jobs** pages (jobs list, new-job wizard,
-job detail, evidence pack, reports). All offline in compose. **Layer 3, the UI scanner (M4, branch
-`m4`)**: crawl a registered web front end in a sandboxed Chromium, inventory and classify every form
+job detail, evidence pack, reports). **M3 adds Oracle and MongoDB** to the same jobs (thin-mode Oracle
+with keyset or ROWID partitions, MongoDB documents transformed by leaf path) and **job groups**: one
+caller-held key across PostgreSQL, Oracle and MongoDB, with a counts-only consistency check that
+joins the masked targets (3 / 3 consistent in the demo). All offline in compose. **Layer 3, the UI scanner (M4)**: crawl a
+registered web front end in a sandboxed Chromium, inventory and classify every form
 field, flag privacy risks, show each form filled with synthetic personas and with reversible tokens
 side by side, and capture pages that render personal data with that data masked — **never
 submitting anything** (a request guard and a scope proxy block every non-GET request; a counting
@@ -28,6 +32,7 @@ server proves it).
 | [`docs/technical/api-m0.md`](docs/technical/api-m0.md) | the Layer 1 API reference (JSON and text) |
 | [`docs/technical/api-m1.md`](docs/technical/api-m1.md) | the M1 additions: documents, schema synthesis, taxonomy, NDJSON, `Idempotency-Key`, OCR providers, T3 labelling |
 | [`docs/technical/api-m2.md`](docs/technical/api-m2.md) | the jobs and PostgreSQL API (routes, error codes, state machine, evidence pack, measured throughput) |
+| [`docs/technical/api-m3.md`](docs/technical/api-m3.md) | Oracle and MongoDB connections, selections per engine, M3 prepare failures, the job-group consistency check |
 | [`docs/technical/api-m4.md`](docs/technical/api-m4.md) | the UI scanner API (routes, error codes, scan lifecycle, export and capture-map formats, evidence `scan` block, the no-submission rules) |
 | [`docs/technical/detector-eval-m1.md`](docs/technical/detector-eval-m1.md) | detector precision and recall per entity type on the synthetic labelled corpus |
 | [`docs/design/mockups/index.html`](docs/design/mockups/index.html) | the console mockups (built so far: Overview, Playground with the Document tab, Policies 05, documents 08, and the jobs pages 07, 03, 06, 10 with the evidence list of 09) |
@@ -42,6 +47,17 @@ docker compose --env-file docker/compose.sources.env --profile docs --profile so
 python tools/smoke_test.py           # 34 checks: Layer 1, documents/OCR/schema, job platform (needs the dev install below for httpx)
 python tools/demo_m2.py              # 10-table UAT copy, in place, append
 docker compose --profile docs --profile sources down
+```
+
+Oracle and MongoDB (M3; Oracle Free needs ~2.7 GB and 1–3 minutes on its first start):
+
+```bash
+docker compose --profile oracle --profile sources up -d --build    # + oracle (1522) and mongo (27018)
+python tools/seed_sources.py --target all --rows 20000 --seed 7   # one customer space in PG, Oracle, MongoDB
+python tools/smoke_test.py --m3      # the checks above + 7 M3 checks: connections, discovery, a job group,
+                                     # three runs under its key, consistency 3/3, evidence, raw PII to LLM = 0
+python tools/bench_connector.py --engine oracle --rows 20000      # rows/s (also --engine mongo)
+docker compose --profile oracle --profile sources down             # resets the Oracle demo (no volume)
 ```
 
 Poll `docker compose ps` until `app`, `worker`, `dps-db`, `azure-ocr-mock`, `source-pg` and `minio`
@@ -109,8 +125,8 @@ PostgreSQL 16 on 5441/5442). Markers: `docs` (the `[docs]` extra), `ocr`, `tesse
 `tesseract` binary), `db`, `pg_source`, `s3`, `slow` (resume-after-kill, about 90 s), `browser` (the
 console checks and the scanner's browser tests; `python -m playwright install chromium` once — the
 scanner tests use a running demo site at `DPS_TEST_DEMO_SITE`, else start it with the host's `node`
-on `${DPS_DEMO_SITE_PORT:-8410}`).
-Without a service its tests skip;
+on `${DPS_DEMO_SITE_PORT:-8410}`), `oracle` (`docker compose --profile oracle up -d oracle`), `mongo`
+(`docker compose --profile sources up -d mongo`). Without a service its tests skip;
 `DPS_TEST_REQUIRE_SERVICES=1` makes them fail instead. The milestone gates with the full stack up:
 
 ```bash
@@ -118,6 +134,8 @@ DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after_kill.py
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle or mongo"                 # M3 (incl. tests/e2e, the M3 console checks)
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/connectors/test_conformance_*.py -m "pg_source or oracle or mongo"
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "browser or db" tests/scanner tests/test_no_values_in_logs_m4.py   # M4
 ```
 

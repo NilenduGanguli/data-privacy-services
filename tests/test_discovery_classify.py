@@ -243,3 +243,124 @@ def test_content_hash_is_canonical() -> None:
     cols = _cols()
     assert content_hash(cols, []) == content_hash([c.model_copy() for c in cols], [])
     assert len(content_hash(cols, [])) == 64
+
+
+def test_bounded_columns_never_get_a_method_whose_output_cannot_fit() -> None:
+    """M2 verify r2 issue 2: discovery suggested det_token for national_id varchar(18), whose
+    worst case is 141 characters, so every In place run on the restored copy failed."""
+    national = c("national_id", "text", data_type="character varying(18)", length=18)
+    mixed = ["123456789012", "123-45-6789", "ABCD123456EFGHIJ12"]
+    obf, _, note = suggest_methods(
+        "NATIONAL_ID",
+        national,
+        policy=POLICY,
+        fpe_enabled=True,
+        min_digits=8,
+        text_column=False,
+        values=mixed,
+    )
+    # letters in the values: no reversible length-preserving method fits all of them, so the
+    # column is a decision with the reason, not a silent overflow
+    assert obf.method == "det_token" and note == "length_overflow"
+    digits = ["123456789012", "123-45-6789", "987654321098"]
+    kept, _, knote = suggest_methods(
+        "NATIONAL_ID",
+        national,
+        policy=POLICY,
+        fpe_enabled=True,
+        min_digits=9,
+        text_column=False,
+        values=digits,
+    )
+    assert kept == MethodSpec(method="fpe_digits") and knote == "length_kept"
+    no_fpe, _, fnote = suggest_methods(
+        "NATIONAL_ID",
+        national,
+        policy=POLICY,
+        fpe_enabled=False,
+        min_digits=9,
+        text_column=False,
+        values=digits,
+    )
+    assert no_fpe.method == "det_token" and fnote == "length_overflow"
+    # an unbounded column takes a token as before
+    free, _, unote = suggest_methods(
+        "NATIONAL_ID",
+        c("national_id", "text"),
+        policy=POLICY,
+        fpe_enabled=True,
+        min_digits=8,
+        text_column=False,
+        values=mixed,
+    )
+    assert free.method == "det_token" and unote is None
+
+
+def test_fpe_values_that_fall_back_to_tokens_are_checked_against_the_column() -> None:
+    pan = c("tax_id", "char", data_type="character(10)", length=10)
+    obf, _, note = suggest_methods(
+        "PAN_IN",
+        pan,
+        policy=POLICY,
+        fpe_enabled=True,
+        min_digits=4,
+        text_column=False,
+        values=["ABCDE1234F", "PQRST6789Z"],  # four digits: fpe_text runs as det_token
+    )
+    assert obf.method == "fpe_text" and note == "length_overflow"
+    name = c("full_name", "text", data_type="character varying(120)", length=120)
+    fits, _, nnote = suggest_methods(
+        "PERSON_NAME",
+        name,
+        policy=POLICY,
+        fpe_enabled=True,
+        min_digits=None,
+        text_column=False,
+        values=["Ananya Krishnan", "Li Wu"],  # "Li Wu" falls back, and its token still fits
+    )
+    assert fits.method == "fpe_text" and nnote is None
+    ssn = c("ssn", "text", data_type="character varying(11)", length=11)
+    kept_suffix, _, snote = suggest_methods(
+        "SSN",
+        ssn,
+        policy=POLICY,
+        fpe_enabled=True,
+        min_digits=9,
+        text_column=False,
+        values=["900-45-1000"],  # keep_suffix 4 leaves five digits: a token, 44 characters
+    )
+    # every digit encrypted instead (no kept suffix): reversible and the length kept
+    assert kept_suffix == MethodSpec(method="fpe_digits") and snote == "length_kept"
+    letters, _, lnote = suggest_methods(
+        "SSN",
+        ssn,
+        policy=POLICY,
+        fpe_enabled=True,
+        min_digits=9,
+        text_column=False,
+        values=["900-45-1000", "AB-45-1000"],
+    )
+    assert letters.method == "fpe_digits" and lnote == "length_overflow"
+
+
+def test_classify_columns_passes_the_sampled_values_to_the_length_check() -> None:
+    from dps.jobs_models import ObjectRef
+    from dps.layers.connectors.base import TableShape
+
+    shape = TableShape(
+        object=ObjectRef(owner="bank", name="people"),
+        key=["id"],
+        key_source="primary_key",
+        columns=[
+            c("id", "int", is_key=True, nullable=False),
+            c("national_id", "text", data_type="character varying(18)", length=18),
+        ],
+    )
+    rows = [{"id": i, "national_id": f"ABCD{100000 + i}EFGHIJ{i % 90 + 10}"} for i in range(40)]
+    out = by_name(
+        classify_columns(
+            shape, rows, policy=POLICY, detector=ENGINE.detector(POLICY, "en_IN"), fpe_enabled=False
+        )
+    )
+    assert out["national_id"].entity_type == "NATIONAL_ID"
+    assert out["national_id"].type_note == "length_overflow"

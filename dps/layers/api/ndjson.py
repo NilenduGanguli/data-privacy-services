@@ -79,13 +79,14 @@ from dps.layers.api.common import (
     CodedHTTPException,
     _measure,
     begin_call,
+    detokenize_auditor,
     end_call,
     map_engine_error,
     payload_from,
-    policy_label,
     route_template,
     with_idempotency,
 )
+from dps.layers.api.policy_refs import policy_label, resolve
 from dps.observability import get_logger
 from dps.ratelimit import enforce_rate_limit
 
@@ -455,10 +456,12 @@ def _engine_runner(
     options: RequestOptions,
     key_material: dict[str, Any] | None,
     labels: LeftoverLabels | None = None,
+    on_detokenize: Callable[[str, str | None, int], None] | None = None,
 ) -> ChunkRunner:
     """Each item through the engine operation of ``mode``, in order, stopping at a failure.
 
-    ``labels`` (T3, one labelling call per stream) give each item its ``extra_findings``.
+    ``labels`` (T3, one labelling call per stream) give each item its ``extra_findings``;
+    ``on_detokenize`` (reveal, SEC-4) audits each detokenization batch.
     """
 
     def run_chunk(
@@ -497,6 +500,7 @@ def _engine_runner(
                             Payload(data=item["result"]),
                             key_material,
                             item.get("reveal_hints") or [],
+                            on_detokenize=on_detokenize,
                         )
                 except Exception as exc:  # noqa: BLE001 - every item failure ends the stream
                     return lines, totals, _failure(index, exc)
@@ -596,7 +600,15 @@ async def _prepare(
         header=header,
         items=items,
         chunk_items=settings.ndjson_chunk_items,
-        run_chunk=_engine_runner(engine, mode, envelope.policy, options, key_material, labels),
+        run_chunk=_engine_runner(
+            engine,
+            mode,
+            envelope.policy,
+            options,
+            key_material,
+            labels,
+            on_detokenize=detokenize_auditor(request) if mode == "reveal" else None,
+        ),
         llm_calls=labels.llm_calls if labels is not None else 0,
     )
 
@@ -703,7 +715,7 @@ async def _start(
 def _label(request: Request, mode: str, envelope: NdjsonEnvelope) -> str:
     if mode == "reveal":
         return "-"
-    return policy_label(envelope.policy, request.app.state.settings.default_policy)
+    return policy_label(envelope.policy, request.app.state.settings.default_policy)  # M5: name@vN
 
 
 async def stream_lines(
@@ -727,6 +739,8 @@ async def stream_request(request: Request, *, mode: StreamMode) -> StreamingResp
 
     async def prepare(tid: str, audit: _Audit) -> _Stream:
         envelope, items = await read_ndjson(request, request.app.state.settings)
+        if mode != "reveal":  # M5: an @name[:vN] reference resolves to the stored version
+            envelope.policy = await resolve(request, envelope.policy)
         audit.policy = _label(request, mode, envelope)
         return await _prepare(request, mode, tid, envelope, items)
 
@@ -750,13 +764,16 @@ async def stream_reveal_array(
     does — and each element becomes an item line.
     """
     engine: PrivacyEngine = request.app.state.engine
+    on_detokenize = detokenize_auditor(request)  # SEC-4: one audit event per batch
 
     def run_chunk(
         offset: int, everything: Sequence[Any], size: int
     ) -> tuple[list[bytes], _Totals, _Failure | None]:
         totals = _Totals()
         try:
-            result = engine.reveal(Payload(data=data), key_material, reveal_hints)
+            result = engine.reveal(
+                Payload(data=data), key_material, reveal_hints, on_detokenize=on_detokenize
+            )
         except Exception as exc:  # noqa: BLE001 - one document: a failure ends the stream at 0
             return [], totals, _failure(offset, exc)
         per_item: Counter[int] = Counter()

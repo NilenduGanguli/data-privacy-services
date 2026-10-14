@@ -201,3 +201,72 @@ def test_third_party_loggers_are_capped() -> None:
     configure_logging("DEBUG", json_output=True)
     assert logging.getLogger("pdfminer").level == logging.ERROR
     assert logging.getLogger("httpx").level == logging.WARNING
+    # Driver debug loggers quote whole commands and bodies: pymongo's command log carries every
+    # document of an insert/update (and E11000 replies quote the duplicate key), botocore logs
+    # request bodies. Capped so DPS_LOG_LEVEL=DEBUG never turns them on (M3 log scan, Task 20).
+    for name in ("pymongo", "botocore", "boto3", "s3transfer", "urllib3"):
+        assert logging.getLogger(name).level == logging.WARNING, name
+        assert not logging.getLogger(f"{name}.command").isEnabledFor(logging.INFO), name
+    # sqlglot's parser logs the statement it cannot fully parse ("EXPLAIN PLAN FOR … WHERE n = '…'")
+    # at WARNING and its parse errors at ERROR, literal included: silenced (M3 review r1).
+    assert logging.getLogger("sqlglot").level == logging.CRITICAL
+    assert not logging.getLogger("sqlglot").isEnabledFor(logging.ERROR)
+
+
+def test_m3_connector_fields_are_allow_listed() -> None:
+    event = {
+        "event": "oracle.read",
+        "engine": "oracle",
+        "op": "read",
+        "job_id": "j_1",
+        "partition_no": 3,
+        "batch_no": 4,
+        "rows": 1000,
+        "driver_code": "ORA-00942",
+        "group_id": "g_1",
+        "value": "secret",
+        "dsn": "u/p@h",
+        "uri": "mongodb://u:p@h",
+    }
+    out = _drop_value_fields(None, "info", dict(event))
+    assert "value" not in out and "dsn" not in out and "uri" not in out
+    assert out["driver_code"] == "ORA-00942" and out["rows"] == 1000 and out["engine"] == "oracle"
+
+
+def test_m5_log_fields_are_allowed() -> None:
+    from dps.observability import _SAFE_FIELDS
+
+    assert {
+        "job_id",
+        "engine",
+        "columns",
+        "rows",
+        "resamples",
+        "adapter",
+        "deleted",
+        "tenants",
+        "artefact_id",
+        "bytes",
+        "gate",
+        "version",
+        "key_count",
+        "grace_hours",
+    } <= _SAFE_FIELDS
+    # "model" stays allowed: M0's LLM gateway logs the model *name* (never a fitted model)
+    forbidden = {"value", "token", "dek", "seed", "tabular_model", "raw_key", "password"}
+    assert not (forbidden & _SAFE_FIELDS)
+
+
+def test_m5_metrics_exist() -> None:
+    from dps.observability import EXTERNAL_CALLS, KEYS_LOADED, TABULAR_RESAMPLES, metrics_payload
+
+    TABULAR_RESAMPLES.inc(0)
+    EXTERNAL_CALLS.labels("tokenize", "ok").inc(0)
+    KEYS_LOADED.set(0)
+    body, _ = metrics_payload()
+    for name in (
+        b"dps_tabular_resamples_total",
+        b"dps_external_token_calls_total",
+        b"dps_auth_keys_loaded",
+    ):
+        assert name in body

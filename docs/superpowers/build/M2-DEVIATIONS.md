@@ -459,7 +459,8 @@ plan's design; the changes below close gaps the plan's code left open (each has 
   (with docstrings) as the plan asks; the two call sites updated.
 - `dps/secrets.py`: `SECRET_FILES` gains `"ca.pem"`.
 - `HANDOFF.md` §7: the `secret_ref` file names and the inline-secret TTL, and the open issue below.
-- **Open issue (not changed, contract question):** a `secret_ref` is not scoped to the tenant.
+- **Open issue (fixed after M2 on main, security fix SEC-2, 2026-10-12: refs resolve under
+  `DPS_SECRET_DIR/<tenant_id>/`, shared refs need an allow-list; see HANDOFF §7):** a `secret_ref` is not scoped to the tenant.
   Any tenant with the `jobs` scope can create a connection naming another tenant's mounted
   reference (`dps/src/<other>`) and read through it. The contract and spec fix the path rule
   (`DPS_SECRET_DIR/<ref>/`) without a tenant prefix and the plan's own test uses a shared

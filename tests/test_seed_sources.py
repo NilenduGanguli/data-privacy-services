@@ -9,7 +9,7 @@ import pytest
 from stdnum import luhn
 from stdnum.mx import curp
 
-from dps.engine.detect.checksums import verhoeff_check_digit
+from dps.engine.detect.checksums import validate, verhoeff_check_digit
 from dps.engine.synth.surrogates import RFC2606_DOMAINS, TEST_CARD_IIN
 from tools.seed_sources import (
     TABLE_DDL,
@@ -70,6 +70,8 @@ def test_identifiers_are_rule_valid_fakes(data) -> None:  # noqa: ANN001
             assert curp.is_valid(value)
         if c["country_code"] == "IN":
             assert re.fullmatch(r"[A-Z]{3}P[A-Z]\d{4}[A-Z]", str(c["tax_id"]))
+            # rule-valid, so discovery still finds the PAN (surrogate PANs carry 0000: invalid)
+            assert validate("PAN_IN", str(c["tax_id"])) is True
         else:
             assert c["tax_id"] is None
         domain = str(c["email"]).rsplit("@", 1)[1]
@@ -126,6 +128,11 @@ def test_cli_arguments_and_unsupported_targets(capsys: pytest.CaptureFixture[str
         False,
         False,
     )
-    assert main(["--target", "oracle"]) == 2 and "arrives with M3" in capsys.readouterr().err
+    assert parse_args(["--target", "all"]).target == "all"
+    # M3: oracle/mongo targets exist; a failure names the exception class, never the endpoint
+    bad = ["--target", "oracle", "--oracle-dsn", "127.0.0.1:1/NOPE", "--rows", "1"]
+    assert main(bad) == 1
+    err = capsys.readouterr().err
+    assert "seeding oracle failed" in err and "127.0.0.1" not in err
     with pytest.raises(SystemExit):
         parse_args(["--target", "postgres", "--schema", "Bad-Name"])

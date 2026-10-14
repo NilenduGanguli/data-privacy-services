@@ -6,6 +6,9 @@ same ``Idempotency-Key`` with another request is 422 ``idempotency_key_reused`` 
 job's stored spec is the redacted one (templates, ids, fingerprints). Controls follow the queue's
 rules (contract §3.1): 409 ``job_terminal`` / ``job_finalizing`` / ``job_not_pausable`` /
 ``job_not_paused`` / ``job_not_retryable`` / ``key_material_required`` / ``key_material_mismatch``.
+``POST /jobs/run/validate`` answers what ``POST /jobs/run`` would refuse (same status and code) or
+``{"ok": true}``, without creating a job or returning a key: the console's step 5 asks it before it
+says "all checks passed".
 """
 
 from __future__ import annotations
@@ -35,8 +38,15 @@ from dps.layers.api.deps import (
 )
 from dps.layers.api.errors import DpsHttpError
 from dps.layers.api.idempotency import REPLAY_HEADER
-from dps.layers.connectors.submit import seal_retry_secret, submit_discover, submit_run
+from dps.layers.api.policy_refs import resolve
+from dps.layers.connectors.submit import (
+    check_run,
+    seal_retry_secret,
+    submit_discover,
+    submit_run,
+)
 from dps.ratelimit import enforce_rate_limit
+from dps.tenants import TenantError, check_daily_quota
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"])
 _JOBS = [Depends(require_scope("jobs")), Depends(enforce_rate_limit), Depends(require_db)]
@@ -76,6 +86,7 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
     """Queue a discover job (one proposed snapshot per object)."""
     counts = {"objects": len(body.objects)}
     try:
+        body.policy = await resolve(request, body.policy)  # M5: @name[:vN] at accept time
         tenant, key = tenant_of(request), idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
         earlier = await jobs.find_by_idempotency(tenant, key, fingerprint=fp) if key else None
@@ -98,14 +109,43 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
     return {"job": _job(job)}
 
 
+@router.post("/jobs/run/validate", dependencies=_JOBS)
+async def validate_run_spec(body: RunSpec, request: Request, response: Response) -> dict[str, bool]:
+    """Run every check ``POST /jobs/run`` makes before a job exists; ``{"ok": true}`` or the
+    run's own refusal. Nothing is queued, sealed, stored or returned."""
+
+    async def body_() -> dict[str, bool]:
+        body.policy = await resolve(request, body.policy)  # M5: as POST /jobs/run resolves it
+        await check_run(
+            body,
+            tenant_id=tenant_of(request),
+            principal=principal_of(request),
+            settings=_settings(request),
+            kek=kek_of(request),
+        )
+        return {"ok": True}
+
+    response.headers["Cache-Control"] = "no-store"
+    return await guarded(body_())
+
+
 @router.post("/jobs/run", status_code=202, dependencies=_JOBS)
 async def run(body: RunSpec, request: Request, response: Response) -> dict[str, Any]:
     """Validate, seal and queue a run; the generated key or seed is in this answer only."""
     try:
         key = idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
+        earlier = None
         if key:  # a key reused with another request is refused before any validation (as on L1)
-            await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+            earlier = await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+        # M5: an @name[:vN] reference becomes the stored body before validation, so the job
+        # records exactly the version it ran
+        body.policy = await resolve(request, body.policy)
+        if earlier is None:  # M5: a replay of an accepted job is never refused for the quota
+            try:
+                await check_daily_quota(tenant_of(request), _settings(request))
+            except TenantError as exc:
+                raise DpsHttpError(exc.status, exc.code, exc.detail) from None
         sub = await submit_run(
             body,
             tenant_id=tenant_of(request),

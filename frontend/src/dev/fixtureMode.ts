@@ -6,7 +6,7 @@
  * the fixture fields (synthetic values only).
  */
 import type { ScanField, ScanPage } from '../lib/types';
-import { FIXTURE_MARKER, ScanFixtureServer, type ArtefactInfo } from './fixtureServer';
+import { FIXTURE_MARKER, ScanFixtureServer, type ArtefactInfo } from './scanFixtureServer';
 
 const INK = '#141a2b';
 const MUTED = '#7e89a6';
@@ -126,7 +126,7 @@ export function installFixtureMode(): void {
     const answer = await server.handle(method, url, body);
     return answer ?? realFetch(input, init);
   };
-  document.documentElement.dataset.fixtures = 'scanner';
+  document.documentElement.dataset.fixtures = [document.documentElement.dataset.fixtures, 'scanner'].filter(Boolean).join(' ');
   const tag = Object.assign(document.createElement('div'), { textContent: 'fixtures', title: 'UI-scanner routes are served from dev fixtures' });
   tag.setAttribute('style', 'position:fixed;right:10px;bottom:10px;z-index:50;font:700 10.5px system-ui;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:99px;background:var(--amber-soft);color:var(--amber);border:1px solid var(--amber-border);pointer-events:none');
   document.body.appendChild(tag);

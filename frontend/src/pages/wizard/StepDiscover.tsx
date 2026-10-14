@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { HeatLegend, HeatMap } from '../../components/HeatMap';
 import { usePoll } from '../../hooks/usePoll';
 import { api, ApiError, type Auth } from '../../lib/api';
+import { columnLabel } from '../../lib/engines';
 import {
-  decisionReason, fmtCount, fqn, heatTone, isTerminal, METHOD_NAMES, methodText, needsDecision, overridesFor, parseCount, runMethodFor,
+  decisionReason, fmtCount, fqn, heatTone, isTerminal, keptHitText, keptWithHits, METHOD_NAMES, methodText, needsDecision, overridesFor, parseCount, runMethodFor,
   selectionOf, shortId, shortType, sourceObject, type ColumnEdit, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, ColumnClassification, MethodSpec } from '../../lib/types';
@@ -93,6 +94,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
   const cols = snapshot?.columns ?? [];
   const tally = { crit: 0, sens: 0, decl: 0, kept: 0 };
   for (const c of cols) tally[heatTone(c)] += 1;
+  const keptHits = cols.filter(keptWithHits).length;
   const decisions = cols.filter(needsDecision);
   const open = decisions.filter((c) => !reviewed.has(c.path));
   const editable = snapshot?.status === 'proposed';
@@ -129,7 +131,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
               <div className="cbox"><div className="l"><i style={{ background: 'var(--rose)' }} />Critical</div><div className="v">{tally.crit}</div><div className="s">government ids, accounts, cards</div></div>
               <div className="cbox"><div className="l"><i style={{ background: 'var(--amber)' }} />Sensitive</div><div className="v">{tally.sens}</div><div className="s">contact, identity, free text</div></div>
               <div className="cbox"><div className="l"><i style={{ background: 'var(--teal)' }} />Declared</div><div className="v">{tally.decl}</div><div className="s">declared fields of the policy</div></div>
-              <div className="cbox"><div className="l"><i style={{ background: 'var(--surface-3)', border: '1px solid var(--border-strong)' }} />Kept</div><div className="v">{tally.kept}</div><div className="s">not personal data</div></div>
+              <div className="cbox"><div className="l"><i style={{ background: 'var(--surface-3)', border: '1px solid var(--border-strong)' }} />Kept</div><div className="v">{tally.kept}</div><div className="s">{keptHits ? `${keptHits} with personal data found` : 'no personal data found'}</div></div>
             </div>
           </>
         )}
@@ -151,7 +153,7 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
             {decisions.length === 0 && <p className="muted" style={{ margin: 0, fontSize: 13 }}>Every classified column has a confident detector result and a method that fits its type.</p>}
             {decisions.map((c) => (
               <div className="decide" key={c.path}>
-                <span className="mono">{c.name}</span>
+                <span className="mono">{columnLabel(c)}</span>
                 <div><div className="why">{decisionReason(c)}</div>
                   <div className="sug">Suggested: {mode === 'synthesize' ? methodText(c.synthesize_suggested) : c.text_column ? 'text pipeline (det_token on each detected span)' : methodText(c.suggested)}{c.entity_type ? ` as ${c.entity_type}` : ''}.</div></div>
                 <span className="rowx">
@@ -176,23 +178,23 @@ export function StepDiscover({ d, dispatch, auth, onNext, onBack }: {
                   const keyRewritten = keyNames.has(c.name) && (mode === 'synthesize' ? (sm ?? runMethodFor(c, 'synthesize')).method : m.method) !== 'keep';
                   return (
                     <tr key={c.path} className={edits[c.path] || c.override || focus === c.path ? 'edited' : ''}>
-                      <td className="mono">{c.name}{c.is_key && <span className="faint sm"> · key</span>}
+                      <td className="mono">{columnLabel(c)}{c.is_key && <span className="faint sm"> · key</span>}
                         {keyRewritten && <span className="faint sm" style={{ display: 'block' }} title="In place updates rows by this key and never changes it">keep it to write in place</span>}</td>
                       <td className="faint" title={c.data_type}>{shortType(c.data_type)}</td>
-                      <td><input className="input mono ent" list="entity-types" aria-label={`Entity of ${c.name}`} disabled={!editable}
+                      <td><input className="input mono ent" list="entity-types" aria-label={`Entity of ${columnLabel(c)}`} disabled={!editable}
                                  value={(value(c, 'entity_type', c.entity_type) as string | null) ?? ''} placeholder="kept"
                                  onChange={(e) => edit(c.path, { entity_type: e.target.value.trim().toUpperCase() || null })} /></td>
-                      <td className="mono">{c.entity_type ? c.confidence.toFixed(2) : '—'}</td>
+                      <td className="mono" title={keptWithHits(c) ? `Detectors found ${(c.value_entities ?? []).join(', ')} in sampled values` : undefined}>{c.entity_type ? c.confidence.toFixed(2) : keptHitText(c)}</td>
                       <td className="shapes" title={c.shapes.length ? `Value shapes (letters as x/X, digits as 9): ${c.shapes.join('  ')}` : undefined}>{c.shapes[0] ?? '—'}</td>
-                      <td><select className="input mono" aria-label={`Method of ${c.name}`} disabled={!editable} value={m.method}
+                      <td><select className="input mono" aria-label={`Method of ${columnLabel(c)}`} disabled={!editable} value={m.method}
                                   onChange={(e) => edit(c.path, { method: methodChoice(e.target.value, c.method, c.suggested) })}>
                         {METHOD_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}</select></td>
-                      {mode === 'synthesize' && <td><select className="input mono" aria-label={`Synthesize method of ${c.name}`} disabled={!editable} value={sm?.method ?? 'keep'}
+                      {mode === 'synthesize' && <td><select className="input mono" aria-label={`Synthesize method of ${columnLabel(c)}`} disabled={!editable} value={sm?.method ?? 'keep'}
                                   onChange={(e) => edit(c.path, { synthesize_method: methodChoice(e.target.value, c.synthesize_method, c.synthesize_suggested) })}>
                         {METHOD_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}</select></td>}
-                      <td><input type="radio" name="anchor" aria-label={`Anchor on ${c.name}`} disabled={!editable || !c.entity_type} checked={!!value(c, 'anchor', c.anchor)}
+                      <td><input type="radio" name="anchor" aria-label={`Anchor on ${columnLabel(c)}`} disabled={!editable || !c.entity_type} checked={!!value(c, 'anchor', c.anchor)}
                                  onChange={() => edit(c.path, { anchor: true })} /></td>
-                      <td><input type="checkbox" aria-label={`Text pipeline for ${c.name}`} disabled={!editable || !['text', 'lob_text', 'json'].includes(c.kind)} checked={!!value(c, 'text_column', c.text_column)}
+                      <td><input type="checkbox" aria-label={`Text pipeline for ${columnLabel(c)}`} disabled={!editable || !['text', 'lob_text', 'json'].includes(c.kind)} checked={!!value(c, 'text_column', c.text_column)}
                                  onChange={(e) => edit(c.path, { text_column: e.target.checked })} /></td>
                     </tr>
                   );

@@ -4,6 +4,7 @@
  * DOM, and nothing here ever formats a customer value: jobs, snapshots and packs hold names,
  * counts, codes and hashes only.
  */
+import { mongoFilterTemplate, parseMongoFilter } from './engines';
 import type {
   ClassificationSnapshot, ColumnClassification, ConnectionTestResult, CountOut, Job, MethodSpec, ObjectRef, PkStrategy, RunSpec, Selection,
   SnapshotOverride, TableShape, TargetSpec, WriteMode,
@@ -187,11 +188,22 @@ export function total(map: Record<string, number> | null | undefined): number {
   return Object.values(map ?? {}).reduce((a, b) => a + (Number(b) || 0), 0);
 }
 
-const DECISION_NOTES = new Set(['fpe_domain_too_small', 'numeric_column', 'date_column', 'text_pipeline']);
+const DECISION_NOTES = new Set(['fpe_domain_too_small', 'numeric_column', 'date_column', 'text_pipeline', 'mixed_entities', 'kept_with_hits', 'length_overflow', 'length_kept']);
 
-/** A column a reviewer should look at: low confidence, a fallback note, or free text. */
+/** A column a reviewer should look at: low confidence, a fallback note, free text, values of
+ *  several personal-data types, or a kept column the detectors still found personal data in. */
 export function needsDecision(col: ColumnClassification): boolean {
   return (!!col.entity_type && col.confidence < 0.8) || (!!col.type_note && DECISION_NOTES.has(col.type_note)) || col.text_column;
+}
+
+/** A kept column the detectors still found personal data in (never "not personal"). */
+export function keptWithHits(col: ColumnClassification): boolean {
+  return !col.entity_type && !col.text_column && (col.value_entities?.length ?? 0) > 0;
+}
+
+/** The confidence cell of a kept column: its detector hit rate when it has hits, else "—". */
+export function keptHitText(col: ColumnClassification): string {
+  return keptWithHits(col) ? `${Math.max(1, Math.round(col.value_hit_rate * 100))} % hits` : '—';
 }
 
 /** Heat-map tone: critical (rose), sensitive (amber), declared (teal), kept (muted). */
@@ -205,6 +217,11 @@ export function heatTone(col: ColumnClassification): 'crit' | 'sens' | 'decl' | 
 /** Why a column needs a decision, in words (value-free: rates and notes only). */
 export function decisionReason(col: ColumnClassification): string {
   if (col.text_column) return `Free text with personal data in ${Math.round(col.value_hit_rate * 100)} % of sampled rows.`;
+  const types = (col.value_entities ?? []).join(', ');
+  if (col.type_note === 'mixed_entities') return `Personal data of several types in one column${types ? ` (${types})` : ''}: every value is replaced whole.`;
+  if (col.type_note === 'kept_with_hits') return `Kept, but the detectors found ${types || 'personal data'} in ${Math.round(col.value_hit_rate * 100)} % of sampled rows. Classify it, or keep it on purpose.`;
+  if (col.type_note === 'length_overflow') return `The suggested ${col.suggested.method} output (or the token FPE falls back to on these values) is longer than ${col.data_type} allows. A copy to a new table or files takes it; In place and Append to this table refuse it. To write it back here, choose a method that keeps the length (fpe_digits, mask_partial, or hmac_pseudonym with a shorter length).`;
+  if (col.type_note === 'length_kept') return `Tokens would not fit ${col.data_type}, so format-preserving encryption of every digit keeps the length (reversible with the key).`;
   const note = typeNoteText(col.type_note);
   if (note) return note;
   return `The detectors agree on ${col.entity_type ?? 'this type'} with confidence ${col.confidence.toFixed(2)} only.`;
@@ -223,6 +240,10 @@ export function typeNoteText(note: string | null | undefined): string | null {
     case 'text_pipeline': return 'Free text: personal data inside it is replaced span by span.';
     case 'synthesize_key_kept': return 'Key or join column: synthesize mode keeps it so joins still work.';
     case 'synthesize_numeric': return 'Sensitive number: synthesize mode nulls or keeps it.';
+    case 'mixed_entities': return 'Personal data of several types in one column: every value is replaced whole.';
+    case 'kept_with_hits': return 'Kept, but the detectors found personal data in its sampled values.';
+    case 'length_overflow': return 'The suggested output is longer than the column allows: In place and Append to this table refuse it.';
+    case 'length_kept': return 'Tokens would not fit the column, so format-preserving encryption keeps the length.';
     default: return note ? note.replace(/_/g, ' ') : null;
   }
 }
@@ -262,6 +283,9 @@ export function errorText(code: string | null | undefined): string {
     ledger_conflict: 'Another holder already wrote this batch; the partition stopped without writing it twice.',
     connection_failed: 'DPS could not log in to the database.',
     secret_unavailable: 'The connection secret could not be read, or an inline secret was purged.',
+    secret_ref_foreign_tenant: 'A secret reference is relative to this tenant\'s secret folder; it cannot name another tenant\'s secrets.',
+    secret_ref_not_shared: 'The shared secret does not list this tenant.',
+    secret_ref_invalid: 'The secret reference is not a valid relative path.',
     target_invalid: 'The target cannot be written as specified (missing table, privilege or type).',
     pk_strategy_invalid: 'The primary-key strategy does not fit the table (key type, range or sequence).',
     pk_collision: 'New keys would collide with keys already in the table; nothing was written.',
@@ -275,11 +299,13 @@ export function errorText(code: string | null | undefined): string {
     statement_timeout: 'A statement ran longer than the statement timeout.',
     object_not_found: 'The table does not exist or is not visible to the login.',
     incompatible_method: 'A method does not fit the column type, so the batch was refused.',
+    length_overflow: 'A method\'s output is longer than the column it is written into; choose a method that keeps the length, or copy to a new table.',
     max_attempts: 'The job ran out of attempts after repeated failures.',
     lease_lost: 'The worker lost its lease; the reaper re-queued the work from its last checkpoint.',
     key_material_required: 'The job key was purged; load the key file to retry.',
     key_material_mismatch: 'The key file does not belong to this job.',
-    admin_scope_required: 'Writing to a production-tagged connection needs an API key with the admin scope.',
+    admin_scope_required: 'Writing to or changing a production-tagged connection needs an API key with the admin scope.',
+    connection_endpoint_change_requires_credentials: 'Pointing a connection with stored credentials at another server needs its credentials again in the same change, or the admin scope.',
     confirm_write_required: 'In place and Append need a typed confirmation.',
     snapshot_not_accepted: 'The run needs the accepted classification snapshot of this table.',
     connection_role: 'The connection lacks the role this step needs (source or target).',
@@ -360,6 +386,8 @@ export interface WizardDraft {
   host: string;
   port: string;
   database: string;
+  serviceName: string;                    // Oracle (M3)
+  connOptions: Record<string, string>;    // allowed connection options: sslmode, replicaSet, directConnection, authSource, tls
   username: string;
   password: string;                       // transient: dropped from React state after the create
   production: boolean;
@@ -370,9 +398,10 @@ export interface WizardDraft {
   owner: string;
   table: string;
   shape: TableShape | null;
-  selMode: 'where' | 'query';
+  selMode: 'where' | 'query' | 'mongo';
   where: string;                          // transient: never stored
   query: string;                          // transient: never stored
+  mongoFilterText: string;                // transient: never stored (MongoDB filter JSON, M3)
   params: Record<string, string | number | boolean | null>;   // transient: never stored
   count: CountOut | null;
   countedAt: string | null;
@@ -432,9 +461,9 @@ export function emptyDraft(draftId: string = newDraftId()): WizardDraft {
   return {
     draftId, step: 1,
     engine: 'postgres', connMode: 'saved', connectionId: null, connectionName: '', connectionTags: [], connectionRoles: [],
-    newName: '', credMode: 'secret_ref', secretRef: '', host: '', port: '5432', database: '', username: '', password: '',
+    newName: '', credMode: 'secret_ref', secretRef: '', host: '', port: '5432', database: '', serviceName: '', connOptions: {}, username: '', password: '',
     production: false, targetConnectionId: null, test: null, testedAt: null,
-    owner: '', table: '', shape: null, selMode: 'where', where: '', query: '', params: {}, count: null, countedAt: null,
+    owner: '', table: '', shape: null, selMode: 'where', where: '', query: '', mongoFilterText: '', params: {}, count: null, countedAt: null,
     countSeconds: null, rows: null, countedKey: null, columns: null, maxRows: '', sampleRows: '2000', parallelism: 4,
     discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, keyMethods: null,
     writeMode: null, targetOwner: '', targetTable: '', tableLoad: 'truncate_insert', createIfMissing: true,
@@ -458,7 +487,7 @@ export function newDraftId(): string {
  * key methods (always read again from the accepted snapshot on the server).
  */
 const TRANSIENT = [
-  'password', 'keyMaterialJson', 'where', 'query', 'params', 'count', 'countedAt', 'countSeconds', 'rows', 'countedKey',
+  'password', 'keyMaterialJson', 'where', 'query', 'mongoFilterText', 'params', 'count', 'countedAt', 'countSeconds', 'rows', 'countedKey',
   'typed', 'confirmedAt', 'confirmedKey', 'confirmLapsed', 'submittedJobId', 'keyMethods',
 ] as const;
 
@@ -501,8 +530,13 @@ export function selectionOf(d: WizardDraft): Selection {
   const sel: Selection = {};
   if (d.selMode === 'where' && d.where.trim()) sel.where = d.where.trim();
   if (d.selMode === 'query' && d.query.trim()) sel.query = d.query.trim();
+  if (d.selMode === 'mongo') {
+    const { filter } = parseMongoFilter(d.mongoFilterText);
+    if (filter) sel.mongo_filter = filter;
+  }
   if (Object.keys(d.params).length) sel.params = { ...d.params };
-  if (d.columns && d.shape && d.columns.length < d.shape.columns.length) sel.columns = [...d.columns];
+  // a document's paths share their top-level name: compare with the distinct names (M3)
+  if (d.columns && d.shape && d.columns.length < new Set(d.shape.columns.map((c) => c.name)).size) sel.columns = [...d.columns];
   const max = parseCount(d.maxRows);
   if (max) sel.max_rows = max;
   return sel;
@@ -641,6 +675,7 @@ export function specPreview(d: WizardDraft): Record<string, unknown> {
   const spec = buildRunSpec(d) as unknown as Record<string, any>;
   const sel = { ...spec.source.selection };
   if (sel.params) sel.params = Object.fromEntries(Object.keys(sel.params).map((k) => [k, '<bound>']));
+  if (sel.mongo_filter) sel.mongo_filter = mongoFilterTemplate(sel.mongo_filter);
   const consistency: Record<string, unknown> = { scope: spec.consistency.scope };
   if (spec.group_id) consistency.group = spec.group_id;
   if (spec.consistency.key_material) consistency.kid = (spec.consistency.key_material as Record<string, unknown>).kid ?? null;
@@ -766,13 +801,13 @@ export function partitionPct(p: { state: string; rows_written: number }, job: Jo
 }
 
 /** The Evidence-so-far tiles from the job's value-free counters. */
-export function evidenceSoFar(job: Job): { rows: number; values: number; hits: number; fallbacks: number; dominantFallback: string | null; done: number; total: number; failed: number } {
+export function evidenceSoFar(job: Job): { rows: number; values: number; hits: number; keptHits: number; fallbacks: number; dominantFallback: string | null; done: number; total: number; failed: number } {
   const { methods, fallbacks } = splitCounters(job.progress.values_by_method);
   const values = Object.entries(methods).filter(([m]) => m !== 'keep').reduce((a, [, v]) => a + v, 0);
   const hits = (job.progress.values_by_method['verify:hits'] ?? 0) + (job.progress.verification.hits ?? 0);
   const ranked = Object.entries(fallbacks).sort((a, b) => b[1] - a[1]);
   return {
-    rows: job.progress.rows_written, values, hits, fallbacks: total(fallbacks), dominantFallback: ranked[0]?.[0] ?? null,
+    rows: job.progress.rows_written, values, hits, keptHits: job.progress.verification.kept_hits ?? 0, fallbacks: total(fallbacks), dominantFallback: ranked[0]?.[0] ?? null,
     done: job.progress.partitions_done, total: job.progress.partitions_total, failed: job.progress.partitions_failed,
   };
 }
@@ -797,6 +832,10 @@ export function typeNoteShort(note: string | null | undefined): string | null {
     case 'date_column': return 'date → date_shift';
     case 'type_kept': return 'type kept';
     case 'binary_kept': return 'binary kept';
+    case 'mixed_entities': return 'mixed types → replaced whole';
+    case 'kept_with_hits': return 'kept · detector hits';
+    case 'length_overflow': return 'output too long for the column';
+    case 'length_kept': return 'too long as a token → fpe_digits';
     case 'text_pipeline': return 'span-level text pipeline';
     case 'synthesize_key_kept': return 'key kept when synthesizing';
     case 'synthesize_numeric': return 'synthesize nulls or keeps';
@@ -889,14 +928,66 @@ export function shortSha(sha: string): string {
   return sha.length > 12 ? `${sha.slice(0, 8)}…${sha.slice(-4)}` : sha;
 }
 
+/** A run whose verification can pass: a failed or canceled run's output is incomplete (N3). */
+export function finishedOutcome(outcome: string | null | undefined): boolean {
+  return !outcome || outcome === 'succeeded' || outcome === 'dry_run';
+}
+
 /**
  * The verification chip of a pack (mockups 09, 10): "passed · 0 leaks", "failed · 2 leaks caught",
- * and "failed closed" for a run that stopped before its counters held a hit (a preflight leak).
+ * "failed closed" for a run that stopped before its counters held a hit (a preflight leak),
+ * "review required" when the post-write sample found personal data in a column kept as not
+ * personal (never "passed": the output holds untransformed personal data), and "not verified · job
+ * failed (length_overflow)" for a run that ended failed or canceled for another reason: its sweep
+ * saw only what was written, often nothing, so it never reads as passed (packs stored before that
+ * rule could say `passed: true` for such a run; the outcome decides).
  */
-export function verificationText(passed: boolean, hits: number): string {
-  if (passed) return `passed · ${fmtCount(hits)} leaks`;
+export function verificationText(passed: boolean, hits: number, review = false, outcome?: string | null, errorCode?: string | null): string {
+  const finished = finishedOutcome(outcome);
+  if (passed && finished) return `passed · ${fmtCount(hits)} leaks`;
   if (hits > 0) return `failed · ${fmtCount(hits)} ${hits === 1 ? 'leak' : 'leaks'} caught`;
+  if (!finished && errorCode !== 'leakage') return `not verified · job ${outcome}${errorCode ? ` (${errorCode})` : ''}`;
+  if (review) return 'review required';
   return 'failed closed';
+}
+
+/** The chip tone of a verification: emerald passed, amber review required, slate canceled, rose failed. */
+export function verificationTone(passed: boolean, hits: number, review = false, outcome?: string | null): 'emerald' | 'amber' | 'rose' | 'slate' {
+  const finished = finishedOutcome(outcome);
+  if (passed && finished) return 'emerald';
+  if (!finished && hits === 0 && outcome === 'canceled') return 'slate';
+  return review && hits === 0 && finished ? 'amber' : 'rose';
+}
+
+/** The unit one source record is counted in: documents for MongoDB, rows for the SQL engines. */
+export function recordNoun(engine: string | null | undefined, n: number): string {
+  return engine === 'mongo' ? (n === 1 ? 'document' : 'documents') : n === 1 ? 'row' : 'rows';
+}
+
+/** Every '?' leaf of a value-free MongoDB filter template: one per bound literal. */
+function templateLiterals(t: unknown): number {
+  if (Array.isArray(t)) return t.reduce((a: number, x) => a + templateLiterals(x), 0);
+  if (t !== null && typeof t === 'object') return Object.values(t as Record<string, unknown>).reduce((a: number, x) => a + templateLiterals(x), 0);
+  return t === '?' ? 1 : 0;
+}
+
+/**
+ * What a pack's run read, value-free: `scope` is the SQL where/query template or the MongoDB filter
+ * template (compact JSON, literals shown as '?'), `detail` the bound-value count and the limits.
+ */
+export function packSelection(sel: Record<string, any>, engine: string | null | undefined): { scope: string; detail: string } {
+  const mongo = engine === 'mongo';
+  const flt = sel.mongo_filter_template as Record<string, unknown> | null | undefined;
+  const hasFilter = mongo && flt !== null && typeof flt === 'object' && Object.keys(flt).length > 0;
+  const scope = mongo
+    ? (hasFilter ? JSON.stringify(flt) : 'all documents')
+    : String(sel.where_template || sel.query_template || 'all rows');
+  const binds = mongo ? (hasFilter ? templateLiterals(flt) : 0) : Number(sel.binds ?? 0);
+  const bound = mongo ? (binds === 1 ? 'literal' : 'literals') : binds === 1 ? 'parameter' : 'parameters';
+  const max = sel.max_rows ? ` · at most ${fmtCount(Number(sel.max_rows))} ${recordNoun(engine, Number(sel.max_rows))}` : '';
+  const n = Array.isArray(sel.columns) ? sel.columns.length : null;
+  const cols = n === null ? '' : ` · ${n} ${mongo ? (n === 1 ? 'field' : 'fields') : n === 1 ? 'column' : 'columns'}`;
+  return { scope, detail: ` · ${fmtCount(binds)} bound ${bound}${max}${cols}` };
 }
 
 /** Where a pack's run wrote, as its title shows it. */

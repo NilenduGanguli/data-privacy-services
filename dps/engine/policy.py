@@ -11,10 +11,18 @@ import json
 import re
 from functools import cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from dps.engine.detect.custom import DeclaredField, RecognizerSpec
 
@@ -95,14 +103,78 @@ class DetectConfig(BaseModel):
     declared_fields: list[DeclaredField] = Field(default_factory=list)
 
 
+JsonScalar = str | int | float | bool | None
+#: A tabular column path: ``$.`` and one SQL column name (tabular synthesis is per table).
+COLUMN_PATH = r"^\$\.[A-Za-z_][A-Za-z0-9_$#]{0,127}$"
+ColumnPath = Annotated[str, Field(pattern=COLUMN_PATH)]
+
+
+class WhenCondition(BaseModel):
+    """``{"path": "$.BALANCE", "op": "<", "value": 0}`` — compared against the synthetic row."""
+
+    model_config = _MODEL_CONFIG
+    path: ColumnPath
+    op: Literal["<", "<=", ">", ">=", "==", "!=", "in", "not_in", "is_null", "not_null"]
+    value: JsonScalar | list[JsonScalar] = None
+
+
+class WhenRule(BaseModel):
+    """``{"if": {...}, "then": "OVERDRAWN"}``; the first matching rule of a constraint wins."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, populate_by_name=True)
+    if_: WhenCondition = Field(alias="if")
+    then: JsonScalar = None
+
+    @model_serializer(mode="wrap")
+    def _dump_if(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # always dumped as "if" (the input form), whether or not the caller asks for aliases
+        data = dict(handler(self))
+        if "if_" in data:
+            data["if"] = data.pop("if_")
+        return data
+
+
+class TabularConstraint(BaseModel):
+    """A rule the tabular engine enforces on every synthetic row (spec §5.6).
+
+    ``object`` limits it to one table (``OWNER.NAME``, case-insensitive); ``None`` applies it
+    wherever the column exists. ``unique`` stands alone; ``min``/``max``/``positive`` and
+    ``when`` may be combined. Literals here are configuration, never customer data.
+    """
+
+    model_config = _MODEL_CONFIG
+    path: ColumnPath
+    object: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_$#.]{1,257}$")
+    min: float | str | None = None
+    max: float | str | None = None
+    positive: bool = False
+    unique: bool = False
+    when: list[WhenRule] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> TabularConstraint:
+        ranged = self.min is not None or self.max is not None or self.positive
+        if self.unique and (ranged or self.when):
+            raise ValueError(
+                f"constraint on {self.path}: unique cannot be combined with other rules"
+            )
+        if not (self.unique or ranged or self.when):
+            raise ValueError(f"constraint on {self.path} sets no rule")
+        return self
+
+
 class SynthesizeConfig(BaseModel):
-    """Methods for synthesize mode: a default plus per-entity overrides."""
+    """Methods for synthesize mode: a default plus per-entity overrides; tabular constraints and
+    the quasi-identifiers the privacy metric counts (M5)."""
 
     model_config = _MODEL_CONFIG
     default: MethodSpec = Field(default_factory=lambda: MethodSpec(method="surrogate"))
     overrides: dict[str, MethodSpec] = Field(default_factory=dict)
     keep_non_sensitive: bool = True
     llm_rewrite_text: bool = False
+    constraints: list[TabularConstraint] = Field(default_factory=list)
+    quasi_identifiers: list[ColumnPath] = Field(default_factory=list)  # "$.NAME" for the QI metric
+    utility_label: ColumnPath | None = None  # "$.NAME": train-on-synthetic/test-on-real label (M5)
 
 
 class ConsistencyConfig(BaseModel):
@@ -153,10 +225,22 @@ class Policy(BaseModel):
         )
 
     def config_hash(self) -> str:
-        """Stable sha256 of the policy for reports and evidence packs."""
-        canon = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        """Stable sha256 of the policy for reports and evidence packs.
+
+        The M5 synthesize fields (``constraints``, ``quasi_identifiers``, ``utility_label``) count
+        only when set, so every hash recorded before M5 (presets, snapshots, evidence packs) still
+        matches.
+        """
+        data = self.model_dump(mode="json")
+        for name in _OPTIONAL_SYNTHESIZE:
+            if not data["synthesize"].get(name):
+                data["synthesize"].pop(name, None)
+        canon = json.dumps(data, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
+
+#: ``synthesize`` fields (M5) left out of :meth:`Policy.config_hash` while empty.
+_OPTIONAL_SYNTHESIZE = ("constraints", "quasi_identifiers", "utility_label")
 
 #: Sections whose values are whole method specs: an override replaces an entry, never merges
 #: into it (``{"method": "fpe_digits"}`` must not inherit the preset's ``keep_suffix``).

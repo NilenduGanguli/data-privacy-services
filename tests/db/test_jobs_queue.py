@@ -273,3 +273,20 @@ async def test_concurrent_replays_at_the_cap_return_the_original(migrated_db) ->
     got = await asyncio.gather(*(_admit(idempotency_key="req-burst") for _ in range(6)))
     assert None not in got and len(set(got)) == 1
     assert await _admit(idempotency_key="req-other") is None
+
+
+async def test_reseal_secret_is_fenced_to_the_prepare_holder(migrated_db) -> None:  # noqa: ANN001
+    """M5 Task 6: ``reseal_secret`` replaces ``key_enc`` only for the worker holding prepare."""
+    job = await _job(sealed_secret=b"\x01old")
+    await jobs.claim_jobs("w1", kinds=(JobKind.run,), batch=1)
+    assert await jobs.reseal_secret("w2", job.id, b"\x01stolen") is False
+    assert await jobs.reseal_secret("w1", job.id, b"\x01new") is True
+    internal = await jobs.load_job_internal(job.id)
+    assert internal is not None and internal.key_enc == b"\x01new"
+    assert await jobs.advance_job(
+        "w1", job.id, phase=JobPhase.finalize, state=JobState.queued, delay_seconds=0
+    )
+    await jobs.claim_jobs("w1", kinds=(JobKind.run,), batch=1)
+    assert await jobs.reseal_secret("w1", job.id, b"\x01late") is False  # finalize: never
+    internal = await jobs.load_job_internal(job.id)
+    assert internal is not None and internal.key_enc == b"\x01new"

@@ -16,7 +16,8 @@ import httpx
 
 #: In-network endpoints of the compose stack (the app and the worker resolve these names).
 SOURCE_PG = {"host": "source-pg", "port": 5432, "database": "bank"}
-#: The demo connections (contract §11; their secrets are written by the demo-secrets one-shot).
+#: The demo connections (contract §11; their secrets are written by the demo-secrets one-shot under
+#: the demo tenant's folder ``DPS_SECRET_DIR/default/``: secret refs are tenant-scoped).
 CONNECTIONS: dict[str, dict[str, Any]] = {
     "bank-pg-ro": {
         "engine": "postgres",
@@ -41,6 +42,35 @@ CONNECTIONS: dict[str, dict[str, Any]] = {
         "engine": "s3",
         "params": {"bucket": "dps-exports", "endpoint_url": "http://minio:9000"},
         "secret_ref": "dps/s3/exports",
+        "roles": ["target"],
+    },
+}
+#: M3's demo Oracle and MongoDB connections (compose ``demo-secrets`` refs; ``oracle``/``mongo`` are
+#: the in-network hosts). The same names as the console harness ``tests/console/m3_console.py``.
+ORACLE_PARAMS = {"host": "oracle", "port": 1521, "service_name": "FREEPDB1"}
+M3_CONNECTIONS: dict[str, dict[str, Any]] = {
+    "smoke-ora-src": {
+        "engine": "oracle",
+        "params": ORACLE_PARAMS,
+        "secret_ref": "dps/src/oracle-crm-ro",
+        "roles": ["source"],
+    },
+    "smoke-ora-tgt": {
+        "engine": "oracle",
+        "params": ORACLE_PARAMS,
+        "secret_ref": "dps/tgt/oracle-crm-masked",
+        "roles": ["target"],
+    },
+    "smoke-mdb-src": {
+        "engine": "mongo",
+        "params": {"database": "crm"},
+        "secret_ref": "dps/src/mongo-crm",
+        "roles": ["source"],
+    },
+    "smoke-mdb-tgt": {
+        "engine": "mongo",
+        "params": {"database": "crm_uat"},
+        "secret_ref": "dps/tgt/mongo-crm-uat",
         "roles": ["target"],
     },
 }
@@ -110,7 +140,8 @@ class Client:
         return r.json() if r.content else None
 
     def ensure_connections(self, names: tuple[str, ...] = tuple(CONNECTIONS)) -> dict[str, str]:
-        """``{name: id}``, creating the demo connections that are missing."""
+        """``{name: id}``, creating the demo connections (M2's or M3's) that are missing."""
+        known = {**CONNECTIONS, **M3_CONNECTIONS}
         found: dict[str, str] = {}
         cursor: str | None = None
         while True:
@@ -129,7 +160,7 @@ class Client:
                     "/api/v1/connections",
                     f"create {name}",
                     ok=(201,),
-                    json={"name": name, **CONNECTIONS[name]},
+                    json={"name": name, **known[name]},
                 )
                 found[name] = made["id"]
         return {name: found[name] for name in names}
@@ -148,19 +179,24 @@ class Client:
     def discover_and_accept(
         self,
         connection_id: str,
-        owner: str,
+        owner: str | None,
         name: str,
         *,
         overrides: list[dict[str, Any]] | None = None,
         timeout: float = 120.0,
+        policy: str | None = None,
     ) -> str:
-        """Discover one table, apply review overrides, accept; returns the snapshot id."""
+        """Discover one table (``owner`` ``None``: a MongoDB collection of the connection's
+        database), apply review overrides, accept; returns the snapshot id. ``policy`` names the
+        preset discovery suggests methods from (default: the server's)."""
+        body: dict[str, Any] = {
+            "connection_id": connection_id,
+            "objects": [{"owner": owner, "name": name}],
+        }
+        if policy:
+            body["policy"] = policy
         out = self.call(
-            "POST",
-            "/api/v1/jobs/discover",
-            f"discover {owner}.{name}",
-            ok=(202,),
-            json={"connection_id": connection_id, "objects": [{"owner": owner, "name": name}]},
+            "POST", "/api/v1/jobs/discover", f"discover {owner}.{name}", ok=(202,), json=body
         )
         job = self.wait(out["job"]["id"], timeout)
         if job["state"] != "succeeded":

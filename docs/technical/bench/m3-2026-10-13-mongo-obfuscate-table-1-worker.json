@@ -1,0 +1,35 @@
+{
+  "batch_rows": 1000,
+  "engine": "mongo",
+  "engine_version": "0.2.0",
+  "fpe_enabled": true,
+  "host": {
+    "cpus": 18,
+    "machine": "arm64"
+  },
+  "job_id": "j_01M4VSW6E7MEA9S7ESG90VD526",
+  "label": "1-worker",
+  "mode": "obfuscate",
+  "parallelism": 4,
+  "partition_rows_per_second": {
+    "p50": 231.9,
+    "p95": 269.6
+  },
+  "partitions": 4,
+  "rows": 20000,
+  "rows_per_second": 860.3,
+  "state": "succeeded",
+  "values_by_method": {
+    "date_shift": 20000,
+    "det_token": 70025,
+    "email": 20000,
+    "fallback:fallback:fpe_domain_too_small": 11989,
+    "fpe_digits": 20000,
+    "fpe_text": 40000,
+    "generalize": 20000,
+    "phone": 20000
+  },
+  "wall_seconds": 23.25,
+  "workers_online": 1,
+  "write_mode": "table"
+}

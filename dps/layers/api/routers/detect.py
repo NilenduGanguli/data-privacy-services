@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 
 from dps.auth import require_scope
 from dps.engine.service import DetectResponse, PrivacyEngine
-from dps.layers.api.common import payload_from, policy_label, run_engine, with_idempotency
+from dps.layers.api.common import payload_from, run_engine, with_idempotency
 from dps.layers.api.ndjson import (
     OPENAPI_NDJSON,
     NdjsonEnvelope,
@@ -16,6 +16,7 @@ from dps.layers.api.ndjson import (
     stream_lines,
     streams_array,
 )
+from dps.layers.api.policy_refs import policy_label, resolved_policy
 from dps.layers.api.schemas import DetectOut, EngineRequest
 from dps.ratelimit import enforce_rate_limit
 
@@ -37,19 +38,21 @@ async def detect(body: EngineRequest, request: Request) -> DetectOut | Streaming
     ``Idempotency-Key`` makes a retry a replay (contract §9).
     """
     engine: PrivacyEngine = request.app.state.engine
-    policy = policy_label(body.policy, engine.settings.default_policy)
+    ref = await resolved_policy(request, body.policy, mode="detect")  # M5: @name[:vN]
+    policy = policy_label(ref, engine.settings.default_policy)
 
     async def run() -> DetectOut | StreamingResponse:
         if streams_array(body.data, body.text, request):
-            envelope = NdjsonEnvelope(policy=body.policy, options=body.options)
+            envelope = NdjsonEnvelope(options=body.options)
+            envelope.policy = ref  # kept as resolved (a stored version keeps its audit label)
             return await stream_lines(request, mode="detect", envelope=envelope, items=body.data)
 
         async def call() -> DetectResponse:
             payload = payload_from(request, body.data, body.text)
-            extra = await engine.label_leftovers(payload, body.policy, body.options)  # T3 (opt-in)
+            extra = await engine.label_leftovers(payload, ref, body.options)  # T3 (opt-in)
             # CPU-bound and synchronous: off the event loop so probes stay responsive.
             return await run_in_threadpool(
-                engine.detect, payload, body.policy, body.options, extra_findings=extra
+                engine.detect, payload, ref, body.options, extra_findings=extra
             )
 
         result, tid = await run_engine(request, mode="detect", policy_name=policy, call=call)

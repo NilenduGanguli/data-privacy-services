@@ -132,7 +132,19 @@ ner: "on" | "off" | "unavailable", free_text_fields, complete, gaps: [...]}`. Fr
 payload, or a JSON string of two or more words that was not replaced whole. With NER off (the
 compose image) or failed to load, names in free text are found only next to a cue — a title
 (`Mr`, `Smt`, `Sra.`…), a lead-in (`name is`, `Dear`, `s/o`, `account holder`…), contact details
-right after the name, or `<name>'s Aadhaar` — so free text is a gap. A detected name is also
+right after the name, `<name>'s Aadhaar`, or the payee of a `NEFT/<name>/…` narration — so free
+text is a gap. Free text is also a gap for every type recognised **only by a field name** (a JSON key
+or a column), never inside text, with NER on or off: the statement starts `types recognised only by
+a field name` and names them all (without NER: `AGE, CASE_ID, COOKIE_ID, CVV, DEVICE_ID,
+DIAGNOSIS_CODE, EMPLOYEE_ID, GENDER, MEDICAL_RECORD_NUMBER, MEDICATION, MRZ, NATIONALITY,
+NATIONAL_ID, ORG_NAME, VOTER_ID`; a policy's custom recognizers remove the types they find in
+text). Account numbers and customer ids are found in text by their label (`A/c`, `Acct#`,
+`Account no.:`, `cuenta`; `Customer ID`, `Cust. No.`, `Client id`, `CIF`) and a `CUST-`/`CIF`
+prefix, and a postal address by a line that starts `Address:` (to a `PIN code` / `Postcode` /
+`ZIP` cue or the line end); a labelled hit is decisive over a checksum shape inside it. Because a
+bare number is not reported as an account, free text is a gap for these too: a third statement
+starts `types found inside free text only next to their label` and names `ACCOUNT_NUMBER,
+CUSTOMER_ID, STREET_ADDRESS` (less what a policy's recognizers find). A detected name is also
 checked part by part: a part of four or more characters that an output string holds more often than
 the input held it outside the detected names (`Krishnan` in a surrogate `Utkarsh Krishnan` for
 `Ananya Krishnan`) is a hit there, with entity type `PERSON_NAME`. Synthesis avoids such hits at the

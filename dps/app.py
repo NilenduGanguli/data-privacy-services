@@ -33,7 +33,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from dps import __version__
 from dps.audit import AuditSink, DbAuditSink, LogAuditSink, NullAuditSink
-from dps.auth import API_KEY_HEADER, TENANT_HEADER, StaticKeyStore, coded_http_exception_handler
+from dps.auth import (
+    API_KEY_HEADER,
+    TENANT_HEADER,
+    KeyStore,
+    StaticKeyStore,
+    coded_http_exception_handler,
+)
 from dps.config import Settings, get_settings
 from dps.engine.service import PrivacyEngine
 from dps.layers.api.common import TRACE_HEADER, CodedHTTPException
@@ -57,6 +63,7 @@ from dps.ratelimit import RateLimiter
 from dps.secrets import load_kek
 
 if TYPE_CHECKING:
+    from dps.auth_db import DbKeyStore
     from dps.worker import Consumer
 
 logger = get_logger(__name__)
@@ -297,6 +304,19 @@ def _dist_file(dist: Path, full_path: str) -> Path | None:
     return None
 
 
+def _db_key_store(settings: Settings) -> DbKeyStore | None:
+    """M5: the DB-backed key store when a metadata database is configured (and the ``db`` extra
+    is installed); ``None`` otherwise — static keys then work alone."""
+    if not settings.pg_host:
+        return None
+    try:
+        from dps.auth_db import DbKeyStore
+    except ModuleNotFoundError as exc:
+        logger.warning("db_keys_disabled", reason=f"missing module {exc.name}")
+        return None
+    return DbKeyStore(settings)
+
+
 class _JobPlatform:
     """The app's side of the job platform (M2): metadata DB, migrations mode, RLS posture, KEK,
     the DB audit sink, readiness ``db``/``jobs`` and — locally only — an embedded worker.
@@ -502,12 +522,18 @@ def create_app(
     settings = settings or get_settings()
     configure_logging(settings.log_level, json_output=settings.env != "local")
     assert_production_posture(settings)
-    key_store = StaticKeyStore.from_settings(settings)
+    static_store = StaticKeyStore.from_settings(settings)
+    db_store = _db_key_store(settings)
+    key_store: KeyStore = static_store
+    if db_store is not None:
+        from dps.auth_db import ChainKeyStore
+
+        key_store = ChainKeyStore(static_store, db_store)
     if engine is None:
         engine = PrivacyEngine(settings, gateway=get_gateway(settings))
     gateway = engine.gateway
     ocr = ocr_client or build_ocr_client(settings)
-    if settings.auth_enabled and not len(key_store):
+    if settings.auth_enabled and not len(static_store) and db_store is None:
         logger.warning("auth_no_keys", reason="DPS_API_KEYS and DPS_BOOTSTRAP_API_KEY are unset")
 
     @asynccontextmanager
@@ -542,6 +568,14 @@ def create_app(
         READINESS.set(
             "fpe", engine.fpe_enabled, "ff1" if engine.fpe_enabled else "det_token fallback"
         )
+        tokenizer = engine.tokenizer
+        tokenizer_ok = await asyncio.to_thread(tokenizer.health) if tokenizer is not None else False
+        READINESS.set(  # M5 external_tokenize: informational, never a required component
+            "tokenizer",
+            tokenizer_ok,
+            ("up" if tokenizer_ok else "down") if tokenizer is not None else "unconfigured",
+            adapter=tokenizer.name if tokenizer is not None else "none",
+        )
         await _refresh_ocr(ocr, settings)
         m2 = _JobPlatform(app, settings, own_audit=audit_sink is None)
         try:
@@ -549,6 +583,18 @@ def create_app(
         except BaseException:
             await ocr.aclose()
             raise
+        READINESS.set(
+            "keys",
+            True,
+            "db+static" if db_store is not None else "static",
+            count=len(static_store),
+        )
+        stop_keys = asyncio.Event()
+        refresher = (
+            asyncio.create_task(db_store.run(stop_keys), name="dps-key-refresher")
+            if db_store is not None and m2.configured
+            else None
+        )
         logger.info(
             "startup",
             env=settings.env,
@@ -569,20 +615,25 @@ def create_app(
                 probe.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await probe
+            if refresher is not None:  # before the pools close: it must not recreate them
+                stop_keys.set()
+                await asyncio.gather(refresher, return_exceptions=True)
             await m2.stop()
             await ocr.aclose()
 
+    production = settings.is_production  # M5 posture: no interactive docs or schema in prod
     app = FastAPI(
         title="Data Privacy Services",
         version=__version__,
         lifespan=lifespan,
-        openapi_url="/api/v1/openapi.json",
-        docs_url="/docs",
+        openapi_url=None if production else "/api/v1/openapi.json",
+        docs_url=None if production else "/docs",
         redoc_url=None,
     )
     app.state.settings = settings
     app.state.engine = engine
-    app.state.auth = {"store": key_store, "enabled": settings.auth_enabled}
+    app.state.auth = {"store": key_store, "enabled": settings.auth_enabled, "static": static_store}
+    app.state.db_keys = db_store
     app.state.rate_limiter = RateLimiter(
         settings.rate_limit_rps, settings.rate_limit_burst, enabled=settings.rate_limit_enabled
     )
@@ -611,19 +662,21 @@ def create_app(
         document_max_bytes=settings.max_document_bytes + DOCUMENT_MULTIPART_OVERHEAD,
         ndjson_max_bytes=settings.max_ndjson_bytes,
     )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "Content-Type",
-            API_KEY_HEADER,
-            TENANT_HEADER,
-            TRACE_HEADER,
-            IDEMPOTENCY_HEADER,
-        ],
-        expose_headers=[REPLAY_HEADER],
-    )
+    origins = settings.cors_origin_list  # M5: explicit origins; [] = same-origin, no CORS at all
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=[
+                "Content-Type",
+                API_KEY_HEADER,
+                TENANT_HEADER,
+                TRACE_HEADER,
+                IDEMPOTENCY_HEADER,
+            ],
+            expose_headers=[REPLAY_HEADER],
+        )
     app.add_middleware(_SecurityHeaders, hsts=settings.env != "local")
 
     app.include_router(ops.router)
@@ -654,10 +707,15 @@ def _include_m2_routers(app: FastAPI) -> bool:
     except ModuleNotFoundError as exc:
         logger.warning("m2_routes_disabled", reason=f"missing module {exc.name}")
         return False
+    from dps.layers.api.routers import admin, policy_store, reports  # M5
+
     install_error_handlers(app)
-    for module in (connections, jobs, snapshots, groups, evidence, artefacts):
+    for module in (connections, jobs, snapshots, groups, evidence, artefacts, admin, reports):
         app.include_router(module.router)
     from dps.layers.api.routers import scans  # M4: the scanner's routes (no Playwright import)
 
     app.include_router(scans.router)
+    # after M0's policies router (create_app): /policies/presets etc. keep their meaning
+    app.include_router(policy_store.router)
+    app.include_router(reports.evidence_pdf_router)
     return True

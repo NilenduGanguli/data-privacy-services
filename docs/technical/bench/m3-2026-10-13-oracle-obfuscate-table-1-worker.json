@@ -1,0 +1,35 @@
+{
+  "batch_rows": 1000,
+  "engine": "oracle",
+  "engine_version": "0.2.0",
+  "fpe_enabled": true,
+  "host": {
+    "cpus": 18,
+    "machine": "arm64"
+  },
+  "job_id": "j_01M4VSVE8QSM41YZT9B9N83PH8",
+  "label": "1-worker",
+  "mode": "obfuscate",
+  "parallelism": 4,
+  "partition_rows_per_second": {
+    "p50": 246.9,
+    "p95": 246.9
+  },
+  "partitions": 4,
+  "rows": 20000,
+  "rows_per_second": 941.6,
+  "state": "succeeded",
+  "values_by_method": {
+    "date_shift": 20000,
+    "det_token": 90025,
+    "email": 20000,
+    "fallback:fallback:fpe_domain_too_small": 11989,
+    "fpe_digits": 20000,
+    "fpe_text": 20000,
+    "generalize": 20000,
+    "phone": 20000
+  },
+  "wall_seconds": 21.24,
+  "workers_online": 1,
+  "write_mode": "table"
+}

@@ -32,17 +32,8 @@ export function scanPackTitle(p: EvidencePack): string {
   return `UI scan ${hostOf((p.source?.origin as string | undefined) ?? (p.source?.url as string | undefined)) || '—'} → captures and exports`;
 }
 
-/**
- * The pack as dps/layers/connectors/evidence.py::canonical_json writes it (sorted keys, compact
- * separators, UTF-8 kept), so a pack without a stored JSON artefact still downloads as the bytes its
- * `pack_sha256` names. (Whole-number floats would differ from Python's `1.0`; packs hold counts.)
- */
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
-}
+/** Re-exported from lib/api.ts, where the evidence JSON download uses it too. */
+export { canonicalJson } from '../../lib/api';
 
 /** A scan's job id (dps/ids.py PREFIX_SCAN = "s"; runs are "j_…"). The evidence list carries no job kind. */
 export const isScanJobId = (jobId: string): boolean => jobId.startsWith('s_');

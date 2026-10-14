@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
 import {
-  buildRunSpec, draftForStorage, emptyDraft, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel,
+  buildRunSpec, draftForStorage, emptyDraft, engineName, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel,
   type Step, type WizardDraft,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, Connection, RunOut } from '../lib/types';
@@ -37,8 +37,8 @@ function JsonPane({ value }: { value: unknown }): JSX.Element {
 /** The one-line summary a finished step shows in the stepper. */
 function stepSub(step: Step, d: WizardDraft): string {
   switch (step) {
-    case 1: return d.connectionId ? `PostgreSQL · ${d.connectionName}` : 'PostgreSQL';
-    case 2: return d.shape ? `${d.count ? fmtCount(d.count.rows) : `~${fmtCount(d.shape.row_estimate)}`} rows · ${d.columns?.length ?? d.shape.columns.length} columns` : '';
+    case 1: return d.connectionId ? `${engineName(d.engine)} · ${d.connectionName}` : engineName(d.engine);
+    case 2: return d.shape ? `${d.count ? fmtCount(d.count.rows) : `~${fmtCount(d.shape.row_estimate)}`} ${d.engine === 'mongo' ? 'documents' : 'rows'} · ${d.columns?.length ?? new Set(d.shape.columns.map((c) => c.name)).size} ${d.engine === 'mongo' ? 'fields' : 'columns'}` : '';
     case 3: return d.snapshotId ? (d.snapshotAccepted ? 'snapshot accepted' : 'review pending') : '';
     case 4: return d.writeMode ? `${writeModeLabel(d.writeMode, d.writeMode === 'table' ? d.tableLoad : null)}${isWriteConfirmed(d) ? ' · confirmed' : ''}` : '';
     case 5: return d.ticket ? `${d.mode} · ${d.ticket}` : '';
@@ -62,6 +62,8 @@ export function JobWizard(): JSX.Element {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const deepSnapshot = params.get('snapshot');
+  const deepGroup = params.get('group');   // Jobs → "Add a job to this group"
+  const [groupName, setGroupName] = useState<string | null>(null);
   const restoredFrom = useRef<Partial<WizardDraft> | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
   const [d, dispatch] = useWizard(() => {
@@ -109,6 +111,7 @@ export function JobWizard(): JSX.Element {
         if (!live) return;
         const dot = snap.object_ref.indexOf('.');
         dispatch({ type: 'set', patch: {
+          engine: conn.engine === 'oracle' || conn.engine === 'mongo' ? conn.engine : 'postgres', selMode: conn.engine === 'mongo' ? 'mongo' : 'where',
           connMode: 'saved', connectionId: conn.id, connectionName: conn.name, connectionTags: conn.tags, connectionRoles: conn.roles,
           production: conn.tags.includes('production'), test, testedAt: new Date().toISOString(),
           owner: dot > 0 ? snap.object_ref.slice(0, dot) : '', table: dot > 0 ? snap.object_ref.slice(dot + 1) : snap.object_ref,
@@ -122,6 +125,15 @@ export function JobWizard(): JSX.Element {
     })();
     return () => { live = false; };
   }, [auth, deepSnapshot, dispatch]);
+
+  // ?group=<id>: step 5's consistency control starts on that group (the caller still loads its key)
+  useEffect(() => {
+    if (!deepGroup) return;
+    dispatch({ type: 'set', patch: { keyChoice: 'group', groupId: deepGroup } });
+    let live = true;
+    api.groups.get(auth, deepGroup).then((g) => { if (live) setGroupName(g.group.name); }).catch(() => { if (live) setGroupName(null); });
+    return () => { live = false; };
+  }, [auth, deepGroup, dispatch]);
 
   // a restored draft opens on the farthest step it can still show
   useEffect(() => { if (!frozen && d.step > reach) dispatch({ type: 'step', step: reach }); }, [d.step, reach, frozen, dispatch]);
@@ -181,6 +193,9 @@ export function JobWizard(): JSX.Element {
         {!submitted && <div className="head-actions"><Link className="btn btn-ghost" to="/data-sources">Cancel</Link><button className="btn" type="button" disabled={busy !== null} onClick={saveDraft}>Save draft</button></div>}
       </div>
       {linkError && <div className="err">Could not open the snapshot: {linkError}</div>}
+      {deepGroup && !submitted && d.keyChoice === 'group' && d.groupId === deepGroup && (
+        <div className="callout" style={{ fontSize: 12.5 }} data-testid="group-preset">Adding a job to job group <span className="mono">{groupName ?? deepGroup}</span>. Step 5 reuses the group's {d.mode === 'synthesize' ? 'seed' : 'key'}: load the <span className="mono">{d.mode === 'synthesize' ? '.dpsseed' : '.dpskey'}</span> file saved when the group was created. DPS keeps no copy.</div>
+      )}
       {restoredFrom.current && !submitted && (
         <div className="callout amber" style={{ fontSize: 12.5 }}>Restored the saved draft <span className="mono">{d.draftId}</span>. Credentials, keys and filters are not saved: re-enter them.{' '}
           <button type="button" className="linkbtn" onClick={() => { restoredFrom.current = null; try { localStorage.removeItem(DRAFT_KEY); } catch { /* private mode */ } dispatch({ type: 'reset' }); }}>Start a new draft</button></div>
@@ -202,7 +217,7 @@ export function JobWizard(): JSX.Element {
         <div className="wiz-main">
           {submitted && d.submittedJobId && <RunResult jobId={d.submittedJobId} out={submission?.out ?? null} writeMode={d.writeMode} onNewJob={startOver} />}
           {!submitted && d.step === 1 && <StepConnect d={d} dispatch={dispatch} auth={auth} connections={connections} onConnectionsChanged={loadConnections} onNext={() => go(2)} />}
-          {!submitted && d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} onNext={() => go(3)} onBack={() => go(1)} />}
+          {!submitted && d.step === 2 && <StepSelect d={d} dispatch={dispatch} auth={auth} connection={connections.find((c) => c.id === d.connectionId) ?? null} onNext={() => go(3)} onBack={() => go(1)} />}
           {!submitted && d.step === 3 && <StepDiscover d={d} dispatch={dispatch} auth={auth} onNext={() => go(4)} onBack={() => go(2)} />}
           {!submitted && d.step === 4 && <StepTarget d={d} dispatch={dispatch} auth={auth} connections={connections} snapshot={snapshot} onConnectionsChanged={loadConnections} onNext={() => go(5)} onBack={() => go(3)} />}
           {!submitted && d.step === 5 && <StepRun d={d} dispatch={dispatch} auth={auth} snapshot={snapshot} go={go} onBack={() => go(4)} run={run} />}

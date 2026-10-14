@@ -273,3 +273,30 @@ describe('the run Idempotency-Key follows the request (contract §9: same key, o
     expect(submissionKey(first, true, '{"a":1}', ids).key).not.toBe(first.key);
   });
 });
+
+describe('step 5 asks the server before it says "all checks passed" (M2 verify r2, issue 1)', () => {
+  it('never claims all checks passed until the server accepted the exact spec', async () => {
+    const { runReadiness } = await import('./state');
+    const waiting = runReadiness([], { state: 'checking' });
+    expect(waiting.chip).not.toBe('all checks passed');
+    expect(waiting.canRun).toBe(false);
+    expect(runReadiness([], { state: 'idle' }).canRun).toBe(false);
+    // append through a read-only connection: the server's own target-role rule
+    const role = runReadiness([], { state: 'refused', message: 'the written connection lacks the target role', code: 'connection_role' });
+    expect(role.canRun).toBe(false);
+    expect(role.chip).toBe('1 to resolve');
+    expect(role.reasons.join(' ')).toMatch(/lacks the target role.*connection_role/);
+    // an offset strategy with neither an offset nor a prefix: the server's model rule
+    const offset = runReadiness([], { state: 'refused', message: 'target.pk_strategy.offset: needs exactly one of offset or prefix' });
+    expect(offset.canRun).toBe(false);
+    expect(offset.reasons.join(' ')).toMatch(/offset or prefix/);
+    const ok = runReadiness([], { state: 'ok' });
+    expect(ok).toMatchObject({ chip: 'all checks passed', tone: 'emerald', canRun: true, reasons: [] });
+  });
+  it('lists the wizard prerequisites first and does not ask the server for an incomplete draft', async () => {
+    const { runReadiness } = await import('./state');
+    const r = runReadiness(['Enter the ticket (3 characters or more) for the purpose.'], { state: 'ok' });
+    expect(r).toMatchObject({ chip: '1 to resolve', canRun: false });
+    expect(r.reasons).toHaveLength(1);
+  });
+});

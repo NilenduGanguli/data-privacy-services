@@ -27,7 +27,10 @@ from dps.secrets import seed_fingerprint
 
 #: Group names follow the connection-name rule (lower-case words joined by hyphens).
 GROUP_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
-_COLS = "id, tenant_id, name, kid, seed_fingerprint, created_by, created_at, closed_at"
+_COLS = (
+    "id, tenant_id, name, kid, seed_fingerprint, created_by, created_at, closed_at, "
+    "last_check, last_check_at"
+)
 _MIN_LIMIT, _MAX_LIMIT = 1, 200
 
 
@@ -43,6 +46,9 @@ class JobGroup(BaseModel):
     created_by: str | None = None
     created_at: datetime
     closed_at: datetime | None = None
+    #: the latest cross-system consistency check (M3, migration 020): counts and codes only
+    last_check: dict[str, Any] | None = None
+    last_check_at: datetime | None = None
 
 
 def _row(row: Mapping[str, Any]) -> JobGroup:
@@ -93,6 +99,20 @@ async def get_group(tenant_id: str, group_id: str) -> JobGroup | None:
             group_id,
         )
     return _row(row) if row else None
+
+
+async def save_last_check(tenant_id: str, group_id: str, check: Mapping[str, Any]) -> bool:
+    """Store ``check`` (a ``ConsistencyCheckResult`` dumped as JSON: counts, codes, ids, paths)
+    as the group's ``last_check``; returns whether the tenant's group was updated."""
+    async with db.acquire(tenant_id) as conn:
+        done = await conn.execute(
+            f"UPDATE {db.schema_ident()}.dps_job_group SET last_check = $3::jsonb, "
+            "last_check_at = now() WHERE tenant_id = $1 AND id = $2",
+            tenant_id,
+            group_id,
+            dict(check),
+        )
+    return str(done).endswith(" 1")
 
 
 async def list_groups(

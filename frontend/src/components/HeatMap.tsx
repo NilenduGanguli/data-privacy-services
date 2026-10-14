@@ -1,8 +1,10 @@
-import { heatTone } from '../lib/jobs';
+import { columnLabel } from '../lib/engines';
+import { heatTone, keptHitText } from '../lib/jobs';
 import type { ColumnClassification } from '../lib/types';
 
 /** Why a column is kept, in a few words (no values). */
 function keptNote(c: ColumnClassification): string {
+  if (c.value_entities?.length) return `kept · ${c.value_entities.join(', ')} found`;
   if (c.is_key) return 'kept · key';
   if (['int', 'decimal', 'float'].includes(c.kind)) return 'kept · numeric';
   if (['date', 'timestamp'].includes(c.kind)) return 'kept · date';
@@ -17,9 +19,9 @@ export function HeatMap({ columns }: { columns: ColumnClassification[] }): JSX.E
         const tone = heatTone(c);
         const entity = c.entity_type ? `${c.entity_type}${c.text_column ? ' · free text' : ''}${c.is_key ? ' · key' : ''}` : keptNote(c);
         return (
-          <div key={c.path} role="listitem" className={`cell ${tone}`} title={`${c.name} · ${c.data_type}`}>
-            <div className="cn">{c.name}</div>
-            <div className="ce"><span>{entity}</span><span>{c.entity_type ? c.confidence.toFixed(2) : '—'}</span></div>
+          <div key={c.path} role="listitem" className={`cell ${tone}`} title={`${columnLabel(c)} · ${c.data_type}`}>
+            <div className="cn">{columnLabel(c)}</div>
+            <div className="ce"><span>{entity}</span><span>{c.entity_type ? c.confidence.toFixed(2) : keptHitText(c)}</span></div>
           </div>
         );
       })}

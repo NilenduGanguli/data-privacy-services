@@ -99,6 +99,12 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("dl number", "DRIVER_LICENSE", 0.7),
     ("licencia", "DRIVER_LICENSE", 0.6),
     ("national id", "NATIONAL_ID", 0.8),
+    # the number on an identity document (KYC): Aadhaar, SSN card, passport, … in one column
+    ("doc number", "NATIONAL_ID", 0.75),
+    ("doc no", "NATIONAL_ID", 0.7),
+    ("document number", "NATIONAL_ID", 0.75),
+    ("document no", "NATIONAL_ID", 0.75),
+    ("id doc number", "NATIONAL_ID", 0.75),
     ("identity number", "NATIONAL_ID", 0.6),
     ("id number", "NATIONAL_ID", 0.5),
     ("mrz", "MRZ", 0.9),
@@ -147,6 +153,19 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("addr", "STREET_ADDRESS", 0.7),
     ("direccion", "STREET_ADDRESS", 0.85),
     ("street", "STREET_ADDRESS", 0.6),
+    # numbered address lines (``line1``, ``address_line2``, ``addr1``): a word with its digit
+    ("address line1", "STREET_ADDRESS", 0.85),
+    ("address line2", "STREET_ADDRESS", 0.85),
+    ("address line3", "STREET_ADDRESS", 0.85),
+    ("address1", "STREET_ADDRESS", 0.8),
+    ("address2", "STREET_ADDRESS", 0.8),
+    ("addr1", "STREET_ADDRESS", 0.75),
+    ("addr2", "STREET_ADDRESS", 0.75),
+    ("street1", "STREET_ADDRESS", 0.75),
+    ("street2", "STREET_ADDRESS", 0.75),
+    ("line1", "STREET_ADDRESS", 0.75),
+    ("line2", "STREET_ADDRESS", 0.75),
+    ("line3", "STREET_ADDRESS", 0.7),
     ("postal code", "POSTAL_CODE", 0.9),
     ("postcode", "POSTAL_CODE", 0.9),
     ("zip", "POSTAL_CODE", 0.85),
@@ -169,6 +188,35 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("middle name", "PERSON_NAME", 0.85),
     ("nombre", "PERSON_NAME", 0.85),
     ("apellido", "PERSON_NAME", 0.85),
+    # a person's role before "name" says whose name it is (``cardholder_name``, ``payee_name``)
+    ("holder name", "PERSON_NAME", 0.85),
+    ("cardholder name", "PERSON_NAME", 0.9),
+    ("cardholder", "PERSON_NAME", 0.8),
+    ("card holder", "PERSON_NAME", 0.8),
+    ("account holder", "PERSON_NAME", 0.8),
+    ("accountholder name", "PERSON_NAME", 0.9),
+    ("counterparty name", "PERSON_NAME", 0.85),
+    ("beneficiary name", "PERSON_NAME", 0.85),
+    ("payee name", "PERSON_NAME", 0.85),
+    ("payer name", "PERSON_NAME", 0.85),
+    ("remitter name", "PERSON_NAME", 0.85),
+    ("nominee name", "PERSON_NAME", 0.85),
+    ("customer name", "PERSON_NAME", 0.85),
+    ("client name", "PERSON_NAME", 0.85),
+    ("applicant name", "PERSON_NAME", 0.85),
+    ("borrower name", "PERSON_NAME", 0.85),
+    ("guarantor name", "PERSON_NAME", 0.85),
+    ("contact name", "PERSON_NAME", 0.85),
+    ("owner name", "PERSON_NAME", 0.85),
+    ("member name", "PERSON_NAME", 0.85),
+    ("patient name", "PERSON_NAME", 0.85),
+    ("employee name", "PERSON_NAME", 0.85),
+    ("signatory name", "PERSON_NAME", 0.85),
+    ("guardian name", "PERSON_NAME", 0.85),
+    ("spouse name", "PERSON_NAME", 0.85),
+    ("father name", "PERSON_NAME", 0.85),
+    ("mother name", "PERSON_NAME", 0.85),
+    ("maiden name", "PERSON_NAME", 0.85),
     ("name", "PERSON_NAME", 0.55),
     ("gender", "GENDER", 0.8),
     ("sex", "GENDER", 0.8),
@@ -227,6 +275,11 @@ _COMPILED: tuple[tuple[re.Pattern[str], str, float, str], ...] = tuple(
 )
 
 
+def structural_entities() -> frozenset[str]:
+    """Every entity type a field name can suggest (the rules above)."""
+    return frozenset(entity for _, entity, _ in _RULES)
+
+
 def classify_key(key: str) -> list[KeyCandidate]:
     """Candidates for ``key`` (a JSON path, column or field name), best first, one per entity."""
     norm = normalize_key(key)
@@ -238,4 +291,85 @@ def classify_key(key: str) -> list[KeyCandidate]:
             current = best.get(entity)
             if current is None or score > current.score:
                 best[entity] = KeyCandidate(entity, score, f"key:{phrase}")
+    return sorted(best.values(), key=lambda c: -c.score)
+
+
+# -- document paths: the parent segments say what a generic leaf holds ----------------------------
+
+#: Leaves that, under an address, are a street line (``line1``, ``line_2``, ``street``, ``house no``).
+_STREET_LEAF = re.compile(
+    r"^(?:line|street|building|house|flat|apartment|apt|road|locality|landmark|premises?)"
+    r"(?: ?\d+)?(?: (?:no|number|name))?$"
+)
+#: Leaves that, under an address, are a postal code (``pin``, ``zip``, ``postcode``, ``postal``).
+_POSTAL_LEAF = re.compile(r"^(?:pin|zip|zipcode|postcode|postal|post code|pin code|pincode)$")
+#: Leaves that say nothing beyond "the value of the parent": ``phones[*].number``.
+_GENERIC_LEAF = frozenset({"number", "no", "num", "nr", "value", "val"})
+#: Score of a context rule: an address parent plus an address-part leaf is as strong as ``zip``.
+_CONTEXT_SCORE = 0.85
+#: A generic leaf inherits its parent's entity at this fraction of the parent's score.
+_INHERIT = 0.9
+
+
+def _named_segments(path: str) -> list[str]:
+    """Named segments of ``path`` (array indices and ``[*]`` skipped); ``[]`` when unparsable."""
+    rooted = path if path.startswith("$") else f"$.{path}"
+    try:  # a column path's ``[*]`` (any element) parses as an index: only the names matter here
+        return [p for p in parse_path(rooted.replace("[*]", "[0]")) if isinstance(p, str)]
+    except ValueError:
+        return []
+
+
+def _segment_candidates(segment: str) -> list[KeyCandidate]:
+    """Candidates of one parent segment, its plural folded (``addresses`` → ``address``,
+    ``phones`` → ``phone``): best per entity, best first."""
+    words = normalize_key(segment).split()
+    variants = {
+        " ".join(words),
+        " ".join(w[:-2] if w.endswith("es") and len(w) > 4 else w for w in words),
+        " ".join(w[:-1] if w.endswith("s") and len(w) > 3 else w for w in words),
+    }
+    best: dict[str, KeyCandidate] = {}
+    for variant in variants:
+        for c in classify_key(variant):
+            if c.entity_type not in best or c.score > best[c.entity_type].score:
+                best[c.entity_type] = c
+    return sorted(best.values(), key=lambda c: -c.score)
+
+
+def classify_path(path: str) -> list[KeyCandidate]:
+    """:func:`classify_key` for a document leaf path, also scoring its parent segments.
+
+    The nearest parent that classifies is the leaf's context: under an address (its best candidate
+    is ``STREET_ADDRESS``, so not ``emailAddress`` or ``ipAddress``) a street-line leaf
+    (``line1``, ``street``) is a ``STREET_ADDRESS`` and ``pin``/``zip``/``postcode`` a
+    ``POSTAL_CODE``; a generic leaf (``number``, ``value``) that classifies to nothing itself
+    inherits the parent's best entity at a lower score. A path without parents (a SQL column, a
+    top-level field) gets exactly :func:`classify_key`'s candidates.
+    """
+    leaf = classify_key(path)
+    segments = _named_segments(path)
+    if len(segments) < 2:
+        return leaf
+    leaf_norm = normalize_key(path)
+    best = {c.entity_type: c for c in leaf}
+
+    def offer(entity: str, score: float, evidence: str) -> None:
+        current = best.get(entity)
+        if current is None or score > current.score:
+            best[entity] = KeyCandidate(entity, score, evidence)
+
+    for segment in reversed(segments[:-1]):
+        context = _segment_candidates(segment)
+        if not context:
+            continue
+        top = context[0]
+        if top.entity_type == "STREET_ADDRESS":
+            if _STREET_LEAF.match(leaf_norm):
+                offer("STREET_ADDRESS", _CONTEXT_SCORE, "path:address line")
+            elif _POSTAL_LEAF.match(leaf_norm):
+                offer("POSTAL_CODE", _CONTEXT_SCORE, "path:address postcode")
+        if not leaf and leaf_norm in _GENERIC_LEAF:
+            offer(top.entity_type, round(top.score * _INHERIT, 3), f"path:{top.evidence}")
+        break  # only the nearest classifying parent is the leaf's context
     return sorted(best.values(), key=lambda c: -c.score)

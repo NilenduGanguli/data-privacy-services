@@ -177,7 +177,8 @@ async def test_same_table_append_refuses_an_offset_inside_the_key_span(
     rw = await register_source(
         "t1", ref="dps/src/test-pg-rw", roles={"source", "target"}, name="gapped-rw"
     )
-    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj)
+    # offset mechanics: an obfuscate append (a synthesize run never shifts a real key, D-A B2)
+    snap = await discover_and_accept(handler_ctx, "t1", rw.id, obj, overrides=IN_PLACE_REVIEW)
 
     async def append(offset: int) -> jobs.Job:
         spec = run_spec(
@@ -189,7 +190,6 @@ async def test_same_table_append_refuses_an_offset_inside_the_key_span(
                 "confirm_write": True,
                 "pk_strategy": {"kind": "offset", "offset": offset},
             },
-            mode="synthesize",
         )
         spec = spec.model_copy(update={"source": spec.source.model_copy(update={"batch_rows": 10})})
         sub = await submit_run(

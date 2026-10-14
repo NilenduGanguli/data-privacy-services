@@ -23,6 +23,7 @@
   .ev .box .v { font-size: 20px; font-weight: 800; margin-top: 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .ev .box .v .faint { font-size: 12px; font-weight: 600; }
   .ev .box .v.ok { color: var(--emerald); } .ev .box .v.bad { color: var(--rose); }
+  .crumbs { margin-bottom: -6px; flex-wrap: wrap; } .crumbs a:hover { color: var(--teal) !important; }
   .retry { display: flex; flex-direction: column; gap: 10px; }
   .snaps td { vertical-align: middle; }
   @media (max-width: 1360px) { .stepper .faint { display: none; } }

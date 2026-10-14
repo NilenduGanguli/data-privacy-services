@@ -1,5 +1,10 @@
 """``/api/v1/connections`` (contract §9, scope ``jobs``; the ``production`` tag needs ``admin``).
 
+SEC-3: updating or deleting a production-tagged connection needs ``admin``; moving a connection
+that holds credentials to another endpoint needs its credentials in the same request or ``admin``
+(:mod:`dps.connections`). The update's audit event names the changed fields
+(``counts["field.<name>"]``), never a value. The test route takes no param overrides.
+
 Credentials never appear in a response (``has_secret`` only); a connection test stores its
 value-free checks as ``last_test``; ``count`` validates and binds the selection before any query
 runs and answers the wizard's checklist (mockup 06 step 2) together with the value-free statement
@@ -18,6 +23,7 @@ from dps.config import Settings
 from dps.connections import (
     Connection,
     ConnectionPatch,
+    changed_fields,
     create_connection,
     delete_connection,
     get_connection,
@@ -28,11 +34,13 @@ from dps.connections import (
 )
 from dps.jobs_models import ConnectionSpec, Selection
 from dps.layers.api.deps import (
+    audit_action,
     audited,
     guarded,
     kek_of,
     page_args,
     principal_of,
+    rejected,
     require_db,
     tenant_of,
 )
@@ -52,9 +60,11 @@ from dps.layers.connectors.selection import (
     SelectionError,
     failed_checks,
     parameterize_literals,
+    read_projection,
     selection_checks,
     validate_selection,
 )
+from dps.netguard import require_tls_connection
 from dps.ratelimit import enforce_rate_limit
 from dps.secrets import SecretUnavailable
 
@@ -128,6 +138,7 @@ async def create(body: ConnectionSpec, request: Request) -> dict[str, Any]:
         tenant = tenant_of(request)
         if PRODUCTION in body.tags:
             _require_admin_for_production(request)
+        require_tls_connection(body, _settings(request))  # M5: TLS-only egress (422)
         conn = await create_connection(
             tenant,
             body,
@@ -163,29 +174,49 @@ async def get(connection_id: str, request: Request) -> dict[str, Any]:
 
 @router.patch("/connections/{connection_id}", dependencies=_JOBS)
 async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> dict[str, Any]:
-    """Update name, params, secret, roles or tags (adding or removing ``production`` needs admin)."""
+    """Update name, params, secret, roles or tags. Any change of a connection that is or becomes
+    production-tagged needs admin; an endpoint change of a connection holding credentials needs
+    them again (``credentials`` / ``secret_ref``) or admin."""
+    fields: dict[str, int] = {}
 
     async def run() -> dict[str, Any]:
         tenant = tenant_of(request)
         current = await _connection(request, connection_id)
-        if body.tags is not None and (PRODUCTION in body.tags) != current.production:
-            _require_admin_for_production(request)
+        fields.update({f"field.{name}": 1 for name in changed_fields(current, body)})
+        if body.params is not None:  # M5: the changed endpoint must use TLS too (422)
+            if current.production or (body.tags is not None and PRODUCTION in body.tags):
+                _require_admin_for_production(request)  # authorisation answers before TLS
+            require_tls_connection(
+                current.model_copy(update={"params": body.params}), _settings(request)
+            )
         updated = await update_connection(
-            tenant, connection_id, body, settings=_settings(request), kek=kek_of(request)
+            tenant,
+            connection_id,
+            body,
+            settings=_settings(request),
+            kek=kek_of(request),
+            admin=principal_of(request).has_scope("admin"),
         )
         if updated is None:
             raise DpsHttpError(404, "connection_not_found", "connection not found")
         return _dump(updated)
 
-    return await audited(request, "connection.update", run())
+    try:
+        result = await run()
+    except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
+        raise rejected(request, "connection.update", exc, counts=fields) from None
+    audit_action(request, action="connection.update", counts=fields)
+    return result
 
 
 @router.delete("/connections/{connection_id}", status_code=204, dependencies=_JOBS)
 async def delete(connection_id: str, request: Request) -> Response:
-    """Delete a connection (409 ``connection_in_use`` while a live job uses it)."""
+    """Delete a connection (409 ``connection_in_use`` while a live job uses it; a
+    production-tagged one needs admin)."""
 
     async def run() -> None:
-        if not await delete_connection(tenant_of(request), connection_id):
+        admin = principal_of(request).has_scope("admin")
+        if not await delete_connection(tenant_of(request), connection_id, admin=admin):
             raise DpsHttpError(404, "connection_not_found", "connection not found")
 
     await audited(request, "connection.delete", run(), status=204)
@@ -282,10 +313,7 @@ async def describe(
 
 
 def _projection(shape: TableShape, sel: Selection) -> list[ColumnInfo]:
-    if not sel.columns:
-        return shape.columns
-    wanted = set(sel.columns) | set(shape.key)
-    return [c for c in shape.columns if c.name in wanted]
+    return read_projection(shape, sel, "postgres")
 
 
 def runs_as(engine: Engine, shape: TableShape, bound: Selection) -> str | None:
@@ -304,6 +332,8 @@ def runs_as(engine: Engine, shape: TableShape, bound: Selection) -> str | None:
 
 def _bind(sel: Selection, engine: Engine, shape: TableShape | None) -> Selection:
     try:
+        # the text as written first (B6): rendering the bound form cannot hide a refused shape
+        validate_selection(sel, engine, shape)
         bound = parameterize_literals(sel, engine)
         validate_selection(bound, engine, shape)
     except SelectionError as exc:

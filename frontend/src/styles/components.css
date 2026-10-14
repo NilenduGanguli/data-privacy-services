@@ -94,3 +94,10 @@
   .confirm { padding: 14px; }
   .ck { grid-template-columns: 20px minmax(0, 1fr); } .ck .meta { grid-column: 2; white-space: normal; }
 }
+
+/* New job group dialog (M3 Task 18): the 06 .confirm frame in teal */
+.confirm.newgroup { border-color: var(--teal-border); background: linear-gradient(180deg, var(--teal-soft), transparent 140px), var(--surface); width: min(560px, 100%); }
+.confirm.newgroup .ngkv { grid-template-columns: 140px minmax(0, 1fr); margin: 0; }
+.confirm.newgroup .ngkv dt { color: var(--ink-3); } .confirm.newgroup .ngkv dd { margin: 0; overflow-wrap: anywhere; }
+.confirm.newgroup .stored { font-size: 12.5px; cursor: pointer; }
+.confirm.newgroup .stored input { accent-color: var(--teal); margin: 0; }

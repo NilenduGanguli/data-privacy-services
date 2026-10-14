@@ -19,6 +19,7 @@ import {
   canConfirmWrite, confirmationKey, countKey, emptyDraft, fqn, inPlaceKeyRewrites, isWriteConfirmed, keyMethodsOf, needsConfirmation, writtenObject,
   type Step, type WizardDraft,
 } from '../../lib/jobs';
+import { defaultPort, needsTransactions, type SourceEngine } from '../../lib/engines';
 import type { ClassificationSnapshot, Connection, ConnectionTestResult, CountOut, TableShape, WriteMode } from '../../lib/types';
 
 export const DRAFT_KEY = 'dps.jobDraft';
@@ -26,6 +27,8 @@ export const DRAFT_KEY = 'dps.jobDraft';
 export type WizardAction =
   | { type: 'set'; patch: Partial<WizardDraft> }
   | { type: 'step'; step: Step }
+  /** A new source engine: every source choice of the old engine is cleared (M3). */
+  | { type: 'engine'; engine: SourceEngine }
   | { type: 'connMode'; mode: 'saved' | 'new' }
   | { type: 'useSaved'; connection: Connection | null }
   | { type: 'credMode'; mode: 'secret_ref' | 'inline' }
@@ -35,7 +38,7 @@ export type WizardAction =
   | { type: 'owner'; owner: string }
   | { type: 'table'; table: string }
   | { type: 'shape'; shape: TableShape | null }
-  | { type: 'selMode'; mode: 'where' | 'query' }
+  | { type: 'selMode'; mode: 'where' | 'query' | 'mongo' }
   | { type: 'filter'; text: string }
   /** `key` is the `countKey` of the draft the count was asked for; a stale answer is ignored. */
   | { type: 'counted'; count: CountOut; at: string; seconds: number; key: string }
@@ -56,7 +59,7 @@ const NO_CONFIRMATION: Partial<WizardDraft> = { typed: '', confirmedAt: null, co
 
 /** What a new source table or connection invalidates: filter, count, discovery, confirmation. */
 const CLEAR_SELECTION: Partial<WizardDraft> = {
-  where: '', query: '', params: {}, ...NO_COUNT, columns: null,
+  where: '', query: '', mongoFilterText: '', params: {}, ...NO_COUNT, columns: null,
   discoverJobId: null, snapshotId: null, snapshotAccepted: false, policyName: null, keyMethods: null, ...NO_CONFIRMATION,
 };
 const CLEAR_TABLE: Partial<WizardDraft> = { ...CLEAR_SELECTION, table: '', shape: null };
@@ -85,6 +88,12 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
       return { ...d, ...a.patch };
     case 'step':
       return { ...d, step: a.step };
+    case 'engine':
+      return a.engine === d.engine ? d : {
+        ...d, ...CLEAR_SOURCE, engine: a.engine, connectionId: null, connectionName: '', connectionTags: [], connectionRoles: [], password: '',
+        port: defaultPort(a.engine), database: '', serviceName: '', connOptions: {}, targetConnectionId: null, targetOwner: '', targetTable: '',
+        selMode: a.engine === 'mongo' ? 'mongo' : 'where',
+      };
     case 'connMode':
       return a.mode === d.connMode ? d : { ...d, ...CLEAR_SOURCE, connMode: a.mode, connectionId: null, connectionName: '', connectionTags: [], connectionRoles: [], password: '' };
     case 'useSaved':
@@ -94,6 +103,7 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
         ...d, ...CLEAR_SOURCE, connMode: 'saved', connectionId: a.connection.id, connectionName: a.connection.name,
         connectionTags: a.connection.tags, connectionRoles: a.connection.roles, production: a.connection.tags.includes('production'),
         engine: a.connection.engine === 'oracle' || a.connection.engine === 'mongo' ? a.connection.engine : 'postgres',
+        selMode: a.connection.engine === 'mongo' ? 'mongo' : d.selMode === 'mongo' ? 'where' : d.selMode,
       };
     case 'credMode':
       // a production-tagged connection must use a secret reference (contract §5.1)
@@ -117,6 +127,7 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
     case 'selMode':
       return a.mode === d.selMode ? d : { ...d, selMode: a.mode, ...NO_COUNT };
     case 'filter':
+      if (d.selMode === 'mongo') return { ...d, mongoFilterText: a.text, ...NO_COUNT };
       return d.selMode === 'where' ? { ...d, where: a.text, ...NO_COUNT } : { ...d, query: a.text, ...NO_COUNT };
     case 'counted':
       if (a.key !== countKey(d)) return d;   // the selection changed while the count was running
@@ -145,7 +156,7 @@ function reduce(d: WizardDraft, a: WizardAction): WizardDraft {
       return { ...d, ...NO_CONFIRMATION, confirmLapsed: false };
     case 'restore':
       return {
-        ...d, ...a.draft, password: '', keyMaterialJson: '', where: '', query: '', params: {}, ...NO_COUNT, ...NO_CONFIRMATION, confirmLapsed: false,
+        ...d, ...a.draft, password: '', keyMaterialJson: '', where: '', query: '', mongoFilterText: '', params: {}, ...NO_COUNT, ...NO_CONFIRMATION, confirmLapsed: false,
         submittedJobId: null, keyMethods: null,
       };
     case 'submitted':
@@ -174,12 +185,17 @@ export function isSubmitted(d: WizardDraft): boolean {
   return d.submittedJobId !== null;
 }
 
+/** The text of the selection mode in use (WHERE, SELECT or the MongoDB filter JSON). */
+export function filterTextOf(d: Pick<WizardDraft, 'selMode' | 'where' | 'query' | 'mongoFilterText'>): string {
+  return d.selMode === 'mongo' ? d.mongoFilterText : d.selMode === 'where' ? d.where : d.query;
+}
+
 /** Whether the step after `step` may open (the Next buttons and the stepper use this). */
 export function canLeave(step: Step, d: WizardDraft): boolean {
   if (isSubmitted(d)) return false;
   switch (step) {
     case 1: return !!d.connectionId && !!d.test?.ok;
-    case 2: return !!d.table && !!d.shape && (!(d.selMode === 'where' ? d.where : d.query).trim() || !!d.count);
+    case 2: return !!d.table && !!d.shape && (!filterTextOf(d).trim() || !!d.count);
     case 3: return !!d.snapshotId && d.snapshotAccepted;
     case 4: return targetReady(d) && (!needsConfirmation(d.writeMode) || isWriteConfirmed(d));
     default: return true;
@@ -193,8 +209,18 @@ export function reachable(d: WizardDraft): Step {
   return s;
 }
 
+/**
+ * In place and Append on MongoDB write with the ledger in one transaction, so they need a replica
+ * set: the tested connection says `capabilities.transactions: false` (the server would refuse the
+ * run at prepare with `transactions_unsupported`).
+ */
+export function transactionsMissing(d: Pick<WizardDraft, 'engine' | 'writeMode' | 'test'>): boolean {
+  return d.engine === 'mongo' && needsTransactions(d.writeMode) && d.test?.capabilities?.transactions === false;
+}
+
 /** Step 4 has everything its write mode needs (confirmation aside). */
 export function targetReady(d: WizardDraft): boolean {
+  if (transactionsMissing(d)) return false;
   switch (d.writeMode) {
     case 'table': return !!d.targetConnectionId && !!d.targetTable.trim();
     case 'files': return !!d.filesConnectionId;
@@ -225,4 +251,23 @@ export function loadSavedDraft(): Partial<WizardDraft> | null {
 /** Remove the saved draft (after a run is submitted or on Cancel → Discard). */
 export function clearSavedDraft(): void {
   try { localStorage.removeItem(DRAFT_KEY); } catch { /* private mode */ }
+}
+
+/** The server's verdict on the exact spec Run job would send (`POST /jobs/run/validate`). */
+export type ServerCheck =
+  | { state: 'idle' | 'checking' | 'ok' }
+  | { state: 'refused'; message: string; code?: string };
+
+/** Step 5's "Ready to run" card: the wizard's own prerequisites first (an incomplete draft is not
+ *  sent), then the server's validation of the spec, so "all checks passed" means the server ran
+ *  the run's own rules (target role, key strategy, admin scope, lengths, …) and accepted it. */
+export function runReadiness(blocked: string[], server: ServerCheck): {
+  chip: string; tone: 'amber' | 'emerald' | 'rose' | 'slate'; canRun: boolean; reasons: string[];
+} {
+  if (blocked.length) return { chip: `${blocked.length} to resolve`, tone: 'amber', canRun: false, reasons: blocked };
+  if (server.state === 'refused') {
+    return { chip: '1 to resolve', tone: 'rose', canRun: false, reasons: [`DPS refuses this run: ${server.message}${server.code ? ` (${server.code})` : ''}`] };
+  }
+  if (server.state !== 'ok') return { chip: 'checking with DPS…', tone: 'slate', canRun: false, reasons: [] };
+  return { chip: 'all checks passed', tone: 'emerald', canRun: true, reasons: [] };
 }

@@ -332,7 +332,11 @@ stream (from its first chunk).
 
 The detector evaluation is committed as `docs/technical/detector-eval-m1.md` (and `.json`): a
 900-record synthetic labelled corpus (`tests/eval/corpus/`), with precision, recall and F1 per
-entity type, a confusion table and a threshold sweep. Regenerate it with:
+entity type, an *In free text* table (spans inside text records and JSON `notes` only — what a
+document, an OCR page or a notes column is swept for, including `ACCOUNT_NUMBER` and `CUSTOMER_ID`
+found by their label), a confusion table and a threshold sweep. A type in the main table that is
+missing from the free-text table is found by its field name alone; the verification's coverage
+gaps name every such type. Regenerate it with:
 
 ```bash
 python tools/eval_detectors.py run --corpus tests/eval/corpus \

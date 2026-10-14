@@ -1,8 +1,9 @@
-// Fails the build when dev-only fixture code reaches the production bundle (src/dev/*, src/lib/scanFixtures.ts).
+// Fails the build when dev-only fixture code reaches the production bundle (src/dev/*, src/lib/scanFixtures.ts;
+// the M5 fixture server src/dev/fixtureServer.ts and the UI-scanner fixtures alike).
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const MARKERS = ['dps-fixture-mode', 'ScanFixtureServer', 's_01K7ZR4M2D9Q8W6X3N5VTB7F1C', 'RklYVFVSRS1PTkxZ'];
+const MARKERS = ['dps-fixture-mode', 'dps-fixture-server', 'installFixtureServer', 'ScanFixtureServer', 's_01K7ZR4M2D9Q8W6X3N5VTB7F1C', 'RklYVFVSRS1PTkxZ'];
 const dir = new URL('../dist/assets/', import.meta.url).pathname;
 const hits = [];
 for (const name of readdirSync(dir)) {

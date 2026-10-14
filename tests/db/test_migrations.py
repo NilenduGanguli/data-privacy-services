@@ -19,8 +19,20 @@ async def _owner(settings):  # noqa: ANN001, ANN202
     return await db.open_migration_connection(settings)
 
 
+#: M5's files (contract §2.2: 040–059); other milestones' ranges are checked by their own lanes.
+M5_FILES = [
+    "040_tenant_quotas.sql",
+    "041_report_rollups.sql",
+    "042_key_rotation.sql",
+    "043_policies.sql",
+    "044_llm_exposure.sql",
+    "045_policy_directory.sql",
+]
+
+
 async def test_files_are_the_contract_set() -> None:
-    assert FILES == [
+    assert [f for f in FILES if "040" <= f < "060"] == M5_FILES
+    assert [f for f in FILES if f < "020"] == [
         "001_schema_and_roles.sql",
         "002_tenancy_and_keys.sql",
         "003_connections.sql",
@@ -31,9 +43,15 @@ async def test_files_are_the_contract_set() -> None:
         "008_rls_policies.sql",
         "009_grants.sql",
         "010_job_idempotency_fp.sql",
-        "030_scans.sql",
-        "031_tenant_hosts.sql",
     ]
+    # M4 (030–039): the scanner's value-free tables and the tenant's registered hosts
+    assert [f for f in FILES if "030" <= f < "040"] == ["030_scans.sql", "031_tenant_hosts.sql"]
+    # M3 (020–029): the group's latest consistency check
+    assert [f for f in FILES if "020" <= f < "030"] == ["020_job_group_last_check.sql"]
+    # WP-I: every number once, every file inside a milestone's range (contract §2.2)
+    numbers = [f[:3] for f in FILES]
+    assert len(numbers) == len(set(numbers)) and numbers == sorted(numbers)
+    assert all(n < "020" or "020" <= n < "060" for n in numbers)
 
 
 async def test_fresh_database_applies_every_file_once(fresh_db) -> None:  # noqa: ANN001

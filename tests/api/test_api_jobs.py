@@ -423,3 +423,59 @@ def test_job_routes_share_layer_1_idempotency_names_and_codes(seeded) -> None:  
         headers={"Origin": "http://console.test", "Access-Control-Request-Method": "POST"},
     )
     assert "Idempotency-Key" in pre.headers.get("access-control-allow-headers", "")
+
+
+def test_run_validate_answers_what_the_run_would_without_queueing(seeded) -> None:  # noqa: ANN001
+    """M2 verify r2 issue 1: the wizard asks the server before it claims "all checks passed".
+    ``POST /jobs/run/validate`` runs the run's own validation and answers its code; no job row,
+    no key material."""
+    c, src, prod = seeded["c"], seeded["src"], seeded["prod"]
+    before = c.get("/api/v1/jobs/stats", headers=JOBS).json()
+    url = "/api/v1/jobs/run/validate"
+    append = {
+        "write_mode": "append",
+        "confirm_write": True,
+        "pk_strategy": {"kind": "offset", "offset": 900000000},
+    }
+    # append through a source-only connection: the server's target-role rule
+    role = c.post(url, json=_run(src, seeded["snap_src"], append), headers=JOBS)
+    assert role.status_code == 422 and role.json()["code"] == "connection_role"
+    assert (
+        c.post("/api/v1/jobs/run", json=_run(src, seeded["snap_src"], append), headers=JOBS).json()[
+            "code"
+        ]
+        == "connection_role"
+    )  # the same answer the run gets
+    # an offset strategy with neither an offset nor a prefix: the server's model rule
+    empty = {**append, "pk_strategy": {"kind": "offset"}}
+    no_offset = c.post(url, json=_run(prod, seeded["snap_prod"], empty), headers=FULL)
+    assert no_offset.status_code == 422
+    assert "offset" in json.dumps(no_offset.json()["detail"])
+    # production in place without admin, and unconfirmed: the run's codes
+    confirmed = {"write_mode": "in_place", "confirm_write": True}
+    no_admin = c.post(url, json=_run(prod, seeded["snap_prod"], confirmed), headers=JOBS)
+    assert no_admin.status_code == 403 and no_admin.json()["code"] == "admin_scope_required"
+    # M2 verify r2 issue 2: tokens that cannot fit the columns they are written back into are
+    # refused before a job exists, every such column named (the run answers the same)
+    for route in (url, "/api/v1/jobs/run"):
+        tokens = c.post(route, json=_run(prod, seeded["snap_prod"], confirmed), headers=FULL)
+        assert tokens.status_code == 422 and tokens.json()["code"] == "length_overflow"
+        assert "$.ssn" in tokens.json()["detail"] and "$.full_name" in tokens.json()["detail"]
+    table = {
+        "write_mode": "table",
+        "connection_id": seeded["uat"],
+        "object": {"owner": "bank_uat", "name": "customers"},
+    }
+    ok = c.post(url, json=_run(src, seeded["snap_src"], table), headers=JOBS)
+    assert ok.status_code == 200 and ok.json() == {"ok": True}
+    assert ok.headers["cache-control"] == "no-store"
+    after = c.get("/api/v1/jobs/stats", headers=JOBS).json()
+    assert after == before  # nothing was queued
+    assert (
+        c.post(
+            url,
+            json=_run(src, seeded["snap_src"], table),
+            headers={"X-API-KEY": "dps_detect", "X-DPS-Tenant": "t1"},
+        ).status_code
+        == 403
+    )  # the jobs scope, like the run

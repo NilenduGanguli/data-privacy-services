@@ -19,10 +19,10 @@ from pydantic import ValidationError
 from dps.auth import require_scope
 from dps.layers.api.common import (
     CodedHTTPException,
-    policy_label,
     run_engine,
     with_idempotency,
 )
+from dps.layers.api.policy_refs import policy_label, resolve
 from dps.layers.api.schemas import DetectOut, TransformOut
 from dps.layers.documents import DocumentOutcome, DocumentPipeline
 from dps.layers.documents.models import (
@@ -91,6 +91,11 @@ async def _run(
         content = await _read(file, settings.max_document_bytes)
     except CodedHTTPException as exc:
         body, refusal = DocumentRequest(), exc
+    if refusal is None:
+        try:  # M5: an @name[:vN] reference resolves to the stored version (refusals audited)
+            body.policy = await resolve(request, body.policy)
+        except CodedHTTPException as exc:
+            refusal = exc
     policy = "-" if refusal else policy_label(body.policy, settings.default_policy)
 
     async def call() -> DocumentOutcome:

@@ -150,10 +150,16 @@ def audit_action(
 
 
 def rejected(
-    request: Request, action: str, exc: Exception, *, job_id: str | None = None
+    request: Request,
+    action: str,
+    exc: Exception,
+    *,
+    job_id: str | None = None,
+    counts: dict[str, int] | None = None,
 ) -> DpsHttpError:
-    """Map ``exc`` with :func:`to_http`, audit it as ``rejected`` (4xx) or ``error`` (5xx) and
-    return the error for the caller to raise (``raise rejected(...) from None``)."""
+    """Map ``exc`` with :func:`to_http`, audit it as ``rejected`` (4xx) or ``error`` (5xx) (with
+    value-free ``counts``, e.g. the field names a refused change named) and return the error for
+    the caller to raise (``raise rejected(...) from None``)."""
     err = to_http(exc)
     audit_action(
         request,
@@ -161,6 +167,7 @@ def rejected(
         outcome="rejected" if err.status < 500 else "error",
         status=err.status,
         job_id=job_id,
+        counts=counts,
     )
     return err
 

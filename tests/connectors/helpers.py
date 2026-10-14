@@ -13,10 +13,20 @@ from typing import Any
 from dps import db, jobs, snapshots
 from dps.connections import Connection, create_connection
 from dps.jobs import TERMINAL_JOB_STATES, ClaimedJob, Job, JobKind, JobPhase
-from dps.jobs_models import ClassificationSnapshot, ConnectionParams, ConnectionSpec, ObjectRef
+from dps.jobs_models import (
+    ClassificationSnapshot,
+    ConnectionParams,
+    ConnectionSpec,
+    ObjectRef,
+    SnapshotOverride,
+)
 from dps.layers.connectors.discovery import discover_job
 from dps.layers.connectors.jobs_run import finalize, prepare, run_partition
 from dps.worker import HandlerContext
+
+#: The demo key reviewed as not personal, as an owner would for a technical id. D-A (G2 review
+#: r1, B2): even then a synthesize run never copies or shifts it — offsets are obfuscate mechanics.
+KEY_NOT_PERSONAL = [SnapshotOverride(path="$.customer_id", entity_type=None, anchor=False)]
 
 PHASES: dict[JobPhase, Callable[[HandlerContext, ClaimedJob], Awaitable[None]]] = {
     JobPhase.discover: discover_job,
