@@ -62,6 +62,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
@@ -158,6 +159,10 @@ class _Unit(NamedTuple):
 
 #: Plan entries of unclassified document leaves use these (contract §5.3 ``unclassified``).
 UNCLASSIFIED_ENTITY = "UNCLASSIFIED"
+#: The detector name of a span that repeats the row's own value of a replaced column (D-A).
+ROW_VALUE_DETECTOR = "row_value"
+#: Entity types of whole values that are free text themselves (never searched for in other text).
+_TEXT_ENTITIES = frozenset({"FREE_TEXT", "MIXED_PII", UNCLASSIFIED_ENTITY})
 _UNCLASSIFIED_TEXT = ColumnInfo(path="$", name="", data_type="", kind="text")
 
 
@@ -408,6 +413,42 @@ def verify_row(
     return hits
 
 
+def _row_value_spans(
+    path: str,
+    text: str,
+    found: list[Finding],
+    originals: list[tuple[ColumnPlan, str, bool]],
+) -> list[Finding]:
+    """D-A (WP-I m3): in a synthesize job, the row's own values of planned whole columns where they
+    occur in its free text (a city the CRM notes repeat: "… Prefers branch in Pune"), as spans of
+    the column's entity type — the detectors alone miss a city without NER, and a synthetic table
+    never carries a source value. Whole words only (no match inside a longer word), at least
+    :data:`EXACT_MIN` characters, never overlapping a detector span."""
+    taken = [(f.locator.start or 0, f.locator.end or len(text)) for f in found]
+    out: list[Finding] = []
+    for column, original, whole in originals:
+        value = original.strip()
+        if not whole or len(normalise(value)) < EXACT_MIN or column.entity_type in _TEXT_ENTITIES:
+            continue
+        pattern = re.compile(rf"(?<!\w){re.escape(value)}(?!\w)", re.IGNORECASE)
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            if any(start < b and a < end for a, b in taken):
+                continue
+            taken.append((start, end))
+            out.append(
+                Finding(
+                    locator=Locator(path=path, start=start, end=end),
+                    entity_type=column.entity_type,
+                    score=1.0,
+                    detectors=[ROW_VALUE_DETECTOR],
+                    sensitivity=entity_info(column.entity_type).sensitivity,
+                    value_hash=hash_value(match.group(0)),
+                )
+            )
+    return out
+
+
 def _checked(originals: list[tuple[ColumnPlan, str, bool]]) -> int:
     count = 0
     for _, original, whole in originals:
@@ -609,9 +650,25 @@ class BatchTransformer:
         if self.mode == "obfuscate":
             planned = [self._entry(f, col.method) for f in found]
         else:
-            planned = build_plan(
-                found, self.policy, "synthesize", fpe_enabled=self.engine.fpe_enabled
-            ).entries
+            planned = [
+                # D-A (WP-I m3): a row's own value of a column the run replaces, repeated in its
+                # free text (``_row_value_spans``), is surrogated even where the policy keeps the
+                # type (``keep_non_sensitive``: a city) — the column was replaced, so its copy
+                # in the text must be too (``targets.kept_attribute``)
+                e.model_copy(
+                    update={
+                        "method": "surrogate",
+                        "params": {},
+                        "reason": f"{e.reason}|d-a:span_surrogated",
+                        "reversible": False,
+                    }
+                )
+                if e.method == "keep" and e.finding.detectors == [ROW_VALUE_DETECTOR]
+                else e
+                for e in build_plan(
+                    found, self.policy, "synthesize", fpe_enabled=self.engine.fpe_enabled
+                ).entries
+            ]
         for entry in planned:
             if entry.method == "keep":
                 continue  # kept on purpose: neither transformed nor searched for
@@ -759,6 +816,8 @@ class BatchTransformer:
                     continue
                 searched.append((unit, text))  # free text is always searched, findings or not
                 found = self._spans(at, text, findings_seen)
+                if self.mode == "synthesize":
+                    found += _row_value_spans(at.path, text, found, originals)
                 per_column[self._column_key(col)] += len(found)
                 entries += self._plan_spans(at, text, found, originals)
             if self.unclassified != "keep":
