@@ -1107,3 +1107,18 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
 - Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
   `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
   semantics are documented in HANDOFF §5 and contract §8.3.
+
+## Task 0 — Preflight: the M0–M4 contract surface (finish stage, `fsec`)
+
+Finish-stage work (worktree `dps-wt-fsec`, branch `fsec`; programme plan §2.6 F1), run on the merged
+code (M0–M3 + M5), so the test describes what is built:
+- `tests/test_contract_surface.py`: `validate_run` **moved** — it lives in
+  `dps.layers.connectors.targets` (M2 as built), so `SURFACE` lists it there instead of under
+  `dps.jobs_models`; nothing was dropped. The route walk uses `fastapi.routing.iter_route_contexts`:
+  FastAPI 0.143 keeps included routers as nested `_IncludedRouter` entries, so the plan's
+  `app.routes` sees only the top-level routes (S3 auth-tenancy finder, 2026-10-14).
+- M4 is not merged into this branch yet: `dps.layers.scanner.scan_job` and `/api/v1/scans` are in
+  `M4_SURFACE` / `M4_ROUTES`, asserted by a **strict `xfail`** test. When the M4 merge brings them,
+  that test passes, the strict marker fails the run, and the merge moves the names into
+  `SURFACE` / `ROUTES` (the names are never dropped).
+- A missing `PARAMS` target is reported as missing (the plan skipped it silently).
