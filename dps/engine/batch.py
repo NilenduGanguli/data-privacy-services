@@ -4,9 +4,9 @@ Pure CPU: callers run :meth:`BatchTransformer.transform` in ``asyncio.to_thread`
 findings come from the accepted snapshot (detector ``"snapshot"``); free-text columns are scanned
 per row and planned with the column's method (obfuscate: ``det_token`` envelopes, so a reveal needs
 no stored hints) or with ``build_plan`` (synthesize); where a row's free text repeats one of its own
-replaced values — a city, a name, or a word of a name such as the first name — that repeat is a
-span too, detected or not (``_row_value_spans``, D-A). A new surrogate engine is made per batch,
-which bounds its persona cache.
+replaced values — a city, a name, or a word of a name such as the first name, from two characters
+up — that repeat is a span too, detected or not (``_row_value_spans``, D-A). A new surrogate engine
+is made per batch, which bounds its persona cache.
 
 **Anchors** (contract §6.2): each row's raw anchor is ``<ENTITY>:<hash>`` of the snapshot's anchor
 column — the string M0's ``anchor_for`` builds for the same entity, so L1 and L2 agree on date
@@ -171,9 +171,15 @@ ROW_NAME_WORD_DETECTOR = "row_value_word"
 _ROW_VALUE_DETECTORS = frozenset({ROW_VALUE_DETECTOR, ROW_NAME_WORD_DETECTOR})
 #: Entity types of whole values that are free text themselves (never searched for in other text).
 _TEXT_ENTITIES = frozenset({"FREE_TEXT", "MIXED_PII", UNCLASSIFIED_ENTITY})
-#: A word of a replaced name with at least this many letters is searched for on its own in the
-#: row's free text (S1-M3 r1 B2: "KYC call with <first name>"; ``_needles``).
-NAME_PART_MIN = 3
+#: Row-value spans (``_needles``) search a replaced whole value, and each word of a replaced name
+#: ("KYC call with <first name>", S1-M3 r1 B2), of at least this many normalised characters — a
+#: floor of their own, below the per-row sweep's ``EXACT_MIN`` / ``CONTAIN_MIN``: the search is
+#: whole-word, caseless and limited to the row's own values, so a short value never matches inside
+#: a longer word, and replacing a word that equals the row's own name or city is harmless (S1-M3
+#: r2 engines B1: under floors of 3 and 4, two-letter first names and three-letter cities stayed
+#: in synthetic notes). ``CHANCE_EQUAL_ENTITIES`` keep ``EXACT_MIN``: a two-letter gender or
+#: nationality code is a common word ("IN", "US") and a low-cardinality attribute, not a copy.
+ROW_VALUE_MIN = 2
 _NAME_WORD = re.compile(r"[^\W\d_]+")
 _UNCLASSIFIED_TEXT = ColumnInfo(path="$", name="", data_type="", kind="text")
 
@@ -426,14 +432,15 @@ def verify_row(
 
 
 def _needles(column: ColumnPlan, value: str) -> list[str]:
-    """What :func:`_row_value_spans` searches for one planned whole value: the value (at least
-    :data:`EXACT_MIN` normalised characters) and, for a name, each of its words of at least
-    :data:`NAME_PART_MIN` letters — the CRM notes repeat the first name alone ("KYC call with
-    Asha; …"), never the whole ``FULL_NAME``."""
-    out = [value] if len(normalise(value)) >= EXACT_MIN else []
+    """What :func:`_row_value_spans` searches for one planned whole value: the value and, for a
+    name, each of its words — the CRM notes repeat the first name alone ("KYC call with Asha; …"),
+    never the whole ``FULL_NAME`` — each of at least :data:`ROW_VALUE_MIN` normalised characters
+    (a gender or nationality value: :data:`EXACT_MIN`)."""
+    floor = EXACT_MIN if column.entity_type in CHANCE_EQUAL_ENTITIES else ROW_VALUE_MIN
+    out = [value] if len(normalise(value)) >= floor else []
     if column.entity_type == NAME_ENTITY:
         for part in _NAME_WORD.findall(value):
-            if len(normalise(part)) >= NAME_PART_MIN and part not in out:
+            if len(normalise(part)) >= ROW_VALUE_MIN and part not in out:
                 out.append(part)
     return out
 
@@ -448,32 +455,42 @@ def _row_value_spans(
     text (a city the CRM notes repeat: "… Prefers branch in Pune"), as spans of the column's entity
     type — the detectors alone miss a city or a first name without NER, and a synthetic table never
     carries a source value. A name is searched whole and word by word (:func:`_needles`; S1-M3 r1
-    B2: the notes repeat the first name only). Whole words only (no match inside a longer word),
-    case-insensitive, never overlapping a detector span or an earlier span. Both modes: an
-    obfuscated note transforms the name it repeats with the text column's method."""
+    B2: the notes repeat the first name only), from :data:`ROW_VALUE_MIN` characters (S1-M3 r2 B1).
+    Whole words only (no match inside a longer word), case-insensitive, never overlapping a
+    detector span or an earlier span; longer needles first, so a short name word never takes part
+    of a longer value that holds it as a word ("Om" in a city "Om Nagar") and leaves the rest of
+    that value behind. Both modes: an obfuscated note transforms the name it repeats with the text
+    column's method."""
+    needles = [
+        (needle, column, needle == value)
+        for column, original, whole in originals
+        if whole and column.entity_type not in _TEXT_ENTITIES
+        for value in (original.strip(),)
+        for needle in _needles(column, value)
+    ]
+    if not needles:
+        return []
+    needles.sort(key=lambda n: len(n[0]), reverse=True)  # stable: ties keep the column order
     taken = [(f.locator.start or 0, f.locator.end or len(text)) for f in found]
     out: list[Finding] = []
     hay = text.casefold()
-    for column, original, whole in originals:
-        if not whole or column.entity_type in _TEXT_ENTITIES:
-            continue
-        value = original.strip()
-        for needle in _needles(column, value):
-            detector = ROW_VALUE_DETECTOR if needle == value else ROW_NAME_WORD_DETECTOR
-            for start, end in _whole_word_spans(text, hay, needle):
-                if any(start < b and a < end for a, b in taken):
-                    continue
-                taken.append((start, end))
-                out.append(
-                    Finding(
-                        locator=Locator(path=path, start=start, end=end),
-                        entity_type=column.entity_type,
-                        score=1.0,
-                        detectors=[detector],
-                        sensitivity=entity_info(column.entity_type).sensitivity,
-                        value_hash=hash_value(text[start:end]),
-                    )
+    for needle, column, is_value in needles:
+        detector = ROW_VALUE_DETECTOR if is_value else ROW_NAME_WORD_DETECTOR
+        for start, end in _whole_word_spans(text, hay, needle):
+            if any(start < b and a < end for a, b in taken):
+                continue
+            taken.append((start, end))
+            out.append(
+                Finding(
+                    locator=Locator(path=path, start=start, end=end),
+                    entity_type=column.entity_type,
+                    score=1.0,
+                    detectors=[detector],
+                    sensitivity=entity_info(column.entity_type).sensitivity,
+                    value_hash=hash_value(text[start:end]),
                 )
+            )
+    out.sort(key=lambda f: f.locator.start or 0)  # spans in text order, as the detectors give them
     return out
 
 

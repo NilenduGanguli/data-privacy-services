@@ -2162,7 +2162,9 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
                 post_sample = {**(post_sample or {}), "identifier_check": ids}
     if plan is not None and _ledgered(plan) and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
-        cleared = await _best_effort(_clear_ledger(ctx, job, spec, plan, source_conn, target_conn))
+        cleared = await _best_effort(
+            _clear_ledger(ctx, job, spec, plan, source_conn, target_conn, snapshot)
+        )
         ledger_cleared = "error" not in cleared
     evidence_id = await _existing_evidence(job)
     if evidence_id is None:
@@ -2242,13 +2244,21 @@ async def _clear_ledger(
     plan: RunPlan,
     source_conn: Connection,
     target_conn: Connection | None,
+    snapshot: ClassificationSnapshot | None,
 ) -> dict[str, Any]:
+    """Delete the job's write-ledger rows (contract §4.2 ``clear_ledger``: by job id, from the
+    ledger owner of the target). The writer takes the source shape the run was planned from (the
+    snapshot's), else the target's own: the source object is never described on the target
+    connection — a separate target login need not see it, and a key-less Oracle load into a table
+    its prepare created (no ``target_shape``) never cleared its ledger (S1-M3 r2 engines B2)."""
     conn = source_conn if _same_connection(spec, source_conn) else target_conn
     if conn is None:
         return {"error": "connection_missing"}
     connector = await _open(ctx, job, conn, "finalize")
     try:
-        shape = plan.target.target_shape or await connector.describe(spec.source.object)
+        shape = (snapshot.shape if snapshot is not None else None) or plan.target.target_shape
+        if shape is None:  # no snapshot to read: the target exists once prepare has run
+            shape = await connector.describe(plan.target.object or spec.source.object)
         writer = await connector.writer(plan.target, shape)
         deleted = await writer.clear_ledger(job.id)
         await writer.close()

@@ -657,10 +657,12 @@ cannot restart an admin's failed production run.
   flag, §6). Stellar calls verify against `DPS_SSL_CERT_FILE` (httpx's default store when unset).
 - Presidio is recall-only; identifiers with checksums come from the pattern tier regardless.
   Without the `ner` image, names in free text are not detected (key names still are) — except a
-  row's **own** replaced name: an L2 run treats the row's planned name, and each of its words of 3+
-  letters, as a span wherever the row's free text repeats it (whole words, any case; the CRM notes'
-  "KYC call with <first name>"), and the same for any other replaced whole value (a city). Names of
-  *other* people in free text still need NER.
+  row's **own** replaced name: an L2 run treats the row's planned name, and each of its words, as a
+  span wherever the row's free text repeats it (whole words, any case; the CRM notes' "KYC call with
+  <first name>"), and the same for any other replaced whole value (a city) — from two characters up
+  (two-letter first names, three-letter cities; a gender or nationality value from four), longest
+  first. Names of *other* people in free text still need NER, and so does a city that only the free
+  text holds (MongoDB `crm.profiles` has no city field: its notes keep the city in both modes).
 - The access log is off (`--no-access-log`): it is stdlib logging and bypasses the allow-list.
 - UK mobiles in the Ofcom drama range (`+44 7700 900xxx`, what the surrogate engine generates for
   GB) are not detected as phones **in free text**. A job whose free-text column repeats such a
@@ -1322,6 +1324,15 @@ demo seed draws the customers from M3's `tools/seed_model.py` and keeps M5's rul
   BSON leaves converted); Oracle `TIMESTAMP(7-9)` / `WITH TIME ZONE` are exact Parquet strings; every
   write into a production-tagged connection needs `admin` (above); a MongoDB evidence pack counts
   each nested leaf under its path, and the console's Evidence page labels leaves by path.
+- Post-merge verification r2 fixes (2026-10-14): row-value spans have their own floor of two
+  characters (r1 searched name words from 3 letters and values from 4: 28 two-letter first names and
+  34 three-letter cities of the 20 000 demo customers stayed in synthetic notes) and match longest
+  first; finalize clears the write ledger of a key-less Oracle `table` load into a table it created
+  on a separate target connection (`CRM` → `CRM_MASKED`: it described the source on the target login,
+  failed silently and left one ledger row per job with `write_ledger_cleared: false`). Ledger rows
+  left by runs before this fix stay in `CRM_MASKED.DPS_WRITE_LEDGER` until deleted by job id. Test
+  oracles compare a format-preserving id row by row only (an FF1 id may equal *another* customer's id;
+  the M2 gate's MongoDB pipeline test went red on that about 1.4 % of runs).
 - Tests: the migration test checks each milestone range and unique numbers; an address-line leaf keeps
   main's own `line1` cue under an e-mail parent.
 

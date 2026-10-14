@@ -1,5 +1,6 @@
 """The first name the CRM notes repeat never reaches a target (S1-M3 post-merge verification r1,
-engines B2 — D-A for synthesize, and the same root cause in obfuscate, N1).
+engines B2 — D-A for synthesize, and the same root cause in obfuscate, N1), two-letter first names
+and (synthesize, Oracle) three-letter cities included (r2 engines B1).
 
 The M3 demo seed writes ``NOTES`` / ``notes`` as "KYC call with <first name>; follow up at <e-mail>
 or <phone>. Prefers branch in <city>. …" (``tools/seed_model.py``). Without NER no detector finds
@@ -46,10 +47,28 @@ def _first_name(full_name: str) -> str:
 
 
 def _keeps(first: str, notes: str | None) -> bool:
-    """The note holds ``first`` as a whole word (any case) — the demo name slot."""
-    if len(first) < 3 or not notes:
+    """The note holds ``first`` as a whole word (any case) — every first name, the two-letter
+    ones too (S1-M3 r2 B1: the probes and this test used to skip names under 3 letters)."""
+    if not notes:
         return False
     return re.search(rf"(?<!\w){re.escape(first)}(?!\w)", notes, re.IGNORECASE) is not None
+
+
+#: The demo notes' city slot: "Prefers branch in <city>. ✅ …" (``tools/seed_model.py``).
+CITY_SLOT = re.compile(r"Prefers branch in (.+?)\. ✅")
+
+
+def _city_kept(city: str, notes: str | None) -> bool:
+    """The note's city slot is still ``city`` (any case)."""
+    found = CITY_SLOT.search(notes or "")
+    return found is not None and found.group(1).casefold() == city.casefold()
+
+
+def _short(first: str, city: str) -> tuple[bool, bool]:
+    """(a first name under 3 letters, a city under 4 characters): what the old floors skipped."""
+    from dps.engine.verify import normalise
+
+    return len(normalise(first)) < 3, len(normalise(city)) < 4
 
 
 async def _run(
@@ -129,16 +148,24 @@ async def test_oracle_notes_keep_no_source_first_name(
     job = await _run(handler_ctx, conn.id, obj, snap.id, target, mode)
     assert job.state == JobState.succeeded, (job.error_code, job.error)
     await _verified(job)
-    # column order of the demo table: 1 FULL_NAME, 13 NOTES, 15 LAST_CONTACT_AT (kept, unique)
+    # column order of the demo table: 1 FULL_NAME, 8 CITY, 13 NOTES, 15 LAST_CONTACT_AT (kept,
+    # unique)
     source = _oracle_rows(oracle_conn, owner, "CUSTOMERS")
     out = _oracle_rows(oracle_conn, owner, "CUSTOMERS_OUT")
     by_ts = {r[15]: r for r in source}
     pairs = [(by_ts[r[15]], r) for r in out if r[15] in by_ts]
     assert len(pairs) == ROWS
+    short = [_short(_first_name(s[1]), s[8]) for s, _ in pairs]
+    assert any(f for f, _ in short) and any(c for _, c in short)  # the sample has both
     control = sum(_keeps(_first_name(s[1]), s[13]) for s, _ in pairs)
     assert control >= ROWS * 0.95  # the probe sees the name slot in the source notes
     kept = sum(_keeps(_first_name(s[1]), t[13]) for s, t in pairs)
     assert kept == 0, kept
+    if mode == "synthesize":  # D-A surrogates CITY (obfuscate keeps it, by the default policy)
+        city_control = sum(_city_kept(s[8], s[13]) for s, _ in pairs)
+        assert city_control >= ROWS * 0.95
+        city_kept = sum(_city_kept(s[8], t[13]) for s, t in pairs)
+        assert city_kept == 0, city_kept
 
 
 # -- MongoDB: crm.profiles --------------------------------------------------------------------------
@@ -178,6 +205,7 @@ async def test_mongo_notes_keep_no_source_first_name(
     out = list(mongo_client[mongo_db]["profiles_out"].find({}))
     pairs = [(by_balance[balance(d)], d) for d in out if balance(d) in by_balance]
     assert len(pairs) == ROWS
+    assert any(_short(_first_name(s["profile"]["fullName"]), "city")[0] for s, _ in pairs)
     control = sum(_keeps(_first_name(s["profile"]["fullName"]), s["notes"]) for s, _ in pairs)
     assert control >= ROWS * 0.95
     kept = sum(_keeps(_first_name(s["profile"]["fullName"]), t.get("notes")) for s, t in pairs)

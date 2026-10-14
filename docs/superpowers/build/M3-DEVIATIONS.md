@@ -1631,6 +1631,10 @@ the fixed code reverse-applied over the new tests). Report: `~/.cache/dps-build/
   whole-word rules) and `tests/e2e/test_m3_free_text_names.py` (Oracle `CRM.CUSTOMERS` and MongoDB
   `crm.profiles` demo shapes, 600 customers, default policy, no NER, both modes: 0 / 600 row-aligned
   notes keep the source first name; the source-vs-itself control ≥ 95 %; evidence passed).
+  **Correction (round 2):** these "0 first names kept" counts — and the live "0 / 20 000" of the
+  round-1 report — skipped first names under 3 letters by construction (the test helpers returned
+  "not kept" for them); the 28 two-letter first names of the 20 000 demo customers were still kept.
+  Fixed in round 2 (below, engines B1).
 - **engines B3 — MongoDB → `files` in every format.** `files._plain` converts nested values
   recursively (datetime → ISO-8601, `Decimal`/`Decimal128` → digits, `ObjectId` → hex, `Int64` →
   int, bytes → hex, non-finite float → text) for JSONL and for the JSON text of CSV/Parquet; a
@@ -1673,3 +1677,74 @@ the fixed code reverse-applied over the new tests). Report: `~/.cache/dps-build/
   count with the transformer's key, `docpaths.column_key(path, name)` (the name of a flat column,
   the path of a nested leaf). Packs sealed before the fix keep their empty counts (sealed and
   hashed by design). Test `tests/test_evidence.py::test_a_mongo_pack_counts_each_nested_leaf_under_its_path`.
+
+## M3 post-merge verification round 2 fixes on main (`S1-M3-{gates,engines}-r2.md`)
+
+Three blocking findings of the round-2 panel on `main` @ `5c11e49`, each fixed with a test that failed
+before the fix (`~/.cache/dps-build/s1-m3-fix-r2/logs/before-fix*.log`; gate logs in the same folder,
+live probes and their counts in `~/.cache/dps-build/reports/S1-M3-fix-r2/`).
+
+- **engines B1 — short values of a row's own replaced columns reached synthetic notes (D-A; r1 B2
+  incomplete).** `_needles` searched a whole value from `EXACT_MIN` = 4 normalised characters and a
+  name word from `NAME_PART_MIN` = 3 letters: the 28 two-letter first names (`Aa` shape, the persona
+  fallback names) and the 34 three-letter cities of the 20 000 demo customers stayed in the notes of
+  every Oracle and MongoDB synthetic target (tables and files) and of obfuscated ones, each row
+  linkable to its source row through the kept `LAST_CONTACT_AT` / balance. Row-value spans now have
+  their own floor, `ROW_VALUE_MIN` = 2, for whole values and name words (`NAME_PART_MIN` is gone);
+  the sweep's `EXACT_MIN` / `CONTAIN_MIN` are unchanged, and a row-value span is still never a sweep
+  original below 8 characters, so nothing new can fail a job closed. **Deviation from the finding's
+  "for whole values" without exception:** `GENDER` / `NATIONALITY` values (`CHANCE_EQUAL_ENTITIES`)
+  keep the floor of 4 — a two-letter code ("IN", "US") is a common word, and every Indian row's
+  "branch in …" would have lost its preposition to a surrogate nationality; they are low-cardinality
+  attributes the surrogate may draw equal anyway (not identifiers). **Beyond the finding:** needles are
+  matched longest first (stable for ties), so a short name word no longer takes part of a longer value
+  that holds it as a word — before, a first name "Ram" claimed the "Ram" of a planned city "Ram
+  Nagar", the city's span was skipped as overlapping, and "Nagar" stayed (also possible with 3+ letter
+  names before this round). Spans are returned in text order. Tests: `tests/test_da_free_text_spans.py`
+  (two-letter first name and three-letter city on the Oracle shape and on the MongoDB shape with a
+  nested `$.contact.city`, both modes, strict: name and city slots kept 0, split short/long; the
+  helper no longer skips short names; `_row_value_spans` unit test: short whole-word matches, not
+  inside longer words, gender/nationality codes not searched, longest first) and
+  `tests/e2e/test_m3_free_text_names.py` (the 600-customer sample holds a two-letter first name and a
+  three-letter city; every first name counted; Oracle synthesize: city slot kept 0, control ≥ 95 %).
+- **engines B2 — a key-less Oracle `table` load into a created table on a separate target connection
+  never cleared its write ledger.** `_clear_ledger` built the clearing writer from
+  `plan.target.target_shape or connector.describe(spec.source.object)` on the target connection; a
+  created table has no `target_shape`, and the target login (`CRM_MASKED`) cannot see the source
+  (`CRM.ADDRESS_HISTORY`): `describe` raised, `_best_effort` swallowed it, the evidence said
+  `write_ledger_cleared: false` next to `passed: true`, and one ledger row per job (the last source
+  ROWID in `LAST_KEY`) stayed. The writer now takes the snapshot's source shape (what the run planned
+  from; `clear_ledger` deletes by job id and needs no shape), else the target's own, and describes
+  the target object only when neither exists. Contract §4.2 amended. Tests:
+  `tests/connectors/test_clear_ledger.py` (offline, a fake target login that cannot see the source:
+  the writer gets the snapshot's shape, else the target shape, else the target object described on
+  its own connection — never the source; HEAD's code fails two of the three cases with
+  `object_not_found`), `tests/connectors/test_oracle_ledger_cross_connection.py` (a second per-session owner without any
+  grant on the source, `oracle_target_schema` in `tests/fixtures/m3_services.py`: obfuscate and
+  synthesize into a created table → `write_ledger_cleared` true, ledger table present, 0 rows of the
+  job; control: obfuscate into an existing table) and a fifth resume-after-kill case
+  (`tests/e2e/test_m3_resume_after_kill.py::test_resume_after_kill[oracle-keyless-table-cross]`:
+  key-less `ADDRESS_HISTORY` copies, each run creating its table on the target login, SIGKILL after 5
+  batches, second worker; digest = reference, 0 ledger rows in the target owner, 0 source address
+  lines); every case of the matrix now also asserts `write_ledger_cleared` on both packs. Ledger rows
+  left by the four earlier demo runs (`CRM_MASKED.DPS_WRITE_LEDGER`) are not removed by the fix.
+- **gates B1 — the M2 gate's MongoDB pipeline tests were flaky by construction (test oracle).**
+  `survivors()` counted a target `$.customerId` equal to **any** source id; FF1 under a fresh key maps
+  some id onto another customer's id in about 1.4 % of runs at 1 200 profiles (the strict per-row
+  verification rules out the row's own id). `tests/connectors/test_mongo_pipeline.py` now compares
+  each target document with its own source document (table: the kept `_id`; append: the kept,
+  per-customer unique balance) for every sensitive leaf, and keeps the any-value comparison for text
+  leaves only; counts are bound before each assert (no document in a failure message). The table
+  and append runs use a fixed key (`derived_key("mongo-pipeline-collision-16")` in
+  `tests/connectors/helpers.py`) under which FF1 maps one seeded id onto another and none onto
+  itself — a premise each test re-checks — and assert that every target id is its own source id's
+  keyed image (`masked_values`, the run's own column plan through the batch transformer) and that the
+  cross-document equality is there; the former oracle fails on it deterministically. Same fix in
+  `tests/connectors/test_oracle_pipeline.py::test_a_query_subset_creates_and_writes_only_the_projected_columns`
+  (`CUSTOMER_ID` over 300 ids, key `oracle-query-collision-145`). **Beyond the finding**, the same
+  latent flake: `tests/e2e/test_m3_three_way.py` treated MongoDB's `$.customerId` as text (about 6 %
+  of runs at 2 400 customers; now row by row like the Oracle and PostgreSQL ids) and
+  `tests/console/test_console_m3_wizard.py` compared the Oracle `MOBILE` (FF1 over the subscriber
+  digits) with any source value (about 0.5 % of runs at the demo's 10 000 retail rows; now rows aligned
+  on the kept FF9 `LAST_CONTACT_AT`, every column row by row, the text columns also against any
+  value).
