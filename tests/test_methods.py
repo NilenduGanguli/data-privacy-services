@@ -475,6 +475,25 @@ def test_date_shift_keeps_sub_microsecond_digits() -> None:
         ("$.name.given", "first"),
         ("$.name.middle", "middle"),
         ("$.customer.name.family", "last"),
+        # review r1 B3: plural surnames, SAP's name-first order and Siebel's short forms
+        ("$.surnames", "last"),
+        ("$.last_names", "last"),
+        ("$.LASTNAMES", "last"),
+        ("$.lastNames", "last"),
+        ("$.family_names", "last"),
+        ("$.familynames", "last"),
+        ("$.NAME_FIRST", "first"),
+        ("$.NAME_GIVEN", "first"),
+        ("$.NAME_MIDDLE", "middle"),
+        ("$.NAME_LAST", "last"),
+        ("$.NAME_FAMILY", "last"),
+        ("$.NameFirst", "first"),
+        ("$.namelast", "last"),
+        ("$.NAMEMIDDLE", "middle"),
+        ("$.CUST_NAME_LAST", "last"),
+        ("$.FST_NAME", "first"),
+        ("$.MID_NAME", "middle"),
+        ("$.LST_NAME", "last"),
     ],
 )
 def test_a_name_field_s_role_comes_from_its_key(path: str, role: str) -> None:
@@ -498,6 +517,10 @@ def test_a_name_field_s_role_comes_from_its_key(path: str, role: str) -> None:
         "$.name.last_updated",
         "$.lname_flag",
         "$.filename",
+        "$.username_first",
+        "$.name_first_seen",
+        "$.NAME_LAST_UPDATED",
+        "$.list_names",
         "$.last_login",
         "$.names[0]",
         "$",
@@ -530,6 +553,11 @@ def test_the_fields_of_one_person_share_a_group_and_another_person_s_do_not() ->
     assert group("$.FIRST_NAME_2") == group("$.SURNAME_2")
     assert group("$.people[1].first_name") == group("$.people[1].family_name")
     assert group("$.name.first") == group("$.name.last")
+    # review r1 B3: SAP's name-first keys are the record's own person; the words before them say
+    # whose name it is, as the words before first_name do
+    assert {group("$.NAME_FIRST"), group("$.NAME_LAST"), group("$.surnames")} == one
+    assert group("$.CUST_NAME_LAST") == group("$.CUST_FIRST_NAME") != group("$.NAME_LAST")
+    assert group("$.NAME_FIRST_2") == group("$.LAST_NAME_2") == group("$.FIRST_NAME_2")
 
 
 class NameSynth(FakeSynth):

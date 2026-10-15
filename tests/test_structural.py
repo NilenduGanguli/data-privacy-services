@@ -173,6 +173,14 @@ NAME_PART_PATHS = [
             "lname", "LNAME", "l_name", "lName", "LName", "custLName", "cust_lname",
             "nominee_first_name", "nominee_given_name", "nominee_family_name", "NOMINEE_SURNAME",
             "FIRST_NAME_2", "first_name2", "firstname2", "FNAME1", "lastName2", "surname3",
+            # review r1 B3: plural surnames, and the name-first order of SAP's business partner
+            # (BUT000.NAME_FIRST / NAME_LAST) and Siebel's short forms (S_CONTACT.FST_NAME)
+            "surnames", "SURNAMES", "last_names", "lastNames", "LASTNAMES", "lastnames",
+            "family_names", "familyNames", "familynames", "NOMINEE_SURNAMES",
+            "NAME_FIRST", "NAME_LAST", "NAME_MIDDLE", "NAME_GIVEN", "NAME_FAMILY", "NameFirst",
+            "NameLast", "nameFirst", "namelast", "NAMEFIRST", "NAMEMIDDLE", "NAMELAST",
+            "CUST_NAME_FIRST", "CUST_NAME_LAST", "NAME_FIRST_2", "name_last2",
+            "FST_NAME", "fstName", "MID_NAME", "midname", "LST_NAME", "lstname",
         )
     ),
     "$['Last Name']",
@@ -213,6 +221,13 @@ def test_every_key_that_holds_a_name_part_is_detected_as_a_name(path: str) -> No
         "$.file_name",
         "$.name.last_updated",
         "$.username.first",
+        # review r1 B3: a name-first part is the key's last two words, nothing longer or joined
+        "$.username_first",
+        "$.name_first_seen",
+        "$.NAME_LAST_UPDATED",
+        "$.name_lastly",
+        "$.midnight",
+        "$.list_names",
     ],
 )
 def test_words_near_a_name_part_are_not_names(path: str) -> None:

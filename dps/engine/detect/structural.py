@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Literal
 
 from dps.engine.jsonpath import parse_path
@@ -334,14 +333,24 @@ NameRole = Literal["first", "middle", "last"]
 #: same table (:func:`classify_key`), so every field synthesis gives a part is detected, in any
 #: spelling: ``given_names``, ``FName``, ``custLName``, ``surName``, ``FIRSTNAME2`` (S8 review r1
 #: B2: with NER off, a key with a part but no detection kept its real name in a synthetic record).
+#: Also the plural surnames and the name-first order of SAP's business partner (``BUT000``:
+#: ``NAME_FIRST``, ``NAME_LAST``; the words before them say whose name it is, ``CUST_NAME_LAST``)
+#: and the short forms of Siebel's ``S_CONTACT.FST_NAME`` / ``MID_NAME`` and ``LST_NAME`` (review
+#: r1 B3: none had a part or a score above ``name`` 0.55, so a synthesize run copied the real names).
 NAME_PART_KEYS: dict[str, tuple[NameRole, float]] = {
     **dict.fromkeys(
         ("firstname", "firstnames", "givenname", "givennames", "forename", "forenames"),
         ("first", 0.9),
     ),
+    **dict.fromkeys(("namefirst", "namegiven", "fstname"), ("first", 0.85)),
     "fname": ("first", 0.75),
     **dict.fromkeys(("middlename", "middlenames"), ("middle", 0.85)),  # not "mname": a mother's too
-    **dict.fromkeys(("lastname", "surname", "familyname"), ("last", 0.9)),
+    **dict.fromkeys(("namemiddle", "midname"), ("middle", 0.85)),
+    **dict.fromkeys(
+        ("lastname", "lastnames", "surname", "surnames", "familyname", "familynames"),
+        ("last", 0.9),
+    ),
+    **dict.fromkeys(("namelast", "namefamily", "lstname"), ("last", 0.85)),
     "lname": ("last", 0.8),
 }
 #: A bare key holds a part only under a key that names a name (``name.first``, ``name.family``).
@@ -384,7 +393,6 @@ def name_part(key: str, parent: str | None = None) -> tuple[NameRole, int, float
     return None
 
 
-@lru_cache(maxsize=4096)
 def _name_part_candidate(key: str) -> KeyCandidate | None:
     """``PERSON_NAME`` when the field ``key`` names (a path, a column, a form field) holds a part
     of a person's name (:func:`name_part`, a path's parent segment the context of a bare part)."""

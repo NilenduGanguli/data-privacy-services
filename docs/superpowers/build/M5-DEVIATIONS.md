@@ -1204,11 +1204,22 @@ name of the other gender about half the time (`Mr. Lakshmi …`; 138 of 300 job 
 - **Known limits (review r1, not changed):** a key with a word after `name` (`first_name_en`) gets no
   role (N3, detected as a full name, as on `5cef802`); a prefixed own group (`cust_first_name`) is not
   the record's own group, so a person-name key sorting before it still owns the record persona (N4,
-  the pre-existing first-declared rule). Seen while re-running the review's probes, pre-existing on
-  `5cef802`/`e437f48` and outside name parts: with NER off, a `<role>_name` key whose role word is not
-  in the structural list (`agent_name`, `officer_name`, `witness_name`) scores only `name` 0.55, so an
-  untitled full name in it is not detected and is kept in a synthetic record with verification
-  passing; follow-up: more bank roles before `name`, or a lexicon name detector when NER is off.
+  the pre-existing first-declared rule).
+- **Known limits: name keys still missed with NER off** (pre-existing on `5cef802`/`e437f48`; the
+  default image has no NER, so a value under such a key is kept in a synthetic record and verification
+  passes). Owner follow-up: a lexicon-backed person-name detector when NER is off, or per-system key
+  lists.
+  - `<role>_name` keys whose role word is not in the structural list (`agent_name`, `officer_name`,
+    `witness_name`) score only `name` 0.55: an untitled full name in them is not detected under
+    synthetic-realistic (synthetic-strict takes 0.55).
+  - Abbreviated name parts: `FIRST_NM`, `LAST_NM`, `CUST_FRST_NM`, `CUST_LST_NM`, `GIVEN_NM`, `SURNM`,
+    `FIRSTNM`/`LASTNM`, `MID_INIT` — not detected at all.
+  - Other languages: `vorname`/`nachname`, `prenom`/`nom`, `apellidos` — not detected; `nombre` and
+    `apellido` are detected (0.85) but get no part.
+  - SAP's second surname `NAME_LST2` scores `name` 0.55 (a trailing number would also read as a
+    second person, so it is not simply a table entry).
+  - Covered since review r1 B3 (below): plural surnames, SAP's `NAME_FIRST`/`NAME_LAST` order,
+    Siebel's `FST_NAME`/`MID_NAME` and `LST_NAME`.
 - Tests for r1 (48 new cases, each fails on `e437f48`): `tests/test_structural.py` (every key spelling
   that gets a role is detected by `classify_key` and `classify_path`, also as an L2 column name;
   neighbours that are not names stay undetected, a guard that passes on both), `tests/test_methods.py`
@@ -1219,6 +1230,42 @@ name of the other gender about half the time (`Mr. Lakshmi …`; 138 of 300 job 
   before `NOMINEE_GIVEN_NAME` is the `JOINT_HOLDER_NAME` of another table under the row's anchor),
   `tests/test_discovery_classify.py` (plural, split and camel name-part columns are `PERSON_NAME` with
   a synthesize method other than `keep`).
+- **Review r1 B3 — plural surnames and name-first keys.** The shared table had plural forms for first
+  and middle names but none for last names, and nothing for the name-first order of SAP's business
+  partner (`BUT000.NAME_FIRST`/`NAME_LAST`/`NAME_MIDDLE`, run together `NAMEFIRST`…): `surnames`,
+  `last_names`, `lastnames`, `family_names`, `familynames` scored nothing, `NAME_FIRST`/`NAME_LAST`
+  only `name` 0.55, and none got a part. With NER off a synthesize run copied the real names with
+  verification passing (L1: both of SAP's names, or the plural surname, kept 40/40 under both synthetic
+  presets; a 200-row L2 job on the lane's source-pg wrote `NAME_FIRST`, `NAME_LAST`, `surnames` and
+  `last_names` equal to the source row's in 200/200 rows each), and when classified as names anyway
+  (synthetic-strict discovery at 0.55, or a reviewer's override) the last-name column held a first
+  name (99/100 rows) and the e-mail did not agree (0/100). Pre-existing on `5cef802`/`e437f48`, not a
+  regression; `def4fe1`'s "every name-part key is detected" overclaimed. `NAME_PART_KEYS` now also
+  has `lastnames`, `surnames`, `familynames` (last, 0.9); `namefirst`, `namegiven` (first, 0.85),
+  `namemiddle` (middle, 0.85), `namelast`, `namefamily` (last, 0.85); and the short forms of
+  Siebel's `S_CONTACT.FST_NAME`/`MID_NAME` and `LST_NAME`: `fstname` (first), `midname` (middle),
+  `lstname` (last), 0.85.
+  `name_part` already joins a key's last two words, so `NAME_FIRST` is `namefirst` and the words before
+  it say whose name it is: `CUST_NAME_LAST` → group `cust`, `NAME_FIRST` → the record's own group (with
+  `FIRST_NAME`), `NAME_FIRST_2` → a second person. Still not names: `$.username_first`,
+  `$.name_first_seen`, `$.NAME_LAST_UPDATED`, `$.name_lastly`, `$.list_names`, `$.midnight`. Measured on the fix
+  (counts only): L1 0/40 kept and e-mail agreeing 40/40 for `NAME_FIRST`/`NAME_LAST`,
+  `first_names`/`last_names` and `first_name`/`surnames` under both presets; L2 rows planned as names
+  0/100 last-name columns with a first name, e-mail agreeing 100/100; the same 200-row L2 job 0/200
+  equal to the source in all 11 name columns, 0 rows holding any source name part, verification
+  passed; detection sweep of 2,625 keys × 6 path shapes against `b18abc7`: 15 keys changed, all to
+  `PERSON_NAME` 0.85/0.9 from nothing or `name` 0.55, nothing lost. Also dropped the `lru_cache` on
+  `_name_part_candidate` (review N2): it kept raw keys and paths for the life of the process, and an
+  L1 path can hold a value (a document keyed by an account number).
+- Tests for B3 (written first; 67 cases fail on `b18abc7`, 10 guard cases pass on both):
+  `tests/test_structural.py` (32 spellings detected by `classify_key` and `classify_path`, also as L2
+  column names; 6 neighbours stay undetected), `tests/test_methods.py` (18 roles; the groups of
+  `NAME_FIRST`, `CUST_NAME_LAST`, `NAME_FIRST_2`; 4 neighbours get no part), `tests/test_service.py`
+  (six more layouts with NER off keep no original and agree with the e-mail; `NAME_FIRST`/
+  `NAME_LAST`/`EMAIL`, `first_names`/`last_names`, `first_name`/`surnames` under both synthetic
+  presets), `tests/test_discovery_classify.py` (the B3 columns are `PERSON_NAME`, not `keep`, under
+  both presets), `tests/test_batch.py` (SAP `BUT000` rows planned as names: each column holds the row
+  persona's part and the e-mail agrees, both presets).
 
 ## Deferred to final stage
 

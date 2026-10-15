@@ -713,6 +713,21 @@ NAME_PART_LAYOUTS: list[tuple[dict[str, Any], tuple[str, ...], tuple[str, ...]]]
         ("customer", "name", "given"),
         ("customer", "name", "family"),
     ),
+    # review r1 B3: plural surnames, SAP's name-first order and Siebel's short forms
+    ({"first_names": "Arjun Kumar", "last_names": "Mehta"}, ("first_names",), ("last_names",)),
+    ({"first_name": "Arjun", "surnames": "Mehta"}, ("first_name",), ("surnames",)),
+    ({"given_names": "Arjun", "family_names": "Mehta"}, ("given_names",), ("family_names",)),
+    ({"NAME_FIRST": "Arjun", "NAME_LAST": "Mehta"}, ("NAME_FIRST",), ("NAME_LAST",)),
+    (
+        {"NameFirst": "Arjun", "NameMiddle": "Kumar", "NameLast": "Mehta"},
+        ("NameFirst",),
+        ("NameLast",),
+    ),
+    (
+        {"FST_NAME": "Arjun", "MID_NAME": "Kumar", "LAST_NAME": "Mehta"},
+        ("FST_NAME",),
+        ("LAST_NAME",),
+    ),
 ]
 
 
@@ -738,3 +753,29 @@ async def test_every_name_part_key_is_synthesised_with_ner_off(
         assert not {"arjun", "mehta", "kumar"} & words, written
         first, last = at(out.result, given), at(out.result, family)
         assert out.result["email"].startswith(f"{ascii_fold(first)}.{ascii_fold(last)}"), written
+
+
+@pytest.mark.parametrize("preset", ["synthetic-realistic", "synthetic-strict"])
+@pytest.mark.parametrize(
+    ("first_key", "last_key", "email_key"),
+    [
+        ("NAME_FIRST", "NAME_LAST", "EMAIL"),  # SAP's business partner (BUT000)
+        ("first_names", "last_names", "email"),
+        ("first_name", "surnames", "email"),
+    ],
+)
+async def test_sap_and_plural_name_keys_keep_no_real_name_with_ner_off(
+    engine: PrivacyEngine, preset: str, first_key: str, last_key: str, email_key: str
+) -> None:
+    # review r1 B3: these keys had no part and no detection with NER off, so a synthesize run under
+    # either synthetic preset kept the real names (both of SAP's, the surname of the plural keys)
+    # and verification passed; now they hold the record persona's parts and the e-mail agrees
+    record = {first_key: "Arjun", last_key: "Mehta", email_key: "arjun.mehta@example.in"}
+    for _ in range(3):
+        out = await engine.synthesize(Payload(data=record), preset, RequestOptions())
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        written = json.dumps(out.result)
+        assert not {"arjun", "mehta"} & {w.lower() for w in re.findall(r"[A-Za-z]+", written)}
+        first, last = out.result[first_key], out.result[last_key]
+        assert first in IndiaNames.first_names and last in IndiaNames.last_names, written
+        assert out.result[email_key].startswith(f"{ascii_fold(first)}.{ascii_fold(last)}"), written

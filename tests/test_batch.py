@@ -760,3 +760,41 @@ def test_a_nominee_s_split_columns_are_the_same_person_as_their_full_name_elsewh
             f"{ascii_fold(o['FIRST_NAME'])}.{ascii_fold(o['LAST_NAME'])}".lower()
         )
         assert a["HOLDER_NAME"].split(" ")[-1] == o["LAST_NAME"].title()
+
+
+@pytest.mark.parametrize("preset", ["synthetic-realistic", "synthetic-strict"])
+def test_sap_name_first_columns_hold_the_row_persona_s_parts(preset: str) -> None:
+    # review r1 B3: SAP's business partner names its columns name-first (BUT000.NAME_FIRST /
+    # NAME_LAST); planned as names (strict discovery, or a reviewer) without a part, the last-name
+    # column got a first name in 99/100 rows and the e-mail agreed in 0/100
+    texts = ("NAME_FIRST", "NAME_MIDDLE", "NAME_LAST", "EMAIL")
+    rows = [
+        {
+            "PARTNER": 70_000_001 + i,
+            "NAME_FIRST": GIVEN[(i * 3) % 8].upper(),
+            "NAME_MIDDLE": GIVEN[(i * 5 + 1) % 8].upper(),
+            "NAME_LAST": FAMILY[i % 8].upper(),
+            "EMAIL": f"{GIVEN[(i * 3) % 8].lower()}.{FAMILY[i % 8].lower()}@example-mail.in",
+        }
+        for i in range(24)
+    ]
+    result = BatchTransformer(
+        ENGINE,
+        policy=load_preset(preset),
+        mode="synthesize",
+        columns=_bank_plans(texts),
+        shape=_bank_table("BUT000", "PARTNER", texts),
+        key=None,
+        seed=generate_synthesis_seed(),
+        locale="en_IN",
+        anchor=("PARTNER", "PARTNER"),
+    ).transform([dict(r) for r in rows])
+    assert result.verification.passed
+    firsts = {n.lower() for n in IndiaNames.first_names}
+    lasts = {n.lower() for n in IndiaNames.last_names}
+    for row, out in zip(rows, result.rows, strict=True):
+        first, last = out["NAME_FIRST"].lower(), out["NAME_LAST"].lower()
+        assert first in firsts and last in lasts, (first, last)
+        assert out["EMAIL"].lower().startswith(f"{ascii_fold(first)}.{ascii_fold(last)}".lower())
+        originals = {row[n].lower() for n in texts[:3]}
+        assert not originals & {out[n].lower() for n in texts[:3]}

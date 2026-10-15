@@ -366,7 +366,8 @@ def test_classify_columns_passes_the_sampled_values_to_the_length_check() -> Non
     assert out["national_id"].type_note == "length_overflow"
 
 
-def test_name_part_columns_are_names_with_ner_off() -> None:
+@pytest.mark.parametrize("preset", ["synthetic-realistic", "synthetic-strict"])
+def test_name_part_columns_are_names_with_ner_off(preset: str) -> None:
     # review r1 B2: a column that holds a part of a name is a PERSON_NAME on its key alone (the
     # default image has no NER); classified as nothing, a synthesize job kept the real names
     parts = (
@@ -377,6 +378,18 @@ def test_name_part_columns_are_names_with_ner_off() -> None:
         "f_name",
         "l_name",
         "surName",
+        # review r1 B3, all classified keep before: plural surnames and NAMEMIDDLE under both
+        # presets, SAP's NAME_FIRST order and Siebel's short forms under synthetic-realistic
+        # (where "name" alone, 0.55, is below the floor)
+        "surnames",
+        "last_names",
+        "family_names",
+        "NAME_FIRST",
+        "NAME_MIDDLE",
+        "NAME_LAST",
+        "NAMEMIDDLE",
+        "FST_NAME",
+        "MID_NAME",
     )
     shape = TableShape(
         object=ObjectRef(owner="bank", name="kyc"),
@@ -391,7 +404,7 @@ def test_name_part_columns_are_names_with_ner_off() -> None:
         {"customer_id": 1000 + i, **dict.fromkeys(parts, ("Kavya Devi", "Rohan")[i % 2])}
         for i in range(20)
     ]
-    policy = load_preset("synthetic-realistic")
+    policy = load_preset(preset)
     cols = by_name(
         classify_columns(
             shape, rows, policy=policy, detector=ENGINE.detector(policy, "en_IN"), fpe_enabled=False
