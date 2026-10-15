@@ -66,6 +66,19 @@ export function sweepSeries(sweeps: SweepDay[], layer: Layer, outcome: Outcome):
 }
 
 const column = (path: string): string => path.replace(/^\$\./, '').replace(/^\$/, '');
+/** A pack error's `where` that names a place, not a column (dps/layers/connectors/jobs_run.py). */
+const PLACE = /^(partition \d+|prepare|finalize)$/;
+
+/** The columns a failed sweep names: its `paths` without the places a pack error names
+ *  ("partition 0", "prepare") — the API sends those for a run, never a column (S2 console r3 B1). */
+export function sweepColumns(f: FailedSweep): string[] {
+  return f.paths.filter((p) => !PLACE.test(p)).map(column).filter(Boolean);
+}
+
+/** "3", "3 and 4", "1, 2 and 5". */
+function andList(items: (string | number)[]): string {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
 
 /** The report layer a failed sweep belongs to: a job's partitions are Connectors, a scan is the
  *  UI scanner, an API call is API (S2 console r2 B1). */
@@ -86,10 +99,18 @@ export function failedSweepText(f: FailedSweep): { where: string; what: string }
     ? `${shortId(f.job_id)}${f.partitions.length ? ` · ${f.partitions.map((n) => `p${n}`).join(', ')}` : ''}`
     : f.route ?? 'API request';
   let what: string;
-  if (f.error_code === 'leakage') {
-    const cols = f.paths.map(column).filter(Boolean);
-    what = `The leakage sweep found ${cols.length ? `source values in ${cols.join(', ')}` : 'a source value in the output'}. `
-      + (f.where === 'job' ? 'The partitions were discarded before writing; nothing reached the target.' : 'The response was not sent.');
+  if (f.error_code === 'leakage' && f.where === 'job') {
+    // the unit that fails closed is the batch (contract §0 rule 2, §6.4): the batch the sweep
+    // refused was not written, but batches committed before it may already be in the target
+    // (a table, in-place or append run commits per batch) — never "nothing reached the target"
+    const cols = sweepColumns(f);
+    const many = f.partitions.length > 1;
+    const of = f.partitions.length ? ` of ${many ? 'partitions' : 'partition'} ${andList(f.partitions)}` : '';
+    what = `The leakage sweep found ${cols.length ? `source values in ${cols.join(', ')}, in` : 'a source value in'} ${many ? 'batches' : 'a batch'}${of}. `
+      + `${many ? 'Those batches were' : 'That batch was'} not written (fail closed); batches committed before ${many ? 'them' : 'it'} may already be in the target. Open the job to see what was written.`;
+  } else if (f.error_code === 'leakage') {
+    const cols = sweepColumns(f);
+    what = `The leakage sweep found ${cols.length ? `source values in ${cols.join(', ')}` : 'a source value in the output'}. The response was not sent.`;
   } else if (f.error_code === 'verification_failed') {
     what = 'The output verifier failed closed. The response carried no original value; the request fell back or was refused.';
   } else {
@@ -160,6 +181,9 @@ export function verificationChip(row: EvidenceRow): Chip {
     return { tone: 'emerald', text: `passed · ${hits} leaks` };
   }
   if (hits > 0) return { tone: 'rose', text: `failed · ${hits} ${hits === 1 ? 'leak' : 'leaks'} caught` };
+  // a run the leakage sweep stopped: a refused batch leaves no hit in the counters (it was not
+  // written), and the pack seals its verification failed closed — say so, as the pack does
+  if (!finished && item.outcome === 'failed' && s.verification_status === 'failed') return { tone: 'rose', text: 'failed closed' };
   if (!finished) return { tone: item.outcome === 'canceled' ? 'slate' : 'rose', text: `not verified · ${item.layer === 'ui' ? 'scan' : 'job'} ${item.outcome}` };
   // main's post-write gate (B1) and M5's D-A review: personal data in a column kept as is
   if (s.review_required === true) return { tone: 'amber', text: 'review required' };

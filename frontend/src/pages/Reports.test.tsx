@@ -44,6 +44,21 @@ describe('ReportsView', () => {
     expect(out).toContain('href="/data-sources/jobs/j_01K7F2W8Q4LMF2"');
   });
 
+  it('words a run the sweep stopped by its batch and names no column the API did not name (S2 console r3 B1)', () => {
+    const base = fx.reportsJobs(NOW, 14);
+    const day = base.sweeps[base.sweeps.length - 1].day;
+    // what /reports/jobs sends for a run that failed closed after committing 9 batches
+    const stopped = { where: 'job' as const, day, job_id: 'j_01M4YPD09E5MX92DEKJS9MC8TA', partitions: [0], route: null, error_code: 'leakage', paths: ['partition 0'] };
+    const t = text(html(<ReportsView {...props({ jobs: { ...base, failed_sweeps: [stopped] }, filters: { ...filters, layer: 'conn' } })} />));
+    expect(t).toContain('The leakage sweep found a source value in a batch of partition 0. That batch was not written (fail closed); batches committed before it may already be in the target. Open the job to see what was written.');
+    expect(t).toContain('failed closed Open the job to see what was written, then re-run it.');
+    expect(t).not.toContain('nothing reached the target');
+    expect(t).not.toContain('Review the columns named above');
+    // a sweep that names its columns still asks to review them
+    const named = text(html(<ReportsView {...props()} />));
+    expect(named).toContain('failed closed Review the columns named above, then re-run the job.');
+  });
+
   it('counts and lists a scan whose own verification failed under All and UI scanner only (S2 console r2 B1)', () => {
     const base = fx.reportsJobs(NOW, 14);
     const day = base.sweeps[base.sweeps.length - 1].day;

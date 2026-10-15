@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ApiRollup } from './types';
 import * as fx from '../dev/fixtures';
 import {
-  auditFilters, auditOutcomeTone, evidenceRows, rollupRoute, fromSummary, failedSweepText, filtersToParams, methodsSummary, parseFilters, policyLabel, sweepSeries,
+  auditFilters, auditOutcomeTone, evidenceRows, rollupRoute, fromSummary, failedSweepText, filtersToParams, methodsSummary, parseFilters, policyLabel, sweepColumns, sweepSeries,
   verificationChip, type EvidenceRow,
 } from './reports';
 
@@ -37,9 +37,26 @@ describe('sweeps', () => {
   });
   it('describes a failed sweep in words, value-free', () => {
     const [job, apiFail] = report.failed_sweeps;
-    expect(failedSweepText(job)).toEqual({ where: 'j_01K7F2…F2 · p3, p4', what: 'The leakage sweep found source values in EMPLOYER_NAME. The partitions were discarded before writing; nothing reached the target.' });
+    // the unit that fails closed is the batch (contract §0 rule 2, §6.4): batches committed before
+    // it may already be in the target, so nothing here says the target was untouched
+    expect(failedSweepText(job)).toEqual({
+      where: 'j_01K7F2…F2 · p3, p4',
+      what: 'The leakage sweep found source values in EMPLOYER_NAME, in batches of partitions 3 and 4. Those batches were not written (fail closed); batches committed before them may already be in the target. Open the job to see what was written.',
+    });
     expect(failedSweepText(apiFail).where).toBe('POST /api/v1/synthesize');
     expect(failedSweepText(apiFail).what).toContain('failed closed');
+  });
+  it('words a job the sweep stopped by its batch and names no column the API did not name (S2 console r3 B1)', () => {
+    // what /reports/jobs sends for a run that failed closed after committing 9 batches: the pack
+    // error's `where` ("partition 0") is a place, not a column
+    const stopped = { where: 'job' as const, day: '2026-10-15', job_id: 'j_01M4YPD09E5MX92DEKJS9MC8TA', partitions: [0], route: null, error_code: 'leakage', paths: ['partition 0'] };
+    const words = failedSweepText(stopped);
+    expect(words.where).toBe('j_01M4YP…TA · p0');
+    expect(words.what).toBe('The leakage sweep found a source value in a batch of partition 0. That batch was not written (fail closed); batches committed before it may already be in the target. Open the job to see what was written.');
+    expect(words.what).not.toMatch(/nothing reached|discarded before writing/);
+    expect(sweepColumns(stopped)).toEqual([]);
+    expect(sweepColumns({ ...stopped, paths: ['prepare', 'partition 2', '$.EMAIL'] })).toEqual(['EMAIL']);
+    expect(failedSweepText({ ...stopped, partitions: [1, 2, 5] }).what).toContain('in batches of partitions 1, 2 and 5. Those batches were not written');
   });
   it('words a UI scan whose own verification failed (S2 console r2 B1)', () => {
     const scan = { where: 'scan' as const, day: '2026-10-13', job_id: 's_01K7SC4NQ8ZP3M', partitions: [], route: null, error_code: 'submission_detected', paths: [] };
@@ -131,6 +148,12 @@ describe('verification of runs that did not finish (r1 B2, main N3)', () => {
     // a hit or an unfinished run outranks the review
     expect(verificationChip(pack('succeeded', { verification_passed: false, review_required: true, hits: 2 }))).toEqual({ tone: 'rose', text: 'failed · 2 leaks caught' });
     expect(verificationChip(pack('failed', { verification_passed: false, review_required: true, hits: 0 })).text).toBe('not verified · job failed');
+  });
+  it('a run the leakage sweep stopped reads as failed closed, as its own pack seals it (S2 console r3 B1)', () => {
+    // a leakage refusal discards its batch's counters, so hits stays 0; the pack's status is failed
+    expect(verificationChip(pack('failed', { verification_passed: false, hits: 0, verification_status: 'failed', rows_written: 9000 }))).toEqual({ tone: 'rose', text: 'failed closed' });
+    expect(verificationChip(pack('failed', { verification_passed: false, hits: 0, verification_status: 'incomplete' })).text).toBe('not verified · job failed');
+    expect(verificationChip(pack('canceled', { verification_passed: false, hits: 0, verification_status: 'incomplete', rows_written: 14000 })).text).toBe('not verified · job canceled');
   });
   it('a scan passes only when it succeeded (no dry run for scans)', () => {
     expect(verificationChip(pack('succeeded', { verification_passed: true, submissions: 0 }, 'ui', 'scan'))).toEqual({ tone: 'emerald', text: 'passed · 0 POSTs left' });

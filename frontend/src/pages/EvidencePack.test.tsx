@@ -6,12 +6,40 @@ import * as fx from '../dev/fixtures';
 import type { ClassificationSnapshot, ColumnClassification, EvidenceOut } from '../lib/types';
 import { html, occurrences, text } from '../test/render';
 import { SCAN_PACK } from '../test/scanPack';
-import type { EvidenceOut } from '../lib/types';
 import { EvidenceSheet } from './EvidencePack';
 
 const NOW = new Date('2026-10-13T10:15:00Z');
 const packs = fx.evidencePacks(NOW);
 const noop = async (): Promise<{ blob: Blob; filename: string }> => ({ blob: new Blob([]), filename: 'x' });
+
+/** The obfuscate pack as a run that stopped after writing `rows` rows: no post-write sample ran. */
+function stopped(outcome: 'failed' | 'canceled', rows: number): EvidenceOut {
+  const base = packs.ev_01K7ZQ9QA1;
+  return {
+    ...base,
+    pack: {
+      ...base.pack, outcome,
+      counts: { ...base.pack.counts, rows_read: rows, rows_written: rows, rows_skipped: 0 },
+      verification: { ...base.pack.verification, passed: false, hits: 0, status: outcome === 'failed' ? 'failed' : 'incomplete', post_sample: null },
+      errors: outcome === 'failed' ? [{ code: 'leakage', where: 'partition 0' }] : [],
+    },
+  };
+}
+
+describe('EvidenceSheet — the post-write sample of a run that stopped (S2 console r3 B1)', () => {
+  for (const outcome of ['failed', 'canceled'] as const) {
+    it(`a ${outcome} run that wrote rows says they were not re-read, not that there were none`, () => {
+      const t = text(html(<EvidenceSheet ev={stopped(outcome, 9000)} job={null} snapshot={null} onJson={noop} onPdf={noop} />));
+      expect(t).toContain(`Post-write sample not run The job ended ${outcome} before the post-write sample; the 9,000 written rows were not re-read.`);
+      expect(t).not.toContain('No written rows to sample');
+      expect(t).toContain('9,000 read · 9,000 written');
+    });
+  }
+  it('a run that wrote nothing has no written rows to sample', () => {
+    const t = text(html(<EvidenceSheet ev={stopped('failed', 0)} job={null} snapshot={null} onJson={noop} onPdf={noop} />));
+    expect(t).toContain('Post-write sample not run No written rows to sample');
+  });
+});
 
 describe('EvidenceSheet', () => {
   it('offers Download JSON, Download PDF and Print', () => {

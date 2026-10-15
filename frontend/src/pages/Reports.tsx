@@ -10,7 +10,7 @@ import { useSettings } from '../hooks/useSettings';
 import { api, ApiError, errorText, type Download } from '../lib/api';
 import { compact, count, plural, utc } from '../lib/format';
 import {
-  auditFilters, DEFAULT_FILTERS, evidenceRows, failedSweepLayer, failedSweepText, filtersToParams, fromSummary, parseFilters, sweepSeries, type EvidenceRow, type Layer,
+  auditFilters, DEFAULT_FILTERS, evidenceRows, failedSweepLayer, failedSweepText, filtersToParams, fromSummary, parseFilters, sweepColumns, sweepSeries, type EvidenceRow, type Layer,
   type Outcome, type ReportFilters,
 } from '../lib/reports';
 import type { ApiRollup, AuditRow, EvidenceItem, Readiness, ReportsJobsOut } from '../lib/types';
@@ -109,7 +109,7 @@ export function ReportsView(p: ReportsViewProps): JSX.Element {
               <div className="fail" key={`${s.where}-${s.job_id ?? s.route}-${s.day}`}>
                 <div className="top"><span className="mono">{to ? <Link to={to}>{words.where}</Link> : words.where}</span><span className="faint sm">{utc(`${s.day}T00:00:00Z`).replace(' 00:00', '')} · UTC day</span></div>
                 <div className="what">{words.what}</div>
-                <div className="fix">{s.where === 'job' ? <><span className="chip amber">failed closed</span> Review the columns named above, then re-run the job.</>
+                <div className="fix">{s.where === 'job' ? <><span className="chip amber">failed closed</span> {sweepColumns(s).length ? 'Review the columns named above, then re-run the job.' : 'Open the job to see what was written, then re-run it.'}</>
                   : s.where === 'scan' ? <><span className="chip rose">review</span> Open the scan and check the target system for that request.</>
                     : <><span className="chip slate">contained automatically</span> No action needed. The model saw placeholders only.</>}</div>
               </div>
