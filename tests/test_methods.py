@@ -458,6 +458,23 @@ def test_date_shift_keeps_sub_microsecond_digits() -> None:
         ("$.name.last", "last"),
         ("$.name.family", "last"),
         ("$.customer.first_name", "first"),
+        # review r1 B2: plural, split short and camel forms, and a number run on
+        ("$.first_names", "first"),
+        ("$.firstNames", "first"),
+        ("$.given_names", "first"),
+        ("$.forenames", "first"),
+        ("$.fore_name", "first"),
+        ("$.middle_names", "middle"),
+        ("$.f_name", "first"),
+        ("$.FName", "first"),
+        ("$.custFName", "first"),
+        ("$.l_name", "last"),
+        ("$.custLName", "last"),
+        ("$.surName", "last"),
+        ("$.FIRSTNAME2", "first"),
+        ("$.name.given", "first"),
+        ("$.name.middle", "middle"),
+        ("$.customer.name.family", "last"),
     ],
 )
 def test_a_name_field_s_role_comes_from_its_key(path: str, role: str) -> None:
@@ -477,6 +494,10 @@ def test_a_name_field_s_role_comes_from_its_key(path: str, role: str) -> None:
         "$.nickname",
         "$.mname",  # a middle name, or a mother's name
         "$.first",  # not under a key that names a name: "first" is no name part
+        "$.address.last",
+        "$.name.last_updated",
+        "$.lname_flag",
+        "$.filename",
         "$.last_login",
         "$.names[0]",
         "$",

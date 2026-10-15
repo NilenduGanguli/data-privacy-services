@@ -152,3 +152,71 @@ def test_run_together_name_part_keys_are_names(key: str) -> None:
     # forms (first_name, last_name, given_name) do; otherwise a synthetic record keeps the value
     top = classify_key(key)[0]
     assert top.entity_type == "PERSON_NAME" and top.score >= 0.7
+
+
+#: Every spelling of a key that holds one part of a person's name (``methods.name_field`` gives it
+#: a role): run together, spaced, camel, upper case, plural, the split short forms, a number run on,
+#: a bare part under a key that names a name. Each must be detected on its own key (review r1 B2:
+#: ``given_names``, ``FName``/``LName`` and ``name.first`` had a role but were not detected with
+#: NER off, so a synthesize run copied the real names).
+NAME_PART_PATHS = [
+    *(
+        f"$.{key}"
+        for key in (
+            "first_name", "FIRST_NAME", "firstName", "FirstName", "firstname", "FIRSTNAME",
+            "first_names", "firstNames", "FIRSTNAMES", "given_name", "GivenName", "givenname",
+            "given_names", "givenNames", "GIVENNAMES", "forename", "fore_name", "foreName",
+            "forenames", "FORENAMES", "fname", "FNAME", "f_name", "fName", "FName", "custFName",
+            "middle_name", "middleName", "MIDDLENAME", "middle_names", "middlenames",
+            "last_name", "LAST_NAME", "lastName", "lastname", "LASTNAME", "surname", "Surname",
+            "SURNAME", "sur_name", "surName", "family_name", "familyName", "familyname",
+            "lname", "LNAME", "l_name", "lName", "LName", "custLName", "cust_lname",
+            "nominee_first_name", "nominee_given_name", "nominee_family_name", "NOMINEE_SURNAME",
+            "FIRST_NAME_2", "first_name2", "firstname2", "FNAME1", "lastName2", "surname3",
+        )
+    ),
+    "$['Last Name']",
+    "$.customer.first_name",
+    "$.nominee.fname",
+    "$.name.first",
+    "$.name.given",
+    "$.name.middle",
+    "$.name.last",
+    "$.name.family",
+    "$.customer.name.family",
+    "$.customerName.first",
+    "$.people[1].given_names",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("path", NAME_PART_PATHS)
+def test_every_key_that_holds_a_name_part_is_detected_as_a_name(path: str) -> None:
+    from dps.engine.detect.structural import classify_path
+    from dps.engine.transform.methods import name_field
+
+    assert name_field(path) is not None, path  # a key synthesis fills with one part of a name
+    for top in (classify_key(path)[0], classify_path(path)[0]):  # L1 / the scanner, L2
+        assert top.entity_type == "PERSON_NAME" and top.score >= 0.7, (path, top)
+    if path.count(".") == 1 and "[" not in path:  # an L2 column name, no "$."
+        top = classify_path(path[2:])[0]
+        assert top.entity_type == "PERSON_NAME" and top.score >= 0.7, (path, top)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "$.first",
+        "$.last",
+        "$.given",
+        "$.address.last",
+        "$.filename",
+        "$.file_name",
+        "$.name.last_updated",
+        "$.username.first",
+    ],
+)
+def test_words_near_a_name_part_are_not_names(path: str) -> None:
+    from dps.engine.detect.structural import classify_path
+
+    for found in (classify_key(path), classify_path(path)):
+        assert not [c for c in found if c.entity_type == "PERSON_NAME" and c.score >= 0.7], path

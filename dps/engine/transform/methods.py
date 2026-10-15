@@ -27,30 +27,14 @@ from typing import Any, Literal, Protocol, runtime_checkable
 import phonenumbers
 from cryptography.exceptions import InvalidTag
 
+from dps.engine.detect.structural import key_words, name_part
 from dps.engine.jsonpath import child_path, parse_path
 from dps.engine.policy import METHOD_NAMES
 from dps.engine.transform import crypto, fpe
 from dps.engine.transform.crypto import KeyMaterial
 
-#: The part of a person's name a field holds.
+#: The part of a person's name a field holds (the same parts as the detector's table).
 NameRole = Literal["first", "middle", "last"]
-#: A field key's words run together, lower case → the part of a name it holds.
-_NAME_PART_KEYS: dict[str, NameRole] = {
-    **dict.fromkeys(("firstname", "fname", "givenname", "givennames", "forename", "forenames"),
-                    "first"),
-    **dict.fromkeys(("middlename", "middlenames"), "middle"),  # not "mname": a mother's too
-    **dict.fromkeys(("lastname", "lname", "surname", "familyname"), "last"),
-}  # fmt: skip
-#: A bare key holds a part only under a key that names a name (``name.first``, ``name.family``).
-_BARE_PART_KEYS: dict[str, NameRole] = {
-    "first": "first",
-    "given": "first",
-    "middle": "middle",
-    "last": "last",
-    "family": "last",
-}
-#: The words of a key: ``custLName`` → cust L Name, ``LAST_NAME`` → LAST NAME, ``name2`` → name 2.
-_KEY_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 
 
 @dataclass(frozen=True)
@@ -69,20 +53,13 @@ class NameHint:
     gender: str | None = None
 
 
-def _key_words(key: str) -> tuple[list[str], str]:
-    """A key's words in lower case and its trailing number (``LAST_NAME_2`` → last, name; 2)."""
-    words = [w.lower() for w in _KEY_WORD.findall(key)]
-    number: list[str] = []
-    while words and words[-1].isdigit():
-        number.insert(0, words.pop())
-    return words, "_".join(number)
-
-
 def name_field(path: str) -> NameHint | None:
     """The part of a person's name the field at ``path`` holds, read from its key alone (never
-    its value), with the group of fields that hold the same person's parts: the parent, the
-    key's other words and its number (``FIRST_NAME_2`` and ``LAST_NAME_2`` are a second person).
-    ``None`` for any other key (``name``, ``full_name``, ``nominee_name``, a list item)."""
+    its value: :func:`~dps.engine.detect.structural.name_part`, the table detection reads too, so
+    such a field is always detected), with the group of fields that hold the same person's parts:
+    the parent, the key's other words and its number (``FIRST_NAME_2`` and ``LAST_NAME_2`` are a
+    second person). ``None`` for any other key (``name``, ``full_name``, ``nominee_name``, a list
+    item)."""
     try:
         segments = parse_path(path)
     except ValueError:
@@ -92,16 +69,13 @@ def name_field(path: str) -> NameHint | None:
     parent = "$"
     for segment in segments[:-1]:
         parent = child_path(parent, segment) if isinstance(segment, str) else f"{parent}[{segment}]"
-    words, number = _key_words(segments[-1])
-    for n in (1, 2, 3):  # surname, last name, family name; lname, l name
-        role = _NAME_PART_KEYS.get("".join(words[-n:])) if len(words) >= n else None
-        if role is not None:
-            return NameHint(role=role, group=f"{parent}|{'_'.join(words[:-n])}|{number}")
-    above = segments[-2] if len(segments) >= 2 else None
-    bare = _BARE_PART_KEYS.get(words[0]) if len(words) == 1 and not number else None
-    if bare is not None and isinstance(above, str) and _key_words(above)[0][-1:] == ["name"]:
-        return NameHint(role=bare, group=f"{parent}||")
-    return None
+    above = segments[-2] if len(segments) >= 2 and isinstance(segments[-2], str) else None
+    found = name_part(segments[-1], above)
+    if found is None:
+        return None
+    role, n, _ = found
+    words, number = key_words(segments[-1])
+    return NameHint(role=role, group=f"{parent}|{'_'.join(words[:-n])}|{number}")
 
 
 class SurrogateProvider(Protocol):

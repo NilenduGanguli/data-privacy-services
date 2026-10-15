@@ -213,6 +213,8 @@ _PERSON_ANCHOR = re.compile(r"\|person:([0-9a-f]+)(?=\||$)")
 #: The group of a record's own name fields: ``first_name``/``last_name`` at the top of the record
 #: (:func:`~dps.engine.transform.methods.name_field`), no other word, no number.
 _OWN_GROUP = "$||"
+#: A group's name fields are one name in name order, whatever order they were declared in.
+_NAME_ORDER: dict[NameRole | None, int] = {"first": 0, "middle": 1, "last": 2}
 
 
 def _covers(parts: frozenset[str], name: frozenset[str]) -> bool:
@@ -322,10 +324,12 @@ def _people(seed: bytes, names: Sequence[tuple[str, NameHint | None]]) -> _Peopl
     A name is the first earlier person whose parts cover its own, or whose parts it covers
     (:func:`_covers`); any other name is a new person, keyed by a seeded digest of its
     normalised form. The name fields of one group (``first_name``, ``last_name``) are one name,
-    placed at the first of them; the record's own fields (top-level, no other word: group
-    ``$||``) come first, so they are the record's persona even when another person's name was
-    declared before them (``father_name`` sorts before ``first_name``). A name without a letter
-    stands for nobody; a person's gender is the first a title gave.
+    in name order (first, middle, last: ``nominee_family_name`` sorts before
+    ``nominee_given_name``, yet the nominee is the same person as a ``nominee_name`` holding
+    their full name), placed at the first of them; the record's own fields (top-level, no other
+    word: group ``$||``) come first, so they are the record's persona even when another person's
+    name was declared before them (``father_name`` sorts before ``first_name``). A name without
+    a letter stands for nobody; a person's gender is the first a title gave.
 
     Roles, by person and normalised word: a name field's value is the part its key names (from
     the key alone); the first and the last word of a name of several words (without a comma:
@@ -349,7 +353,11 @@ def _people(seed: bytes, names: Sequence[tuple[str, NameHint | None]]) -> _Peopl
         group = hint.group if hint is not None else None
         if group is not None and group in groups:
             continue  # placed with the group's first field
-        whole = " ".join(member for member, _ in members[group]) if group is not None else name
+        if group is not None:  # first, middle, last: a person's key is their name's, in any layout
+            ordered = sorted(members[group], key=lambda entry: _NAME_ORDER.get(entry[1], 3))
+            whole = " ".join(member for member, _ in ordered)
+        else:
+            whole = name
         canon, parts = normalise(whole), name_parts([whole])
         if not parts:
             continue

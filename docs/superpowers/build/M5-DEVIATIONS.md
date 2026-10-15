@@ -1148,15 +1148,17 @@ name of the other gender about half the time (`Mr. Lakshmi …`; 138 of 300 job 
   persona-drawn in L2 (the per-row sweep treats a chance-equal gender as no copy), but the L1 strict
   sweep then refuses about half the requests (a surrogate equal to the original by chance). Left for
   an owner decision.
-- **Detection.** The structural detector now also takes the run-together and short keys as names:
+- **Detection** (extended by review r1 B2 below). The structural detector now also takes the
+  run-together and short keys as names:
   `firstname`, `lastname`, `givenname`, `familyname`, `forename` (0.9), `middlename` (0.85), `lname`
   (0.8), `fname` (0.75, also a file name; a person's on a bank's records). Before, `{"fname": …,
   "lname": …}` and `FIRSTNAME`/`LASTNAME` columns were not detected at all with NER off, so a
   synthesize run copied the real names. More is detected, nothing less.
 - **Not changed:** records whose layout says nothing about their names (no name-part keys, no gendered
-  titles) get the same surrogates as on `5cef802`; the leakage sweep, `held_by` and `_reveals` are
-  untouched. Schema generation (`schema_gen._generate` → `surrogate(entity, template, …, "row")`) and
-  MOSTLY linked generation declare no record and pass no hints, so a generated spec with `first_name`
+  titles, no single name word after a declared name of several words) get the same surrogates as on
+  `5cef802`; the leakage sweep, `held_by` and `_reveals` are untouched. Schema generation
+  (`schema_gen._generate` → `surrogate(entity, template, …, "row")`) and MOSTLY linked generation
+  declare no record and pass no hints, so a generated spec with `first_name`
   and `last_name` fields still gets a full `First Last` in each — follow-up for `fspec`, whose worktree
   holds uncommitted `schema_gen.py` changes (not touched here): call `name_surrogate` with
   `name_field(f"$.{field.name}")` for `PERSON_NAME` fields.
@@ -1172,6 +1174,47 @@ name of the other gender about half the time (`Mr. Lakshmi …`; 138 of 300 job 
   `tests/connectors/test_synthesize_people.py` (marker `pg_source`: a 300-row synthesize job on the
   lane's source-pg; counts only, all 0 with the fix: e-mail, nominee e-mail, notes, title gender,
   nominee sharing the first name; source-vs-target name parts, e-mails and keys surviving).
+- **Review r1 B1 — a person's key is their name in name order.** A group's fields were joined in
+  declaration order to key its person (`record-person|<canon>`): L1 declares in path order, so
+  `nominee_family_name` sorted before `nominee_given_name` and the nominee was keyed on
+  "Nair Priya", while `nominee_first_name`/`_last_name` or a full `nominee_name` were keyed on
+  "Priya Nair" — the same nominee became a different synthetic person by key spelling or column order
+  (P3; measured: 0/50 seeds, and 0/400 L2 rows against a `JOINT_HOLDER_NAME` in another table). Now
+  the fields are joined first, middle, last (stable): 50/50 and 400/400 in both orders. The record's
+  own group was never affected (its persona is the anchor's).
+- **Review r1 B2 — one table for a name part's role and its detection.** `name_field` gave roles to
+  keys the detector did not take with NER off (`given_names`, `forenames`, `first_names`,
+  `middle_names`, `f_name`/`l_name`, `FName`/`LName`, `custFName`, `surName`, `foreName`,
+  `FIRSTNAME2`, and a bare `first`/`given`/`middle`/`last`/`family` under a key ending in `name`), so a
+  synthesize run kept those real names (L1, verification passing; L2 classified them `keep`). The
+  table now lives in `structural.NAME_PART_KEYS` (+ `BARE_NAME_PART_KEYS`, `key_words`, `name_part`):
+  `methods.name_field` reads its role from it and `classify_key` (so `classify_path`, L1's ensemble,
+  L2 discovery and the scanner) detects `PERSON_NAME` from it at the key's score (0.9; `middlename(s)`
+  0.85; `lname` 0.8; `fname` 0.75; a bare part under a name key 0.85, evidence `path:name part`) —
+  every key that gets a role is detected, by construction. `firstnames` joined the table. The phrase
+  rules are unchanged (they still also match a part word followed by more words, e.g. `first_name_en`,
+  which gets no role). Not detected, as before: `$.first`, `$.last`, `$.address.last`, `file_name`,
+  `$.name.last_updated`, `$.username.first`.
+- **Open owner decisions (review r1 N1, N2):** the P3 cost of titles measured on L2 by the review —
+  two tables under one `CUSTOMER_ID` anchor: untitled customers' first names agree 266/266, titled
+  (`Mr.`/`Mrs.` in the customers table's notes) 58–67/134; last names 400/400. And "first title wins"
+  through surname coverage: `Mrs. Mehta called on behalf of her husband` next to `first_name: Arjun,
+  last_name: Mehta` gives the customer a female persona. Both follow from reading titles as the
+  person's gender; the alternative (keep the persona, rewrite the title) is described above.
+- **Known limits (review r1, not changed):** a key with a word after `name` (`first_name_en`) gets no
+  role (N3, detected as a full name, as on `5cef802`); a prefixed own group (`cust_first_name`) is not
+  the record's own group, so a person-name key sorting before it still owns the record persona (N4,
+  the pre-existing first-declared rule).
+- Tests for r1 (48 new cases, each fails on `e437f48`): `tests/test_structural.py` (every key spelling
+  that gets a role is detected by `classify_key` and `classify_path`, also as an L2 column name;
+  neighbours that are not names stay undetected, a guard that passes on both), `tests/test_methods.py`
+  (the new spellings' roles), `tests/test_surrogates.py` (a nominee declared family-first, given-first
+  or as a full name is one synthetic name, 40 seeds), `tests/test_service.py` (the same nominee under
+  three key spellings and as a full name with one seed and anchor; seven layouts with NER off keep no
+  original and agree with the e-mail), `tests/test_batch.py` (Oracle-style `NOMINEE_FAMILY_NAME`
+  before `NOMINEE_GIVEN_NAME` is the `JOINT_HOLDER_NAME` of another table under the row's anchor),
+  `tests/test_discovery_classify.py` (plural, split and camel name-part columns are `PERSON_NAME` with
+  a synthesize method other than `keep`).
 
 ## Deferred to final stage
 

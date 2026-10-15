@@ -1100,3 +1100,24 @@ def test_a_record_s_own_name_fields_are_its_persona_wherever_they_are_declared()
         assert eng.surrogate("GENDER", "M", "en_IN", "r1") == p.gender[0].upper(), i
         father = eng.surrogate("PERSON_NAME", "Ramesh Nair", "en_IN", "r1")
         assert father.split(" ")[0] != p.first_name, i
+
+
+def test_a_person_s_split_name_is_the_same_person_in_any_field_order() -> None:
+    # review r1 B1: a group's fields are joined in name order (first, middle, last), not in
+    # declaration order, so a nominee is one synthetic person whatever their fields are called:
+    # family/given keys sort family first (L1 declares in path order, L2 in column order)
+    own: list[tuple[str, str]] = [("PERSON_NAME", "Arjun"), ("PERSON_NAME", "Mehta")]
+    family_first = [("PERSON_NAME", "Nair"), ("PERSON_NAME", "Priya")]
+    for i in range(40):
+        full = _split_engine(
+            _collision_seed(i), [*own, ("PERSON_NAME", "Priya Nair")], [GIVEN, FAMILY_NAME, None]
+        )
+        want = full.surrogate("PERSON_NAME", "Priya Nair", "en_IN", "r1")
+        for pairs, hints in (
+            (family_first, [NOMINEE_FAMILY, NOMINEE_GIVEN]),
+            (family_first[::-1], [NOMINEE_GIVEN, NOMINEE_FAMILY]),
+        ):
+            eng = _split_engine(_collision_seed(i), [*own, *pairs], [GIVEN, FAMILY_NAME, *hints])
+            first = eng.name_surrogate("Priya", "en_IN", "r1", NOMINEE_GIVEN)
+            last = eng.name_surrogate("Nair", "en_IN", "r1", NOMINEE_FAMILY)
+            assert f"{first} {last}" == want, i

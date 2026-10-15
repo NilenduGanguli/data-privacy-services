@@ -9,8 +9,8 @@ import pytest
 from dps.config import Settings
 from dps.engine.policy import MethodSpec, load_preset
 from dps.engine.service import PrivacyEngine
-from dps.jobs_models import ColumnClassification, SnapshotOverride
-from dps.layers.connectors.base import ColumnInfo
+from dps.jobs_models import ColumnClassification, ObjectRef, SnapshotOverride
+from dps.layers.connectors.base import ColumnInfo, TableShape
 from dps.layers.connectors.discovery import (
     JOIN_ENTITIES,
     classify_columns,
@@ -364,3 +364,40 @@ def test_classify_columns_passes_the_sampled_values_to_the_length_check() -> Non
     )
     assert out["national_id"].entity_type == "NATIONAL_ID"
     assert out["national_id"].type_note == "length_overflow"
+
+
+def test_name_part_columns_are_names_with_ner_off() -> None:
+    # review r1 B2: a column that holds a part of a name is a PERSON_NAME on its key alone (the
+    # default image has no NER); classified as nothing, a synthesize job kept the real names
+    parts = (
+        "given_names",
+        "forenames",
+        "first_names",
+        "middle_names",
+        "f_name",
+        "l_name",
+        "surName",
+    )
+    shape = TableShape(
+        object=ObjectRef(owner="bank", name="kyc"),
+        columns=[
+            c("customer_id", "int", data_type="bigint", is_key=True, nullable=False),
+            *(c(n, "text", data_type="varchar(80)", length=80) for n in parts),
+        ],
+        key=["customer_id"],
+        key_source="primary_key",
+    )
+    rows = [
+        {"customer_id": 1000 + i, **dict.fromkeys(parts, ("Kavya Devi", "Rohan")[i % 2])}
+        for i in range(20)
+    ]
+    policy = load_preset("synthetic-realistic")
+    cols = by_name(
+        classify_columns(
+            shape, rows, policy=policy, detector=ENGINE.detector(policy, "en_IN"), fpe_enabled=False
+        )
+    )
+    for name in parts:
+        col = cols[name]
+        assert col.entity_type == "PERSON_NAME", name
+        assert col.synthesize_method is not None and col.synthesize_method.method != "keep", name

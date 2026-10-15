@@ -673,3 +673,90 @@ def test_synthetic_rows_name_one_person_in_every_column() -> None:
         originals = {*row["nominee_name"].split(), row["first_name"], row["last_name"]}
         written = {first, last, *out["nominee_name"].split()}
         assert not originals & written
+
+
+def _bank_table(name: str, key: str, texts: tuple[str, ...]) -> TableShape:
+    return TableShape(
+        object=ObjectRef(owner="BANK", name=name),
+        columns=[
+            ColumnInfo(path=f"$.{key}", name=key, data_type="number", kind="int"),
+            *(
+                ColumnInfo(path=f"$.{n}", name=n, data_type="varchar2(60)", kind="text", length=60)
+                for n in texts
+            ),
+        ],
+        key=[key],
+        key_source="primary_key",
+    )
+
+
+def _bank_plans(names: tuple[str, ...]) -> list[ColumnPlan]:
+    return [
+        ColumnPlan(
+            path=f"$.{n}",
+            name=n,
+            entity_type="EMAIL" if n.endswith("EMAIL") else "PERSON_NAME",
+            method=MethodSpec(method="surrogate"),
+            text_column=False,
+            reversible=False,
+            kind="text",
+            length=60,
+        )
+        for n in names
+    ]
+
+
+def test_a_nominee_s_split_columns_are_the_same_person_as_their_full_name_elsewhere() -> None:
+    # review r1 B1: a nominee's family-name column before their given-name column (Oracle style)
+    # is the same synthetic person as their full name in another table under the row's anchor
+    customers = ("LAST_NAME", "FIRST_NAME", "EMAIL", "NOMINEE_FAMILY_NAME", "NOMINEE_GIVEN_NAME")
+    accounts = ("CUSTOMER_ID", "HOLDER_NAME", "JOINT_HOLDER_NAME")
+    rows = [
+        {
+            "CUSTOMER_ID": 50_000_001 + i,
+            "LAST_NAME": FAMILY[i % 8].upper(),
+            "FIRST_NAME": GIVEN[(i * 3) % 8].upper(),
+            "EMAIL": f"{GIVEN[(i * 3) % 8].lower()}.{FAMILY[i % 8].lower()}@example-mail.in",
+            "NOMINEE_FAMILY_NAME": FAMILY[(i + 5) % 8],
+            "NOMINEE_GIVEN_NAME": GIVEN[(i * 3 + 1) % 8],
+        }
+        for i in range(24)
+    ]
+    seed = generate_synthesis_seed()
+
+    def run(shape: TableShape, plans: list[ColumnPlan], table: list[Row]) -> list[Row]:
+        result = BatchTransformer(
+            ENGINE,
+            policy=load_preset("synthetic-realistic"),
+            mode="synthesize",
+            columns=plans,
+            shape=shape,
+            key=None,
+            seed=seed,
+            locale="en_IN",
+            anchor=("CUSTOMER_ID", "CUSTOMER_ID"),
+        ).transform(table)
+        assert result.verification.passed
+        return result.rows
+
+    own = run(_bank_table("CUSTOMERS", "CUSTOMER_ID", customers), _bank_plans(customers), rows)
+    joint = run(
+        _bank_table("ACCOUNTS", "ACCOUNT_ID", accounts),
+        _bank_plans(accounts[1:]),
+        [
+            {
+                "ACCOUNT_ID": 70_000_001 + i,
+                "CUSTOMER_ID": r["CUSTOMER_ID"],
+                "HOLDER_NAME": f"{r['FIRST_NAME'].title()} {r['LAST_NAME'].title()}",
+                "JOINT_HOLDER_NAME": f"{r['NOMINEE_GIVEN_NAME']} {r['NOMINEE_FAMILY_NAME']}",
+            }
+            for i, r in enumerate(rows)
+        ],
+    )
+    for o, a in zip(own, joint, strict=True):
+        nominee = f"{o['NOMINEE_GIVEN_NAME']} {o['NOMINEE_FAMILY_NAME']}"
+        assert a["JOINT_HOLDER_NAME"] == nominee
+        assert o["EMAIL"].startswith(
+            f"{ascii_fold(o['FIRST_NAME'])}.{ascii_fold(o['LAST_NAME'])}".lower()
+        )
+        assert a["HOLDER_NAME"].split(" ")[-1] == o["LAST_NAME"].title()
