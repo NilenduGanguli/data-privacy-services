@@ -5,14 +5,20 @@ starts — registered hosts only, no numeric host encodings (``0x7f000001``, ``2
 ``127.1``), and no address that is link-local or a cloud metadata endpoint, multicast,
 unspecified or reserved, or (outside ``env=local``) loopback — checked on the literal and on
 every address the name resolves to, IPv4-mapped / NAT64 / 6to4 IPv6 unwrapped first.
-:func:`chromium_resolver_rules` makes Chromium resolve only the registered hosts. Private
+:func:`chromium_resolver_rules` makes Chromium resolve only the hosts it names. Private
 (RFC 1918) addresses stay allowed: internal UAT sites are the use case.
+
+Wired on the scanner's paths (the M4 merge into ``fsec``): ``POST /scans`` and the browser-worker
+(again, before any browser starts) run :func:`check_scan_url`; the scan's scope proxy resolves
+every hop's host with :func:`resolve_addresses` and dials only addresses
+:func:`forbidden_ip_reason` lets through; Chromium resolves nothing but the proxy's address.
 
 Nothing here quotes the value it rejects: a host or URL may carry credentials or an internal name.
 """
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 import socket
@@ -175,6 +181,21 @@ def default_resolver(host: str) -> list[str]:
     )
 
 
+async def resolve_addresses(host: str, port: int = 0) -> list[str]:
+    """Every address ``host`` resolves to (TCP), in the resolver's order, duplicates dropped; an
+    IP literal is itself. Runs on the event loop's resolver (never blocks the loop).
+
+    Raises:
+        OSError: the name does not resolve (``socket.gaierror``).
+    """
+    if is_ip(host):
+        return [host]
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
+    )
+    return list(dict.fromkeys(str(info[4][0]) for info in infos))
+
+
 def _embedded_ipv4(ip: IPAddress) -> IPAddress:
     """The IPv4 address an IPv4-mapped, NAT64 or 6to4 IPv6 address carries (else ``ip``)."""
     if isinstance(ip, ipaddress.IPv6Address):
@@ -196,10 +217,12 @@ def forbidden_ip_reason(address: str | IPAddress, *, allow_loopback: bool) -> st
             return "link-local or cloud metadata address"
         if candidate.is_link_local:
             return "link-local or cloud metadata address"
+        if candidate.is_loopback:  # before "reserved": ::1 lies in the reserved ::/8
+            if allow_loopback:
+                continue
+            return "loopback address"
         if candidate.is_multicast or candidate.is_unspecified or candidate.is_reserved:
             return "non-routable address"
-        if candidate.is_loopback and not allow_loopback:
-            return "loopback address"
     return None
 
 

@@ -12,12 +12,13 @@ module level (the crawler and the browser are imported inside :func:`scan_job`).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
-from dps import db, jobs
+from dps import db, jobs, netguard
 from dps.audit import AuditEvent
 from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.service import EngineError
@@ -61,6 +62,7 @@ __all__ = [
     "ScanRuntime",
     "ScanSetupError",
     "ScanSink",
+    "check_start_url",
     "finalize_scan",
     "open_runtime",
     "scan_finalize_job",
@@ -294,9 +296,30 @@ class DbScanSink:
         )
 
 
+async def check_start_url(ctx: HandlerContext, runtime: ScanRuntime) -> None:
+    """S5 (security review): the start URL passes ``netguard.check_scan_url`` again on the
+    browser-worker, before any browser starts — its host may resolve elsewhere now than when the
+    scan was accepted (DNS rebinding), and a scan queued before the check existed is covered too.
+
+    Raises :class:`ScanSetupError` with the guard's code (``host_forbidden``,
+    ``host_not_registered``).
+    """
+    try:
+        await asyncio.to_thread(
+            netguard.check_scan_url,
+            runtime.start_url,
+            registered_hosts=sorted(runtime.scope.registered_hosts),
+            settings=ctx.settings,
+            resolver=netguard.default_resolver,
+        )
+    except netguard.NetGuardError as exc:
+        raise ScanSetupError(exc.code) from None
+
+
 async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
-    """Phase ``scan``: open the runtime, crawl, finalize (``succeeded``). A setup error fails the
-    job with its code and purges the key; a lost lease returns (the new owner finalizes)."""
+    """Phase ``scan``: open the runtime, check the start URL again (S5), crawl, finalize
+    (``succeeded``). A setup error fails the job with its code and purges the key; a lost lease
+    returns (the new owner finalizes)."""
     from dps.layers.scanner.browser import get_browser
     from dps.layers.scanner.crawler import ScanRunner
 
@@ -323,6 +346,21 @@ async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
         # the job ends with it; crawling again would only add a second, contradicting pack
         logger.info("scan_evidence_exists", job_id=job.id)
         await finalize_scan(ctx, job, runtime, store=store, outcome=None, result="succeeded")
+        return
+    try:
+        await check_start_url(ctx, runtime)
+    except ScanSetupError as exc:
+        logger.info("scan_setup_failed", job_id=job.id, error_code=exc.code)
+        await jobs.advance_job(
+            ctx.worker_id,
+            job.id,
+            phase=JobPhase.scan,
+            state=JobState.failed,
+            progress={"outcome": "failed"},
+            error_code=exc.code,
+            error=exc.code,
+            purge_secret=True,
+        )
         return
     async with db.acquire_queue(job.tenant_id) as conn:  # a reaped-and-retried attempt starts clean
         await store.reset_scan(conn, job.id)

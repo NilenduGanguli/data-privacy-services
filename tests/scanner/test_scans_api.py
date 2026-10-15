@@ -603,10 +603,22 @@ def test_overview_and_reports_rows_name_the_scanned_host_its_forms_and_personas(
 
 
 @pytest.mark.db
-def test_hosts_registered_on_the_admin_page_decide_what_a_tenant_may_scan(api_client: Any) -> None:
+def test_hosts_registered_on_the_admin_page_decide_what_a_tenant_may_scan(
+    api_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """M5 Admin › UI-scanner hosts writes ``dps_tenant.registered_hosts`` (normalised); from then on
     ``POST /scans`` accepts exactly those hosts for the tenant, and the local fallback list
-    (``DPS_SCAN_REGISTERED_HOSTS``) no longer applies to it; another tenant keeps the fallback."""
+    (``DPS_SCAN_REGISTERED_HOSTS``) no longer applies to it; another tenant keeps the fallback.
+    The SSRF guard (S5) resolves a registered name: the made-up UAT host resolves, in this test, to
+    an internal (RFC 1918) address."""
+    uat = {"uat.bank.example": ["10.20.30.40"]}
+
+    def resolve(host: str) -> list[str]:
+        if host not in uat:
+            raise OSError("no such host")
+        return uat[host]
+
+    monkeypatch.setattr("dps.netguard.default_resolver", resolve)
     c = _client(api_client)
     assert _create(c).status_code == 202  # no hosts registered: the local fallback list applies
     made = c.post(

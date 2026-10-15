@@ -1,6 +1,9 @@
 """``/api/v1/scans`` (contract §9, scope ``scan``): the UI scanner's routes.
 
-``POST /scans`` validates the spec against the tenant's registered hosts, seals the start URL, the
+``POST /scans`` runs the SSRF guard on the start URL (``netguard.check_scan_url``: numeric host
+encodings, link-local/metadata, multicast, reserved and — outside ``env=local`` — loopback
+addresses, also after DNS; S5, security review), validates the spec against the tenant's
+registered hosts, seals the start URL, the
 key material, the synthesis seed and any inline storage state into ``key_enc`` (and a policy body
 into ``spec_enc``: the stored spec keeps its label, S3 security review F-18) and queues a ``scan``
 job; the key and the seed are in that answer **only** (``Cache-Control: no-store``; an answer that
@@ -12,6 +15,7 @@ scanned site, or returns stored key material (decision D4, the contract §9 clos
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
@@ -22,7 +26,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 
-from dps import db, jobs
+from dps import db, jobs, netguard
 from dps.auth import require_scope
 from dps.config import Settings
 from dps.engine.service import EngineError, PrivacyEngine
@@ -235,10 +239,19 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
         # M5 (contract §5.5): an @name[:vN] reference becomes the tenant's published body now, so
         # the stored spec — which the browser-worker runs and the evidence names — pins the version
         body.policy = await resolve_policy_ref(request, body.policy)
-        try:
-            validated = validate_scan(
-                body, settings=settings, hosts=await _hosts(request, tenant), tenant_id=tenant
+        hosts = await _hosts(request, tenant)
+        try:  # S5: the SSRF guard (DNS included, off the event loop) before any job exists
+            await asyncio.to_thread(
+                netguard.check_scan_url,
+                body.url,
+                registered_hosts=sorted(hosts),
+                settings=settings,
+                resolver=netguard.default_resolver,
             )
+        except netguard.NetGuardError as exc:
+            raise DpsHttpError(422, exc.code, exc.detail) from None
+        try:
+            validated = validate_scan(body, settings=settings, hosts=hosts, tenant_id=tenant)
         except ScanSpecError as exc:
             raise DpsHttpError(exc.status, exc.code, f"the scan was refused: {exc.code}") from None
         try:

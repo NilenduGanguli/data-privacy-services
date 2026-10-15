@@ -19,23 +19,34 @@ proxy:
   URL. The proxy sends one request per connection, with ``Connection: close`` in both
   directions, so a kept-alive connection can never carry a request that was not checked.
 
+**Addresses, on every hop** (S5, security review). A hop the check allows is dialled through
+``dial`` (``ScanGuard``): the host is resolved once and every address it resolves to must pass the
+guard's address rule — no link-local or cloud metadata address, multicast, unspecified or reserved
+address, and no loopback outside ``env=local`` — then the proxy connects to those addresses itself,
+in order, so a second lookup can never answer differently (DNS rebinding). A refusal answers
+``403`` (the guard counts it, reason ``host_forbidden``); a name that does not resolve, or an
+address that does not answer, is ``502``.
+
 Loopback goes through the proxy as well. Playwright adds ``<-loopback>`` to the bypass list, and
 ``PROXY_BYPASS`` adds it again so that an environment with
 ``PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK`` set cannot switch it off. The proxy
-listens on 127.0.0.1 on an ephemeral port and logs nothing. Policy and counting belong to the
-``check`` callback (``ScanGuard``); the proxy only enforces its answer.
+listens on :data:`PROXY_HOST` on an ephemeral port and logs nothing — the one address the scan's
+Chromium resolves (``browser.RESOLVER_RULES``). Policy and counting belong to the ``check`` and
+``dial`` callbacks (``ScanGuard``); the proxy only enforces their answers.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TypedDict
 from urllib.parse import urlsplit
 
 #: the bypass list given to Chromium with the proxy: no host, not even loopback, skips it
 PROXY_BYPASS = "<-loopback>"
+#: the address the proxy listens on (and the only one the scan's Chromium may resolve)
+PROXY_HOST = "127.0.0.1"
 HEAD_LIMIT = 64 * 1024  # request or response head larger than this: refused
 HEAD_TIMEOUT_S = 30.0
 CONNECT_TIMEOUT_S = 15.0
@@ -58,6 +69,9 @@ class ProxySettings(TypedDict):
 
 #: (method, url, request headers by lower-case name) -> allow. A CONNECT passes ``https://host:port/``.
 HopCheck = Callable[[str, str, Mapping[str, str]], bool]
+#: (method, url, host, port) of an allowed hop -> the addresses the proxy may dial, in order, or
+#: ``None`` (refused: 403). Raises ``OSError`` when the host does not resolve (502).
+HopDial = Callable[[str, str, str, int], Awaitable[list[str] | None]]
 
 
 def _status(code: int, text: str) -> bytes:
@@ -118,10 +132,13 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 
 
 class ScopeProxy:
-    """A forward proxy for one scan context. ``check`` decides every hop (``ScanGuard``)."""
+    """A forward proxy for one scan context. ``check`` decides every hop and ``dial`` the
+    addresses an allowed hop may reach (``ScanGuard``; without ``dial`` a hop is dialled by
+    name — unit tests of the proxy alone)."""
 
-    def __init__(self, check: HopCheck) -> None:
+    def __init__(self, check: HopCheck, *, dial: HopDial | None = None) -> None:
         self._check = check
+        self._dial = dial
         self._server: asyncio.Server | None = None
         self._port = 0
         self._writers: set[asyncio.StreamWriter] = set()
@@ -135,10 +152,10 @@ class ScopeProxy:
         """Listen on 127.0.0.1 (idempotent) and return the context's ``proxy=`` option."""
         if self._server is None:
             self._server = await asyncio.start_server(
-                self._accept, host="127.0.0.1", port=0, limit=HEAD_LIMIT
+                self._accept, host=PROXY_HOST, port=0, limit=HEAD_LIMIT
             )
             self._port = int(self._server.sockets[0].getsockname()[1])
-        return ProxySettings(server=f"http://127.0.0.1:{self._port}", bypass=PROXY_BYPASS)
+        return ProxySettings(server=f"http://{PROXY_HOST}:{self._port}", bypass=PROXY_BYPASS)
 
     async def close(self) -> None:
         """Stop listening and drop every open connection (idempotent)."""
@@ -191,13 +208,11 @@ class ScopeProxy:
         if authority is None or not self._check("CONNECT", f"https://{target}/", {}):
             writer.write(_status(403, "Forbidden"))
             return
-        try:
-            up_reader, up_writer = await asyncio.wait_for(
-                asyncio.open_connection(*authority, limit=HEAD_LIMIT), CONNECT_TIMEOUT_S
-            )
-        except (OSError, TimeoutError):
-            writer.write(_status(502, "Bad Gateway"))
+        connected = await self._connect("CONNECT", f"https://{target}/", *authority)
+        if isinstance(connected, int):
+            writer.write(_refusal(connected))
             return
+        up_reader, up_writer = connected
         self._writers.add(up_writer)
         try:
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -238,13 +253,11 @@ class ScopeProxy:
         if not host or not self._check(method, target, names):
             writer.write(_status(403, "Forbidden"))
             return
-        try:
-            up_reader, up_writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, limit=HEAD_LIMIT), CONNECT_TIMEOUT_S
-            )
-        except (OSError, TimeoutError):
-            writer.write(_status(502, "Bad Gateway"))
+        connected = await self._connect(method, target, host.lower(), port)
+        if isinstance(connected, int):
+            writer.write(_refusal(connected))
             return
+        up_reader, up_writer = connected
         self._writers.add(up_writer)
         try:
             path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
@@ -252,6 +265,41 @@ class ScopeProxy:
         finally:
             self._writers.discard(up_writer)
             up_writer.close()
+
+    async def _connect(
+        self, method: str, url: str, host: str, port: int
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | int:
+        """Open the upstream connection of an allowed hop, or the status to answer instead:
+        ``403`` when ``dial`` refuses every address of the host, ``502`` when the host does not
+        resolve or none of its (allowed) addresses answers within ``CONNECT_TIMEOUT_S``."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CONNECT_TIMEOUT_S
+        try:
+            if self._dial is None:
+                addresses: list[str] | None = [host]
+            else:
+                addresses = await asyncio.wait_for(
+                    self._dial(method, url, host, port), CONNECT_TIMEOUT_S
+                )
+        except (OSError, TimeoutError, ValueError):  # unresolvable, slow or not a host: no dial
+            return 502
+        if addresses is None:
+            return 403
+        for address in addresses:
+            left = deadline - loop.time()
+            if left <= 0:
+                break
+            try:
+                return await asyncio.wait_for(
+                    asyncio.open_connection(address, port, limit=HEAD_LIMIT), left
+                )
+            except (OSError, TimeoutError):
+                continue
+        return 502
+
+
+def _refusal(status: int) -> bytes:
+    return _status(403, "Forbidden") if status == 403 else _status(502, "Bad Gateway")
 
 
 async def _exchange(

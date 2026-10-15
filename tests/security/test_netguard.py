@@ -139,3 +139,21 @@ def test_forbidden_addresses(address: str, forbidden: bool) -> None:
     assert (forbidden_ip_reason(address, allow_loopback=False) is not None) is forbidden
     if address == "127.0.0.1":
         assert forbidden_ip_reason(address, allow_loopback=True) is None
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "127.8.9.10", "::1", "::ffff:127.0.0.1"])
+def test_loopback_follows_the_environment_on_both_ip_versions(address: str) -> None:
+    """``::1`` lies in the reserved ``::/8``: the loopback rule is decided first, so ``localhost``
+    (127.0.0.1 and ::1) is a scan target in ``env=local`` and refused elsewhere."""
+    assert forbidden_ip_reason(address, allow_loopback=False) == "loopback address"
+    assert forbidden_ip_reason(address, allow_loopback=True) is None
+
+
+def test_localhost_is_scannable_in_local_only() -> None:
+    resolve = {"localhost": ["127.0.0.1", "::1"]}.__getitem__
+    hosts = ["localhost"]
+    url = "http://localhost:8410/apply"
+    assert check_scan_url(url, registered_hosts=hosts, settings=_settings(), resolver=resolve)
+    with pytest.raises(NetGuardError) as caught:
+        check_scan_url(url, registered_hosts=hosts, settings=_settings(env="dev"), resolver=resolve)
+    assert caught.value.code == "host_forbidden"

@@ -302,6 +302,7 @@ class ScanRunner:
         self.guard = ScanGuard(
             host_allowed=self.rt.scope.network_host_allowed,
             path_verdict=self.rt.scope.request_path_verdict,
+            allow_loopback=self.s.env == "local",  # S5: the address rule of every hop
         )
         self.context = await new_scan_context(
             self.browser,
