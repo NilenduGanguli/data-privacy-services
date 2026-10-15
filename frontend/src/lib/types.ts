@@ -245,8 +245,10 @@ export interface SummaryOut {
   layers: SummaryLayers; posture: Record<string, number>; recent_jobs: JobBrief[];
 }
 export interface SweepDay { day: string; layer: string; passed: number; failed: number }
+/** A failed sweep: a job's partitions or an API call (both failed closed), or a UI scan whose own
+ *  verification failed (`where: 'scan'`, `job_id` the scan; S2 console r2 B1). */
 export interface FailedSweep {
-  where: 'job' | 'api'; day: string; job_id: string | null; partitions: number[]; route: string | null; error_code: string; paths: string[];
+  where: 'job' | 'api' | 'scan'; day: string; job_id: string | null; partitions: number[]; route: string | null; error_code: string; paths: string[];
 }
 export interface ReportsJobsOut { days: number; sweeps: SweepDay[]; totals: Record<string, number>; failed_sweeps: FailedSweep[] }
 /** `EvidenceItem.summary`: only these value-free keys (dps/reports.py::evidence_list). */

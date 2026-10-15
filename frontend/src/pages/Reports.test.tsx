@@ -44,6 +44,37 @@ describe('ReportsView', () => {
     expect(out).toContain('href="/data-sources/jobs/j_01K7F2W8Q4LMF2"');
   });
 
+  it('counts and lists a scan whose own verification failed under All and UI scanner only (S2 console r2 B1)', () => {
+    const base = fx.reportsJobs(NOW, 14);
+    const day = base.sweeps[base.sweeps.length - 1].day;
+    const jobs = {
+      ...base,
+      sweeps: base.sweeps.map((s) => (s.layer === 'ui' && s.day === day ? { ...s, failed: s.failed + 1 } : s)),
+      failed_sweeps: [...base.failed_sweeps, { where: 'scan' as const, day, job_id: 's_01K7SC4NQ8ZP3M', partitions: [], route: null, error_code: 'submission_detected', paths: [] }],
+    };
+    const ui = html(<ReportsView {...props({ jobs, filters: { ...filters, layer: 'ui' } })} />);
+    const uiText = text(ui);
+    // the tile, the chart and the card agree: one failed UI sweep, and it is listed
+    expect(uiText).toMatch(/Verification sweeps [\d,]+ [\d,]+ passed · 1 failed, 1 scan to review/);
+    expect(uiText).not.toContain('all failed closed');
+    expect(uiText).toContain('Failed sweeps 1 in 14 days');
+    expect(uiText).toContain('UI scan s_01K7SC…3M');
+    expect(uiText).toContain('a request that is not a GET');
+    expect(ui).toContain('href="/scanner/scans/s_01K7SC4NQ8ZP3M"');
+    expect(uiText).not.toContain('No sweep failed in this window');
+    const all = text(html(<ReportsView {...props({ jobs })} />));
+    expect(all).toMatch(/Verification sweeps [\d,]+ [\d,]+ passed · 4 failed, 3 failed closed, 1 scan to review/);
+    expect(all).toContain('Failed sweeps 3 in 14 days');
+    expect(all).toContain('UI scan s_01K7SC…3M');
+    const conn = text(html(<ReportsView {...props({ jobs, filters: { ...filters, layer: 'conn' } })} />));
+    expect(conn).not.toContain('UI scan s_01K7SC…3M');
+    expect(conn).toMatch(/passed · 2 failed, all failed closed/);
+    // a window whose UI scans all passed: no failure on the tile, none in the card
+    const clean = text(html(<ReportsView {...props({ filters: { ...filters, layer: 'ui' } })} />));
+    expect(clean).toMatch(/Verification sweeps [\d,]+ [\d,]+ passed · 0 failed/);
+    expect(clean).toContain('Failed sweeps 0 in 14 days');
+  });
+
   it('lists evidence packs and roll-ups with downloads and links', () => {
     const out = html(<ReportsView {...props()} />);
     const t = text(out);

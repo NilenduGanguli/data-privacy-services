@@ -298,7 +298,7 @@ Each page's `artefacts` maps a variant to an artefact id (`GET /artefacts/{id}`)
 |---|---|
 | `original` | the page as loaded, **personal data it renders masked** with boxes drawn before encoding (an unmasked original only with `DPS_SCAN_STORE_UNMASKED_ORIGINALS=true`, local only) |
 | `annotated` | `original` with the numbered field overlays (numbers = `field_no`) |
-| `filled_synthesize` / `filled_obfuscate` | the parallel view: the page filled with the display persona / with tokens of it, numbered overlays, never submitted |
+| `filled_synthesize` / `filled_obfuscate` | the parallel view: the page filled with the display persona / with tokens of it, numbered overlays, never submitted (a personal select stays masked: a fill can only pick one of the page's own options) |
 | `masked_capture` | the obfuscated capture of a page that renders personal data: the DOM text is replaced (tokens for `obfuscate`, persona surrogates for `synthesize`), every remaining copy is boxed, PNG |
 | `capture_json` | `obfuscate` mode only: the reversible map of that capture (`dps.capture.v1`, below) |
 
@@ -308,7 +308,12 @@ original), no image is stored for it (`capture_status: "withheld"`, event `captu
 the reason). Frames: a cross-origin frame (or any frame with `scope.iframes` off) is painted over
 whole (`FRAME`); text in a read same-origin frame is masked where that frame draws it — wherever its
 document is scrolled to, inside its border and padding, nested frames included — and a read frame
-that is transformed or zoomed is painted over whole as well. Not yet masked (known limits): text in
+that is transformed or zoomed is painted over whole as well. Masks are placed where the full-page
+screenshot draws each value whatever the page's scroll position: a root that snaps (`scroll-snap-type`)
+and an RTL or `vertical-rl` document wider than the viewport (whose scroll origin is its right edge)
+are masked like any other page, and a page that scrolls between the measurements and the screenshot
+is withheld. A closed select is masked by what it draws — its selected option's `label` attribute
+when it has one. Not yet masked (known limits): text in
 closed shadow roots, CSS generated content (`::before`/`::after` `content`), canvas-drawn text and an
 input value a script sets after the page was read. The exports (artefact kinds `export_json`, `export_csv`) and the printable evidence
 pack (`evidence_html`) are stored at finalize.

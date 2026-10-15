@@ -19,10 +19,19 @@ Text nodes are read whole up to ``TEXT_READ_CAP`` (a longer node marks the snaps
 which withholds every capture of the page). Captures do not rely on the classification text list
 alone: ``CENSUS_JS`` (``render_census``) lists every string a read frame renders at capture time
 (button text, listbox options and input button labels included), measured by ``census_rects``.
+
+Coordinates: page scripts measure in their own frame's viewport (client rects), and Python adds
+where that viewport is in *document coordinates* — the coordinates of the full-page screenshot,
+whose origin is the top-left corner of the document's scrollable area. For the top frame that is
+:func:`viewport_box` (the browser's own layout-viewport position, not ``scrollX``/``scrollY``,
+which count from the scroll origin: the right edge of an RTL or vertical-rl document wider than
+the viewport — S2 captures-privacy r2 B2 — and which root scroll snapping keeps off 0,0 after a
+``scrollTo(0, 0)`` — r2 B1); for a read child frame it is the frame's content box.
 """
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -184,9 +193,8 @@ EXTRACT_JS = (
   window.__dpsSnap = null;
   const fields = [], forms = new Map(), texts = [], links = [], clickables = [];
   let truncated = false, clickOrdinal = 0, budget = TEXT_BUDGET;
-  // document coordinates in the main frame (frame 0); a child frame's rects stay in its viewport,
-  // which its frame draws at its content box (``window.parent`` is the page's to replace)
-  const sx = frameIndex === 0 ? window.scrollX : 0, sy = frameIndex === 0 ? window.scrollY : 0;
+  // rects are in this frame's viewport: the caller adds where that viewport is in the document
+  // (``viewport_box`` for the top frame, the content box for a child frame)
   const onField = (el, inShadow) => {
     const tag = el.tagName.toLowerCase();
     const type = tag === 'input' ? (el.getAttribute('type') || 'text').toLowerCase()
@@ -213,10 +221,11 @@ EXTRACT_JS = (
       maxlength: el.maxLength > 0 ? el.maxLength : null, minlength: el.minLength > 0 ? el.minLength : null,
       required: el.required === true, readonly: el.readOnly === true, disabled: el.disabled === true,
       visible: type !== 'hidden' && visible(el), inputmode: el.getAttribute('inputmode'),
-      options: tag === 'select' ? Array.from(el.options).slice(0, 300).map((o) => ({ value: o.value, text: clean(o.text), disabled: o.disabled, selected: o.selected })) : [],
+      // an option's label is what a select draws for it (its label attribute, else its text)
+      options: tag === 'select' ? Array.from(el.options).slice(0, 300).map((o) => ({ value: o.value, text: clean(o.text), label: clean(o.label), disabled: o.disabled, selected: o.selected })) : [],
       value: secret || tag === 'select' ? null : (el.value || null),
       checked: type === 'checkbox' || type === 'radio' ? el.checked : null,
-      rect: { x: r.left + sx, y: r.top + sy, w: r.width, h: r.height }, selector: describe(el, inShadow) });
+      rect: { x: r.left, y: r.top, w: r.width, h: r.height }, selector: describe(el, inShadow) });
   };
   const onText = (node) => {
     if (!textOk(node)) return;
@@ -353,22 +362,20 @@ CLICK_TARGET_JS = r"""
 }
 """
 
-#: Client rects of ``[i, start, end]`` text spans (``[spans, top]``): document coordinates in the top
-#: frame, viewport coordinates in a child frame (its frame draws that viewport at its content box;
-#: adding the child document's own scroll put masks of a scrolled frame below the text, S2
-#: captures-privacy r1 B1). ``top`` comes from the caller (Playwright's frame tree), not the page.
+#: Client rects of ``[i, start, end]`` text spans, in the frame's own viewport. The caller adds
+#: where that viewport is in the document (the top frame: ``viewport_box``; a child frame: its
+#: content box, where its frame draws that viewport — adding the child document's own scroll put
+#: masks of a scrolled frame below the text, S2 captures-privacy r1 B1; adding the top page's
+#: ``scrollX``/``scrollY`` put them off by the scroll origin or a snapped scroll, r2 B1/B2).
 TEXT_RECTS_JS = r"""
-([spans, top]) => {
-  const sx = top ? window.scrollX : 0, sy = top ? window.scrollY : 0;
-  return spans.map(([i, start, end]) => {
-    const node = (window.__dpsTextNodes || [])[i];
-    if (!node) return [];
-    const range = document.createRange();
-    try { range.setStart(node, start); range.setEnd(node, end); } catch (e) { return []; }
-    return Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
-      .map((r) => ({ x: r.left + sx, y: r.top + sy, w: r.width, h: r.height }));
-  });
-}
+(spans) => spans.map(([i, start, end]) => {
+  const node = (window.__dpsTextNodes || [])[i];
+  if (!node) return [];
+  const range = document.createRange();
+  try { range.setStart(node, start); range.setEnd(node, end); } catch (e) { return []; }
+  return Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
+    .map((r) => ({ x: r.left, y: r.top, w: r.width, h: r.height }));
+})
 """
 
 #: Rewrite extracted text nodes whole: a node is replaced only while it still holds exactly the text
@@ -391,8 +398,9 @@ REPLACE_TEXT_JS = r"""
 #: with no box of its own whose text has client rects) with no minimum length and no ``button``
 #: exclusion (only ``script``/``style``/``noscript``/``template``/``title`` and a ``textarea``'s
 #: source text, whose shown value is a field, are left out), every visible ``<option>`` (its text
-#: and its ``label``; a listbox shows its options, a closed select's are not rendered and its shown
-#: option is swept as a field), and the strings the browser draws from attributes of a visible
+#: and its ``label``; a listbox shows its options, a closed select's are not rendered and the label
+#: its selected option draws is swept as the field's shown value, ``OptionFacts.drawn``), and the
+#: strings the browser draws from attributes of a visible
 #: element (M4 verify r1 B5): the label of a button-type ``<input>``, an ``<optgroup>`` label, the
 #: ``alt`` of an ``<img>`` or ``<input type=image>`` (shown when the image is broken), and the
 #: placeholder of an empty ``<input>`` or ``<textarea>``.
@@ -472,14 +480,13 @@ CENSUS_JS = (
     .replace("__TEXT_BUDGET__", str(TEXT_READ_BUDGET))
 )
 
-#: Client rects of ``[k, start, end]`` census spans of the last ``CENSUS_JS`` call (``[spans, top]``;
-#: a range for a text node, UTF-16 offsets; the whole element box for an element): document
-#: coordinates in the top frame, viewport coordinates in a child frame (as ``TEXT_RECTS_JS``).
+#: Client rects of ``[k, start, end]`` census spans of the last ``CENSUS_JS`` call (a range for a text
+#: node, UTF-16 offsets; the whole element box for an element), in the frame's own viewport (the
+#: caller adds its offset, as for ``TEXT_RECTS_JS``).
 CENSUS_RECTS_JS = r"""
-([spans, top]) => spans.map(([k, start, end]) => {
+(spans) => spans.map(([k, start, end]) => {
   const t = (window.__dpsCensus || [])[k];
   if (!t) return [];
-  const sx = top ? window.scrollX : 0, sy = top ? window.scrollY : 0;
   let rects;
   if (t.nodeType === Node.TEXT_NODE) {
     const range = document.createRange();
@@ -490,7 +497,7 @@ CENSUS_RECTS_JS = r"""
     rects = [t.getBoundingClientRect()];
   }
   return rects.filter((r) => r.width > 0 && r.height > 0)
-    .map((r) => ({ x: r.left + sx, y: r.top + sy, w: r.width, h: r.height }));
+    .map((r) => ({ x: r.left, y: r.top, w: r.width, h: r.height }));
 })
 """
 
@@ -527,6 +534,9 @@ VALIDATION_JS = r"""
 """
 
 SUBMIT_ATTEMPTS_JS = "() => (window.__dpsGuard ? window.__dpsGuard.submitAttempts : 0)"
+#: Scrolls the top page to its scroll origin. Where it lands is not assumed: root scroll snapping
+#: can keep it elsewhere, and in an RTL or vertical-rl document the origin is the right edge of
+#: the overflow, not the screenshot's left edge — every box is placed with ``viewport_box``.
 SCROLL_JS = (
     "() => { window.scrollTo(0, 0); "
     "return [window.scrollX, window.scrollY, document.documentElement.scrollHeight]; }"
@@ -579,9 +589,45 @@ _SIZE_TOLERANCE = 1.0
 _NO_OFFSET = Rect(x=0, y=0, w=0, h=0)
 
 
+async def viewport_box(page: Page) -> Rect | None:
+    """The top page's layout viewport in document coordinates — those of the full-page screenshot,
+    whose origin is the top-left corner of the document's scrollable area — as the browser itself
+    reports it (CDP ``Page.getLayoutMetrics``, ``cssLayoutViewport``): ``x``/``y`` is where the
+    viewport's top-left corner is, ``w``/``h`` its size. A client rect of the top frame (and a
+    Playwright box, which is one) plus ``x``/``y`` is where the screenshot draws it.
+
+    ``window.scrollX``/``scrollY`` cannot say this: they count from the scroll origin, which is the
+    right edge of an RTL or vertical-rl document wider than the viewport (S2 captures-privacy r2
+    B2), and root scroll snapping can hold the page off 0,0 after ``scrollTo(0, 0)`` (r2 B1).
+    ``None`` when it cannot be read (the page is gone): the caller withholds."""
+    try:
+        session = await page.context.new_cdp_session(page)
+    except PlaywrightError:
+        return None
+    try:
+        metrics: dict[str, Any] = await session.send("Page.getLayoutMetrics")
+    except PlaywrightError:
+        return None
+    finally:
+        with contextlib.suppress(PlaywrightError):
+            await session.detach()
+    viewport = metrics.get("cssLayoutViewport")
+    if not isinstance(viewport, dict):
+        return None
+    try:
+        return Rect(
+            x=float(viewport["pageX"]),
+            y=float(viewport["pageY"]),
+            w=float(viewport["clientWidth"]),
+            h=float(viewport["clientHeight"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class FrameGeometry:
-    """Where a child frame is on the top page (document coordinates, at the given scroll).
+    """Where a child frame is on the top page (document coordinates).
 
     ``border``: its element's border box as the browser draws it (transforms included) — what a
     capture paints over when the frame is not read. ``content``: the box its document's viewport
@@ -597,7 +643,7 @@ class FrameGeometry:
     flat: bool
 
 
-async def _geometry(frame: Frame, scroll: tuple[float, float]) -> FrameGeometry:
+async def _geometry(frame: Frame, origin: tuple[float, float]) -> FrameGeometry:
     """``frame_geometry``; raises ``PlaywrightError`` when the frame or its element is gone."""
     element = await frame.frame_element()
     box = await element.bounding_box()  # relative to the main viewport, transforms included
@@ -605,7 +651,7 @@ async def _geometry(frame: Frame, scroll: tuple[float, float]) -> FrameGeometry:
         return FrameGeometry(border=_NO_OFFSET, content=_NO_OFFSET, flat=True)
     raw: dict[str, Any] = await element.evaluate(FRAME_BOX_JS)
     inner = await frame.evaluate(VIEWPORT_JS)
-    border = Rect(x=box["x"] + scroll[0], y=box["y"] + scroll[1], w=box["width"], h=box["height"])
+    border = Rect(x=box["x"] + origin[0], y=box["y"] + origin[1], w=box["width"], h=box["height"])
     content = Rect(
         x=border.x + float(raw["left"]),
         y=border.y + float(raw["top"]),
@@ -622,11 +668,12 @@ async def _geometry(frame: Frame, scroll: tuple[float, float]) -> FrameGeometry:
     return FrameGeometry(border=border, content=content, flat=flat)
 
 
-async def frame_geometry(frame: Frame, scroll: tuple[float, float]) -> FrameGeometry | None:
-    """A child frame's :class:`FrameGeometry` now (``scroll``: the top page's scroll, added to make
-    document coordinates); ``None`` when it cannot be determined (the frame or its element is gone)."""
+async def frame_geometry(frame: Frame, origin: tuple[float, float]) -> FrameGeometry | None:
+    """A child frame's :class:`FrameGeometry` now (``origin``: where the top page's viewport is in
+    document coordinates, ``viewport_box``, added to Playwright's viewport boxes); ``None`` when it
+    cannot be determined (the frame or its element is gone)."""
     try:
-        return await _geometry(frame, scroll)
+        return await _geometry(frame, origin)
     except PlaywrightError:
         return None
 
@@ -729,8 +776,9 @@ async def census_rects(
 ) -> list[list[Rect]]:
     """Client rects (document coordinates of the top page) of ``(item, start, end)`` spans over
     ``items`` (positions in that list; code-point offsets into the item's text, ignored for a
-    ``box`` item, which is measured whole), in the order given. ``offsets``: each read frame's box
-    now. A span that cannot be measured gets ``[]``. One evaluation per frame."""
+    ``box`` item, which is measured whole), in the order given. ``offsets``: where each read
+    frame's viewport is in the document now (the top frame's ``viewport_box``, a child frame's
+    content box). A span that cannot be measured gets ``[]``. One evaluation per frame."""
     out: list[list[Rect]] = [[] for _ in spans]
     per_frame: dict[int, list[tuple[int, list[int]]]] = {}
     for n, (pos, start, end) in enumerate(spans):
@@ -743,8 +791,7 @@ async def census_rects(
         if frame is None:
             continue
         try:
-            top = frame.parent_frame is None
-            raw = await frame.evaluate(CENSUS_RECTS_JS, [[js for _, js in todo], top])
+            raw = await frame.evaluate(CENSUS_RECTS_JS, [js for _, js in todo])
         except PlaywrightError:
             continue
         off = offsets.get(frame_index, _NO_OFFSET)
@@ -784,16 +831,18 @@ async def frame_map(page: Page, *, iframes: bool) -> dict[int, Frame]:
     return out
 
 
-async def _frame_offset(frame: Frame, scroll: tuple[float, float]) -> Rect:
-    """Where a read frame's viewport starts on the top page: its content box (zero for the main
-    frame and a frame not rendered). Raises ``PlaywrightError`` when the frame is gone."""
+async def _frame_offset(frame: Frame, origin: Rect) -> Rect:
+    """Where a read frame's viewport is in the document: the top page's viewport (``origin``,
+    ``viewport_box``) for the main frame, a child frame's content box (zero-size when it is not
+    rendered). Raises ``PlaywrightError`` when the frame is gone."""
     if frame.parent_frame is None:
-        return _NO_OFFSET
-    return (await _geometry(frame, scroll)).content
+        return origin
+    return (await _geometry(frame, (origin.x, origin.y))).content
 
 
-async def _unread_box(frame: Frame, scroll: tuple[float, float]) -> Rect | None:
-    """An unread frame's box in document coordinates (zero-size: not rendered; ``None``: unknown)."""
+async def _unread_box(frame: Frame, origin: Rect) -> Rect | None:
+    """An unread frame's box in document coordinates (``origin``: the top page's viewport;
+    zero-size: not rendered; ``None``: unknown)."""
     try:
         element = await frame.frame_element()
         box = await element.bounding_box()
@@ -801,7 +850,7 @@ async def _unread_box(frame: Frame, scroll: tuple[float, float]) -> Rect | None:
         return None
     if box is None:  # not rendered (display:none, detached)
         return _NO_OFFSET
-    return Rect(x=box["x"] + scroll[0], y=box["y"] + scroll[1], w=box["width"], h=box["height"])
+    return Rect(x=box["x"] + origin.x, y=box["y"] + origin.y, w=box["width"], h=box["height"])
 
 
 async def extract_page(
@@ -813,11 +862,18 @@ async def extract_page(
     is recorded in ``frames_failed`` (fail closed: no masked capture of the page) and listed with
     ``read=False`` and its box while it is still on the page, like every rendered child frame that
     is not read at all (cross-origin, or any child frame when ``iframes`` is off), whose box a
-    capture must black out. The main frame's errors propagate.
+    capture must black out. The main frame's errors propagate (a top viewport that cannot be
+    measured raises ``PlaywrightError``, as the main frame's own script would).
+
+    Field rects and frame boxes are in document coordinates (the full-page screenshot's): each
+    frame's viewport rects plus where that viewport is (``viewport_box``, a content box).
     """
     frames = await frame_map(page, iframes=iframes)
     token = secrets.token_hex(12)
-    sx, sy, _ = await page.evaluate(SCROLL_JS)
+    await page.evaluate(SCROLL_JS)
+    origin = await viewport_box(page)
+    if origin is None:
+        raise PlaywrightError("the top page's viewport could not be measured")
     fields: list[FieldFacts] = []
     forms: list[FormFacts] = []
     texts: list[TextFacts] = []
@@ -837,7 +893,7 @@ async def extract_page(
             "token": token,
         }
         try:
-            offset = await _frame_offset(frame, (sx, sy))
+            offset = await _frame_offset(frame, origin)
             raw: dict[str, Any] = await frame.evaluate(EXTRACT_JS, args)
         except PlaywrightError:
             if index == 0:
@@ -856,7 +912,7 @@ async def extract_page(
         if index == 0:
             title = raw["title"]
         for f in raw["fields"]:
-            if index and f.get("rect"):
+            if f.get("rect"):  # the frame's viewport -> the document
                 f["rect"] = {
                     **f["rect"],
                     "x": f["rect"]["x"] + offset.x,
@@ -877,7 +933,7 @@ async def extract_page(
         next_index += 1
     main = _origin(page.main_frame.url)
     for index, frame in unread:
-        box = await _unread_box(frame, (sx, sy))
+        box = await _unread_box(frame, origin)
         if box is None and frame.is_detached():
             continue  # gone from the page: nothing of it is rendered
         frame_facts.append(
@@ -932,7 +988,9 @@ async def text_rects(
 ) -> list[list[Rect]]:
     """Client rects (document coordinates of the top page) for ``(frame_index, i, start, end)``
     spans, in the order given; ``start``/``end`` are code-point offsets into the node text the
-    detector saw. A span whose node or frame is gone gets ``[]``. One evaluation per frame."""
+    detector saw. Each frame's rects are placed with its ``FrameFacts.offset`` in ``snapshot``
+    (where its viewport is in the document: the top frame's ``viewport_box``, a child frame's
+    content box). A span whose node or frame is gone gets ``[]``. One evaluation per frame."""
     by_key = {(t.frame_index, t.i): t.text for t in snapshot.texts}
     offsets = {f.frame_index: f.offset for f in snapshot.frames if f.read and f.offset}
     out: list[list[Rect]] = [[] for _ in spans]
@@ -947,8 +1005,7 @@ async def text_rects(
         if frame is None:
             continue
         try:
-            top = frame.parent_frame is None
-            raw = await frame.evaluate(TEXT_RECTS_JS, [[js for _, js in items], top])
+            raw = await frame.evaluate(TEXT_RECTS_JS, [js for _, js in items])
         except PlaywrightError:
             continue
         off = offsets.get(frame_index, _NO_OFFSET)

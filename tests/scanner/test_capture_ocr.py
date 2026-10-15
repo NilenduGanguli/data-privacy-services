@@ -75,19 +75,24 @@ def _tesseract() -> str:
     return cmd
 
 
-def _ocr(cmd: str, png: bytes) -> str:
+def _ocr(cmd: str, png: bytes, *, psm: tuple[str, ...] = ("11",)) -> str:
+    """The image upscaled 2x and read once per page segmentation mode in ``psm`` (sparse text by
+    default; ``("11", "3")`` also reads text inside a bordered box such as an input), normalised."""
     with Image.open(io.BytesIO(png)) as im:
         big = im.convert("RGB").resize((im.width * 2, im.height * 2), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
     big.save(buf, format="PNG")
-    out = subprocess.run(
-        [cmd, "stdin", "stdout", "--psm", "11"],
-        input=buf.getvalue(),
-        capture_output=True,
-        timeout=180,
-        check=True,
-    )
-    return normalise(out.stdout.decode("utf-8", "replace"))
+    reads = []
+    for mode in psm:
+        out = subprocess.run(
+            [cmd, "stdin", "stdout", "--psm", mode],
+            input=buf.getvalue(),
+            capture_output=True,
+            timeout=180,
+            check=True,
+        )
+        reads.append(normalise(out.stdout.decode("utf-8", "replace")))
+    return " ".join(reads)
 
 
 def _pieces(value: str, *, strict: bool) -> set[str]:

@@ -369,10 +369,12 @@ def _named(names: set[str], phrases: frozenset[str]) -> bool:
 
 
 def shown_text(facts: FieldFacts) -> str:
-    """What a field shows: an input's or a textarea's value, a select's selected option text."""
+    """What a field shows: an input's or a textarea's value; for a select, what it draws for its
+    selected option — the option's label attribute when it has one, else its text
+    (``OptionFacts.drawn``; S2 captures-privacy r2 B3)."""
     if facts.tag == "select":
         chosen = [o for o in facts.options if o.selected and o.value.strip()]
-        return chosen[0].text if chosen else ""
+        return chosen[0].drawn if chosen else ""
     return facts.value or ""
 
 

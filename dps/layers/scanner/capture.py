@@ -29,8 +29,15 @@ Rules:
 * Text the read frames render that the extraction did not read (added or changed later) is
   classified with the caller's detector and its hits boxed; without a detector such text withholds.
 * Boxes are measured on the live page right before the screenshot and again right after it
-  (child-frame offsets included, CSS animations and transitions off); if anything moved while the
-  screenshot was taken the capture is withheld rather than masked in the wrong place.
+  (child-frame offsets included, CSS animations, transitions and scroll snapping off); if anything
+  moved while the screenshot was taken the capture is withheld rather than masked in the wrong
+  place. Every box is placed in the screenshot's own coordinates: a box measured in the top
+  page's viewport (a client rect, a Playwright box) is moved by where the browser reports that
+  viewport to be (``dom.viewport_box``), never by ``scrollX``/``scrollY`` — root scroll snapping
+  can keep the page off 0,0 after ``scrollTo(0, 0)`` (S2 captures-privacy r2 B1), and an RTL or
+  vertical-rl document wider than the viewport scrolls from its right edge while the screenshot
+  starts at its left (r2 B2). The page must be where it was measured when it is shot (else the
+  capture is withheld: a fixed or sticky box would be drawn elsewhere).
 * A read child frame draws its document's viewport at its content box (inside its border and
   padding), wherever that document is scrolled to: rects inside it are measured in its viewport,
   mapped through the content box and cut to what the frame (and every frame around it) shows. A
@@ -87,6 +94,7 @@ from dps.layers.scanner.dom import (
     render_census,
     stamped,
     text_rects,
+    viewport_box,
 )
 from dps.layers.scanner.guard import ScanGuard
 from dps.layers.scanner.models import (
@@ -112,12 +120,19 @@ LOCATE_TIMEOUT_MS = 2000
 SETTLE_BEFORE_SHOT_MS = 50
 #: Boxes measured before and after the screenshot may differ by this much (sub-pixel rounding).
 _MOVE_TOLERANCE = 0.5
+#: Injected into every read frame before anything is measured: no animation or transition, no
+#: caret, no smooth scrolling, and no scroll snapping — a root that snaps keeps the page at its
+#: first snap area after ``scrollTo(0, 0)`` (S2 captures-privacy r2 B1; masks are placed with the
+#: page's real position either way, ``dom.viewport_box``).
 _NO_MOTION_CSS = (
     "*, *::before, *::after { animation: none !important; transition: none !important; "
-    "caret-color: transparent !important; scroll-behavior: auto !important; }"
+    "caret-color: transparent !important; scroll-behavior: auto !important; "
+    "scroll-snap-type: none !important; }"
 )
 _NO_MOTION_JS = (
-    "(css) => { const s = document.createElement('style'); s.setAttribute('data-dps-capture', '');"
+    "(css) => { if (Array.from(document.querySelectorAll('style[data-dps-capture]'))"
+    ".some((x) => x.textContent === css)) return true;"
+    " const s = document.createElement('style'); s.setAttribute('data-dps-capture', '');"
     " s.textContent = css; (document.head || document.documentElement).appendChild(s); return true; }"
 )
 _ZERO = Rect(x=0, y=0, w=0, h=0)
@@ -217,8 +232,9 @@ def draw_overlays(png: bytes, boxes: list[OverlayBox], *, variant: str) -> bytes
 
 
 # --- measuring the live page ------------------------------------------------------------------
-async def _element_box(frame: Frame | None, key: str) -> Rect | None:
-    """A field element's box in document coordinates (the page is scrolled to 0,0)."""
+async def _element_box(frame: Frame | None, key: str, origin: Rect) -> Rect | None:
+    """A field element's box in document coordinates: Playwright's box (the top page's viewport,
+    through every frame) moved by ``origin``, where that viewport is (``dom.viewport_box``)."""
     if frame is None:
         return None
     try:
@@ -229,11 +245,12 @@ async def _element_box(frame: Frame | None, key: str) -> Rect | None:
         return None
     if box is None:
         return None
-    return Rect(x=box["x"], y=box["y"], w=box["width"], h=box["height"])
+    return Rect(x=box["x"] + origin.x, y=box["y"] + origin.y, w=box["width"], h=box["height"])
 
 
-async def _frame_box(frame: Frame) -> Rect | None:
-    """A child frame's box now (zero-size: not rendered; ``None``: cannot be determined)."""
+async def _frame_box(frame: Frame, origin: Rect) -> Rect | None:
+    """A child frame's box now, in document coordinates (``origin`` as for ``_element_box``;
+    zero-size: not rendered; ``None``: cannot be determined)."""
     try:
         element = await frame.frame_element()
         box = await element.bounding_box()
@@ -241,7 +258,7 @@ async def _frame_box(frame: Frame) -> Rect | None:
         return None
     if box is None:
         return _ZERO
-    return Rect(x=box["x"], y=box["y"], w=box["width"], h=box["height"])
+    return Rect(x=box["x"] + origin.x, y=box["y"] + origin.y, w=box["width"], h=box["height"])
 
 
 async def _read_frames(
@@ -292,8 +309,9 @@ def _shown_part(rects: Sequence[Rect], clip: Rect | None) -> list[Rect]:
 
 @dataclass(frozen=True)
 class _LiveFrames:
-    """The page as a capture measures it now. ``snapshot``: the read frames' offsets (content box
-    origins) measured now; ``unread``: the boxes of every live child frame that was not read
+    """The page as a capture measures it now. ``snapshot``: the read frames' offsets measured now
+    (the top page's viewport, child frames' content boxes); ``unread``: the boxes of every live
+    child frame that was not read
     (always painted over); ``opaque``: the boxes of the read frames whose pixels are not the page's
     (``FrameGeometry.flat``), painted over whenever values are masked; ``whole``: the read frames
     inside such a box, whose text and fields are not masked one by one; ``shows``: the box each
@@ -308,11 +326,11 @@ class _LiveFrames:
 
 
 async def _fresh_frames(
-    page: Page, frames: Mapping[int, Frame], snapshot: PageSnapshot
+    page: Page, frames: Mapping[int, Frame], snapshot: PageSnapshot, origin: Rect
 ) -> _LiveFrames | None:
-    """The live frames of ``snapshot`` (by identity; measured now). ``None``: withhold (a frame
-    failed while it was read, a read frame changed or cannot be located, an unread frame cannot be
-    located)."""
+    """The live frames of ``snapshot`` (by identity; measured now, ``origin``: where the top page's
+    viewport is, ``dom.viewport_box``). ``None``: withhold (a frame failed while it was read, a
+    read frame changed or cannot be located, an unread frame cannot be located)."""
     ext = await _read_frames(page, frames, snapshot)
     if ext is None:
         return None
@@ -322,7 +340,7 @@ async def _fresh_frames(
     for index, frame in ext.frames.items():
         if index == 0:
             continue
-        measured = await frame_geometry(frame, (0.0, 0.0))  # the page is at 0,0 (``SCROLL_JS``)
+        measured = await frame_geometry(frame, (origin.x, origin.y))
         if measured is None:
             return None
         geometry[index] = measured
@@ -335,7 +353,7 @@ async def _fresh_frames(
         if facts is None:
             return None
         if index == 0:
-            fresh.append(facts.model_copy(update={"offset": _ZERO}))
+            fresh.append(facts.model_copy(update={"offset": origin}))
             continue
         geo = geometry[index]
         fresh.append(facts.model_copy(update={"offset": geo.content}))
@@ -358,7 +376,7 @@ async def _fresh_frames(
     for frame in page.frames:
         if frame is page.main_frame or any(frame is r for r in read):
             continue
-        box = await _frame_box(frame)
+        box = await _frame_box(frame, origin)
         if box is None:
             if frame.is_detached():
                 continue
@@ -389,9 +407,10 @@ def _flat(text: str) -> tuple[str, list[int]]:
 
 
 def _shown(f: FieldFacts) -> list[str]:
-    """What a field shows: its value, or a select's selected option texts."""
+    """What a field shows: its value, or what a select draws for its selected options (each one's
+    label attribute, else its text: ``OptionFacts.drawn``; S2 captures-privacy r2 B3)."""
     if f.tag == "select":
-        return [o.text for o in f.options if o.selected and o.text]
+        return [o.drawn for o in f.options if o.selected and o.drawn]
     return [f.value] if f.value else []
 
 
@@ -547,18 +566,30 @@ class _MaskPlan:
     unmasked: bool = False
 
 
-Measure = Callable[[], Awaitable[list[MaskBox] | None]]
+@dataclass(frozen=True)
+class _Measured:
+    """The masks of one measurement, and where the top page's viewport was while they were
+    measured (document coordinates, ``dom.viewport_box``)."""
+
+    masks: list[MaskBox]
+    origin: Rect
+
+
+Measure = Callable[[], Awaitable[_Measured | None]]
 
 
 def _measurer(
     page: Page, frames: Mapping[int, Frame], snapshot: PageSnapshot, plan: _MaskPlan
 ) -> Measure:
-    """Measure the masks of ``plan`` on the live page; ``None`` when one of them (or a frame)
-    cannot be located, or text appeared that cannot be checked."""
+    """Measure the masks of ``plan`` on the live page; ``None`` when one of them (or a frame, or the
+    page's viewport) cannot be located, or text appeared that cannot be checked."""
 
-    async def measure() -> list[MaskBox] | None:
-        await page.evaluate(SCROLL_JS)
-        state = await _fresh_frames(page, frames, snapshot)
+    async def measure() -> _Measured | None:
+        await page.evaluate(SCROLL_JS)  # where it lands is read, not assumed (``viewport_box``)
+        origin = await viewport_box(page)
+        if origin is None:
+            return None
+        state = await _fresh_frames(page, frames, snapshot, origin)
         if state is None:
             return None
         live, ext = state.snapshot, state.ext
@@ -618,12 +649,12 @@ def _measurer(
                 shown = _shown_part(found, state.shows.get(items[c[0]].frame_index))
                 masks += [MaskBox(rect=r, label=c[3]) for r in shown]
         for f, entity in fields:
-            box = await _element_box(ext.frames.get(f.frame_index), f.key)
+            box = await _element_box(ext.frames.get(f.frame_index), f.key, origin)
             if box is None:
                 return None
             shown = _shown_part([box], state.shows.get(f.frame_index))
             masks += [MaskBox(rect=r, label=entity) for r in shown]
-        return masks
+        return _Measured(masks=masks, origin=origin)
 
     return measure
 
@@ -651,6 +682,11 @@ def _classify_census(
     return out
 
 
+def _same_place(a: Rect, b: Rect) -> bool:
+    """Whether the top page's viewport is at the same place in ``a`` and ``b``."""
+    return abs(a.x - b.x) <= _MOVE_TOLERANCE and abs(a.y - b.y) <= _MOVE_TOLERANCE
+
+
 def _same(a: list[MaskBox], b: list[MaskBox]) -> bool:
     if len(a) != len(b):
         return False
@@ -673,38 +709,57 @@ async def _stop_motion(frames: Mapping[int, Frame]) -> None:
             continue
 
 
-async def _full_page_png(page: Page, max_height: int) -> bytes:
+async def _full_page_png(page: Page, max_height: int) -> tuple[bytes, Rect] | None:
+    """The full-page PNG and where the top page's viewport was while it was taken (the same just
+    before and just after it; ``None`` otherwise, or when it cannot be read)."""
     await page.evaluate(SCROLL_JS)
+    before = await viewport_box(page)
     png = await page.screenshot(
         full_page=True, type="png", animations="disabled", caret="hide", scale="css"
     )
-    return crop_height(png, max_height)
+    after = await viewport_box(page)
+    if before is None or after is None or not _same_place(before, after):
+        return None
+    return crop_height(png, max_height), before
 
 
 async def _shoot(
     page: Page, frames: Mapping[int, Frame], measure: Measure, max_height: int
 ) -> bytes | None:
-    """Measure, screenshot, measure again; masks painted before encoding. ``None``: withheld."""
+    """Measure, screenshot, measure again; masks painted before encoding. ``None``: withheld — also
+    when the page was not at the same place for both measurements and the screenshot (a fixed or
+    sticky box would be drawn where it was not measured)."""
     await _stop_motion(frames)
     await page.wait_for_timeout(SETTLE_BEFORE_SHOT_MS)
-    masks = await measure()
-    if masks is None:
+    first = await measure()
+    if first is None:
         return None
-    png = await _full_page_png(page, max_height)
+    shot = await _full_page_png(page, max_height)
+    if shot is None:
+        return None
+    png, at = shot
     again = await measure()
-    if again is None or not _same(masks, again):
+    if again is None or not _same(first.masks, again.masks):
         return None  # the page moved while it was taken: never a mask in the wrong place
-    return draw_masks(png, masks) if masks else png
+    if not (_same_place(first.origin, at) and _same_place(at, again.origin)):
+        return None  # the page scrolled between the measurements and the screenshot
+    return draw_masks(png, first.masks) if first.masks else png
 
 
 async def field_boxes(frames: dict[int, Frame], fields: list[FieldFacts]) -> list[OverlayBox]:
-    """Numbered boxes of the visible fields (document coordinates of the top page)."""
-    await frames[0].evaluate(SCROLL_JS)  # bounding boxes at scroll 0 == document coordinates
+    """Numbered boxes of the visible fields (document coordinates of the top page), measured as a
+    capture measures (no motion, no scroll snapping, placed with ``dom.viewport_box``); none when
+    the page's viewport cannot be read (the outlines are drawn on a capture, never needed)."""
+    await _stop_motion(frames)
+    await frames[0].evaluate(SCROLL_JS)
+    origin = await viewport_box(frames[0].page)
+    if origin is None:
+        return []
     out: list[OverlayBox] = []
     for f in fields:
         if not f.visible or f.frame_index not in frames:
             continue
-        box = await _element_box(frames[f.frame_index], f.key)
+        box = await _element_box(frames[f.frame_index], f.key, origin)
         if box is not None:
             out.append(OverlayBox(number=f.field_no, rect=box))
     return out

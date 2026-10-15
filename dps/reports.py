@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -41,6 +42,27 @@ AUDIT_COUNT_TIMEOUT = "5s"
 MAX_FAILED_SWEEPS = 100
 _ENTITY = r"^[A-Z][A-Z0-9_]{0,63}$"
 _COUNT = r"^[0-9]{1,18}$"
+_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+#: UI sweeps (S2 console r2 B1): a UI sweep is one scan's own verification. A scan that succeeded
+#: passed it; a scan whose evidence pack records a verification error (``submission_detected``: its
+#: request log held a non-GET request the guard allowed) failed it. A scan that failed before it
+#: swept anything (a setup error such as ``secret_unavailable``, a crash: no pack, or a pack with no
+#: error) and a canceled scan are no sweep — the scanner and job pages show them. Read from the job
+#: and evidence tables (always fresh, one definition for the tile, the chart, the Failed sweeps
+#: card and the Overview posture); a scan counts on its finish day (UTC), as the roll-ups do.
+_UI_SWEEPS = """
+SELECT j.id AS job_id, (j.finished_at AT TIME ZONE 'UTC')::date AS day,
+       coalesce(jsonb_array_length(ev.errors), 0) > 0 AS failed, ev.errors
+FROM __S__.dps_job j
+LEFT JOIN LATERAL (
+  SELECT CASE WHEN jsonb_typeof(e.pack->'errors') = 'array' THEN e.pack->'errors' END AS errors
+  FROM __S__.dps_evidence e WHERE e.job_id = j.id AND e.tenant_id = j.tenant_id
+  ORDER BY e.created_at DESC LIMIT 1) ev ON true
+WHERE j.tenant_id = $1 AND j.kind = 'scan' AND j.finished_at >= $2
+  AND (j.state = 'succeeded' OR coalesce(jsonb_array_length(ev.errors), 0) > 0)
+ORDER BY j.finished_at DESC, j.id
+"""
 
 _STATEMENTS = r"""
 DELETE FROM __S__.dps_report_daily WHERE tenant_id = $1 AND day BETWEEN $2 AND $3;
@@ -276,9 +298,11 @@ class SweepDay(BaseModel):
 
 
 class FailedSweep(BaseModel):
-    """A sweep that failed closed: a job's partitions, or an API call's verification."""
+    """A sweep that failed: a job's partitions or an API call's verification (both failed closed),
+    or a UI scan whose own verification failed (``where="scan"``, ``job_id`` the scan, ``error_code``
+    the first error of its evidence pack; S2 console r2 B1)."""
 
-    where: Literal["job", "api"]
+    where: Literal["job", "api", "scan"]
     day: date
     job_id: str | None = None
     partitions: list[int] = Field(default_factory=list)
@@ -433,6 +457,29 @@ def _pct(part: int, whole: int) -> float:
     return round(100.0 * part / whole, 1) if whole else 100.0
 
 
+async def _ui_sweeps(conn: Any, tenant_id: str, start: datetime) -> list[dict[str, Any]]:
+    """The UI sweeps finished since ``start`` (``_UI_SWEEPS``): ``job_id``, ``day``, ``failed`` and,
+    for a failed one, ``error_code`` (its pack's first error code; value-free by construction)."""
+    rows = await conn.fetch(_UI_SWEEPS.replace("__S__", db.schema_ident()), tenant_id, start)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        errors = r["errors"] if isinstance(r["errors"], list) else []
+        codes = [
+            str(e["code"])
+            for e in errors
+            if isinstance(e, dict) and isinstance(e.get("code"), str) and _CODE.match(e["code"])
+        ]
+        out.append(
+            {
+                "job_id": r["job_id"],
+                "day": r["day"],
+                "failed": bool(r["failed"]),
+                "error_code": codes[0] if codes else "verification_failed",
+            }
+        )
+    return out
+
+
 async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
     """Tiles, trend, findings by type, layers, posture and recent jobs for the last ``days``."""
     first, last = span(days)
@@ -508,6 +555,7 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
             "ORDER BY created_at DESC LIMIT 1",
             tenant_id,
         )
+        ui_sweeps = await _ui_sweeps(conn, tenant_id, start)
     recent, _ = await jobs.list_jobs(tenant_id, limit=6)
 
     def protected(rs: list[dict[str, Any]]) -> int:
@@ -530,8 +578,11 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
         by_mode[str(r["action"])] = by_mode.get(str(r["action"]), 0) + int(r["calls"])
     scans = [r for r in current if r["action"] == "job.scan"]
     parts = [r for r in current if r["action"] == "job.partition"]
+    # one meaning of a sweep on every surface: API batches, partitions and UI scans (``_UI_SWEEPS``)
     passed = sum(int(r["verify_passed"]) for r in api + parts)
+    passed += sum(1 for u in ui_sweeps if not u["failed"])
     failed = sum(int(r["verify_failed"]) for r in api + parts)
+    failed += sum(1 for u in ui_sweeps if u["failed"])
     last_scan: dict[str, Any] | None = None
     if scan is not None:
         progress = scan["progress"] if isinstance(scan["progress"], dict) else {}
@@ -601,7 +652,7 @@ async def summary(tenant_id: str, days: int, settings: Settings) -> SummaryOut:
 
 
 async def jobs_report(tenant_id: str, days: int, settings: Settings) -> ReportsJobsOut:
-    """Sweeps per day and layer, totals and the sweeps that failed closed."""
+    """Sweeps per day and layer, totals and the sweeps that failed (UI sweeps: ``_UI_SWEEPS``)."""
     first, last = span(days)
     await ensure_fresh(tenant_id, first, last, settings=settings)
     rows = await _daily_rows(tenant_id, first, last)
@@ -619,15 +670,10 @@ async def jobs_report(tenant_id: str, days: int, settings: Settings) -> ReportsJ
             slot = sweeps[(r["day"], "conn")]
             slot.passed += int(r["verify_passed"])
             slot.failed += int(r["verify_failed"])
-        elif r["action"] == "job.scan":
-            slot = sweeps[(r["day"], "ui")]
-            if r["outcome"] == "succeeded":
-                slot.passed += int(r["calls"])
-            elif r["outcome"] in ("failed", "dead"):
-                slot.failed += int(r["calls"])
     s = db.schema_ident()
     start = _start_ts(first)
     async with db.acquire(tenant_id) as conn:
+        ui_sweeps = await _ui_sweeps(conn, tenant_id, start)
         packs = await conn.fetch(
             "SELECT coalesce(pack->>'job_kind', 'run') AS kind, count(*) AS n "
             f"FROM {s}.dps_evidence WHERE tenant_id = $1 AND created_at >= $2 GROUP BY 1",
@@ -687,6 +733,19 @@ async def jobs_report(tenant_id: str, days: int, settings: Settings) -> ReportsJ
         FailedSweep(where="api", day=r["day"], route=r["route"], error_code="verification_failed")
         for r in api_failed
     ]
+    for u in ui_sweeps:
+        ui_slot = sweeps.get((u["day"], "ui"))
+        if ui_slot is None:
+            continue  # finished after the window's last day (not reachable: it ends today)
+        if u["failed"]:
+            ui_slot.failed += 1
+        else:
+            ui_slot.passed += 1
+    failed_sweeps += [
+        FailedSweep(where="scan", day=u["day"], job_id=u["job_id"], error_code=u["error_code"])
+        for u in ui_sweeps
+        if u["failed"]
+    ][:MAX_FAILED_SWEEPS]
     values = list(sweeps.values())
     totals = {
         "packs": sum(by_kind.values()),

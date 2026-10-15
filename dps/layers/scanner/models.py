@@ -59,7 +59,9 @@ def _page(default: Any = ...) -> Any:
 
 
 class Rect(BaseModel):
-    """A box in document coordinates of the top-level page."""
+    """A box in document coordinates of the top-level page: those of the full-page screenshot,
+    whose origin is the top-left corner of the document's scrollable area (not the scroll origin,
+    which is the right edge of an RTL document wider than the viewport; ``dom.viewport_box``)."""
 
     model_config = _HIDDEN
     x: float
@@ -70,13 +72,21 @@ class Rect(BaseModel):
 
 # --- DOM facts: page data, worker memory only (never logged, never persisted as such) ---------
 class OptionFacts(BaseModel):
-    """One ``<option>`` of a select."""
+    """One ``<option>`` of a select. ``label`` is the option's ``label`` IDL attribute — its label
+    attribute, else its text — which is what a select draws for it (``drawn``)."""
 
     model_config = _HIDDEN
     value: str = _page()
     text: str = _page()
+    label: str = _page("")
     disabled: bool
     selected: bool
+
+    @property
+    def drawn(self) -> str:
+        """What a select draws for this option: a closed select shows its selected option's label
+        attribute when it has one (S2 captures-privacy r2 B3), else the option's text."""
+        return self.label or self.text
 
 
 class FieldFacts(BaseModel):
@@ -160,8 +170,9 @@ class FrameFacts(BaseModel):
     finding.
 
     ``offset`` is, in document coordinates of the top page (zero-size: not rendered), the box a
-    read frame's document is drawn in — its content box, where the child's viewport coordinates
-    start (S2 captures-privacy r1 B1) — and an unread frame's border box. It is ``None`` only for
+    read frame's document is drawn in — the top page's viewport (``dom.viewport_box``) for the main
+    frame, a child frame's content box, where the child's viewport coordinates start (S2
+    captures-privacy r1 B1) — and an unread frame's border box. It is ``None`` only for
     an unread frame whose box could not be determined. A capture must black out every unread
     frame's box, and is withheld when one is ``None`` or a frame failed while it was read
     (``PageSnapshot.frames_failed``; ``dom.unread_frame_boxes``).

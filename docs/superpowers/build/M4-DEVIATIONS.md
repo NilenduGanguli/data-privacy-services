@@ -1689,3 +1689,90 @@ adaptations,console}-r1.md`), each fixed test-first: every new test below failed
   test assertions are unchanged. Alternative not taken: redrawing a surrogate found in the source
   column inside the synthesize run (a hot-path change; the post-write check already fails such a run
   closed to review).
+
+## S2 fix round 2 — masks follow the page wherever it is scrolled; a closed select's label (2026-10-15)
+
+Three blocking findings of `~/.cache/dps-build/reports/S2-captures-privacy-r2.md` (all M4 code that
+predates round 1) and one of `S2-console-r2.md` (the console's, in `M4-DEVIATIONS-console.md`; its
+backend part is listed here too). Each fixed test-first: every new test failed on `a3cd667` (logs
+under `~/.cache/dps-build/s2-fix-r2/logs/`).
+
+- **Every box is placed where the full-page screenshot draws it** (captures-privacy B1 and B2;
+  `dps/layers/scanner/dom.py`, `capture.py`). Masks were placed in "document coordinates" built as a
+  client rect plus `window.scrollX`/`scrollY` (text ranges, census items), or as Playwright's
+  viewport box taken "at scroll 0,0" (fields, selects, swept fields, read and opaque frames, unread
+  `FRAME` boxes, the annotated outlines). Both are wrong whenever the top page is not at the
+  screenshot's origin: (B1) **root scroll snapping** (`html { scroll-snap-type: y mandatory |
+  proximity }` under a header) keeps the page at its first snap area after the capture's
+  `scrollTo(0, 0)`, so every Playwright box landed 174–201 px above its value — `original`,
+  `annotated` and both filled screens showed pre-filled fields and same-origin frame text, and a
+  pre-selected sensitive select or a cross-origin frame even showed in the obfuscated
+  `masked_capture`; (B2) in an **RTL or `vertical-rl` document wider than the viewport** `scrollX` 0
+  is the right edge while the full-page screenshot starts at the left edge of the overflow, so
+  *every* mask landed `scrollWidth − clientWidth` px left of its value. Now page scripts return
+  client rects in their own frame's viewport (`TEXT_RECTS_JS`, `CENSUS_RECTS_JS`, `EXTRACT_JS`
+  field rects; the `top` argument is gone) and Python places every rect and box with **where the
+  browser reports the top page's layout viewport** — `dom.viewport_box` (CDP
+  `Page.getLayoutMetrics` `cssLayoutViewport`: `pageX`/`pageY` in the document's scrollable area,
+  i.e. the screenshot's coordinates, plus its size) — or a child frame's content box (itself a
+  Playwright box plus that origin). `FrameFacts.offset` of the main frame is that viewport box
+  (it was zero). Each capture measures the origin with its masks, reads it again just before and
+  just after the screenshot and **withholds** unless the page was at the same place for both
+  measurements and the screenshot (a fixed or sticky box is drawn where the page is when shot).
+  Defence in depth: `_NO_MOTION_CSS` (injected into every read frame before measuring, idempotent
+  now) adds `scroll-snap-type: none !important`, so a snapping root goes back to its top; an
+  inline `!important` declaration still wins over it — the masks then follow the snapped page.
+  `field_boxes` stops motion and places the outlines the same way. `extract_page` raises
+  `PlaywrightError` when the viewport cannot be measured (as for any main-frame failure); a capture
+  withholds. Why not `scrollTo(-1e9, -1e9)` to find the scroll origin, as the finding suggested:
+  under snapping that also lands on a snap area (measured: `[0, 174]`), and a page can override
+  `scrollTo`; the browser's own metric needs neither. Measured in Chromium 1187: client + `pageX` is
+  where the shot draws in-flow, fixed and sticky boxes, in LTR, RTL (`pageX` 1144 at `scrollX` 0),
+  `vertical-rl` and snapped pages. Note: Chromium paints an out-of-process (cross-origin) frame
+  only where it is in view, so a full-page shot of a cross-origin frame in the left overflow of a
+  `vertical-rl` page is blank (its `FRAME` box is painted anyway).
+  Tests (`tests/scanner/test_capture_geometry.py`, pages from a counting server, the cross-origin
+  frame on `localhost`, each made-up value on its own pastel background):
+  `test_masks_cover_every_value_where_the_screenshot_draws_it` (snapping mandatory, proximity and an
+  inline `!important` the stylesheet cannot override, a 2400 px RTL statement table, `vertical-rl`,
+  and B3 below: not one pixel of any value's background is left in the masked capture, the plain
+  screenshot shows every one; the snapping page is shot at its top, the inline one at its snap
+  area), `test_no_value_is_readable_in_any_capture_off_the_scroll_origin` (OCR, tesseract page
+  segmentation modes 11 and 3 — 11 alone skips text inside a bordered input: masked plus both
+  obfuscated captures read 0 against the plain screenshot), `test_every_screen_the_crawler_stores_
+  is_masked_off_the_scroll_origin` (`ScanRunner`, both modes: `original`, `annotated`, both
+  `filled_*` and `masked_capture` read 0; 0 non-GET requests). `tests/scanner/test_capture_ocr.py::
+  _ocr` takes the page segmentation modes (default unchanged).
+- **A closed select's drawn label is classified, swept and masked** (captures-privacy B3;
+  `dom.py` `EXTRACT_JS`, `models.OptionFacts`, `classify.shown_text`, `capture._shown`). A closed
+  `<select>` draws its selected option's `label` attribute, but the extraction kept only
+  `option.text`, so a value drawn only as that label (`<option selected label="PAN">x</option>`)
+  was never classified or masked — readable in every capture, the obfuscated ones included.
+  `EXTRACT_JS` keeps `label: clean(o.label)` per option (the IDL attribute: the label attribute,
+  else the text); `OptionFacts.label` (default `""`) and `OptionFacts.drawn` (label, else text);
+  `shown_text` and `capture._shown` return what the select draws, so `classify_fields`' shown-value
+  rule, `sensitive_prefilled` and the sweep see the drawn string. Persona fill records are unchanged
+  (a matched option keeps the persona's own value). Tests: `test_a_closed_select_shows_and_is_
+  classified_by_its_option_label` (classification and `sensitive_prefilled` → `PAN_IN`),
+  `test_the_extraction_reads_what_each_option_draws`, and the `select_label` case of the three
+  capture tests above.
+- **A select the fill chose stays masked when it is personal** (found while fixing B3, same class:
+  what a closed select draws; `dps/layers/scanner/crawler.py::_filled_screen`). A fill cannot put a
+  persona value into a select: it picks one of the page's own options. The filled screens kept
+  every filled field readable, so a personal select whose placeholder was selected at load (the
+  original shows nothing) showed the option the fill picked — a payee's PAN — in clear in
+  `filled_synthesize` and `filled_obfuscate`. A select that `sensitive_prefilled` reports (classified
+  personal, or a detected value in what it draws) is now masked in the filled screens whoever chose
+  its option; inputs and textareas the fill typed into stay readable, as before. Test:
+  `test_capture_geometry.py::test_a_select_the_fill_chooses_never_shows_a_personal_option`
+  (`ScanRunner`, both modes; OCR of original, annotated and both filled screens reads none of the
+  three made-up PANs; the control selects each option in a plain page and reads it; failed before:
+  the filled screens read one).
+- **UI sweeps on Reports and the Overview** (console B1; `dps/reports.py`): see
+  `M4-DEVIATIONS-console.md` "S2 fix round 2". `jobs_report` and `summary` read UI sweeps from the
+  job and evidence tables (`_UI_SWEEPS`): a scan that succeeded passed; a scan whose evidence pack
+  records a verification error failed (listed in `failed_sweeps` as `where: "scan"`, its job id
+  and first error code); a scan that failed before it swept anything (no pack, or none with an
+  error) or was canceled is no sweep. `FailedSweep.where` gains `"scan"`; the posture's
+  `sweeps_passed_pct` counts UI sweeps too. Test: `tests/test_reports.py::
+  test_a_ui_sweep_means_the_same_on_every_reports_surface`.

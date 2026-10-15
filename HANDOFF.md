@@ -1566,3 +1566,23 @@ round 1"; report `~/.cache/dps-build/reports/S2-fix-r1.md`.
 - **Console:** below 1100 px a menu button opens the navigation drawer (mockups' `vault.js`); scan
   rows read "UI scan of <host> · … pages · … forms · … personas · … submissions"; Admin › UI-scanner
   hosts states the local/dev fallback instead of "scans are refused".
+
+### 16.2 S2 fix round 2 (2026-10-15) — what changes for a build, a deploy or a demo
+
+Details and tests: `docs/superpowers/build/M4-DEVIATIONS.md` and `M4-DEVIATIONS-console.md` "S2 fix
+round 2"; report `~/.cache/dps-build/reports/S2-fix-r2.md`.
+
+- **Captures:** every mask is placed where the full-page screenshot draws the value, using the
+  browser's own position of the page's viewport (CDP `Page.getLayoutMetrics`, `dom.viewport_box`)
+  instead of `scrollX`/`scrollY`: pages whose root snaps (`scroll-snap-type`) and RTL or
+  `vertical-rl` pages wider than the viewport are masked correctly; scroll snapping is switched off
+  while a capture is taken, and a page that scrolls between the measurements and the screenshot is
+  withheld (fail closed). A closed select is classified and masked by what it draws (its selected
+  option's `label` attribute when it has one), and a personal select stays masked in the filled
+  screens (the fill can only pick one of the page's own options). No setting change; the
+  browser-worker image must be rebuilt to carry it.
+- **Reports / Overview:** a UI sweep is a scan's own verification — succeeded = passed, an evidence
+  pack with a verification error (`submission_detected`) = failed and listed under Failed sweeps
+  (`where: "scan"`, linked to the scan); a scan that failed before it crawled (`secret_unavailable`,
+  …) or was canceled is no sweep. The Overview posture counts UI sweeps too. No migration: UI sweeps
+  are read from the job and evidence tables, so past days need no roll-up refresh.

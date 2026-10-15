@@ -41,6 +41,13 @@ describe('sweeps', () => {
     expect(failedSweepText(apiFail).where).toBe('POST /api/v1/synthesize');
     expect(failedSweepText(apiFail).what).toContain('failed closed');
   });
+  it('words a UI scan whose own verification failed (S2 console r2 B1)', () => {
+    const scan = { where: 'scan' as const, day: '2026-10-13', job_id: 's_01K7SC4NQ8ZP3M', partitions: [], route: null, error_code: 'submission_detected', paths: [] };
+    const words = failedSweepText(scan);
+    expect(words.where).toBe('UI scan s_01K7SC…3M');
+    expect(words.what).toBe('The scan\'s request log holds a request that is not a GET and that the guard allowed. The scan was marked failed and its key purged.');
+    expect(failedSweepText({ ...scan, error_code: 'other_check' }).what).toBe('The scan\'s verification failed (other_check). The scan was marked failed and its key purged.');
+  });
 });
 
 describe('roll-up routes', () => {

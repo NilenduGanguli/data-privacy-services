@@ -39,10 +39,13 @@ SECTIONS: dict[str, str] = {
     "Reports & audit": "/reports",
     "Admin": "/admin",
 }
-#: Whether the page shows the section of ``path`` (a section may open one of its own pages: the
-#: Policies page opens the first policy, ``/policies/<name>``).
+#: Whether the page shows the section of ``path`` and has landed there: the Policies page opens
+#: the first policy (``/policies/<name>``) once its list call returns (with or without an error),
+#: and that route change closes a drawer opened before it — so the walk waits for it (under the
+#: per-key rate limit the list answers late, and the next click found the drawer closed).
 IN_SECTION_JS = (
     "(path) => path === '/' ? location.pathname === '/'"
+    " : path === '/policies' ? location.pathname.startsWith('/policies/')"
     " : location.pathname === path || location.pathname.startsWith(path + '/')"
 )
 #: Whether the document scrolls sideways (the console's rule: never at 390 px).
@@ -100,6 +103,7 @@ def test_every_section_is_reachable_through_the_drawer_from_every_page(
         for start, start_path in SECTIONS.items():
             pg.goto(f"{app_url}{start_path}")
             pg.wait_for_selector("header.topbar")
+            pg.wait_for_function(IN_SECTION_JS, arg=start_path)  # landed (Policies opens one)
             assert not pg.locator("#sidebar").is_visible(), (width, start)  # hidden below 1100
             assert not pg.evaluate(H_SCROLL_JS), (width, start)
             for name, path in SECTIONS.items():

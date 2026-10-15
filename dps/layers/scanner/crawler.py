@@ -791,7 +791,10 @@ class ScanRunner:
     ) -> None:
         """The filled tab, read again now that it shows persona values: every value the page
         rendered or pre-filled itself is masked (and every copy of what it showed before the fill
-        swept), the filled fields stay readable and are outlined with their numbers."""
+        swept), the filled fields stay readable and are outlined with their numbers — except a
+        select: a fill cannot put a persona value into one, it picks one of the page's own
+        options, so a select that is personal (or shows a detected value) stays masked whoever
+        chose its option (S2 fix round 2)."""
         snap, frames = await self._extract(page)
         filled = {a.key for a in fill.actions}
         now = {
@@ -802,7 +805,7 @@ class ScanRunner:
         untouched = [
             (f, entity)
             for f, entity in sensitive_prefilled(snap.fields, now, self.detector)
-            if f.key not in filled
+            if f.key not in filled or f.tag == "select"
         ]
         earlier = classify_rendered(before.texts, detector=self.detector)
         text_of = {(x.frame_index, x.i): x.text for x in before.texts}
