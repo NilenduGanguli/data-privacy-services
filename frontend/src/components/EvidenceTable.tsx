@@ -24,8 +24,11 @@ function packLine(item: EvidenceItem): string {
     parts.push(plural(s.submissions ?? 0, 'submission'));
   } else {
     if (s.write_mode) parts.push(s.write_mode);
-    if (item.outcome === 'failed') parts.push('stopped, nothing written');
-    else if (s.rows_written !== null && s.rows_written !== undefined) parts.push(`${count(s.rows_written)} ${s.mode === 'synthesize' ? 'synthetic rows' : 'rows'}`);
+    // a run commits per batch: one that stopped may have written rows before it (S2 console r3 B1)
+    if (item.outcome === 'failed') {
+      const written = Number(s.rows_written ?? 0);
+      parts.push(written > 0 ? `stopped · ${count(written)} ${s.mode === 'synthesize' ? 'synthetic rows' : 'rows'} written before it` : 'stopped, nothing written');
+    } else if (s.rows_written !== null && s.rows_written !== undefined) parts.push(`${count(s.rows_written)} ${s.mode === 'synthesize' ? 'synthetic rows' : 'rows'}`);
     if (s.fidelity_score !== null && s.fidelity_score !== undefined) parts.push(`fidelity ${s.fidelity_score.toFixed(2)}`);
   }
   if (item.outcome !== 'succeeded' && item.outcome !== 'failed') parts.push(item.outcome.replace('_', ' '));

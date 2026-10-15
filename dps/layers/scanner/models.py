@@ -116,7 +116,16 @@ class FieldFacts(BaseModel):
     disabled: bool
     visible: bool
     inputmode: str | None
-    options: list[OptionFacts] = Field(default_factory=list, repr=False)
+    options: list[OptionFacts] = Field(default_factory=list, repr=False)  # the first 300
+    #: A select: what its closed box draws, as the extraction read it (S2 captures-privacy r3 B1)
+    #: — a customizable select's button text first (its ``<selectedcontent>`` clone of the selected
+    #: option's content, or the author's own text), then the label of every selected option,
+    #: whatever its value and wherever it sits (``options`` stops at 300). ``None``: not read by
+    #: an extraction (facts built in memory); ``classify.shown_texts`` then reads ``options``.
+    drawn: list[str] | None = _page(None)
+    #: A customizable select (``appearance: base-select``, or a ``<button>`` / ``<selectedcontent>``
+    #: in it): it draws author content, so a capture boxes it whenever it draws text.
+    custom_select: bool = False
     value: str | None = _page(None)  # pre-filled value (never read for password inputs)
     checked: bool | None = None
     rect: Rect | None = None  # document coordinates in the top-level page

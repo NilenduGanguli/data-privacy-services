@@ -312,8 +312,18 @@ that is transformed or zoomed is painted over whole as well. Masks are placed wh
 screenshot draws each value whatever the page's scroll position: a root that snaps (`scroll-snap-type`)
 and an RTL or `vertical-rl` document wider than the viewport (whose scroll origin is its right edge)
 are masked like any other page, and a page that scrolls between the measurements and the screenshot
-is withheld. A closed select is masked by what it draws — its selected option's `label` attribute
-when it has one. Not yet masked (known limits): text in
+is withheld. A closed select is masked by what it draws, whatever its selected option's `value`
+(an empty or blank one included: whether an option is a real choice is the fill's rule, not the
+capture's) and wherever that option sits in a long list (the inventory reads the first 300 options;
+the selected ones are always read): its selected option's `label` attribute when it has one, else
+its text. A select classified personal is masked even while it draws its placeholder ("Choose…"),
+and every copy of a value a select draws is boxed elsewhere on the page (a placeholder — options
+without a value whose text reads "Choose…", "Select…" — is no value: it is not swept and it alone
+takes no obfuscated capture). A customizable select
+(`appearance: base-select`, or a `<button>`/`<selectedcontent>` in it) draws its button — a clone of
+the selected option's content or the author's own text, not the label — so its button text is read
+and swept, and the select is boxed whole (`SELECT`) whenever it draws text, even when nothing
+classifies what it draws. Not yet masked (known limits): text in
 closed shadow roots, CSS generated content (`::before`/`::after` `content`), canvas-drawn text and an
 input value a script sets after the page was read. The exports (artefact kinds `export_json`, `export_csv`) and the printable evidence
 pack (`evidence_html`) are stored at finalize.

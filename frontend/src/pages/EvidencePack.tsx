@@ -4,6 +4,7 @@ import { DownloadButton } from '../components/DownloadButton';
 import { FidelityPanel } from '../components/FidelityPanel';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError, type Download } from '../lib/api';
+import { columnLabel } from '../lib/engines';
 import {
   engineName, errorText, finishedOutcome, fmtCount, fmtDuration, fmtUtc, methodText, packSelection, packTargetText, recordNoun, shortId, shortSha, shortType,
   typeNoteShort, writeModeLabel, verificationText, verificationTone,
@@ -90,6 +91,16 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
   const retries = parts.reduce((a, x) => a + Math.max(0, Number(x.attempts ?? 1) - 1), 0);
   const resumed = parts.filter((x) => Number(x.resumed ?? 0) > 0);
   const post = (v.post_sample ?? null) as Record<string, any> | null;
+  // why no post-write sample: none runs for a job that did not succeed or for a files target —
+  // rows it wrote are still there, so "no written rows" only when none were (S2 console r3 B1)
+  const written = Number(counts.rows_written ?? 0);
+  const postNotRun = written <= 0
+    ? 'No written rows to sample'
+    : p.outcome !== 'succeeded' && p.outcome !== 'dry_run'
+      ? `The job ended ${p.outcome} before the post-write sample; the ${fmtCount(written)} written ${written === 1 ? 'row was' : 'rows were'} not re-read.`
+      : tgt.write_mode === 'files'
+        ? `A files target is not read back; the manifest lists the files that hold the ${fmtCount(written)} written rows.`
+        : `The post-write sample did not run; the ${fmtCount(written)} written ${written === 1 ? 'row was' : 'rows were'} not re-read.`;
   const keptHits = Number(post?.kept_column_hits ?? 0);
   const flagged = (post?.kept_columns ?? []) as string[];
   const fallbacks = (v.fallbacks ?? {}) as Record<string, number>;
@@ -178,7 +189,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
               const s = byPath.get(String(c.path));
               return (
                 <tr key={String(c.path)}>
-                  <td className="m" data-l="Column">{s?.name ?? String(c.path).replace(/^\$\./, '')}</td>
+                  <td className="m" data-l="Column">{columnLabel(s ?? { path: String(c.path), name: String(c.path).replace(/^\$\./, '') })}</td>
                   <td className="faint" data-l="Type">{c.data_type ? shortType(String(c.data_type)) : s ? shortType(s.data_type) : '—'}</td>
                   <td data-l="Entity">{text(c.entity_type)}{c.text_column && c.entity_type !== 'FREE_TEXT' ? ' · free text' : ''}</td>
                   <td className="num m" data-l="Conf.">{typeof c.confidence === 'number' ? c.confidence.toFixed(2) : s?.entity_type ? s.confidence.toFixed(2) : '—'}</td>
@@ -190,7 +201,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
             })}
             {!p.columns.length && <tr><td colSpan={7} className="faint">No column was planned.</td></tr>}
           </tbody></table></div>
-          <p className="note">{keptNone.length ? `${keptNone.length} ${keptNone.length === 1 ? 'column' : 'columns'} kept, no entity: ${keptNone.map((c) => c.name).join(', ')}. ` : ''}{keptByPolicy.length ? `${keptByPolicy.length} classified ${keptByPolicy.length === 1 ? 'column' : 'columns'} kept by the policy or the review: ${keptByPolicy.map((c) => `${c.name} (${c.entity_type})`).join(', ')}. ` : ''}{flagged.length ? `The post-write sample found personal data in ${flagged.join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
+          <p className="note">{keptNone.length ? `${keptNone.length} ${keptNone.length === 1 ? 'column' : 'columns'} kept, no entity: ${keptNone.map((c) => columnLabel(c)).join(', ')}. ` : ''}{keptByPolicy.length ? `${keptByPolicy.length} classified ${keptByPolicy.length === 1 ? 'column' : 'columns'} kept by the policy or the review: ${keptByPolicy.map((c) => `${columnLabel(c)} (${c.entity_type})`).join(', ')}. ` : ''}{flagged.length ? `The post-write sample found personal data in ${flagged.join(', ')}. ` : ''}{snapshot ? `Discovery sampled ${fmtCount(snapshot.sample_rows)} rows; examples shown to the reviewer were masked.` : 'Examples shown to the reviewer were masked.'}</p>
         </Sec>
 
         <Sec n={4} title="Execution" right={`${parts.length} ${parts.length === 1 ? 'partition' : 'partitions'}`}>
@@ -220,7 +231,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
         <Sec n={5} title="Verification" right={`mode ${text(v.mode)}`} keep>
           <div className="tbl-scroll"><table className="tbl doc stack"><thead><tr><th>Check</th><th>Result</th><th>What was checked</th><th>Status</th></tr></thead><tbody>
             <tr><td data-l="Check"><b>Leakage sweep</b></td><td className="m" data-l="Result">{fmtCount(hits)} hits</td><td className="wide" data-l="What">Every transformed value compared with the source values of its row before the batch was written ({fmtCount(Number(v.values_checked ?? 0))} values in {fmtCount(Number(v.batches ?? 0))} batches)</td><td data-l="Status"><span className={`chip ${unfinished ? 'slate' : hits || (!passed && !review) ? 'rose' : 'emerald'}`}>{unfinished ? 'incomplete' : hits || (!passed && !review) ? 'fail' : 'pass'}</span></td></tr>
-            <tr><td data-l="Check"><b>Post-write sample</b></td><td className="m" data-l="Result">{post && post.rows !== undefined ? `${fmtCount(keptHits)} in columns kept as not personal${flagged.length ? ` (${flagged.join(', ')})` : ''} · ${fmtCount(post.detector_hits ?? 0)} in transformed columns` : 'not run'}</td><td className="wide" data-l="What">{post && post.rows !== undefined ? `${fmtCount(post.rows)} written rows read back and rescanned with the detectors. Findings in transformed columns are expected (format-preserving tokens still look like their type). Personal data in a column the snapshot kept as not personal means it reached the target untransformed: verification is not passed until it is reviewed.` : 'No written rows to sample'}</td><td data-l="Status"><span className={`chip ${!post || post.rows === undefined ? 'slate' : keptHits === 0 ? 'emerald' : 'amber'}`}>{!post || post.rows === undefined ? 'skipped' : keptHits === 0 ? 'pass' : 'review required'}</span></td></tr>
+            <tr><td data-l="Check"><b>Post-write sample</b></td><td className="m" data-l="Result">{post && post.rows !== undefined ? `${fmtCount(keptHits)} in columns kept as not personal${flagged.length ? ` (${flagged.join(', ')})` : ''} · ${fmtCount(post.detector_hits ?? 0)} in transformed columns` : 'not run'}</td><td className="wide" data-l="What">{post && post.rows !== undefined ? `${fmtCount(post.rows)} written rows read back and rescanned with the detectors. Findings in transformed columns are expected (format-preserving tokens still look like their type). Personal data in a column the snapshot kept as not personal means it reached the target untransformed: verification is not passed until it is reviewed.` : postNotRun}</td><td data-l="Status"><span className={`chip ${!post || post.rows === undefined ? 'slate' : keptHits === 0 ? 'emerald' : 'amber'}`}>{!post || post.rows === undefined ? 'skipped' : keptHits === 0 ? 'pass' : 'review required'}</span></td></tr>
             <tr><td data-l="Check"><b>Row counts</b></td><td className="m" data-l="Result">{fmtCount(counts.rows_read ?? 0)} read · {fmtCount(counts.rows_written ?? 0)} written</td><td className="wide" data-l="What">{fmtCount(counts.rows_skipped ?? 0)} rows skipped{counts.rows_estimated ? ` · ${fmtCount(counts.rows_estimated)} estimated at prepare` : ''}</td><td data-l="Status"><span className={`chip ${counts.rows_read === counts.rows_written + (counts.rows_skipped ?? 0) ? 'emerald' : 'amber'}`}>{counts.rows_read === counts.rows_written + (counts.rows_skipped ?? 0) ? 'pass' : 'review'}</span></td></tr>
             <tr><td data-l="Check"><b>FPE fallbacks</b></td><td className="m" data-l="Result">{fmtCount(fbTotal)} values</td><td className="wide" data-l="What">{fbTotal ? Object.entries(fallbacks).map(([k, n]) => `${fmtCount(n)} × ${k.replace(/^(fallback:)+/, '')}`).join(' · ') : 'Every value ran its planned method'}</td><td data-l="Status"><span className="chip slate">recorded</span></td></tr>
             {v.write_ledger_cleared !== undefined && <tr><td data-l="Check"><b>Write ledger</b></td><td className="m" data-l="Result">{v.write_ledger_cleared ? 'cleared' : 'kept'}</td><td className="wide" data-l="What">The per-batch marks DPS keeps in the target to resume without writing twice</td><td data-l="Status"><span className="chip slate">recorded</span></td></tr>}

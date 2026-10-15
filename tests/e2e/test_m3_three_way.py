@@ -75,7 +75,9 @@ def _discover_override_accept(
 #: ``seed_oracle`` / ``seed_mongo`` / ``seed_sources``) writes into each member table, with whether
 #: it is text (then also checked against *every* source value). Independent of discovery: a
 #: field discovery misses still fails here. Dates are compared per row only (a shifted birth date
-#: may equal another customer's); numeric ids per row only (a token may equal another id).
+#: may equal another customer's); customer ids per row only — the FF1 token of the numeric id and
+#: of MongoDB's ``CUST-`` id alike may equal another customer's id (S1-M3 r2 gates B1: about 6 %
+#: of runs at 2,400 customers counted such an equality as a survivor of ``$.customerId``).
 SENSITIVE: dict[str, dict[str, bool]] = {
     "oracle": {
         "CUSTOMER_ID": False, "FULL_NAME": True, "NATIONAL_ID": True, "TAX_ID": True,
@@ -87,7 +89,7 @@ SENSITIVE: dict[str, dict[str, bool]] = {
         "tax_id": True, "email": True, "mobile": True, "notes": True,
     },
     "mongo": {
-        "$.customerId": True, "$.profile.fullName": True, "$.profile.dob": False,
+        "$.customerId": False, "$.profile.fullName": True, "$.profile.dob": False,
         "$.contact.email": True, "$.contact.mobile": True,
         "$.contact.addresses[*].line1": True, "$.contact.addresses[*].pin": True,
         "$.kyc.taxId": True, "$.accounts[*].iban": True, "$.notes": True,

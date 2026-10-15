@@ -149,3 +149,53 @@ def test_a_rowid_pseudo_key_is_never_pseudonymised() -> None:
             projection=projection,  # type: ignore[arg-type]
         )
         assert "ROWID" not in {p.name for p in got}, write_mode
+
+
+@pytest.mark.parametrize("write_mode", ["table", "files"])
+def test_the_prepare_guard_never_counts_a_rowid_pseudo_key_as_copied(write_mode: str) -> None:
+    """S1-M3 r1 (engines B1): a key-less Oracle table pages on ``ROWID``, which is never
+    pseudonymised (it is never written). The D-A prepare guard counted it among the keys a
+    synthesize run would copy, so every such run failed ``leakage`` with nothing written."""
+    from dps.layers.connectors.jobs_run import copied_personal_columns
+    from dps.layers.connectors.targets import RunPlan, build_column_plans
+
+    snap = _keyless_oracle_snapshot()
+    projection = list(dict.fromkeys(c.name for c in snap.shape.columns))
+    plans = build_column_plans(
+        snap, mode="synthesize", write_mode=write_mode, pk_strategy=None, projection=projection
+    )  # type: ignore[arg-type]
+    pseudonyms = pseudonym_columns(
+        snap,
+        mode="synthesize",
+        write_mode=write_mode,  # type: ignore[arg-type]
+        pk_strategy=None,
+        projection=projection,
+    )
+    plan = RunPlan.model_validate(
+        {
+            "columns": [p.model_dump() for p in plans],
+            "key": ["ROWID"],
+            "projection": projection,
+            "target": {
+                "job_id": "j",
+                "write_mode": write_mode,
+                "connection_id": "c",
+                "engine": "oracle",
+                "key": [],
+                "write_columns": projection,
+            },
+            "source_object": "CRM.ADDRESS_HISTORY",
+            "policy_name": "p",
+            "policy_hash": "h",
+            "snapshot_id": snap.id,
+            "snapshot_hash": snap.content_hash,
+            "locale": "en_IN",
+            "batch_rows": 100,
+            "pseudonyms": [p.model_dump() for p in pseudonyms],
+        }
+    )
+    assert copied_personal_columns(plan, snap, set()) == []
+    assert copied_personal_columns(plan, snap, set(), snap.shape) == []
+    # a real key copied as its source value is still caught (the guard is not switched off)
+    keyed = plan.model_copy(update={"key": ["ROWID", "full_name"], "columns": []})
+    assert copied_personal_columns(keyed, snap, set()) == ["dob", "email", "full_name"]

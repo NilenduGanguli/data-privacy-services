@@ -37,6 +37,21 @@ SRC = make_connection("c_src", roles=["source", "target"], tags=["production"])
 UAT = make_connection("c_uat", roles=["target"])
 S3 = make_connection("c_s3", engine="s3", roles=["target"], params={"bucket": "dps-exports"})
 PVC = make_connection("c_pvc", engine="pvc", roles=["target"], params={"base_path": "exports"})
+#: S1-M3 r1 (security B1): production-tagged write targets — a table connection and a pvc
+PROD = make_connection("c_prod", roles=["target"], tags=["production"])
+PROD_PVC = make_connection(
+    "c_ppvc", engine="pvc", roles=["target"], tags=["production"], params={"base_path": "exports"}
+)
+PROD_TABLE: dict[str, Any] = {
+    "write_mode": "table",
+    "connection_id": "c_prod",
+    "object": {"owner": "bank", "name": "customers_copy"},
+}
+PROD_FILES: dict[str, Any] = {
+    "write_mode": "files",
+    "connection_id": "c_ppvc",
+    "files": {"format": "jsonl"},
+}
 KEK = bytes(32)
 UAT_TABLE: dict[str, Any] = {
     "write_mode": "table",
@@ -138,6 +153,17 @@ CASES = [
         422,
     ),
     (dict(**UAT_TABLE, mode="synthesize"), ADMIN, SRC, UAT, None, None),
+    # S1-M3 r1 (security B1): every write into a production-tagged connection needs admin — a
+    # table load truncates or upserts an existing table, files land in production storage
+    (dict(**PROD_TABLE), JOBS, SRC, PROD, "admin_scope_required", 403),
+    (dict(**PROD_TABLE, table_load="upsert"), JOBS, SRC, PROD, "admin_scope_required", 403),
+    (dict(**PROD_TABLE, mode="synthesize"), JOBS, SRC, PROD, "admin_scope_required", 403),
+    (dict(**PROD_FILES), JOBS, SRC, PROD_PVC, "admin_scope_required", 403),
+    (dict(**PROD_TABLE), ADMIN, SRC, PROD, None, None),
+    (dict(**PROD_TABLE, table_load="upsert"), ADMIN, SRC, PROD, None, None),
+    (dict(**PROD_FILES), ADMIN, SRC, PROD_PVC, None, None),
+    # reading a production source is not writing it: a jobs key may copy it to UAT
+    (dict(**UAT_TABLE), JOBS, SRC, UAT, None, None),
 ]
 
 

@@ -164,7 +164,8 @@ def test_plans_must_name_shape_paths() -> None:
 
 
 def test_leakage_in_documents_fails_closed() -> None:
-    row = _doc(1, tags=["met Ananya Krishnan 001 at the branch"])
+    # glued into one word: neither a detector (NER off) nor a row-value span (whole words) finds it
+    row = _doc(1, tags=["met AnanyaKrishnan001 at the branch"])
     plans = [
         _plan("$.profile.fullName", "PERSON_NAME"),
         _plan("$.tags[*]", "FREE_TEXT", text=True),  # no detector finds the name (NER off)
@@ -173,6 +174,12 @@ def test_leakage_in_documents_fails_closed() -> None:
         _run(plans, [row], unclassified="keep")
     kept_copy = _run(plans[:1], [row], unclassified="keep")  # kept leaves are not searched
     assert kept_copy.verification.passed
+    # S1-M3 r1 (B2): the leaf's own name repeated as words in the element is a span: replaced
+    spaced = _run(
+        plans, [_doc(1, tags=["met Ananya Krishnan 001 at the branch"])], unclassified="keep"
+    )
+    assert spaced.verification.passed
+    assert "Ananya" not in spaced.rows[0]["tags"][0] and "Krishnan" not in spaced.rows[0]["tags"][0]
 
 
 def test_a_timestamp9_date_shift_keeps_its_nanoseconds() -> None:

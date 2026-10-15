@@ -1,12 +1,17 @@
-"""Resume after kill on Oracle and MongoDB, ``in_place`` and ``append`` (M3 Task 19; contract §12.3).
+"""Resume after kill on Oracle and MongoDB, ``in_place`` and ``append`` (M3 Task 19; contract §12.3),
+and a key-less Oracle ``table`` load into a table it creates on a separate target connection
+(S1-M3 post-merge verification r2, engines B2).
 
-Each case builds two identical copies (A, B) of 3,000 demo customers from the shared customer space,
+Each case builds two identical copies (A, B) of 3,000 demo rows from the shared customer space,
 runs B to completion on one ``python -m dps.worker`` subprocess (the reference), then runs A with the
 same key on a first worker that is ``SIGKILL``ed once five batches are committed; a second worker
 finishes A after the reaper reclaims the dead worker's leases. A must equal B row for row
-(``in_place``) or hold the same multiset of appended rows (``append``; generated keys differ), the
-job's write-ledger rows must be gone after finalize, and the evidence must count a resumed
-partition. Counts and digests only — no value is printed.
+(``in_place``, and the two created ``table`` targets) or hold the same multiset of appended rows
+(``append``; generated keys differ), the job's write-ledger rows must be gone after finalize and the
+evidence must say so (``write_ledger_cleared``), and the evidence must count a resumed partition.
+The key-less case reads ``ADDRESS_HISTORY`` (paged on ``ROWID``, a ledgered load) with the session's
+test owner and writes with a second owner that cannot see it, as the demo's ``CRM`` → ``CRM_MASKED``.
+Counts and digests only — no value is printed.
 """
 
 from __future__ import annotations
@@ -56,9 +61,14 @@ pytestmark = [
 TENANT = "t1"
 ROWS = 3000
 CASES = [
-    pytest.param(name, mode, id=f"{name}-{mode}", marks=getattr(pytest.mark, name))
-    for name in ("oracle", "mongo")
-    for mode in ("in_place", "append")
+    *(
+        pytest.param(name, mode, id=f"{name}-{mode}", marks=getattr(pytest.mark, name))
+        for name in ("oracle", "mongo")
+        for mode in ("in_place", "append")
+    ),
+    pytest.param(
+        "oracle-keyless", "table", id="oracle-keyless-table-cross", marks=pytest.mark.oracle
+    ),
 ]
 
 #: ``CRM.CUSTOMERS`` of the demo schema, in the test owner (``{t}`` = the table).
@@ -94,6 +104,8 @@ class Case:
     ledger_rows: Callable[[str], int]
     #: written rows whose e-mail or name is still a seeded (source) value (counts only)
     survivors: Callable[[str], int]
+    #: ``table`` loads: the target of each label (a separate connection and a created object)
+    targets: dict[str, dict[str, Any]] | None = None
 
 
 def _seeded() -> set[str]:
@@ -111,8 +123,15 @@ def _digest(rows: list[tuple[Any, ...]]) -> tuple[int, str]:
 # -- Oracle ---------------------------------------------------------------------------------------
 
 
-async def _register_oracle(ctx: HandlerContext, schema: OracleTestSchema) -> Connection:
-    ref = "m3/resume-oracle-owner"
+async def _register_oracle(
+    ctx: HandlerContext,
+    schema: OracleTestSchema,
+    *,
+    ref: str = "m3/resume-oracle-owner",
+    name: str = "resume-oracle",
+    roles: frozenset[str] = frozenset({"source", "target"}),
+) -> Connection:
+    """A connection that logs in as ``schema``'s owner (``ref`` holds its credentials)."""
     write_ref(
         Path(ctx.settings.secret_dir),
         ref,
@@ -120,11 +139,11 @@ async def _register_oracle(ctx: HandlerContext, schema: OracleTestSchema) -> Con
     )
     host, port = host_port(schema.dsn)
     spec = ConnectionSpec(
-        name="resume-oracle",
+        name=name,
         engine="oracle",
         params=ConnectionParams(host=host, port=port, service_name=schema.dsn.rsplit("/", 1)[-1]),
         secret_ref=ref,
-        roles={"source", "target"},
+        roles=set(roles),  # type: ignore[arg-type]
     )
     return await create_connection(
         TENANT, spec, settings=ctx.settings, kek=ctx.kek, created_by="test"
@@ -221,6 +240,106 @@ async def _oracle_case(
     return Case(conn, objects, {"a": second.id, "b": first.id}, digest, ledger_rows, survivors)
 
 
+#: ``CRM.ADDRESS_HISTORY`` of the demo schema: no key (read in ROWID ranges, a ledgered load).
+ADDRESS_DDL = """CREATE TABLE "{o}"."{t}" (CUSTOMER_ID NUMBER(12) NOT NULL,
+  ADDR_LINE1 VARCHAR2(200 CHAR), CITY VARCHAR2(80 CHAR), PIN_CODE VARCHAR2(10), VALID_FROM DATE)"""
+
+
+async def _oracle_keyless_case(
+    ctx: HandlerContext,
+    schema: OracleTestSchema,
+    target_schema: OracleTestSchema,
+    admin: Any,
+    oracle_conn: Any,
+) -> Case:
+    """Two copies of ``ADDRESS_HISTORY`` (3,000 rows, 1,500 customers) in the source owner; each
+    run creates its own table in the target owner through a ``target``-only connection whose
+    login holds no grant on the source (S1-M3 r2 engines B2)."""
+    from tests.connectors.oracle_fixtures import drop_all
+    from tools.seed_model import seed_customers
+    from tools.seed_oracle import address_rows
+
+    owner, target_owner = schema.owner, target_schema.owner
+    for name in (owner, target_owner):
+        drop_all(admin, name)
+    rows = [r for c in seed_customers(ROWS // 2, 7) for r in address_rows(c)]
+    assert len(rows) == ROWS
+    cols = list(rows[0])
+    tables = {"a": "ADDR_A", "b": "ADDR_B"}
+    with oracle_conn.cursor() as cur:
+        for table in tables.values():
+            cur.execute(ADDRESS_DDL.format(o=owner, t=table))
+            cur.executemany(
+                f'INSERT INTO "{owner}"."{table}" ({", ".join(cols)}) '
+                f"VALUES ({', '.join(':' + c for c in cols)})",
+                rows,
+            )
+    oracle_conn.commit()
+    conn = await _register_oracle(ctx, schema)
+    target_conn = await _register_oracle(
+        ctx,
+        target_schema,
+        ref="m3/resume-oracle-target",
+        name="resume-oracle-target",
+        roles=frozenset({"target"}),
+    )
+    objects = {k: ObjectRef(owner=owner, name=t) for k, t in tables.items()}
+    outputs = {"a": "ADDR_A_OUT", "b": "ADDR_B_OUT"}
+    first = await discover_and_accept(ctx, TENANT, conn.id, objects["b"])
+    assert first.shape.key_source == "rowid"
+    planned = {c.name: c.method.method for c in first.columns if c.entity_type}
+    assert planned.get("ADDR_LINE1", "keep") != "keep"  # what the survivors check counts
+    second = await clone_accepted(first, objects["a"])
+
+    def read(label: str) -> list[tuple[Any, ...]]:
+        import oracledb
+
+        def text_lobs(cursor: Any, meta: Any) -> Any:  # a created token column may be a CLOB
+            if meta.type_code in (oracledb.DB_TYPE_CLOB, oracledb.DB_TYPE_NCLOB):
+                return cursor.var(oracledb.DB_TYPE_LONG, arraysize=cursor.arraysize)
+            return None
+
+        with admin.cursor() as cur:  # SYSTEM reads the target owner's tables
+            cur.outputtypehandler = text_lobs
+            cur.execute(f'SELECT {", ".join(cols)} FROM "{target_owner}"."{outputs[label]}"')
+            return [tuple(r) for r in cur.fetchall()]
+
+    async def digest(label: str) -> tuple[int, str]:
+        return _digest(read(label))
+
+    def ledger_rows(job_id: str) -> int:
+        with admin.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM all_tables WHERE owner = :o AND table_name = "
+                "'DPS_WRITE_LEDGER'",
+                {"o": target_owner},
+            )
+            assert cur.fetchone()[0], "the key-less load was not ledgered in the target owner"
+            cur.execute(
+                f'SELECT COUNT(*) FROM "{target_owner}".DPS_WRITE_LEDGER WHERE JOB_ID = :j',
+                {"j": job_id},
+            )
+            return int(cur.fetchone()[0])
+
+    def survivors(label: str) -> int:
+        seeded = {r["ADDR_LINE1"] for r in rows}
+        line1 = cols.index("ADDR_LINE1")
+        return sum(1 for r in read(label) if r[line1] in seeded)
+
+    targets = {
+        label: {
+            "write_mode": "table",
+            "connection_id": target_conn.id,
+            "object": {"owner": target_owner, "name": name},
+            "create_if_missing": True,
+        }
+        for label, name in outputs.items()
+    }
+    return Case(
+        conn, objects, {"a": second.id, "b": first.id}, digest, ledger_rows, survivors, targets
+    )
+
+
 # -- MongoDB --------------------------------------------------------------------------------------
 
 
@@ -289,6 +408,12 @@ async def test_resume_after_kill(
             handler_ctx, mode, schema, request.getfixturevalue("oracle_admin"),
             request.getfixturevalue("oracle_conn"),
         )  # fmt: skip
+    elif store == "oracle-keyless":
+        case = await _oracle_keyless_case(
+            handler_ctx, request.getfixturevalue("oracle_schema"),
+            request.getfixturevalue("oracle_target_schema"),
+            request.getfixturevalue("oracle_admin"), request.getfixturevalue("oracle_conn"),
+        )  # fmt: skip
     else:
         case = await _mongo_case(
             handler_ctx, mode, request.getfixturevalue("mongo_client"),
@@ -297,18 +422,22 @@ async def test_resume_after_kill(
     key = generate_key_material("key").model_dump(mode="json")
     if mode == "in_place":
         target: dict[str, Any] = {"write_mode": "in_place", "confirm_write": True}
-    else:
+    elif mode == "append":
         target = {
             "write_mode": "append",
             "confirm_write": True,
             "pk_strategy": {"kind": "generate"},
         }
+    else:  # a ``table`` load: each label writes its own created target
+        assert case.targets is not None
+        target = {}
     env = {**worker_env(handler_ctx.settings, tmp_path), "DPS_WORKER_CONCURRENCY": "4"}
 
     async def submit(label: str) -> str:
+        written = {**target, **(case.targets or {}).get(label, {}), "expected_rows": ROWS}
         spec = run_spec(
             case.conn.id, case.objects[label], case.snapshots[label],
-            {**target, "expected_rows": ROWS}, {"key_material": key}, "obfuscate",
+            written, {"key_material": key}, "obfuscate",
         )  # fmt: skip
         spec = spec.model_copy(
             update={
@@ -357,6 +486,14 @@ async def test_resume_after_kill(
     assert evidence is not None and evidence.pack.counts["resumed_partitions"] >= 1
     verification = evidence.pack.verification  # counts, statuses and column names only
     assert verification["passed"], {k: v for k, v in verification.items() if k != "hits"}
+    # every case is ledgered (in_place, append, a key-less table load): finalize says it cleared
+    reference = await get_evidence(TENANT, ref.progress.evidence_id or "")
+    assert reference is not None
+    cleared = (
+        verification.get("write_ledger_cleared"),
+        reference.pack.verification.get("write_ledger_cleared"),
+    )
+    assert cleared == (True, True), cleared
     logs = "".join(p.read_text(errors="replace") for p in tmp_path.glob("*.log"))
     from tools.seed_model import seed_customers
 

@@ -108,10 +108,9 @@ def oracle_admin() -> Iterator[oracledb.Connection]:
     conn.close()
 
 
-@pytest.fixture(scope="session")
-def oracle_schema(oracle_admin: oracledb.Connection) -> Iterator[OracleTestSchema]:
-    """``DPS_T_<6 hex>`` (owner) and ``DPS_T_<6 hex>_RO`` (CREATE SESSION only), dropped at the end."""
-    oracledb = pytest.importorskip("oracledb")
+def _create_schema(admin: oracledb.Connection) -> OracleTestSchema:
+    """``DPS_T_<6 hex>`` (owner: tables, sequences, quota) and ``DPS_T_<6 hex>_RO`` (CREATE
+    SESSION only)."""
     tag = secrets.token_hex(3).upper()
     schema = OracleTestSchema(
         dsn=oracle_dsn(),
@@ -120,7 +119,7 @@ def oracle_schema(oracle_admin: oracledb.Connection) -> Iterator[OracleTestSchem
         ro_user=f"DPS_T_{tag}_RO",
         ro_password="p" + secrets.token_hex(12),
     )
-    with oracle_admin.cursor() as cur:
+    with admin.cursor() as cur:
         cur.execute(
             f'CREATE USER "{schema.owner}" IDENTIFIED BY "{schema.owner_password}" '
             "DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS"
@@ -128,15 +127,39 @@ def oracle_schema(oracle_admin: oracledb.Connection) -> Iterator[OracleTestSchem
         cur.execute(f'GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE TO "{schema.owner}"')
         cur.execute(f'CREATE USER "{schema.ro_user}" IDENTIFIED BY "{schema.ro_password}"')
         cur.execute(f'GRANT CREATE SESSION TO "{schema.ro_user}"')
-    yield schema
+    return schema
+
+
+def _drop_schema(admin: oracledb.Connection, schema: OracleTestSchema) -> None:
+    oracledb = pytest.importorskip("oracledb")
     for user in (schema.ro_user, schema.owner):
         for _ in range(10):
             try:
-                with oracle_admin.cursor() as cur:
+                with admin.cursor() as cur:
                     cur.execute(f'DROP USER "{user}" CASCADE')
                 break
             except oracledb.DatabaseError:  # ORA-01940: a pool still holds a session — retry
                 time.sleep(1)
+
+
+@pytest.fixture(scope="session")
+def oracle_schema(oracle_admin: oracledb.Connection) -> Iterator[OracleTestSchema]:
+    """``DPS_T_<6 hex>`` (owner) and ``DPS_T_<6 hex>_RO`` (CREATE SESSION only), dropped at the end."""
+    pytest.importorskip("oracledb")
+    schema = _create_schema(oracle_admin)
+    yield schema
+    _drop_schema(oracle_admin, schema)
+
+
+@pytest.fixture(scope="session")
+def oracle_target_schema(oracle_admin: oracledb.Connection) -> Iterator[OracleTestSchema]:
+    """A second per-session owner, the login of a **separate** target connection (the demo's
+    ``CRM`` → ``CRM_MASKED``): it holds no grant on :func:`oracle_schema`'s tables, so it cannot
+    see the source object. Dropped at the end."""
+    pytest.importorskip("oracledb")
+    schema = _create_schema(oracle_admin)
+    yield schema
+    _drop_schema(oracle_admin, schema)
 
 
 @pytest.fixture

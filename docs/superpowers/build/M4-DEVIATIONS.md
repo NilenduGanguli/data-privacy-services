@@ -1776,3 +1776,60 @@ under `~/.cache/dps-build/s2-fix-r2/logs/`).
   error) or was canceled is no sweep. `FailedSweep.where` gains `"scan"`; the posture's
   `sweeps_passed_pct` counts UI sweeps too. Test: `tests/test_reports.py::
   test_a_ui_sweep_means_the_same_on_every_reports_surface`.
+
+## M4 merged into main — S1 integration fixes (WP-I, 2026-10-15)
+
+`git merge --no-ff m4` on main (`5959a75`, `merge: M4 into main`; main had gained the S1-M3 post-merge
+fixes `5c11e49`, `d2fdc3f` since the pre-merge). One textual conflict, contract §8.1 (the `admin` scope):
+both sides kept — main's "every write to a `production`-tagged connection (`in_place`, `append`, `table`
+and `files` alike, and the retry of a run that writes one)" and `m4`'s "routes that serve any job kind
+check the owning job's kind". One semantic conflict: both sides added `import type { EvidenceOut }` to
+`frontend/src/pages/EvidencePack.test.tsx` (main in a combined import, `m4` on its own line); Vitest
+does not type-check, so only `tsc --noEmit` (the console build in the app image) failed — one import kept.
+
+Then the open S2 findings, each fixed test-first (`tests/scanner/test_capture_select_drawn.py`: 33 of its
+first 35 tests failed on the merged code, the two index-299 controls passing — log
+`~/.cache/dps-build/s1-merge-m4/logs/10-select-tests-on-old-code.log`; the placeholder rule below was
+driven by the existing `test_full_demo_crawl_in_memory`, red on the first version of the fix, and its
+own unit test):
+
+- **A closed select is masked by what it draws, in three more shapes** (`S2-captures-privacy-r3` B1a,
+  B1b, B1c; `dom.py` `EXTRACT_JS`/`CENSUS_JS`, `models.FieldFacts`, `classify.shown_texts`/`shown_text`/
+  `classify_fields`/`sensitive_prefilled`, `capture._shown`/`obfuscated_capture`).
+  - **B1a — an empty or blank `value`.** `shown_text` kept only selected options with a non-empty
+    value, so `<option value="" selected>` holding an account number was never shown, classified or
+    masked, even under an "Account number" label. What a select shows is now what it draws, whatever
+    the option's value: whether an option is a real choice is the fill's rule (`personas_fill._usable`,
+    unchanged). A select classified personal is therefore also masked while it draws its placeholder
+    ("Choose…"). A placeholder is no value of the page, though (`classify.draws_placeholder`: every
+    selected option listed has an empty or blank value or is disabled, and everything drawn reads as a
+    placeholder by the fill's own rule, now `classify.PLACEHOLDER_OPTION`): it is not swept for
+    elsewhere on the page (other selects reading "Choose…" stay readable) and it alone takes no
+    obfuscated capture — without that rule every form page with a personal select took one, which
+    `test_crawler.py::test_full_demo_crawl_in_memory` caught (the identity page gained a
+    `masked_capture`). A value behind an empty `value`, an option selected past the list and anything
+    a customizable select draws are never placeholders.
+  - **B1b — a selected option past the first 300.** `EXTRACT_JS` lists the first 300 options (the fill
+    and the inventory's `options_count` are unchanged) but now reads every selected option apart
+    (`el.selectedOptions`; more than 300 selected, or more text than the read budget, marks the
+    extraction `truncated`: no capture). `FieldFacts.drawn` holds what the closed select draws.
+  - **B1c — a customizable select** (computed `appearance: base-select`, or a `<button>` /
+    `<selectedcontent>` in it; Chromium 140 ships it). Measured in Chromium 1187: with a `<button>`
+    child the closed select draws that button — a `<selectedcontent>` clone of the selected option's
+    *content*, or the author's own text — not the option's `label`; without one it draws the label, as
+    a classic select. `EXTRACT_JS` reads the button / `<selectedcontent>` text first in
+    `FieldFacts.drawn` and sets `FieldFacts.custom_select`; `CENSUS_JS` now reads text under a select's
+    `<button>`/`<selectedcontent>` (still skipping option text, which a closed select draws itself);
+    and `sensitive_prefilled` boxes a customizable select **whenever it draws text** — labelled
+    `SELECT` when nothing classifies it — because it draws author markup the field model reads only
+    as text (a bare account number no detector reads, in the verifier's "Debit from" case).
+  - The obfuscated capture also sweeps what a sensitive select draws (it was boxed but its copies
+    elsewhere were not), as the masked capture already did.
+  - Tests: classification of each shape and `FieldFacts.drawn` / `custom_select` (no browser); the
+    extraction and census in Chromium; the masked capture leaves 0 pixels of each select's background
+    (12 pages: B1a ×4, B1b ×4 + the index-299 control, B1c ×3); OCR: the masked capture and both
+    obfuscated captures read 0 where the plain screenshot reads the value (12 pages); `ScanRunner`, both
+    modes, on the same selects next to a rendered e-mail (the verifier's r3c pages): `original`,
+    `annotated`, both `filled_*` and `masked_capture` read 0 (4 cases × 2 modes). Every value is made up.
+  - Not changed: the known limits of the doc (a select a script fills after the page was read is the
+    select form of "an input value a script sets after the page was read"; S2 r3 N3).

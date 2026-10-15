@@ -176,7 +176,7 @@ export function StepConnect({ d, dispatch, auth, connections, onConnectionsChang
               <label className="switch plain"><input type="checkbox" role="switch" checked={writable} onChange={(e) => setWritable(e.target.checked)} /><span className="track" />Writable (In place and Append)</label>
               {d.production && <span className="chip amber">production · writes need the admin scope</span>}
             </div>
-            <div className="help">Reads are unaffected. Writing back to a production-tagged connection (In place or Append) needs the admin scope, and so does tagging it. A production-tagged connection always uses a secret reference.</div>
+            <div className="help">Reads are unaffected. Any write to a production-tagged connection (in place, append, a table load or files) needs the admin scope, and so does tagging it. A production-tagged connection always uses a secret reference.</div>
           </div>
         )}
       </div>

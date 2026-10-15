@@ -4,6 +4,7 @@ terminal, plus small helpers (discover-and-accept, a PVC target, sealed-key chec
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import secrets
 from collections.abc import Awaitable, Callable
@@ -109,3 +110,59 @@ async def register_pvc(tenant: str, ctx: HandlerContext, *, base_path: str) -> C
 def json_from_export(ctx: HandlerContext, key: str) -> Any:
     """Read a JSON object written under ``DPS_EXPORT_ROOT`` (a PVC target)."""
     return json.loads((Path(ctx.settings.export_root) / key).read_text(encoding="utf-8"))
+
+
+def derived_key(label: str) -> dict[str, Any]:
+    """Caller key material derived from ``label``: a fixed key a test can pin for a property it
+    needs (a test fixture, not a secret — the DEK is ``sha256`` of the label)."""
+    from dps.engine.transform.crypto import KeyMaterial, b64u, key_check_value
+
+    km = KeyMaterial(
+        kid="k_" + hashlib.sha256(f"kid|{label}".encode()).hexdigest()[:16],
+        dek=b64u(hashlib.sha256(f"dek|{label}".encode()).digest()),
+        consistency_scope="key",
+    )
+    km.kcv = key_check_value(km)
+    return km.model_dump(mode="json")
+
+
+def masked_values(
+    ctx: HandlerContext,
+    snapshot: ClassificationSnapshot,
+    key_material: dict[str, Any],
+    path: str,
+    values: list[Any],
+) -> dict[Any, Any]:
+    """source value → the value an obfuscate run of ``snapshot`` under ``key_material`` writes at
+    the top-level ``path``: the run's own column plan (``build_column_plans``) through the
+    engine's batch transformer — deterministic methods only (FPE, ``det_token``). It lines target
+    rows up with their source rows without reading any key from DPS."""
+    from dps.engine.batch import BatchTransformer
+    from dps.engine.transform.crypto import key_material_from_caller
+    from dps.layers.connectors.targets import build_column_plans
+
+    column = next(c for c in snapshot.columns if c.path == path)
+    [plan] = [
+        p
+        for p in build_column_plans(
+            snapshot,
+            mode="obfuscate",
+            write_mode="table",
+            pk_strategy=None,
+            projection=[column.name],
+        )
+        if p.path == path
+    ]
+    keys = {k: None for k in snapshot.shape.key if k != column.name}
+    out = BatchTransformer(
+        ctx.engine,
+        policy=ctx.engine.policy(snapshot.policy_name),
+        mode="obfuscate",
+        columns=[plan],
+        shape=snapshot.shape,
+        key=key_material_from_caller(key_material),
+        seed=None,
+        locale="en_IN",
+        unclassified="keep",
+    ).transform([{**keys, column.name: v} for v in values])
+    return {v: r[column.name] for v, r in zip(values, out.rows, strict=True)}

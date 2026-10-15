@@ -85,13 +85,19 @@ def _drop_target(engine: str) -> None:
 
 
 def _oracle_survivors() -> tuple[int, int, dict[str, int]]:
-    """(retail source rows, target rows, column → target values equal to any source value)."""
+    """(retail source rows, target rows, check → count): per column, target rows that kept their
+    own source row's value (rows aligned on the kept, unique FF9 ``LAST_CONTACT_AT``), and for the
+    text columns (``*``) target values equal to any source value. ``MOBILE`` is compared row by
+    row only: the ``phone`` method is FF1 over the subscriber digits, so at the demo's 10 000
+    retail rows a masked number lands on another customer's number in about 0.5 % of runs (ten
+    digits per country code; S1-M3 r2 gates B1, the class of ``test_mongo_pipeline``'s flake)."""
     import oracledb
 
     from tests.fixtures.m3_services import oracle_dsn
 
     cols = ("FULL_NAME", "EMAIL", "MOBILE", "NATIONAL_ID", "TAX_ID")
-    sel = ", ".join(cols)
+    text = ("FULL_NAME", "EMAIL", "NATIONAL_ID", "TAX_ID")
+    sel = ", ".join(cols) + ", TO_CHAR(LAST_CONTACT_AT, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')"
 
     def text_lobs(cursor: Any, meta: Any) -> Any:  # a widened target column may be a CLOB
         if meta.type_code in (oracledb.DB_TYPE_CLOB, oracledb.DB_TYPE_NCLOB):
@@ -108,10 +114,19 @@ def _oracle_survivors() -> tuple[int, int, dict[str, int]]:
             cur.outputtypehandler = text_lobs
             cur.execute(f"SELECT {sel} FROM CRM_MASKED.CUSTOMERS_CONSOLE")
             target = cur.fetchall()
-    out: dict[str, int] = {}
+
+    def norm(value: Any) -> str | None:
+        return None if value is None else str(value).rstrip()
+
+    at = len(cols)  # the LAST_CONTACT_AT text
+    by_ts = {r[at]: r for r in source}
+    pairs = [(by_ts[t[at]], t) for t in target if t[at] in by_ts]
+    out: dict[str, int] = {"unaligned": len(target) - len(pairs)}
     for i, col in enumerate(cols):
-        seen = {str(r[i]).rstrip() for r in source if r[i] is not None}
-        out[col] = sum(1 for r in target if r[i] is not None and str(r[i]).rstrip() in seen)
+        out[col] = sum(1 for s, t in pairs if s[i] is not None and norm(s[i]) == norm(t[i]))
+        if col in text:
+            seen = {norm(r[i]) for r in source if r[i] is not None}
+            out[f"{col}*"] = sum(1 for r in target if r[i] is not None and norm(r[i]) in seen)
     return len(source), len(target), out
 
 

@@ -5,7 +5,14 @@ The registry opens the MongoDB connector from a stored connection (the ``uri`` o
 handlers read keyset pages on ``_id``, transform nested leaves at their concrete paths and write
 through ``MongoWriter``; finalize clears the write ledger. The documents are the demo profiles of
 ``tools/seed_mongo.py`` (the shared customer space). Every masking claim is a source-vs-target
-comparison (counts only): for each sensitive leaf path, how many target values equal a source value.
+comparison (counts only), document by document — each target document against its **own** source
+document (a ``table`` load keeps ``_id``; an append keeps the per-customer account balance) — and,
+for text leaves, against every source value too. The ``fpe_digits`` customer id is compared
+document by document only: FF1 permutes its eight digits under the run's key, so a masked id can
+equal *another* customer's id (about 1.4 % of runs at 1,200 profiles), which the run's strict
+per-row verification rightly allows and the former any-value check counted as a survivor (S1-M3
+post-merge verification r2, gates B1). The table and append runs use a fixed key under which that
+happens, so both cases are met on every run.
 """
 
 from __future__ import annotations
@@ -25,7 +32,13 @@ from dps.layers.connectors.docpaths import values_at
 from dps.layers.connectors.evidence import get_evidence
 from dps.layers.connectors.submit import submit_run
 from dps.worker import HandlerContext
-from tests.connectors.helpers import db_key_enc, discover_and_accept, drive
+from tests.connectors.helpers import (
+    db_key_enc,
+    derived_key,
+    discover_and_accept,
+    drive,
+    masked_values,
+)
 from tests.connectors.test_run_modes import run_spec
 from tests.fixtures.m3_services import mongo_uri
 from tests.fixtures.sources import write_ref
@@ -43,6 +56,13 @@ SENSITIVE = (
     "$.kyc.taxId",
     "$.accounts[*].iban",
 )
+#: The customer id (``fpe_digits``): compared document by document only (module docstring).
+ID_PATH = "$.customerId"
+#: The text leaves: compared document by document and against every source value.
+TEXT_LEAVES = tuple(p for p in SENSITIVE if p != ID_PATH)
+#: ``derived_key`` label of a fixed key under which FF1 maps at least one seeded customer id onto
+#: another seeded customer's id and none onto itself (each test re-checks this premise).
+COLLIDING_KEY = "mongo-pipeline-collision-16"
 #: Without NER the sample does not show these as addresses: the reviewer maps them.
 ADDRESS_REVIEW = [
     SnapshotOverride(
@@ -100,21 +120,72 @@ def register_mongo(handler_ctx: HandlerContext) -> RegisterMongo:
     return register
 
 
+Pairs = list[tuple[dict[str, Any], dict[str, Any]]]
+
+
 def survivors(source: list[dict[str, Any]], target: list[dict[str, Any]], path: str) -> int:
-    """Target leaves at ``path`` that equal a source leaf at ``path`` (counts only)."""
+    """Target leaves at ``path`` that equal **any** source leaf at ``path`` (counts only) — for
+    text leaves; a format-preserving id may equal another document's id by design."""
     seen = {v for d in source for v in values_at(d, path) if v is not None}
     return sum(1 for d in target for v in values_at(d, path) if v in seen)
+
+
+def same_document(pairs: Pairs, path: str) -> int:
+    """Leaves at ``path`` that kept their **own** source document's value (counts only)."""
+    return sum(
+        1
+        for src, out in pairs
+        for a, b in zip(values_at(src, path), values_at(out, path), strict=False)
+        if a is not None and a == b
+    )
 
 
 def present(docs: list[dict[str, Any]], path: str) -> int:
     return sum(1 for d in docs for v in values_at(d, path) if v is not None)
 
 
+def balance(doc: dict[str, Any]) -> str:
+    """The first account's balance as text: kept by every run, unique per demo customer."""
+    return str(doc["accounts"][0]["balance"])
+
+
+def assert_masked(source: list[dict[str, Any]], target: list[dict[str, Any]], pairs: Pairs) -> None:
+    """Source vs target, counts only (each count is bound before its assert, so a failure prints
+    a path and a number, never a document): every sensitive leaf is present as often as in the
+    source and kept no document's own value; no text leaf equals any source value."""
+    for path in SENSITIVE:
+        written, read = present([o for _, o in pairs], path), present([s for s, _ in pairs], path)
+        assert written == read > 0, (path, written, read)
+        same = same_document(pairs, path)
+        assert same == 0, (path, same)
+    for path in TEXT_LEAVES:
+        anywhere = survivors(source, target, path)
+        assert anywhere == 0, (path, anywhere)
+
+
+def colliding(ctx: HandlerContext, snapshot: Any, ids: list[str]) -> tuple[dict[str, str], int]:
+    """``COLLIDING_KEY``'s masked id per seeded id, and how many land on *another* seeded id; the
+    premise that makes a test meet the cross-document equality: at least one, no fixed point."""
+    mapping = masked_values(ctx, snapshot, derived_key(COLLIDING_KEY), ID_PATH, ids)
+    seeded = set(ids)
+    fixed = sum(1 for v in ids if mapping[v] == v)
+    crossed = sum(1 for v in ids if mapping[v] != v and mapping[v] in seeded)
+    assert (fixed, crossed > 0) == (0, True), (fixed, crossed)
+    return mapping, crossed
+
+
 async def _run(
-    ctx: HandlerContext, conn: Connection, obj: ObjectRef, snap_id: str, target: dict[str, Any]
+    ctx: HandlerContext,
+    conn: Connection,
+    obj: ObjectRef,
+    snap_id: str,
+    target: dict[str, Any],
+    *,
+    key: dict[str, Any] | None = None,
 ) -> Any:
+    extra = {"consistency": {"scope": "key", "key_material": key}} if key else {}
     sub = await submit_run(
-        run_spec(conn.id, obj, snap_id, target, source={"partition_rows": 1000}),
+        run_spec(conn.id, obj, snap_id, target, source={"partition_rows": 1000}, **extra),
         tenant_id="t1",
         principal=LOCAL_PRINCIPAL,
         settings=ctx.settings,
@@ -134,25 +205,31 @@ async def test_mongo_profiles_are_discovered_and_masked_into_a_created_collectio
     for path in SENSITIVE:
         assert cols[path].entity_type and cols[path].method.method != "keep", path
     assert cols["$.segment"].method.method == "keep" and cols["$._id"].method.method == "keep"
+    mapping, crossed = colliding(handler_ctx, snap, [d["customerId"] for d in source])
     target = {"write_mode": "table", "connection_id": conn.id, "object": {"name": "profiles_uat"}}
-    job = await _run(handler_ctx, conn, obj, snap.id, target)
-    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    job = await _run(handler_ctx, conn, obj, snap.id, target, key=derived_key(COLLIDING_KEY))
+    assert job.state == JobState.succeeded, (job.error_code, job.error)  # strict verification
     assert job.progress.rows_written == ROWS and job.progress.partitions_done >= 2
     out = list(mongo_client[mongo_db]["profiles_uat"].find({}))
     assert len(out) == ROWS and {d["_id"] for d in out} == {d["_id"] for d in source}
-    for path in SENSITIVE:  # source vs target, per sensitive leaf (counts only)
-        assert present(out, path) == present(source, path) > 0, path
-        assert survivors(source, out, path) == 0, path
     by_id = {d["_id"]: d for d in source}
-    for d in out:  # free-text notes keep no source e-mail; kept fields are byte-identical
-        src = by_id[d["_id"]]
-        assert src["contact"]["email"] not in d["notes"]
-        assert (d["segment"], d["riskScore"], d["tags"]) == (
-            src["segment"],
-            src["riskScore"],
-            src["tags"],
-        )
-        assert type(d["riskScore"]) is type(src["riskScore"])
+    pairs = [(by_id[d["_id"]], d) for d in out]  # a table load keeps _id
+    assert_masked(source, out, pairs)
+    keyed = sum(1 for src, d in pairs if d["customerId"] == mapping[src["customerId"]])
+    assert keyed == ROWS  # each id is its own source id under the key ...
+    crossed_out = survivors(source, out, ID_PATH)
+    assert crossed_out == crossed > 0  # ... and some equal another customer's id (not survivors)
+    # free-text notes keep no source e-mail; kept fields are byte-identical (counts only)
+    in_notes = sum(1 for src, d in pairs if src["contact"]["email"] in d["notes"])
+    assert in_notes == 0
+    changed = sum(
+        1
+        for src, d in pairs
+        if (d["segment"], d["riskScore"], d["tags"])
+        != (src["segment"], src["riskScore"], src["tags"])
+        or type(d["riskScore"]) is not type(src["riskScore"])
+    )
+    assert changed == 0
     assert await db_key_enc(job.id) is None
     ev = await get_evidence("t1", job.progress.evidence_id or "")
     assert ev is not None and ev.pack.verification["passed"], ev and ev.pack.verification
@@ -176,20 +253,25 @@ async def test_mongo_in_place_masks_leaves_and_finalize_clears_the_ledger(
     assert job.progress.rows_written == ROWS
     out = list(mongo_client[mongo_db]["profiles"].find({}))
     assert len(out) == ROWS
-    for path in SENSITIVE[1:]:
-        assert survivors(source, out, path) == 0, path
-    assert survivors(source, out, "$.customerId") == ROWS  # reviewed to keep
     by_id = {d["_id"]: d for d in source}
-    for d in out:  # structure and every untouched leaf unchanged
-        src = by_id[d["_id"]]
-        assert set(d) == set(src) and set(d["profile"]) == set(src["profile"])
-        assert len(d["accounts"]) == len(src["accounts"])
-        assert d["accounts"][0]["balance"] == src["accounts"][0]["balance"]
-        assert (d["segment"], d["riskScore"], d["kyc"].get("verifiedAt")) == (
-            src["segment"],
-            src["riskScore"],
-            src["kyc"].get("verifiedAt"),
-        )
+    pairs = [(by_id[d["_id"]], d) for d in out]
+    for path in TEXT_LEAVES:  # counts only
+        same, anywhere = same_document(pairs, path), survivors(source, out, path)
+        assert (same, anywhere) == (0, 0), (path, same, anywhere)
+    kept = same_document(pairs, ID_PATH)
+    assert kept == ROWS  # reviewed to keep
+    # structure and every untouched leaf unchanged (counts only)
+    changed = sum(
+        1
+        for src, d in pairs
+        if set(d) != set(src)
+        or set(d["profile"]) != set(src["profile"])
+        or len(d["accounts"]) != len(src["accounts"])
+        or balance(d) != balance(src)
+        or (d["segment"], d["riskScore"], d["kyc"].get("verifiedAt"))
+        != (src["segment"], src["riskScore"], src["kyc"].get("verifiedAt"))
+    )
+    assert changed == 0
     assert mongo_client[mongo_db]["dps_write_ledger"].count_documents({"job_id": job.id}) == 0
     ev = await get_evidence("t1", job.progress.evidence_id or "")
     assert ev is not None and ev.pack.verification["passed"]
@@ -202,16 +284,24 @@ async def test_mongo_append_generate_on_the_same_collection(
     conn = await register_mongo("t1", database=mongo_db, roles={"source", "target"}, name="mdb")
     obj = ObjectRef(name="profiles")
     snap = await discover_and_accept(handler_ctx, "t1", conn.id, obj, overrides=ADDRESS_REVIEW)
+    mapping, crossed = colliding(handler_ctx, snap, [d["customerId"] for d in source])
     target = {"write_mode": "append", "confirm_write": True, "pk_strategy": {"kind": "generate"}}
-    job = await _run(handler_ctx, conn, obj, snap.id, target)
-    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    job = await _run(handler_ctx, conn, obj, snap.id, target, key=derived_key(COLLIDING_KEY))
+    assert job.state == JobState.succeeded, (job.error_code, job.error)  # strict verification
     assert job.progress.rows_written == ROWS
     coll = mongo_client[mongo_db]["profiles"]
     assert coll.count_documents({}) == 2 * ROWS
     old = {d["_id"] for d in source}
     appended = [d for d in coll.find({}) if d["_id"] not in old]
     assert len(appended) == ROWS
-    for path in SENSITIVE:
-        assert survivors(source, appended, path) == 0, path
+    # each appended document against its own source document: new _ids, the kept balance
+    by_balance = {balance(d): d for d in source}
+    pairs = [(by_balance[balance(d)], d) for d in appended if balance(d) in by_balance]
+    assert len(pairs) == ROWS
+    assert_masked(source, appended, pairs)
+    keyed = sum(1 for src, d in pairs if d["customerId"] == mapping[src["customerId"]])
+    assert keyed == ROWS
+    crossed_out = survivors(source, appended, ID_PATH)
+    assert crossed_out == crossed > 0
     ev = await get_evidence("t1", job.progress.evidence_id or "")
     assert ev is not None and ev.pack.verification["passed"]

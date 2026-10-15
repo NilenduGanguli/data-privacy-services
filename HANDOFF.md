@@ -201,7 +201,7 @@ and a worker subprocess, resume after kill on Oracle and MongoDB for `in_place` 
 `dps-db`, `source-pg`, `oracle` and `mongo` (`docker compose --profile oracle --profile sources up -d
 dps-db source-pg oracle mongo`), then `DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/e2e`
 (about 3 minutes). They seed `CRM.*`, `crm.profiles` and a PostgreSQL copy in schema `m3e2e`
-themselves and leave `bank` alone. MongoDB is a run source since M3 Task 19 (discovery; `table`, `in_place`, `append` proven; `files` not yet tested for documents); without NER, discovery does not classify nested address fields of a document (no
+themselves and leave `bank` alone. MongoDB is a run source since M3 Task 19 (discovery; `table`, `in_place`, `append` proven; `files` since the post-merge fix of 2026-10-14 — a field holding a sub-document or an array is one JSON-text column, manifest type `document`, in `jsonl`, `csv` and `parquet`); without NER, discovery does not classify nested address fields of a document (no
 column name to go by): map them in review.
 
 
@@ -744,6 +744,17 @@ value. `POST /connections/{id}/test` takes no param overrides, so it always test
 endpoint. Residual: a `jobs` key may still *create* a connection that names any of its own tenant's
 `secret_ref`s with an endpoint of its choice; restrict the key or mount fewer refs per tenant.
 
+Who may write a production connection (D3; widened 2026-10-14, S1-M3 post-merge r1 security B1):
+**every** run that writes a `production`-tagged connection needs the `admin` scope — `in_place`
+and `append` (which also need `confirm_write: true`), and equally a `table` load (`truncate_insert`
+empties an existing table or collection, `upsert` rewrites it, a new table is created in
+production) and a `files` export into a production-tagged `s3`/`pvc` connection; otherwise 403
+`admin_scope_required` from `POST /jobs/run/validate` and `POST /jobs/run`, and no job is created.
+Reading a production *source* into a non-production target stays a `jobs` right. `POST
+/jobs/{id}/retry` re-checks the scope against the job's target connection (its source for
+`in_place` and a same-connection `append`) as tagged now, before any key check, so a `jobs` key
+cannot restart an admin's failed production run.
+
 ## 8. Traps
 
 - **Images and the local stack (M5 Task 24):**
@@ -802,7 +813,13 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
   sets `DPS_COIN_CA_FILE` (preferred) or `DPS_COIN_TLS_INSECURE=true` (+ the staging/prod exception
   flag, §6). Stellar calls verify against `DPS_SSL_CERT_FILE` (httpx's default store when unset).
 - Presidio is recall-only; identifiers with checksums come from the pattern tier regardless.
-  Without the `ner` image, names in free text are not detected (key names still are).
+  Without the `ner` image, names in free text are not detected (key names still are) — except a
+  row's **own** replaced name: an L2 run treats the row's planned name, and each of its words, as a
+  span wherever the row's free text repeats it (whole words, any case; the CRM notes' "KYC call with
+  <first name>"), and the same for any other replaced whole value (a city) — from two characters up
+  (two-letter first names, three-letter cities; a gender or nationality value from four), longest
+  first. Names of *other* people in free text still need NER, and so does a city that only the free
+  text holds (MongoDB `crm.profiles` has no city field: its notes keep the city in both modes).
 - The access log is off (`--no-access-log`): it is stdlib logging and bypasses the allow-list.
 - UK mobiles in the Ofcom drama range (`+44 7700 900xxx`, what the surrogate engine generates for
   GB) are not detected as phones **in free text**. A job whose free-text column repeats such a
@@ -1457,6 +1474,22 @@ demo seed draws the customers from M3's `tools/seed_model.py` and keeps M5's rul
   job replaces a replaced column's value where the row's free text repeats it (Oracle `NOTES` repeat
   the customer's city; D-A surrogates `CITY`, and the sweep failed every Oracle synthesize closed);
   external tokenization pre-tokenizes each leaf a document path matches.
+- Post-merge verification r1 fixes (2026-10-14): a key-less Oracle table synthesizes (the D-A prepare
+  guard no longer counts the `ROWID` pseudo key as a copied key; no file or table ever gets a `ROWID`
+  column); a name's words are row-value spans too, in both modes, so the CRM notes' first name never
+  reaches a target; MongoDB → `files` works in every format (document fields are JSON text, nested
+  BSON leaves converted); Oracle `TIMESTAMP(7-9)` / `WITH TIME ZONE` are exact Parquet strings; every
+  write into a production-tagged connection needs `admin` (above); a MongoDB evidence pack counts
+  each nested leaf under its path, and the console's Evidence page labels leaves by path.
+- Post-merge verification r2 fixes (2026-10-14): row-value spans have their own floor of two
+  characters (r1 searched name words from 3 letters and values from 4: 28 two-letter first names and
+  34 three-letter cities of the 20 000 demo customers stayed in synthetic notes) and match longest
+  first; finalize clears the write ledger of a key-less Oracle `table` load into a table it created
+  on a separate target connection (`CRM` → `CRM_MASKED`: it described the source on the target login,
+  failed silently and left one ledger row per job with `write_ledger_cleared: false`). Ledger rows
+  left by runs before this fix stay in `CRM_MASKED.DPS_WRITE_LEDGER` until deleted by job id. Test
+  oracles compare a format-preserving id row by row only (an FF1 id may equal *another* customer's id;
+  the M2 gate's MongoDB pipeline test went red on that about 1.4 % of runs).
 - Tests: the migration test checks each milestone range and unique numbers; an address-line leaf keeps
   main's own `line1` cue under an e-mail parent.
 
