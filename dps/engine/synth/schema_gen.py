@@ -608,9 +608,10 @@ class _Steering:
 
     A field a ``rule`` constraint writes is not steered: the rule overwrites it in every row, so
     its generated values never reach the output. Once a value is kept although it holds a sample
-    value, the sweep will refuse the run, so nothing is steered any more (``lost``). A value kept
-    although only its own field's ``avoid_in`` test flags it (an ID-like key's sampled value,
-    which the sweep may not look for) stops the steering of that field alone.
+    value, the sweep will refuse the run, so nothing is steered any more (``lost``). A field that
+    cannot get away from its own ``avoid_in`` test (an ID-like key whose range is its sampled
+    values, which the sweep may not look for) stops avoiding them alone: it is still steered
+    around the sample's swept values (``avoid``), the value it gave up on included.
     """
 
     def __init__(
@@ -648,14 +649,21 @@ class _Steering:
         own = self.own.get(field.name)
         return own is not None and own(value)
 
-    def give_up(self, field: FieldSpec, value: Any) -> None:
-        """``value`` is kept although it could not get away from the sample: the sweep will refuse
-        it when the guard flags it, so nothing is steered any more; otherwise only its field
-        avoided it, and that field alone is no longer steered."""
-        if self.avoid is not None and self.avoid(value):
-            self.lost = True
-        else:
-            self.how.pop(field.name, None)
+    def give_up(self, field: FieldSpec, value: Any) -> bool:
+        """``field`` drew ``MAX_SAMPLE_REDRAWS`` values in a row that it is steered away from, the
+        last one ``value``. A field with its own ``avoid_in`` test stops avoiding its own sampled
+        values (it may keep them; review r1 re-check B2: it used to stop being steered at all, and
+        then wrote the swept values in its range) and is still steered around the guard: true when
+        the guard flags ``value``, which is then drawn again (a fresh ``MAX_SAMPLE_REDRAWS``).
+        Otherwise ``value`` is kept; when the guard flags it the sweep will refuse the run, so
+        nothing is steered any more."""
+        if self.own.pop(field.name, None) is not None:
+            if self.avoid is None:
+                self.how.pop(field.name, None)  # nothing else to steer this field around
+                return False
+            return self.avoid(value)
+        self.lost = True  # no own test: the guard flagged ``value`` (``holds``)
+        return False
 
 
 def _skip(field: FieldSpec, row: int, value: Any, steer: _Steering) -> Any:
@@ -663,10 +671,12 @@ def _skip(field: FieldSpec, row: int, value: Any, steer: _Steering) -> Any:
     later row with it), so it stays unique and ascending."""
     offset = steer.offsets.get(field.name, 0)
     skipped = 0
+    budget = MAX_SAMPLE_REDRAWS
     while steer.holds(field, value):
-        if skipped == MAX_SAMPLE_REDRAWS:
-            steer.give_up(field, value)
-            break
+        if skipped == budget:
+            if not steer.give_up(field, value):
+                break
+            budget += MAX_SAMPLE_REDRAWS
         skipped += 1
         value = _sequence(field.params, row + offset + skipped)
     steer.offsets[field.name] = offset + skipped
@@ -730,8 +740,9 @@ def execute_spec(
     happens to hold a sampled one is replaced before the sample sweep sees it. A value still
     holding one after that is kept and the sweep refuses the run. ``avoid_in`` (field name →
     test; ``schema_profile.sample_ids``) is true for a value that field must not take: an ID-like
-    key's own sampled values, steered the same way (not for an ``entity`` field); one it cannot
-    get away from is kept and that field is no longer steered (the sweep need not refuse it).
+    key's own sampled values, steered the same way (not for an ``entity`` field); once a field
+    cannot get away from them it keeps them (the sweep need not refuse them) and is steered around
+    ``avoid`` alone.
     ``sample_redraws`` counts the draws steering discarded. Without ``avoid`` and ``avoid_in`` the
     rows are exactly those of the spec and seed alone; with them, a row differs from them only
     where it held a sample value (and a skipping sequence, from there on).
@@ -762,6 +773,7 @@ def execute_spec(
             if how == "skip":
                 value = _skip(field, row, value, steer)
             attempt = duplicates = redrawn = 0
+            budget = MAX_SAMPLE_REDRAWS
             while True:
                 if field.unique and json.dumps(value, default=str) in seen[field.name]:
                     duplicates += 1
@@ -772,9 +784,10 @@ def execute_spec(
                             f"field {field.name!r} cannot produce {rows} unique values",
                         )
                 elif how == "redraw" and steer.holds(field, value):
-                    if redrawn == MAX_SAMPLE_REDRAWS:
-                        steer.give_up(field, value)
-                        break
+                    if redrawn == budget:
+                        if not steer.give_up(field, value):
+                            break
+                        budget += MAX_SAMPLE_REDRAWS
                     redrawn += 1
                 else:
                     break

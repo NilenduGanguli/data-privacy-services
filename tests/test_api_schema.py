@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 from typing import Any
 
 import pytest
@@ -391,3 +393,57 @@ def test_an_id_like_key_does_not_repeat_the_sample(
     assert r.status_code == 200, r.text
     assert [row["id"] for row in body["rows"]][:3] == [7000, 7005, 7006]
     assert body["report"]["sample_redraws"] >= 4
+
+
+def test_code_and_list_columns_do_not_repeat_a_sampled_id(client: TestClient) -> None:
+    """Review r1 re-check (B1): ``_``, ``;``, quotes and brackets joined digits the way ``-`` does
+    in a date, so a generated ``TXN_9999_9999`` code or ``["9999","9999"]`` list holding a sampled
+    customer ID as a token answered 200 (176-208 values per column at 1 000 rows). A token is a
+    copy: such a value is drawn again, so none is left. Samples are fictitious."""
+    rng = random.Random(14)
+    ids = rng.sample(range(1000, 10000), 300)
+    sample = [
+        {
+            "cust_id": cust_id,
+            "txn_ref": f"TXN_{rng.randint(1000, 9999)}_{rng.randint(1000, 9999)}",
+            "related": json.dumps([str(i) for i in rng.sample(ids, 2)], separators=(",", ":")),
+        }
+        for cust_id in ids
+    ]
+    r = client.post(
+        "/api/v1/schema/synthesize",
+        headers=FULL,
+        json={"sample": sample, "rows": 500, "locale": "en_IN"},
+    )
+    body = r.json()
+    assert r.status_code == 200, r.text
+    generators = {f["name"]: f["generator"] for f in body["spec"]["fields"]}
+    assert generators["txn_ref"] == generators["related"] == "pattern"
+    assert body["report"]["verification"]["passed"] and body["report"]["sample_redraws"] > 0
+    tokens = [
+        token
+        for row in body["rows"]
+        for column in ("txn_ref", "related")
+        for token in re.findall(r"[0-9]+", str(row[column]))
+    ]
+    assert len(tokens) > 1000
+    assert len(set(tokens) & {str(i) for i in ids}) == 0  # a count: no value in a message
+
+
+def test_a_dense_id_next_to_a_swept_id_is_not_refused(client: TestClient) -> None:
+    """Review r1 re-check (B2): an ``id`` whose sampled values fill its range (1000..1099, a later
+    page of a table) gave up steering altogether once it could not avoid them, wrote the sampled
+    customer IDs that lie inside its range, and every call was refused (422 ``leakage``;
+    ``a46d1c5`` answered 200). It now stops avoiding its own values only."""
+    rng = random.Random(16)
+    cust = rng.sample(range(1000, 1100), 20) + rng.sample(range(2000, 10000), 80)
+    rng.shuffle(cust)
+    sample = [{"id": 1000 + i, "cust_id": c} for i, c in enumerate(cust)]
+    for _ in range(3):
+        r = client.post(
+            "/api/v1/schema/synthesize", headers=FULL, json={"sample": sample, "rows": 300}
+        )
+        body = r.json()
+        assert r.status_code == 200, r.text
+        assert body["report"]["verification"]["passed"]
+        assert len({row["id"] for row in body["rows"]} & set(cust)) == 0

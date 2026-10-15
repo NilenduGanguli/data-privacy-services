@@ -154,14 +154,20 @@ with it (name, e-mail and birth date still agree) — and then the rows are swep
 values; the request fails closed (422 `leakage`, no value echoed) on a match, which is then a spec
 literal or a value that could not get away from the sample. The sweep finds an all-digit sample
 value of up to eight digits (an ID, a date) only where it starts and ends at the edge of a run of
-digits or at whitespace, so ID `1001` is found in `1001`, `1001.0`, `1001.00`, `CUST-1001`,
-`x1001@…` or `1001, 1002` but not inside `2010-01-04`, `21001.5` or `1001-2020`; one of nine digits
-or more (a mobile, a card number) anywhere in the digits (`+91 98100 10012`). It does not look for
+digits or at a break: any character that is neither a letter, a digit nor one of `-` `/` `.` `:`
+`,`, which join digits as in a date, an amount or a range (whitespace, `_`, `;`, `|`, quotes,
+brackets, `#` and `+` are breaks; full-width forms count as their ASCII ones). So ID `1001` is
+found in `1001`, `1001.0`, `1001.00`, `CUST-1001`, `x1001@…`, `1001, 1002`, `1001;1002`,
+`["1001","1002"]` or `TXN_4821_1001`, but not inside `2010-01-04`, `21001.5`, `1001-2020`,
+`1001,1002` or `1001/1002`; one of nine digits or more (a mobile, a card number) anywhere in the
+digits (`+91 98100 10012`). It does not look for
 gender, nationality, city or card expiry values, which are generated from small fixed lists (a
 generated `Mumbai` is not a copy, and avoiding the sample's cities would show them by their
 absence). A key that names an ID or a reference (`id`, `order_ref`, `invoiceNo`) avoids its own
 sampled values of four characters or more, even when the detector does not type it; such a field
-is steered, not swept, so one whose range holds nothing else keeps them. `report.sample_redraws` counts the draws steering discarded; the rows are a function of
+is steered, not swept, so one whose range holds nothing else keeps them, and is still steered
+around the sample's swept values. `report.sample_redraws` counts the draws steering discarded; the
+rows are a function of
 the spec, the seed, the row count and the sample, so replaying the returned spec and seed without
 the sample gives the same rows except where `sample_redraws` steered — which is also why the seed
 stays secret: with the output, the spec and the seed, a replay shows which generated values

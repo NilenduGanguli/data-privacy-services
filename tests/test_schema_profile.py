@@ -7,6 +7,7 @@ import math
 import random
 import re
 import time
+import unicodedata
 from collections.abc import Sequence
 from decimal import Decimal, localcontext
 from typing import Any
@@ -829,8 +830,10 @@ def test_live_sample_with_presidio_keeps_names_and_types() -> None:
 #: a date, an amount, a code. None of them is a copy.
 ACCIDENTAL: list[Any] = ["2010-01-04", "2001-10-03", 21001.5, 1001.25, "x10012", 41003, "1001-2020"]
 #: Copies: an ID (a value, an integral float or numeric string, full-width digits, inside a code
-#: or an e-mail, next to another ID across a space), a sampled date (also inside a datetime, after
-#: a ``T`` or before a space), a sampled name (re-cased, inside text) and an e-mail.
+#: or an e-mail, next to another ID across a space or any separator that never joins the digits of
+#: a date, an amount or a range: ``;``, ``|``, ``_``, quotes, brackets, ``#``, ``+``, a zero-width
+#: space), a sampled date (also inside a datetime, after a ``T`` or before a space or an ``_``, or
+#: in a ``;`` list), a sampled name (re-cased, inside text) and an e-mail.
 LEAKS: list[Any] = [
     1001,
     1002.0,
@@ -841,12 +844,27 @@ LEAKS: list[Any] = [
     "1003 1004",
     "1001.00",
     "1,002.00",
+    "1001;1002",
+    "1001|1002",
+    '["1001","1002"]',
+    "TXN_4821_1003",
+    "1001_1002",
+    "(1001)(1002)",
+    "#1001#1002",
+    "1001+1002",
+    "1003\u200b1004",
     "2019-04-11",
     "2016-09-02T08:00:00+00:00",
     "2016-09-02 10:15:00",
+    "2016-09-02;2019-04-11",
+    "2016-09-02_10:15:00",
+    "[2016-09-02]10:15",
     "met ARJUN MEHTA today",
     "priya.nair@example.in",
 ]
+#: Joined like a date, an amount or a range (``-`` ``/`` ``.`` ``:`` ``,``, also full-width), so not
+#: read as two IDs: documented trade-offs, not refused.
+JOINED: list[Any] = ["1003-07", "1003/1004", "1001,1002", "[1001,1002]", "１００１－２０２０"]
 
 
 def _seeds(count: int) -> list[bytes]:
@@ -861,16 +879,19 @@ def test_the_sample_sweep_matches_numbers_as_whole_digit_runs() -> None:
     """Live run at 100 rows: a sampled ID 1001 was "found" inside generated dates (2010-01-04) and
     amounts (21001.5). A short all-digit original now counts only from a break to a break (the
     edge of a run of digits, or whitespace: review r1 found ``1001, 1002`` and a space-separated
-    datetime let through by whole runs alone); every copy still fails, and the guard the executor
-    steers with flags exactly what the sweep refuses."""
+    datetime let through by whole runs alone; or any other character that never joins the digits
+    of a date, an amount or a range: its re-check found ``1001;1002``, ``["1001","1002"]`` and
+    ``TXN_4821_1003`` let through); every copy still fails, and the guard the executor steers with
+    flags exactly what the sweep refuses."""
     result = profile_from_sample(LIVE_SAMPLE, DETECTOR)
     assert [f.entity_type for f in result.profile.fields][0] == "CUSTOMER_ID"
-    assert verify_against_sample([{"v": v} for v in ACCIDENTAL], result).passed
+    assert verify_against_sample([{"v": v} for v in [*ACCIDENTAL, *JOINED]], result).passed
     for value in LEAKS:
         assert not verify_against_sample([{"v": value}], result).passed, value
     guard = sample_guard(result)
     assert guard is not None
-    assert [v for v in ACCIDENTAL if guard(v)] == [] and [v for v in LEAKS if not guard(v)] == []
+    assert [v for v in [*ACCIDENTAL, *JOINED] if guard(v)] == []
+    assert [v for v in LEAKS if not guard(v)] == []
 
 
 def test_the_guard_flags_exactly_what_the_sweep_refuses() -> None:
@@ -903,15 +924,23 @@ def _naive_found(needle: str, raw: str) -> bool:
     """The sample sweep's rule the slow way, for one original in one output string: a numeric
     string that is a whole number (``1,001.00``) is read as it; a text original, or an all-digit one
     of nine or more digits, is a substring of the normalised string (M0); a shorter all-digit one
-    must start and end at a break, the edge of a run of digits or whitespace in the raw string."""
+    must start and end at a break, the edge of a run of digits or a character of the raw string
+    (read after NFKC) that is neither a letter, a digit nor one of ``-`` ``/`` ``.`` ``:`` ``,``."""
     number = re.fullmatch(r"\s*([+-]?)(\d[\d,]*)\.0+\s*", raw)
     if number:
         raw = number.group(1) + number.group(2).replace(",", "")
-    words = [normalise(word) for word in raw.split()]
+    words: list[str] = []  # each character on its own, so every break is between two of them
+    cuts: list[int] = []
+    for ch in unicodedata.normalize("NFKC", raw):
+        words.append(normalise(ch))
+        if ch == "_" or not (ch.isalnum() or ch in "-/.:,"):
+            cuts.append(len(words) - 1)  # before and after this character
+            cuts.append(len(words))
     hay = "".join(words)
     if re.fullmatch(r"[0-9]+", needle) is None or len(needle) >= 9:
         return needle in hay
-    breaks = {0, len(hay), *itertools.accumulate(len(word) for word in words)}
+    ends = [0, *itertools.accumulate(len(word) for word in words)]
+    breaks = {0, len(hay), *(ends[cut] for cut in cuts)}
     for start in range(len(hay) - len(needle) + 1):
         end = start + len(needle)
         if hay[start:end] != needle:
@@ -921,6 +950,23 @@ def _naive_found(needle: str, raw: str) -> bool:
         if left and right:
             return True
     return False
+
+
+def test_the_sweep_reads_a_string_as_normalise_does() -> None:
+    """The digit rule cuts an output string at every break character and normalises the pieces one
+    by one: together they must be the whole string normalised, where text originals are matched
+    (M0), whatever the script, compatibility form, combining mark or case folding (U+0345, a
+    combining mark and so a break, folds to a letter)."""
+    rng = random.Random(3)
+    alphabet = (
+        "aZ09_-/.:,;| \t\"'[](){}#+@"
+        "\u00e9\u0301\u0345\u1fb3\u2121\u2460\u00bc\u00df\uff11\uff0d\uff0c\u200b\u0130"
+    )
+    for _ in range(3000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+        if schema_profile._INTEGRAL_TEXT.fullmatch(text):  # read as an integer instead
+            continue
+        assert schema_profile._words(text)[0] == normalise(text), ascii(text)
 
 
 def _naive_sweep(rows: list[dict[str, Any]], result: ProfileResult) -> Verification:
@@ -951,12 +997,15 @@ def test_the_indexed_sweep_equals_the_naive_one() -> None:
     rng = random.Random(8)
     sample = [dict(r, ref=f"R{rng.randint(10, 99)}-{1001 + i}") for i, r in enumerate(LIVE_SAMPLE)]
     result = profile_from_sample(sample, DETECTOR)
-    pool: list[Any] = [*ACCIDENTAL, *LEAKS, "Pune", "Navi Mumbai", "xx", "", 0, 3.5, None, True]
-    pool += [str(v) for row in sample for v in row.values()] + [r["ref"].lower() for r in sample]
+    pool: list[Any] = [*ACCIDENTAL, *LEAKS, *JOINED, "Pune", "Navi Mumbai", "xx", "", 0, 3.5, None]
+    pool += [True, *(str(v) for row in sample for v in row.values())]
+    pool += [r["ref"].lower() for r in sample]
+    seps = [" ", " ", ";", "_", "|", "-", "/", ",", ".", ":", '","', "\u200b", "－", "\u0345"]
     rows: list[dict[str, Any]] = []
     for i in range(300):
         picks = rng.sample(pool, 4)
-        mixed = f"{rng.choice(pool)} {rng.randint(0, 99999)} {rng.choice(pool)}"
+        left, right = rng.choice(seps), rng.choice(seps)
+        mixed = f"{rng.choice(pool)}{left}{rng.randint(0, 99999)}{right}{rng.choice(pool)}"
         rows.append({"a": picks[0], "b": {"c": picks[1], "d": picks[2]}, "e": [picks[3], mixed]})
         if i % 50 == 0:
             rows.append({str(rng.choice(pool)): i})  # a key holding a value
@@ -1288,6 +1337,48 @@ def test_an_id_like_key_avoids_its_sampled_values() -> None:
     assert not {r["cust_id"] for r in kept.rows} & {1001, 1002, 1003, 1004}  # still steered
     assert kept.sample_redraws < 40 + schema_gen.MAX_SAMPLE_REDRAWS * 2
     assert verify_against_sample(kept.rows, result).passed
+
+
+def _dense_ids(inside: int, rows: int = 100) -> tuple[list[dict[str, Any]], set[int]]:
+    """A later page of a table: ``id`` 1000..1099 (fictitious), and a customer ID per row of which
+    ``inside`` lie in 1000..1099 (the others in 2000..9999)."""
+    rng = random.Random(5)
+    cust = rng.sample(range(1000, 1000 + rows), inside) + rng.sample(
+        range(2000, 10000), rows - inside
+    )
+    rng.shuffle(cust)
+    return [{"id": 1000 + i, "cust_id": c} for i, c in enumerate(cust)], set(cust)
+
+
+def test_a_field_that_cannot_avoid_its_own_values_still_avoids_the_swept_ones() -> None:
+    """Review r1 re-check (B2): an ``id`` whose sampled values fill its range (``integer`` over
+    1000..1100 for a sampled 1000..1099) gave up on them, and was then not steered at all: it wrote
+    the sampled customer IDs that lie inside its range, and the sweep refused every run (``a46d1c5``
+    passed it). Such a field stops avoiding its own values only, and keeps steering around the
+    swept ones — also the value it gives up on (with half the range swept, that one is a sampled
+    customer ID every other time), for a drawn integer and for a skipping ``sequence``."""
+    sample, cust = _dense_ids(inside=50)
+    result = profile_from_sample(sample, DETECTOR)
+    by = {f.name: f for f in result.profile.fields}
+    assert (by["id"].entity_type, by["cust_id"].entity_type) == (None, "CUSTOMER_ID")
+    spec = heuristic_spec(result, locale="en_IN")
+    assert {f.name: f.params for f in spec.fields}["id"] == {"min": 1000, "max": 1100}
+    sequence = spec.model_copy(
+        update={
+            "fields": [
+                FieldSpec(name="id", generator="sequence", params={"start": 1000}, unique=True),
+                *spec.fields[1:],
+            ]
+        }
+    )
+    guard, ids = sample_guard(result), sample_ids(result)
+    for proposal in (spec, sequence):
+        for seed in _seeds(10):
+            out = execute_spec(proposal, rows=150, seed=seed, avoid=guard, avoid_in=ids)
+            generated = [r["id"] for r in out.rows]
+            assert verify_against_sample(out.rows, result).passed, proposal.fields[0].generator
+            assert len(set(generated) & cust) == 0  # no sampled customer ID in the id column
+            assert set(generated) & set(range(1000, 1100))  # its own values: kept, as documented
 
 
 #: Wide decimal columns (name, precision, scale) whose bound has more than 28 significant digits.

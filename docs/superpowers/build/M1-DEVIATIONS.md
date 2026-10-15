@@ -1792,8 +1792,10 @@ M1 plan's Tasks 12 and 13 where they differ.
     by accident. This restores mobiles, Aadhaar, card and account numbers in any grouping.
   - A shorter one is found where it starts and ends at a break: the edge of a run of digits, or
     whitespace between two digits in the output string. Each output string is normalised word by
-    word (the concatenation equals `normalise` of the whole string). `-`, `/`, `.`, `:` and a comma
-    with no space after it still join digits, as in dates, amounts and ranges.
+    word (the concatenation equals `normalise` of the whole string). As built in `ec74985`, every
+    other separator joined digits, not only `-`, `/`, `.`, `:` and a comma with no space after it
+    as this entry first said; the re-check below (B1) makes every character other than a letter,
+    a digit or one of those five joiners a break.
   - A string that is a whole number with a zero fraction (`1001.00`, `1,001.0`) is read as that
     integer, as an integral float already was.
   - Not refused, by design: `1003-07` and `1003/1004` (joined like a date or a range, the class of
@@ -1823,8 +1825,9 @@ M1 plan's Tasks 12 and 13 where they differ.
     steered this way.
   - Values shorter than `SWEEP_MIN_LEN` are not avoided (row numbers; the sweep skips them too).
   - Such a field is not swept. One that cannot get away from its sampled values (its range is the
-    sample's) keeps them, and only that field stops being steered (`_Steering.give_up`). The run
-    is not refused, and the swept fields are still steered.
+    sample's) keeps them (`_Steering.give_up`), and the run is not refused. As built in `ec74985`
+    that field then stopped being steered at all, also around the swept values; the re-check below
+    (B2) keeps it steered around them.
 - **Recorded, not changed (owner decisions).**
   - N1, absence: steered values over a narrow space show the sample by absence much sooner than
     the S8 entry's "aggregate effect" example (nine years of dates against 10 000 rows) suggests.
@@ -1893,3 +1896,87 @@ M1 plan's Tasks 12 and 13 where they differ.
   - `scanner/test_guard.py::test_https_popups_opened_while_arm_runs_relay_nothing[False-0]`,
     a browser navigation race under the load of other lanes ("Execution context was destroyed").
     It passed 4/4 on a re-run.
+
+## Fix round 1 for S8-spec, re-check (review `S8-spec-review-r1` at `41f30d6`)
+
+- **B1: separators that never occur in a date, an amount or a range still joined digits.**
+  `_words` cut an output string only at whitespace, and `normalise` drops every other
+  separator, so `_`, `;`, `|`, quotes, brackets, `#` and `+` joined two digit groups into one
+  run. Copies that M0 refused passed the sweep and were not steered by the guard: `1001;1002`,
+  `["1001","1002"]`, `TXN_4821_1003`, two sampled dates `2016-09-02;2019-04-11`, a sampled
+  date before `_10:15:00`. Through the route, a 1 000-row sample with a `TXN_dddd_dddd` code
+  column and a JSON-list column of customer IDs answered 200 with `verification.passed`, and
+  176-208 generated values per column held a sampled customer ID as a token. The rule now
+  (`schema_profile._BREAK`, `_words`; shared by the guard and the sweep):
+  - The string is read after NFKC (a full-width hyphen is a `-`), then cut at every run of
+    characters that are neither a letter nor a digit, except the joiners `-`, `/`, `.`, `:` and
+    `,`. Whitespace, `_`, `;`, `|`, quotes, brackets, `#`, `+`, `@` and a zero-width space are
+    breaks.
+  - Every piece, breaks included, is normalised on its own, so the string searched is still
+    `normalise` of the whole value (a combining U+0345 is a break but folds to a letter).
+  - Adding cuts only adds candidate spans: this is a superset of the round-1 rule, and still not
+    M0. Dates, amounts and ranges stay joined: `2010-01-04`, `21001.5`, `1001.25`, `1001-2020`,
+    `1003-07`, `1003/1004`, `1001,1002` and `[1001,1002]` are not refused (the documented
+    trade-off; a comma with no space is ambiguous with thousands separators).
+- **B2: `_Steering.give_up` stopped all steering of a field that could not avoid its own
+  values.** An ID-like key whose sampled values fill its range (`id` 1000..1099 gives `integer`
+  1000..1100) exhausts its own `avoid_in` test on its first row; `give_up` then removed the field
+  from steering altogether, so it also wrote the sampled customer IDs inside its range. A
+  1 000-row sample with a dense `id` 1000..1999 next to 1 000 random 4-digit customer IDs was
+  refused 3/3 (422 `leakage`), where `a46d1c5` answered 200 3/3.
+  - Now `give_up` drops only the field's own test and keeps the field steered around the guard
+    (without a guard it stops steering the field, as before).
+  - The value it gives up on is steered too: when the guard flags it, the field draws again (or
+    a `sequence` skips again) with a fresh `MAX_SAMPLE_REDRAWS`, and only a value the guard still
+    flags after that is kept, which loses the run as before. The reviewer's prototype (`p17`:
+    drop the own test, keep the field steered) kept that last value. With 20 or 50 of 100
+    sampled customer IDs inside the `id` range, it was refused for 7/40 and 19/40 seeds. The
+    committed version was refused for 0/40 and 0/40 (`reports/S8-spec-fix-r1/probes/`
+    `proto_vs_test.py` and `fixed_vs_test.py`).
+  - A field that keeps its own sampled values is acceptable as documented (review N-d: about 600
+    of 1 000 generated `id`s are sampled ids in `p16`).
+- **Docs.** The joiner sentences in `_SampleValues`, `verify_against_sample`, the module docstring,
+  `api-m1.md` and the round-1 entry above now match the break set. The steering sentences in
+  `_Steering`, `execute_spec`, `sample_ids`, `api-m1.md` and the N3 entry above now say that a
+  field that cannot avoid its own values is still steered around the swept ones.
+- **Tests (written first: two extended and three new cases failed on `41f30d6`; the new
+  normalisation property test passed there too).**
+  - `tests/test_schema_profile.py` went from 63 to 65 cases.
+    - `LEAKS` gains `1001;1002`, `1001|1002`, `["1001","1002"]`, `TXN_4821_1003`, `1001_1002`,
+      `(1001)(1002)`, `#1001#1002`, `1001+1002`, two IDs across a zero-width space,
+      `2016-09-02;2019-04-11`, `2016-09-02_10:15:00` and `[2016-09-02]10:15`.
+    - A new `JOINED` list holds the documented trade-offs, which must pass: `1003-07`, `1003/1004`,
+      `1001,1002`, `[1001,1002]`, and a full-width `1001-2020`.
+    - `_naive_found` follows the new break set character by character, after NFKC. The indexed
+      sweep must still equal it on 300 random rows, which are now joined by random separators.
+    - `test_the_sweep_reads_a_string_as_normalise_does`: 3 000 random strings over scripts,
+      compatibility forms, combining marks and case folding.
+    - `test_a_field_that_cannot_avoid_its_own_values_still_avoids_the_swept_ones`: half of the
+      sampled customer IDs lie inside `id`'s range. For 10 seeds each, an `integer` and a skipping
+      `sequence` pass the sweep, write no sampled customer ID and keep their own values.
+  - `tests/test_api_schema.py` went from 25 to 27 cases.
+    - A 300-row sample with a `TXN_dddd_dddd` column and a JSON-list column, 500 rows: 200, and
+      no sampled customer ID among the generated tokens.
+    - A dense `id` next to customer IDs inside its range, 3 calls of 300 rows: 200, and no
+      generated `id` is a sampled customer ID.
+- **Measured (the reviewer's probes re-run in process through the real route; values never
+  printed).**
+  - Separator forms (`p13`): all 17 are refused, and the guard agrees with the sweep on each.
+    12 of them passed at `41f30d6`. The joined forms and the accidents still pass.
+  - Code and list columns (`p14`), 1 000 rows from a 1 000-row sample: 200 3/3, with 0 values
+    holding a sampled-ID token (176-208 per column before).
+  - Dense `id` (`p16`): 200 3/3, with 0 `id`s equal to a sampled `cust_id` (422 3/3 before).
+  - Live sample and an independent variant: 0 refusals in 880 calls (20/20, 300/300 and 100/100
+    with patterns and NER). A sampled ID appears only as the integer part of a variant's
+    balance, by design.
+  - Planted copies: 22/23 are refused with no echo, as before (`1003-07` by design), and the
+    accidents give 200.
+  - Realistic 1 000-row samples to 10 000 rows: 200 3/3 in 3.6 s (3.3 s before); with mobile
+    and PAN, 4.7-4.8 s.
+  - No sample: the executor is byte-identical to `e1f3a3a`. Determinism holds.
+  - P1: 0 sample values in the provider messages (the LLM is faked at `LlmGateway._stellar`).
+  - Probes and outputs are in `reports/S8-spec-fix-r1/`.
+- **Gates.** `ruff format --check`, `ruff check` and `mypy dps` are clean. The full suite (lane
+  venv, lane `dps-db` and OCR mock up) gave 3 294 passed, 354 skipped and 5 failed. The five are
+  the pre-existing, unrelated failures that the review's baseline lists: two scanner captures,
+  two crawlers and playground NER coverage.
