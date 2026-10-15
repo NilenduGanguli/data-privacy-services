@@ -1009,7 +1009,13 @@ async def checkpoint(
     values_by_method: dict[str, int],
     verify_checked: int,
 ) -> bool:
-    """Record one committed batch (deltas) and renew the lease; fenced. ``False`` = stop now.
+    """Record one committed batch (deltas) and renew the lease; fenced on the holder
+    (``locked_by``). ``False`` = stop now (the lease is lost).
+
+    A partition canceled under its holder (:func:`cancel`) still records the batch the holder
+    committed to the target under its lease, so the job's progress, its evidence pack and
+    Reports count every row the target holds (S1-M4 regression r1 B1); the holder then sees
+    ``cancel`` from :func:`partition_control` and stops.
 
     M5: the written rows also count towards the tenant's usage of the UTC day
     (``dps_tenant_usage``, the daily row quota) in the same transaction — a fenced-out call
@@ -1025,7 +1031,8 @@ async def checkpoint(
             f"values_by_method = {s}.dps_jsonb_add(values_by_method, $8::jsonb), "
             "verify_checked = verify_checked + $9, "
             "lease_expires_at = now() + make_interval(secs => $10), updated_at = now() "
-            "WHERE id = $1 AND locked_by = $2 AND state = 'running' RETURNING tenant_id",
+            "WHERE id = $1 AND locked_by = $2 AND state IN ('running', 'canceled') "
+            "RETURNING tenant_id",
             partition_id,
             worker_id,
             last_key,
@@ -1048,6 +1055,49 @@ async def checkpoint(
                 rows_written,
             )
     return tenant is not None
+
+
+async def record_ledger_batches(
+    job_id: str, partition_no: int, *, last_key: EncodedKey, batch_no: int, rows: int
+) -> int:
+    """Finalize of a canceled run, before its write ledger is cleared: record the batches a
+    canceled partition's ledger holds beyond its checkpoint (its holder committed them and died, or
+    lost its lease, before checkpointing) — the ledger is authoritative, as on a resume — and
+    charge them to the tenant's usage of the UTC day. Only a canceled partition no live holder
+    owns; returns the rows recorded (0 when the checkpoint is not behind the mark)."""
+    s = db.schema_ident()
+    async with db.acquire_queue(None) as conn, conn.transaction():
+        row = await conn.fetchrow(
+            f"SELECT id, tenant_id, batch_no, rows_written FROM {s}.dps_job_partition "
+            "WHERE job_id = $1 AND partition_no = $2 AND state = 'canceled' "
+            "AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= now()) "
+            "FOR UPDATE",
+            job_id,
+            partition_no,
+        )
+        if row is None or row["batch_no"] >= batch_no:
+            return 0
+        delta = max(0, rows - int(row["rows_written"]))
+        await conn.execute(
+            f"UPDATE {s}.dps_job_partition SET last_key = $2::jsonb, batch_no = $3, "
+            "rows_read = rows_read + $4, rows_written = rows_written + $4, locked_by = NULL, "
+            "lease_expires_at = NULL, updated_at = now() WHERE id = $1",
+            row["id"],
+            last_key,
+            batch_no,
+            delta,
+        )
+        if delta > 0:
+            await conn.execute(
+                f"INSERT INTO {s}.dps_tenant_usage (tenant_id, day, rows_written) "
+                "VALUES ($1, (now() AT TIME ZONE 'UTC')::date, $2) "
+                "ON CONFLICT (tenant_id, day) DO UPDATE "
+                "SET rows_written = dps_tenant_usage.rows_written + EXCLUDED.rows_written, "
+                "updated_at = now()",
+                row["tenant_id"],
+                delta,
+            )
+    return delta
 
 
 async def finish_partition(
@@ -1321,8 +1371,10 @@ async def cancel(tenant_id: str, job_id: str) -> Job | None:
             raise JobStateError(
                 "job_finalizing", "the job is finalizing and can no longer be canceled"
             )
-        # Running partitions keep locked_by: their holders' next fenced write fails and they
-        # abandon; the reaper releases the lock of a holder that never comes back.
+        # Running partitions keep locked_by: their holders record the batch they committed under
+        # their lease (checkpoint accepts a canceled partition of its holder), see ``cancel`` and
+        # abandon; the finalize waits for those live leases (S1-M4 regression r1 B1). The
+        # reaper releases the lock of a holder that never comes back.
         await conn.execute(
             f"UPDATE {s}.dps_job_partition SET state = 'canceled', finished_at = now(), "
             "updated_at = now() WHERE job_id = $1 AND state IN ('queued', 'running')",

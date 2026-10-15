@@ -2163,9 +2163,16 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
     if plan is not None and _ledgered(plan) and outcome in ("succeeded", "canceled"):
         # a failed job keeps its ledger: a retry resumes from it (never re-applies a batch)
         cleared = await _best_effort(
-            _clear_ledger(ctx, job, spec, plan, source_conn, target_conn, snapshot)
+            _clear_ledger(ctx, job, spec, plan, source_conn, target_conn, snapshot, parts)
         )
         ledger_cleared = "error" not in cleared
+        if cleared.get("recovered"):
+            # batches the ledger held beyond a canceled partition's checkpoint were recorded
+            # before it was cleared: the evidence counts them (S1-M4 regression r1 B1)
+            parts = await _partitions(job)
+            fresh = await jobs.load_job_internal(job.id)
+            if fresh is not None:
+                job = job.model_copy(update={"progress": fresh.progress})
     evidence_id = await _existing_evidence(job)
     if evidence_id is None:
         evidence_id = await _store_evidence(
@@ -2245,12 +2252,19 @@ async def _clear_ledger(
     source_conn: Connection,
     target_conn: Connection | None,
     snapshot: ClassificationSnapshot | None,
+    parts: list[_Partition],
 ) -> dict[str, Any]:
     """Delete the job's write-ledger rows (contract §4.2 ``clear_ledger``: by job id, from the
     ledger owner of the target). The writer takes the source shape the run was planned from (the
     snapshot's), else the target's own: the source object is never described on the target
     connection — a separate target login need not see it, and a key-less Oracle load into a table
-    its prepare created (no ``target_shape``) never cleared its ledger (S1-M3 r2 engines B2)."""
+    its prepare created (no ``target_shape``) never cleared its ledger (S1-M3 r2 engines B2).
+
+    Before it clears, the ledger is cross-checked against every canceled partition: a mark ahead
+    of the partition's checkpoint (a batch committed by a holder that died or lost its lease
+    before checkpointing) is recorded first (:func:`jobs.record_ledger_batches`), since clearing
+    deletes the only record of it (S1-M4 regression r1 B1). ``recovered`` counts such
+    partitions."""
     conn = source_conn if _same_connection(spec, source_conn) else target_conn
     if conn is None:
         return {"error": "connection_missing"}
@@ -2260,11 +2274,28 @@ async def _clear_ledger(
         if shape is None:  # no snapshot to read: the target exists once prepare has run
             shape = await connector.describe(plan.target.object or spec.source.object)
         writer = await connector.writer(plan.target, shape)
-        deleted = await writer.clear_ledger(job.id)
-        await writer.close()
+        try:
+            recovered = 0
+            for part in parts:
+                if part.state != PartitionState.canceled.value:
+                    continue
+                mark = await writer.read_ledger(job.id, part.no)
+                if mark is None or mark.batch_no <= part.batch_no:
+                    continue
+                await jobs.record_ledger_batches(
+                    job.id,
+                    part.no,
+                    last_key=mark.last_key,
+                    batch_no=mark.batch_no,
+                    rows=mark.rows,
+                )
+                recovered += 1
+            deleted = await writer.clear_ledger(job.id)
+        finally:
+            await writer.close()
     finally:
         await connector.close()
-    return {"deleted": deleted}
+    return {"deleted": deleted, "recovered": recovered}
 
 
 async def _store_evidence(

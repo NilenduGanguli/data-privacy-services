@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -181,18 +182,23 @@ async def test_partition_control_and_cancel(migrated_db) -> None:  # noqa: ANN00
     assert canceled.phase == JobPhase.finalize and canceled.state == JobState.queued
     assert canceled.progress.outcome == "canceled"
     assert await jobs.partition_control("w1", a.id) == "cancel"
-    assert not await jobs.checkpoint(
-        "w1",
-        a.id,
-        last_key=[{"t": "int", "v": "1"}],
-        batch_no=1,
-        rows_read=1,
-        rows_written=1,
-        rows_skipped=0,
-        values_by_method={},
-        verify_checked=0,
-    )
+    batch: dict[str, Any] = {
+        "last_key": [{"t": "int", "v": "1"}],
+        "batch_no": 1,
+        "rows_read": 1,
+        "rows_written": 1,
+        "rows_skipped": 0,
+        "values_by_method": {},
+        "verify_checked": 0,
+    }
+    # S1-M4 regression r1 B1: the holder records the batch it committed under its lease (it is
+    # in the target), another worker cannot; after it abandons, nobody can
+    assert not await jobs.checkpoint("w2", a.id, **batch)
+    assert await jobs.checkpoint("w1", a.id, **batch)
     await jobs.abandon_partition("w1", a.id)
+    assert not await jobs.checkpoint("w1", a.id, **(batch | {"batch_no": 2}))
+    views = {v.partition_no: v for v in await jobs.list_partitions("t1", job_id)}
+    assert views[a.partition_no].rows_written == 1 and views[a.partition_no].batch_no == 1
     states = {v.partition_no: v.state for v in await jobs.list_partitions("t1", job_id)}
     assert set(states.values()) == {PartitionState.canceled}
     with pytest.raises(jobs.JobStateError) as err:

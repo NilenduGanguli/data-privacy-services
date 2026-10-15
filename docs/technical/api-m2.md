@@ -185,7 +185,11 @@ partition claims (running partitions stop after their batch and go back to `queu
 to `waiting`. `dry_run` skips partitions (no writes, no DDL). A worker that loses its lease is fenced
 (its writes match zero rows) and the reaper re-queues the row with backoff (`attempts` counted;
 `dead` after `max_attempts`). Cancel: queued/waiting/paused at once, running holders at their next
-fenced write; a cancel finalize still writes the evidence (`outcome: canceled`) and purges the key.
+fenced write — a holder first records the batch it already committed to the target (its checkpoint is
+fenced on its own lock), so every row the target holds is counted in the job, its evidence pack, Reports
+and the daily row usage; before a cancel finalize clears a write ledger it records any batch the ledger
+holds beyond a partition's checkpoint. A cancel finalize still writes the evidence (`outcome: canceled`)
+and purges the key.
 Retry: failed/dead run jobs only; failed/dead partitions are re-queued and resume from their
 checkpoints (409 `key_material_required` when the key was purged and none is resubmitted).
 
