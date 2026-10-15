@@ -562,7 +562,11 @@ class Connector(Protocol):
         after_key: tuple[Any, ...] | None,
         batch: int,
     ) -> AsyncIterator[list[Row]]:
-        """Batches of rows in ``key_range`` after ``after_key``, ordered by key, keyset paged."""
+        """Batches of rows in ``key_range`` after ``after_key``, ordered by key, keyset paged.
+
+        A yielded page is the consumer's: the connector takes its length and the next page's
+        bound before yielding it, so a consumer that empties or rewrites it reads on unchanged.
+        """
         ...
 
     async def writer(self, target: ResolvedTarget, source_shape: TableShape) -> BatchWriter:

@@ -1748,3 +1748,70 @@ live probes and their counts in `~/.cache/dps-build/reports/S1-M3-fix-r2/`).
   digits) with any source value (about 0.5 % of runs at the demo's 10 000 retail rows; now rows aligned
   on the kept FF9 `LAST_CONTACT_AT`, every column row by row, the text columns also against any
   value).
+
+## M3 post-merge verification round 3 fix (`S1-M3-engines-r3.md` B1) — S8-idcheck on `fidcheck`
+
+One blocking finding of the round-3 engines lens (`main` @ `d2fdc3f`, still present at `5cef802`), fixed
+on `fidcheck` (a feeder of `fllm`) with tests that failed on the tree as built: the new and changed
+tests were run against an export of `5cef802` (21 + 2 failed, `~/.cache/dps-build/s8-idcheck/logs/
+before-fix-*-at-HEAD.log`) and pass on the fix. Live proofs and their counts:
+`~/.cache/dps-build/reports/S8-idcheck/`.
+
+- **engines B1 — the D-A post-write identifier check read one 5 000-row page on Oracle and MongoDB
+  but reported `whole_table`.** `identifier_check.py` emptied every page it had counted
+  (`rows.clear()` in `key_floor`, `_tally_target` and the source loop); Oracle's and MongoDB's
+  `read_partition` read that same list again after the consumer resumed them (`len(rows) < size`,
+  `len(docs) < batch`, also in MongoDB's key-less `_read_unkeyed`) and stopped. A real identifier
+  past row 5 000 of a target, or whose source row lay past row 5 000, was never flagged and the pack
+  said `passed`; an append's `key_floor` was the first page's largest key. Fixed in three layers:
+  1. **Connectors.** Oracle and MongoDB take a page's length and the next page's bound before they
+     yield it: a yielded page is the consumer's to empty or rewrite (protocol docstring in
+     `base.py`; contract §12.3). PostgreSQL already yielded a fresh list.
+  2. **The check pages each side itself** (`_every_row`): every read starts after the last key read
+     (`after_key`), and a side ends only when a read after that key returns no row — how a connector
+     pages inside one read is no longer taken as the end of the object (one extra, empty read per
+     side). `key_floor` reads the key column the same way. The check no longer empties pages.
+  3. **It says what it read and fails closed.** The result carries `rows_read: {target, source}`
+     (`source` null in place; contract §7.1 evidence model); `checked` still counts the values read.
+     A read that cannot finish raises `IncompleteCheck` (a `ConnectorError`,
+     `identifier_check_incomplete`, value-free detail): a read that does not advance past its start
+     key, a row without its key, a key-less MongoDB collection (one cursor, no `after_key`) read
+     short of `count()`, a SQL column the object does not list (a read projects only listed
+     columns, so it would have counted as a clean column). Finalize's `_best_effort` records
+     `{"error": "identifier_check_incomplete"}` and every written identifier column becomes a review
+     column; no scope is claimed. In prepare (`key_floor` of a synthesize append) the job fails
+     before it writes.
+  - **Beyond the finding:** a MongoDB shape is inferred from a 500-document sample
+    (`DESCRIBE_SAMPLE_MAX`), and a written identifier leaf the target's (or the source's) sample
+    missed was skipped as if it held nothing (`checked` 0, never flagged). It is now read as the
+    other side describes it, else as its key names it (the path's top-level field, read as text —
+    what `to_engine_text` makes of every non-`char` kind). SQL shapes come from the catalogue: no
+    fallback there (see 3).
+  - **Deviation (fail-closed cost):** a key-less MongoDB collection that gains documents while the
+    check reads it fails closed (review) — a count cannot tell a short read from a concurrent insert.
+    Keyed objects need no count: the empty read after the last key is the proof. Packs sealed before
+    the fix keep their counts (sealed and hashed by design).
+  - **Tests:** `tests/test_identifier_check.py` (the fake now pages as Oracle did, reading its own
+    yielded list after the consumer resumes it; a read that stops after one page is paged on by the
+    check, hits past page 1 on both sides found, 6 + 5 reads; a read that does not advance —
+    restarting at the first row, with or without its own paging — fails closed on either side; a
+    row without its key; a key-less read held to the count, short on either side; a document leaf
+    a sampled shape missed is read through the other shape or its key, in place too; a SQL column
+    the object lacks fails closed on either side and in place; `rows_read` of whole-table, append
+    and in-place checks; `key_floor` over every page; `_best_effort` turns an incomplete check into
+    `{"error": "identifier_check_incomplete"}`), `tests/test_identifier_check_documents.py` (its
+    fake now honours `after_key`; `rows_read` counts documents),
+    `tests/connectors/conformance.py::test_paging_does_not_depend_on_what_the_consumer_does_with_a_page`
+    (int, text and key-less tables, 53 rows in pages of 7, the consumer empties every row and the
+    page: every row once, in the database's order — failed on Oracle and MongoDB for all three key
+    kinds; PostgreSQL skips key-less, `no_key`), `tests/connectors/test_identifier_check_engines.py`
+    (scratch 20 000-row target and source on PostgreSQL, Oracle and MongoDB with the real
+    `CHECK_BATCH`; one source account number at target row 15 000 / source row 18 000, one issuable
+    source national id at 17 500 / 19 000: both flagged with counts of exactly 1, `checked` =
+    `rows_read` = 20 000 on both sides; `key_floor` = 20 000; an append check after a floor of 5 000
+    reads exactly 15 000 rows; a ROWID-paged Oracle target and a key-less MongoDB collection give the
+    same counts — as built Oracle and MongoDB said `checked` 5 000, `in_source` 0) and
+    `tests/connectors/test_identifier_check_runs.py` (Oracle demo customers and MongoDB profiles,
+    synthesize → created table → finalize in process, `CHECK_BATCH` 128: every pack column's
+    `checked` equals its values in the target, `rows_read` equals both sides' rows — as built
+    `TAX_ID` said 71 of 1 821, `$.kyc.taxId` 68 of 355).

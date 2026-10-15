@@ -885,7 +885,17 @@ cannot restart an admin's failed production run.
     integer key (`plan.prepare.identifier_floor`, `scope: written_rows`): the target's own rows
     are not the run's output (`bank_perf.transactions` holds 1 000 seed rows with the source's
     IBAN). Fewer rows after that key than the run wrote → every row (`scope: whole_table`,
-    `scope_reason: rows_below_floor`). Files targets record `not_run: files_target`. Tools that need *rule-valid* PANs (the demo seed, the
+    `scope_reason: rows_below_floor`). Files targets record `not_run: files_target`. **Every row
+    on every engine** (S8-idcheck, 2026-10-15; S1-M3 engines r3 B1): the check (and the append's
+    `key_floor`) pages each side itself — each read starts after the last key it read, and a side
+    ends only when a read after that key returns no row — so a connector's own paging can never
+    shorten it (Oracle and MongoDB used to stop after one 5 000-row page while the pack said
+    `whole_table`); the pack says what was read (`rows_read: {target, source}`; `checked` counts
+    the values read). A read that cannot finish (no progress past a key, a row without its key,
+    a key-less MongoDB collection read short of its count, a SQL column the object lacks) is
+    `{"error": "identifier_check_incomplete"}`: every written identifier column is reviewed, no
+    scope is claimed. Packs sealed before the fix keep their counts; no setting or migration — the
+    worker image must be rebuilt to carry it. Tools that need *rule-valid* PANs (the demo seed, the
     demo documents, the eval corpus) draw them themselves (`evaluation.corpus.rule_valid_pan`).
 - **M3 stack traps.**
   - `docker compose up --wait` fails on the exited one-shots (contract §11): start, then poll
