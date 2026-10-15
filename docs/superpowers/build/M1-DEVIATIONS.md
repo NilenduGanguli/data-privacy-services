@@ -1656,3 +1656,123 @@ for CVV", "Run on the engine", "Re-run plan", …) and test ids (`policy-header`
   `/documents/obfuscate` with `ocr_verify: false`, and the default `/documents/obfuscate` all
   answered 422 `corrupt_document` for the review's `[4 4 5] /Count 2` file. No response body
   holds the SSN.
+
+## Post-M5 fix: schema synthesis from a sample at realistic sizes (`fspec`, e1f3a3a and S8-spec)
+
+A live generator-spec run (Gemini, NER on) of a seven-column, four-row customer sample (`cust_id`
+1001..1004, `full_name`, `email`, `city`, `segment`, `balance`, `opened`) found the defects below.
+`e1f3a3a` fixed the spec; S8-spec fixed the sweep, which refused 17 to 19 of 20
+`POST /schema/synthesize` calls of 100 rows (also on `e1f3a3a`). The code as built wins over the
+M1 plan's Tasks 12 and 13 where they differ.
+
+- **Rule change (e1f3a3a): a flagged sample key is aliased in the prompt only.** M1 Task 12 (plan:
+  "a field whose *name* looks sensitive is aliased `field_N` (and keeps that name in the spec, so
+  the output never echoes it)") made the profile, the spec and the generated rows lose the
+  caller's column (Presidio reads the key `cust_id` as a LOCATION, so `cust_id` came back as
+  `field_1`). Now `profile_from_sample` sets `prompt_alias` for a key the detector flags, as it
+  already did for a key that is not identifier-like (M1 B2): `render_prompt` sends `field_N`,
+  `merge_llm_spec` maps the reply's names (fields and constraints) back, and the profile, the spec
+  and the rows keep the caller's name (identifier-cleaned, as every key). The model still never
+  sees a flagged key, and the sweep still searches output keys for sample values. A key that is
+  data (an e-mail address used as a key) therefore reaches the output as the caller's own column
+  name, which the caller sent.
+- **Other e1f3a3a rules.** NER alone no longer types a JSON number (`_value_entity`): spaCy reads
+  almost any bare 4- to 12-digit number as a year, which typed the ID column `DATE`; a number whose
+  digits spell a calendar date (`yyyymmdd`) and pattern hits on numbers still vote. A sampled range
+  that two-significant-figure rounding collapses (1001..1004 → 1000..1000, every row 1000) spans its
+  orders of magnitude (1000..9999). A model `choice` made of value shapes or placeholders
+  (`xxxxxxxx`, `<label_1>`) is ignored, with a note; categorical fields keep DPS's own labels.
+- **Rule change (S8): an all-digit sample value is matched as a whole run of digits.** The M1 sweep
+  (M0 `verify_output`) found an original as a substring of the normalised output, so ID `1001` was
+  "found" inside generated dates (`2010-01-04` → `20100104`) and amounts (`21001.5`). On e1f3a3a, 20
+  seeded runs of 100 rows: 19 refused; 15 held a sampled ID inside a date, an amount or an e-mail's
+  digits, 17 a sampled city, 3 a sampled date. `verify_against_sample` now finds an original that
+  normalises to digits only where it is a whole digit run (no digit next to it, separators removed
+  as everywhere in the sweep), and reads an integral float as its integer: `1001` is found in
+  `1001`, `1001.0`, `１００１`, `CUST-1001` and `x1001@…` (and in `10.01`, the same digits), not in
+  `2010-01-04`, `21001.5`, `1001.25` or `1001-2020`. Every other original is a substring, as in M0.
+  M0's `verify_output` is unchanged (`verify.py` only gains `output_strings`, the walker it uses);
+  the sample sweep matches through its own index (`schema_profile._SampleValues`), which is also the
+  executor's guard, so the two agree on every value
+  (`test_the_guard_flags_exactly_what_the_sweep_refuses`). Indexing the originals by their first
+  four characters made the sweep linear in the output: 10 000 rows against a 1 000-row sample took
+  13.4 s on e1f3a3a and 0.29 s now (`test_the_indexed_sweep_equals_the_naive_one` checks it against
+  the naive loop and against `verify_output` on 300 random rows).
+- **Rule change (S8): the executor steers around the sample's values** (`execute_spec(avoid=...)`,
+  `schema_profile.sample_guard`). The plan executed the spec blind and swept afterwards, so any
+  coincidence refused the run: a generated date or birth date equal to a sampled one, the wider ID
+  range drawing a sampled ID, a sampled 4-digit ID among the 1..9999 digits a surrogate e-mail
+  appends. With a sample, a value that holds a sampled one is replaced before the sweep
+  (`schema_gen.STEERING`): `integer`, `decimal`, `normal`, `lognormal`, `date`, `datetime`,
+  `pattern`, `text` and `uuid` draw it again (a UUID's 32 hex digits hold a sampled 4-digit ID in
+  a few rows in 10 000); a `sequence` skips it and moves on, so it stays unique and ascending (a
+  model may propose `sequence{start: 1000}` for the ID it sees as `field_1`); an `entity` value
+  takes the row's whole persona with it (every entity field of the row is drawn again from
+  `persona|N` under the row seed), so name, e-mail and birth date still agree — drawing the e-mail
+  alone took another persona's address. `constant`, `choice` and `boolean` are never steered: a
+  spec literal that holds a sample value is refused. A field a `rule` constraint writes is not
+  steered (its values never reach the output). After `MAX_SAMPLE_REDRAWS` (20) new draws a value
+  is kept and the run is lost to the sweep, so steering stops for the rest of the run (no 20 draws
+  per row on a doomed run). `report.sample_redraws` counts the discarded draws.
+  - **Determinism.** Rows are a function of (spec, seed, rows, sample). Without a sample (a
+    caller's spec, a schema, DDL) the executor is unchanged, byte for byte; with one, a row differs
+    from the spec-and-seed rows only where it held a sample value (and a skipping sequence from
+    there on). Replaying the returned spec and seed without the sample therefore gives the same
+    rows except where `sample_redraws` steered; the same sample, spec and seed give the same rows.
+  - **Aggregate effect.** A steered value never equals a sampled one. Where the output is much
+    larger than a field's value space (opening dates over nine years against 10 000 rows), the
+    days that never occur are mostly the sampled days. No row is tied to a sample record, so no
+    person's value is revealed; this is why the small fixed spaces below are not steered at all.
+- **`SWEEP_EXEMPT` gains `CITY` and `CARD_EXPIRY` (gender and nationality's rationale).** The
+  task preferred steering cities over exempting them; steering is impossible at realistic sizes,
+  so the M0 rationale applies (forcing a different value reveals the original): Faker draws `en_IN`
+  cities from a fixed list of 318 and card expiry dates from 48 `MM/YY` values. Measured with them
+  swept and steered (1 000 generated rows, 5 runs each): a 4-row sample passes; 50 sampled rows
+  (46 cities, 31 expiries) were refused 4/5; 200 rows (150 cities, 47 expiries) and 1 000 rows
+  (298 cities) 5/5, every value space exhausted. Where steering works it shows the sample by
+  absence: steered over 10 000 rows, the four sampled cities were drawn 0 times and every other
+  city at least 17 times. Swept unsteered, four sampled cities were drawn in 72% of 100-row runs.
+  The taxonomy has no `STATE` or `COUNTRY` type; other place names are NER's `LOCATION`, generated
+  from value shapes (not a list), and stay swept.
+- **A flagged key is never categorical.** Its values are swept as originals, and DPS's own
+  `choice` wrote those labels back, so every run was refused (Presidio flags keys such as
+  `cust_id` and `ifsc`). Such a field is shaped (`pattern`) instead; an ordinary key keeps its
+  labels.
+- **Declared bounds are exact.** `_range` rounded declared bounds to two significant figures too,
+  so DDL `NUMBER(3)` became `integer{max: 1000}` and `NUMBER(5,2)` `decimal{max: 1000.0}` (the plan
+  computed `10.0 ** digits - 1`, 999 for `NUMBER(5,2)`): values the column cannot hold. DDL and
+  JSON Schema bounds are now kept as declared: an integer column's top is an exact integer
+  (`NUMBER(20)` → `10**20 - 1`), a decimal column's the largest float whose decimal form is not
+  above the bound (`NUMBER(18,2)`'s 9999999999999999.99 is no float: 9999999999999998.0, not
+  1e16), and an `integer` field takes the integers inside fractional bounds (`minimum: 1.5` → 2).
+  `FieldStats.minimum` / `maximum` are `int | float` so integer bounds stay exact.
+- **Tests.** `tests/test_schema_profile.py` 46 → 61 cases (the whole-digit rule on copies and
+  accidents, guard = sweep, the indexed sweep = the naive loop, steering per generator — redraw,
+  sequence skip, UUID, persona coherence, rule targets, stopping when lost, rows unchanged where
+  nothing is flagged — the exempt types, flagged keys, a model `sequence` on a flagged ID, the
+  live sample 20 × 100 rows with and without NER, exact bounds); `tests/test_api_schema.py`
+  10 → 19 (20 calls of 100 rows of the live sample all 200; a sampled e-mail, name, re-cased name
+  in another field, ID, ID as an amount, ID inside an e-mail and date forced into the rows after
+  execution, and a spec literal: each 422 `leakage` without the value in the body). Two M1 tests
+  changed:
+  `test_generated_rows_holding_a_sample_value_fail_closed` relied on the same seed regenerating a
+  value that was added to the sample, which the executor now steers around; it is
+  `test_generated_values_the_sample_holds_are_drawn_again`, and fail-closed is covered by the
+  forced-leak tests. `test_the_returned_spec_replays_the_rows` uses a fixed seed that draws no
+  sample value (a random one could steer and differ from the sample-free replay).
+- **Measured** (`POST /schema/synthesize`, stub LLM, `en_IN`; Faker-generated samples, values never
+  printed): the live sample, 20 calls × 100 rows: 20/20 refused on e1f3a3a (18/20 with Presidio),
+  0/20 now (0/20 with Presidio). A 1 000-row, eight-column sample (4-digit IDs, names, e-mails,
+  cities, segment, balance, opening date, birth date): 10 000 rows refused 3/3 on e1f3a3a (14 s),
+  200 3/3 now (3.3-3.8 s; 4.5 s with Presidio); 1 000 rows 0.4 s. On the lane stack's image of
+  `9e38165` over HTTP: 20/20 calls of the live sample 200, and for those and three 10 000-row
+  calls of the 1 000-row sample (3.5-3.7 s) an independent comparison found 0 generated values
+  equal to a sampled value of the same column and 0 output strings holding one; a sample whose IDs
+  fill the generated range and a sampled name used as a column name both answered 422 `leakage`;
+  smoke 25/25; the app log held none of the sample's names, e-mails, dates or IDs.
+- **Open (not changed).** A sample whose names come as single words (`first_name`, `last_name`)
+  and that is large enough to hold most of the generator's vocabulary (533 given names and 554
+  surnames under `en_IN`; about 1 000 rows) is refused: no persona can avoid every sampled word
+  (4, 50 and 200 rows pass). Whether a common given name in a generated full name is a copy is a
+  policy decision; the sweep stays fail-closed. The heuristic also gives such a column full names
+  (the `PERSON_NAME` template is `First Last`).
