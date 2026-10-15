@@ -10,8 +10,12 @@ never a frozen server), and a run waits a bounded time for a matcher process.
 
 R3-B2: building a deny list's trie sat outside every budget and cost about 10 times the round-1
 flat compile (one 2.7 MB ``/detect`` with 50 inline deny lists: 34 CPU-seconds). A build now costs
-about what the flat compile did, is charged to the call (within an allowance per term character),
-and a call past its ceiling builds no further list.
+about 1.2 times the flat compile, is charged to the call (toward its ceiling), and a call past its
+ceiling builds no further list.
+
+S3c review round 1, R1-B1: the bounded wait for a matcher process refused legitimate runs under
+ordinary concurrency, because the pool let a caller that had just released a matcher retake it at
+once; matchers now go to waiting callers in arrival order.
 
 Every text, term and pattern here is synthetic. The heavy end-to-end check runs in a child process
 with a hard time limit, so a regression fails the test instead of hanging the run.
@@ -20,6 +24,7 @@ with a hard time limit, so a regression fails the test instead of hanging the ru
 from __future__ import annotations
 
 import asyncio
+import functools
 import gc
 import json
 import os
@@ -33,6 +38,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -43,7 +49,7 @@ from pydantic import ValidationError
 from dps.app import create_app
 from dps.config import Settings
 from dps.engine.call_scope import call_scope
-from dps.engine.detect import custom
+from dps.engine.detect import custom, pattern_process, regex_guard
 from dps.engine.detect.custom import (
     PolicyCustomDetector,
     RecognizerSpec,
@@ -360,6 +366,157 @@ def test_a_busy_pool_refuses_the_call_with_a_retryable_code(
     assert (refused.value.status, refused.value.code) == (503, "pattern_matcher_busy")
 
 
+def test_the_recognizer_test_route_answers_a_busy_pool_with_the_retryable_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3c review round 1, N2: ``/policies/test-recognizer`` answered 500 without a code when
+    every matcher stayed busy; it answers 503 ``pattern_matcher_busy`` like the engine routes."""
+
+    def busy(*_args: object, **_kw: object) -> object:
+        raise MatcherBusy
+
+    monkeypatch.setattr(MatcherPool, "run", busy)
+    recognizer = {
+        "name": "emp",
+        "supported_entity": "EMPLOYEE_ID",
+        "patterns": [{"name": "p", "regex": _ATTACK, "score": 0.5}],
+    }
+    with TestClient(create_app(_settings()), raise_server_exceptions=False) as client:
+        answer = client.post(
+            "/api/v1/policies/test-recognizer", json={"recognizer": recognizer, "text": "1" * 3000}
+        )
+    assert _code(answer) == (503, "pattern_matcher_busy")
+
+
+# --- S3c review round 1, R1-B1: matchers go to waiting callers in arrival order -----------------
+
+
+def test_callers_sharing_the_matchers_all_progress_without_refusals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-B1: four callers (the worker's default concurrency) share two matcher processes (the
+    default), each making back-to-back legitimate deny-list scans that go straight to a matcher
+    (``_HEAVY`` routing: no in-thread slice between them). A caller that had just released a
+    matcher used to retake it at once — it still held the GIL — so two callers ran hundreds of
+    scans while the other two waited until the bounded wait refused them (``PatternMatcherBusy``,
+    a 503 or a failed partition). Matchers now go to the oldest waiter: no refusal, and every
+    caller makes about the same progress. The bound is shortened to 1 s here, the run to 4 s."""
+    pool = MatcherPool(size=2)
+    bound, seconds, callers = 1.0, 4.0, 4
+    monkeypatch.setattr(
+        regex_guard, "POOL", SimpleNamespace(run=functools.partial(pool.run, wait=bound))
+    )
+    deny = compile_deny_list(_random_terms(1000, 20, seed=211))
+    rnd = random.Random(212)
+    words = "the customer called about the loan account and asked for a statement".split()
+    text = " ".join(rnd.choice(words) for _ in range(120_000))  # about 600 KB, no term in it
+    runs, busy = [0] * callers, [0] * callers
+    other: list[str] = []
+    stop = time.monotonic() + seconds
+
+    def caller(i: int) -> None:
+        budget = PatternBudget(run_cap=5.0)  # a worker handler task: no ceiling
+        while time.monotonic() < stop:
+            budget.earn(len(text), 1)
+            try:
+                if budget.run(deny, text):
+                    other.append("a match in a text without terms")
+                runs[i] += 1
+            except PatternMatcherBusy:
+                busy[i] += 1
+            except Exception as exc:  # noqa: BLE001 — reported by the assertion below
+                other.append(type(exc).__name__)
+
+    threads = [threading.Thread(target=caller, args=(i,)) for i in range(callers)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(seconds + 60)
+    finally:
+        pool.close()
+    assert not other, other
+    assert busy == [0] * callers, (runs, busy)
+    assert min(runs) >= 5 and min(runs) * 2 >= max(runs), (runs, busy)
+
+
+class _StubMatcher:
+    """A matcher stand-in (no process): the pool's hand-out order is what is under test."""
+
+    def close(self) -> None:
+        pass
+
+
+def _until(condition: Any, limit: float = 5.0) -> None:
+    deadline = time.monotonic() + limit
+    while not condition():
+        assert time.monotonic() < deadline, "the condition never held"
+        time.sleep(0.002)
+
+
+def test_a_released_matcher_goes_to_the_oldest_waiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1-B1: with every matcher busy, callers queue; a released matcher goes to the oldest of
+    them, never back to the caller that released it — that caller queues behind them."""
+    monkeypatch.setattr(pattern_process, "_Matcher", _StubMatcher)
+    pool = MatcherPool(size=1)
+    held = pool._acquire(1.0)
+    order: list[str] = []
+
+    def take(name: str) -> None:
+        matcher = pool._acquire(5.0)
+        order.append(name)
+        pool._release(matcher)
+
+    threads: list[threading.Thread] = []
+    for name in ("first", "second", "third"):
+        threads.append(threading.Thread(target=take, args=(name,)))
+        threads[-1].start()
+        _until(lambda: pool.waiting == len(threads))
+    pool._release(held)
+    again = pool._acquire(5.0)  # the releaser comes straight back for its next run
+    order.append("releaser")
+    pool._release(again)
+    for thread in threads:
+        thread.join(5)
+    assert order == ["first", "second", "third", "releaser"]
+    assert pool.waiting == 0
+
+
+def test_a_caller_that_gives_up_leaves_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller refused after its bounded wait leaves the queue: the matcher released next goes to
+    a caller still waiting (or back to the idle ones), never to the one that gave up."""
+    monkeypatch.setattr(pattern_process, "_Matcher", _StubMatcher)
+    pool = MatcherPool(size=1)
+    held = pool._acquire(1.0)
+    with pytest.raises(MatcherBusy):
+        pool._acquire(0.05)
+    assert pool.waiting == 0
+    pool._release(held)
+    assert pool._acquire(0.05) is held
+
+
+def test_a_freed_slot_goes_to_the_oldest_waiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A matcher replaced after a failed run frees its slot for the oldest waiter, which starts a
+    new process; so does a pool that grows."""
+    monkeypatch.setattr(pattern_process, "_Matcher", _StubMatcher)
+    pool = MatcherPool(size=1)
+    held = pool._acquire(1.0)
+    got: list[object] = []
+    replaced = threading.Thread(target=lambda: got.append(pool._acquire(5.0)))
+    replaced.start()
+    _until(lambda: pool.waiting == 1)
+    pool._discard(held)
+    replaced.join(5)
+    assert len(got) == 1 and got[0] is not held
+    grown = threading.Thread(target=lambda: got.append(pool._acquire(5.0)))
+    grown.start()
+    _until(lambda: pool.waiting == 1)
+    pool.resize(2)
+    grown.join(5)
+    assert len(got) == 2 and got[1] is not got[0]
+    assert pool.waiting == 0
+
+
 # --- R3-B2: the deny-list build -----------------------------------------------------------------
 
 
@@ -418,7 +575,7 @@ def test_the_reviewers_2_7_mb_deny_list_policy_answers_within_the_ceiling() -> N
     """The reviewer's request: 50 new inline deny lists of 1000 terms of 50 characters (2.7 MB).
     Under a 1 s ceiling the builds stop once the call has spent it (422 within about the ceiling)
     — before the fix the request built every list first, 34 CPU-seconds outside any budget. Under
-    the default 5 s ceiling, 20 new such lists answer 200 at about the round-1 cost."""
+    the default 5 s ceiling, 20 new such lists answer 200 at about 1.2 times the round-1 cost."""
     out = _isolated(_BUILD_SCRIPT, limit=150)
     status, code, took, _cpu, mb = out["tight"]
     assert 2.5 < float(mb) < 3.0, out
@@ -430,8 +587,9 @@ def test_the_reviewers_2_7_mb_deny_list_policy_answers_within_the_ceiling() -> N
 
 
 def test_a_deny_list_builds_at_about_the_round_1_cost() -> None:
-    """R3-B2: building a 1000 x 50 deny list (pattern text and compile) costs about what the
-    round-1 flat compile did — round 2's character classes cost 10 times that. Measured with the
+    """R3-B2: building a 1000 x 50 deny list (pattern text and compile) costs 1.0-1.3 times the
+    round-1 flat compile, bounded here at 1.6 times plus 5 ms (other list shapes measure up to
+    about 1.9 times: S3c review round 1, N1) — round 2's character classes cost 10 times that. Measured with the
     cyclic garbage collector paused (a collection on a large heap lands in whichever timing it
     interrupts) and the best of three lists each."""
     custom._cased()  # the one-off case table (built once per process)

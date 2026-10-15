@@ -15,9 +15,10 @@ Patterns and deny lists run on the ``regex`` module under the call's CPU budget
 refuses the call (``custom_pattern_too_slow``) instead of pinning a CPU. A deny list is one pattern
 shaped as a trie of its terms (:func:`deny_list_pattern`, review round 2): at each position the
 matcher follows one path, so its cost per character does not grow with the number of terms. Its
-build costs about what the round-1 flat compile did and is charged to the call (review round 3,
-R3-B2: :func:`build_deny_list`); a term is at most :data:`MAX_DENY_TERM` characters, so one list's
-build stays bounded. Declared-field globs are matched without any regex (:class:`PathGlob`): linear
+build costs about 1.2 times the round-1 flat compile (0.9-1.9 times by the list's shape: short
+terms and Turkish names cost most) and is charged to the call (review round 3, R3-B2:
+:func:`build_deny_list`); a term is at most :data:`MAX_DENY_TERM` characters, so one list's build
+stays bounded. Declared-field globs are matched without any regex (:class:`PathGlob`): linear
 in the path whatever the stars.
 """
 

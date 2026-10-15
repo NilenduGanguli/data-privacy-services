@@ -665,8 +665,9 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   synchronous synthesize for callers already off the loop), the app's call scope records the
   loop's thread and a run or build there is refused as a server defect (`PatternOnEventLoop`, a
   value-free 500, log `pattern_on_event_loop`), and `/health` is answered on the loop itself; a
-  run waits at most 30 s for a matcher process (503 `pattern_matcher_busy`); a deny list's build
-  costs about the round-1 flat compile (plain characters under `IGNORECASE`, explicit classes only
+  run waits at most 30 s for a matcher process, waiting runs served in arrival order (503
+  `pattern_matcher_busy`; S3c review round 1, R1-B1); a deny list's build costs about 1.2 times the
+  round-1 flat compile, at most about 1.9 times measured (plain characters under `IGNORECASE`, explicit classes only
   for the Turkish i's) and is charged to the call (`custom.build_deny_list`: counts toward the
   ceiling, no further list once the budget is spent), as is a matcher process's compile; deny-list
   terms are at most 256 characters. The static filter (`check_pattern`: no

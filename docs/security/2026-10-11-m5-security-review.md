@@ -26,7 +26,7 @@ credentials or raw DPS keys tracked; no `.env` tracked; no `dangerouslySetInnerH
 |---|---|---|---|---|---|
 | S1 | logs/errors | 422 bodies echoed input; pydantic's `union_tag_invalid` and value-quoting validators still echoed it after M0's handler (finder F5: an SSN as `pk_strategy.kind`, as `supported_entity`, as a method) | `dps/layers/api/validation.py`: `{"detail": [{"loc","msg","type"}], "code": "invalid_request"}`; quoting messages replaced (`dps.errors.safe_error_items`); non-identifier `loc` parts shown as `<key>`; the engine's 400 `invalid policy`, the policy store's `invalid_policy`, the recognizer test and connection validation use the same scrubbing; `custom.py`, `policy.py`, `jsonpath.py` validators name the rule, never the value | `tests/security/test_validation_errors.py`; scans: `tests/security/test_scanner_paths.py` (§3.24) | fixed + test |
 | S2 | secrets | `repr(Settings)` printed 12 secrets; `ApplyOptions`/`TransformContext` printed the SEC-4 binding key and the token cache | every secret setting `Field(default="", repr=False)`; `binding_keys`, `binding`, `external_cache`, `external` `field(repr=False)` | `tests/security/test_secrets_hygiene.py::test_settings_repr_hides_secrets`, `::test_engine_dataclasses_hide_binding_keys_and_token_maps` | fixed + test |
-| S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | two layers (§3.2): the static first filter `regex_guard.check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies), and — review rounds 1 and 2 — the bound: patterns and deny lists run on the `regex` module, each run charged its own CPU (5 ms in the calling thread holding the GIL, then a matcher process), under a per-call allowance of 10 ms + 20 µs per run + 0.5 µs per character per pattern, capped at `DPS_PATTERN_CPU_SECONDS` per request and per NDJSON item (422 `custom_pattern_too_slow` past it); deny lists are matched as a trie; declared-field globs are matched without a regex (`custom.PathGlob`), linear in the path; round 3 (§3.2): no policy pattern runs, and no deny list is built, on the event loop serving a request (refused there as a server defect), a run waits at most 30 s for a matcher process (503 `pattern_matcher_busy`), and a deny list's build costs about the round-1 compile and is charged to the call (terms ≤ 256 characters) | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py`, `test_event_loop_freeze.py` | fixed + test (rounds 1–3) |
+| S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | two layers (§3.2): the static first filter `regex_guard.check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies), and — review rounds 1 and 2 — the bound: patterns and deny lists run on the `regex` module, each run charged its own CPU (5 ms in the calling thread holding the GIL, then a matcher process), under a per-call allowance of 10 ms + 20 µs per run + 0.5 µs per character per pattern, capped at `DPS_PATTERN_CPU_SECONDS` per request and per NDJSON item (422 `custom_pattern_too_slow` past it); deny lists are matched as a trie; declared-field globs are matched without a regex (`custom.PathGlob`), linear in the path; round 3 (§3.2): no policy pattern runs, and no deny list is built, on the event loop serving a request (refused there as a server defect), a run waits at most 30 s for a matcher process (503 `pattern_matcher_busy`), waiting runs served in arrival order (S3c review round 1, R1-B1), and a deny list's build costs about 1.2 times the round-1 compile (at most about 1.9 times measured) and is charged to the call (terms ≤ 256 characters) | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py`, `test_event_loop_freeze.py` | fixed + test (rounds 1–3) |
 | S4 | injection (selections) | `validate_selection` / the MongoDB allow-list are the only barrier before SQL/BSON | none needed: the adversarial corpus is refused on both dialects; comments are stripped (M2 design), never reach the statement | `tests/security/test_selection_injection.py` | accepted (control holds) + test |
 | S5 | SSRF (scanner) | no `check_scan_url`: numeric encodings, IPv4-mapped IPv6, metadata IPs and DNS that resolves to link-local were not refused; Chromium resolved any name | `dps.netguard.check_scan_url`, `forbidden_ip_reason` (IPv4-mapped/NAT64/6to4 unwrapped; loopback decided before "reserved", so `::1` follows the environment), `check_resolved_host`, `chromium_resolver_rules`; wired (§3.25): `POST /scans` and the browser-worker run `check_scan_url`, the scope proxy resolves and checks every hop's addresses and dials them itself, Chromium resolves nothing but the proxy's address | `tests/security/test_netguard.py`, `test_scan_ssrf.py`, `tests/scanner/test_scan_ssrf_browser.py` | fixed + test (wired 2026-10-15) |
 | S6 | auth | a route added without `require_scope` would be public | `require_scope`/`require_any_scope` tag their dependency (`__dps_scope__`); the walk uses `iter_route_contexts` (FastAPI 0.143 nests included routers, so the plan's `app.routes` walk saw 2 routes) | `tests/security/test_route_auth.py` | fixed + test |
@@ -217,18 +217,32 @@ Fix as built (round 3, finish stage, branch `fsecc`):
   the request; `PatternBudget.run` and a deny-list build refuse to run there
   (`regex_guard.ensure_off_serving_loop`: `PatternOnEventLoop`, logged as `pattern_on_event_loop`,
   a value-free 500) — a server defect is refused, the server never frozen. Outside a request (the
-  worker, the browser-worker, tools) nothing changes.
+  worker, the browser-worker, tools) nothing changes — so the browser-worker's crawl still runs
+  detection on the loop that answers its ops `/health`, and a scan's long but allowed runs pause
+  that loop for at most the run cap plus a matcher wait (S3c review round 1, an observation; with
+  `browser_concurrency` 2 and two matcher processes the wait is short).
 - **Every wait is bounded.** A run waits at most 30 s for a matcher process
   (`pattern_process.ACQUIRE_TIMEOUT_SECONDS`), then the call is refused with 503
-  `pattern_matcher_busy` (retryable: the call did nothing wrong).
-- **Deny-list builds cost what round 1 did, and are charged.** An edge of the trie is one plain
+  `pattern_matcher_busy` (retryable: the call did nothing wrong). Waiting runs are served in arrival
+  order (S3c review round 1, R1-B1): a released matcher goes straight to the oldest waiter, and a
+  caller that has just released one queues behind the others. Before, a caller making back-to-back
+  runs that went straight to a matcher retook it at once (it still held the GIL); with four callers
+  on two matchers — the worker's and the pool's defaults — two callers ran over a thousand scans
+  each while the other two were refused at 30 s. Now the bound refuses a run only when the runs
+  queued ahead of it really outlast it.
+- **Deny-list builds cost about 1.2 times round 1's compile, and are charged.** An edge of the trie is one plain
   character under `IGNORECASE` wherever its set of text characters is exactly that character's case
   matches, and a case-sensitive class `(?-i:[…])` only where the matcher's case relation is not an
   equivalence (the Turkish i's); a node with one term left writes that term's ending as text. The
   pattern is about as long as the flat alternation and builds (text plus compile) at 1.0–1.3 times
   its compile for terms of 20 to 256 characters (1000 × 50: 0.063 s against 0.050 s; round 2:
-  0.6–1.05 s; 1.6 times for 8-character terms, 0.017 s), with the same
-  exact spans (the reviewer's wide differential: Greek symbol variants, titlecase digraphs, the
+  0.6–1.05 s; 1.6 times for 8-character terms, 0.017 s). Other list shapes cost more (the S3c
+  reviewer's matrix, best of three with the collector paused): 1.28 times for "First Last N" names,
+  1.89 times for Turkish names, 1.18 times for e-mail addresses, 1.01 times for CJK terms and 0.93
+  times for account ids; end to end, the reviewer's 2.7 MB request costs 1.18 times round 1. So a
+  build is not at or below round 1's cost for every list shape (S3c review round 1, N1, left to the
+  owner to accept); it is charged and bounded by the ceiling whatever its shape. The trie matches
+  the flat form's spans exactly (the reviewer's wide differential: Greek symbol variants, titlecase digraphs, the
   Kelvin, Angstrom, Ohm and micro signs, Cherokee, Georgian, the Turkish i's, long s). Each build
   is charged to the call (`custom.build_deny_list`, `PatternBudget.charge_build`): its CPU counts
   toward the call's ceiling — not toward the run allowance, which stays what the call's texts earn
@@ -246,8 +260,8 @@ Proof (round 3):
   synthesize attacks (before: 14 health answers in 4 s instead of ≥ 50) and while `/synthesize`
   builds 20 new deny lists (before: 16.96 s); the reviewer's 2.7 MB policy is refused at a 1 s
   ceiling within 4 s (before: HTTP 200 after 41.2 s, 40.5 CPU-seconds) and 20 new such lists
-  answer 200 under the default ceiling; the build costs under twice the flat compile (before:
-  17.8 times); a build is charged and a call past its ceiling builds no further list; the guard
+  answer 200 under the default ceiling; the build costs under 1.6 times the flat compile plus
+  5 ms (before: 17.8 times); a build is charged and a call past its ceiling builds no further list; the guard
   refuses a run or a build on the serving loop's thread and allows it off the loop; T3 labelling
   and `synthesize` (text and JSON) run inside a request's scope; the bounded wait; the child's
   compile charge; no core dumps; terms over 256 characters refused value-free.
@@ -258,9 +272,25 @@ Proof (round 3):
   reviewer's 2.7 MB `/detect` (50 new lists of 1000 random 50-letter terms) is now refused at the
   5 s ceiling (422 after 5.06 CPU-seconds); uncapped it costs 4.85 CPU-seconds on the build Mac,
   where round 1 costs 4.25 (HTTP 200) and round 2 40.0 — the 50 builds alone 3.58 s against round
-  1's 3.17 s (random letters share no prefixes; name-like lists, which do, build below round 1's
-  compile). The 7.2 MB variant (140-character terms) is refused at the ceiling too (5.11 CPU-s;
-  round 2: 42.0 s).
+  1's 3.17 s (random letters share no prefixes; name-like lists, which do, are no cheaper: the
+  S3c reviewer measured 1.28 times round 1's compile for "First Last N" names and 1.89 times for
+  Turkish names, 0.93 times for account ids). The 7.2 MB variant (140-character terms) is refused
+  at the ceiling too (5.11 CPU-s; round 2: 42.0 s).
+
+Proof (S3c review round 1, R1-B1 and N2):
+- `tests/security/test_event_loop_freeze.py`, written first and failing on `1532ef9`: four callers
+  on two matcher processes make back-to-back deny-list scans that go straight to a matcher, for
+  4 s under a 1 s bound — none is refused and each makes about the same progress (before: runs
+  `[46, 47, 0, 0]`, refusals `[0, 0, 4, 4]`); without processes, a released matcher goes to the
+  oldest waiter and the releaser queues behind the others, a caller that gives up leaves the queue,
+  and a replaced matcher's slot or a grown pool's goes to the oldest waiter; `/policies/test-recognizer`
+  answers a busy pool 503 `pattern_matcher_busy` (before: 500 without a code).
+- The reviewer's probes on the new code (`~/.cache/dps-build/reports/S3c-fix-r1/probes/`; 4 callers,
+  2 matchers, 45 s, `PatternBudget(run_cap=5.0)` as a worker handler binds it): 3 MB texts 515,
+  514, 513 and 514 scans, 600 KB texts 2650, 2650, 2649 and 2647, no refusal, longest scan 0.1 s
+  (before: 1074 and 1092 scans for two callers, the other two refused at 30 s); through
+  `MatcherPool.run` with 0.37 s runs: 57, 57, 56 and 56 runs, longest call 0.9 s (before: 120 and
+  116, two callers refused).
 
 ### 3.4 F-04 — a stronger detector never weakens protection
 
@@ -603,8 +633,8 @@ counters, never on the absence of an error.
   process (default 2), plus 5 ms GIL slices in request threads and — round 3 — the deny-list builds
   of new lists, which hold the GIL on a worker thread (never the event loop) and count toward the
   same 5 s per request (at about 1.3 µs per term character a 2.7 MB policy of 50 new lists costs
-  about 3.3 s). Other tenants' long pattern runs then queue for a matcher process for at most 30 s,
-  then 503 `pattern_matcher_busy` (retryable); a queued request holds a worker thread meanwhile, and
+  about 3.3 s). Other tenants' long pattern runs then queue for a matcher process, in arrival order,
+  for at most 30 s, then 503 `pattern_matcher_busy` (retryable); a queued request holds a worker thread meanwhile, and
   there is no per-tenant fairness yet (review round 3, N-r3-2: 48 concurrent ceiling-spending
   requests from one key delayed another caller's ordinary `/detect` 24 s; `/health` answers on the
   loop and is not delayed). Their short runs are unaffected. An NDJSON stream spends at most its

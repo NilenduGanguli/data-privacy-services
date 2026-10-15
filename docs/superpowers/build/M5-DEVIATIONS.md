@@ -1505,7 +1505,7 @@ in the report).
   value-free 500 via `map_engine_error`, `internal_error` on an NDJSON line; logged
   `pattern_on_event_loop`). Thread identity, not "any running loop": an NDJSON thread, the worker
   and the browser-worker keep running patterns on their own loops' threads as before (the worker's
-  detector builds on its loop are unchanged and now cost about round-1's compile).
+  detector builds on its loop are unchanged and now cost about 1.2 times round-1's compile).
 - **Bounded waits.** `MatcherPool.run(..., wait=ACQUIRE_TIMEOUT_SECONDS)` (30 s) uses
   `Condition.wait_for` with a timeout and raises `MatcherBusy`; `PatternBudget.run` maps it to the new
   `PatternMatcherBusy` (503 `pattern_matcher_busy`, retryable; in an L2 job the generic handler
@@ -1520,8 +1520,11 @@ in the report).
   pattern text instead; the deep-endings test counts `_alternation` calls instead of looking for
   `(?i:`). Exactness: the round-2 differential test and the reviewer's wide-alphabet differential
   (now a test, 600 cases) pass. Cost: 1.0–1.3 times the round-1 flat compile for 1000 random-letter
-  terms of 20–256 characters (1.6 times at 8; the test bounds it at twice), below it for name-like
-  lists (shared prefixes). End to end, the reviewer's 2.7 MB request costs 4.85 CPU-s uncapped
+  terms of 20–256 characters (1.6 times at 8; the test bounds it at 1.6 times plus 5 ms). Name-like
+  lists are not cheaper, as this entry first said: the S3c reviewer measured 1.28 times for "First
+  Last N" names, 1.89 times for Turkish names, 1.18 for e-mail addresses, 1.01 for CJK terms and
+  0.93 for account ids (corrected in S3c round 1, N1; about 1.2 times is for the owner to accept —
+  every build is charged and bounded by the ceiling either way). End to end, the reviewer's 2.7 MB request costs 4.85 CPU-s uncapped
   (round 1: 4.25, round 2: 40.0) and is now refused at the 5 s ceiling, since builds count toward it
   — a deliberate change from round 1, which answered it 200 (the reviewer accepts 200 or 422 within
   about the ceiling).
@@ -1548,3 +1551,37 @@ in the report).
   on target hardware), N-r3-5 (process-wide caches keyed by caller content) — recorded in the
   security review §5.
 - Report `~/.cache/dps-build/reports/S3c-impl.md`.
+
+## S3c review round 1 fix R1-B1 — matchers handed out in arrival order (finish stage, `fsecc`)
+
+Review: `~/.cache/dps-build/reports/S3c-review-r1.md` (R1-B1 blocking; N1 docs).
+
+- **R1-B1.** `MatcherPool` no longer waits on a `threading.Condition`: `notify()` woke a waiter,
+  but the caller that had just released the matcher still held the GIL and, issuing its next run at
+  once (a `_HEAVY`-routed pattern goes straight to the pool, no slice in between), retook the idle
+  matcher first. With four callers on two matchers (the worker's and the pool's defaults), two
+  callers ran over a thousand scans and the other two were refused (`PatternMatcherBusy`) when the
+  round-3 bound passed. The pool now keeps a FIFO of waiters (`_Waiter`: an `Event`, a `granted`
+  flag and the matcher handed over). `_release` hands the matcher straight to the oldest waiter and
+  returns it to `_idle` only when nobody waits; `_acquire` queues behind existing waiters even when
+  a matcher is idle (by construction none is while callers wait); a slot freed by a replaced
+  matcher, a failed start or a larger `resize` goes to the oldest waiter, which starts a child. A
+  waiter whose bound passes re-checks under the lock: handed something meanwhile, it takes it;
+  otherwise it leaves the queue and raises `MatcherBusy`. A waiter interrupted by an exception
+  passes on what it was handed (`_abandon`). New read-only `MatcherPool.waiting` (queued callers).
+  `MatcherPool.run`'s signature and the 30 s bound are unchanged; per-tenant fairness (N-r3-2)
+  stays open.
+- **Tests (written first, failing on `1532ef9`):** `test_event_loop_freeze.py::
+  test_callers_sharing_the_matchers_all_progress_without_refusals` (4 callers, 2 matcher
+  processes, back-to-back `_HEAVY`-routed deny-list scans through `PatternBudget.run` for 4 s under
+  a 1 s bound; before: runs `[46, 47, 0, 0]`, refusals `[0, 0, 4, 4]`), and process-free checks of
+  the hand-out order (`test_a_released_matcher_goes_to_the_oldest_waiter`), of a caller that gives
+  up leaving the queue, and of freed and added slots going to the oldest waiter.
+- **N1 (docs).** The build-cost parity claims are corrected in the security review (§1 S3 row,
+  §3.2 round 3), this log's round-3 entry and `custom.py`'s module docstring: about 1.2 times the
+  round-1 compile, at most about 1.9 times measured (Turkish names); the test bounds the
+  random-letter build at 1.6 times plus 5 ms. The browser-worker observation is noted in §3.2.
+- **N2 (taken in passing).** `/policies/test-recognizer` caught only `PatternTooSlow`, so a busy
+  pool answered 500 without a code; it now maps `PatternMatcherBusy` to 503 `pattern_matcher_busy`
+  like the engine routes (`test_the_recognizer_test_route_answers_a_busy_pool_with_the_retryable_code`,
+  failing first). N3-N6 stay open (security review §5 and the F1/owner list).

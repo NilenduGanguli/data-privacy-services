@@ -10,7 +10,8 @@ The recognizer test answers with offsets only: the sample text is neither stored
 nothing is registered (a recognizer's ``sensitivity`` is dropped before the detector is built). The
 route bounds the text (20 000 characters), each pattern (500 characters) and the number of
 patterns (50), and the patterns run under the request's CPU budget like every policy pattern
-(S3 review round 1 B1): one that runs past it answers 422 ``custom_pattern_too_slow``.
+(S3 review round 1 B1): one that runs past it answers 422 ``custom_pattern_too_slow``, and one
+that finds every matcher process busy for the wait's bound 503 ``pattern_matcher_busy``.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dps.auth import require_scope
 from dps.engine.detect.custom import PolicyCustomDetector, RecognizerSpec
-from dps.engine.detect.regex_guard import PatternTooSlow
+from dps.engine.detect.regex_guard import PatternMatcherBusy, PatternTooSlow
 from dps.engine.taxonomy import TAXONOMY, Family, entity_info, is_builtin_entity
 from dps.layers.api.common import CodedHTTPException
 from dps.layers.documents.models import validation_message
@@ -120,7 +121,8 @@ def test_recognizer(body: RecognizerTestRequest) -> RecognizerTestOut:
     base = {p.name: p.score for p in spec.patterns}
     try:
         hits = detector.scan(body.text, None)
-    except PatternTooSlow as exc:  # S3 review round 1 B1: refused, never a pinned CPU
+    except (PatternTooSlow, PatternMatcherBusy) as exc:  # refused, never a pinned CPU (S3 B1);
+        # every matcher busy: 503, retryable (S3c review round 1, N2)
         raise CodedHTTPException(exc.status, exc.code, exc.detail) from None
     matches = [
         RecognizerMatch(

@@ -10,9 +10,11 @@ server's GIL and event loop stay free while it runs.
 The pool holds at most :func:`configure_pattern_processes` children (``DPS_PATTERN_PROCESSES``,
 default 2), started on first use; a caller waits for a free one — for at most
 :data:`ACQUIRE_TIMEOUT_SECONDS`, then the run is refused as busy (:class:`MatcherBusy`; S3 review
-round 3: every wait is bounded). Callers are never on the event loop that serves requests
-(:func:`dps.engine.detect.regex_guard.ensure_off_serving_loop`), so a wait here holds a worker
-thread, never the server. So long pattern runs occupy at most that many CPUs of a server process,
+round 3: every wait is bounded). Waiting callers are served in arrival order (S3c review round 1,
+R1-B1), so the bound refuses a run only when the runs queued ahead of it really outlast it, never
+because other callers kept retaking their matchers. Callers are never on the event loop that
+serves requests (:func:`dps.engine.detect.regex_guard.ensure_off_serving_loop`), so a wait here
+holds a worker thread, never the server. So long pattern runs occupy at most that many CPUs of a server process,
 however many requests carry them. A child that dies, hangs or answers out of protocol is killed and
 replaced, and the run is reported as failed — the caller refuses it (fail closed), never skips it. Children get an empty environment (no ``DPS_*`` setting
 or secret reaches them), run in isolated mode (``python -I``), print nothing and exit when the
@@ -28,6 +30,7 @@ import sys
 import threading
 import time
 from array import array
+from collections import deque
 from pathlib import Path
 
 from dps.engine.detect.pattern_child import ANSWER, OK, REQUEST, TIMED_OUT
@@ -142,29 +145,57 @@ class _Matcher:
             pass
 
 
+class _Waiter:
+    """A caller queued for a matcher: :meth:`MatcherPool._grant_locked` hands it a matcher, or the
+    right to start one, and sets its event."""
+
+    __slots__ = ("event", "granted", "matcher")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.granted = False
+        self.matcher: _Matcher | None = None
+
+
 class MatcherPool:
-    """At most ``size`` matcher processes, started on first use, shared by every thread."""
+    """At most ``size`` matcher processes, started on first use, shared by every thread.
+
+    Callers get a matcher in arrival order (S3c review round 1, R1-B1): a released matcher goes
+    straight to the oldest waiting caller, and a caller that arrives while others wait queues
+    behind them even if it has just released one. Without that, a caller issuing back-to-back runs
+    retook its matcher at once (it still held the GIL), and the others waited until the bounded
+    wait refused them; now a wait is about the runs queued ahead of it divided among the matchers,
+    so the bound refuses only a real overload.
+    """
 
     def __init__(self, size: int = DEFAULT_PROCESSES) -> None:
         self._size = max(1, size)
         self._idle: list[_Matcher] = []
         self._count = 0
-        self._cond = threading.Condition()
+        self._waiters: deque[_Waiter] = deque()
+        self._lock = threading.Lock()
 
     @property
     def size(self) -> int:
         """The most children this pool runs at once."""
         return self._size
 
+    @property
+    def waiting(self) -> int:
+        """How many callers are queued for a matcher."""
+        with self._lock:
+            return len(self._waiters)
+
     def resize(self, size: int) -> None:
-        """Change the most children run at once; idle ones above the new size are stopped."""
+        """Change the most children run at once; idle ones above the new size are stopped, and
+        waiting callers get the slots a larger size adds."""
         surplus: list[_Matcher] = []
-        with self._cond:
+        with self._lock:
             self._size = max(1, size)
             while self._idle and self._count > self._size:
                 surplus.append(self._idle.pop())
                 self._count -= 1
-            self._cond.notify_all()
+            self._grant_starts_locked()
         for matcher in surplus:
             matcher.close()
 
@@ -178,7 +209,7 @@ class MatcherPool:
         wait: float = ACQUIRE_TIMEOUT_SECONDS,
     ) -> RunResult:
         """Run ``pattern`` over ``text`` in a child, with a CPU limit of ``limit`` seconds, after
-        waiting at most ``wait`` seconds for a free child.
+        waiting at most ``wait`` seconds for a free child (callers are served in arrival order).
 
         Raises:
             MatcherBusy: no child became free within ``wait``.
@@ -194,45 +225,91 @@ class MatcherPool:
         return result
 
     def _acquire(self, wait: float) -> _Matcher:
-        with self._cond:
-            if not self._cond.wait_for(lambda: self._idle or self._count < self._size, wait):
-                logger.warning("pattern_matcher_busy")
-                raise MatcherBusy
-            if self._idle:
+        waiter: _Waiter | None = None
+        with self._lock:
+            if self._waiters or (not self._idle and self._count >= self._size):
+                waiter = _Waiter()  # behind everyone already waiting, even if one is idle
+                self._waiters.append(waiter)
+            elif self._idle:
                 return self._idle.pop()
-            self._count += 1
+            else:
+                self._count += 1  # a slot to start a child in
+        if waiter is not None:
+            try:
+                waiter.event.wait(wait)
+            except BaseException:
+                self._abandon(waiter)
+                raise
+            with self._lock:
+                if not waiter.granted:  # the bound passed and nothing was handed over meanwhile
+                    self._waiters.remove(waiter)
+                    logger.warning("pattern_matcher_busy")
+                    raise MatcherBusy
+            if waiter.matcher is not None:
+                return waiter.matcher
+        return self._start()
+
+    def _start(self) -> _Matcher:
+        """Start a child in a slot already counted for this caller."""
         try:
             if not sys.executable:
                 raise OSError("no interpreter to start")
             return _Matcher()
         except (OSError, ValueError):
-            with self._cond:
-                self._count -= 1
-                self._cond.notify()
+            self._free_slot()
             logger.error("pattern_matcher_start_failed")
             raise MatcherFailed from None
 
     def _release(self, matcher: _Matcher) -> None:
-        with self._cond:
+        with self._lock:
             surplus = self._count > self._size
             if surplus:
                 self._count -= 1
+            elif self._waiters:
+                self._grant_locked(self._waiters.popleft(), matcher)
             else:
                 self._idle.append(matcher)
-            self._cond.notify()
         if surplus:
             matcher.close()
 
     def _discard(self, matcher: _Matcher) -> None:
         logger.warning("pattern_matcher_replaced")
         matcher.close()
-        with self._cond:
+        self._free_slot()
+
+    def _free_slot(self) -> None:
+        """A counted child is gone (replaced, or never started): its slot goes to the oldest
+        waiter, which starts a new one."""
+        with self._lock:
             self._count -= 1
-            self._cond.notify()
+            self._grant_starts_locked()
+
+    def _abandon(self, waiter: _Waiter) -> None:
+        """A waiter interrupted while waiting (an exception raised in its thread) leaves the queue,
+        and passes on whatever it was handed meanwhile."""
+        with self._lock:
+            if not waiter.granted:
+                self._waiters.remove(waiter)
+                return
+        if waiter.matcher is not None:
+            self._release(waiter.matcher)
+        else:
+            self._free_slot()
+
+    def _grant_locked(self, waiter: _Waiter, matcher: _Matcher | None) -> None:
+        """Hand ``waiter`` a matcher, or (``None``) a counted slot to start one in."""
+        waiter.matcher = matcher
+        waiter.granted = True
+        waiter.event.set()
+
+    def _grant_starts_locked(self) -> None:
+        while self._waiters and self._count < self._size:
+            self._count += 1
+            self._grant_locked(self._waiters.popleft(), None)
 
     def close(self) -> None:
         """Stop the idle children (tests; at exit their stdin closes and they end anyway)."""
-        with self._cond:
+        with self._lock:
             idle, self._idle = self._idle, []
             self._count -= len(idle)
         for matcher in idle:
@@ -240,8 +317,8 @@ class MatcherPool:
 
     def _after_fork(self) -> None:
         """In a forked process the parent's children are not ours (and a lock may be held)."""
-        self._cond = threading.Condition()
-        self._idle, self._count = [], 0
+        self._lock = threading.Lock()
+        self._idle, self._count, self._waiters = [], 0, deque()
 
 
 POOL = MatcherPool()
