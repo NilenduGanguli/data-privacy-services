@@ -1,0 +1,28 @@
+/* Demo Bank onboarding: a plain, readable bank look. */
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #1f2a44; background: #f6f8fc; }
+header.top { display: flex; align-items: center; gap: 24px; padding: 12px 24px; background: #0f3d6e; color: #fff; }
+header.top .brand { color: #fff; font-weight: 700; text-decoration: none; font-size: 17px; }
+header.top nav { display: flex; flex-wrap: wrap; gap: 16px; }
+header.top nav a { color: #dce7f5; text-decoration: none; }
+header.top nav a:hover { text-decoration: underline; }
+main { max-width: 860px; margin: 24px auto; padding: 0 16px; }
+h1 { font-size: 22px; margin: 0 0 16px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; background: #fff; padding: 16px; border: 1px solid #dfe5f0; border-radius: 8px; }
+.field.full, .actions { grid-column: 1 / -1; }
+.field label, .field .lbl { display: block; font-size: 12px; color: #4d5875; margin-bottom: 4px; }
+input, select, textarea { width: 100%; padding: 8px; border: 1px solid #c5cde0; border-radius: 6px; font: inherit; background: #fff; }
+input[type="checkbox"], input[type="radio"] { width: auto; }
+.msg { color: #be123c; font-size: 12px; }
+.actions button { padding: 8px 16px; border: 0; border-radius: 6px; background: #0f766e; color: #fff; font: inherit; cursor: pointer; }
+ul.links { padding-left: 18px; }
+table.profile { border-collapse: collapse; background: #fff; border: 1px solid #dfe5f0; }
+table.profile th { text-align: left; padding: 6px 12px; color: #4d5875; font-weight: 600; }
+table.profile td { padding: 6px 12px; }
+dl.review { display: grid; grid-template-columns: 200px 1fr; gap: 6px 12px; background: #fff; padding: 16px; border: 1px solid #dfe5f0; border-radius: 8px; }
+dl.review dt { color: #4d5875; }
+dl.review dd { margin: 0; }
+.linkish { color: #0f766e; text-decoration: underline; cursor: pointer; }
+body.widget { background: #fff; }
+body.widget .grid { border: 0; }
+@media (max-width: 640px) { .grid { grid-template-columns: 1fr; } dl.review { grid-template-columns: 1fr; } }

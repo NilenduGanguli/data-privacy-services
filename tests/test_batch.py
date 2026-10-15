@@ -301,14 +301,19 @@ def test_short_originals_inside_other_outputs_are_not_leaks() -> None:
 
 
 def test_an_undetected_copy_in_free_text_is_a_leak() -> None:
-    # NER is off and a lower-case name has no cue: the notes keep the customer's name in clear.
-    row = {**ROWS[0], "notes": "ref ananya krishnan fees"}
+    # NER is off and the name is glued into one word: no detector finds it, and no row-value span
+    # either (those match whole words), so the notes would keep the customer's name in clear.
+    row = {**ROWS[0], "notes": "ref ananyakrishnan fees"}
     with pytest.raises(LeakageError):
         _obf().transform([row])
     warned = _obf(verify="warn").transform([row])
     assert warned.verification.hits == [
         {"path": "$.notes", "entity_type": "PERSON_NAME", "rule": "contained"}
     ]
+    # S1-M3 r1 (B2): repeated as words — any case — the row's own name is a span and is replaced
+    spaced = _obf().transform([{**ROWS[0], "notes": "ref ananya krishnan fees"}])
+    assert spaced.verification.passed
+    assert not {"ananya", "krishnan"} & set(spaced.rows[0]["notes"].lower().split())
 
 
 def test_a_name_part_that_appears_from_nowhere_is_a_leak() -> None:

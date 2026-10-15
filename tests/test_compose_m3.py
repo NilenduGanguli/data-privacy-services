@@ -111,7 +111,12 @@ def test_demo_secrets_write_the_oracle_and_mongo_refs_as_local_literals() -> Non
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
 def test_demo_secret_refs_resolve_to_credentials(tmp_path: Path) -> None:
-    script = _demo_secrets_command().replace(SECRET_ROOT, str(tmp_path))
+    # /seed/ui is the one-shot's read-only mount of the repo's demo session folder (M4)
+    script = (
+        _demo_secrets_command()
+        .replace(SECRET_ROOT, str(tmp_path))
+        .replace("/seed/ui", str(ROOT / "docker/secrets/default/dps/ui"))
+    )
     subprocess.run(["sh", "-c", script], check=True, capture_output=True, timeout=30)
     settings = Settings(_env_file=None, secret_dir=str(tmp_path))
     now = datetime.now(UTC)
@@ -150,5 +155,7 @@ def test_demo_secret_refs_resolve_to_credentials(tmp_path: Path) -> None:
         assert not (tmp_path / ref).exists(), ref
         with pytest.raises(SecretUnavailable):
             asyncio.run(load_credentials(conn("oracle", ref, "t1"), settings=settings, kek=None))
-    # M2's refs are still written beside them.
+    # M2's refs are still written beside them, and M4's demo session under the same tenant
     assert (tmp_path / "default/dps/src/bank-pg-ro/username").read_text() == "dps_reader"
+    session = tmp_path / "default/dps/ui/demo-onboarding/storage_state.json"
+    assert session.is_file() and not (tmp_path / "dps/ui").exists()

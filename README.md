@@ -18,7 +18,12 @@ the **Document** tab), **Policies**, and the **Data sources & jobs** pages (jobs
 job detail, evidence pack, reports). **M3 adds Oracle and MongoDB** to the same jobs (thin-mode Oracle
 with keyset or ROWID partitions, MongoDB documents transformed by leaf path) and **job groups**: one
 caller-held key across PostgreSQL, Oracle and MongoDB, with a counts-only consistency check that
-joins the masked targets (3 / 3 consistent in the demo). All offline in compose.
+joins the masked targets (3 / 3 consistent in the demo). All offline in compose. **Layer 3, the UI scanner (M4)**: crawl a
+registered web front end in a sandboxed Chromium, inventory and classify every form
+field, flag privacy risks, show each form filled with synthetic personas and with reversible tokens
+side by side, and capture pages that render personal data with that data masked — **never
+submitting anything** (a request guard and a scope proxy block every non-GET request; a counting
+server proves it).
 
 | Read | For |
 |---|---|
@@ -28,6 +33,7 @@ joins the masked targets (3 / 3 consistent in the demo). All offline in compose.
 | [`docs/technical/api-m1.md`](docs/technical/api-m1.md) | the M1 additions: documents, schema synthesis, taxonomy, NDJSON, `Idempotency-Key`, OCR providers, T3 labelling |
 | [`docs/technical/api-m2.md`](docs/technical/api-m2.md) | the jobs and PostgreSQL API (routes, error codes, state machine, evidence pack, measured throughput) |
 | [`docs/technical/api-m3.md`](docs/technical/api-m3.md) | Oracle and MongoDB connections, selections per engine, M3 prepare failures, the job-group consistency check |
+| [`docs/technical/api-m4.md`](docs/technical/api-m4.md) | the UI scanner API (routes, error codes, scan lifecycle, export and capture-map formats, evidence `scan` block, the no-submission rules) |
 | [`docs/technical/detector-eval-m1.md`](docs/technical/detector-eval-m1.md) | detector precision and recall per entity type on the synthetic labelled corpus |
 | [`docs/design/mockups/index.html`](docs/design/mockups/index.html) | the console mockups (built so far: Overview, Playground with the Document tab, Policies 05, documents 08, and the jobs pages 07, 03, 06, 10 with the evidence list of 09) |
 | [`docs/superpowers/plans/`](docs/superpowers/plans/) | the milestone plans (M0–M5) and the M1–M5 contract |
@@ -77,10 +83,31 @@ Open the console, paste the key into the header, and try:
 - **Data sources & jobs → New job**: connect `bank-pg-ro`, select and count rows, discover and review
   the columns, choose a write mode, run, then open the job and its evidence pack.
 
+## Scan a web front end (M4)
+
+```bash
+docker compose --profile scanner up -d --build   # + browser-worker (Playwright 1.55.0 image) and the demo
+                                                  # onboarding site (127.0.0.1:8410, in-network demo-site:8410)
+docker compose --profile scanner ps               # poll until app, browser-worker and demo-site are healthy
+DPS_SMOKE_M2=off DPS_SMOKE_SCANNER=1 python tools/smoke_test.py   # Layer 1 checks + 11 scanner checks
+docker compose --profile scanner down
+```
+
+Open the console at `/scanner/new`, paste the key, and scan `http://demo-site:8410/apply` with the
+session `dps/ui/demo-onboarding` (the demo site's login, copied by `demo-secrets` from `docker/secrets/default/…`):
+the crawl map and navigation log fill in live; the scan detail shows each page's original and
+annotated screenshots, the **parallel view** (flip synthetic ↔ obfuscated), the field inventory with
+risk flags, the masked captures, the persona/field exports and the evidence pack. The scan's key and
+synthesis seed are shown once. Only registered hosts can be scanned (`DPS_SCAN_REGISTERED_HOSTS`
+locally: `localhost,127.0.0.1,demo-site`), and the demo site's `GET /__received` counts every
+non-GET request and form submission it ever received — it stays the same through any scan.
+Settings, image, ports and traps: `HANDOFF.md` §12; API: `docs/technical/api-m4.md`.
+
 ## Develop
 
 ```bash
-uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e ".[dev,fpe,docs,db,connectors,uitest,e2e]"
+uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e ".[dev,fpe,docs,db,connectors,scanner,uitest,e2e]"
+python -m playwright install chromium            # once: Chromium 1187 for the scanner and console tests
 ruff check dps tests tools && ruff format --check dps tests tools && mypy dps && pytest -q
 (cd frontend && npm ci && npm run typecheck && npm test && npm run build)
 DPS_AUTH_ENABLED=false DPS_LLM_PROVIDER=stub uvicorn dps.app:create_app --factory --port 8400
@@ -96,8 +123,10 @@ Services for the integration tests: `docker compose up -d dps-db` (marker `db`),
 docs up -d azure-ocr-mock` (`ocr`), or, without Docker, `tools/scratch_pg.sh start all` (Homebrew
 PostgreSQL 16 on 5441/5442). Markers: `docs` (the `[docs]` extra), `ocr`, `tesseract` (a host
 `tesseract` binary), `db`, `pg_source`, `s3`, `slow` (resume-after-kill, about 90 s), `browser` (the
-console check; `python -m playwright install chromium` once), `oracle` (`docker compose --profile
-oracle up -d oracle`), `mongo` (`docker compose --profile sources up -d mongo`). Without a service its tests skip;
+console checks and the scanner's browser tests; `python -m playwright install chromium` once — the
+scanner tests use a running demo site at `DPS_TEST_DEMO_SITE`, else start it with the host's `node`
+on `${DPS_DEMO_SITE_PORT:-8410}`), `oracle` (`docker compose --profile oracle up -d oracle`), `mongo`
+(`docker compose --profile sources up -d mongo`). Without a service its tests skip;
 `DPS_TEST_REQUIRE_SERVICES=1` makes them fail instead. The milestone gates with the full stack up:
 
 ```bash
@@ -107,6 +136,7 @@ DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle or mongo"                 # M3 (incl. tests/e2e, the M3 console checks)
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/connectors/test_conformance_*.py -m "pg_source or oracle or mongo"
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "browser or db" tests/scanner tests/test_no_values_in_logs_m4.py   # M4
 ```
 
 `npm run build` writes `frontend/dist`, which the API process serves at `/` when it exists.
@@ -117,7 +147,8 @@ PNG, DOCX, TXT, CSV); the console's "Load demo KYC scan" serves `frontend/public
 Optional extras: `ner` (Presidio + spaCy, higher recall on names and places), `fpe` (FF1
 format-preserving encryption, used only with `DPS_FPE_ENABLED=true`), `docs` (M1 documents:
 pypdf, pdfplumber, pypdfium2, reportlab, python-docx, Pillow), `db` (asyncpg: metadata database and
-PostgreSQL connector), `connectors` (sqlglot, pyarrow, boto3), `uitest` / `e2e` (Playwright 1.55.0
+PostgreSQL connector), `connectors` (sqlglot, pyarrow, boto3), `scanner` (Playwright 1.55.0 and
+Pillow for the browser-worker; never in the app image), `uitest` / `e2e` (Playwright 1.55.0
 for the M1 and M2 console checks), `vertex` (laptop path to Gemini). Production goes through the
 Stellar gateway — see `HANDOFF.md`.
 

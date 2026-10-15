@@ -7,6 +7,8 @@ import type {
   QueueOut, Readiness, RecognizerSpec, RecognizerTestOut, ReportsJobsOut, RevealOut, RotateResult, RunOut, RunSpec,
   Selection, SnapshotOverride, SummaryOut, TableShape, TenantPatch, TenantPolicyDetail, TenantSpec, TenantView,
   TransformOut, WriteMode,
+  InventoryRow, NumberedRiskFlag, PersonaPreview, ScanCreated, ScanDetail, ScanEvent, ScanPage, ScanPageDetail, ScanSpecIn,
+  SynthesisSeed,
 } from './types';
 
 /** An API refusal: `message` is the server's value-free `detail`, `code` its machine code (absent on
@@ -78,6 +80,19 @@ async function download(path: string, auth: Auth, fallback: string, fixedName = 
   return { blob: await res.blob(), filename: name ?? fallback };
 }
 
+/**
+ * The pack as dps/layers/connectors/evidence.py::canonical_json writes it (sorted keys, compact
+ * separators, UTF-8 kept), so a pack without a stored JSON artefact (a UI scan's finalize stores the
+ * HTML rendering only, M4) still downloads as the bytes its `pack_sha256` names. (Whole-number
+ * floats would differ from Python's `1.0`; packs hold counts.)
+ */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+}
+
 /** Query string from the defined, non-empty params (`?a=1&b=x`, or '' when there are none). */
 export const qs = (p: Record<string, string | number | boolean | undefined | null>): string => {
   const s = new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => [k, String(v)]));
@@ -109,6 +124,25 @@ function documentForm(file: File, policy: Policy, options: DocumentOptions): For
 /** A JSON POST's RequestInit for the L1 `call` sites. */
 const postInit = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body) });
 const enc = encodeURIComponent;
+/** An authenticated binary download (screenshots, exports); ApiError on a refusal, never an error body as a blob. */
+const blob = (path: string, auth: Auth): Promise<Blob> => request(path, auth).then((r) => r.blob());
+
+/** M4: the UI scanner (contract §9). There is no route that submits a form or returns a stored key. */
+export const scansApi = {
+  create: (auth: Auth, spec: ScanSpecIn, idempotencyKey?: string) =>
+    post<ScanCreated>('/api/v1/scans', auth, spec, idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined),
+  list: (auth: Auth, p: { state?: string; limit?: number; cursor?: string } = {}) => json<Page<Job>>(`/api/v1/scans${qs(p)}`, auth),
+  get: (auth: Auth, id: string) => json<ScanDetail>(`/api/v1/scans/${enc(id)}`, auth),
+  pages: (auth: Auth, id: string, after = 0, limit = 200) => json<Page<ScanPage>>(`/api/v1/scans/${enc(id)}/pages${qs({ after, limit })}`, auth),
+  page: (auth: Auth, id: string, pageNo: number) => json<ScanPageDetail>(`/api/v1/scans/${enc(id)}/pages/${pageNo}`, auth),
+  events: (auth: Auth, id: string, after = 0, limit = 200) => json<Page<ScanEvent>>(`/api/v1/scans/${enc(id)}/events${qs({ after, limit })}`, auth),
+  inventory: (auth: Auth, id: string) => json<{ items: InventoryRow[]; risk_flags: NumberedRiskFlag[] }>(`/api/v1/scans/${enc(id)}/inventory?format=json`, auth),
+  download: (auth: Auth, id: string, what: 'inventory' | 'export', format: 'json' | 'csv') => blob(`/api/v1/scans/${enc(id)}/${what}?format=${format}`, auth),
+  cancel: (auth: Auth, id: string) => post<Job>(`/api/v1/scans/${enc(id)}/cancel`, auth),
+  personaPreview: (auth: Auth, body: { locale: string; count?: number; synthesis_seed?: SynthesisSeed | null }) =>
+    post<PersonaPreview>('/api/v1/scans/personas/preview', auth, body),
+  artefact: (auth: Auth, artefactId: string) => blob(`/api/v1/artefacts/${enc(artefactId)}`, auth),
+};
 
 export const api = {
   // M0: readiness, metrics and the Layer 1 engine routes.
@@ -211,10 +245,14 @@ export const api = {
     get: (a: Auth, id: string) => json<EvidenceOut>(`/api/v1/evidence/${enc(id)}`, a),
     /** M5: the server-rendered, archivable PDF of a pack (rendered once, then streamed). */
     pdf: (a: Auth, id: string) => download(`/api/v1/evidence/${enc(id)}/pdf`, a, `evidence-${id}.pdf`),
-    /** The sealed JSON artefact of a pack (the bytes `pack_sha256` was computed over). */
+    /** The sealed JSON artefact of a pack (the bytes `pack_sha256` was computed over); a scan's
+     *  pack has no JSON artefact, so it is saved as the pack in its canonical form (M4). */
     json: async (a: Auth, id: string): Promise<Download> => {
       const ev = await json<EvidenceOut>(`/api/v1/evidence/${enc(id)}`, a);
       const art = ev.artefacts.find((x) => x.kind === 'evidence_json');
+      if (!art && ev.pack?.job_kind === 'scan' && ev.pack.scan) {
+        return { blob: new Blob([canonicalJson(ev.pack)], { type: 'application/json' }), filename: `evidence-${id}.json` };
+      }
       if (!art) throw new ApiError(404, 'the pack has no JSON artefact', 'artefact_not_found');
       return download(`/api/v1/artefacts/${enc(art.id)}`, a, `evidence-${id}.json`, true);
     },
@@ -249,6 +287,8 @@ export const api = {
     apiRollupFile: (a: Auth, day: string, action: string, format: 'json' | 'pdf') =>
       download(`/api/v1/reports/api-rollups/${enc(day)}${qs({ action, format })}`, a, `api-rollup-${day}-${action}.${format}`),
   },
+  // M4: the UI scanner (contract §14: api.scans.*).
+  scans: scansApi,
   artefacts: {
     /** Fetch with the API key (artefacts are not public links), then hand the browser a blob to save. */
     download: async (a: Auth, id: string, filename: string): Promise<void> => {

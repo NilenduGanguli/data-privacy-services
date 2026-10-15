@@ -88,9 +88,9 @@ async def test_expired_jobs_their_objects_and_scan_rows_are_deleted(
             await conn.fetchval("SELECT to_regclass($1)", f"{s}.dps_scan_page") is not None
         )
         if scan_tables:  # M4's 030 (after the lanes merge): rows cascade from dps_job
-            await conn.execute(
-                f"INSERT INTO {s}.dps_scan_page (tenant_id, job_id, page_no, url_redacted, depth, status) "
-                "VALUES ('t1', $1, 1, '/', 0, 'done')",
+            await conn.execute(  # M4's 030 as built: template NOT NULL (contract §2.4 "may add")
+                f"INSERT INTO {s}.dps_scan_page (tenant_id, job_id, page_no, url_redacted, depth, "
+                "status, template) VALUES ('t1', $1, 1, '/', 0, 'done', 'demo-site/')",
                 scan,
             )
             await conn.execute(

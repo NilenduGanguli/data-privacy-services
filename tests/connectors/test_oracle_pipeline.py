@@ -31,7 +31,13 @@ from dps.jobs_models import (
 from dps.layers.connectors.evidence import get_evidence
 from dps.layers.connectors.submit import submit_discover, submit_run
 from dps.worker import HandlerContext
-from tests.connectors.helpers import db_key_enc, discover_and_accept, drive
+from tests.connectors.helpers import (
+    db_key_enc,
+    derived_key,
+    discover_and_accept,
+    drive,
+    masked_values,
+)
 from tests.connectors.oracle_fixtures import create_customers, drop_all
 from tests.connectors.test_run_modes import run_spec
 from tests.fixtures.m3_services import OracleTestSchema
@@ -41,6 +47,9 @@ from tests.services import host_port
 pytestmark = [pytest.mark.db, pytest.mark.integration, pytest.mark.oracle]
 RegisterOracle = Callable[..., Awaitable[Connection]]
 LEDGER = "DPS_WRITE_LEDGER"
+#: ``derived_key`` label of a fixed key under which FF1 maps one of the 300 test customer ids
+#: (``create_customers``) onto another of them and none onto itself (S1-M3 r2 gates B1).
+QUERY_COLLIDING_KEY = "oracle-query-collision-145"
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +105,22 @@ def _survivors(conn: Any, src: str, out: str, column: str) -> int:
     )
 
 
+def _rows(conn: Any, table: str) -> list[tuple[Any, str]]:
+    """``(CUSTOMER_ID, EMAIL as text)`` of every row of ``table`` (a widened target column may
+    be a CLOB). For in-memory comparisons only — never printed."""
+    import oracledb
+
+    def text_lobs(cursor: Any, meta: Any) -> Any:
+        if meta.type_code in (oracledb.DB_TYPE_CLOB, oracledb.DB_TYPE_NCLOB):
+            return cursor.var(oracledb.DB_TYPE_LONG, arraysize=cursor.arraysize)
+        return None
+
+    with conn.cursor() as cur:
+        cur.outputtypehandler = text_lobs
+        cur.execute(f"SELECT CUSTOMER_ID, EMAIL FROM {table}")
+        return [(r[0], str(r[1])) for r in cur.fetchall()]
+
+
 def _ledger_rows(conn: Any, owner: str, job_id: str) -> int:
     """The job's rows in the owner's write ledger (0 when the ledger table does not exist)."""
     exists = _count(
@@ -119,9 +144,11 @@ async def _run(
     *,
     source: dict[str, Any] | None = None,
     loops: int = 2000,
+    key: dict[str, Any] | None = None,
 ) -> Any:
+    extra = {"consistency": {"scope": "key", "key_material": key}} if key else {}
     sub = await submit_run(
-        run_spec(conn.id, obj, snap_id, target, source=source),
+        run_spec(conn.id, obj, snap_id, target, source=source, **extra),
         tenant_id="t1",
         principal=LOCAL_PRINCIPAL,
         settings=ctx.settings,
@@ -299,16 +326,32 @@ async def test_a_query_subset_creates_and_writes_only_the_projected_columns(
         "object": {"owner": owner, "name": "CUST_Q"},
     }
     sel = {"query": f'SELECT customer_id, email, segment FROM "{owner}".customers'}
-    _, job = await _run(handler_ctx, conn, obj, snap.id, target, source={"selection": sel})
-    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    key = derived_key(QUERY_COLLIDING_KEY)
+    source_rows = _rows(oracle_conn, f'"{owner}"."CUSTOMERS"')
+    ids = [r[0] for r in source_rows]
+    mapping = masked_values(handler_ctx, snap, key, "$.CUSTOMER_ID", ids)
+    fixed = sum(1 for v in ids if mapping[v] == v)
+    crossed = sum(1 for v in ids if mapping[v] != v and mapping[v] in set(ids))
+    assert (fixed, crossed > 0) == (0, True), (fixed, crossed)  # the pinned key's premise
+    _, job = await _run(handler_ctx, conn, obj, snap.id, target, source={"selection": sel}, key=key)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)  # strict verification
     assert job.progress.rows_written == 300
     assert _target_columns(oracle_conn, owner, "CUST_Q") == ["CUSTOMER_ID", "EMAIL", "SEGMENT"]
     src, out = f'"{owner}"."CUSTOMERS"', f'"{owner}"."CUST_Q"'
     assert _count(oracle_conn, f"SELECT COUNT(*) FROM {out}") == 300
     for column in ("CUSTOMER_ID", "EMAIL", "SEGMENT"):  # nothing NULL-filled
         assert _count(oracle_conn, f"SELECT COUNT(*) FROM {out} WHERE {column} IS NULL") == 0
-    for column in ("CUSTOMER_ID", "EMAIL"):  # source vs target (counts only)
-        assert _survivors(oracle_conn, src, out, column) == 0, column
+    # source vs target (counts only): the e-mail (text) against every source value; the
+    # fpe_digits CUSTOMER_ID row by row — FF1 may map an id onto *another* customer's id (as this
+    # key does once), the strict per-row verification allows that, and it is no survivor
+    emails = _survivors(oracle_conn, src, out, "EMAIL")
+    assert emails == 0
+    by_masked = {r[0]: r for r in _rows(oracle_conn, out)}
+    pairs = [(s, by_masked.get(mapping[s[0]])) for s in source_rows]
+    aligned = sum(1 for _, t in pairs if t is not None)
+    same = sum(1 for s, t in pairs if t is not None and (s[0] == t[0] or s[1] == t[1]))
+    crossed_out = sum(1 for t in by_masked if t in set(ids))
+    assert (aligned, same, crossed_out) == (300, 0, crossed)
     ev = await get_evidence("t1", job.progress.evidence_id or "")
     assert ev is not None and ev.pack.verification["passed"]
 

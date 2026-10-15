@@ -4,7 +4,7 @@
 > programme exactly where it stopped, without the original chat. It complements, and points into, the
 > binding documents listed in §2. **Do not trust the snapshot in §4 blindly — run §3 first.**
 
-**Last updated:** 2026-10-14 16:05 IST by the orchestrating session (workflow `wf_c77f2c08-9ae`, running 25 h, 93 agents finished, none lost).
+**Last updated:** 2026-10-15 10:00 IST (M4 merged into main). **Active orchestration: workflow `wf_c6c9b6f6-603` "dps-finish-fast"** (script copy: `docs/superpowers/build/orchestration/dps-finish-fast.workflow.js`); the earlier `wf_c77f2c08-9ae` "dps-to-v1" and `wf_4dc1989c-3ce` were stopped at 16:45.
 **Goal:** tag `v1.0.0` on `main` with every Definition-of-Done gate green (M0–M5 shipped).
 
 ---
@@ -103,13 +103,33 @@ Interpretation rules:
 
 ## 4. Snapshot (re-check with §3)
 
-### 4.0 Latest progress — 2026-10-14 16:05 IST (newest first; the table in 4.1 is the older detailed snapshot)
+### 4.00 Orchestration since 2026-10-14 17:00 IST — "dps-finish-fast" (owner: finish fast, max effort, max parallelism)
+
+Docker Desktop raised to **16 CPUs / 36 GiB** (backup of the old settings: `~/.cache/dps-build/docker-settings-store.backup.json`).
+Seven streams run at once (every agent at max effort, verifications as parallel panels by lens):
+
+| Stream | Worktree / branch | Work | Then |
+|---|---|---|---|
+| S1 | main | M3 post-merge verification panel → tag `v0.4.0-m3` | after S2: merge `m4` → panel → tag `v0.5.0-m4` |
+| S2 | `dps-wt-m4` / `m4` | finish the in-progress merge of main into `m4`, adapt the scanner (SEC-5, SEC-2, M5 keys/posture/policy refs, discovery semantics), panel review | feeds S1, S3b, S4b, S6b |
+| S3 | `dps-wt-fsec` / `fsec` | security: 5 parallel finders by lens → adversarial refutation → T0 + T17 + confirmed fixes | after S2: merge `m4`, T8B + scanner SSRF/D4 |
+| S4 | `dps-wt-fimg` / `fimg` | T24 images, compose `full`, smoke M5 block, flow report, demo client | after S2: scanner in images/compose/smoke |
+| S5 | `dps-wt-fos` / `fos` | T25 OpenShift manifests | — |
+| S6 | `dps-wt-fdemo` / `fdemo` | T26B deck builder + test, demo script draft | after S4 + S2: T26 demo seed + e2e demo run, deck from real outputs, Keynote QA |
+| S7 | `dps-wt-fdocs` / `fdocs` | T27 docs tooling and drafts, polish items | — |
+| Release | main | merge fsec, fimg, fos, fdemo, fdocs → T28 → final verification panel (8 lenses) → `v1.0.0`, worktree cleanup | |
+
+Finish-stream ports: fsec 8416…, fimg 8417…, fdemo 8418…, fos 8419…, fdocs 8422… (each worktree's `.env`).
+Reports: `~/.cache/dps-build/reports/S*-*.md`, `FINAL-*`, `release*.md`.
+
+### 4.0 Latest progress — 2026-10-15 10:00 IST (newest first; the table in 4.1 is the older detailed snapshot)
 
 | Stream | State |
 |---|---|
 | **M5** | lane verification PASS (r3, after fixing real national ids in synthetic targets); **merged into main** `8378da7`; post-merge verification r1 FAIL → fixed → **r2 PASS** (no milestone tag by design; ships as v1.0.0) |
 | **M3** | all tasks done; lane verification r1 FAIL → fixed (incl. M3-B6 alias/UNPIVOT, B3r3, B4r3) → **r2 PASS** (`13875fd`); **merging into main now** (integration adapting MongoDB/Oracle paths to main's D-A and synthesize gates: ObjectId pseudonyms, identifier check by document path, tabular synthesis refused for Mongo) → then post-merge verification → tag `v0.4.0-m3` |
-| **M4** | **pre-merge in progress, now driven by workflow `dps-finish-fast`** (started 2026-10-14 ~16:50; earlier run `wf_4dc1989c-3ce` stopped mid-merge: main merged into `m4` in its worktree + scanner adapted + reviewed; the main workflow's M4 merge waits for `~/.cache/dps-build/PRE-m4.done`, programme plan §2.5.1); all tasks done, `m4ui` merged and wired; lane verification r1, r2 FAIL → fixed → **r3 PASS** (`bdbdc0a`); waits for the main lock → merge (incl. SEC-5) → verification → tag `v0.5.0-m4` |
+| **M4 (2026-10-15)** | **merged into main** `5959a75` (S1 stream, after S2 fix rounds 1–2 on `m4`); S2 r3's open findings fixed on main test-first (`932075a` stopped-run wording, the select-drawn masking commit after it); gates on the merged tree and the live stack in `~/.cache/dps-build/reports/S1-merge-m4.md` → post-merge verification panel → tag `v0.5.0-m4` |
+| M4 (history) | **pre-merge in progress, now driven by workflow `dps-finish-fast`** (started 2026-10-14 ~16:50; earlier run `wf_4dc1989c-3ce` stopped mid-merge: main merged into `m4` in its worktree + scanner adapted + reviewed; the main workflow's M4 merge waits for `~/.cache/dps-build/PRE-m4.done`, programme plan §2.5.1); all tasks done, `m4ui` merged and wired; lane verification r1, r2 FAIL → fixed → **r3 PASS** (`bdbdc0a`); waits for the main lock → merge (incl. SEC-5) → verification → tag `v0.5.0-m4` |
 | Finish / release | not started; begins after the M4 merge is verified |
 | GitHub | everything pushed (`tools/dev/autopush.sh`); one held push on 2026-10-14 was a reviewed false positive (`DPS_FPE_ENABLED=true` in HANDOFF), now in `.gitleaksignore` |
 

@@ -18,9 +18,11 @@ numbers, RFC 2606 e-mail domains, fictional phone ranges) and HMRC's example NIN
 mean **no real PII ever exists in the demo source**. Non-personal columns come from
 ``random.Random(seed)``. The same seed always gives the same rows.
 
-Idempotent: a ``<schema>._dps_seed_info`` row ``(seed, rows)`` marks a seeded schema ("already
-seeded", exit 0; other parameters: exit 3 unless ``--reset``). ``--reset`` truncates the ten tables
-and the marker first. ``--restore-copy`` copies the ten tables into ``bank_restore`` (owned by
+Idempotent: a ``<schema>._dps_seed_info`` row ``(seed, rows, version)`` marks a seeded schema
+("already seeded", exit 0; other parameters: exit 3 unless ``--reset``). A schema seeded with the same
+parameters by an older demo data model (``version`` < :data:`tools.seed_model.DEMO_MODEL_VERSION`)
+is reloaded, its restore copy too ("reloaded"). ``--reset`` truncates the ten tables and the marker
+first. ``--restore-copy`` copies the ten tables into ``bank_restore`` (owned by
 ``dps_writer``; the "restored production backup" for in-place demos) and puts 1 000 rows into
 ``bank_perf.transactions``. Another ``--schema`` uses ``<schema>_restore`` / ``<schema>_perf``, and
 missing tables are created from :data:`TABLE_DDL` (the same DDL as
@@ -47,7 +49,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # `python tools/seed_sources.py`
 
-from tools.seed_model import demo_seed_bytes, pan_for, seed_customers  # noqa: E402
+from tools.seed_model import (  # noqa: E402
+    DEMO_MODEL_VERSION,
+    demo_seed_bytes,
+    pan_for,
+    seed_customers,
+)
 
 #: The ten demo tables, parents before children (contract §11).
 TABLES: tuple[str, ...] = (
@@ -519,6 +526,8 @@ class SeedResult:
     counts: dict[str, int]
     elapsed_s: float
     restored: bool = False
+    #: the schema held an older demo data model's rows (same seed and rows) and was reloaded
+    reloaded: bool = False
 
 
 class SeedConflict(RuntimeError):
@@ -544,7 +553,11 @@ async def _ensure_tables(conn: Any, schema: str) -> None:
         await conn.execute(f"CREATE TABLE IF NOT EXISTS {s}.{table} ({ddl})")
     await conn.execute(
         f"CREATE TABLE IF NOT EXISTS {s}.{MARKER} (seed int NOT NULL, rows int NOT NULL, "
-        "seeded_at timestamptz NOT NULL DEFAULT now())"
+        "seeded_at timestamptz NOT NULL DEFAULT now(), version int NOT NULL DEFAULT 1)"
+    )
+    # a marker written before the demo data model had a version holds model 1's rows
+    await conn.execute(
+        f"ALTER TABLE {s}.{MARKER} ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1"
     )
     for role in ("dps_reader", "dps_writer"):
         exists = await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", role)
@@ -626,10 +639,16 @@ async def seed(
             await conn.execute(
                 f"TRUNCATE {', '.join(f'{s}.{t}' for t in TABLES)}, {s}.{MARKER} CASCADE"
             )
-        marker = await conn.fetchrow(f"SELECT seed, rows FROM {s}.{MARKER} LIMIT 1")
+        marker = await conn.fetchrow(f"SELECT seed, rows, version FROM {s}.{MARKER} LIMIT 1")
         already = marker is not None
         if already and (marker["seed"], marker["rows"]) != (seed, rows):
             raise SeedConflict("the schema was seeded with other parameters: use --reset")
+        reloaded = already and marker["version"] != DEMO_MODEL_VERSION
+        if reloaded:  # same parameters, an older demo data model: load the current one
+            await conn.execute(
+                f"TRUNCATE {', '.join(f'{s}.{t}' for t in TABLES)}, {s}.{MARKER} CASCADE"
+            )
+            already = False
         if not already:
             occupied = await _counts(conn, schema, TABLES)
             if any(occupied.values()):
@@ -645,15 +664,24 @@ async def seed(
                         schema_name=schema,
                     )
                 await conn.execute(
-                    f"INSERT INTO {s}.{MARKER} (seed, rows) VALUES ($1, $2)", seed, rows
+                    f"INSERT INTO {s}.{MARKER} (seed, rows, version) VALUES ($1, $2, $3)",
+                    seed,
+                    rows,
+                    DEMO_MODEL_VERSION,
                 )
             del data
-        restored = await _restore_copy(conn, schema, force=reset) if restore_copy else False
+        restored = (
+            await _restore_copy(conn, schema, force=reset or reloaded) if restore_copy else False
+        )
         counts = await _counts(conn, schema, TABLES)
     finally:
         await conn.close()
     return SeedResult(
-        already=already, counts=counts, elapsed_s=time.monotonic() - started, restored=restored
+        already=already,
+        counts=counts,
+        elapsed_s=time.monotonic() - started,
+        restored=restored,
+        reloaded=reloaded,
     )
 
 
@@ -734,6 +762,8 @@ def _main_postgres(args: argparse.Namespace) -> int:
         return 1
     if result.already:
         print(f"already seeded: schema {args.schema} (seed {args.seed}, {args.rows} customers)")
+    if result.reloaded:
+        print(f"reloaded: schema {args.schema} held an older demo data model")
     for table in TABLES:
         print(f"  {table:<16} {result.counts[table]:>9}")
     if args.restore_copy:

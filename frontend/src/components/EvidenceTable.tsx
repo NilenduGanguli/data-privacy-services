@@ -17,11 +17,18 @@ function packLine(item: EvidenceItem): string {
   const parts: string[] = [];
   if (s.ticket) parts.push(s.ticket);
   if (item.layer === 'ui') {
-    parts.push(`${count(s.pages ?? 0)} pages`, `${count(s.submissions ?? 0)} submissions`);
+    // mockup 09: "38 pages · 12 forms · 20 personas · 0 submissions" (forms and personas from M4's scan block)
+    parts.push(plural(s.pages ?? 0, 'page'));
+    if (s.forms !== null && s.forms !== undefined) parts.push(plural(s.forms, 'form'));
+    if (s.personas !== null && s.personas !== undefined) parts.push(plural(s.personas, 'persona'));
+    parts.push(plural(s.submissions ?? 0, 'submission'));
   } else {
     if (s.write_mode) parts.push(s.write_mode);
-    if (item.outcome === 'failed') parts.push('stopped, nothing written');
-    else if (s.rows_written !== null && s.rows_written !== undefined) parts.push(`${count(s.rows_written)} ${s.mode === 'synthesize' ? 'synthetic rows' : 'rows'}`);
+    // a run commits per batch: one that stopped may have written rows before it (S2 console r3 B1)
+    if (item.outcome === 'failed') {
+      const written = Number(s.rows_written ?? 0);
+      parts.push(written > 0 ? `stopped · ${count(written)} ${s.mode === 'synthesize' ? 'synthetic rows' : 'rows'} written before it` : 'stopped, nothing written');
+    } else if (s.rows_written !== null && s.rows_written !== undefined) parts.push(`${count(s.rows_written)} ${s.mode === 'synthesize' ? 'synthetic rows' : 'rows'}`);
     if (s.fidelity_score !== null && s.fidelity_score !== undefined) parts.push(`fidelity ${s.fidelity_score.toFixed(2)}`);
   }
   if (item.outcome !== 'succeeded' && item.outcome !== 'failed') parts.push(item.outcome.replace('_', ' '));

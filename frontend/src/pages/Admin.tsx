@@ -76,7 +76,7 @@ function ConnectionsCard({ connections, keys }: { connections: Connection[]; key
         })}
         {!connections.length && <tr className="empty-row"><td colSpan={5}>No connection is registered for this tenant.</td></tr>}
       </tbody></table></div>
-      <div className="callout sm" style={{ marginTop: 12 }}>In place rewrites the selected rows in the source table; append adds transformed copies as new rows. On connections tagged <b>production</b> both need a key with the admin scope; elsewhere the jobs scope. The console always asks for a confirmation with row counts first.</div>
+      <div className="callout sm" style={{ marginTop: 12 }}>In place rewrites the selected rows in the source table; append adds transformed copies as new rows. On connections tagged <b>production</b> both need a key with the admin scope, as does every other write there (a table load, files); elsewhere the jobs scope. The console always asks for a confirmation with row counts first.</div>
     </section>
   );
 }
@@ -199,7 +199,7 @@ export function AdminView({ actions, ...d }: AdminData & { actions: AdminActions
             <TenantsTable tenants={d.tenants} onEdit={(t) => setTenantDlg({ edit: t, form: tenantForm(t), busy: false, error: null })} onAdd={() => setTenantDlg({ edit: null, form: tenantForm(null), busy: false, error: null })} />
           </div>
           <ConnectionsCard connections={d.connections} keys={d.keys} />
-          <HostsCard rows={hosts} tenants={tenantIds} defaultTenant={d.tenant} onAdd={addHost} onRemove={(row) => setRemoveHost({ row, busy: false, error: null })} />
+          <HostsCard rows={hosts} tenants={tenantIds} defaultTenant={d.tenant} onAdd={addHost} onRemove={(row) => setRemoveHost({ row, busy: false, error: null })} env={d.posture?.env ?? null} fallbackHosts={d.posture?.scan_fallback_hosts ?? null} />
           <div className="row-e">
             <HealthGrid tiles={tiles} />
             {d.posture && <PostureList posture={d.posture} now={d.now} dueKeys={kpis.dueNames} onRotate={(name) => { const key = d.keys.find((k) => k.name === name); if (key) setRotate({ key, grace: 24, busy: false, error: null }); }} />}

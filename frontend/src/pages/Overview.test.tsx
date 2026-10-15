@@ -51,6 +51,14 @@ describe('OverviewView', () => {
     expect(t).toContain('Last scan: 38 pages, 20 personas, 0 submitted');
   });
 
+  it('counts the personal data fields the scans found, not every field inventoried', () => {
+    const summary = fx.summary(NOW);
+    const ui = { ...summary.layers.ui, fields: 140, personal_fields: 81 };
+    const t2 = text(html(<OverviewView tenant="t" ready={fx.readiness()} summary={{ ...summary, layers: { ...summary.layers, ui } }} degraded={null} policyLabel={null} />));
+    expect(t2).toContain('38 pages · 81 personal data fields · 3 risk flags');
+    expect(t2).not.toContain('140 personal data fields');
+  });
+
   it('lists findings by entity type and the recent jobs with links', () => {
     expect(t).toContain('Findings by entity type');
     expect(out).toContain('<span class="chip rose">PAN_IN</span>');
@@ -58,6 +66,7 @@ describe('OverviewView', () => {
     expect(t).toContain('1,412,204');
     expect(out).toContain('href="/data-sources/jobs/j_01K7ZQ3R8D5W9Q"');
     expect(out).toContain('href="/scanner/scans/s_01K7ZRB2M4XQ"');
+    expect(t).toContain('UI scan of onboarding-uat.bank.internal'); // the brief's source: the scanned host
     expect(t).toContain('CRM.CUSTOMERS → CRM_MASKED.CUSTOMERS');
     expect(t).toContain('awaiting review');
   });

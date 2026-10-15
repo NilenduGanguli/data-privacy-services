@@ -15,6 +15,11 @@ Environment:
   configured metadata database; ``off`` skips them (the plain ``docker compose up`` stack has the
   database but not the ``sources`` profile's demo source, so those checks cannot pass there); ``on``
   runs them whatever ``/readyz`` says.
+- ``DPS_SMOKE_SCANNER``: ``auto`` (default) runs the UI-scanner checks (M4) when the demo onboarding
+  site answers at ``DPS_TEST_DEMO_SITE`` — only the ``scanner`` and ``full`` profiles run it, so a
+  plain run against ``--profile full`` covers the scanner; ``on`` (or ``1``) runs them whatever the
+  stack (a missing browser worker or demo site fails: the M4 and ``full`` gates); ``off`` (or
+  ``0``) skips them.
 
 Waits for ``/health``, then runs the checks in order, prints a one-line verdict per check and exits
 non-zero on the first failure. Never prints a request or response body, a value or a key: a
@@ -31,6 +36,23 @@ dry-run in-place job on ``bank_restore.contacts`` and the worker count. They are
 key material a run returns is never printed or kept. ``DPS_SMOKE_JOB_TIMEOUT`` (default 180 s)
 bounds each run.
 
+Eleven UI-scanner checks (M4) follow the M1 ones against ``docker compose --profile scanner`` (or
+``full``) — by default when the demo site answers, always under ``DPS_SMOKE_SCANNER=on``: the
+browser-worker is online, a scan of the demo onboarding site (``/apply``, deny
+``/logout`` and ``/admin``, the mounted demo session, five ``en_IN`` personas) is accepted with key
+and seed, succeeds with classified fields and the expected risk flags, the demo site's
+``/__received`` counters (non-GET requests, GET-form submissions, ``/logout`` and ``/admin`` hits)
+do not move while ``non_get_allowed`` is 0 — with two positive controls, so that check cannot pass
+unproven: the site served the scan's pages during it (its ``get`` count moved by at least the
+scan's ``pages_visited``: these are the counters of the site the browser-worker scanned) and the
+request guard stopped at least one non-GET request (the pages tried to send) — the identity page
+has its four parallel-view screenshots and one is served as a PNG, a masked capture is served, the
+persona export holds none of the demo site's customer values, the evidence pack says 0
+submissions, and ``/scanner/new`` is served. ``DPS_SMOKE_DEMO_URL`` is the demo site as the
+browser-worker sees it (default ``http://demo-site:8410``); the script itself reads the counters
+at ``DPS_TEST_DEMO_SITE`` (default ``http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}``).
+``DPS_SMOKE_SCAN_TIMEOUT`` (default 300 s) bounds the scan. Run with ``DPS_SMOKE_M2=off`` unless
+the ``sources`` profile is up too.
 ``--m3`` adds seven Oracle + MongoDB checks after the M2 ones; they need the ``oracle`` and
 ``sources`` profiles and the three-engine demo seed (``python tools/seed_sources.py --target all``):
 ``m3 connections`` (the four demo connections of ``tools/m2_api.M3_CONNECTIONS`` created or reused,
@@ -42,6 +64,18 @@ runs under the group's key into ``bank_uat.customers_smoke``, ``crm_uat.profiles
 ``m3 consistency 3/3`` (the group's check passes with three consistent pairs), ``m3 evidence``
 (each pack verified, under the group's key id) and ``m3 raw pii to llm`` (the counter is 0). The
 key is held in memory for the three submissions and dropped; nothing of it is printed.
+
+The M5 block (eight checks) runs last, on every stack: ``policies with hashes`` (the policy store
+lists every shipped preset with its 64-hex hash); when ``/readyz`` reports the database
+``reports summary`` (the Overview tiles, ``raw_pii_sent_to_llm`` 0), ``posture report`` (the
+eleven posture checks), ``db key lifecycle`` (a one-day ``detect`` key minted through the admin
+API — answered ``Cache-Control: no-store`` — authenticates within ``DPS_KEY_CACHE_SECONDS``) and
+``db key disabled`` (once disabled it is refused); when ``/readyz`` reports the tokenizer
+``external tokenization round trip`` (an SSN tokenized by the bank tokenizer mock as ``tk_…`` and
+revealed); then ``422 never echoes input`` and ``api responses are not cacheable`` (``no-store`` on
+``/api/``). Checks whose component is down print ``SKIP`` and do not fail —
+``DPS_SMOKE_REQUIRE_M5=1`` (the M5 gate on ``--profile full``) turns a skip into a failure. The
+temporary key is held in memory only and disabled before the block ends.
 """
 
 from __future__ import annotations
@@ -51,9 +85,10 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -76,6 +111,7 @@ KEY = (
 )
 WAIT_SECONDS = float(os.environ.get("DPS_SMOKE_WAIT_SECONDS") or "90")
 REQUIRE_OCR = os.environ.get("DPS_SMOKE_REQUIRE_OCR") == "1"
+REQUIRE_M5 = os.environ.get("DPS_SMOKE_REQUIRE_M5") == "1"
 H = {"X-API-KEY": KEY}
 DEMO = Path(__file__).resolve().parents[1] / "demo" / "documents"
 # A fictional customer: made-up values whose identifiers only have to pass their checksums.
@@ -476,6 +512,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         m1_checks(c)
 
+        with httpx.Client(base_url=DEMO_FROM_HERE, timeout=5.0) as demo:
+            scanner_block(c, demo, os.environ.get("DPS_SMOKE_SCANNER"))
+
         root = c.get("/")
         check(
             "console served",
@@ -491,7 +530,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             if not run_m2:
                 check("m3 needs the job platform", False, "the M2 checks did not run")
             m3_checks(c)
-    tail = f", {len(skipped)} skipped (OCR not ready)" if skipped else ""
+        m5_checks(c, H)
+    tail = f", {len(skipped)} skipped (component not ready)" if skipped else ""
     print(f"\nall {len(results)} checks passed against {BASE}{tail}")
 
 
@@ -743,6 +783,248 @@ def m2_checks(c: httpx.Client) -> None:
     )
 
 
+# -- M4: the UI scanner (profile `scanner`) ------------------------------------------------------
+
+
+def scanner_wanted(setting: str | None, demo_up: Callable[[], bool]) -> tuple[bool, str]:
+    """Whether to run the UI-scanner checks, and the note printed when they are skipped.
+
+    ``setting`` is ``DPS_SMOKE_SCANNER`` (case-insensitive; empty = ``auto``): ``auto`` runs them
+    when the demo onboarding site answers (``demo_up``: only the ``scanner`` and ``full`` profiles
+    run it), so a plain run against ``--profile full`` covers the scanner; ``on`` (or ``1``, M4's
+    switch) runs them whatever the stack, so a missing browser worker or demo site fails; ``off``
+    (or ``0``) skips them. ``on`` and ``off`` never probe the demo site.
+    """
+    choice = (setting or "auto").strip().lower()
+    choice = {"1": "on", "0": "off"}.get(choice, choice)
+    if choice not in ("auto", "on", "off"):
+        raise SystemExit("DPS_SMOKE_SCANNER must be auto, on or off")
+    if choice == "off":
+        return False, "note: DPS_SMOKE_SCANNER=off: the UI-scanner checks are skipped"
+    if choice == "on" or demo_up():
+        return True, ""
+    return False, (
+        f"note: no demo site answers at {DEMO_FROM_HERE}: the UI-scanner checks are skipped "
+        "(DPS_SMOKE_SCANNER=on requires them)"
+    )
+
+
+def scanner_block(c: httpx.Client, demo: httpx.Client, setting: str | None, **kw: Any) -> None:
+    """The UI-scanner checks as ``DPS_SMOKE_SCANNER`` asks (:func:`scanner_wanted`): skipped with a
+    note, or run (``kw`` goes to :func:`scanner_checks`); under ``on`` a demo site that does not
+    answer is a failed check, not a traceback."""
+    run, note = scanner_wanted(setting, lambda: demo_answers(demo))
+    if not run:
+        print(note)
+        return
+    if not demo_answers(demo):
+        check("demo site answers", False, f"nothing answers /health at {DEMO_FROM_HERE}")
+    scanner_checks(c, demo, **kw)
+
+
+def demo_answers(demo: httpx.Client) -> bool:
+    """Whether the demo onboarding site answers its ``/health`` (it runs in the ``scanner`` and
+    ``full`` profiles only, published on the lane's ``DPS_DEMO_SITE_PORT``)."""
+    try:
+        return demo.get("/health").status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def demo_from_here(env: Mapping[str, str]) -> str:
+    """The demo site as this script reaches it (a lane's compose publishes it on its own port)."""
+    explicit = env.get("DPS_TEST_DEMO_SITE")
+    if explicit:
+        return explicit.rstrip("/")
+    return f"http://127.0.0.1:{env.get('DPS_DEMO_SITE_PORT') or '8410'}"
+
+
+#: The demo site as the browser-worker sees it (the scan's start URL host).
+DEMO_FROM_WORKER = (os.environ.get("DPS_SMOKE_DEMO_URL") or "http://demo-site:8410").rstrip("/")
+DEMO_FROM_HERE = demo_from_here(os.environ)
+SCAN_TIMEOUT = float(os.environ.get("DPS_SMOKE_SCAN_TIMEOUT") or "300")
+#: The demo site's customer values (made up), which no export may carry. The birth date is left out:
+#: a generated persona may share a date, and a date is not identifying on its own.
+DEMO_VALUES: tuple[str, ...] = tuple(
+    str(v)
+    for k, v in json.loads(
+        (Path(__file__).resolve().parents[1] / "demo/onboarding/data.json").read_text("utf-8")
+    ).items()
+    if k != "dob"
+)
+#: The demo site's counters that must not move during a scan: every non-GET request, every
+#: GET-form submission, and every hit on the paths the scan denies.
+SITE_COUNTERS = ("non_get", "form_get", "logout_hits", "admin_hits")
+#: The demo site's count of the pages and files it served: it must move during the scan — the
+#: positive control that the counters read here belong to the site the browser-worker scanned.
+SITE_SERVED = "get"
+
+
+def _received(demo: httpx.Client) -> dict[str, int]:
+    """The demo site's ``/__received`` counters (counts only); ``get`` only where the site counts
+    what it serves (a site without it fails the D4 check instead of passing it unproven)."""
+    body = demo.get("/__received").json()
+    counts = {name: int(body[name]) for name in SITE_COUNTERS}
+    if SITE_SERVED in body:
+        counts[SITE_SERVED] = int(body[SITE_SERVED])
+    return counts
+
+
+def _sends_blocked(blocked: Any) -> int:
+    """The non-GET requests the request guard stopped during the scan (``blocked_requests`` by
+    method): the demo pages' autosave posts and draft flushes, which the scan provokes by
+    filling."""
+    if not isinstance(blocked, dict):
+        return 0
+    return sum(
+        int(n) for method, n in blocked.items() if str(method).upper() not in ("GET", "HEAD")
+    )
+
+
+def _artefact_png(c: httpx.Client, artefact_id: str | None) -> bool:
+    """Whether the app serves ``artefact_id`` as a PNG."""
+    if not artefact_id:
+        return False
+    r = c.get(f"/api/v1/artefacts/{artefact_id}", headers=H)
+    return r.status_code == 200 and r.content[:4] == b"\x89PNG"
+
+
+def _browser_ready(c: httpx.Client, wait: float, interval: float) -> dict[str, Any]:
+    """``/readyz``'s ``browser`` component, polled for up to ``wait`` seconds: the app refreshes it
+    from worker heartbeats every 15 s, so a stack that has just come up still reads ``unknown``."""
+    deadline = time.monotonic() + wait
+    while True:
+        browser: dict[str, Any] = c.get("/readyz").json()["components"].get("browser", {})
+        if browser.get("ok") or time.monotonic() >= deadline:
+            return browser
+        time.sleep(interval)
+
+
+def scanner_checks(
+    c: httpx.Client,
+    demo: httpx.Client,
+    *,
+    timeout: float = SCAN_TIMEOUT,
+    interval: float = 3.0,
+    browser_wait: float = 60.0,
+) -> None:
+    """The eleven UI-scanner checks (module docstring); ``demo`` reads the demo site's counters."""
+    browser = _browser_ready(c, browser_wait, interval)
+    check("browser worker online", bool(browser.get("ok")), str(browser.get("detail")))
+
+    before = _received(demo)
+    created = c.post(
+        "/api/v1/scans",
+        headers=H,
+        json={
+            "url": f"{DEMO_FROM_WORKER}/apply",
+            "scope": {"max_pages": 25, "max_depth": 3, "deny": ["/logout", "/admin"]},
+            "auth": {"storage_state_ref": "dps/ui/demo-onboarding"},
+            "mode": "synthesize",
+            "fill": {"personas": 5, "locale": "en_IN"},
+        },
+    )
+    body = created.json() if created.status_code == 202 else {}
+    check(
+        "scan accepted, key and seed returned once",
+        created.status_code == 202
+        and bool((body.get("key_material") or {}).get("dek"))
+        and bool((body.get("synthesis_seed") or {}).get("seed")),
+        f"HTTP {created.status_code}",
+    )
+    body.pop("key_material", None)  # never kept or printed
+    body.pop("synthesis_seed", None)
+    sid = body["scan"]["id"]
+
+    detail: dict[str, Any] = {}
+    deadline = time.monotonic() + timeout
+    while True:
+        detail = c.get(f"/api/v1/scans/{sid}", headers=H).json()
+        if detail["scan"]["state"] in TERMINAL or time.monotonic() >= deadline:
+            break
+        time.sleep(interval)
+    s = detail.get("summary", {})
+    check(
+        "scan succeeded",
+        detail["scan"]["state"] == "succeeded",
+        f"{detail['scan']['state']}: {s.get('pages_visited')} pages, {s.get('fields')} fields, "
+        f"{s.get('personal_fields')} personal",
+    )
+    flags = {f["flag"] for f in s.get("risk_flags", [])}
+    wanted = {"autocomplete_enabled_sensitive", "pii_in_query_string", "pii_rendered_unmasked"}
+    check(
+        "classification and risk flags",
+        s.get("personal_fields", 0) >= 20 and flags >= wanted,
+        f"{s.get('personal_fields')} personal fields, {len(s.get('risk_flags', []))} risk flags, "
+        f"{len(wanted - flags)} expected flag kinds missing",
+    )
+
+    # D4 with its positive controls: the site the browser-worker scanned served the scan's pages
+    # (at least one GET per visited page — it sends no-store, so every visit fetches its page —
+    # so these are its counters), its pages tried to send (the guard stopped non-GET requests),
+    # and it received nothing — no non-GET request, no GET-form submission, no denied path.
+    after = _received(demo)
+    moved = {name: after[name] - before[name] for name in SITE_COUNTERS}
+    served = after.get(SITE_SERVED, 0) - before.get(SITE_SERVED, 0)
+    visited = int(s.get("pages_visited") or 0)
+    sends_blocked = _sends_blocked(s.get("blocked_requests"))
+    check(
+        "no submission reached the site",
+        not any(moved.values())
+        and s.get("non_get_allowed") == 0
+        and served >= max(1, visited)
+        and sends_blocked > 0,
+        ", ".join(f"{name} +{n}" for name, n in moved.items())
+        + f"; pages served +{served} ({visited} visited); non-GET blocked {sends_blocked}"
+        + f"; non_get_allowed {s.get('non_get_allowed')}, blocked {s.get('blocked_requests')}",
+    )
+
+    pages = c.get(f"/api/v1/scans/{sid}/pages", params={"limit": 200}, headers=H).json()["items"]
+    ident = next((p for p in pages if p["url_redacted"].endswith("/apply/identity")), {})
+    shots = ident.get("artefacts", {})
+    parallel = {"original", "annotated", "filled_synthesize", "filled_obfuscate"}
+    check(
+        "parallel view captured",
+        parallel <= set(shots),
+        f"{len(parallel & set(shots))}/4 screenshots of the identity page",
+    )
+    check("screenshot served", _artefact_png(c, shots.get("filled_synthesize")))
+    masked = [p["artefacts"]["masked_capture"] for p in pages if "masked_capture" in p["artefacts"]]
+    check(
+        "masked capture served",
+        s.get("captures", 0) >= 1 and bool(masked) and _artefact_png(c, masked[0]),
+        f"{s.get('captures')} captures, {len(masked)} masked",
+    )
+
+    export = c.get(f"/api/v1/scans/{sid}/export", params={"format": "json"}, headers=H)
+    text = export.text.lower() if export.status_code == 200 else ""
+    found = sum(1 for v in DEMO_VALUES if v.lower() in text)
+    check(
+        "persona export",
+        export.status_code == 200 and export.json().get("personas") == 5 and found == 0,
+        f"HTTP {export.status_code}, {found} demo values found",
+    )
+
+    evidence = c.get("/api/v1/evidence", params={"job_id": sid}, headers=H).json().get("items", [])
+    pack = (
+        c.get(f"/api/v1/evidence/{evidence[0]['id']}", headers=H).json()["pack"] if evidence else {}
+    )
+    scan_block = pack.get("scan") or {}
+    check(
+        "evidence: submissions 0",
+        bool(scan_block)
+        and scan_block.get("submissions") == 0
+        and scan_block.get("non_get_allowed") == 0,
+        f"{len(evidence)} packs",
+    )
+    console = c.get("/scanner/new")
+    check(
+        "scanner console served",
+        console.status_code == 200 and b'<div id="root">' in console.content,
+        f"HTTP {console.status_code}",
+    )
+
+
 # -- M3: Oracle and MongoDB under one job group (profiles `oracle` + `sources`) -------------------
 
 M3_TIMEOUT = float(os.environ.get("DPS_SMOKE_M3_TIMEOUT") or "600")
@@ -952,6 +1234,140 @@ def m3_checks(c: httpx.Client) -> None:
         "m3 raw pii to llm",
         b"dps_llm_raw_pii_sent_total 0.0" in c.get("/metrics").content,
         "dps_llm_raw_pii_sent_total 0",
+    )
+
+
+# -- M5: policy store, reports, posture, DB keys, bank tokenizer, scrubbed errors, caching -------
+
+#: A fictional SSN (the well-known sample number): the tokenizer round trip and the 422 probe.
+M5_SSN = "123-45-6789"
+#: How long a new DB-backed key may take to authenticate: the local stack's
+#: ``DPS_KEY_CACHE_SECONDS=5`` plus a margin (the creating replica refreshes at once).
+KEY_PROPAGATION_SECONDS = float(os.environ.get("DPS_SMOKE_KEY_WAIT_SECONDS") or "12")
+
+
+def skip_m5(name: str, why: str) -> None:
+    """An M5 check whose component is not ready: ``SKIP``, a failure under
+    ``DPS_SMOKE_REQUIRE_M5=1``."""
+    if REQUIRE_M5:
+        check(name, False, f"{why} (DPS_SMOKE_REQUIRE_M5=1)")
+    skipped.append(name)
+    print(f"SKIP  {name} — {why}", flush=True)
+
+
+def _key_works(c: httpx.Client, key: str, deadline: float) -> bool:
+    """Whether ``key`` authenticates ``POST /detect`` before ``deadline`` (monotonic)."""
+    while True:
+        status = c.post(
+            "/api/v1/detect", json={"text": "x"}, headers={"X-API-KEY": key}
+        ).status_code
+        if status == 200 or time.monotonic() >= deadline:
+            return status == 200
+        time.sleep(0.5)
+
+
+def m5_db_key_checks(c: httpx.Client, h: dict[str, str]) -> None:
+    """``db key lifecycle`` and ``db key disabled``: mint, use, disable, refuse (value-free)."""
+    made = c.post(
+        "/api/v1/admin/keys",
+        headers=h,
+        json={"name": "smoke-temp", "tenant_ids": ["default"], "scopes": ["detect"],
+              "expires_in_days": 1},
+    )  # fmt: skip
+    body = made.json() if made.status_code == 201 else {}
+    key = str(body.get("key") or "")
+    key_id = str((body.get("record") or {}).get("id") or "")
+    works = bool(key) and _key_works(c, key, time.monotonic() + KEY_PROPAGATION_SECONDS)
+    disabled = c.post(f"/api/v1/admin/keys/{key_id}/disable", headers=h) if key_id else None
+    check(
+        "db key lifecycle",
+        made.status_code == 201
+        and works
+        and made.headers.get("cache-control") == "no-store"
+        and disabled is not None
+        and disabled.status_code == 200,
+        f"HTTP {made.status_code}, authenticated={works}, "
+        f"disable HTTP {disabled.status_code if disabled is not None else '-'}",
+    )
+    refused = c.post("/api/v1/detect", json={"text": "x"}, headers={"X-API-KEY": key}).status_code
+    check("db key disabled", refused == 401, f"HTTP {refused} with the disabled key")
+    del key, body
+
+
+def m5_checks(c: httpx.Client, h: dict[str, str]) -> None:
+    """The eight M5 checks (module docstring); never prints a body, a token or a key."""
+    pol = c.get("/api/v1/policies", headers=h)
+    presets = pol.json().get("presets", []) if pol.status_code == 200 else []
+    check(
+        "policies with hashes",
+        pol.status_code == 200
+        and bool(presets)
+        and all(re.fullmatch(r"[0-9a-f]{64}", str(p.get("hash"))) for p in presets),
+        f"HTTP {pol.status_code}, {len(presets)} presets",
+    )
+    components = c.get("/readyz").json().get("components", {})
+    if components.get("db", {}).get("ok"):
+        summ = c.get("/api/v1/reports/summary", params={"days": 14}, headers=h)
+        tiles = summ.json().get("tiles", {}) if summ.status_code == 200 else {}
+        check(
+            "reports summary",
+            summ.status_code == 200 and tiles.get("raw_pii_sent_to_llm") == 0,
+            f"HTTP {summ.status_code}, raw_pii_sent_to_llm={tiles.get('raw_pii_sent_to_llm')}",
+        )
+        post = c.get("/api/v1/admin/posture", headers=h)
+        pbody = post.json() if post.status_code == 200 else {}
+        check(
+            "posture report",
+            post.status_code == 200 and pbody.get("total") == 11,
+            f"HTTP {post.status_code}, {pbody.get('passed')}/{pbody.get('total')} checks pass",
+        )
+        m5_db_key_checks(c, h)
+    else:
+        for name in ("reports summary", "posture report", "db key lifecycle", "db key disabled"):
+            skip_m5(name, "/readyz reports no metadata database")
+    if components.get("tokenizer", {}).get("ok"):
+        policy = {
+            "preset": "gdpr-pseudonymise",
+            "treat": {"SSN": {"method": "external_tokenize", "profile": "ssn"}},
+        }
+        out = c.post(
+            "/api/v1/obfuscate", headers=h, json={"data": {"ssn": M5_SSN}, "policy": policy}
+        )
+        obody = out.json() if out.status_code == 200 else {}
+        token = str((obody.get("result") or {}).get("ssn") or "")
+        back = c.post(
+            "/api/v1/reveal",
+            headers=h,
+            json={
+                "data": obody.get("result"),
+                "key_material": obody.get("key_material") or {},
+                "reveal_hints": obody.get("reveal_hints") or [],
+            },
+        )
+        check(
+            "external tokenization round trip",
+            out.status_code == 200
+            and token.startswith("tk_")
+            and back.status_code == 200
+            and back.json().get("result") == {"ssn": M5_SSN},
+            f"HTTP {out.status_code}/{back.status_code}, token issued={token.startswith('tk_')}",
+        )
+        del obody, token
+    else:
+        skip_m5("external tokenization round trip", "/readyz reports the tokenizer not ready")
+    bad = c.post(
+        "/api/v1/detect", headers=h, json={"text": 123456789, "options": {"locale": [M5_SSN]}}
+    )
+    check(
+        "422 never echoes input",
+        bad.status_code == 422 and M5_SSN not in bad.text and "123456789" not in bad.text,
+        f"HTTP {bad.status_code}",
+    )
+    cache = c.get("/api/v1/policies/presets", headers=h).headers.get("cache-control")
+    check(
+        "api responses are not cacheable",
+        cache == "no-store",
+        f"Cache-Control {cache or 'absent'} on /api/v1/policies/presets",
     )
 
 

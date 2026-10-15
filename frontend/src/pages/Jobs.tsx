@@ -9,7 +9,7 @@ import { useAuth } from '../hooks/useAuth';
 import { api, ApiError, saveBlob, type Auth } from '../lib/api';
 import {
   errorText, etaSeconds, filterJobs, fmtClock, fmtCompact, fmtCount, fmtDuration, fmtWhen, isTerminal, jobsCsv, jobTargetText,
-  jobWriteMode, needsDecision, NO_FILTERS, ownerOf, progressPct, pushSample, shortId, statusBucket, writeModeLabel,
+  jobWriteMode, needsDecision, NO_FILTERS, ownerOf, progressPct, pushSample, shortId, statusBucket, tableJobs, writeModeLabel,
   writeModeTone, type JobFilters, type StatusBucket,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, Connection, Job, JobGroup, JobStats } from '../lib/types';
@@ -203,7 +203,7 @@ export function Jobs(): JSX.Element {
   const loadGroups = useCallback(() => { api.groups.list(auth).then((p) => setGroups(p.items)).catch(() => setGroups([])); }, [auth]);
   useEffect(() => { loadGroups(); }, [loadGroups]);
   useEffect(() => { api.connections.list(auth, 200).then((p) => setConnections(p.items)).catch(() => setConnections([])); }, [auth]);
-  useEffect(() => { setAnyActive(!!list.data?.items.some((j) => !isTerminal(j))); }, [list.data]);
+  useEffect(() => { setAnyActive(tableJobs(list.data?.items ?? []).some((j) => !isTerminal(j))); }, [list.data]);
   useEffect(() => {
     if (!stats.data) return;
     const now = new Date().toISOString();
@@ -212,7 +212,7 @@ export function Jobs(): JSX.Element {
     setUpdated(fmtClock(now));
   }, [stats.data]);
 
-  const jobs = list.data?.items ?? [];
+  const jobs = tableJobs(list.data?.items ?? []);
   const proposedSnaps = snaps.data?.items ?? [];
   const proposed = useMemo(() => new Set(proposedSnaps.map((s) => s.id)), [proposedSnaps]);
   const snapById = useMemo(() => new Map(proposedSnaps.map((s) => [s.id, s])), [proposedSnaps]);

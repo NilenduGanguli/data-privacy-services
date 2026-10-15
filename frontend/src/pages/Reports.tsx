@@ -10,7 +10,7 @@ import { useSettings } from '../hooks/useSettings';
 import { api, ApiError, errorText, type Download } from '../lib/api';
 import { compact, count, plural, utc } from '../lib/format';
 import {
-  auditFilters, DEFAULT_FILTERS, evidenceRows, failedSweepText, filtersToParams, fromSummary, parseFilters, sweepSeries, type EvidenceRow, type Layer,
+  auditFilters, DEFAULT_FILTERS, evidenceRows, failedSweepLayer, failedSweepText, filtersToParams, fromSummary, parseFilters, sweepColumns, sweepSeries, type EvidenceRow, type Layer,
   type Outcome, type ReportFilters,
 } from '../lib/reports';
 import type { ApiRollup, AuditRow, EvidenceItem, Readiness, ReportsJobsOut } from '../lib/types';
@@ -44,7 +44,13 @@ export function ReportsView(p: ReportsViewProps): JSX.Element {
   const series = useMemo(() => (p.jobs ? sweepSeries(p.jobs.sweeps, f.layer, f.outcome) : []), [p.jobs, f.layer, f.outcome]);
   const passed = series.reduce((a, d) => a + d.passed, 0);
   const failed = series.reduce((a, d) => a + d.failed, 0);
-  const fails = (p.jobs?.failed_sweeps ?? []).filter((s) => (f.layer === 'all' || (s.where === 'job' ? f.layer === 'conn' : f.layer === 'api'))
+  // a failed UI sweep is a scan whose own verification failed: not "failed closed" (S2 console r2 B1)
+  const uiFailed = useMemo(() => (p.jobs && (f.layer === 'all' || f.layer === 'ui') ? sweepSeries(p.jobs.sweeps, 'ui', f.outcome).reduce((a, d) => a + d.failed, 0) : 0),
+    [p.jobs, f.layer, f.outcome]);
+  const closed = failed - uiFailed;
+  const failedNote = !failed ? '' : !uiFailed ? ', all failed closed'
+    : `${closed ? `, ${count(closed)} failed closed` : ''}, ${plural(uiFailed, 'scan')} to review`;
+  const fails = (p.jobs?.failed_sweeps ?? []).filter((s) => (f.layer === 'all' || failedSweepLayer(s) === f.layer)
     && (f.outcome === 'all' || f.outcome === 'failed'));
   const isAdmin = !!p.audit && !p.audit.forbidden;
   const dbOk = p.ready?.components.db?.ok;
@@ -81,14 +87,14 @@ export function ReportsView(p: ReportsViewProps): JSX.Element {
 
       <div className="grid cols-4">
         <Kpi label="Evidence packs" value={p.jobs ? count(totals.packs) : '—'} delta={p.jobs ? `${count(totals.run_packs)} jobs · ${count(totals.scan_packs)} scans · ${count(totals.api_rollups)} API roll-ups` : 'loading'} />
-        <Kpi label="Verification sweeps" value={p.jobs ? count(passed + failed) : '—'} delta={p.jobs ? `${count(passed)} passed · ${count(failed)} failed${failed ? ', all failed closed' : ''}` : 'loading'} />
+        <Kpi label="Verification sweeps" value={p.jobs ? count(passed + failed) : '—'} delta={p.jobs ? `${count(passed)} passed · ${count(failed)} failed${failedNote}` : 'loading'} />
         <Kpi label="Audit rows" value={auditRows !== undefined ? compact(auditRows) : '—'} delta="append-only · monthly partitions" />
         <Kpi zero label="Customer values stored" value={0} delta="counts, hashes and key names only" />
       </div>
 
       <div className="split">
         <section className="card" aria-labelledby="vh-t">
-          <div className="card-head"><div><div className="card-title" id="vh-t">Verification sweeps per day</div><div className="faint sm" style={{ marginTop: 2 }}>One sweep per job partition, scan page and hourly API batch</div></div></div>
+          <div className="card-head"><div><div className="card-title" id="vh-t">Verification sweeps per day</div><div className="faint sm" style={{ marginTop: 2 }}>One sweep per job partition, completed scan and hourly API batch</div></div></div>
           {f.outcome === 'blocked'
             ? <div className="muted sm" style={{ padding: '40px 8px', textAlign: 'center' }}>Sweeps pass or fail; none are blocked. Blocked requests are listed in the audit log below.</div>
             : <BarChart data={series as unknown as Record<string, string | number>[]} xKey="day" height={220} label={`Verification sweeps per day, last ${f.days} days, passed and failed`}
@@ -98,11 +104,14 @@ export function ReportsView(p: ReportsViewProps): JSX.Element {
           <div className="card-head"><div className="card-title" id="fs-t">Failed sweeps</div><span className={`chip ${fails.length ? 'rose' : 'emerald'}`}>{fails.length} in {f.days} days</span></div>
           {fails.map((s) => {
             const words = failedSweepText(s);
+            const to = s.job_id ? (s.where === 'scan' ? `/scanner/scans/${encodeURIComponent(s.job_id)}` : `/data-sources/jobs/${encodeURIComponent(s.job_id)}`) : null;
             return (
               <div className="fail" key={`${s.where}-${s.job_id ?? s.route}-${s.day}`}>
-                <div className="top"><span className="mono">{s.job_id ? <Link to={`/data-sources/jobs/${encodeURIComponent(s.job_id)}`}>{words.where}</Link> : words.where}</span><span className="faint sm">{utc(`${s.day}T00:00:00Z`).replace(' 00:00', '')} · UTC day</span></div>
+                <div className="top"><span className="mono">{to ? <Link to={to}>{words.where}</Link> : words.where}</span><span className="faint sm">{utc(`${s.day}T00:00:00Z`).replace(' 00:00', '')} · UTC day</span></div>
                 <div className="what">{words.what}</div>
-                <div className="fix">{s.where === 'job' ? <><span className="chip amber">failed closed</span> Review the columns named above, then re-run the job.</> : <><span className="chip slate">contained automatically</span> No action needed. The model saw placeholders only.</>}</div>
+                <div className="fix">{s.where === 'job' ? <><span className="chip amber">failed closed</span> {sweepColumns(s).length ? 'Review the columns named above, then re-run the job.' : 'Open the job to see what was written, then re-run it.'}</>
+                  : s.where === 'scan' ? <><span className="chip rose">review</span> Open the scan and check the target system for that request.</>
+                    : <><span className="chip slate">contained automatically</span> No action needed. The model saw placeholders only.</>}</div>
               </div>
             );
           })}
