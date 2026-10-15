@@ -4,10 +4,11 @@
 ``(seed, entity type, canonical original)`` for value-level consistency (the canonical form is the
 verifier's normalisation, so ``2341 2341 2346`` and ``234123412346`` get the same digits, each in
 its own layout). Persona fields (name, e-mail, birth date, address, ...) also depend on the
-record's ``anchor`` so one record stays coherent. Nothing depends on request order, and what else
-the record holds matters only when a draw would reuse a part of it ("Never a part of the record"
-below): the same seed gives the same fake across fields, tables, requests and systems (spec §5.6,
-P3).
+record's ``anchor`` so one record stays coherent, and a record that names several people gives
+each their own persona ("One persona per person" below). Nothing depends on request order, and
+what else the record holds matters only when a draw would reuse a part of it ("Never a part of
+the record" below) or to tell its people apart: the same seed gives the same fake across fields,
+tables, requests and systems (spec §5.6, P3).
 
 Generated identifiers are *valid in format* and *never issued* where an unissued range exists:
 SSNs in the 900 area (groups 01-49, where no ITIN or ATIN is either), ITINs in group 89, SINs
@@ -40,6 +41,20 @@ Guarantees beyond the plan's generators:
   construction, the first that does not reveal its own original is kept and the sweep rules on
   it. A record's declaration changes a surrogate only when a draw collides, so the same seed
   still gives the same fake across records and requests everywhere else.
+* **One persona per person.** The record's persona belongs to the first name it declared;
+  every other person it declares (a nominee, the people a call note mentions) gets a persona of
+  their own, anchored at ``anchor|person:<key>`` where the key is a seeded digest of the first
+  name declared for them (never the name). A declared name is the same person as an earlier one
+  when its parts hold all of theirs, or theirs all of its own (``Priya``, ``PRIYA NAIR`` and
+  ``P Nair`` are ``Priya Nair``: an initial stands for a part it starts). Each person's persona
+  shares no part with any of the record's names, and is re-keyed (``|redraw1``, ...) while its
+  first or full name is a person's before it, so two people do not share a first name. A name
+  draws on the persona of the person it names (by its normalised form, else by the parts it
+  shares with them); an e-mail, a username or an MRZ on the persona of the person whose name
+  parts its local part, handle or holder holds the most of (a part under three letters counts
+  only as a whole word). A value that names no other person, and every other persona field
+  (phone, birth date, address, ...), keeps the record's persona; so does every value of a record
+  that declared one person or none.
 * **Reshaped identifiers are a keyed derangement** (``reshape.py``): identifiers of unmapped
   types (a derangement of an *issued* space maps real numbers onto other real ones, which is why
   every government identifier with a never-issued range is drawn from it instead), CVVs, sort codes, IFSC branch codes, amounts, diagnosis codes and BICs keep their
@@ -50,7 +65,7 @@ Guarantees beyond the plan's generators:
   short codes stay (``CUST-``, ``MH14``: :func:`~dps.engine.synth.reshape.code_letters`); names
   and words next to digits are replaced like any other letters. Amounts keep their currency.
 * **Documents and wallets are rebuilt, not reshaped** (``formats.py``): an ICAO MRZ carries
-  the record's persona as holder (never one sharing a name part with the original), a fresh
+  its holder's persona (see above; never one sharing a name part with the original), a fresh
   document number and optional data, the persona's birth date, a shifted expiry date and
   recomputed check digits; the document code and countries stay. Bitcoin and Ethereum
   addresses are fresh valid addresses of the original's kind.
@@ -154,23 +169,62 @@ _IDENTITY_OK = _REDACT | {"GENDER", "NATIONALITY"}
 _NAME = "PERSON_NAME"
 #: Declared values shorter than this are not avoided (the leakage sweep skips them too).
 _MIN_DECLARED = SWEEP_MIN_LEN
+#: A name part shorter than this is found in an e-mail, a handle or an MRZ only as a whole word.
+_MIN_HELD = 3
+
+
+@dataclass(frozen=True)
+class _Person:
+    """One person a record declared: the key of their persona's anchor (a seeded digest of the
+    first name declared for them, never the name) and the parts of every name declared for them."""
+
+    key: str
+    parts: frozenset[str]
+
+
+#: The cache key of a record's people's persona anchors: anchor, locale, name parts, people.
+_PeopleKey = tuple[str, str, frozenset[str], tuple[_Person, ...]]
+
+
+def _covers(parts: frozenset[str], name: frozenset[str]) -> bool:
+    """True when every part of ``name`` is one of ``parts``, or an initial that starts one."""
+    return all(p in parts or (len(p) == 1 and any(q.startswith(p) for q in parts)) for p in name)
+
+
+def _best(people: tuple[_Person, ...], score: Callable[[_Person], int]) -> int:
+    """The person with the highest positive score, the first on a tie; else 0 (the record's)."""
+    best, top = 0, 0
+    for i, person in enumerate(people):
+        points = score(person)
+        if points > top:
+            best, top = i, points
+    return best
 
 
 @dataclass(frozen=True)
 class _Record:
     """What a record declared: its names' parts and its normalised values (no raw values), the
     values indexed by their first ``_MIN_DECLARED`` characters so a check is linear in the
-    surrogate's length, not in the size of the record."""
+    surrogate's length, not in the size of the record; and the people its names stand for, in
+    declaration order, with each declared name's normalised form mapped to its person."""
 
     parts: frozenset[str] = frozenset()
     index: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    people: tuple[_Person, ...] = ()
+    names: dict[str, int] = field(default_factory=dict)
 
     @classmethod
-    def of(cls, parts: frozenset[str], values: Iterable[str]) -> _Record:
+    def of(
+        cls,
+        parts: frozenset[str],
+        values: Iterable[str],
+        people: tuple[_Person, ...] = (),
+        names: dict[str, int] | None = None,
+    ) -> _Record:
         index: dict[str, tuple[str, ...]] = {}
         for value in set(values):
             index[value[:_MIN_DECLARED]] = (*index.get(value[:_MIN_DECLARED], ()), value)
-        return cls(parts=parts, index=index)
+        return cls(parts=parts, index=index, people=people, names=names or {})
 
     def held_by(self, canon: str, value: str) -> bool:
         """True when ``value`` holds another of the record's values or a part of its names."""
@@ -181,8 +235,57 @@ class _Record:
                     return True
         return holds_name_part(value, self.parts)
 
+    def named(self, name: str) -> int:
+        """The person ``name`` stands for: by its normalised form when it was declared, else the
+        one whose parts it shares the most of, by length; 0 (the record's own) when none."""
+        found = self.names.get(normalise(name))
+        if found is not None:
+            return found
+        parts = name_parts([name])
+        return _best(self.people, lambda person: sum(len(p) for p in parts & person.parts))
+
+    def holder(self, text: str) -> int:
+        """The person whose name parts ``text`` (an e-mail's local part, a handle, an MRZ holder)
+        holds the most of, by length; 0 (the record's own) when it holds none."""
+        folded, words = normalise(text), name_parts([text])
+        return _best(
+            self.people,
+            lambda person: sum(
+                len(p) for p in person.parts if p in words or (len(p) >= _MIN_HELD and p in folded)
+            ),
+        )
+
 
 _NOTHING = _Record()
+
+
+def _people(seed: bytes, names: Iterable[str]) -> tuple[tuple[_Person, ...], dict[str, int]]:
+    """The people a record's declared ``names`` stand for, in declaration order, and each
+    name's normalised form mapped to its person. A name is the first earlier person whose parts
+    cover its own, or whose parts it covers (:func:`_covers`); any other name is a new person,
+    keyed by a seeded digest of its normalised form. A name without a letter stands for nobody."""
+    people: list[_Person] = []
+    index: dict[str, int] = {}
+    for name in names:
+        canon, parts = normalise(name), name_parts([name])
+        if not parts:
+            continue
+        i = index.get(canon)
+        if i is None:
+            i = next(
+                (
+                    j
+                    for j, person in enumerate(people)
+                    if _covers(person.parts, parts) or _covers(parts, person.parts)
+                ),
+                len(people),
+            )
+            index[canon] = i
+        if i == len(people):
+            people.append(_Person(f"{seed_int(seed, f'record-person|{canon}'):016x}", parts))
+        else:
+            people[i] = _Person(people[i].key, people[i].parts | parts)
+    return tuple(people), index
 
 
 class SynthesisSeed(BaseModel):
@@ -331,6 +434,7 @@ class SurrogateEngine:
         self._default_locale = normalise_locale(default_locale)
         self._personas = PersonaFactory(seed)
         self._cache: dict[tuple[str, str, frozenset[str]], Persona] = {}
+        self._anchors: dict[_PeopleKey, tuple[str, ...]] = {}
         self._records: dict[str, _Record] = {}
         self._reshaper = Reshaper(seed)
         self._generators: dict[str, Callable[[str, str, str, random.Random], str]] = {
@@ -391,15 +495,21 @@ class SurrogateEngine:
         """Declare the record's detected values, as ``(entity_type, original)`` pairs.
 
         Call it before synthesising any field of the record, so every field draws on the same
-        persona. It replaces what was declared for ``anchor`` before (a record's surrogates
-        depend on that record's values, never on another's); the engine's own retries of the
-        record (``anchor|retry1``, ``anchor|mrz2``) inherit it. Only normalised forms and name
-        parts are kept, and only in this engine.
+        personas: the first ``PERSON_NAME`` declared is the record's persona, every other person
+        named gets their own (see "One persona per person" in the module docstring). It replaces
+        what was declared for ``anchor`` before (a record's surrogates depend on that record's
+        values, never on another's); the engine's own retries of the record (``anchor|retry1``,
+        ``anchor|mrz2``) and its people's personas (``anchor|person:<key>``) inherit it. Only
+        normalised forms, name parts and seeded digests are kept, and only in this engine.
         """
         pairs = list(originals)
+        names = [original for entity, original in pairs if entity == _NAME]
+        people, named = _people(self._seed, names)
         record = _Record.of(
-            name_parts(original for entity, original in pairs if entity == _NAME),
+            name_parts(names),
             (canon for _, original in pairs if len(canon := normalise(original)) >= _MIN_DECLARED),
+            people=people,
+            names=named,
         )
         if record.parts or record.index:
             self._records[anchor] = record
@@ -418,7 +528,8 @@ class SurrogateEngine:
 
     def persona(self, anchor: str, locale: str, avoid: Iterable[str] = ()) -> Persona:
         """The record's persona (cached), sharing no part with the record's declared names or
-        with the names in ``avoid``."""
+        with the names in ``avoid``. The record's other people have theirs at their own anchors
+        (:meth:`_people_anchors`)."""
         loc = normalise_locale(locale)
         parts = self._declared(anchor).parts | name_parts(avoid)
         key = (anchor, loc, parts)
@@ -426,11 +537,50 @@ class SurrogateEngine:
             self._cache[key] = self._personas.for_anchor(anchor, loc, avoid=parts)
         return self._cache[key]
 
+    def _people_anchors(self, anchor: str, loc: str) -> tuple[str, ...]:
+        """The persona anchor of each person the record declared (cached): ``anchor`` for the
+        first, ``anchor|person:<key>`` for the others, re-keyed while its persona would have the
+        first name or the full name of a person before it (the first that fits, else the last)."""
+        record = self._declared(anchor)
+        key = (anchor, loc, record.parts, record.people)
+        cached = self._anchors.get(key)
+        if cached is not None:
+            return cached
+        first = self.persona(anchor, loc)
+        firsts, fulls = {normalise(first.first_name)}, {normalise(first.full_name)}
+        anchors = [anchor]
+        for person in record.people[1:]:
+            candidate = base = f"{anchor}|person:{person.key}"
+            p = self.persona(candidate, loc)
+            for attempt in range(1, _ATTEMPTS):
+                if normalise(p.first_name) not in firsts and normalise(p.full_name) not in fulls:
+                    break
+                candidate = f"{base}|redraw{attempt}"
+                p = self.persona(candidate, loc)
+            firsts.add(normalise(p.first_name))
+            fulls.add(normalise(p.full_name))
+            anchors.append(candidate)
+        self._anchors[key] = tuple(anchors)
+        return self._anchors[key]
+
+    def _named(self, anchor: str, loc: str, name: str) -> str:
+        """The persona anchor of the person ``name`` stands for (``anchor`` for the record's)."""
+        record = self._declared(anchor)
+        person = record.named(name) if len(record.people) > 1 else 0
+        return self._people_anchors(anchor, loc)[person] if person else anchor
+
+    def _holder(self, anchor: str, loc: str, text: str) -> str:
+        """The persona anchor of the person whose name ``text`` holds (``anchor`` for nobody's)."""
+        record = self._declared(anchor)
+        person = record.holder(text) if len(record.people) > 1 else 0
+        return self._people_anchors(anchor, loc)[person] if person else anchor
+
     def surrogate(self, entity_type: str, original: str, locale: str, anchor: str) -> str:
         """A synthetic stand-in for ``original`` (see the module docstring for the guarantees).
 
         A pure function of the seed, the entity type, the canonical original, what the record
-        declared and (for persona fields) the anchor: it never depends on what this engine was
+        declared (which also decides whose persona a name, an e-mail, a username or an MRZ
+        draws on) and (for persona fields) the anchor: it never depends on what this engine was
         asked before.
         """
         if not original.strip():
@@ -493,9 +643,10 @@ class SurrogateEngine:
         return self._reshape(entity, original, rng, True, keep=code_letters(original) or None)
 
     def _person_name(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
+        # the persona of the person it names (the record's first name: the record's persona);
         # never a part of the name it replaces, even when the record's names were not declared
-        # (declared names include it, so this is then the record's persona)
-        p = self.persona(anchor, loc, avoid=(original,))
+        # (declared names include it, so this is then that person's persona)
+        p = self.persona(self._named(anchor, loc, original), loc, avoid=(original,))
         name = p.first_name if len(original.split()) <= 1 else p.full_name
         return name.upper() if original.isupper() else name
 
@@ -514,7 +665,9 @@ class SurrogateEngine:
         return render(_shift(day, rng.choice([d for d in range(-30, 31) if d != 0])))
 
     def _email(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        local = self.persona(anchor, loc).email_local
+        # the persona of the person its local part names (``priya.nair@``), else the record's
+        holder = self._holder(anchor, loc, original.partition("@")[0])
+        local = self.persona(holder, loc).email_local
         return f"{local}{rng.randint(1, 9999)}@{rng.choice(RFC2606_DOMAINS)}"
 
     def _phone_for(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
@@ -569,7 +722,8 @@ class SurrogateEngine:
         return f"{month:02d}{sep}{year % 100:02d}"
 
     def _mrz(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        """An ICAO MRZ rebuilt field by field for the record's persona, check digits valid."""
+        """An ICAO MRZ rebuilt field by field for its holder's persona (the record's, unless the
+        holder is another person the record declared), check digits valid."""
         parsed = split_mrz(original)
         if parsed is None:  # not an ICAO layout: every letter and digit but the issuer goes
             start = len(original) - len(original.lstrip())
@@ -579,6 +733,7 @@ class SurrogateEngine:
         flat, layout = parsed
         out = list(flat)
         holder = [part for part in flat[layout.name].split("<") if part]
+        anchor = self._holder(anchor, loc, " ".join(holder))  # the holder's persona from here on
         width = layout.name.stop - layout.name.start
         name = _redraw(flat[layout.name], rng)  # unreachable fallback: every persona collides
         persona = self.persona(anchor, loc)
@@ -673,7 +828,8 @@ class SurrogateEngine:
         return mac.upper() if upper else mac
 
     def _username(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        handle = self.persona(anchor, loc).email_local.replace(".", "_") + _digits(rng, 2)
+        persona = self.persona(self._holder(anchor, loc, original), loc)
+        handle = persona.email_local.replace(".", "_") + _digits(rng, 2)
         return "@" + handle if original.startswith("@") else handle
 
     def _device_id(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:

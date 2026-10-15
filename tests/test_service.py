@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import string
 import time
 from typing import Any
@@ -19,6 +20,7 @@ from dps.engine.service import (
     RequestOptions,
     VerificationFailed,
 )
+from dps.engine.synth.personas import ascii_fold
 from dps.engine.transform.crypto import unwrap_dek
 from dps.llm.gateway import LlmGateway, LlmResult
 
@@ -513,3 +515,50 @@ async def test_a_leaked_name_part_fails_the_strict_sweep(
     monkeypatch.setattr(SurrogateEngine, "_person_name", lambda *a: "Tanmayi Krishnan")
     with pytest.raises(VerificationFailed):
         await engine.synthesize(payload, "synthetic-realistic", RequestOptions())
+
+
+# a customer and a nominee in one record, and three people in one text (invented names)
+FAMILY_RECORD = {
+    "customer_name": "Arjun Mehta",
+    "customer_email": "arjun.mehta@example.in",
+    "nominee_name": "Priya Nair",
+    "nominee_email": "priya.nair@example.in",
+    "phone": "+91 98765 43210",
+}
+THREE_PEOPLE = "Mr. Arjun Mehta and Mrs. Priya Nair met Dr. Rohan Kulkarni."
+
+
+def _email_local(name: str) -> str:
+    first, last = name.split(" ")
+    return f"{ascii_fold(first)}.{ascii_fold(last)}"
+
+
+@pytest.mark.parametrize("policy", ["synthetic-realistic", "synthetic-strict"])
+async def test_each_person_in_a_json_record_gets_their_own_synthetic_name(
+    engine: PrivacyEngine, policy: str
+) -> None:
+    out = await engine.synthesize(Payload(data=FAMILY_RECORD), policy, RequestOptions())
+    result = out.result
+    assert out.report.verification.passed  # type: ignore[union-attr]
+    customer, nominee = result["customer_name"], result["nominee_name"]
+    assert customer.split(" ")[0] != nominee.split(" ")[0]
+    assert result["customer_email"].startswith(_email_local(customer))
+    assert result["nominee_email"].startswith(_email_local(nominee))
+    for value in FAMILY_RECORD.values():
+        assert value not in str(result)
+
+
+async def test_each_person_in_a_text_gets_their_own_synthetic_name(engine: PrivacyEngine) -> None:
+    out = await engine.synthesize(
+        Payload(text=THREE_PEOPLE), "synthetic-realistic", RequestOptions()
+    )
+    assert out.report.verification.passed  # type: ignore[union-attr]
+    match = re.fullmatch(r"Mr\. (\S+ \S+) and Mrs\. (\S+ \S+) met Dr\. (\S+ \S+)\.", out.result)
+    assert match is not None
+    assert len({name.split(" ")[0] for name in match.groups()}) == 3
+    # the same seed gives the same people, as many times as it is asked
+    seed = out.synthesis_seed.model_dump(mode="json")  # type: ignore[union-attr]
+    options = RequestOptions(consistency={"synthesis_seed": seed})
+    await engine.synthesize(Payload(data=FAMILY_RECORD), "synthetic-realistic", options)
+    again = await engine.synthesize(Payload(text=THREE_PEOPLE), "synthetic-realistic", options)
+    assert again.result == out.result
