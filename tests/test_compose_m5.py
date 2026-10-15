@@ -120,6 +120,21 @@ def test_a_browser_worker_inherits_the_worker_settings() -> None:
     assert worker.get("read_only") is True or (inherits and services["worker"]["read_only"] is True)
 
 
+def test_the_local_mocks_run_unprivileged_with_a_read_only_root() -> None:
+    """The scanner's demo site and the OCR mock run in ``full`` beside the image roles: like
+    them, as a non-root user, with a read-only root, no capabilities and no privilege escalation
+    (review S4 r2 R2-4). The data stores keep their images' own users and data directories, and
+    the ``demo-secrets`` one-shot writes the secrets volume as root (HANDOFF §6)."""
+    services = _services()
+    for name in ("demo-site", "azure-ocr-mock"):
+        service = services[name]
+        user = str(service.get("user") or "")
+        assert user and user.split(":")[0] not in ("0", "root"), (name, user)
+        assert service.get("read_only") is True, name
+        assert service.get("cap_drop") == ["ALL"], name
+        assert "no-new-privileges:true" in (service.get("security_opt") or []), name
+
+
 def _ignored(path: str) -> bool:
     out = subprocess.run(
         ["git", "-C", str(ROOT), "check-ignore", "-q", "--no-index", path],

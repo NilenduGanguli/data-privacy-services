@@ -158,6 +158,15 @@ services:
       context: ../mock_azure_ocr
     image: document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG:-latest}
     profiles: ["docs", "full"]
+    # Hardened like the image roles (M5 Task 24): any non-root UID reads the mock's code and
+    # Tesseract's data; pytesseract writes its image and result files to the /tmp tmpfs only.
+    user: "10001:0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:${DPS_OCR_PORT:-5016}:5000"
     healthcheck:
@@ -282,6 +291,12 @@ services:
     image: node:22-slim
     profiles: ["scanner", "full"]
     command: ["node", "/srv/demo/server.mjs", "--host", "0.0.0.0", "--port", "8410"]
+    # The image's own non-root user; the server only reads its mounted files (M5 Task 24).
+    user: node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./demo/onboarding:/srv/demo:ro
     ports:
