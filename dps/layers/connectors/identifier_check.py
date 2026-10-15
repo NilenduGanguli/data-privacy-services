@@ -25,10 +25,18 @@ read in one pass and held to its row count. ``rows_read`` says how many rows of 
 read; ``checked`` counts the values read. A MongoDB shape comes from a sample of documents, so a
 written leaf the sample missed is read as the other side describes it, else as its key names it.
 A read that cannot be completed — one that does not advance past its start key, a row without
-its key, fewer rows than a key-less object holds, a SQL column the object does not have —
-raises :class:`IncompleteCheck` (``identifier_check_incomplete``): the run's evidence then
-records ``{"error": ...}`` and every written identifier column is a review column. A partial
-read never reports a scope.
+its key, fewer rows than a key-less object holds, a SQL column the object does not have or a
+SQL read does not return — raises :class:`IncompleteCheck` (``identifier_check_incomplete``):
+the run's evidence then records ``{"error": ...}`` and every written identifier column is a
+review column. A partial read never reports a scope.
+
+**As the object spells it** (S8-idcheck review r1). A column list is a person's selection:
+validated by name and folded to upper case on Oracle (the Wega rule), so a quoted mixed-case
+Oracle column was never read (``checked`` 0, passed) and a name with a space, or a MongoDB field
+with a hyphen, was refused and failed the run's finalize. A SQL read lists no column: it reads
+the shape narrowed to its key and the identifier columns, which the connector quotes as the
+catalogue spells them. A MongoDB read projects plain top-level field names only; a field a
+projection cannot name (a hyphen, a dot) is read from whole documents.
 """
 
 from __future__ import annotations
@@ -57,6 +65,7 @@ from dps.layers.connectors.base import (
     to_engine_text,
 )
 from dps.layers.connectors.docpaths import column_key
+from dps.layers.connectors.selection import MONGO_PATH
 
 #: Financial identifiers checked against the source too (governments' are found by family).
 FINANCIAL_IDENTIFIERS = frozenset({"CARD_PAN", "IBAN", "ACCOUNT_NUMBER", "CRYPTO_ADDRESS"})
@@ -251,11 +260,49 @@ def _fields(columns: dict[str, ColumnInfo]) -> list[str]:
     return list(dict.fromkeys(c.name for c in columns.values()))
 
 
+def _plain_field(name: str) -> bool:
+    """A MongoDB top-level field a find projection names as it is: one segment of the selection
+    validator's path syntax (no dot — a projection would read the field before it — and no
+    hyphen, space or leading ``$``, which the validator refuses)."""
+    return "." not in name and MONGO_PATH.fullmatch(name) is not None
+
+
+def _read_request(
+    connector: Connector, shape: TableShape, fields: list[str]
+) -> tuple[TableShape, Selection]:
+    """The shape and selection a read of ``fields`` passes to ``read_partition``.
+
+    A column list is a person's selection (validated by name, folded to upper case on Oracle),
+    so a SQL read lists none: ``shape`` is narrowed to its key and ``fields``, every one a name
+    the catalogue gave, and the connector projects and quotes them as it spells them. MongoDB
+    projects by the list: plain top-level names are projected, anything else reads whole
+    documents.
+    """
+    if _sampled(connector):
+        if all(_plain_field(f) for f in fields):
+            return shape, Selection(columns=fields)
+        return shape, Selection()
+    keep = {*fields, *shape.key}
+    columns = [c for c in shape.columns if c.name in keep]
+    return shape.model_copy(update={"columns": columns}), Selection()
+
+
 def _page_end(page: list[Row], shape: TableShape) -> tuple[Any, ...]:
     try:
         return key_tuple(page[-1], shape)
     except KeyError:
         raise IncompleteCheck("a row was read without its key") from None
+
+
+def _projected(page: list[Row], fields: list[str]) -> None:
+    """A SQL row holds every column the read projects (a NULL is a value of the row): a row
+    without one was not read as asked.
+
+    Raises:
+        IncompleteCheck: a row without one of ``fields``.
+    """
+    if any(f not in row for row in page for f in fields):
+        raise IncompleteCheck("a read did not return an identifier column")
 
 
 async def _every_row(
@@ -269,33 +316,39 @@ async def _every_row(
     Keyset pages driven by the check: each read starts after the last key read so far, and the
     scan ends only when a read after that key returns no row, so a read the connector ends early
     cannot shorten it. A page's last key is taken before the page is handed on. A key-less
-    shape is read in one pass, and its rows are counted against the object's.
+    shape is read in one pass, and its rows are counted against the object's. Columns are read
+    as the object spells them (:func:`_read_request`).
 
     Raises:
         IncompleteCheck: a read that does not advance past its start key, a row without its
-            key, fewer rows than a key-less object holds.
+            key, fewer rows than a key-less object holds, a SQL row without one of ``fields``.
     """
-    selection = Selection(columns=fields)
+    read_shape, selection = _read_request(connector, shape, fields)
+    sql = not _sampled(connector)  # a MongoDB document may lack a field; a SQL row may not
     if not shape.key:
         if after_key is not None:
             raise IncompleteCheck("a key-less object has no rows after a key")
         read = 0
         async for page in connector.read_partition(
-            shape, selection, {}, KeyRange(), after_key=None, batch=CHECK_BATCH
+            read_shape, selection, {}, KeyRange(), after_key=None, batch=CHECK_BATCH
         ):
+            if sql:
+                _projected(page, fields)
             read += len(page)
             yield page
-        if read < await connector.count(shape, Selection(), {}):
+        if read < await connector.count(read_shape, Selection(), {}):
             raise IncompleteCheck("fewer rows were read than the key-less object holds")
         return
     cursor = after_key
     while True:
         got, end = 0, cursor
         async for page in connector.read_partition(
-            shape, selection, {}, KeyRange(), after_key=cursor, batch=CHECK_BATCH
+            read_shape, selection, {}, KeyRange(), after_key=cursor, batch=CHECK_BATCH
         ):
             if not page:
                 continue
+            if sql:
+                _projected(page, fields)
             got += len(page)
             end = _page_end(page, shape)
             yield page

@@ -18,6 +18,7 @@ from dps.layers.connectors.identifier_check import (
     is_identifier,
     key_floor,
 )
+from dps.layers.connectors.selection import SelectionError, read_projection, validate_selection
 
 
 def test_identifier_family() -> None:
@@ -91,6 +92,11 @@ class _Fake:
     ``one_page``: every call yields only its first page (a read that stops early: the check must
     page on by itself, after the last key it read). ``ignore_after``: the read starts at the first
     row whatever ``after_key`` says (a read that cannot advance).
+
+    A read yields what the engine's connector would (S8-idcheck review r1): a SQL engine the
+    columns of ``read_projection`` after ``validate_selection`` (Oracle folds a listed column to
+    upper case), MongoDB the top-level field of each listed path (``mongo._projection``, after the
+    selection validator), whole rows without a list.
     """
 
     engine = "postgres"
@@ -117,13 +123,23 @@ class _Fake:
         after_key: Any,
         batch: int,
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        assert selection.columns and key_range == KeyRange()
+        assert key_range == KeyRange()
         self.calls += 1
+        key = shape.key[0] if shape.key else "id"
+        keep: set[str] | None
+        if self.engine == "mongo":
+            validate_selection(selection, "mongo", None)
+            keep = {c.split(".", 1)[0] for c in selection.columns or []} or None
+        else:
+            validate_selection(selection, self.engine, shape)
+            keep = {c.name for c in read_projection(shape, selection, self.engine)}
         after = None if self.ignore_after else after_key
         size = 2
         while True:
-            rows = [r for r in self.rows if after is None or r["id"] > after[0]]
-            page = [{k: v for k, v in r.items() if k in {*selection.columns, "id"}} for r in rows]
+            rows = [r for r in self.rows if after is None or r[key] > after[0]]
+            page = [
+                {k: v for k, v in r.items() if keep is None or k in keep or k == key} for r in rows
+            ]
             page = page[:size]
             if not page:
                 return
@@ -132,7 +148,7 @@ class _Fake:
             # the aliasing the review found: the consumer's list decides the next page
             if self.one_page or len(page) < size:
                 return
-            after = (page[-1]["id"],)
+            after = (page[-1][key],)
 
     async def count(self, shape: TableShape, selection: Any, params: dict[str, Any]) -> int:
         return len(self.rows)
@@ -421,3 +437,108 @@ def test_an_incomplete_check_reaches_the_evidence_as_an_error() -> None:
         )
     )
     assert out == {"error": "identifier_check_incomplete"}
+
+
+# -- S8-idcheck review r1: a column is read as the object spells it, or the check fails closed --
+
+
+def _named(names: list[str], *, key: str = "ID") -> TableShape:
+    """A SQL shape: ``key`` and ``names`` (catalogue spellings), every column text but the key."""
+    cols = [ColumnInfo(path=f"$.{key}", name=key, data_type="NUMBER", kind="int", is_key=True)]
+    cols += [ColumnInfo(path=f"$['{n}']", name=n, data_type="VARCHAR2", kind="text") for n in names]
+    return TableShape(object=ObjectRef(name="T"), columns=cols, key=[key], key_source="primary_key")
+
+
+def _late_rows(names: list[str], *, key: str = "ID") -> tuple[list[dict[str, Any]], ...]:
+    """Nine target rows and eight source rows; one target value of each column sits in the
+    source, past the first page on both sides (target key 7, source key 6)."""
+    target = [{key: i, **{n: f"DF{i:06d}{j}" for j, n in enumerate(names)}} for i in range(9)]
+    source = [{key: i, **{n: f"QQ{i:06d}{j}" for j, n in enumerate(names)}} for i in range(8)]
+    for n in names:
+        source[6][n] = target[7][n]
+    return target, source
+
+
+def _check_named(target: Any, source: Any, names: list[str], shape: TableShape) -> dict[str, Any]:
+    return asyncio.run(
+        check_identifiers(
+            dict.fromkeys(names, "NATIONAL_ID"),
+            target=target,
+            target_shape=shape,
+            source=source,
+            source_shape=shape,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "names", [["NationalId"], ["acct_no"], ["Tax Id"], ["NATIONAL_ID", "acctNo"]]
+)
+def test_an_oracle_column_is_read_as_the_catalogue_spells_it(names: list[str]) -> None:
+    """Oracle folds a *listed* column to upper case (a person's selection, the Wega rule), so a
+    mixed-case or lower-case column the catalogue holds was never read: ``checked`` 0, nothing
+    flagged, ``whole_table`` and passed on a target holding a real identifier; a name with a
+    space was refused as a selection and the run's finalize failed in a loop. The check reads
+    the columns as the catalogue spells them (a mixed-case key column too)."""
+    for key in ("ID", "RowKey"):
+        target, source = _late_rows(names, key=key)
+        fake_target, fake_source = _Fake(target), _Fake(source)
+        fake_target.engine = fake_source.engine = "oracle"
+        out = _check_named(fake_target, fake_source, names, _named(names, key=key))
+        for n in names:
+            assert out["columns"][n]["checked"] == 9, n
+            assert out["columns"][n]["in_source"] == 1, n
+        assert sorted(out["review_columns"]) == sorted(names)
+        assert out["rows_read"] == {"target": 9, "source": 8}
+        assert asyncio.run(key_floor(fake_target, _named(names, key=key))) == (8,)  # type: ignore[arg-type]
+
+
+def test_a_sql_read_without_an_identifier_column_fails_closed() -> None:
+    """A SQL read yields every column it projects (a NULL is still a key of the row): a page
+    without an identifier column was not read as asked, so the check fails closed instead of
+    counting no value as a clean column."""
+
+    class _Drops(_Fake):
+        async def read_partition(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            async for page in super().read_partition(*args, **kwargs):
+                yield [{k: v for k, v in r.items() if k != "national_id"} for r in page]
+
+    for side in ("target", "source"):
+        target, source = _hit_late()
+        if side == "target":
+            target = _Drops(target.rows)
+        else:
+            source = _Drops(source.rows)
+        with pytest.raises(ConnectorError) as err:
+            _run(target, source)
+        assert err.value.code == "identifier_check_incomplete", side
+
+
+@pytest.mark.parametrize("names", [["tax-id"], ["acct.no"], ["tax-id", "acct.no", "plain"]])
+def test_a_mongo_field_a_projection_cannot_name_is_read_from_whole_documents(
+    names: list[str],
+) -> None:
+    """A MongoDB read projects the top-level field of each listed path: a field name with a
+    hyphen is refused as a selection (the run's finalize failed in a loop), and a field name
+    holding a dot is projected as the field before the dot (never read: ``checked`` 0, passed).
+    Such a field is read from whole documents."""
+    target, source = _late_rows(names, key="id")
+    fake_target, fake_source = _Fake(target), _Fake(source)
+    fake_target.engine = fake_source.engine = "mongo"
+    out = _check_named(fake_target, fake_source, names, _named(names, key="id"))
+    for n in names:
+        assert out["columns"][n]["checked"] == 9, n
+        assert out["columns"][n]["in_source"] == 1, n
+    assert out["rows_read"] == {"target": 9, "source": 8}
+
+
+def test_a_refused_selection_reaches_the_evidence_as_an_error() -> None:
+    """A finalize step refused by the selection validator records ``{"error": code}`` (every
+    written identifier column then needs review) instead of failing finalize until the job is
+    dead without an evidence pack."""
+    from dps.layers.connectors.jobs_run import _best_effort
+
+    async def refused() -> dict[str, Any]:
+        raise SelectionError("selection_identifier_invalid", "not a valid MongoDB field path")
+
+    assert asyncio.run(_best_effort(refused())) == {"error": "selection_identifier_invalid"}

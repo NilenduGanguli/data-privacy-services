@@ -215,6 +215,61 @@ async def test_oracle_checks_every_row(
     _assert_whole(keyless, "ACCOUNT_NUMBER", "NATIONAL_ID")
 
 
+def _ora_spelt(
+    admin: Any, schema: OracleTestSchema, name: str, rows: list[Any], names: tuple[str, ...]
+) -> ObjectRef:
+    """A table whose key and columns are quoted names the catalogue holds as written."""
+    owner = schema.owner
+    key, account, national = names
+    with admin.cursor() as cur:
+        cur.execute(
+            f'CREATE TABLE "{owner}"."{name}" ("{key}" NUMBER(12) PRIMARY KEY, '
+            f'"{account}" VARCHAR2(20), "{national}" VARCHAR2(12))'
+        )
+        cur.executemany(
+            f'INSERT INTO "{owner}"."{name}" ("{key}", "{account}", "{national}") '
+            "VALUES (:1, :2, :3)",
+            [(i, *v) for i, v in enumerate(rows, 1)],
+        )
+    admin.commit()
+    schema.grant_select(admin, name)
+    return ObjectRef(owner=owner, name=name)
+
+
+@pytest.mark.oracle
+@pytest.mark.usefixtures("_ora_clean")
+async def test_oracle_reads_columns_as_the_catalogue_spells_them(
+    oracle_admin: Any, oracle_schema: OracleTestSchema, _ora: Connector
+) -> None:
+    """S8-idcheck review r1: a column list is a person's selection, which Oracle folds to upper
+    case, so a mixed-case column was never read (``checked`` 0, ``whole_table``, passed on a
+    target holding a real identifier) and a name with a space was refused (the run's finalize
+    failed until the job was dead). Quoted names are read as the catalogue spells them — a
+    mixed-case key too, every page of it."""
+    target, source = _rows()
+    names = ("RowKey", "acctNo", "National Id")
+    tgt = _ora_spelt(oracle_admin, oracle_schema, "IDC_SPELT_TARGET", target, names)
+    src = _ora_spelt(oracle_admin, oracle_schema, "IDC_SPELT_SOURCE", source, names)
+    tshape, sshape = await _ora.describe(tgt), await _ora.describe(src)
+    assert [c.name for c in tshape.columns] == list(names) and tshape.key == ["RowKey"]
+    columns = {"acctNo": "ACCOUNT_NUMBER", "National Id": "NATIONAL_ID"}
+    out = await check_identifiers(
+        columns, target=_ora, target_shape=tshape, source=_ora, source_shape=sshape
+    )
+    _assert_whole(out, "acctNo", "National Id")
+    assert await key_floor(_ora, tshape) == (N,)
+    appended = await check_identifiers(
+        columns,
+        target=_ora,
+        target_shape=tshape,
+        source=_ora,
+        source_shape=sshape,
+        after_key=(FLOOR,),
+        expected_rows=N - FLOOR,
+    )
+    _assert_after_floor(appended, "acctNo", "National Id")
+
+
 # -- MongoDB --------------------------------------------------------------------------------------
 
 
@@ -256,5 +311,41 @@ async def test_mongo_checks_every_document(mongo_client: Any, mongo_db: str) -> 
             columns, target=c, target_shape=kshape, source=c, source_shape=sshape
         )
         _assert_whole(keyless, account, national)
+    finally:
+        await c.close()
+
+
+@pytest.mark.mongo
+async def test_mongo_reads_fields_a_projection_cannot_name(
+    mongo_client: Any, mongo_db: str
+) -> None:
+    """S8-idcheck review r1: a read projects the top-level field of each listed path, so a field
+    name with a hyphen was refused as a selection (the run's finalize failed until the job was
+    dead) and one holding a dot was projected as the field before the dot (``checked`` 0,
+    passed). Such fields are read from whole documents."""
+    from bson import ObjectId
+
+    from tests.connectors.mongo_fixtures import connector
+    from tests.fixtures.m3_services import mongo_uri
+
+    target, source = _rows()
+
+    def doc(_id: Any, account: str, national: str) -> dict[str, Any]:
+        return {"_id": _id, "acct.no": account, "tax-id": national}
+
+    db = mongo_client[mongo_db]
+    db["target"].insert_many([doc(ObjectId(f"{i:024x}"), *v) for i, v in enumerate(target, 1)])
+    db["source"].insert_many([doc(i, *v) for i, v in enumerate(source, 1)])
+    c = connector(mongo_uri(), mongo_db)
+    await c.open()
+    try:
+        tshape = await c.describe(ObjectRef(name="target"))
+        sshape = await c.describe(ObjectRef(name="source"))
+        assert {col.name for col in tshape.columns} == {"_id", "acct.no", "tax-id"}
+        columns = {"acct.no": "ACCOUNT_NUMBER", "tax-id": "NATIONAL_ID"}
+        out = await check_identifiers(
+            columns, target=c, target_shape=tshape, source=c, source_shape=sshape
+        )
+        _assert_whole(out, "acct.no", "tax-id")
     finally:
         await c.close()

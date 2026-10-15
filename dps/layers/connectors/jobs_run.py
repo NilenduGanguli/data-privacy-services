@@ -2227,11 +2227,13 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
 
 
 async def _best_effort(step: Awaitable[dict[str, Any]]) -> dict[str, Any]:
-    """Run an informational finalize step; a target or secret failure becomes ``{"error":
-    code}`` in the evidence instead of blocking the pack (and the key purge) behind retries."""
+    """Run an informational finalize step; a target, secret or selection failure becomes
+    ``{"error": code}`` in the evidence instead of blocking the pack (and the key purge) behind
+    retries (a read the selection validator refuses is refused again on every retry: S8-idcheck
+    review r1, a finalize that failed until the job was dead, without an evidence pack)."""
     try:
         return await step
-    except (ConnectorError, StorageError, ConnectionStoreError) as exc:
+    except (ConnectorError, StorageError, ConnectionStoreError, SelectionError) as exc:
         return {"error": exc.code}
     except (SecretUnavailable, SealError):
         return {"error": "secret_unavailable"}

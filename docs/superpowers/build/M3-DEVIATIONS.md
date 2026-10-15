@@ -1828,3 +1828,66 @@ before-fix-*-at-HEAD.log`) and pass on the fix. Live proofs and their counts:
     and `in_source` equal to an independent count (0). One source identifier planted after every
     pseudonymised key of a 40 001-row Oracle and MongoDB target (`table_load: upsert`) gives
     `in_source` 1, `review_required`, not `passed`.
+
+### S8-idcheck fix round 1 — the check reads a column as the object spells it (review r1 probes)
+
+The S8-idcheck review r1 (paused before its report; probes and outputs in
+`~/.cache/dps-build/reports/S8-idcheck-review-r1/`) found, on `fidcheck` @ `794007e`, that the
+check still read a column as a person's selection. Fixed with tests that failed on that tree (9 unit
+and 2 engine tests, `~/.cache/dps-build/s8-idcheck/logs/r1-engines-before-fix.log`); live proofs in
+`~/.cache/dps-build/reports/S8-idcheck-fix-r1/`.
+
+- **Finding — a column the selection rules spell differently was never read, or failed finalize.**
+  `_every_row` passed `Selection(columns=fields)`. On Oracle `read_projection` folds a listed column
+  to upper case (the Wega rule) and keeps only shape columns whose name equals the folded one, while
+  `validate_selection` accepts it (it compares upper-cased names): a quoted mixed-case or lower-case
+  column (`"NationalId"`, `"acctNo"`) was left out of every read — `checked` 0, `whole_table`,
+  `passed`; live, a source national id and account number planted in an 801-row target were not
+  flagged (job `j_01M50693MJ7PDV59C16T5CR7VR`). A name the validator refuses (Oracle `"Tax Id"`,
+  MongoDB `tax-id`) raised `SelectionError`, not a `ConnectorError`: finalize's `_best_effort` let
+  it through, finalize failed on every retry and the job ended `dead` without an evidence pack
+  (`j_01M506EKR5N1KCPSB65QE9GZF5`). A MongoDB top-level field whose name holds a dot (`acct.no`)
+  passed the validator and was projected as the field before the dot: never read, `checked` 0.
+- **Fix** (`identifier_check._read_request`, `_projected`; `jobs_run._best_effort`):
+  1. A SQL read lists no column: it reads the shape narrowed to its key and the identifier columns,
+     names the catalogue gave, which the connector projects and quotes as spelt (Oracle `qcol`).
+  2. MongoDB projects plain top-level names only (one segment of the validator's path syntax); a
+     field a projection cannot name (a hyphen, a dot, a space) is read from whole documents.
+  3. Fail closed: a SQL row without one of the requested columns (a SQL row holds every column it
+     projects; a NULL is a value) raises `IncompleteCheck` — a projection mismatch can no longer
+     count as a clean column.
+  4. `_best_effort` records a `SelectionError` as `{"error": code}` like a connector error: every
+     written identifier column is reviewed and the pack is written (the key purge with it), instead
+     of a finalize retried until the job is dead.
+- **Deviations:** a MongoDB check of a field with a hyphen or dot reads whole documents (more bytes
+  than a projection; plain names and `key_floor` are unchanged). A PostgreSQL column whose name the
+  connector cannot quote (`PG_IDENT`: a space) still cannot be read — the run's own read of such a
+  table fails first — and would now be recorded as `{"error": "selection_identifier_invalid"}`
+  (review) rather than a dead job. Contract §7.1 and HANDOFF §8 amended.
+- **Tests:** `tests/test_identifier_check.py` — the fake now reads as each engine's connector reads
+  (SQL: `validate_selection` + `read_projection`; MongoDB: the validator + the top-level
+  projection; whole rows without a list); Oracle `NationalId`, `acct_no`, `Tax Id` and
+  `NATIONAL_ID` + `acctNo` with an upper-case and a mixed-case key (`RowKey`): flagged, `checked` =
+  rows, `key_floor` over the mixed-case key (as built: `checked` 0, or `SelectionError`); a SQL read
+  without the identifier column fails closed on either side (as built: `checked` 0, passed);
+  MongoDB `tax-id`, `acct.no` and a mixed list read from whole documents (as built:
+  `SelectionError`, or `checked` 0); `_best_effort` maps a `SelectionError` to `{"error":
+  "selection_identifier_invalid"}` (as built: raised). `tests/connectors/test_identifier_check_engines.py`
+  — Oracle `"RowKey"` / `"acctNo"` / `"National Id"` and MongoDB `acct.no` / `tax-id`, 20 000-row
+  scratch target and source each, the planted values at target rows 15 000 and 17 500: both flagged,
+  `checked` = `rows_read` = 20 000, Oracle `key_floor` 20 000 and an append after a floor of 5 000
+  reads 15 000 rows (as built: `SelectionError` on both engines).
+- **Verification** (lane stack `dps-wt-fidcheck`, report `~/.cache/dps-build/reports/S8-idcheck-impl.md`
+  §9): ruff and mypy clean; the whole suite with the lane's services up 3 569 passed, 86 skipped,
+  0 failed; the identifier engine and run tests with services required 7 passed; smoke `--m3` 39
+  passed (OCR skipped). On the rebuilt image (app and worker `identifier_check.py` and `jobs_run.py`
+  identical to the tree), synthesize `table` runs from Oracle tables with `"NationalId"` /
+  `"acctNo"` and `"National Id"` / `"Acct No"` say `checked` 400 = the target's 400 values, and after
+  one source national id and account number are planted in each target, an `upsert` run says
+  `checked` 801, `in_source` 1 (= an independent count), `issuable` 1 for the national id,
+  `review_required`, not `passed` (as built: `checked` 0, `passed`); the upper-case control is
+  unchanged. A MongoDB run whose identifier is `$['tax-id']` succeeds with a pack: `checked` 300 =
+  its 300 documents, `rows_read` 300 / 300 (as built: finalize failed until the job was dead, no
+  pack). The 20 000-row planted-hit proof (Oracle and MongoDB, hits at target rows 15 000 and
+  17 500) still flags both columns with `checked` = `rows_read` = 20 000. App and worker logs since
+  the image started: 0 of 92 192 demo values and 800 probe values, 7 / 7 probe job ids, no traceback.
