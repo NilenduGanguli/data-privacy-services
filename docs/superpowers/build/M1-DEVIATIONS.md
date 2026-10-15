@@ -1776,3 +1776,120 @@ M1 plan's Tasks 12 and 13 where they differ.
   (4, 50 and 200 rows pass). Whether a common given name in a generated full name is a copy is a
   policy decision; the sweep stays fail-closed. The heuristic also gives such a column full names
   (the `PERSON_NAME` template is `First Last`).
+
+## Fix round 1 for S8-spec (review `S8-spec-review-r1`)
+
+- **B1: the digit rule missed copies that M0 refused.** S8's first rule found an all-digit original
+  only as a whole run of digits once separators were removed, so whitespace and punctuation no
+  longer separated two numbers. Several real copies answered 200 with the value in the body:
+  two sampled IDs side by side (`1001, 1002`, `1001 1002`), a sampled date in a space-separated
+  datetime (`2016-09-02 10:15:00`; the `T` form was caught), and a sampled mobile with a country
+  code (`+91 9810010012`, `+91-98100-10012`, the format DPS's own PHONE generator writes). M0's
+  `verify_output` refuses all of them. The rule now (`schema_profile._SampleValues`, shared by the
+  guard and the sweep):
+  - An all-digit original of `LONG_DIGITS` (9) digits or more is found anywhere in the digits, as
+    in M0. It is longer than a date's eight digits, so no generated date, amount or code holds one
+    by accident. This restores mobiles, Aadhaar, card and account numbers in any grouping.
+  - A shorter one is found where it starts and ends at a break: the edge of a run of digits, or
+    whitespace between two digits in the output string. Each output string is normalised word by
+    word (the concatenation equals `normalise` of the whole string). `-`, `/`, `.`, `:` and a comma
+    with no space after it still join digits, as in dates, amounts and ranges.
+  - A string that is a whole number with a zero fraction (`1001.00`, `1,001.0`) is read as that
+    integer, as an integral float already was.
+  - Not refused, by design: `1003-07` and `1003/1004` (joined like a date or a range, the class of
+    the documented `1001-2020`), and a sampled ID as the integer part of an amount (`1001.25`).
+    Text originals are unchanged (substring, M0).
+  - The reviewer validated the rule before implementation (`p7_hybrid_rule.py`, rule `combo`).
+    It keeps the index: long digit originals join the text originals' four-character head index,
+    and short ones are looked up per span of whitespace-delimited segments of each run (at most
+    eight digits), so one output string still costs one lookup per position.
+- **B2: wide decimal bounds rounded up.** `_column_top` computed `10**digits - 10**-scale` in the
+  default 28-digit decimal context. A bound with more than 28 significant digits therefore rounded
+  up to `10**digits`, above the column: `NUMBER(30,10)` gave 1e20, `NUMBER(38,10)` 1e28,
+  `DECIMAL(38,18)` 1e20 and `DECIMAL(65,30)` 1e35. The bound is now computed with `digits + scale
+  + 2` digits of precision: 9.999999999999998e19, 9.999999999999997e27 and 9.999999999999998e34,
+  each the largest float not above the column's maximum.
+- **N3: an ID-like key avoids its own sampled values, swept or not.** S8 avoided exact sample
+  values only for fields the sweep looks at (a detected identifier type or a flagged key). The
+  detector does not type a generic key (`id`, `order_ref`, `invoiceNo`), so such a field was
+  neither swept nor steered: a generated `id` could equal a sampled one, and a model `sequence`
+  started near the sample wrote them all (D-A: no real identifiers in synthetic data).
+  - A key is ID-like when its last word is `id`, `ids`, `key`, `ref`, `no`, `nbr`, `num`,
+    `number`, `seq` or `pk` (snake, kebab or camel case).
+  - `profile_from_sample` keeps the values of such an integer or string field
+    (`FieldStats.id_values`, never in a prompt or a response), and `schema_profile.sample_ids`
+    turns them into per-field tests. `execute_spec(avoid_in=...)` steers the field like the
+    others: a drawn value is drawn again and a `sequence` skips it. An `entity` field is not
+    steered this way.
+  - Values shorter than `SWEEP_MIN_LEN` are not avoided (row numbers; the sweep skips them too).
+  - Such a field is not swept. One that cannot get away from its sampled values (its range is the
+    sample's) keeps them, and only that field stops being steered (`_Steering.give_up`). The run
+    is not refused, and the swept fields are still steered.
+- **Recorded, not changed (owner decisions).**
+  - N1, absence: steered values over a narrow space show the sample by absence much sooner than
+    the S8 entry's "aggregate effect" example (nine years of dates against 10 000 rows) suggests.
+    With one-year opening dates (Faker `en_IN`), predicting "the days that never occur are the
+    sampled days" scored as follows:
+
+    | Sample rows | Output rows | Precision | Recall |
+    |---|---|---|---|
+    | 50 | 1 000 | 0.80 | 1.00 |
+    | 200 | 1 000 | 0.99 | 1.00 |
+    | 200 | 5 000 | 1.00 | 1.00 |
+
+    A 1 000-row sample (or 500 rows to 5 000) is refused 3/3, because it exhausts the day space as
+    the cities did. The options per field, when a sample covers a large share of the field's value
+    space, are steering (as now), exempting (as for cities) or refusing.
+  - N2, P1, pre-existing since `0fd76d0`: an identifier-like data key that the detector does not
+    flag (`arjun_mehta`, or `Mumbai` with NER off) reaches the model as is. Neither e1f3a3a nor S8
+    changed what reaches the prompt. One option is to alias every sample key that is not a known
+    schema word.
+  - N4: originals shorter than `SWEEP_MIN_LEN` (3-digit IDs) are neither swept nor avoided
+    (M0's rule).
+  - N5: replaying the spec and seed without the sample regenerates exactly the values that
+    steering removed. Whoever holds the output, the spec and the seed can therefore learn which
+    values coincided with the sample. The seed is caller-custodied secret material (D2). This is
+    stated in `api-m1.md`.
+  - N6: the comment on `batch.CHANCE_EQUAL_ENTITIES` now says that `SWEEP_EXEMPT` holds both of its
+    types plus the city and card-expiry lists (comment only).
+- **Tests (written first; the new API cases failed on `a46d1c5`).**
+  - `tests/test_schema_profile.py` went from 61 to 63 cases. `LEAKS` gains `1001, 1002`,
+    `1003 1004`, `1001.00`, `1,002.00` and `2016-09-02 10:15:00`, so guard and sweep are checked on
+    each form. `_naive_sweep` is an independent position-by-position version of the new rule, and
+    the indexed sweep must still equal it on 300 random rows.
+    `test_a_long_number_is_found_wherever_its_digits_are` covers mobiles with a country code and
+    IDs next to each other, against near misses and dates. `test_an_id_like_key_avoids_its_sampled_values`
+    covers `sequence`, `pattern` and `integer`, and the doomed case keeps steering the swept field.
+    `test_declared_bounds_are_kept_exactly` adds `NUMBER(38,10)`, `DECIMAL(38,18)` and
+    `NUMBER(30,10)`.
+  - `tests/test_api_schema.py` went from 19 to 25 cases. Four new forms are forced into the rows
+    (two IDs with a comma, two IDs with a space, a space datetime, a numeric-string ID), plus a
+    sampled mobile written `+91-98200-20023` and `+91 9810010012`; each gives 422 `leakage` with
+    no echo. An `id` key whose proposal is `sequence{start: 7000}` skips the sampled 7001..7004
+    and answers 200.
+- **Measured (in process, through the real route; values never printed).**
+  - Live sample and an independent variant, 100 rows per call: 0 refusals in 880 calls. That is
+    20/20 each with patterns and with Presidio, 300/300 each with patterns, and 100/100 each with
+    Presidio.
+  - An independent client-side check found 0 generated values equal to a sampled value of the same
+    swept column. A sampled ID appears only as the integer part of a balance (`<ID>.99`, `<ID>.9`;
+    10 strings in 300 calls of the variant, whose sample holds a balance of 1001.0).
+  - Planted copies: 22 of 23 forms give 422 `leakage` with no echo (patterns and Presidio). The
+    exception is `1003-07`, by design. The four accidents give 200.
+  - Declared bounds: all 10 DDL columns, `NUMBER(3)` up to `DECIMAL(65,30)`, are within the column.
+  - Realistic 1 000-row samples:
+    - to 10 000 rows: 3/3 OK in 3.9-4.2 s (3.8-3.9 s before);
+    - with mobile and PAN columns: 3/3 OK in 4.9-5.3 s (4.4-4.6 s before; long numbers are now
+      scanned as substrings);
+    - 200 rows to 1 000: 5/5 OK.
+  - A sample whose IDs fill the range is refused in 0.09 s at 100 rows and 0.42 s at 10 000 rows.
+  - Without a sample, the executor is byte-identical to `e1f3a3a` (`p6_identity.py`, equal
+    hashes).
+  - Probes and outputs are in `reports/S8-spec/fix-r1/`.
+- **Gates.** `ruff format --check`, `ruff check` and `mypy dps` are clean. The full suite (lane
+  venv, lane `dps-db` and OCR mock up) gave 3 289 passed, 354 skipped and 6 failed:
+  - five failures that are pre-existing and unrelated: four in the scanner's capture and crawler,
+    and one in playground NER coverage. They fail the same way on an exported `e1f3a3a` tree;
+  - `scanner/test_guard.py::test_https_popups_opened_while_arm_runs_relay_nothing[False-0]`,
+    a browser navigation race under the load of other lanes ("Execution context was destroyed").
+    It passed 4/4 on a re-run.
