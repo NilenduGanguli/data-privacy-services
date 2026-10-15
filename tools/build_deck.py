@@ -51,10 +51,22 @@ Facts the deck reads (dotted paths inside a step's ``facts``; anything else is i
     S8   counts.rows_written, fidelity.score, privacy.exact_row_matches,
          privacy.nndr.{ratio,target,measured}, privacy.membership_inference.{run,auc,target},
          utility.{run,ratio,metric}                  (subset of the synthetic evidence pack)
-    S9   scan.{pages,fields,personas,submissions}, posts_received (demo-site /__received)
+    S9   scan.{pages,fields,personas,submissions,non_get_allowed}
+                                                     (subset of the scan's evidence-pack scan block)
+         received.{non_get,form_get,logout_hits,admin_hits,get}
+                                                     (how far each demo-site /__received counter
+                                                     moved across the scan)
+         sends_blocked                               (non-GET requests the request guard stopped:
+                                                     the pack's scan.blocked_requests less GET/HEAD)
     S10  packs_listed, audit_rows, pdf_ok
     S11  posture.{passed,total,enforced}, posture.env (optional), rotated_key_status,
          retention_state                             (posture: GET /admin/posture's own keys)
+
+Slide 10 shows the site's count of non-GET requests only with the smoke's D4 positive controls
+(``tools/smoke_test.py``): the site served at least one GET per page the scan visited
+(``received.get >= scan.pages``) and the guard stopped at least one send (``sends_blocked >= 1``);
+without them the count is a placeholder that ``--strict`` refuses. It is emerald only when no
+counter moved and ``scan.non_get_allowed`` is 0 (an S9 that passed), rose otherwise.
 
 ``/admin/posture`` evaluates its checks as if in production in every environment and enforces
 them only in staging and prod (``enforced``), so a local stack fails the production-only checks by
@@ -128,6 +140,9 @@ SCRIPTED_STEPS = tuple(f"S{n}" for n in range(1, 12))  # S12 (the console walk) 
 REPORTED_ENVS = {"local": "local", "dev": "dev"}
 ENFORCED_ENVS = {"staging": "staging", "prod": "production"}
 BOOT_RULE = "to boot when a check enforced at boot fails"  # "staging and production refuse …"
+#: The demo site's ``/__received`` counters that must not move during a scan (the smoke's
+#: ``SITE_COUNTERS``): every non-GET request, every GET-form submission, every denied-path hit.
+SITE_COUNTERS = ("non_get", "form_get", "logout_hits", "admin_hits")
 ENGINES = {"postgres": "PostgreSQL", "oracle": "Oracle", "mongo": "MongoDB"}
 WRITE_MODES = {"table": "table", "files": "files", "in_place": "in place", "append": "append"}
 MODES = {"obfuscate": "obfuscate", "synthesize": "synthesize"}
@@ -1766,6 +1781,32 @@ def _slide_synthetic(deck: Deck, report: Report) -> Any:
     return slide
 
 
+def _site_counts(report: Report) -> dict[str, float] | _Absent:
+    """S9's D4 figures, or why the site's count cannot be shown.
+
+    The smoke's D4 rule (``tools/smoke_test.py`` ``scanner_checks``): a zero proves nothing unless
+    the counters belong to the site the browser-worker scanned and the scan gave its pages a
+    chance to send. So the count is shown only with both positive controls: the site served at
+    least one GET per page the scan visited, and the request guard stopped at least one send.
+    """
+    paths = [f"received.{name}" for name in (*SITE_COUNTERS, "get")]
+    paths += ["scan.pages", "scan.non_get_allowed", "sends_blocked"]
+    got: dict[str, float] = {}
+    for path in paths:
+        num = report.number("S9", path)
+        if isinstance(num, _Absent):
+            return num
+        got[path] = num
+    if got["received.get"] < max(1.0, got["scan.pages"]) or got["sends_blocked"] < 1:
+        return _Absent(
+            "S9 D4 positive controls",
+            "The counters do not show that the demo site served the scan's pages and that the "
+            "browser blocked their sends: read /__received of the stack's own demo site around "
+            "the scan, then rehearse again.",
+        )
+    return got
+
+
 def _slide_scanner(deck: Deck, report: Report, screens: Path | None) -> Any:
     slide = deck.new_slide(
         kicker="L3 · UI SCANNER",
@@ -1782,19 +1823,29 @@ def _slide_scanner(deck: Deck, report: Report, screens: Path | None) -> Any:
         deck.absent(slide, (x, 2.1, w, 4.7), "s9", gate)
         deck.chrome(slide, _footer(report))
         return slide
-    posts = report.number("S9", "posts_received")
-    if isinstance(posts, _Absent):
-        deck.absent(slide, (x, 2.1, w, 1.55), "posts", posts)
+    d4 = _site_counts(report)
+    if isinstance(d4, _Absent):
+        deck.absent(slide, (x, 2.1, w, 1.55), "posts", d4)
     else:
+        clean = d4["scan.non_get_allowed"] == 0 and not any(
+            d4[f"received.{name}"] for name in SITE_COUNTERS
+        )
+        served, blocked = d4["received.get"], d4["sends_blocked"]
         deck.kpi(
             slide,
             (x, 2.1, w, 1.55),
             "posts",
-            "POST requests received by the site",
-            _fmt_count(posts),
-            tone=EMERALD if posts == 0 else ROSE,
-            caption="counted by the demo site itself",
-            value_size=40,
+            "Non-GET requests received by the site",
+            _fmt_count(d4["received.non_get"]),
+            tone=EMERALD if clean else ROSE,
+            caption=(
+                f"counted by the demo site, which served the scan {_fmt_count(served)} "
+                f"GET{'' if served == 1 else 's'}; the browser blocked {_fmt_count(blocked)} "
+                f"send{'' if blocked == 1 else 's'}"
+            )
+            if clean
+            else "the demo site counted a request that could submit: S9 must fail",
+            value_size=36,
         )
     tiles = (
         ("pages", "scan.pages", "Pages crawled"),

@@ -63,9 +63,14 @@ S8_FACTS: dict[str, Any] = {
     },
     "utility": {"run": True, "metric": "accuracy", "ratio": 0.9721},
 }
+#: S9 as the smoke's D4 check measures it (tools/smoke_test.py, Task 24 S4b): the scan's evidence
+#: block, how far the demo site's own /__received counters moved across the scan, and the sends the
+#: request guard stopped (the two positive controls: the site served the scan, its pages tried to
+#: send).
 S9_FACTS: dict[str, Any] = {
-    "scan": {"pages": 3, "fields": 17, "personas": 3, "submissions": 0},
-    "posts_received": 0,
+    "scan": {"pages": 21, "fields": 63, "personas": 3, "submissions": 0, "non_get_allowed": 0},
+    "received": {"non_get": 0, "form_get": 0, "logout_hits": 0, "admin_hits": 0, "get": 175},
+    "sends_blocked": 60,
 }
 FULL_FACTS: dict[str, dict[str, Any]] = {
     "S1": {"raw_pii_sent_to_llm": 0},
@@ -313,7 +318,7 @@ def test_complete_report_fills_every_slot(tmp_path: Path) -> None:
             for token in NUMBER.findall(text):
                 assert _traceable(token, numbers), (token, text)
     text10 = "\n".join(_texts(slides[9]))
-    assert "POST requests received" in text10
+    assert "Non-GET requests received by the site" in text10
     eleven = "\n".join(_texts(slides[10]))
     assert "5 of 11" in eleven and "raw PII sent to an LLM" in eleven
     eight = "\n".join(_texts(slides[7]))
@@ -560,6 +565,87 @@ def test_posture_count_without_its_enforcement_is_a_placeholder(
     names = _names(list(prs.slides)[10])
     assert "placeholder:posture" in names and "kpi:posture" not in names
     assert any("S11 facts.posture.enforced" in m for m in result.missing)
+
+
+# -- slide 10: the site's zero only with the smoke's D4 positive controls (Task 24 S4b) ------------
+D4_LABEL = "Non-GET requests received by the site"
+D4_CAPTION = (
+    "counted by the demo site, which served the scan 175 GETs; the browser blocked 60 sends"
+)
+
+
+def _s9(
+    *, scan: dict[str, Any] | None = None, received: dict[str, Any] | None = None, **top: Any
+) -> dict[str, Any]:
+    """S9's facts with ``scan`` / ``received`` keys and top-level facts replaced."""
+    facts: dict[str, Any] = json.loads(json.dumps(S9_FACTS))
+    facts["scan"].update(scan or {})
+    facts["received"].update(received or {})
+    facts.update(top)
+    return facts
+
+
+def _scanner_kpi(prs: Any) -> tuple[str, str, str, str]:
+    """(label, value text, value colour, caption) of slide 10's site-counter card."""
+    card = {s.name: s for s in _shapes(list(prs.slides)[9])}["kpi:posts"]
+    paras = card.text_frame.paragraphs
+    value = paras[1].runs[0]
+    caption = paras[2].runs[0].text if len(paras) > 2 and paras[2].runs else ""
+    return paras[0].runs[0].text, value.text, str(value.font.color.rgb), caption
+
+
+def test_scanner_zero_is_shown_with_its_positive_controls(tmp_path: Path) -> None:
+    prs, result = _build_doc(tmp_path, _report(FULL_FACTS))
+    assert _scanner_kpi(prs) == (D4_LABEL, "0", build_deck.EMERALD, D4_CAPTION)
+    assert result.missing == ()
+    assert _strict_exit(tmp_path) == 0
+
+
+@pytest.mark.parametrize(
+    ("facts", "why"),
+    [
+        # the site never served the scan: these counters are not the scanned site's
+        (_s9(received={"get": 0}), "S9 D4 positive controls"),
+        # fewer GETs than pages visited (every visit fetches its page: it sends no-store)
+        (_s9(received={"get": 20}), "S9 D4 positive controls"),
+        # the guard stopped no send: the scan never provoked one, so the zero proves nothing
+        (_s9(sends_blocked=0), "S9 D4 positive controls"),
+        # the contract before the scanner merged: a bare count, no positive controls
+        (
+            {"scan": dict(S9_FACTS["scan"]), "posts_received": 0},
+            "S9 facts.received.non_get",
+        ),
+        (_s9(received={"form_get": None}), "S9 facts.received.form_get"),
+        (_s9(scan={"non_get_allowed": "0"}), "S9 facts.scan.non_get_allowed"),
+        ({k: v for k, v in _s9().items() if k != "sends_blocked"}, "S9 facts.sends_blocked"),
+    ],
+)
+def test_scanner_zero_without_its_proof_is_a_placeholder(
+    tmp_path: Path, facts: dict[str, Any], why: str
+) -> None:
+    prs, result = _build_doc(tmp_path, _report({**FULL_FACTS, "S9": facts}))
+    names = _names(list(prs.slides)[9])
+    assert "placeholder:posts" in names and "kpi:posts" not in names
+    assert any(why in m for m in result.missing), result.missing
+    assert _strict_exit(tmp_path) == 1
+
+
+@pytest.mark.parametrize(
+    ("facts", "value"),
+    [
+        (_s9(received={"non_get": 2}), "2"),
+        (_s9(received={"form_get": 1}), "0"),  # a form sent by GET is a submission too
+        (_s9(received={"admin_hits": 1}), "0"),  # a denied path reached the site
+        (_s9(scan={"non_get_allowed": 1}), "0"),  # the request log let one through
+    ],
+)
+def test_scanner_count_that_moved_is_never_emerald(
+    tmp_path: Path, facts: dict[str, Any], value: str
+) -> None:
+    prs, _ = _build_doc(tmp_path, _report({**FULL_FACTS, "S9": facts}))
+    label, shown, tone, caption = _scanner_kpi(prs)
+    assert (label, shown, tone) == (D4_LABEL, value, build_deck.ROSE)
+    assert caption == "the demo site counted a request that could submit: S9 must fail"
 
 
 def test_strings_that_are_not_names_never_reach_a_slide(tmp_path: Path) -> None:
