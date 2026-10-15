@@ -1,7 +1,9 @@
 # The ten-minute demo: presenter script
 
 > **Status: draft, finish stage S6a (2026-10-14).** Written against the console and API as built on `main`
-> plus the M4 scanner branch. Finish stage S6b runs the real rehearsal (`tools/demo_seed.py`,
+> plus the M4 scanner branch; every console label below was checked again on 2026-10-15 against the
+> merged console (lane `fdemo` with `fimg`: M4 as merged on `main`, Task 24's `full` stack). Finish
+> stage S6b runs the real rehearsal (`tools/demo_seed.py`,
 > `tools/e2e_demo.py --console`), confirms every label and timing below against the running stack, and
 > rebuilds the deck from that run. This script never quotes a figure that was not measured: where a beat
 > says "read it off the screen", the number comes from the live stack or from the deck slide built from
@@ -33,7 +35,7 @@ has no slide; it is shown live only.
 | 0:30 | Playground (2:30) | Playground | 5–6 | findings with evidence; reveal identical; redacted PDF |
 | 3:00 | Policies (1:00) | Policies | — | v1 to v2 diff with its change ticket |
 | 4:00 | Data sources (3:00) | Data sources & jobs | 7–9 | partitions; evidence pack; three-way join; synthetic pack |
-| 7:00 | UI scanner (2:00) | UI scanner | 10 | "No submissions · POST interception on"; POSTs received 0 |
+| 7:00 | UI scanner (2:00) | UI scanner | 10 | "No submissions · POST interception on"; the site received 0 non-GET requests |
 | 9:00 | Reports and Admin (1:00) | Reports & audit, Admin | 11 | evidence PDF; audit trail; posture checks with the ones enforced at boot marked; rotated key refused |
 | 10:00 | Close, then Q&A | — | 12 | — |
 
@@ -211,9 +213,10 @@ the synthetic pack shows exact-row matches 0.
 ## 7:00 · UI scanner (2 minutes)
 
 **Show, step by step:**
-1. Sidebar **UI scanner** (new scan): Start URL `http://demo-site:8410/apply` (the onboarding form of the
-   demo site, reached from inside the stack), fill mode **Synthesize persona fill**, three personas,
-   **Start crawl**.
+1. Sidebar **UI scanner** (new scan): the form opens with the Start URL `http://demo-site:8410/apply` (the
+   onboarding form of the demo site, reached from inside the stack) and, under **Authentication**, the
+   stored session `dps/ui/demo-onboarding` already filled in. Keep fill mode **Synthesize persona fill**,
+   set **Personas** to 3, **Start crawl**.
 2. The live crawl map, then the scan page: **Pages with forms** and the annotated form with its field chips.
 3. **Parallel view**, **Filled with: Synthetic persona**, then flip to **Obfuscated tokens**.
 4. **Export inventory** (CSV).
@@ -224,14 +227,17 @@ the synthetic pack shows exact-row matches 0.
 > original."
 > "There is no submit button in DPS, and the browser blocks every POST."
 
-**Proof:** the demo site's own counter of POST requests received stays at 0 (slide 10 shows the rehearsal's).
+**Proof:** the demo site's own counters of POST (and every other non-GET) requests and of forms sent by GET
+stay at 0 while it serves every page the scan visits (slide 10 shows the rehearsal's, with the GETs the site
+served and the sends the browser blocked).
 
 #### Slide 10 · UI scanner: every screen filled, nothing submitted
 
 > "The scanner walked the onboarding journey, classified every field and filled each screen with a synthetic
 > persona and, flipped, with obfuscated tokens."
-> "The demo site counts every POST it receives: zero. DPS has no submit path, and the browser blocks every
-> POST from a filled page."
+> "The demo site counts every POST, every other non-GET request and every form sent by GET: zero, although
+> it served every page of the scan. DPS has no submit path, and the browser blocked every send from a filled
+> page."
 
 ## 9:00 · Reports and Admin (1 minute)
 

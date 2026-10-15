@@ -1346,8 +1346,10 @@ with `reports/e2e-demo-report.json`, runs the rehearsal, builds and commits
   (consistency-check result keys); S8 `counts.rows_written`, `fidelity.score`,
   `privacy.exact_row_matches`, `privacy.nndr.{ratio,target,measured}`,
   `privacy.membership_inference.{run,auc,target}`, `utility.{run,ratio,metric}` (synthetic pack keys);
-  S9 `scan.{pages,fields,personas,submissions}` (scan evidence keys) and `posts_received` (demo-site
-  `/__received`); S10 `packs_listed`, `audit_rows`, `pdf_ok`; S11 `posture.{passed,total,enforced}`
+  S9 `scan.{pages,fields,personas,submissions,non_get_allowed}` (scan evidence keys),
+  `received.{non_get,form_get,logout_hits,admin_hits,get}` (how far the demo site's own `/__received`
+  counters moved across the scan) and `sends_blocked` (changed at the `fimg` merge from a bare
+  `posts_received`; see "fimg merged into fdemo" below); S10 `packs_listed`, `audit_rows`, `pdf_ok`; S11 `posture.{passed,total,enforced}`
   and optionally `posture.env` (`GET /admin/posture`'s own keys), `rotated_key_status`,
   `retention_state`. Screenshots: `reports/demo-screens/<page>-light.png` for
   `playground`, `job`, `scan-parallel`, `evidence` (S12's walk writes `<page>-<theme>.png`). Only a
@@ -1462,3 +1464,50 @@ finalises it after the rehearsal together with `tools/demo_seed.py`, `tools/e2e_
   before this fix 17 of the 18 new cases fail (the list status with `TypeError: unhashable type`);
   the 12 earlier tests and the positive control (slide 1's measured time) pass on both
   (`~/.cache/dps-build/reports/s6a-fix-r1/`).
+
+## fimg merged into fdemo (2026-10-15) — Task 24 and the scanner under the demo tools (Tasks 26, 26B)
+
+Finish-stage work on lane `fdemo`: `git merge --no-ff fimg` (`fimg` `3f8af02`: Task 24 with S4b, and
+M4 as merged on `main` `5959a75` with the integrate fixes up to `8ea220a`), so S6b's demo tools
+(`tools/demo_seed.py`, `tools/e2e_demo.py`) can build on `tools/demo_client.py`, the `full` stack
+with the browser-worker and the demo site, the smoke's scanner block and the console's scanner pages.
+
+- **Conflicts, both sides kept.** HANDOFF §1, the `dps` package row: one row naming `fimg`'s
+  `scanner` extra and this lane's `deck` extra. This log: `fimg`'s Task 24 section first, then this
+  lane's Task 26B, Task 26 and S6a fix sections. Auto-merged and checked: `pyproject.toml` (both
+  extras) and contract §1's extras sentence (both).
+- **The deck's S9 contract follows the D4 proof that came in.** The S6a contract read
+  `posts_received`, a key the demo site does not have: `/__received` counts `non_get`, `form_get`,
+  `logout_hits`, `admin_hits` and, since S4b, `get` (pages and files served). A bare zero also proves
+  nothing when the counters read are not those of the site the browser-worker scanned, which is why
+  S4b gave the smoke's D4 check two positive controls. S9 now carries the smoke's own figures:
+  `scan.{pages,fields,personas,submissions,non_get_allowed}` (the pack's scan block),
+  `received.{non_get,form_get,logout_hits,admin_hits,get}` (each counter after the scan less before
+  it) and `sends_blocked` (the pack's `scan.blocked_requests` less GET and HEAD, the smoke's
+  `_sends_blocked`). Slide 10's card reads "Non-GET requests received by the site" and shows the
+  count only when both controls hold (`received.get >= max(1, scan.pages)`, `sends_blocked >= 1`),
+  with the served GETs and the blocked sends in its caption; otherwise it is the placeholder
+  `S9 D4 positive controls`, listed as missing, so `--strict` refuses the deck. The count is emerald
+  only when no counter moved and `scan.non_get_allowed` is 0, rose otherwise. **For S6b:**
+  `e2e_demo.py` passes S9 only on the smoke's rule (the same four counters, `non_get_allowed` 0 and
+  both controls) and records these facts; `/__received` is read from the host at
+  `DPS_TEST_DEMO_SITE`, the scan reaches the site in-network at `http://demo-site:8410`.
+- **The presenter script** (`docs/demo/DEMO-SCRIPT.md`): every console label it names was checked
+  again in the merged console source (Playground, Policies, Data sources, Reports, Admin, the top
+  bar and the scanner pages: "UI scanner", "Start URL", "Synthesize persona fill", "Start crawl",
+  "Pages with forms", "Parallel view", "Filled with", "Synthetic persona", "Obfuscated tokens",
+  "Export inventory", "No submissions · POST interception on"); all are present. The status line says
+  so; the 7:00 timeline proof, the beat's **Proof** and slide 10's notes now speak of non-GET requests
+  and forms sent by GET, received 0 while the site served the scan, as the slide does. The scanner
+  beat's first step follows the New scan page's defaults (`frontend/src/lib/scans.ts`
+  `DEFAULT_CONFIG`): the demo URL and the stored session `dps/ui/demo-onboarding` are already filled
+  in, and Personas (default 20) is set to 3, the plan's S9 count.
+- **S6a review N3 closed by Task 24:** `.gitignore` ignores `/reports/` (the e2e reports, demo
+  screenshots and flow report) and `var/` (demo keys and the group file).
+- **Tests:** `tests/test_deck.py` 30 → 42: the complete report's slide 10 shows the emerald 0 with
+  its controls and builds under `--strict`; seven cases without proof are placeholders that
+  `--strict` refuses (no GET served, fewer GETs than pages, no send blocked, the old
+  `posts_received` shape, a counter that is not a number, `non_get_allowed` not a number,
+  `sends_blocked` absent); four moved counts are rose (`non_get` 2, `form_get` 1, `admin_hits` 1,
+  `non_get_allowed` 1). On the code before the change 20 of the 42 failed (the new cases and every
+  test that builds from the complete fixture report).
