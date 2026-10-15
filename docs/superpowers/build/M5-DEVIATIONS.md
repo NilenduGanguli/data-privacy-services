@@ -1642,3 +1642,16 @@ the bench files (no placeholder).
 - **N1 — the driver.** Any other exception of a step body (Playwright's `TimeoutError` in S12) is an
   `ERROR` with its class name only, so the run still writes its reports instead of leaving the
   previous ones for `build_deck.py --strict`.
+- **Rehearsals after the fixes (this lane's `full` stack, images rebuilt from `b0bea88`, no
+  `down -v`).** The target `crm_uat.profiles_demo` had lost the reviewer's failing state when the
+  stack was stopped (MongoDB's shutdown checkpoint rebuilt the tree: `$sample` 500 passed 5/5).
+  One server-side rewrite of the same 20 000 documents (`delete_many`, then `$merge` back — what a
+  `truncate_insert` run does) put it back: `$sample` 500 failed 5/5 with 28799. Then, in a row:
+  `e2e_demo.py` PASS 12/12 (S12 not requested) in 2:49; `--skip-oracle --skip-scanner` PASS in 1:14
+  (S7 joined the run's two jobs, 1/1 pair); `--console` PASS 12/12 in 3:17. Each run left the target
+  failing the plain `$sample` 500 again (5/5, 28799), and the app and worker logged 3, 4 and 3
+  `mongo_sample_scan` (the prepare `describe`, the post-write sample, the consistency check's
+  `describe`, in the second run also its anchor sample) and no failed sample call; every pack's
+  `verification.post_sample` is a result, not an error. The deck is rebuilt `--strict` from the
+  `--console` run (footer: commit `b0bea88`, rehearsal 2026-10-15 21:29 UTC); a second build is
+  byte-identical.

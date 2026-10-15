@@ -1,11 +1,12 @@
 # The ten-minute demo: presenter script
 
-> **Status: final, finish stage S6b (2026-10-15).** Drafted in S6a against the console and API as built;
-> every console label below was checked against the merged console (lane `fdemo` with `fimg`: M4 as
-> merged on `main`, Task 24's `full` stack). S6b ran the real rehearsal on that stack —
-> `tools/demo_seed.py`, then `tools/e2e_demo.py --console` at commit `37ec781`: every step S1 to S12
-> PASS, the whole run 3:25 (the API path S1 to S11 3:12) — and built `docs/demo/dps-showcase.pptx`
-> from it. This script
+> **Status: final, finish stage S6b (2026-10-15; review round 1 fixes 2026-10-16).** Drafted in S6a
+> against the console and API as built; every console label below was checked against the merged
+> console (lane `fdemo` with `fimg`: M4 as merged on `main`, Task 24's `full` stack). After the review
+> fixes (commit `b0bea88`) the demo was rehearsed three times in a row on one stack without a reset —
+> `tools/e2e_demo.py`, then `--skip-oracle --skip-scanner`, then `--console` — every run PASS; the last
+> ran every step S1 to S12 in 3:17 (the API path S1 to S11 3:04), and `docs/demo/dps-showcase.pptx`
+> is built from it. This script
 > never quotes a figure that was not measured: where a beat says "read it off the screen", the number
 > comes from the live stack or from the deck slide built from the rehearsal.
 
