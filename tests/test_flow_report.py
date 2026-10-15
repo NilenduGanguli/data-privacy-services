@@ -23,11 +23,14 @@ from tools import flow_report
 from tools.demo_client import DpsClient
 from tools.flow_report import EXPECT, TENANT_KEY_EXPECT, Row, render, top_keys, verdict
 
-#: Routes the app serves that are not contract §9 route groups.
+#: Routes the app serves that are not contract §9 route groups: the API docs, and the console's
+#: index and SPA fallback (registered only when ``frontend/dist`` is built, as in every image).
 NOT_IN_SECTION_9 = {
     ("GET", "/docs"),
     ("GET", "/docs/oauth2-redirect"),
     ("GET", "/api/v1/openapi.json"),
+    ("GET", "/"),
+    ("GET", "/{full_path:path}"),
 }
 SECRET = "123-45-6789"
 IDS = {
