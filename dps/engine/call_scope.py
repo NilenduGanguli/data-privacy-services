@@ -13,7 +13,9 @@ A call gets its own
   grows with what it scans, and every single run is capped.
 
 Bound by the app's ``_CallScope`` middleware for every HTTP request and by the worker for every
-handler task. A task copies its context when it is created, and ``asyncio.to_thread`` /
+handler task. An HTTP request's scope also records the thread of the event loop serving it: a
+policy pattern never runs, and a deny list is never built, there (S3 review round 3, R3-B1:
+:func:`dps.engine.detect.regex_guard.ensure_off_serving_loop`). A task copies its context when it is created, and ``asyncio.to_thread`` /
 Starlette's threadpool copy it for every call, so the engine's worker threads share the call's
 objects (they are thread-safe). Code outside a request or a job (tools, tests) runs without a
 scope: the process-global ``TAXONOMY`` and a budget per detector apply there.
@@ -27,7 +29,9 @@ from contextlib import contextmanager
 from dps.engine.detect.regex_guard import (
     DEFAULT_CPU_SECONDS,
     bind_pattern_budget,
+    bind_serving_thread,
     reset_pattern_budget,
+    reset_serving_thread,
 )
 from dps.engine.taxonomy import bind_custom_entities, reset_custom_entities
 
@@ -40,17 +44,24 @@ def bind_call_scope(*, pattern_run_cap: float = DEFAULT_CPU_SECONDS) -> None:
 
 
 @contextmanager
-def call_scope(*, pattern_ceiling: float | None = DEFAULT_CPU_SECONDS) -> Iterator[None]:
+def call_scope(
+    *, pattern_ceiling: float | None = DEFAULT_CPU_SECONDS, serving: bool = False
+) -> Iterator[None]:
     """Bind a fresh scope for the ``with`` block (one HTTP request), then restore the previous
     one. ``pattern_ceiling`` caps the call's policy-pattern CPU in total and per run (``None``:
-    no total ceiling, runs capped at the default)."""
+    no total ceiling, runs capped at the default). ``serving``: the block runs on the event loop
+    that serves the request (the app's middleware), whose thread then never runs a policy pattern
+    or builds a deny list."""
     entities = bind_custom_entities()
     if pattern_ceiling is None:
         budget = bind_pattern_budget()
     else:
         budget = bind_pattern_budget(ceiling=pattern_ceiling, run_cap=pattern_ceiling)
+    serving_token = bind_serving_thread() if serving else None
     try:
         yield
     finally:
+        if serving_token is not None:
+            reset_serving_thread(serving_token)
         reset_pattern_budget(budget)
         reset_custom_entities(entities)

@@ -8,10 +8,13 @@ run is stopped on its own work and never on what other requests of the server ar
 server's GIL and event loop stay free while it runs.
 
 The pool holds at most :func:`configure_pattern_processes` children (``DPS_PATTERN_PROCESSES``,
-default 2), started on first use; a caller waits for a free one. So long pattern runs occupy at
-most that many CPUs of a server process, however many requests carry them. A child that dies, hangs
-or answers out of protocol is killed and replaced, and the run is reported as failed — the caller
-refuses it (fail closed), never skips it. Children get an empty environment (no ``DPS_*`` setting
+default 2), started on first use; a caller waits for a free one — for at most
+:data:`ACQUIRE_TIMEOUT_SECONDS`, then the run is refused as busy (:class:`MatcherBusy`; S3 review
+round 3: every wait is bounded). Callers are never on the event loop that serves requests
+(:func:`dps.engine.detect.regex_guard.ensure_off_serving_loop`), so a wait here holds a worker
+thread, never the server. So long pattern runs occupy at most that many CPUs of a server process,
+however many requests carry them. A child that dies, hangs or answers out of protocol is killed and
+replaced, and the run is reported as failed — the caller refuses it (fail closed), never skips it. Children get an empty environment (no ``DPS_*`` setting
 or secret reaches them), run in isolated mode (``python -I``), print nothing and exit when the
 server process does (their stdin closes).
 """
@@ -39,20 +42,30 @@ DEFAULT_PROCESSES = 2
 #: stuck and is killed (a busy host stretches wall time, never the CPU a run may use)
 WALL_GRACE_SECONDS = 60.0
 WALL_FACTOR = 20.0
+#: the longest a run waits for a free matcher process before it is refused (:class:`MatcherBusy`)
+ACQUIRE_TIMEOUT_SECONDS = 30.0
 
 
 class MatcherFailed(Exception):
     """No child process could run the pattern (start failure, crash, hang); value-free."""
 
 
+class MatcherBusy(Exception):
+    """No matcher process became free within the wait's bound; value-free."""
+
+
 class RunResult:
-    """A child's answer: ``spans`` (``None`` when the limit ran out) and the CPU the run took."""
+    """A child's answer: ``spans`` (``None`` when the limit ran out), the CPU the run took and the
+    CPU compiling the pattern took there (``0.0`` when the child had it cached)."""
 
-    __slots__ = ("cpu", "spans")
+    __slots__ = ("compile_cpu", "cpu", "spans")
 
-    def __init__(self, spans: list[tuple[int, int]] | None, cpu: float) -> None:
+    def __init__(
+        self, spans: list[tuple[int, int]] | None, cpu: float, compile_cpu: float = 0.0
+    ) -> None:
         self.spans = spans
         self.cpu = cpu
+        self.compile_cpu = compile_cpu
 
 
 def _encode(value: str) -> bytes:
@@ -88,15 +101,15 @@ class _Matcher:
             self._in.flush()
         except (OSError, ValueError):
             raise MatcherFailed from None
-        status, cpu, count = ANSWER.unpack(self._read(ANSWER.size, deadline))
+        status, cpu, compile_cpu, count = ANSWER.unpack(self._read(ANSWER.size, deadline))
         raw_spans = self._read(16 * count, deadline) if count else b""
         if status == TIMED_OUT:
-            return RunResult(None, cpu)
+            return RunResult(None, cpu, compile_cpu)
         if status != OK:
             raise MatcherFailed
         flat = array("q")
         flat.frombytes(raw_spans)
-        return RunResult(list(zip(flat[0::2], flat[1::2], strict=True)), cpu)
+        return RunResult(list(zip(flat[0::2], flat[1::2], strict=True)), cpu, compile_cpu)
 
     def _read(self, size: int, deadline: float) -> bytes:
         chunks: list[bytes] = []
@@ -155,13 +168,23 @@ class MatcherPool:
         for matcher in surplus:
             matcher.close()
 
-    def run(self, pattern: str, flags: int, text: str, limit: float) -> RunResult:
-        """Run ``pattern`` over ``text`` in a child, with a CPU limit of ``limit`` seconds.
+    def run(
+        self,
+        pattern: str,
+        flags: int,
+        text: str,
+        limit: float,
+        *,
+        wait: float = ACQUIRE_TIMEOUT_SECONDS,
+    ) -> RunResult:
+        """Run ``pattern`` over ``text`` in a child, with a CPU limit of ``limit`` seconds, after
+        waiting at most ``wait`` seconds for a free child.
 
         Raises:
+            MatcherBusy: no child became free within ``wait``.
             MatcherFailed: no child could run it (start failure, crash, hang).
         """
-        matcher = self._acquire()
+        matcher = self._acquire(wait)
         try:
             result = matcher.run(pattern, flags, text, limit)
         except BaseException:
@@ -170,10 +193,11 @@ class MatcherPool:
         self._release(matcher)
         return result
 
-    def _acquire(self) -> _Matcher:
+    def _acquire(self, wait: float) -> _Matcher:
         with self._cond:
-            while not self._idle and self._count >= self._size:
-                self._cond.wait()
+            if not self._cond.wait_for(lambda: self._idle or self._count < self._size, wait):
+                logger.warning("pattern_matcher_busy")
+                raise MatcherBusy
             if self._idle:
                 return self._idle.pop()
             self._count += 1

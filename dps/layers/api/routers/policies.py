@@ -37,8 +37,8 @@ async def validate(body: ValidatePolicyRequest, request: Request) -> PolicyOut:
     400 naming the broken rule (422 ``verify_warn_disallowed`` where verification is strict)."""
     engine: PrivacyEngine = request.app.state.engine
     ref = await resolve(request, body.policy)
-    try:
-        policy = engine.policy(ref)
+    try:  # S3 review round 3: validating compiles the policy's patterns, off the event loop
+        policy = await run_in_threadpool(engine.policy, ref)
     except EngineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except CodedError as exc:

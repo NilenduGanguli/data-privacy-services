@@ -1,4 +1,4 @@
-"""ReDoS defences for policy-supplied regular expressions (security review S3, rounds 1 and 2).
+"""ReDoS defences for policy-supplied regular expressions (security review S3, rounds 1 to 3).
 
 Two layers:
 
@@ -20,12 +20,25 @@ Two layers:
 
    * it starts in the calling thread **holding the GIL** for at most :data:`SLICE_SECONDS` —
      while it holds the GIL no other Python thread runs, so the process clock is the run's own,
-     and no thread (the event loop included) waits longer than the slice;
+     and no other thread waits longer than the slice;
    * a run that needs longer (a long text, or a pattern that backtracks) continues in a matcher
      process (:mod:`dps.engine.detect.pattern_process`): one run at a time on one thread, so there
      the ``regex`` timeout is exactly the run's CPU, and the server's threads stay free. Such runs
-     occupy at most ``DPS_PATTERN_PROCESSES`` CPUs of a server process, however many arrive. A
-     pattern whose last such run predicts it would outgrow the slice again starts there directly.
+     occupy at most ``DPS_PATTERN_PROCESSES`` CPUs of a server process, however many arrive; a run
+     waits at most ``pattern_process.ACQUIRE_TIMEOUT_SECONDS`` for one, then the call is refused
+     with 503 ``pattern_matcher_busy`` (:class:`PatternMatcherBusy`, retryable). A pattern whose
+     last such run predicts it would outgrow the slice again starts there directly.
+   * a run never happens on the event loop that serves the request (review round 3, R3-B1): the
+     routes run their engine work on worker threads, and a run (or a deny-list build) on the
+     loop's own thread is refused as a server defect (:func:`ensure_off_serving_loop`, a
+     value-free 500) — a pattern can never freeze the server, ``/health`` included.
+
+   A deny list's build — the trie's text and its compile, cached by its terms — is charged to the
+   call that makes it (review round 3, R3-B2): its CPU counts toward the call's ceiling (never
+   toward the run allowance, which stays what the call's texts earn), and no list is built once
+   the call has spent its budget. A build is linear in the list (about 1.3 µs per term character
+   on the build Mac), so a request builds at most a ceiling's worth. A matcher process charges its
+   own compile of a pattern it has not seen the same way.
 
    The allowance: every call — one API request, one NDJSON item, one worker handler task
    (:mod:`dps.engine.call_scope`) — starts with :data:`BUDGET_BASE_SECONDS` and earns, for every
@@ -54,7 +67,7 @@ from typing import Any
 
 import regex
 
-from dps.engine.detect.pattern_process import POOL, MatcherFailed
+from dps.engine.detect.pattern_process import POOL, MatcherBusy, MatcherFailed
 from dps.errors import CodedError
 from dps.observability import get_logger
 
@@ -103,6 +116,54 @@ class PatternTooSlow(CodedError):
             "text per call",
             status=422,
         )
+
+
+class PatternMatcherBusy(CodedError):
+    """Every matcher process stayed busy for the wait's bound (review round 3); value-free and
+    retryable — the call did nothing wrong."""
+
+    status = 503
+
+    def __init__(self) -> None:
+        super().__init__(
+            "pattern_matcher_busy",
+            "every matcher process for custom recognizer patterns stayed busy; retry later",
+            status=503,
+        )
+
+
+class PatternOnEventLoop(RuntimeError):
+    """A policy pattern was about to run, or a deny list to be built, on the event loop that
+    serves the request (review round 3, R3-B1). A server defect: the call is refused (a value-free
+    500) rather than the server frozen for every caller."""
+
+
+#: The thread that runs the event loop serving the current request (bound by the app's call
+#: scope); ``None`` outside a request (tools, the worker, the browser-worker).
+_SERVING_THREAD: ContextVar[int | None] = ContextVar("dps_serving_thread", default=None)
+
+
+def bind_serving_thread() -> Token[int | None]:
+    """Record the current thread as the one running the serving event loop (the app's call
+    scope, entered on that loop); returns the token to reset it."""
+    return _SERVING_THREAD.set(threading.get_ident())
+
+
+def reset_serving_thread(token: Token[int | None]) -> None:
+    """Undo :func:`bind_serving_thread` (same context)."""
+    _SERVING_THREAD.reset(token)
+
+
+def ensure_off_serving_loop() -> None:
+    """Refuse to run a policy pattern (or build a deny list) on the serving event loop's thread:
+    there it would freeze every request, liveness checks included (R3-B1).
+
+    Raises:
+        PatternOnEventLoop: the current thread runs the loop serving this request.
+    """
+    if _SERVING_THREAD.get() == threading.get_ident():
+        logger.error("pattern_on_event_loop")
+        raise PatternOnEventLoop("policy patterns never run on the serving event loop")
 
 
 def check_pattern(pattern: str) -> None:
@@ -232,9 +293,17 @@ class PatternBudget:
         if self.parent is not None:
             self.parent._charge(seconds)
 
+    def charge_build(self, used: float) -> None:
+        """Charge a deny-list build (or a matcher process's compile) that took ``used`` CPU seconds
+        (R3-B2): it counts toward the ceiling, never toward the run allowance — a build is linear
+        in the list and its timing includes whatever the interpreter did meanwhile (a garbage
+        collection), so it is bounded by the ceiling, not judged against the texts' earnings."""
+        self._credit(used)
+        self._charge(used)
+
     @property
     def spent(self) -> float:
-        """CPU seconds this call's runs have taken."""
+        """CPU seconds this call's runs and deny-list builds have taken."""
         with self._lock:
             return self._spent
 
@@ -255,7 +324,10 @@ class PatternBudget:
 
         Raises:
             PatternTooSlow: the budget is spent, or the pattern ran past it on ``text``.
+            PatternMatcherBusy: the run needed a matcher process and none became free in time.
+            PatternOnEventLoop: called on the event loop serving the request (a server defect).
         """
+        ensure_off_serving_loop()
         left = min(self.left, self.run_cap)
         if left <= 0:
             raise PatternTooSlow()
@@ -283,9 +355,13 @@ class PatternBudget:
         # the run goes on in a matcher process, where the clock is its own
         try:
             result = POOL.run(pattern.pattern, pattern.flags, text, left)
+        except MatcherBusy:
+            raise PatternMatcherBusy() from None
         except MatcherFailed:
             logger.error("pattern_matcher_failed")
             raise PatternTooSlow() from None
+        if result.compile_cpu:  # a pattern the matcher had not seen: charged like a build
+            self.charge_build(result.compile_cpu)
         self._charge(result.cpu)
         if len(_HEAVY) >= _HEAVY_MAX:
             _HEAVY.clear()

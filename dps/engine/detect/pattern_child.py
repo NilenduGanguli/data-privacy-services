@@ -12,8 +12,13 @@ so here the limit is exactly the run's own CPU time, whatever the server is doin
 It imports only the standard library and ``regex`` (never ``dps``) and writes nothing but its
 binary answers to stdout; it exits when stdin closes (the server is gone). Texts travel as UTF-8
 with ``surrogatepass``, so any Python ``str`` survives and the spans index the same string. A
-``RLIMIT_CPU`` set before each run is a backstop should the matcher ever miss its own limit: the
-kernel ends the process and the server refuses the run (fail closed).
+``RLIMIT_CPU`` set before each compile and each run is a backstop should the matcher ever miss its
+own limit: the kernel ends the process and the server refuses the run (fail closed); the process
+never writes a core (``RLIMIT_CORE`` 0: a core would hold request texts — review round 3, N-r3-3).
+
+Compiling a pattern it has not seen (a deny list's trie is the largest) is part of the run's
+charge (review round 3, R3-B2): the answer reports its CPU (``compile_cpu``) beside the run's, and
+the server charges it to the call like a deny-list build.
 """
 
 from __future__ import annotations
@@ -29,8 +34,9 @@ import regex
 
 #: request: pattern bytes, text bytes, ``regex`` flags, CPU limit in seconds
 REQUEST = struct.Struct("<IIId")
-#: answer: status, CPU seconds the run took, number of spans (then 2 x int64 per span)
-ANSWER = struct.Struct("<BdQ")
+#: answer: status, CPU seconds the run took, CPU seconds compiling the pattern took (0 when it was
+#: cached), number of spans (then 2 x int64 per span)
+ANSWER = struct.Struct("<BddQ")
 OK, TIMED_OUT, FAILED = 0, 1, 2
 #: compiled patterns kept (a policy's patterns come back for every text it scans)
 CACHE_SIZE = 64
@@ -64,8 +70,20 @@ def _cpu_backstop(limit: float) -> None:
         pass
 
 
+def _no_core_dumps() -> None:
+    """Never write a core: SIGXCPU (the backstop) dumps one by default, and it would hold the
+    request texts this process was matching."""
+    try:
+        import resource  # noqa: PLC0415 - POSIX only
+
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ImportError, OSError, ValueError):  # no such limit here: nothing to dump into either
+        pass
+
+
 def main() -> None:
     """Serve runs until stdin closes."""
+    _no_core_dumps()
     reader, writer = sys.stdin.buffer, sys.stdout.buffer
     cache: OrderedDict[tuple[str, int], regex.Pattern[str]] = OrderedDict()
     while True:
@@ -80,11 +98,14 @@ def main() -> None:
         pattern = raw_pattern.decode("utf-8", "surrogatepass")
         text = raw_text.decode("utf-8", "surrogatepass")
         spans = array("q")
-        status, used = OK, 0.0
+        status, used, compiling = OK, 0.0, 0.0
         try:
             compiled = cache.get((pattern, flags))
             if compiled is None:
+                _cpu_backstop(limit)
+                started = time.process_time()
                 compiled = regex.compile(pattern, flags)
+                compiling = time.process_time() - started
                 cache[(pattern, flags)] = compiled
                 if len(cache) > CACHE_SIZE:
                     cache.popitem(last=False)
@@ -100,7 +121,7 @@ def main() -> None:
             used = time.process_time() - started
         except Exception:  # noqa: BLE001 - value-free: the server refuses the run (fail closed)
             status, spans = FAILED, array("q")
-        writer.write(ANSWER.pack(status, used, len(spans) // 2))
+        writer.write(ANSWER.pack(status, used, compiling, len(spans) // 2))
         writer.write(spans.tobytes())
         writer.flush()
 

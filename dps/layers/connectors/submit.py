@@ -16,6 +16,7 @@ passed" is the server's verdict rather than a copy of its rules (M2 verify r2, i
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -243,7 +244,10 @@ async def _validate_run(
     group = await get_group(tenant_id, spec.group_id) if spec.group_id else None
     if spec.group_id and group is None:
         raise SpecError("group_not_found", 404, "job group not found")
-    validate_run(
+    refs = await production_refs(tenant_id)
+    # S3 review round 3: validating the run's policy compiles its patterns — off the event loop
+    await asyncio.to_thread(
+        validate_run,
         spec,
         principal=principal,
         source_conn=source,
@@ -253,7 +257,7 @@ async def _validate_run(
         kek=kek,
         group=(group.kid, group.seed_fingerprint, group.kcv) if group else None,
         child_snapshot=child_snapshot,
-        production_refs=await production_refs(tenant_id),
+        production_refs=refs,
     )
     engine = cast(Engine, source.engine)
     selection = _bind(spec.source.selection, engine, snapshot.shape if snapshot else None)

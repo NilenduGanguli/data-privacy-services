@@ -478,9 +478,7 @@ def _engine_runner(
     """
     stream_budget = (call_budget() or PatternBudget()).for_stream()
 
-    def run_item(
-        item: Any, loop: asyncio.AbstractEventLoop | None
-    ) -> DetectResponse | TransformResponse | RevealResponse:
+    def run_item(item: Any) -> DetectResponse | TransformResponse | RevealResponse:
         extra: Sequence[Finding] = ()
         if labels is not None and mode != "reveal":
             extra = engine.apply_labels(Payload(data=item), policy_ref, options, labels)
@@ -488,10 +486,9 @@ def _engine_runner(
             return engine.detect(Payload(data=item), policy_ref, options, extra_findings=extra)
         if mode == "obfuscate":
             return engine.obfuscate(Payload(data=item), policy_ref, options, extra_findings=extra)
-        if mode == "synthesize":
-            assert loop is not None
-            return loop.run_until_complete(
-                engine.synthesize(Payload(data=item), policy_ref, options, extra_findings=extra)
+        if mode == "synthesize":  # an item is a JSON document: no LLM step, no event loop
+            return engine.synthesize_data(
+                Payload(data=item), policy_ref, options, extra_findings=extra
             )
         assert key_material is not None
         return engine.reveal(
@@ -507,20 +504,15 @@ def _engine_runner(
         items = everything[offset : offset + size]
         lines: list[bytes] = []
         totals = _Totals()
-        loop = asyncio.new_event_loop() if mode == "synthesize" else None
-        try:
-            for n, item in enumerate(items):
-                index = offset + n
-                try:
-                    with budget_scope(stream_budget.item()):  # R2-B2: the item's own budget
-                        result = run_item(item, loop)
-                except Exception as exc:  # noqa: BLE001 - every item failure ends the stream
-                    return lines, totals, _failure(index, exc)
-                totals.add(result)
-                lines.append(_item_line(index, result, mode, options))
-        finally:
-            if loop is not None:
-                loop.close()
+        for n, item in enumerate(items):
+            index = offset + n
+            try:
+                with budget_scope(stream_budget.item()):  # R2-B2: the item's own budget
+                    result = run_item(item)
+            except Exception as exc:  # noqa: BLE001 - every item failure ends the stream
+                return lines, totals, _failure(index, exc)
+            totals.add(result)
+            lines.append(_item_line(index, result, mode, options))
         return lines, totals, None
 
     return run_chunk
@@ -595,23 +587,30 @@ async def _prepare(
 ) -> _Stream:
     engine: PrivacyEngine = request.app.state.engine
     settings: Settings = engine.settings
-    _check_items(items, settings, mode)
-    key_material: dict[str, Any] | None = None
-    if mode == "reveal":
-        if not envelope.key_material:
-            raise _invalid("line 1: the reveal envelope must carry key_material")
-        try:
-            key_material_from_caller(envelope.key_material)
-        except ValueError as exc:
-            raise EngineError(f"invalid reveal request: {exc}") from None
-        key_material = envelope.key_material
-        options = envelope.options
-    else:
-        options = resolve_stream_material(engine, mode, envelope.policy, envelope.options)
-        engine.policy(envelope.policy)  # an unknown or invalid policy fails before streaming
-    header = _header(engine, mode, tid, envelope, options)
+
+    def validated() -> tuple[RequestOptions, dict[str, Any] | None, dict[str, Any], bool]:
+        _check_items(items, settings, mode)
+        key_material: dict[str, Any] | None = None
+        if mode == "reveal":
+            if not envelope.key_material:
+                raise _invalid("line 1: the reveal envelope must carry key_material")
+            try:
+                key_material_from_caller(envelope.key_material)
+            except ValueError as exc:
+                raise EngineError(f"invalid reveal request: {exc}") from None
+            key_material = envelope.key_material
+            options = envelope.options
+        else:
+            options = resolve_stream_material(engine, mode, envelope.policy, envelope.options)
+            engine.policy(envelope.policy)  # an unknown or invalid policy fails before streaming
+        header = _header(engine, mode, tid, envelope, options)
+        labelling = mode != "reveal" and engine.labelling_enabled(envelope.policy)
+        return options, key_material, header, labelling
+
+    # S3 review round 3: validating a policy compiles its patterns — CPU work, off the event loop
+    options, key_material, header, labelling = await asyncio.to_thread(validated)
     labels: LeftoverLabels | None = None
-    if mode != "reveal" and engine.labelling_enabled(envelope.policy):
+    if labelling:
         # T3 (opt-in): one labelling call per stream, from the first chunk's leftover fields.
         sample = await asyncio.to_thread(lambda: list(items[: settings.ndjson_chunk_items]))
         labels = await engine.label_templates(sample, envelope.policy, options)

@@ -11,18 +11,21 @@ Deny-list entries and patterns are often the sensitive terms themselves, so vali
 never echo the input (``hide_input_in_errors``) and a bad regex is reported without its text.
 
 Patterns and deny lists run on the ``regex`` module under the call's CPU budget
-(:mod:`dps.engine.detect.regex_guard`, S3 review rounds 1 and 2): a pattern that backtracks past it
+(:mod:`dps.engine.detect.regex_guard`, S3 review rounds 1 to 3): a pattern that backtracks past it
 refuses the call (``custom_pattern_too_slow``) instead of pinning a CPU. A deny list is one pattern
 shaped as a trie of its terms (:func:`deny_list_pattern`, review round 2): at each position the
-matcher follows one path, so its cost per character does not grow with the number of terms.
-Declared-field globs are matched without any regex (:class:`PathGlob`): linear in the path
-whatever the stars.
+matcher follows one path, so its cost per character does not grow with the number of terms. Its
+build costs about what the round-1 flat compile did and is charged to the call (review round 3,
+R3-B2: :func:`build_deny_list`); a term is at most :data:`MAX_DENY_TERM` characters, so one list's
+build stays bounded. Declared-field globs are matched without any regex (:class:`PathGlob`): linear
+in the path whatever the stars.
 """
 
 from __future__ import annotations
 
 import functools
 import re
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -34,10 +37,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from dps.engine.detect.patterns import CONTEXT_BONUS, CONTEXT_WINDOW, Hit
 from dps.engine.detect.regex_guard import (
     PatternBudget,
+    PatternTooSlow,
     UnsafePattern,
     call_budget,
     check_pattern,
     compile_policy_pattern,
+    ensure_off_serving_loop,
 )
 from dps.engine.detect.structural import KeyCandidate
 from dps.engine.taxonomy import (
@@ -51,6 +56,8 @@ from dps.engine.taxonomy import (
 
 _ENTITY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 DENY_LIST_SCORE = 0.9
+#: The longest deny-list term (characters): one list's build stays bounded (S3 review round 3).
+MAX_DENY_TERM = 256
 
 
 def _check_entity_name(value: str) -> str:
@@ -114,6 +121,13 @@ class RecognizerSpec(BaseModel):
     def _no_blank_terms(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if any(not term.strip() for term in value):
             raise ValueError("list entries must be non-blank")
+        return value
+
+    @field_validator("deny_list")
+    @classmethod
+    def _short_terms(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(len(term) > MAX_DENY_TERM for term in value):
+            raise ValueError(f"deny_list entries must be at most {MAX_DENY_TERM} characters")
         return value
 
     @model_validator(mode="after")
@@ -280,8 +294,8 @@ def _alternation(terms: Iterable[str]) -> str:
 
 
 def deny_list_pattern(terms: Iterable[str]) -> str:
-    """A deny list as one pattern: its terms as a trie of exact character classes (compile it
-    **without** ``IGNORECASE``: :func:`compile_deny_list`).
+    """A deny list as one pattern: its terms as a trie (compile it **with** ``IGNORECASE``:
+    :func:`compile_deny_list`).
 
     It matches exactly what the case-insensitive flat alternation of the terms (longest first)
     between ``(?<!\\w)`` and ``(?!\\w)`` matches — the same longest term at the same place, the
@@ -289,14 +303,33 @@ def deny_list_pattern(terms: Iterable[str]) -> str:
     characters that one or more terms accept at that place, as the matcher's case-insensitive
     comparison decides (:func:`_matches`), and the edges of a node never share a character, so at
     each position the matcher follows a single path instead of trying every term: its cost per
-    character stays flat however many terms there are (a 1000-name list: about 0.05 µs per
-    character, against 0.7 µs for the flat form; S3 review round 2, R2-B2). Below
-    :data:`_TRIE_DEPTH` levels the remaining endings are listed flat (case-insensitive, longest
-    first).
+    character stays flat however many terms there are (a 1000-name list: about 0.03 µs per
+    character, against 0.4-0.7 µs for the flat form; S3 review round 2, R2-B2).
+
+    An edge is written as one plain character, which ``IGNORECASE`` widens to exactly that set,
+    wherever the set is one character's case matches; only where the matcher's case relation is
+    not an equivalence (the Turkish i's) is it an explicit case-sensitive class ``(?-i:[…])``. A
+    node with a single term left writes that term's ending as plain text, and below
+    :data:`_TRIE_DEPTH` levels the remaining endings are listed flat (longest first). So the
+    pattern is about as long as the flat alternation and compiles at about its cost (review round
+    3, R3-B2: round 2 wrote a ``[Aa]`` class per character, about 10 times the compile).
     """
     unique = sorted(set(terms))
     budget = [_TRIE_WORK_BASE + _TRIE_WORK_FACTOR * sum(len(t) for t in unique)]
     return rf"(?<!\w)(?:{_emit(unique, 0, budget)})(?!\w)"
+
+
+def _edge(text_chars: list[str]) -> str:
+    """The pattern of one trie edge (``text_chars``: every text character it accepts), under
+    ``IGNORECASE``: a plain character whose case matches are exactly the set, else the set as a
+    case-sensitive class."""
+    accepted = frozenset(text_chars)
+    for char in sorted(text_chars):
+        if _matches(char) == accepted:
+            return re.escape(char)
+    if len(text_chars) == 1:
+        return f"(?-i:{re.escape(text_chars[0])})"
+    return "(?-i:[" + "".join(re.escape(c) for c in sorted(text_chars)) + "])"
 
 
 def _emit(suffixes: list[str], depth: int, budget: list[int]) -> str:
@@ -312,8 +345,10 @@ def _emit(suffixes: list[str], depth: int, budget: list[int]) -> str:
     budget[0] -= len(rest)
     if budget[0] < 0:
         raise _TrieTooLarge
-    if depth >= _TRIE_DEPTH:
-        body = f"(?i:{_alternation(rest)})"
+    if len(rest) == 1:  # one term left: its ending as plain text (IGNORECASE)
+        body = re.escape(rest[0])
+    elif depth >= _TRIE_DEPTH:
+        body = f"(?:{_alternation(rest)})"
     else:
         by_first: dict[str, set[str]] = {}
         for suffix in rest:
@@ -328,33 +363,52 @@ def _emit(suffixes: list[str], depth: int, budget: list[int]) -> str:
             regions.setdefault(frozenset(chars), []).append(text_char)
         branches = []
         for accepted, text_chars in sorted(regions.items(), key=lambda kv: min(kv[1])):
-            edge = (
-                re.escape(text_chars[0])
-                if len(text_chars) == 1
-                else "[" + "".join(re.escape(c) for c in sorted(text_chars)) + "]"
-            )
             tails = sorted(set().union(*(by_first[c] for c in accepted)))
-            branches.append(edge + _emit(tails, depth + 1, budget))
+            branches.append(_edge(text_chars) + _emit(tails, depth + 1, budget))
         body = branches[0] if len(branches) == 1 else "(?:" + "|".join(branches) + ")"
     # a term may end here: a longer one is tried first (greedy), as in the flat form
     return f"(?:{body})?" if ends_here else body
 
 
+def flat_deny_list_pattern(terms: Iterable[str]) -> str:
+    """The flat form of a deny list (compile it with ``IGNORECASE``): its terms as one
+    alternation, longest first — DPS's deny-list semantics, and the fallback of
+    :func:`compile_deny_list`."""
+    return rf"(?<!\w)(?:{_alternation(terms)})(?!\w)"
+
+
 def compile_deny_list(terms: Iterable[str]) -> regex.Pattern[str]:
     """Compile a deny list for :meth:`~dps.engine.detect.regex_guard.PatternBudget.run`
-    (:func:`deny_list_pattern`; the flat case-insensitive form if the trie would be too large or
-    cannot be compiled). Cached by its terms: a policy's detector is rebuilt for every request and
-    NDJSON item."""
+    (:func:`deny_list_pattern`; the flat form if the trie would be too large or cannot be
+    compiled). Cached by its terms: a policy's detector is rebuilt for every request and NDJSON
+    item. :func:`build_deny_list` charges the build to the call."""
     return _compile_deny_list(tuple(terms))
 
 
 @functools.lru_cache(maxsize=128)
 def _compile_deny_list(terms: tuple[str, ...]) -> regex.Pattern[str]:
     try:
-        return compile_policy_pattern(deny_list_pattern(terms))
+        return compile_policy_pattern(deny_list_pattern(terms), regex.IGNORECASE)
     except (_TrieTooLarge, RecursionError, regex.error):
-        flat = rf"(?<!\w)(?:{_alternation(terms)})(?!\w)"
-        return compile_policy_pattern(flat, regex.IGNORECASE)
+        return compile_policy_pattern(flat_deny_list_pattern(terms), regex.IGNORECASE)
+
+
+def build_deny_list(terms: tuple[str, ...], budget: PatternBudget) -> regex.Pattern[str]:
+    """:func:`compile_deny_list`, charged to ``budget`` (S3 review round 3, R3-B2): never on the
+    event loop serving a request, never once the call's budget is spent, and its CPU counts toward
+    the call's ceiling (:meth:`~dps.engine.detect.regex_guard.PatternBudget.charge_build`).
+
+    Raises:
+        PatternTooSlow: the call's budget is spent (value-free; nothing was built).
+        PatternOnEventLoop: called on the serving event loop's thread (a server defect).
+    """
+    ensure_off_serving_loop()
+    if budget.left <= 0:
+        raise PatternTooSlow()
+    started = time.thread_time()
+    compiled = compile_deny_list(terms)
+    budget.charge_build(time.thread_time() - started)
+    return compiled
 
 
 _UNREGISTERED = object()
@@ -417,6 +471,13 @@ class PolicyCustomDetector:
     """Implements :class:`dps.engine.detect.base.CustomDetector` from policy declarations."""
 
     def __init__(self, recognizers: list[RecognizerSpec], declared: list[DeclaredField]) -> None:
+        """Compile the recognizers' patterns and build their deny lists (charged to the call's
+        budget: :func:`build_deny_list`).
+
+        Raises:
+            PatternTooSlow: the call's budget was spent before a deny list could be built.
+            PatternOnEventLoop: built on the serving event loop's thread (a server defect).
+        """
         self._declared = [(d, path_glob(d.path)) for d in declared]
         #: this detector's own budget, used only outside a request or a worker handler (a call
         #: binds one budget for all its detectors: :mod:`dps.engine.call_scope`)
@@ -430,12 +491,13 @@ class PolicyCustomDetector:
         #: the tiers this policy declares, in this call now and in any later call that uses it
         self._tiers = CustomTiers(recognizers, declared)
         self._tiers.ensure()
+        budget = call_budget() or self._budget
         for rec in recognizers:
             allowed = frozenset(rec.allow_list)
             for pat in rec.patterns:
                 self._patterns.append((rec, pat, compile_policy_pattern(pat.regex), allowed))
-            if rec.deny_list:
-                self._deny.append((rec, compile_deny_list(rec.deny_list), allowed))
+            if rec.deny_list:  # R3-B2: each build is charged to the call, list by list
+                self._deny.append((rec, build_deny_list(rec.deny_list, budget), allowed))
 
     @property
     def text_entities(self) -> frozenset[str]:
