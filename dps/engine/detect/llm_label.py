@@ -26,9 +26,10 @@ Nothing is logged but counts (``fields``, ``verdicts``) and the fallback reason.
 
 M5 Task 8B wires the same module into L2 discovery (``discovery.label_leftover_columns``: the
 columns T0–T2 left unclassified, by name, declared type, value shapes, rates and table) and L3
-classification (``classify.label_leftover_fields``: the fields left unclassified, by name, redacted
-label, placeholder shape and attribute hints). A label's score is capped at :data:`SCORE_CAP` in
-every layer, and a job or scan records :func:`job_llm_metrics` in ``progress.metrics.llm``.
+classification (``classify.label_leftover_fields``: the fields left unclassified, by name,
+placeholder shape, attribute hints and — only when NER runs — a value-free label,
+``classify.prompt_label``). A label's score is capped at :data:`SCORE_CAP` in every layer, and a
+job or scan records :func:`job_llm_metrics` in ``progress.metrics.llm``.
 """
 
 from __future__ import annotations
@@ -77,7 +78,7 @@ class FieldMeta(BaseModel):
     name: str  # key / column / field name; aliased "field_N" when it looks like a value
     data_type: str | None = None  # "string", "number", "VARCHAR2(20)", "input[type=text]"
     shapes: list[str] = Field(default_factory=list, max_length=MAX_SHAPES)
-    label: str | None = None  # a human label, already redacted by the caller (L3)
+    label: str | None = None  # a human label, made value-free by the caller (L3: prompt_label)
     hints: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
     @field_validator("shapes")

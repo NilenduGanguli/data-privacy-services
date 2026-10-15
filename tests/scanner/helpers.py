@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from dps.config import Settings
+from dps.engine.detect.patterns import Hit
 from dps.engine.service import PrivacyEngine
 from dps.engine.synth.surrogates import generate_synthesis_seed
 from dps.engine.transform.crypto import generate_key_material
@@ -25,6 +26,28 @@ def received(url: str) -> dict[str, Any]:
     """The demo site's counters of everything non-GET (and every GET-form submission) it received."""
     data: dict[str, Any] = httpx.get(f"{url}/__received", timeout=5.0).json()
     return data
+
+
+class FakeNer:
+    """A T2 (NER) stand-in for an engine (``engine.ner = FakeNer(...)``; the lanes have no spaCy
+    model): finds every occurrence of the made-up ``names`` it is given as ``PERSON_NAME``.
+    ``available=False`` is an NER whose model failed to load (it finds nothing)."""
+
+    languages = ("en",)
+
+    def __init__(self, *names: str, available: bool = True) -> None:
+        self.names = names
+        self.available = available
+
+    def analyze(self, text: str, language: str) -> list[Hit]:
+        hits: list[Hit] = []
+        for name in self.names if self.available else ():
+            start = text.find(name)
+            while start >= 0:
+                end = start + len(name)
+                hits.append(Hit("PERSON_NAME", start, end, 0.85, "ner:fake", "ner:PERSON:0.85"))
+                start = text.find(name, end)
+        return hits
 
 
 _FIELD_BASE: dict[str, Any] = dict(

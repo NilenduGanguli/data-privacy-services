@@ -1388,8 +1388,10 @@ egress verifier, `strict`) and fakes only the provider seam (`_stellar`). Differ
   so a value pre-filled into a field only T3 recognised is masked in that capture too.
 - **A value-free L3 prompt** beyond the plan's list: the `type` attribute only when it is a known
   input type (else `text`), `autocomplete` only as a dictionary token or `on`/`off` (both are
-  page-chosen text); the label as the inventory stores it (detector-redacted); a field with no
-  name, id, label or placeholder is not sent.
+  page-chosen text); the label as the inventory stores it (detector-redacted) — not value-free
+  enough: superseded by the S3b review r1 fix (B1, below: the label only when NER runs, never the
+  placeholder fallback, value tokens as shapes); a field with no name, id, label or placeholder is
+  not sent.
 - **`protected` (L3):** the plan's "pre-filled values and rendered texts" would protect every
   label rendered on the page (a `<label>` is a text node), so every call would be refused. As
   built (`page_protected`): what the fields hold or show (pre-filled and hidden values, a selected
@@ -1475,3 +1477,40 @@ The functions landed with Task 17 before M4 was on the branch; the wiring follow
   `logout_hits`, `admin_hits` +0, `non_get_allowed` 0) and a T3 scan (+0); container logs free of
   demo values.
 - Commit: `90ed7df`; report `~/.cache/dps-build/reports/S3b-impl.md`.
+
+## S3b review r1 fix — B1: the L3 labelling prompt's label is value-free whatever its source (finish stage, `fsec`)
+
+Review `~/.cache/dps-build/reports/S3b-review-r1.md`, B1 (P1). As built in Task 8B the L3 prompt
+carried `redact_text(label)`, and `page_protected` protects digit/`@` tokens of rendered text
+only: a label from an `aria-label`, a `title`, the `placeholder` fallback or a hidden
+`aria-labelledby` target reached the model with any record value no detector names (the
+reviewer's probe: 4 of 4 made-up values sent, `blocked 0`); the same number in a rendered
+`<label for>` blocked the page's whole call through the leak guard.
+
+- **`classify.prompt_label(facts, detector)`** (used by `leftover_field_meta`): no label from the
+  `placeholder` fallback (its shape is sent already); no label unless the detector runs NER
+  (`classify.ner_runs`: an NER adapter, `ner` in the policy's tiers, its model loaded — read
+  after the label was analysed, so a model that failed to load counts as off); else the label
+  detector-redacted, then every whitespace token still holding a digit or an `@` replaced by its
+  `value_shape` (uncut), with only digit-free redaction tags (`<PERSON_NAME>`) kept inside such a
+  token — a page's own `<A1234567>` is shaped.
+- **Why NER is required, not only for attribute-sourced labels** (the review allowed either, or a
+  residual): per-record controls carry their record in a `<label>` wrap, a `<label for>` or an
+  `aria-labelledby` cell as often as in an `aria-label`, and only NER finds a bare name. The cost:
+  in the default images (no NER) T3 labels L3 fields by name, type, placeholder shape and hints
+  only. Residual (security review §5): a name NER misses.
+- **Not changed** (review's non-blocking N1–N7): `metrics.llm.blocked` still counts egress-verifier
+  blocks only; numeric hints can still collide with protected digit tokens (N2); the
+  `ipaddress` interpreter difference, the Azure WireServer address and `ScanGuard`'s default
+  stay for the owner.
+- **Tests** (all red on the previous commit's `classify.py`, green now):
+  `tests/test_llm_label_l2_l3.py` — `test_l3_labels_are_value_free_whatever_their_source`
+  (attribute-only and with a rendered `<label for>`), `test_l3_labels_are_sent_only_when_ner_runs`
+  (NER off, NER whose model failed to load), `test_a_label_value_token_keeps_its_redaction_tags`;
+  `tests/scanner/test_crawler_llm_label.py::test_record_values_in_labels_never_reach_the_model`
+  (real Chromium and `ScanRunner`, NER off/on × attribute-only / with a rendered label). Updated:
+  `test_scanner_labels_a_leftover_field` runs with NER (its label is sent), and the leak-guard
+  test now plants a name NER does not know in a label, shown as another field's value (a number
+  can no longer reach a label). `tests/scanner/helpers.FakeNer` is the T2 stand-in (no spaCy
+  model in the lanes).
+- Report `~/.cache/dps-build/reports/S3b-fix-r1.md`.

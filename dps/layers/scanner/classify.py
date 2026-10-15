@@ -18,15 +18,18 @@ backtracking. Inputs tested against a compiled pattern are synthetic and at most
 in ``detect.tiers`` and a real LLM provider is configured). After every field of a page is
 classified, the fields left without an entity — not a password, hidden or file input — are
 labelled by the LLM gateway in one call per page (at most ``DPS_LLM_LABEL_MAX_FIELDS``), from
-value-free metadata only: the ``name`` (or ``id``) attribute, the label as the inventory stores it
-(detector-redacted), the placeholder's shape, the element and a known input type, the
-autocomplete token from the fixed dictionary and the ``maxlength``/``pattern``-length/``required``
-hints (:func:`leftover_field_meta`). The page's own values — what its fields hold or show, the
-personal data the detectors find in its text, and every token of its text that holds a digit or
-an ``@`` (:func:`page_protected`) — stay in worker memory and are checked against the prompt
-before it is sent; a page label is metadata and is not protected. A verdict sets the field's
-entity at a confidence capped at 0.85 with ``llm_label`` among its detectors and evidence;
-persona attributes and fill formats then follow as for any other classifier.
+value-free metadata only: the ``name`` (or ``id``) attribute, the placeholder's shape, the element
+and a known input type, the autocomplete token from the fixed dictionary, the
+``maxlength``/``pattern``-length/``required`` hints and — only when the detector runs NER, never
+from the placeholder fallback — the label, detector-redacted with every token that holds a digit
+or an ``@`` as its shape (:func:`prompt_label`, :func:`leftover_field_meta`): a per-record control
+is labelled with its record, from an attribute or rendered text alike. The page's own values —
+what its fields hold or show, the personal data the detectors find in its text, and every token of
+its text that holds a digit or an ``@`` (:func:`page_protected`) — stay in worker memory and are
+checked against the prompt before it is sent; the words of a page label are metadata and are not
+protected. A verdict sets the field's entity at a confidence capped at 0.85 with ``llm_label``
+among its detectors and evidence; persona attributes and fill formats then follow as for any other
+classifier.
 
 Nothing here imports Playwright or Pillow (the API imports this module).
 """
@@ -58,6 +61,7 @@ from dps.engine.detect.structural import (
     normalize_key,
 )
 from dps.engine.findings import Finding
+from dps.engine.shapes import value_shape
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.layers.scanner.models import (
     FieldClassification,
@@ -657,11 +661,51 @@ _PROMPT_TYPES = frozenset(
 #: A whitespace-delimited token of page text that holds a digit or an ``@``: an identifier, a
 #: number, a date or an address no detector may name — a value, whatever words surround it.
 _VALUE_TOKEN = re.compile(r"\S*[\d@]\S*")
+#: A tag :func:`redact_text` wrote in place of a detected value (``<PERSON_NAME>``; no built-in
+#: entity type holds a digit, so a page's own ``<A1234567>`` is no tag and is shaped).
+_REDACTION_TAG = re.compile(r"(<[A-Z][A-Z_]*>)")
 
 
 def field_ref(facts: FieldFacts) -> str:
     """A field's handle in a labelling prompt and its verdict: ``field:<form>/<field_no>``."""
     return f"field:{facts.form_index}/{facts.field_no}"
+
+
+def ner_runs(detector: Detector) -> bool:
+    """True when ``detector`` runs T2 (NER) — the only tier that finds a person's name with no cue
+    around it — with a model that loaded (an NER whose model failed to load finds nothing)."""
+    ner = detector.ner
+    return ner is not None and detector.config.ner_enabled and bool(getattr(ner, "available", True))
+
+
+def _value_token_shape(match: re.Match[str]) -> str:
+    """A value token as its shape (``value_shape``, uncut); a redaction tag inside it is kept."""
+    return "".join(
+        part if _REDACTION_TAG.fullmatch(part) else value_shape(part, max_chars=len(part))
+        for part in _REDACTION_TAG.split(match.group(0))
+    )
+
+
+def prompt_label(facts: FieldFacts, detector: Detector) -> str | None:
+    """A field's label as a T3 prompt may carry it: value-free whatever its source (B1).
+
+    A label is page-authored free text, and a per-record control is labelled with its record
+    ("Close loan 77…", "Nominee <name> agrees") in an ``aria-label``, a ``title``, a hidden
+    ``aria-labelledby`` target or a rendered ``<label>`` alike, so:
+
+    * none from the ``placeholder`` fallback: the placeholder is sent as its shape already;
+    * none unless the detector runs NER (:func:`ner_runs`): no other tier finds a bare name;
+    * else the label redacted as the inventory stores it (:func:`redact_text`), every token that
+      still holds a digit or an ``@`` (an identifier no detector names) replaced by its shape —
+      ``Close loan 99999999999`` — so a number in a rendered label no longer blocks the page's
+      call either (its digits are protected tokens of the page, :func:`page_protected`).
+    """
+    if not facts.label or facts.label_source == "placeholder" or not ner_runs(detector):
+        return None
+    redacted = redact_text(facts.label, detector)
+    if not redacted or not ner_runs(detector):  # the model failed to load while reading it
+        return None
+    return _VALUE_TOKEN.sub(_value_token_shape, redacted)
 
 
 def _prompt_autocomplete(attr: str | None) -> str:
@@ -681,15 +725,16 @@ def leftover_field_meta(
 ) -> list[FieldMeta]:
     """One value-free :class:`~dps.engine.detect.llm_label.FieldMeta` per field T3 may label: no
     entity after T0–T2, not a password, hidden or file input, and something to label it by (a
-    name or id, a label or a placeholder). Never a value: the label is redacted as the inventory
-    stores it, the placeholder is sent as its shape only."""
+    name or id, a label or a placeholder). Never a value: the label as :func:`prompt_label` gives
+    it (only when NER runs, never the placeholder fallback, value tokens as shapes), the
+    placeholder as its shape only."""
     out: list[FieldMeta] = []
     for f in fields:
         cls = classes.get(f.key)
         if cls is None or cls.entity_type is not None or f.input_type in UNLABELLED_TYPES:
             continue
         name = f.name or f.id or ""
-        label_text = redact_text(f.label, detector) if f.label else None
+        label_text = prompt_label(f, detector)
         shape = placeholder_shape(f.placeholder)
         if not (name or label_text or shape):
             continue

@@ -461,10 +461,40 @@ at its seam only (`tests/test_llm_label_l2_l3.py`, `tests/scanner/test_crawler_l
 - **Opt-in, per column / per field:** only a policy that lists `llm_label` and a real provider
   (never `stub`); never per row.
 - **Metadata only:** a column's leaf name, declared type, ≤ 3 value shapes (`XX-9999`), kind, null
-  rate, distinct ratio and table name; a field's `name`/`id`, its detector-redacted label, its
-  placeholder's shape, a known input type and dictionary-only autocomplete, `maxlength`,
-  `pattern` length and `required`. Names, labels and refs a detector finds a value in are aliased
-  (`field_N`), as in Layer 1.
+  rate, distinct ratio and table name; a field's `name`/`id`, its placeholder's shape, a known
+  input type and dictionary-only autocomplete, `maxlength`, `pattern` length and `required`, and
+  its label only as `classify.prompt_label` makes it value-free (below). Names, labels and refs a
+  detector finds a value in are aliased (`field_N`), as in Layer 1.
+- **A field's label is value-free whatever its source** (S3b review r1, B1 — corrected
+  2026-10-15). As first built, the prompt carried the label after detector redaction only, and
+  `page_protected` protects digit/`@` tokens of *rendered* text only: a label taken from an
+  `aria-label`, a `title`, the `placeholder` fallback or a hidden `aria-labelledby` target was in
+  no protected list, so a record value no detector names went to the model unchanged — the
+  reviewer's probe (real Chromium, `ScanRunner`, the real `complete()` under `strict`, the
+  provider faked at `_stellar`) found 4 of 4 made-up values (three 11-digit numbers, one person
+  name) in the messages the provider received while `progress.metrics.llm` said
+  `{calls 1, raw_values 0, blocked 0}`; the same number in a rendered `<label for>` blocked the
+  page's whole call. Banking UIs label per-record controls with their record ("Close loan …",
+  "Nominee … agrees"), so this was the realistic case. Now (`prompt_label`):
+  - the `placeholder` fallback is never a label: the placeholder is sent as its shape only;
+  - a label is sent only when the scanner's detector runs NER (T2 configured, in the policy's
+    tiers and its model loaded; `ner_runs`): a label is page-authored free text, and no other
+    tier finds a bare person's name. Without NER (the default images: `DPS_NER_ENABLED=false`,
+    `WITH_NER=0`) the prompt carries no label at all; the field is still labelled by its
+    name, type, placeholder shape and hints, in the same one call;
+  - the label is detector-redacted (`<PERSON_NAME>`), then every token that still holds a digit
+    or an `@` is replaced by its shape (`Close loan 99999999999`); only digit-free redaction
+    tags are kept. A number in a rendered label therefore no longer blocks the page's call.
+
+  Proof: `tests/test_llm_label_l2_l3.py` (`test_l3_labels_are_value_free_whatever_their_source`,
+  `test_l3_labels_are_sent_only_when_ner_runs` — NER off and an NER whose model failed to load —,
+  `test_a_label_value_token_keeps_its_redaction_tags`) and, end to end with real Chromium and
+  pages whose labels come from `aria-label`, `placeholder`, `title`, a hidden `aria-labelledby`
+  target and a rendered `<label for>`, `tests/scanner/test_crawler_llm_label.py::
+  test_record_values_in_labels_never_reach_the_model` (NER off and on): the provider receives none
+  of the values, one call per page is made, `{calls 1, raw_values 0, blocked 0}`, no write
+  reaches the site. All nine were red on the code before the fix. The reviewer's probe on the
+  fix: 0 of 4 values sent on its attribute page, and its rendered-label page makes its call.
 - **Checked twice before it leaves:** the module's leak guard against the `protected` originals —
   every sampled value of the leftover columns (L2); what the page's fields hold or show, the
   detectors' findings in its text and every token of its text holding a digit or an `@` (L3,
@@ -587,11 +617,13 @@ counters, never on the absence of an error.
   fixed instructions (one table also matched in its call data). Direction for the owner: exempt the registered constant system prompts from
   the protected scan (the module's leak guard checks every protected value against the call data
   before the verifier runs, so nothing the call carries goes unchecked).
-- T3 labelling, L3: a value rendered on the page that no detector names, holding no digit and no
-  `@` (a bare first name in a cell without a header hint), is not protected; it could reach a
-  prompt only inside a field's own label or `name` that the same detectors did not redact. The
-  egress verifier's pattern scan, the label redaction and NER (when enabled) are the remaining
-  nets; opt in on sites whose labels carry no customer data.
+- T3 labelling, L3: a field's label reaches a prompt only when NER runs (§3.26), with its value
+  tokens as shapes; a name NER misses in a label (or a value holding no digit and no `@` that no
+  detector names: a city, a bare word) is still sent — NER's recall is the bound, and the
+  module's leak guard stops it only when the page also shows it as a field's value or a finding.
+  A field's `name`/`id` attribute is sent as is when it is identifier-like (`_PLAIN_NAME`: no run
+  of four digits) and no detector finds a whole value in it. Opt in on sites whose labels carry
+  no customer data, and run NER where labels matter.
 
 ## 6. Re-running the review
 

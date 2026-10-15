@@ -1,15 +1,20 @@
-"""M5 Task 8B (L3): T3 metadata labelling in the crawl of the demo site.
+"""M5 Task 8B (L3): T3 metadata labelling in the crawl of the demo site, and of a local page whose
+labels carry record values (S3b review r1, B1).
 
 The policy opts in (``llm_label`` in ``detect.tiers``); the LLM is faked at the provider seam only
 (``_stellar``), so ``LlmGateway.complete`` — and its egress verifier under ``strict`` — sees every
 prompt as in production. One call per page with leftover fields; the labelled fields carry
 ``llm_label`` into the inventory and the fill plan; no prompt holds a page value; nothing is
-submitted (the demo site's counters).
+submitted (the demo site's counters, the local page's write log).
 """
 
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -24,7 +29,7 @@ from dps.layers.scanner.models import FieldClassification, PageSnapshot
 from dps.layers.scanner.runtime import MemoryScanSink
 from dps.llm.gateway import LlmGateway, LlmResult
 from tests.scanner.conftest import RotCipher
-from tests.scanner.helpers import field_facts, make_runtime, received
+from tests.scanner.helpers import FakeNer, field_facts, make_runtime, received
 
 #: what the fake model answers, by the field name it was sent (``name`` attribute)
 ANSWERS = {"residence": ("LOCATION", 0.92), "income": ("AMOUNT", 0.9)}
@@ -143,6 +148,127 @@ async def test_a_policy_without_the_tier_never_calls(
         settings=settings, engine=engine, runtime=runtime, sink=MemoryScanSink(), browser=chromium
     ).run()
     assert fake.messages == [] and outcome.llm is None
+
+
+#: B1 (S3b review r1): per-record controls labelled with made-up record values, one per label
+#: source ``dom.py`` resolves (the hidden span is an ``aria-labelledby`` target, not rendered text)
+RECORD_VALUES = {
+    "aria_label": "77120034519",
+    "placeholder": "88120034519",
+    "title": "66120034519",
+    "aria_labelledby": "44120034519",
+    "label_for": "55120034519",
+    "aria_label_person": "Zebulon Quixote",
+}
+_ATTRIBUTE_LABELS = """
+  <input type="checkbox" name="close_sel" aria-label="Close loan {aria_label}">
+  <input type="text" name="ref_txt" placeholder="{placeholder}">
+  <input type="text" name="memo_txt" title="Memo for loan {title}">
+  <span id="nom-l" hidden>Loan {aria_labelledby} nominee</span>
+  <input type="checkbox" name="nom_ok" aria-labelledby="nom-l">
+  <input type="checkbox" name="nominee_ok" aria-label="Nominee {aria_label_person} agrees">"""
+_RENDERED_LABEL = """
+  <label for="c1">Close loan {label_for}</label><input type="checkbox" id="c1" name="close_two">"""
+_PAGE = """<!doctype html><html><head><title>Loans</title></head><body>
+<h1>Your loans</h1>
+<form method="post" action="/close">{controls}
+  <button type="submit">Close</button>
+</form></body></html>"""
+#: ``/attrs``: labels from attributes and a hidden target only (the review's probe page);
+#: ``/loans``: the same plus a rendered ``<label for>`` whose digits are protected page tokens
+RECORD_PAGES = {
+    "/attrs": _PAGE.format(controls=_ATTRIBUTE_LABELS.format(**RECORD_VALUES)),
+    "/loans": _PAGE.format(controls=(_ATTRIBUTE_LABELS + _RENDERED_LABEL).format(**RECORD_VALUES)),
+}
+
+
+@contextmanager
+def _record_site() -> Iterator[tuple[str, list[str]]]:
+    """A site serving :data:`RECORD_PAGES`; every non-GET it receives is recorded."""
+    writes: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: Any) -> None:
+            return
+
+        def do_GET(self) -> None:  # noqa: N802
+            page = RECORD_PAGES.get(self.path.split("?")[0])
+            body = (page or "<html><body>nothing</body></html>").encode()
+            self.send_response(200 if page else 404)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:  # noqa: N802
+            writes.append("POST")
+            self.send_response(204)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", writes
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.browser
+@pytest.mark.slow
+@pytest.mark.parametrize("path", ["/attrs", "/loans"])
+@pytest.mark.parametrize("ner", [False, True])
+async def test_record_values_in_labels_never_reach_the_model(
+    chromium: Any, scan_settings: Settings, ner: bool, path: str
+) -> None:
+    """B1, end to end: a real page whose per-record controls carry record values in an
+    ``aria-label``, a ``placeholder``, a ``title``, a hidden ``aria-labelledby`` target (and, on
+    ``/loans``, a rendered ``<label for>``). The provider (faked at ``_stellar``, behind the real
+    ``complete()`` under ``strict``) never receives one, and the page's call is still made. Without
+    NER no label is sent; with NER the labels are sent with their value tokens as shapes and the
+    names it finds redacted."""
+    from dps.layers.scanner.crawler import ScanRunner
+
+    settings = _settings(scan_settings).model_copy(update={"fpe_enabled": False})
+    fake = FakeGateway(settings)
+    engine = PrivacyEngine(settings, gateway=fake)
+    engine.ner = FakeNer(RECORD_VALUES["aria_label_person"]) if ner else None
+    with _record_site() as (base, writes):
+        runtime = make_runtime(
+            base, settings, engine, path=path, max_pages=1, max_depth=0, cookies=False
+        )
+        runtime.policy = _t3(runtime.policy)
+        sink = MemoryScanSink()
+        outcome = await ScanRunner(
+            settings=settings, engine=engine, runtime=runtime, sink=sink, browser=chromium
+        ).run()
+    fields = {f.name_attr: f for records in sink.fields.values() for f in records}
+    sources = {"aria_label", "placeholder", "title", "aria_labelledby"}
+    rendered = path == "/loans"
+    assert {f.label_source for f in fields.values()} == sources | (
+        {"label_for"} if rendered else set()
+    )
+    sent_text = json.dumps(fake.messages, ensure_ascii=False)
+    leaked = [k for k, v in RECORD_VALUES.items() if v in sent_text]
+    leaked += [p for p in RECORD_VALUES["aria_label_person"].split() if p in sent_text]
+    assert leaked == []
+    assert outcome.llm == {"calls": 1, "raw_values": 0, "blocked": 0} and len(fake.messages) == 1
+    sent = {e["name"]: e for e in json.loads(fake.messages[0][1]["content"])}
+    names = {"close_sel", "ref_txt", "memo_txt", "nom_ok", "nominee_ok"}
+    assert set(sent) == names | ({"close_two"} if rendered else set())
+    assert "label" not in sent["ref_txt"] and sent["ref_txt"]["shapes"] == ["99999999999"]
+    labels = {name: e.get("label") for name, e in sent.items() if name != "ref_txt"}
+    if ner:
+        assert labels == {
+            "close_sel": "Close loan 99999999999",
+            "memo_txt": "Memo for loan 99999999999",
+            "nom_ok": "Loan 99999999999 nominee",
+            "nominee_ok": "Nominee <PERSON_NAME> agrees",
+            **({"close_two": "Close loan 99999999999"} if rendered else {}),
+        }
+    else:
+        assert set(labels.values()) == {None}
+    assert writes == []  # D4: nothing submitted
 
 
 def test_t3_labels_carry_over_to_a_re_extracted_tab_of_the_same_field() -> None:

@@ -27,11 +27,11 @@ from dps.layers.scanner.classify import (
     leftover_field_meta,
     page_protected,
 )
-from dps.layers.scanner.models import OptionFacts, PageSnapshot, TextFacts
+from dps.layers.scanner.models import FieldFacts, OptionFacts, PageSnapshot, TextFacts
 from dps.layers.scanner.personas_fill import plan_field
 from dps.llm.gateway import LlmGateway, LlmResult
 from dps.observability import LLM_STATS, LlmStats
-from tests.scanner.helpers import field_facts
+from tests.scanner.helpers import FakeNer, classification, field_facts
 
 REF_VALUES = ["AB-1234", "CD-9876", "EF-5521", "GH-0042", "JK-7310", "LM-2208"]
 PREFILLED = "EMP-004211"
@@ -96,6 +96,14 @@ def t3_policy(*, tier: bool = True) -> Policy:
     base = load_preset("gdpr-pseudonymise")
     tiers = [*base.detect.tiers, LLM_LABEL_TIER] if tier else list(base.detect.tiers)
     return base.model_copy(update={"detect": base.detect.model_copy(update={"tiers": tiers})})
+
+
+def _ner_engine(settings: Settings, *names: str) -> PrivacyEngine:
+    """An engine whose detectors run T2 (the preset lists ``ner``): a fake NER that finds
+    ``names``. A field's label reaches a T3 prompt only when NER runs."""
+    engine = PrivacyEngine(settings, gateway=None)
+    engine.ner = FakeNer(*names)
+    return engine
 
 
 def _shape() -> TableShape:
@@ -232,7 +240,7 @@ def _page(*, prefilled: str | None = PREFILLED) -> tuple[list[Any], PageSnapshot
 
 async def test_scanner_labels_a_leftover_field() -> None:
     settings = _settings()
-    engine = PrivacyEngine(settings, gateway=None)
+    engine = _ner_engine(settings)  # the label is sent: NER runs
     policy = t3_policy()
     detector = engine.detector(policy, "en_IN")
     fields, snap = _page()
@@ -284,12 +292,16 @@ def test_leftover_field_meta_is_value_free() -> None:
 
 
 async def test_a_prompt_that_would_carry_a_page_value_is_never_sent() -> None:
+    """The module's leak guard is the backstop for a label value no detector redacted: a name NER
+    did not find in a label, which the page shows as a field's value, never leaves."""
     settings = _settings()
-    engine = PrivacyEngine(settings, gateway=None)
+    engine = _ner_engine(settings)  # NER runs but knows no name: the label keeps it
     policy = t3_policy()
     detector = engine.detector(policy, "en_IN")
     fields, snap = _page()
-    leaky = fields[0].model_copy(update={"label": "Ref code EMP-007733"})
+    shown = field_facts(key="0:5", field_no=5, name="holder", value=NOMINEE)
+    leaky = fields[0].model_copy(update={"label": f"Nominee {NOMINEE} agrees"})
+    snap = snap.model_copy(update={"fields": [*snap.fields, shown]})
     classes = classify_fields([leaky], detector=detector, min_score=0.6)
     fake = FakeGateway(verdicts(("refcd", "EMPLOYEE_ID", 0.9)))
     labelled, outcome = await label_leftover_fields(
@@ -303,6 +315,161 @@ async def test_a_prompt_that_would_carry_a_page_value_is_never_sent() -> None:
     )
     assert fake.messages == [] and labelled["0:1"].entity_type is None
     assert outcome is not None and outcome.fallback == "leak_guard"
+
+
+#: B1 (S3b review r1): made-up record values in the labels of per-record controls, one per label
+#: source; only the ``<label for>`` is rendered text (its digits are protected tokens of the page)
+PLANTED = {
+    "aria_label": "77120034519",
+    "placeholder": "88120034519",
+    "title": "66120034519",
+    "aria_labelledby": "44120034519",
+    "label_for": "55120034519",
+}
+NOMINEE = "Zebulon Quixote"
+
+
+def _record_labels_page(*, rendered: bool) -> tuple[list[FieldFacts], PageSnapshot]:
+    """Labels as ``dom.py`` resolves them: from attributes (``aria-label``, the ``placeholder``
+    fallback, ``title``), a hidden ``aria-labelledby`` target and, if ``rendered``, a rendered
+    ``<label for>``."""
+
+    def box(no: int, name: str, label: str, source: str, **kw: Any) -> FieldFacts:
+        return field_facts(
+            key=f"0:{no}",
+            field_no=no,
+            input_type=kw.pop("input_type", "checkbox"),
+            name=name,
+            label=label,
+            label_source=source,
+            **kw,
+        )
+
+    fields = [
+        box(
+            1, "close_sel", (a := f"Close loan {PLANTED['aria_label']}"), "aria_label", aria_label=a
+        ),
+        box(
+            2,
+            "ref_txt",
+            PLANTED["placeholder"],
+            "placeholder",
+            input_type="text",
+            placeholder=PLANTED["placeholder"],
+        ),
+        box(
+            3,
+            "memo_txt",
+            (t := f"Memo for loan {PLANTED['title']}"),
+            "title",
+            input_type="text",
+            title=t,
+        ),
+        box(4, "nom_ok", f"Loan {PLANTED['aria_labelledby']} nominee", "aria_labelledby"),
+        box(5, "nominee_ok", (n := f"Nominee {NOMINEE} agrees"), "aria_label", aria_label=n),
+    ]
+    texts = [TextFacts(frame_index=0, i=0, text="Your loans", in_table=False, label_hint=None)]
+    if rendered:
+        shown = f"Close loan {PLANTED['label_for']}"
+        fields.append(box(6, "close_two", shown, "label_for"))
+        texts.append(TextFacts(frame_index=0, i=1, text=shown, in_table=False, label_hint=None))
+    snap = PageSnapshot(
+        url="http://127.0.0.1/loans",
+        title="Loans",
+        forms=[],
+        fields=fields,
+        texts=texts,
+        links=[],
+        clickables=[],
+        frames=[],
+    )
+    return fields, snap
+
+
+async def _label_record_page(
+    engine: PrivacyEngine, settings: Settings, *, rendered: bool = True
+) -> tuple[FakeGateway, dict[str, dict[str, Any]], dict[str, int]]:
+    """Label :func:`_record_labels_page` through the real ``complete()`` (``strict``), the provider
+    faked at ``_stellar``: the prompt's entries by field name and the scan's LLM figures."""
+    policy = t3_policy()
+    detector = engine.detector(policy, "en_IN")
+    fields, snap = _record_labels_page(rendered=rendered)
+    classes = classify_fields(fields, detector=detector, min_score=policy.detect.min_score)
+    assert [k for k, c in classes.items() if c.entity_type is not None] == []  # all leftovers
+    fake = FakeGateway(lambda sent: "[]", settings)
+    token = LLM_STATS.set(LlmStats())
+    try:
+        _, outcome = await label_leftover_fields(
+            fields,
+            classes,
+            gateway=fake,
+            settings=settings,
+            policy=policy,
+            detector=detector,
+            protected=page_protected(snap, detector=detector),
+        )
+        assert outcome is not None
+        figures = job_llm_metrics(outcome.llm_calls)
+    finally:
+        LLM_STATS.reset(token)
+    prompt = fake.prompt()
+    leaked = [k for k, v in PLANTED.items() if v in prompt]
+    leaked += [part for part in NOMINEE.split() if part in prompt]
+    assert leaked == []  # no planted value, whatever the label's source
+    assert len(fake.messages) == 1 and figures == {"calls": 1, "raw_values": 0, "blocked": 0}
+    sent = {str(e["name"]): e for m in fake.messages for e in json.loads(m[1]["content"])}
+    return fake, sent, figures
+
+
+@pytest.mark.parametrize("rendered", [False, True])
+async def test_l3_labels_are_value_free_whatever_their_source(rendered: bool) -> None:
+    """B1: a label from an attribute, a hidden ``aria-labelledby`` target or a rendered ``<label
+    for>`` reaches the prompt with every token holding a digit or an ``@`` as its shape and the
+    names NER finds redacted; the placeholder fallback is sent as its shape only. The page's call
+    is made: a number in a rendered label no longer blocks it."""
+    settings = _settings()
+    engine = _ner_engine(settings, NOMINEE)
+    _, sent, _ = await _label_record_page(engine, settings, rendered=rendered)
+    assert sent["close_sel"]["label"] == "Close loan 99999999999"
+    assert sent["memo_txt"]["label"] == "Memo for loan 99999999999"
+    assert sent["nom_ok"]["label"] == "Loan 99999999999 nominee"
+    assert sent["nominee_ok"]["label"] == "Nominee <PERSON_NAME> agrees"
+    assert "label" not in sent["ref_txt"] and sent["ref_txt"]["shapes"] == ["99999999999"]
+    if rendered:
+        assert sent["close_two"]["label"] == "Close loan 99999999999"
+
+
+@pytest.mark.parametrize("ner", ["off", "failed_to_load"])
+async def test_l3_labels_are_sent_only_when_ner_runs(ner: str) -> None:
+    """A label is page-authored free text, and only NER finds a person's name with no cue around
+    it: without T2 (or with an NER whose model failed to load) no label is sent. The fields are
+    still labelled — by name, type, placeholder shape and hints — in one call."""
+    settings = _settings()
+    engine = PrivacyEngine(settings, gateway=None)
+    if ner == "failed_to_load":
+        engine.ner = FakeNer(NOMINEE, available=False)
+    _, sent, _ = await _label_record_page(engine, settings)
+    assert set(sent) == {"close_sel", "ref_txt", "memo_txt", "nom_ok", "nominee_ok", "close_two"}
+    assert [name for name, e in sent.items() if "label" in e] == []
+    assert sent["ref_txt"]["shapes"] == ["99999999999"]
+
+
+def test_a_label_value_token_keeps_its_redaction_tags() -> None:
+    """Value tokens become shapes; a ``<ENTITY>`` tag the label redaction wrote stays readable."""
+    engine = _ner_engine(_settings(), NOMINEE)
+    detector = engine.detector(t3_policy(), "en_IN")
+    f = field_facts(
+        name="ack",
+        label=f"Ack ({NOMINEE}),a.b@x ref 7c",
+        label_source="label_wrap",
+        input_type="checkbox",
+    )
+    [meta] = leftover_field_meta([f], {f.key: classification(None, None)}, detector=detector)
+    assert meta.label == "Ack (<PERSON_NAME>),x.x@x ref 9x"
+    # a page's own text in tag form is no redaction tag when it holds a digit: it is shaped
+    page_tag = f.model_copy(update={"label": "Code <A1234567>"})
+    [meta] = leftover_field_meta([page_tag], {f.key: classification(None, None)}, detector=detector)
+    assert meta.label == "Code <X9999999>"
 
 
 @pytest.mark.parametrize("layer", ["l2", "l3"])
