@@ -1,15 +1,19 @@
 """Structure profiles and generator-spec proposers for synthesize-from-schema (spec §5.6).
 
 P1 holds: the LLM never sees a value. :func:`render_prompt` sends only structure — field names
-(aliased when a name itself looks sensitive, and, for a sample, sent as ``field_N`` when the key is
-not identifier-like, since a key can be data such as a person's name), inferred types, value
-*shapes* (``XX-9999``), orders of magnitude, null and distinct rates, DPS's own entity verdicts, and
-for a categorical field only how many labels it has (``enum_size``). The labels themselves
-(``FieldProfile.enum``: ≤ 12 distinct, letters only, each seen at least twice, nothing detected in
-them) stay in DPS: without NER a column of first names passes every one of those tests, so they are
-returned to the caller but never put in a prompt, and an enum field keeps DPS's ``choice`` whatever
-the model proposes. Exact statistics stay in :class:`FieldStats`, which is never put in a prompt;
-the rule-based proposer (no LLM) uses them, rounded to two significant figures.
+(for a sample, a key the detector flags or that is not identifier-like is sent as ``field_N``,
+since a key can be data such as a person's name or an e-mail address; the alias lives in the prompt
+only, and the profile, the spec and the generated rows keep the caller's names), inferred types,
+value *shapes* (``XX-9999``), orders of magnitude, null and distinct rates, DPS's own entity
+verdicts, and for a categorical field only how many labels it has (``enum_size``). The labels
+themselves (``FieldProfile.enum``: ≤ 12 distinct, letters only, each seen at least twice, nothing
+detected in them) stay in DPS: without NER a column of first names passes every one of those tests,
+so they are returned to the caller but never put in a prompt, and an enum field keeps DPS's
+``choice`` whatever the model proposes; a model ``choice`` on any other field whose values are value
+shapes or placeholders (all it could write without labels) is ignored too. Exact statistics stay in
+:class:`FieldStats`, which is never put in a prompt; the rule-based proposer (no LLM) uses them,
+rounded to two significant figures (a sampled range that rounding collapses to one value spans its
+orders of magnitude instead).
 
 Every profile turns into a spec that validates: field names become unique identifiers nesting at
 most four levels (a name that cannot be one, or that collides, is aliased ``field_N``), at most
@@ -109,6 +113,18 @@ _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4
 _NOT_IDENT = re.compile(r"[^A-Za-z0-9_]")
 #: A sample key segment the model may see as is: identifier-like and no run of four digits.
 _PLAIN_KEY = re.compile(r"(?!.*\d{4})[A-Za-z_][A-Za-z0-9_-]{0,62}")
+#: An integer whose digits spell a calendar date (``20190411``): the one bare number NER may type.
+_YYYYMMDD = re.compile(r"(?:1[89]|2[01])\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])")
+#: A value *shape* (``xxxxxx``, ``XX-9999``: x, X, 9 and punctuation only) or a placeholder
+#: (``<label_1>``, ``{SEGMENT_1}``, ``category_2``, ``REDACTED``): what a model that never saw a
+#: field's labels writes into a ``choice`` in their place.
+_SHAPE_VALUE = re.compile(r"[xX9\W_]*[xX9][xX9\W_]*")
+_PLACEHOLDER_VALUE = re.compile(
+    r"<[^<>]*>|\[[^\[\]]*\]|\{[^{}]*\}"
+    r"|(?i:(?:label|value|val|category|cat|option|opt|enum|item|choice)"
+    r"(?:[ _-]?\d{1,3}|[ _-][a-z]))"
+    r"|(?i:placeholder|redacted|masked)(?:[ _-]?\d{1,3})?"
+)
 _PATTERN_LITERALS = set("Aa9X\\")
 _CONSTRAINTS: TypeAdapter[list[Constraint]] = TypeAdapter(list[Constraint])
 
@@ -133,7 +149,8 @@ SPEC_SYSTEM = (
 class FieldProfile(BaseModel):
     """Structure of one field. ``enum`` holds categorical labels for the caller and the heuristic
     proposer only — :func:`render_prompt` sends their count (``enum_size``) instead — and
-    ``prompt_alias`` (never serialised) marks a sample key the model sees as ``field_N``."""
+    ``prompt_alias`` (never serialised) marks a sample key the model sees as ``field_N`` while
+    ``name`` stays the caller's."""
 
     name: str
     type: FieldType
@@ -223,13 +240,13 @@ class _Namer:
             and not any(".".join(parts[:i]) in self._taken for i in range(1, len(parts)))
         )
 
-    def name(self, parts: list[str], index: int, *, alias: bool = False) -> str:
+    def name(self, parts: list[str], index: int) -> str:
         """The name for a field whose raw path is ``parts`` (``index`` numbers aliases)."""
         if len(self._taken) >= MAX_FIELDS:
             _too_many_fields()
         candidate = (
             ".".join(_ident(part, index) for part in parts)
-            if not alias and 1 <= len(parts) <= MAX_NAME_DEPTH
+            if 1 <= len(parts) <= MAX_NAME_DEPTH
             else ""
         )
         if not candidate or not self._free(candidate):
@@ -269,6 +286,37 @@ def _sig2(value: float) -> float:
     if value == 0:
         return 0.0
     return round(value, -_order(value) + 1)
+
+
+def _order_span(lo: float, hi: float, *, integer: bool) -> tuple[float, float]:
+    """``[lo, hi]`` widened to the whole orders of magnitude it lies in (1001..1004 → 1000..9999,
+    -5..30 → -9..99): bounds that say what the profile's ``magnitude`` says, never a sampled
+    value."""
+
+    def edge(value: float, upper: bool) -> float:
+        if value == 0:
+            return 0.0
+        inner = 10.0 ** _order(value)
+        outer = min(10.0 * inner - (1 if integer else 0), MAX_ABS)
+        bound = outer if upper == (value > 0) else inner
+        return bound if value > 0 else -bound
+
+    return edge(lo, False), edge(hi, True)
+
+
+def _range(s: FieldStats, *, sampled: bool, integer: bool) -> tuple[float, float]:
+    """A numeric generator's ``(min, max)``: the observed (sample) or declared (JSON Schema, DDL)
+    range rounded to two significant figures. When rounding collapses it to one value (1001..1004
+    both round to 1000, so every row would be 1000), a sample spans its orders of magnitude
+    (:func:`_order_span`) and declared bounds are kept as declared."""
+    low = _sig2(s.minimum) if s.minimum is not None else 0.0
+    high = _sig2(s.maximum) if s.maximum is not None else 1000.0
+    low, high = min(low, high), max(low, high)
+    if low < high or s.minimum is None or s.maximum is None:
+        return low, high
+    if sampled:
+        return _order_span(s.minimum, s.maximum, integer=integer)
+    return min(s.minimum, s.maximum), max(s.minimum, s.maximum)
 
 
 def _decimals(values: list[float]) -> int:
@@ -625,7 +673,30 @@ def profile_from_ddl(ddl: str, *, name: str | None = None) -> ProfileResult:
 
 
 # -- sample ---------------------------------------------------------------------------------------
+def _calendar_number(value: Any) -> bool:
+    """An integer whose digits spell a calendar date (``20190411``), as core-banking tables store
+    dates."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    text = str(value)
+    if not _YYYYMMDD.fullmatch(text):
+        return False
+    try:
+        date(int(text[:4]), int(text[4:6]), int(text[6:]))
+    except ValueError:
+        return False
+    return True
+
+
 def _value_entity(values: list[Any], detector: Detector) -> str | None:
+    """The entity type at least ``VALUE_HIT_RATE`` of the (first 50) values are, else ``None``.
+
+    NER alone does not vote on a JSON number (int or float) unless its digits spell a calendar
+    date (``20190411``): spaCy reads almost any bare 4- to 12-digit number as a year or a date
+    (``1001``, ``12345``), which typed an integer ID column ``DATE``. Pattern hits on numbers (a
+    card, a phone or an Aadhaar written as a number) still vote, and strings — ISO dates among
+    them — are read as before.
+    """
     votes: Counter[str] = Counter()
     checked = 0
     for value in values[:50]:
@@ -633,7 +704,14 @@ def _value_entity(values: list[Any], detector: Detector) -> str | None:
         if not text.strip():
             continue
         checked += 1
+        number = isinstance(value, int | float) and not isinstance(value, bool)
         for finding in detector.detect(text=text).findings:
+            if (
+                number
+                and all(d.startswith("ner:") for d in finding.detectors)
+                and not (finding.entity_type == "DATE" and _calendar_number(value))
+            ):
+                continue
             covered = (
                 len(text)
                 if finding.locator.whole
@@ -669,11 +747,15 @@ def profile_from_sample(
     stats: dict[str, FieldStats] = {}
     namer = _Namer()
     for index, (key, values) in enumerate(columns.items(), start=1):
+        parts = key.split(".")
+        # A key can be data (a person's name, an e-mail address). One the detector flags, or one
+        # that is not identifier-like, reaches the model as ``field_N`` (``prompt_alias``); the
+        # profile, the spec and the generated rows keep the caller's name.
         sensitive_name = bool(detector.detect(text=key).findings)
-        fname = namer.name(key.split("."), index, alias=sensitive_name)
+        fname = namer.name(parts, index)
         present = [v for v in values if v is not None and v != ""]
         ftype = _infer_type(present)
-        entity = None if sensitive_name else _structural(key.split(".")[-1])
+        entity = None if sensitive_name else _structural(parts[-1])
         source: Literal["structural", "values", "schema", "none"] = (
             "structural" if entity else "none"
         )
@@ -687,7 +769,7 @@ def profile_from_sample(
             nullable=len(present) < len(values),
             entity_type=entity,
             entity_source=source,
-            prompt_alias=not all(_PLAIN_KEY.fullmatch(part) for part in key.split(".")),
+            prompt_alias=sensitive_name or not all(_PLAIN_KEY.fullmatch(part) for part in parts),
         )
         st = FieldStats()
         if present:
@@ -762,15 +844,12 @@ def _heuristic_field(p: FieldProfile, s: FieldStats, rows_sampled: int | None) -
             generator="boolean",
             params={"p_true": round(s.true_rate if s.true_rate is not None else 0.5, 2)},
         )
+    sampled = rows_sampled is not None  # statistics observed in a sample, not declared bounds
     if p.type == "integer":
-        lo = int(_sig2(s.minimum)) if s.minimum is not None else 0
-        hi = int(_sig2(s.maximum)) if s.maximum is not None else 1000
-        return FieldSpec(
-            **base, generator="integer", params={"min": min(lo, hi), "max": max(lo, hi)}
-        )
+        lo, hi = _range(s, sampled=sampled, integer=True)
+        return FieldSpec(**base, generator="integer", params={"min": int(lo), "max": int(hi)})
     if p.type == "number":
-        low = _sig2(s.minimum) if s.minimum is not None else 0.0
-        high = _sig2(s.maximum) if s.maximum is not None else 1000.0
+        low, high = _range(s, sampled=sampled, integer=False)
         scale = min(max(s.decimals, 0) or 2, MAX_SCALE)
         if (
             s.minimum is not None
@@ -850,7 +929,9 @@ def _text_field(p: FieldProfile) -> FieldSpec:
 def heuristic_spec(result: ProfileResult, *, locale: str) -> GeneratorSpec:
     """The rule-based proposal (no LLM): deterministic, uses the private statistics.
 
-    A field whose proposal does not validate (statistics outside what a generator accepts)
+    Numeric ranges are rounded to two significant figures; a sampled range that rounding
+    collapses to one value spans its orders of magnitude instead (see :func:`_range`). A field
+    whose proposal does not validate (statistics outside what a generator accepts)
     becomes short ``text``; the notes say how many did, never which values.
     """
     fields: list[FieldSpec] = []
@@ -955,13 +1036,34 @@ def _llm_constraints(
     return kept, len(parsed) - len(kept)
 
 
+def _invented_labels(candidate: dict[str, Any], shapes: set[str]) -> bool:
+    """A model ``choice`` with a value shape or a placeholder among its values: one of the field's
+    own shapes (what the prompt showed it), any shape of two or more characters, or a placeholder
+    (``_PLACEHOLDER_VALUE``)."""
+    params = candidate.get("params")
+    values = params.get("values") if isinstance(params, dict) else None
+    if candidate.get("generator") != "choice" or not isinstance(values, list):
+        return False
+    for value in values:
+        text = value.strip() if isinstance(value, str) else ""
+        if text and (
+            text in shapes
+            or (len(text) >= 2 and _SHAPE_VALUE.fullmatch(text))
+            or _PLACEHOLDER_VALUE.fullmatch(text)
+        ):
+            return True
+    return False
+
+
 def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -> GeneratorSpec:
     """Parse the model's reply (written in the prompt's names, see :func:`render_prompt`); keep its
     choices only for fields DPS does not generate itself — a detected field keeps its generator (a
     model cannot downgrade a detected SSN to an integer) and a categorical one its ``choice`` over
-    the labels the model never saw. Its constraints may not write (``rule``) or reorder (``order``)
-    such a field either: those are dropped with a note naming how many, and constraints that do
-    not validate are all dropped with a note.
+    the labels the model never saw. On any other field a model ``choice`` whose values are value
+    shapes or placeholders (``xxxxxx``, ``<label_1>``: the model has no labels to give) is ignored
+    and the heuristic generator kept, with a note naming how many. Its constraints may not write
+    (``rule``) or reorder (``order``) a field DPS generates itself either: those are dropped with a
+    note naming how many, and constraints that do not validate are all dropped with a note.
 
     Raises:
         ValueError: the reply holds no JSON object, its ``fields`` is not a list, or it proposes
@@ -985,11 +1087,17 @@ def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -
     if not proposed.keys() & {f.name for f in heuristic.fields}:
         raise ValueError("the reply proposes none of the fields")
     kept_by_dps = {p.name for p in result.profile.fields if p.entity_type or p.enum}
+    shapes = {p.name: set(p.shapes) for p in result.profile.fields}
     fields: list[FieldSpec] = []
+    shaped = 0
     for fallback in heuristic.fields:
         candidate = proposed.get(fallback.name)
         if candidate is None or fallback.name in kept_by_dps:
             fields.append(fallback)
+            continue
+        if _invented_labels(candidate, shapes.get(fallback.name, set())):
+            fields.append(fallback)
+            shaped += 1
             continue
         try:
             fields.append(
@@ -999,6 +1107,11 @@ def merge_llm_spec(text: str, heuristic: GeneratorSpec, result: ProfileResult) -
             fields.append(fallback)
     raw_notes = data.get("notes")
     notes = [str(n)[:200] for n in raw_notes][:20] if isinstance(raw_notes, list) else []
+    if shaped:
+        notes.append(
+            f"{shaped} llm choice generator(s) ignored: their values were value shapes or "
+            "placeholders (the model never sees labels); the DPS rule-based generator was kept"
+        )
     base = {
         "name": heuristic.name,
         "locale": heuristic.locale,

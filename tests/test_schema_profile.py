@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -9,6 +10,8 @@ import pytest
 
 from dps.config import Settings
 from dps.engine.detect.ensemble import Detector, DetectorConfig
+from dps.engine.detect.ner_presidio import PresidioNer
+from dps.engine.detect.patterns import Hit
 from dps.engine.shapes import value_shape
 from dps.engine.synth.schema_gen import RuleConstraint, SchemaError, execute_spec
 from dps.engine.synth.schema_profile import (
@@ -210,12 +213,14 @@ def test_safe_enums_are_kept() -> None:
     assert by["status"].enum == ["ACTIVE", "CLOSED"]
 
 
-def test_sensitive_field_names_are_aliased() -> None:
+def test_sensitive_field_names_are_aliased_in_the_prompt_only() -> None:
     result = profile_from_sample(
         [{"ananya.k@example-mail.in": "x1"}, {"ananya.k@example-mail.in": "x2"}], DETECTOR
     )
-    assert [f.name for f in result.profile.fields] == ["field_1"]
-    assert "ananya" not in render_prompt(result.profile)[1]["content"]
+    assert [f.name for f in result.profile.fields] == ["ananya.k_example_mail.in"]
+    sent = render_prompt(result.profile)[1]["content"]
+    assert [f["name"] for f in json.loads(sent)["fields"]] == ["field_1"]
+    assert "ananya" not in sent and "example" not in sent
 
 
 async def test_heuristic_spec_from_sample_executes_without_leaks() -> None:
@@ -548,3 +553,251 @@ def test_json_schema_labels_are_counted_not_sent() -> None:
     sent = render_prompt(result.profile)[1]["content"]
     assert json.loads(sent)["fields"][0]["enum_size"] == 2
     assert "Gold" not in sent and "Platinum" not in sent
+
+
+# -- live run with NER and Gemini (generator spec from a sample) ----------------------------------
+LIVE_SAMPLE: list[dict[str, Any]] = [
+    {
+        "cust_id": 1001 + i,
+        "full_name": name,
+        "email": email,
+        "city": city,
+        "segment": segment,
+        "balance": balance,
+        "opened": opened,
+    }
+    for i, (name, email, city, segment, balance, opened) in enumerate(
+        [
+            ("Arjun Mehta", "arjun.mehta@example.in", "Pune", "retail", 48250.50, "2019-04-11"),
+            ("Priya Nair", "priya.nair@example.in", "Kochi", "premier", 812300.00, "2016-09-02"),
+            (
+                "Kavya Raghunathan",
+                "kavya.r@example.in",
+                "Chennai",
+                "retail",
+                1520.75,
+                "2022-01-19",
+            ),
+            (
+                "Rohan Kulkarni",
+                "rohan.k@example.in",
+                "Mumbai",
+                "business",
+                2390000.00,
+                "2014-06-30",
+            ),
+        ]
+    )
+]
+
+
+class SpacyLikeNer:
+    """Presidio over spaCy as the live run saw it, without the model: a bare run of 4 to 12 digits
+    or an ISO date is a DATE (spaCy reads ``1001`` as a year), and ``places`` are LOCATIONs (it
+    read the key ``cust_id`` as one)."""
+
+    languages = ("en",)
+
+    def __init__(self, places: Sequence[str] = ()) -> None:
+        self.places = set(places)
+
+    def analyze(self, text: str, language: str) -> list[Hit]:
+        if re.fullmatch(r"\d{4,12}|\d{4}-\d{2}-\d{2}", text):
+            return [Hit("DATE", 0, len(text), 0.85, "ner:presidio", "ner:DATE_TIME:0.85")]
+        if text in self.places:
+            return [Hit("LOCATION", 0, len(text), 0.85, "ner:presidio", "ner:LOCATION:0.85")]
+        return []
+
+
+NER_DETECTOR = Detector(
+    DetectorConfig(locale="en_IN", ner_enabled=True), ner=SpacyLikeNer(places=["cust_id"])
+)
+
+
+class ProviderSeamGateway(LlmGateway):
+    """The real ``complete`` — availability, the strict egress verifier, counters — with only the
+    provider call scripted; ``sent`` keeps every prompt the verifier let out."""
+
+    def __init__(self, reply: str) -> None:
+        super().__init__(
+            Settings(
+                _env_file=None,
+                llm_provider="stellar",
+                stellar_base_url="https://stellar.test",
+                coin_url="https://coin.test",
+                llm_egress_check="strict",
+            )
+        )
+        self.reply = reply
+        self.sent: list[list[dict[str, str]]] = []
+
+    async def _stellar(
+        self, messages: list[dict[str, str]], temperature: float, max_tokens: int
+    ) -> LlmResult:
+        self.sent.append(messages)
+        return LlmResult(text=self.reply, provider="stellar", model="test")
+
+
+def test_ner_does_not_read_json_numbers_as_dates() -> None:
+    """Live run: Presidio's DATE_TIME read the integer IDs 1001..1004 as years, so ``cust_id``
+    was profiled ``DATE`` from value votes. A JSON number gets no NER-only vote unless its digits
+    spell a calendar date; pattern hits on numbers and NER on date strings still count."""
+    cards = [4111111111111111, 5500000000000004, 4012888888881881, 4000056655665556]
+    rows = [
+        {
+            "ref": 1001 + i,
+            "code": 12345678 + i,
+            "posted": 20190410 + i,
+            "opened": f"2019-04-1{i}",
+            "ref_b": card,
+        }
+        for i, card in enumerate(cards)
+    ]
+    by = {f.name: f for f in profile_from_sample(rows, NER_DETECTOR).profile.fields}
+    assert (by["ref"].type, by["ref"].entity_type) == ("integer", None)
+    assert by["code"].entity_type is None  # eight digits, but no calendar date
+    assert (by["posted"].type, by["posted"].entity_type) == ("integer", "DATE")  # yyyymmdd
+    assert (by["opened"].entity_type, by["opened"].entity_source) == ("DATE", "values")
+    assert by["ref_b"].entity_type == "CARD_PAN"  # the pattern tier still reads numbers
+
+
+async def test_flagged_keys_are_aliased_in_the_prompt_only() -> None:
+    """Live run: Presidio read the key ``cust_id`` as a LOCATION, so the profile, the spec and the
+    generated rows named the column ``field_1``. The alias belongs in the prompt only: here the
+    flagged key and a key that is data (an e-mail address) reach the model as ``field_N``, the
+    reply's aliases map back, and the caller's names come out."""
+    email_key = "arjun.mehta@example.in"
+    rows = [{"cust_id": 1001 + i, email_key: i % 3, "score": 10 * i + 7} for i in range(6)]
+    result = profile_from_sample(rows, NER_DETECTOR)
+    names = ["cust_id", "arjun.mehta_example.in", "score"]
+    assert [f.name for f in result.profile.fields] == names
+    prompt = json.loads(render_prompt(result.profile)[1]["content"])
+    alias = {real: f["name"] for real, f in zip(names, prompt["fields"], strict=True)}
+    assert list(alias.values()) == ["field_1", "field_2", "score"]
+    reply = json.dumps(
+        {
+            "fields": [
+                {"name": alias["cust_id"], "generator": "integer", "params": {"min": 1, "max": 99}},
+                {"name": alias[names[1]], "generator": "integer", "params": {"min": 0, "max": 2}},
+            ],
+            "constraints": [{"kind": "order", "fields": [alias[names[1]], "score"]}],
+        }
+    )
+    gateway = ProviderSeamGateway(reply)
+    spec, info = await propose_spec(result, gateway, locale="en_IN")
+    assert info["source"] == "llm" and len(gateway.sent) == 1
+    sent = normalise(json.dumps(gateway.sent))
+    assert [w for w in ("custid", "arjun", "mehta", "example") if w in sent] == []
+    assert [f.name for f in spec.fields] == names
+    assert spec.fields[0].params == {"min": 1, "max": 99}
+    assert [c.model_dump(by_alias=True)["fields"] for c in spec.constraints] == [names[1:]]
+    generated = execute_spec(spec, rows=20, seed=bytes(32)).rows
+    assert all(set(r) == {"cust_id", "arjun", "score"} for r in generated)
+    assert all(r["arjun"]["mehta_example"]["in"] <= r["score"] for r in generated)
+    assert verify_against_sample(generated, result).passed
+
+
+def test_collapsed_ranges_span_orders_of_magnitude() -> None:
+    """Live run: 1001..1004 rounded to two significant figures gave ``integer{min: 1000, max:
+    1000}`` and every row was 1000. A sampled range that rounding collapses spans its orders of
+    magnitude (no sampled value in the spec); declared bounds stay as declared."""
+    rows = [
+        {"ref": 1001 + i, "debit": -1001 - i, "amount": 1001.5 + i, "score": 553 + 88 * i}
+        for i in range(4)
+    ]
+    spec = heuristic_spec(profile_from_sample(rows, DETECTOR), locale="en_US")
+    by = {f.name: f for f in spec.fields}
+    assert by["ref"].params == {"min": 1000, "max": 9999}
+    assert by["debit"].params == {"min": -9999, "max": -1000}
+    assert by["amount"].generator == "decimal"
+    assert (by["amount"].params["min"], by["amount"].params["max"]) == (1000.0, 10000.0)
+    assert by["score"].params == {"min": 550, "max": 820}  # a range survives rounding: as before
+    dumped = json.dumps(spec.model_dump(mode="json"))
+    assert [v for v in range(1001, 1005) if str(v) in dumped] == []
+    generated = execute_spec(spec, rows=50, seed=bytes(32)).rows
+    assert len({r["ref"] for r in generated}) > 1 and len({r["amount"] for r in generated}) > 1
+    declared = heuristic_spec(
+        _schema({"n": {"type": "integer", "minimum": 1000, "maximum": 1049}}), locale="en_US"
+    )
+    assert declared.fields[0].params == {"min": 1000, "max": 1049}
+
+
+async def test_llm_choice_of_shapes_or_placeholders_is_not_accepted() -> None:
+    """Live run: ``segment`` (three labels in four rows, so not categorical) came back from the
+    model as a ``choice`` over value shapes, and every generated segment was ``xxxxxxxx``. The
+    model never sees labels: a categorical field keeps DPS's labels, and on any other field a
+    choice of shapes or placeholders is ignored with a note. A choice of real-looking labels the
+    model knows for such a field is still taken."""
+    rows = [
+        {"segment": seg, "tier": tier, "channel": channel, "product": product, "full_name": name}
+        for seg, tier, channel, product, name in [
+            ("retail", "GOLD", "branch", "savings", "Arjun Mehta"),
+            ("premier", "GOLD", "online", "current", "Priya Nair"),
+            ("retail", "BASIC", "mobile", "savings", "Kavya Raghunathan"),
+            ("business", "BASIC", "branch", "deposit", "Rohan Kulkarni"),
+        ]
+    ]
+    result = profile_from_sample(rows, DETECTOR)
+    profiled = {f.name: f for f in result.profile.fields}
+    assert profiled["segment"].enum is None and profiled["tier"].enum == ["BASIC", "GOLD"]
+    labels = ["Savings", "Current", "Fixed Deposit"]
+    reply = json.dumps(
+        {
+            "fields": [
+                {
+                    "name": "segment",
+                    "generator": "choice",
+                    "params": {"values": profiled["segment"].shapes},
+                },
+                {"name": "tier", "generator": "choice", "params": {"values": ["xxxx", "xxxxx"]}},
+                {
+                    "name": "channel",
+                    "generator": "choice",
+                    "params": {"values": ["<label_1>", "<label_2>"]},
+                },
+                {"name": "product", "generator": "choice", "params": {"values": labels}},
+                {"name": "full_name", "generator": "choice", "params": {"values": ["Xxxxx Xxxxx"]}},
+            ],
+            "notes": ["segment looks categorical"],
+        }
+    )
+    gateway = ProviderSeamGateway(reply)
+    spec, info = await propose_spec(result, gateway, locale="en_IN")
+    assert info == {"llm_calls": 1, "source": "llm", "fallback": None} and len(gateway.sent) == 1
+    sent = normalise(json.dumps(gateway.sent))
+    values = {str(v) for row in rows for v in row.values()}
+    assert [v for v in values if normalise(v) in sent] == []
+    by = {f.name: f for f in spec.fields}
+    heuristic = {f.name: f for f in heuristic_spec(result, locale="en_IN").fields}
+    assert by["segment"] == heuristic["segment"] and by["segment"].generator == "pattern"
+    assert by["channel"] == heuristic["channel"]
+    assert by["tier"].generator == "choice" and by["tier"].params["values"] == ["BASIC", "GOLD"]
+    assert by["product"].generator == "choice" and by["product"].params["values"] == labels
+    assert by["full_name"].generator == "entity"
+    assert any(note.startswith("2 llm choice generator(s) ignored") for note in spec.notes)
+    generated = execute_spec(spec, rows=30, seed=bytes(32)).rows
+    shape = re.compile(r"[xX9\W_]+")
+    assert not [r for r in generated if shape.fullmatch(r["segment"] + r["channel"])]
+    assert {r["tier"] for r in generated} <= {"BASIC", "GOLD"}
+
+
+@pytest.mark.ner
+def test_live_sample_with_presidio_keeps_names_and_types() -> None:
+    """The live run's sample through the real Presidio: the caller's names, ``cust_id`` an
+    integer (not a date) over 1000..9999, and none of the sample in the prompt."""
+    pytest.importorskip("presidio_analyzer")
+    spacy = pytest.importorskip("spacy")
+    if not any(spacy.util.is_package(m) for m in ("en_core_web_lg", "en_core_web_sm")):
+        pytest.skip("no spaCy English model installed")
+    detector = Detector(
+        DetectorConfig(locale="en_IN", ner_enabled=True), ner=PresidioNer(languages=("en",))
+    )
+    result = profile_from_sample(LIVE_SAMPLE, detector)
+    by = {f.name: f for f in result.profile.fields}
+    assert list(by) == list(LIVE_SAMPLE[0])
+    assert by["cust_id"].type == "integer" and by["cust_id"].entity_type in (None, "CUSTOMER_ID")
+    spec = {f.name: f for f in heuristic_spec(result, locale="en_IN").fields}
+    assert spec["cust_id"].generator == "integer"
+    assert spec["cust_id"].params == {"min": 1000, "max": 9999}
+    sent = normalise(render_prompt(result.profile)[1]["content"])
+    assert [v for row in LIVE_SAMPLE for v in map(str, row.values()) if normalise(v) in sent] == []
