@@ -9,7 +9,8 @@ the verification on main (programme plan §2.5).
 **M4 UI scanner (lane `dps-wt-m4`, branch `m4`, 2026-10-14):** browser-worker image, `scanner`
 compose profile with the demo site, scans API and console pages — see §15 (run, verification,
 traps), `docs/technical/api-m4.md` (API as built) and the M4 rows of §1, §4, §5 and §7. `main` (M5 + M3) is merged
-into `m4` ahead of the M4 integration (§15.1); `m4` itself is not yet merged into `main`.
+into `m4` ahead of the M4 integration (§16); **`m4` is merged into `main` on 2026-10-15 (§17)** — the
+`v0.5.0-m4` tag follows the verification on main.
 
 **Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
 — merged with `--no-ff`; the gates of the integrated tree are recorded in §11, and the fixes of the
@@ -1719,6 +1720,57 @@ round 2"; report `~/.cache/dps-build/reports/S2-fix-r2.md`.
   (`where: "scan"`, linked to the scan); a scan that failed before it crawled (`secret_unavailable`,
   …) or was canceled is no sweep. The Overview posture counts UI sweeps too. No migration: UI sweeps
   are read from the job and evidence tables, so past days need no roll-up refresh.
+
+## 17. M4 integrated on `main` (2026-10-15, WP-I)
+
+`git merge --no-ff m4` (`5959a75`, `merge: M4 into main`): `m4` already held main up to `144cc65` (the M4
+pre-merge, §16); main had gained the S1-M3 post-merge fixes `5c11e49` and `d2fdc3f`. One conflict (contract
+§8.1, the `admin` scope: main's "every write to a production-tagged connection" and `m4`'s "routes that
+serve any job kind check its kind" — both kept) and one semantic conflict (both sides imported
+`EvidenceOut` into `EvidencePack.test.tsx`; Vitest passed, `tsc --noEmit` — the console build in the app
+image — failed; one import kept). Migrations on main: 001–010, 020, 030–031, 040–045 (030/031 applied on
+the next `docker compose up`).
+
+**Fixed on main during the merge** (test-first; details in `M4-DEVIATIONS.md` and `M4-DEVIATIONS-console.md`
+"M4 merged into main"):
+
+- **A closed select is masked by what it draws** (S2 captures-privacy r3 B1): whatever its selected option's
+  `value` (an empty or blank one included), wherever that option sits in a long list (the selected options
+  are read apart from the first 300), and a customizable select (`appearance: base-select`) by its button
+  text — boxed whole (`SELECT`) whenever it draws text. A select classified personal is masked even while
+  it draws its placeholder ("Choose…"); a placeholder is no value of the page (it is not swept for
+  elsewhere and takes no obfuscated capture of its own).
+  The browser-worker image must be rebuilt to carry it.
+- **A stopped run is worded by its batch** (S2 console r3 B1): Reports › Failed sweeps no longer says
+  "nothing reached the target" (a table run commits per batch); a failed pack that wrote rows reads
+  "stopped · N rows written before it" and "failed closed"; the evidence pack's post-write row says the
+  written rows were not re-read.
+
+**Run main with the scanner:** `DPS_TOKENIZER_MOCK_PORT=8430 docker compose --profile docs --profile sources
+--profile oracle --profile scanner --profile tokenizer up --build -d` (the `m4` lane's demo site holds host
+port 8420). The demo site is on 8410, the browser-worker publishes no host port. The `seed-sources` one-shot
+reloads PostgreSQL `bank` to demo data model 2 on the first `up` after the merge (§16.1); reload Oracle and
+MongoDB with `python tools/seed_sources.py --target all --rows 20000 --seed 7`. Capture OCR tests need
+`DPS_TEST_TESSERACT_CMD` (a wrapper running the app image's `tesseract` with `--network none`; the Mac has
+none). The console tests overwrite the tracked `docs/superpowers/build/m3-shots/` PNGs (A-N2).
+
+**Verified 2026-10-15 on main** (`40d8b34`; the five profiles above, images rebuilt from the tree — every
+file under `dps/` identical in `app`, `worker` and `browser-worker`, the served console bundle equal to the
+host build): ruff format/check and mypy clean in `.venv` and in a fresh venv with every extra
+(`[ner,fpe,vertex,docs,db,connectors,uitest,e2e,scanner,tabular,synth-ml,dev]`; its extras tests 92 passed,
+2 need the spaCy model). With `DPS_TEST_REQUIRE_SERVICES=1` (and `DPS_TEST_TESSERACT_CMD` running the app
+image's tesseract): `pytest -q` **3598 passed**, 8 skipped (Mongo composite keys, 2 host tesseract, MOSTLY
+and pandas ×3, spaCy ×2); `docs or ocr` 139 passed (2 host tesseract); `db or pg_source or s3` **434**;
+`oracle or mongo` **178** (1 by design; a foreign test run aimed at main's default ports broke one seeding
+test in the first pass — clean on the rerun); `browser` **271**; frontend 44 node + 377 Vitest tests and
+the build; smoke **52/52** twice (`DPS_SMOKE_SCANNER=1 DPS_SMOKE_REQUIRE_OCR=1 … --m3`: 21 pages, 63
+fields, 51 personal, 60 POST + 1 GET blocked, `non_get_allowed` 0, 3 masked captures, M3 consistency
+3/3). D4: the demo site's `/__received` counters moved only with the deliberate positive controls of the
+whole suite and the browser gate (+8/+2/+1/+1 each) and the foreign run, never during a smoke;
+`dps_llm_raw_pii_sent_total` 0; the logs of all 15 containers hold 0 tracebacks and 0 demo values. The
+rebuilt browser-worker image, run with `--network none` over the S2 r3 verifier's select pages, reads
+none of their made-up values in any capture (94 PNGs OCR'd, every control readable). Report:
+`~/.cache/dps-build/reports/S1-merge-m4.md`.
 
 ## 18. M5 Task 24 — images, the `full` stack, the smoke M5 block, the flow report (finish stage, lane `fimg`, 2026-10-14)
 

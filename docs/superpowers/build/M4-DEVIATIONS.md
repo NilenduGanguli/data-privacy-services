@@ -1791,7 +1791,8 @@ Then the open S2 findings, each fixed test-first (`tests/scanner/test_capture_se
 first 35 tests failed on the merged code, the two index-299 controls passing — log
 `~/.cache/dps-build/s1-merge-m4/logs/10-select-tests-on-old-code.log`; the placeholder rule below was
 driven by the existing `test_full_demo_crawl_in_memory`, red on the first version of the fix, and its
-own unit test):
+own unit test. Re-run of the final module on the pre-fix code (`932075a` with the new names stubbed):
+34 of 36 fail, the two index-299 controls pass — `logs/26-select-tests-final-on-old-code.log`):
 
 - **A closed select is masked by what it draws, in three more shapes** (`S2-captures-privacy-r3` B1a,
   B1b, B1c; `dom.py` `EXTRACT_JS`/`CENSUS_JS`, `models.FieldFacts`, `classify.shown_texts`/`shown_text`/
