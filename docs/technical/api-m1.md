@@ -137,15 +137,30 @@ profile, source, fallback, llm: {calls, raw_pii_sent}, trace_id}`. `source` is `
 `fallback` says why a model proposal was asked for but not used: `leak_guard` (the prompt would have
 carried a sampled value, so no call was made), `llm_invalid_spec` (the reply did not validate), or
 the gateway's error class (`LlmUnavailable`, `LlmCallError`). It is `null` when no model was asked
-(`use_llm: false`, or no real provider: the stub always uses the heuristic proposer).
+(`use_llm: false`, or no real provider: the stub always uses the heuristic proposer). The
+heuristic keeps declared bounds exactly (DDL `NUMBER(3)` → `integer{min: 0, max: 999}`,
+`NUMBER(5,2)` → `decimal{max: 999.99}`, a JSON Schema `minimum`/`maximum`) and rounds a sampled
+range to two significant figures; a sampled range that rounding would collapse (IDs 1001..1004)
+spans its orders of magnitude (1000..9999), so the spec never echoes a sampled value.
 
 **`POST /schema/synthesize`** takes exactly one of `spec`, `schema`, `ddl` or `sample`, plus `rows`
 (default 100, ≤ `DPS_SCHEMA_MAX_ROWS`), `seed` (a `synthesis_seed` from an earlier response),
 `format` (`json` | `csv`), `name`, `locale` and `use_llm`. It returns `{rows | csv, spec, spec_hash,
 synthesis_seed, report, trace_id}`. The same spec, seed and row count give the same rows, byte for
 byte (`AGE` and `CARD_EXPIRY` are relative to today, so within a day). With a `sample`, the
-generated rows are swept against the sample's sensitive values and the request fails closed
-(422 `leakage`) on a match.
+executor steers around any generated value that holds one of the sample's sensitive values — a
+drawn value is drawn again, a `sequence` skips it, an `entity` value takes the row's whole persona
+with it (name, e-mail and birth date still agree) — and then the rows are swept against those
+values; the request fails closed (422 `leakage`, no value echoed) on a match, which is then a spec
+literal or a value that could not get away from the sample. The sweep finds an all-digit sample
+value (an ID, a date) only as a whole run of digits, so ID `1001` is found in `1001`, `1001.0`,
+`CUST-1001` or `x1001@…` but not inside `2010-01-04` or `21001.5`; it does not look for gender,
+nationality, city or card expiry values, which are generated from small fixed lists (a generated
+`Mumbai` is not a copy, and avoiding the sample's cities would show them by their absence).
+`report.sample_redraws` counts the draws steering discarded; the rows are a function of the spec,
+the seed, the row count and the sample, so replaying the returned spec and seed without the
+sample gives the same rows except where `sample_redraws` steered. A field whose key itself looks
+like data (the detector flags it) is never categorical, since its values are swept.
 
 A spec (`dps.genspec.v1`) is a reviewable artefact: `fields[]` of `{name, generator, params,
 null_rate, unique, entity_type}` with generators `sequence uuid integer decimal normal lognormal

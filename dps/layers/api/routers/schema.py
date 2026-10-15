@@ -1,10 +1,14 @@
 """POST /api/v1/schema/generator-spec and /api/v1/schema/synthesize (spec §5.6, contract §9).
 
 Profiling (DDL parsing, detection over a sample), execution and the sample's leakage sweep are
-CPU-bound and run in worker threads. The sweep fails closed: when a generated row holds a value of
-a sample field DPS judged sensitive, nothing is returned (422 ``leakage``). Size limits are coded:
-413 ``ddl_too_large`` / ``sample_too_large`` / ``too_many_rows``. ``/schema/synthesize`` honours
-``Idempotency-Key`` (contract §9); a replay is identical only with the caller's ``seed``.
+CPU-bound and run in worker threads. With a sample, the executor steers around any generated value
+that holds one of the sample's sensitive values (``schema_profile.sample_guard``; the draws it
+discarded are the report's ``sample_redraws``), and the sweep fails closed on what is left: when
+a generated row holds a value of a sample field DPS judged sensitive, nothing is returned (422
+``leakage``). Size limits are coded: 413 ``ddl_too_large`` / ``sample_too_large`` /
+``too_many_rows``. ``/schema/synthesize`` honours ``Idempotency-Key`` (contract §9); a replay is
+identical only with the caller's ``seed`` (and, for a sample, the same sample: replaying the
+returned spec and seed alone gives the same rows except where ``sample_redraws`` steered).
 """
 
 from __future__ import annotations
@@ -18,7 +22,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dps.auth import require_scope
 from dps.engine.detect.ensemble import Detector, DetectorConfig
-from dps.engine.synth.schema_gen import GeneratorSpec, SchemaError, execute_spec, rows_to_csv
+from dps.engine.synth.schema_gen import (
+    GeneratorSpec,
+    SchemaError,
+    SchemaResult,
+    execute_spec,
+    rows_to_csv,
+)
 from dps.engine.synth.schema_profile import (
     MAX_SAMPLE_ROWS,
     ProfileResult,
@@ -27,6 +37,7 @@ from dps.engine.synth.schema_profile import (
     profile_from_json_schema,
     profile_from_sample,
     propose_spec,
+    sample_guard,
     verify_against_sample,
 )
 from dps.engine.synth.surrogates import (
@@ -87,6 +98,7 @@ class SchemaReport(BaseModel):
     generators_used: dict[str, int]
     nulls: int
     unique_retries: int
+    sample_redraws: int = 0
     spec_hash: str
     source: str
     fallback: str | None = None
@@ -112,6 +124,16 @@ def _exactly_one(
     if given != 1:
         options = "spec, schema, ddl or sample" if allow_spec else "schema, ddl or sample"
         raise SchemaError("exactly_one_input", f"give exactly one of {options}")
+
+
+def _execute(
+    spec: GeneratorSpec, rows: int, seed: bytes, sample: ProfileResult | None
+) -> SchemaResult:
+    """Execution, in a worker thread. With a sample the executor steers around the sample's
+    sensitive values; the guard is built here too (it normalises every sampled value)."""
+    return execute_spec(
+        spec, rows=rows, seed=seed, avoid=sample_guard(sample) if sample is not None else None
+    )
 
 
 async def _profile(body: SchemaSource, request: Request) -> ProfileResult:
@@ -207,12 +229,11 @@ async def schema_synthesize(body: SchemaSynthesizeRequest, request: Request) -> 
             )
         except ValueError:
             raise SchemaError("invalid_seed", "the synthesis seed is not valid") from None
-        generated = await asyncio.to_thread(
-            execute_spec, spec, rows=body.rows, seed=seed_bytes(seed)
-        )
+        sample = result if result is not None and result.profile.source == "sample" else None
+        generated = await asyncio.to_thread(_execute, spec, body.rows, seed_bytes(seed), sample)
         verification: Verification | None = None
-        if result is not None and result.profile.source == "sample":
-            verification = await asyncio.to_thread(verify_against_sample, generated.rows, result)
+        if sample is not None:
+            verification = await asyncio.to_thread(verify_against_sample, generated.rows, sample)
             if not verification.passed:
                 raise SchemaError(
                     "leakage", "generated rows matched a sample value; nothing was returned"
@@ -223,6 +244,7 @@ async def schema_synthesize(body: SchemaSynthesizeRequest, request: Request) -> 
             generators_used=generated.generators_used,
             nulls=generated.nulls,
             unique_retries=generated.unique_retries,
+            sample_redraws=generated.sample_redraws,
             spec_hash=generated.spec_hash,
             source=info["source"],
             fallback=info["fallback"],

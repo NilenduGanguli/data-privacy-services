@@ -5,6 +5,12 @@ A ``GeneratorSpec`` names one generator per field. The LLM may *propose* a spec 
 seed and row count give the same rows, byte for byte. PII-typed fields come from the surrogate
 engine with one persona per row (name, e-mail and date of birth agree) and rule-valid, never
 issued identifiers; nothing is drawn from real data. The spec is a reviewable, reusable artefact.
+Synthesis from a sample also passes a predicate that flags a value holding one of the sample's
+sensitive values (``execute_spec(avoid=...)``), and the executor steers around such a value
+instead of writing it: a drawn value is drawn again, a sequence skips it, and an entity value
+takes the row's whole persona with it, so name, e-mail and birth date still agree. The sample
+only ever shapes what is *not* produced: a row that held no sample value is the same with or
+without the sample (a sequence that skipped one stays shifted from there on).
 
 Two entity types are relative to today, as everywhere in the surrogate engine: ``AGE`` agrees with
 the row's date of birth as of the day of execution, and ``CARD_EXPIRY`` lies one to four years
@@ -130,6 +136,28 @@ ENTITY_TEMPLATES: dict[str, str] = {
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d %b %Y", "%Y%m%d")
 SORTABLE_DATE_FORMATS = ("%Y-%m-%d", "%Y%m%d")
 MAX_UNIQUE_RETRIES = 50
+#: How ``execute_spec(avoid=...)`` steers a generator around a value that holds a sample value:
+#: ``redraw`` draws that value again; ``skip`` moves a sequence on to its next value (it stays
+#: unique and ascending); ``persona`` draws every ``entity`` value of the row again from a new
+#: persona. ``constant``, ``choice`` and ``boolean`` are never steered: they write the spec's own
+#: literals or a flag, and a sample value one of them writes is left for the sample sweep to refuse.
+STEERING: dict[str, Literal["redraw", "skip", "persona"]] = {
+    "integer": "redraw",
+    "decimal": "redraw",
+    "normal": "redraw",
+    "lognormal": "redraw",
+    "date": "redraw",
+    "datetime": "redraw",
+    "pattern": "redraw",
+    "text": "redraw",
+    "uuid": "redraw",  # 32 hex digits: a sampled 4-digit ID is a whole digit run in a few in 10^4
+    "sequence": "skip",
+    "entity": "persona",
+}
+#: New draws (values, sequence steps or personas) one value may take to get away from the
+#: sample. A value still holding a sample value after them is kept, and the sweep refuses the run:
+#: from then on the executor stops steering (the run is lost, so further draws would only cost).
+MAX_SAMPLE_REDRAWS = 20
 #: Largest magnitude of a float-valued parameter (keeps uniform/gauss draws finite).
 MAX_ABS = 1e100
 MAX_SCALE = 10
@@ -433,6 +461,7 @@ class SchemaResult(BaseModel):
     generators_used: dict[str, int]
     nulls: int
     unique_retries: int
+    sample_redraws: int = 0
 
 
 def _pattern(template: str, rng: random.Random) -> str:
@@ -460,6 +489,13 @@ def _bounded(value: float, p: dict[str, Any]) -> float | int:
     return round(value, scale) if scale > 0 else int(round(value))
 
 
+def _sequence(p: dict[str, Any], index: int) -> int | str:
+    """The ``index``-th value of a ``sequence`` (``index`` is the row, plus any steps skipped)."""
+    n = int(p.get("start", 1)) + index * int(p.get("step", 1))
+    prefix, width = str(p.get("prefix", "")), int(p.get("width", 0))
+    return f"{prefix}{str(n).zfill(width)}" if prefix or width else n
+
+
 def _generate(
     spec: FieldSpec,
     row: int,
@@ -470,9 +506,7 @@ def _generate(
 ) -> Any:
     p, g = spec.params, spec.generator
     if g == "sequence":
-        n = int(p.get("start", 1)) + row * int(p.get("step", 1))
-        prefix, width = str(p.get("prefix", "")), int(p.get("width", 0))
-        return f"{prefix}{str(n).zfill(width)}" if prefix or width else n
+        return _sequence(p, row)
     if g == "uuid":
         return str(uuid.UUID(int=rng.getrandbits(128), version=4))
     if g == "integer":
@@ -568,8 +602,115 @@ def _row_seed(seed: bytes, spec_hash: str, row: int) -> bytes:
     return hmac.new(seed, f"dps.schema|{spec_hash}|row|{row}".encode(), hashlib.sha256).digest()
 
 
-def execute_spec(spec: GeneratorSpec, *, rows: int, seed: bytes) -> SchemaResult:
-    """Generate ``rows`` rows. Deterministic in (spec, seed, rows); CPU-bound (run in a thread)."""
+class _Steering:
+    """What ``execute_spec(avoid=...)`` steers (``STEERING``) and what it has spent.
+
+    A field a ``rule`` constraint writes is not steered: the rule overwrites it in every row, so
+    its generated values never reach the output. Once a value is kept although it holds a sample
+    value, the sweep will refuse the run, so nothing is steered any more (``lost``).
+    """
+
+    def __init__(self, spec: GeneratorSpec, avoid: Callable[[Any], bool] | None) -> None:
+        rewritten = {c.field for c in spec.constraints if isinstance(c, RuleConstraint)}
+        self.avoid = avoid
+        self.how: dict[str, str] = (
+            {}
+            if avoid is None
+            else {
+                f.name: STEERING[f.generator]
+                for f in spec.fields
+                if f.generator in STEERING and f.name not in rewritten
+            }
+        )
+        self.offsets: dict[str, int] = {}  # sequence steps skipped so far, per field
+        self.redraws = 0
+        self.lost = False
+
+    def holds(self, field: FieldSpec, value: Any) -> bool:
+        """True when ``field`` is steered and ``value`` holds a sample value."""
+        return (
+            self.avoid is not None
+            and not self.lost
+            and field.name in self.how
+            and value is not None
+            and self.avoid(value)
+        )
+
+
+def _skip(field: FieldSpec, row: int, value: Any, steer: _Steering) -> Any:
+    """A sequence value that holds a sample value is skipped: the sequence moves on (and every
+    later row with it), so it stays unique and ascending."""
+    offset = steer.offsets.get(field.name, 0)
+    skipped = 0
+    while steer.holds(field, value):
+        if skipped == MAX_SAMPLE_REDRAWS:
+            steer.lost = True
+            break
+        skipped += 1
+        value = _sequence(field.params, row + offset + skipped)
+    steer.offsets[field.name] = offset + skipped
+    steer.redraws += skipped
+    return value
+
+
+def _new_persona(
+    spec: GeneratorSpec,
+    row: int,
+    row_seed: bytes,
+    values: dict[str, Any],
+    seen: dict[str, set[str]],
+    steer: _Steering,
+    fake: Faker,
+) -> None:
+    """When an ``entity`` value of the row holds a sample value, every entity value of the row is
+    drawn again from a new persona (``persona|N`` under the row seed), so the row's name, e-mail
+    and birth date still agree; drawing one field again would take another persona's e-mail.
+    Rows whose entity values hold none are left as they are."""
+    fields = [f for f in spec.fields if f.generator == "entity" and values[f.name] is not None]
+    if not any(steer.holds(f, values[f.name]) for f in fields):
+        return
+    for attempt in range(1, MAX_SAMPLE_REDRAWS + 1):
+        steer.redraws += 1
+        persona_seed = hmac.new(row_seed, f"persona|{attempt}".encode(), hashlib.sha256).digest()
+        engine = SurrogateEngine(persona_seed, default_locale=spec.locale)
+        fresh = {
+            f.name: _generate(
+                f,
+                row,
+                random.Random(seed_int(persona_seed, f"field|{f.name}")),
+                engine,
+                fake,
+                spec.locale,
+            )
+            for f in fields
+        }
+        if any(f.unique and json.dumps(fresh[f.name], default=str) in seen[f.name] for f in fields):
+            continue
+        if not any(steer.holds(f, fresh[f.name]) for f in fields):
+            values.update(fresh)
+            return
+    steer.lost = True
+
+
+def execute_spec(
+    spec: GeneratorSpec,
+    *,
+    rows: int,
+    seed: bytes,
+    avoid: Callable[[Any], bool] | None = None,
+) -> SchemaResult:
+    """Generate ``rows`` rows. Deterministic in (spec, seed, rows, avoid); CPU-bound (run in a
+    thread).
+
+    ``avoid`` (synthesis from a sample: ``schema_profile.sample_guard``) is true for a value that
+    holds one of the sample's sensitive values; the executor steers around such a value as
+    ``STEERING`` says, up to ``MAX_SAMPLE_REDRAWS`` new draws, so an ID, a date or an e-mail that
+    happens to hold a sampled one is replaced before the sample sweep sees it. A value still
+    holding one after that is kept and the sweep refuses the run. ``sample_redraws`` counts the
+    draws steering discarded. Without ``avoid`` the rows are exactly those of the spec and seed
+    alone; with it, a row differs from them only where it held a sample value (and a skipping
+    sequence, from there on).
+    """
     if rows < 1:
         raise SchemaError("invalid_rows", "rows must be at least 1")
     spec_hash = spec.spec_hash()
@@ -577,6 +718,7 @@ def execute_spec(spec: GeneratorSpec, *, rows: int, seed: bytes) -> SchemaResult
     seen: dict[str, set[str]] = {f.name: set() for f in spec.fields if f.unique}
     used: Counter[str] = Counter()
     nulls = retries = 0
+    steer = _Steering(spec, avoid)
     out: list[dict[str, Any]] = []
     for row in range(rows):
         row_seed = _row_seed(seed, spec_hash, row)
@@ -588,31 +730,48 @@ def execute_spec(spec: GeneratorSpec, *, rows: int, seed: bytes) -> SchemaResult
                 values[field.name] = None
                 nulls += 1
                 continue
-            value = _generate(field, row, rng, surrogates, fake, spec.locale)
-            if field.unique:
-                attempt = 0
-                while json.dumps(value, default=str) in seen[field.name]:
-                    attempt += 1
+            how = steer.how.get(field.name)
+            value = _generate(
+                field, row + steer.offsets.get(field.name, 0), rng, surrogates, fake, spec.locale
+            )
+            if how == "skip":
+                value = _skip(field, row, value, steer)
+            attempt = duplicates = redrawn = 0
+            while True:
+                if field.unique and json.dumps(value, default=str) in seen[field.name]:
+                    duplicates += 1
                     retries += 1
-                    if attempt > MAX_UNIQUE_RETRIES:
+                    if duplicates > MAX_UNIQUE_RETRIES:
                         raise SchemaError(
                             "unique_exhausted",
                             f"field {field.name!r} cannot produce {rows} unique values",
                         )
-                    retry = hmac.new(
-                        row_seed, f"retry|{field.name}|{attempt}".encode(), hashlib.sha256
-                    ).digest()
-                    value = _generate(
-                        field,
-                        row,
-                        random.Random(seed_int(retry, "field")),
-                        SurrogateEngine(retry, default_locale=spec.locale),
-                        fake,
-                        spec.locale,
-                    )
-                seen[field.name].add(json.dumps(value, default=str))
+                elif how == "redraw" and steer.holds(field, value):
+                    if redrawn == MAX_SAMPLE_REDRAWS:
+                        steer.lost = True
+                        break
+                    redrawn += 1
+                else:
+                    break
+                attempt += 1
+                retry = hmac.new(
+                    row_seed, f"retry|{field.name}|{attempt}".encode(), hashlib.sha256
+                ).digest()
+                value = _generate(
+                    field,
+                    row,
+                    random.Random(seed_int(retry, "field")),
+                    SurrogateEngine(retry, default_locale=spec.locale),
+                    fake,
+                    spec.locale,
+                )
+            steer.redraws += redrawn
             values[field.name] = value
             used[field.generator] += 1
+        if steer.how and not steer.lost:
+            _new_persona(spec, row, row_seed, values, seen, steer, fake)
+        for name, taken in seen.items():
+            taken.add(json.dumps(values[name], default=str))
         _apply_constraints(values, spec.constraints)
         out.append(_nest(values))
     return SchemaResult(
@@ -621,6 +780,7 @@ def execute_spec(spec: GeneratorSpec, *, rows: int, seed: bytes) -> SchemaResult
         generators_used=dict(used),
         nulls=nulls,
         unique_retries=retries,
+        sample_redraws=steer.redraws,
     )
 
 

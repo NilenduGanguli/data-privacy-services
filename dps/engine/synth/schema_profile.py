@@ -12,8 +12,16 @@ so they are returned to the caller but never put in a prompt, and an enum field 
 ``choice`` whatever the model proposes; a model ``choice`` on any other field whose values are value
 shapes or placeholders (all it could write without labels) is ignored too. Exact statistics stay in
 :class:`FieldStats`, which is never put in a prompt; the rule-based proposer (no LLM) uses them,
-rounded to two significant figures (a sampled range that rounding collapses to one value spans its
-orders of magnitude instead).
+sampled ranges rounded to two significant figures (one that rounding collapses to a single value
+spans its orders of magnitude instead) and declared JSON Schema / DDL bounds exactly.
+
+Synthesis from a sample never returns a sample's sensitive value: the executor steers around any
+generated value that holds one (:func:`sample_guard`, ``execute_spec(avoid=...)``), and
+:func:`verify_against_sample` refuses what is left. An all-digit original is matched as a whole
+run of digits, so a sampled ID is not "found" inside a generated date or amount; types generated
+from a small fixed space (gender, nationality, city, card expiry: ``SWEEP_EXEMPT``) are not looked
+for; and a field whose key the detector flags is never categorical (its values are swept, so DPS
+must not write them back).
 
 Every profile turns into a spec that validates: field names become unique identifiers nesting at
 most four levels (a name that cannot be one, or that collides, is aliased ``field_N``), at most
@@ -29,8 +37,10 @@ import math
 import re
 import statistics
 from collections import Counter
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import date
+from decimal import Decimal
 from typing import Any, Literal, NoReturn, TypeGuard
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
@@ -51,7 +61,7 @@ from dps.engine.synth.schema_gen import (
     SchemaError,
 )
 from dps.engine.taxonomy import entity_info
-from dps.engine.verify import Verification, verify_output
+from dps.engine.verify import SWEEP_MIN_LEN, Verification, normalise, output_strings
 from dps.llm.egress import LlmEgressBlocked
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmUnavailable
 
@@ -72,10 +82,15 @@ MAX_SCHEMA_DEPTH = 32
 MAX_DIGITS = 38
 #: ``lognormal`` parameters the executor accepts (``schema_gen._check_params``).
 LOGNORMAL_MAX_MU, LOGNORMAL_MAX_SIGMA = 100.0, 20.0
-#: Low-cardinality attributes the surrogate engine may draw equal to an original (M0
-#: ``surrogates._IDENTITY_OK``: forcing a different value would reveal it), so the sample sweep
-#: does not look for them — a generated ``Female`` is not a copy of a sampled ``Female``.
-SWEEP_EXEMPT = frozenset({"GENDER", "NATIONALITY"})
+#: Attributes generated from a small fixed space, which the sample sweep does not look for: a
+#: generated ``Female``, ``Mumbai`` or ``09/29`` is not a copy of a sampled one. Gender and
+#: nationality are M0's (``surrogates._IDENTITY_OK``: forcing a different value would reveal the
+#: original). Cities (318 under ``en_IN``) and card expiry dates (48 ``MM/YY`` values) are the same
+#: case at volume (S8): four sampled cities were drawn in 72% of 100-row runs; a 1 000-row sample
+#: holds about 300 of the 318 cities, so no run could steer around them (still refused); and where
+#: steering works it removes the sample's cities from the output, which then shows which cities the
+#: sample held by their absence — the reason M0 never forces gender or nationality to differ.
+SWEEP_EXEMPT = frozenset({"GENDER", "NATIONALITY", "CITY", "CARD_EXPIRY"})
 #: Entity types whose surrogate is persona-coherent or rule-valid: always the ``entity`` generator.
 DEDICATED_ENTITIES = frozenset(
     {
@@ -126,6 +141,8 @@ _PLACEHOLDER_VALUE = re.compile(
     r"|(?i:placeholder|redacted|masked)(?:[ _-]?\d{1,3})?"
 )
 _PATTERN_LITERALS = set("Aa9X\\")
+#: A run of digits in a normalised string (the sample sweep matches all-digit originals whole).
+_DIGIT_RUN = re.compile(r"[0-9]+")
 _CONSTRAINTS: TypeAdapter[list[Constraint]] = TypeAdapter(list[Constraint])
 
 SPEC_SYSTEM = (
@@ -176,10 +193,11 @@ class StructureProfile(BaseModel):
 
 
 class FieldStats(BaseModel):
-    """Exact statistics of a field — never serialised into a prompt or a response."""
+    """Exact statistics of a field — never serialised into a prompt or a response. Declared
+    bounds (JSON Schema, DDL) keep their type, so an integer bound stays exact (``10**20 - 1``)."""
 
-    minimum: float | None = None
-    maximum: float | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
     median: float | None = None
     p90: float | None = None
     decimals: int = 0
@@ -305,18 +323,21 @@ def _order_span(lo: float, hi: float, *, integer: bool) -> tuple[float, float]:
 
 
 def _range(s: FieldStats, *, sampled: bool, integer: bool) -> tuple[float, float]:
-    """A numeric generator's ``(min, max)``: the observed (sample) or declared (JSON Schema, DDL)
-    range rounded to two significant figures. When rounding collapses it to one value (1001..1004
-    both round to 1000, so every row would be 1000), a sample spans its orders of magnitude
-    (:func:`_order_span`) and declared bounds are kept as declared."""
-    low = _sig2(s.minimum) if s.minimum is not None else 0.0
-    high = _sig2(s.maximum) if s.maximum is not None else 1000.0
-    low, high = min(low, high), max(low, high)
-    if low < high or s.minimum is None or s.maximum is None:
+    """A numeric generator's ``(min, max)``. Declared bounds (JSON Schema, DDL) are the column's
+    contract and are kept exactly (``NUMBER(5,2)`` → 0..999.99). An observed (sample) range is
+    rounded to two significant figures; when rounding collapses it to one value (1001..1004 both
+    round to 1000, so every row would be 1000) it spans its orders of magnitude instead
+    (:func:`_order_span`)."""
+    if s.minimum is None or s.maximum is None:
+        low = _sig2(s.minimum) if s.minimum is not None else 0.0
+        high = _sig2(s.maximum) if s.maximum is not None else 1000.0
+        return min(low, high), max(low, high)
+    if not sampled:
+        return min(s.minimum, s.maximum), max(s.minimum, s.maximum)
+    low, high = sorted((_sig2(s.minimum), _sig2(s.maximum)))
+    if low < high:
         return low, high
-    if sampled:
-        return _order_span(s.minimum, s.maximum, integer=integer)
-    return min(s.minimum, s.maximum), max(s.minimum, s.maximum)
+    return _order_span(s.minimum, s.maximum, integer=integer)
 
 
 def _decimals(values: list[float]) -> int:
@@ -412,7 +433,7 @@ def profile_from_json_schema(schema: dict[str, Any], *, name: str = "dataset") -
             lo, hi = sub.get("minimum"), sub.get("maximum")
             if _finite(lo) and _finite(hi) and ftype in ("integer", "number"):
                 profile.magnitude = _magnitude(float(lo), float(hi), ftype == "integer")
-                st.minimum, st.maximum = float(lo), float(hi)
+                st.minimum, st.maximum = lo, hi
             shortest, longest = sub.get("minLength", 0), sub.get("maxLength")
             if _finite(longest) and isinstance(longest, int) and isinstance(shortest, int):
                 profile.length = {"min": max(0, shortest), "max": max(0, longest)}
@@ -636,6 +657,20 @@ def _ddl_type(column: DdlColumn) -> FieldType:
     return "unknown"
 
 
+def _column_top(digits: int, scale: int, *, integer: bool) -> int | float:
+    """The largest value a numeric column with ``digits`` integer digits and ``scale`` decimals
+    holds: exact for an integer column (``NUMBER(3)`` → 999), and for a decimal one the largest
+    float whose decimal form is not above it (``NUMBER(5,2)`` → 999.99; ``NUMBER(18,2)``'s
+    9999999999999999.99 is no float and becomes 9999999999999998.0, never 1e16)."""
+    if integer:
+        return 10**digits - 1
+    exact = Decimal(10) ** digits - Decimal(1).scaleb(-scale)
+    top = float(exact)
+    while Decimal(repr(top)) > exact:
+        top = math.nextafter(top, -math.inf)
+    return top
+
+
 def profile_from_ddl(ddl: str, *, name: str | None = None) -> ProfileResult:
     """Profile a ``CREATE TABLE`` statement (types, lengths, precision, keys, nullability)."""
     table, columns = parse_ddl(ddl)
@@ -660,10 +695,11 @@ def profile_from_ddl(ddl: str, *, name: str | None = None) -> ProfileResult:
         if ftype == "string" and column.length:
             profile.length = {"min": 0, "max": column.length}
         if ftype in ("integer", "number") and column.precision:
-            digits = max(0, min(MAX_DIGITS, column.precision - (column.scale or 0)))
-            top = 10.0**digits - 1
-            profile.magnitude = _magnitude(0.0, top, ftype == "integer")
-            st.minimum, st.maximum, st.decimals = 0.0, top, column.scale or 0
+            scale = column.scale or 0
+            digits = max(0, min(MAX_DIGITS, column.precision - scale))
+            top = _column_top(digits, scale, integer=ftype == "integer")
+            profile.magnitude = _magnitude(0.0, float(top), ftype == "integer")
+            st.minimum, st.maximum, st.decimals = 0, top, scale
         fields.append(profile)
         stats[fname] = st
     profile_name = name or _ident(table, 0)
@@ -794,7 +830,9 @@ def profile_from_sample(
             st.date_min, st.date_max = min(strings), max(strings)
             if entity != "DATE_OF_BIRTH":
                 profile.year_range = [int(st.date_min[:4]), int(st.date_max[:4])]
-        if entity is None and ftype == "string" and strings:
+        # a flagged key's values are swept as originals (below), so DPS's own ``choice`` must not
+        # write them back: such a field is shaped, never categorical
+        if entity is None and ftype == "string" and strings and not sensitive_name:
             counts = Counter(strings)
             if (
                 len(counts) <= ENUM_MAX
@@ -805,7 +843,7 @@ def profile_from_sample(
                 profile.enum = sorted(counts)
                 st.enum_counts = dict(counts)
         if entity is not None or sensitive_name:
-            st.originals = [str(v) for v in present]
+            st.originals = [_canon(v) for v in present]
         fields.append(profile)
         stats[fname] = st
     structure = StructureProfile(source="sample", name=name, fields=fields, rows_sampled=len(rows))
@@ -847,7 +885,10 @@ def _heuristic_field(p: FieldProfile, s: FieldStats, rows_sampled: int | None) -
     sampled = rows_sampled is not None  # statistics observed in a sample, not declared bounds
     if p.type == "integer":
         lo, hi = _range(s, sampled=sampled, integer=True)
-        return FieldSpec(**base, generator="integer", params={"min": int(lo), "max": int(hi)})
+        # the integers inside the range: a declared ``minimum: 1.5`` is 2, never 1
+        return FieldSpec(
+            **base, generator="integer", params={"min": math.ceil(lo), "max": math.floor(hi)}
+        )
     if p.type == "number":
         low, high = _range(s, sampled=sampled, integer=False)
         scale = min(max(s.decimals, 0) or 2, MAX_SCALE)
@@ -929,8 +970,8 @@ def _text_field(p: FieldProfile) -> FieldSpec:
 def heuristic_spec(result: ProfileResult, *, locale: str) -> GeneratorSpec:
     """The rule-based proposal (no LLM): deterministic, uses the private statistics.
 
-    Numeric ranges are rounded to two significant figures; a sampled range that rounding
-    collapses to one value spans its orders of magnitude instead (see :func:`_range`). A field
+    Sampled numeric ranges are rounded to two significant figures (one that rounding collapses
+    spans its orders of magnitude) and declared bounds are kept exactly (see :func:`_range`). A field
     whose proposal does not validate (statistics outside what a generator accepts)
     becomes short ``text``; the notes say how many did, never which values.
     """
@@ -1175,12 +1216,27 @@ async def propose_spec(
     return spec, info
 
 
-def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> Verification:
-    """Leakage sweep of generated rows against the sample's sensitive values (M0 verifier).
+def _canon(value: Any) -> str:
+    """A value as the sample sweep reads it: an integral float as its integer (a generated
+    ``1001.0`` is the sampled ID ``1001``)."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
-    ``SWEEP_EXEMPT`` types (gender, nationality) are not looked for: their generated values come
-    from a handful of words, so a sampled ``Female`` would fail every healthy run.
-    """
+
+def _canonical(node: Any) -> Any:
+    """``node`` with every integral float read as its integer (see :func:`_canon`)."""
+    if isinstance(node, dict):
+        return {key: _canonical(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_canonical(value) for value in node]
+    if isinstance(node, float) and node.is_integer():
+        return int(node)
+    return node
+
+
+def _sweep_originals(result: ProfileResult) -> list[tuple[Finding, str]]:
+    """Every sample value the sweep looks for, with the finding it is reported as."""
     originals: list[tuple[Finding, str]] = []
     for profile in result.profile.fields:
         stats = result.stats.get(profile.name)
@@ -1195,4 +1251,97 @@ def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> 
             sensitivity=entity_info(entity).sensitivity,
         )
         originals += [(finding, value) for value in stats.originals]
-    return verify_output(originals, rows)
+    return originals
+
+
+class _SampleValues:
+    """The sample's sensitive values as the sweep looks for them, shared by the executor's guard
+    (:func:`sample_guard`) and the sweep (:func:`verify_against_sample`), so the two agree on every
+    value. Both read a value after :func:`~dps.engine.verify.normalise` (an integral float as its
+    integer, :func:`_canon`) and skip originals shorter than ``SWEEP_MIN_LEN``. An all-digit
+    original (an ID, a date's digits) is found only as a whole run of digits, with no digit next
+    to it; any other original as a substring, as in M0. Text originals are indexed by their first
+    ``SWEEP_MIN_LEN`` characters, so a value costs one lookup per position, whatever the size of
+    the sample (the M0 sweep compares every original with every output string)."""
+
+    def __init__(self, originals: list[tuple[Finding, str]]) -> None:
+        self.findings: list[Finding] = []
+        self.needles: list[str] = []
+        digits: dict[str, list[int]] = {}
+        index: dict[str, list[int]] = {}
+        for finding, original in originals:
+            needle = normalise(original)
+            if len(needle) < SWEEP_MIN_LEN:
+                continue
+            slot = len(self.needles)
+            self.needles.append(needle)
+            self.findings.append(finding)
+            if _DIGIT_RUN.fullmatch(needle):
+                digits.setdefault(needle, []).append(slot)
+            else:
+                index.setdefault(needle[:SWEEP_MIN_LEN], []).append(slot)
+        self._digits = {needle: tuple(slots) for needle, slots in digits.items()}
+        self._index = {head: tuple(slots) for head, slots in index.items()}
+
+    def __bool__(self) -> bool:
+        return bool(self.needles)
+
+    def _windows(self, hay: str) -> Iterator[int]:
+        """The text originals ``hay`` holds (an original may be yielded more than once)."""
+        for i in range(len(hay) - SWEEP_MIN_LEN + 1):
+            for slot in self._index.get(hay[i : i + SWEEP_MIN_LEN], ()):
+                if hay.startswith(self.needles[slot], i):
+                    yield slot
+
+    def found(self, hay: str) -> set[int]:
+        """Every original the normalised string ``hay`` holds."""
+        out = {slot for run in _DIGIT_RUN.findall(hay) for slot in self._digits.get(run, ())}
+        out.update(self._windows(hay))
+        return out
+
+    def __call__(self, value: Any) -> bool:
+        """The guard: true when a generated ``value`` holds one of the originals."""
+        if value is None or isinstance(value, bool):
+            return False
+        hay = normalise(_canon(value))
+        if any(run in self._digits for run in _DIGIT_RUN.findall(hay)):
+            return True
+        return next(self._windows(hay), None) is not None
+
+
+def sample_guard(result: ProfileResult) -> Callable[[Any], bool] | None:
+    """For synthesis from a sample: true for a generated value that holds one of the sample's
+    sensitive values exactly as :func:`verify_against_sample` finds them, so the executor steers
+    around it (``execute_spec(avoid=...)``); ``None`` when the sample has none to look for."""
+    values = _SampleValues(_sweep_originals(result))
+    return values if values else None
+
+
+def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> Verification:
+    """Leakage sweep of generated rows against the sample's sensitive values: every key and value
+    of the rows is searched, and a hit is reported once per output path and entity type, in the
+    order of the originals (M0 ``verify_output`` semantics, matched as :class:`_SampleValues`).
+
+    ``SWEEP_EXEMPT`` types (gender, nationality, city, card expiry) are not looked for: they are
+    generated from a small fixed space, so a coincidence says nothing (see ``SWEEP_EXEMPT``). An
+    all-digit original (an ID, a date's digits) is found only as a whole run of digits once
+    separators are removed, and an integral float as its integer: sampled ID ``1001`` is found in
+    a generated ``1001``, ``1001.0``, ``CUST-1001`` or ``x1001@…`` (and in ``10.01``, the same
+    digits), not inside ``2010-01-04``, ``21001.5`` or ``1001.25``. Every other original is found
+    as a substring, as in M0. The executor steers around every value :func:`sample_guard` flags,
+    so a hit here is a spec literal or a value that could not get away from the sample: the route
+    refuses the run (422 ``leakage``).
+    """
+    values = _SampleValues(_sweep_originals(result))
+    found: list[tuple[int, int, str]] = []
+    if values:
+        for position, (path, _key, text) in enumerate(output_strings(_canonical(rows))):
+            found += [(slot, position, path) for slot in values.found(normalise(text))]
+    hits: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for slot, _position, path in sorted(found):
+        entity = values.findings[slot].entity_type
+        if (path, entity) not in seen:
+            seen.add((path, entity))
+            hits.append({"path": path, "entity_type": entity})
+    return Verification(passed=not hits, checked=len(values.needles), hits=hits)

@@ -212,6 +212,12 @@ def _strings(node: Any, path: str = "$") -> Iterator[tuple[str, bool, str]]:
         yield path, False, str(node)
 
 
+def output_strings(output: Any) -> Iterator[tuple[str, bool, str]]:
+    """What the sweep searches in ``output``: every object key and scalar leaf as text, with its
+    path and ``True`` for a key (the sample sweep of synthesize-from-schema walks the same)."""
+    return _strings(output)
+
+
 def _free_text(text: str, min_words: int) -> bool:
     count = 0
     for _ in _WORD.finditer(text):
