@@ -52,6 +52,7 @@ import base64
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -168,6 +169,8 @@ PAGES: tuple[tuple[str, str, str, str], ...] = (
     ("admin", "/admin", "main h1", "Admin"),
 )
 THEMES: tuple[Literal["light", "dark"], ...] = ("light", "dark")
+#: What covers the data key on the Playground's key card in a screenshot (the ink token).
+MASK_COLOR = "#0E141B"
 
 
 class StepFailed(Exception):
@@ -1020,10 +1023,14 @@ def console_walk(
                     url = base_url + route.format(**ids)
                     page.goto(url, wait_until="networkidle")
                     page.locator(selector, has_text=text).first.wait_for(timeout=timeout_ms)
-                    if name == "playground":
-                        _playground_result(page, timeout_ms)
+                    masks = _playground_result(page, timeout_ms) if name == "playground" else []
                     page.wait_for_load_state("networkidle")
-                    page.screenshot(path=str(screens / f"{name}-{theme}.png"), full_page=False)
+                    page.screenshot(
+                        path=str(screens / f"{name}-{theme}.png"),
+                        full_page=False,
+                        mask=masks,
+                        mask_color=MASK_COLOR,
+                    )
                     shots += 1
                 ctx.close()
         finally:
@@ -1047,12 +1054,15 @@ def _collect_errors(page: Any, theme: str, errors: list[str]) -> None:
     page.on("pageerror", on_page_error)
 
 
-def _playground_result(page: Any, timeout_ms: float) -> None:
-    """Run **Synthesize** on the Playground's KYC sample: findings and a synthetic record, and no
-    key card on screen (an obfuscate answer shows part of its key)."""
-    page.get_by_role("button", name="Synthesize", exact=True).click()
-    page.get_by_text("synthetic · no path back").first.wait_for(timeout=timeout_ms)
-    check(page.locator(".keycard").count() == 0, "the playground shows a key card")
+def _playground_result(page: Any, timeout_ms: float) -> list[Any]:
+    """Run **Obfuscate** on the Playground's KYC sample: the findings, the format-kept tokens and
+    the key card. The card prints the start and the end of the data key, so that text is masked
+    in the screenshot (a screenshot never carries key material); returns the locators to mask."""
+    page.get_by_role("button", name="Obfuscate", exact=True).click()
+    page.locator(".keycard").first.wait_for(timeout=timeout_ms)
+    dek = page.locator(".keycard span", has_text=re.compile(r"^dek "))
+    check(dek.count() == 1, "the key card's data key is not where the screenshot mask expects it")
+    return [dek]
 
 
 # -- driver ---------------------------------------------------------------------------------------
