@@ -12,17 +12,20 @@ tenant ``retail-banking-apac``, with the job group key the seed wrote to
 S1      Overview: ``/readyz`` ready; ``/reports/summary`` tile ``raw_pii_sent_to_llm`` is 0
 S2      Playground: the console's KYC sample → ≥ 8 findings incl. AADHAAR, PAN_IN, EMAIL; obfuscate
         under ``@retail-kyc``; reveal gives the input back; synthesize carries no detected input
-        value; the LLM counter of each answer is 0
+        value (every string leaf of every detected field, the nested card number too); the LLM
+        counter of each answer is 0
 S3      Bank tokenization (when ``/readyz`` reports the tokenizer, else SKIP): SSN → ``tk_`` token
         → reveal round trip
 S4      Scanned KYC PDF (the console's demo scan, synthetic) → OCR, redacted PDF: OCR read ≥ 1 page,
         ``%PDF``, 0 characters a text extractor finds, 0 originals an OCR re-read finds
 S5      Discover PostgreSQL ``bank.customers``, MongoDB ``crm.profiles``, Oracle ``CRM.CUSTOMERS``
-        (``--skip-oracle``: two systems); each snapshot classifies ≥ 5 sensitive columns and has
-        heat-map data (``value_hit_rate``); accepted
+        (``--skip-oracle``: two systems); each snapshot classifies ≥ 5 sensitive columns, has
+        heat-map data (``value_hit_rate``) and a customer-id column to join on; accepted
 S6      ``table`` runs under the group's key into the UAT targets; every job succeeded, every
         partition done, the leakage sweep passed, the pack is labelled pseudonymised
-S7      The group's consistency check: passed, every pair consistent with overlap > 0
+S7      The group's consistency check of this run's S6 jobs (one member per job, on the customer-id
+        path of its snapshot; the last submitted anchors the sample): its members are exactly
+        those jobs, passed, every pair consistent with overlap > 0
 S8      Synthetic companion: copula synthesize of ``bank.customers`` → ``bank_uat``; fidelity
         ≥ 0.85, exact-row matches 0, NNDR measured
 S9      UI scanner (``--skip-scanner``: SKIP): a scan of the demo onboarding site (3 personas);
@@ -149,6 +152,12 @@ MEMBERS: tuple[Member, ...] = (
     ),
 )
 SYNTH_TARGET = {"owner": "bank_uat", "name": "customers_synthetic"}
+#: S7 joins the S6 runs on this entity (the first of the server's join preference).
+JOIN_ENTITY = "CUSTOMER_ID"
+#: Distinct customer ids S7 samples from the anchor's target.
+CHECK_SAMPLE = 500
+#: Shortest detected value S2 probes the synthetic record for (shorter ones occur by chance).
+SYNTH_PROBE_MIN = 4
 #: Rows per partition of the S6 runs: several partitions per job to watch commit (2 at a time).
 PARTITION_ROWS = 5_000
 #: The categorical column the synthetic companion's utility test predicts (train on synthetic,
@@ -432,14 +441,10 @@ class Demo:
         check(identical, "reveal did not restore the input")
         del obf, rev
         syn = self.c.post("/synthesize", {"data": record, "policy": "synthetic-realistic"})
-        detected = sorted(
-            {
-                str(record[key])
-                for f in findings
-                if isinstance(key := _top_key(f.get("locator")), str) and key in record
-            }
-        )
-        leaked = found_in([json.dumps(syn.get("result"))], detected, min_len=4)
+        detected = [v for v in detected_values(record, findings) if len(v) >= SYNTH_PROBE_MIN]
+        answer = syn.get("result")
+        hay = [*leaves(answer), json.dumps(answer, ensure_ascii=False)]
+        leaked = found_in(hay, detected, min_len=SYNTH_PROBE_MIN)
         check(leaked == 0, f"{leaked} detected input values in the synthetic record")
         sent = int((report.get("llm") or {}).get("raw_pii_sent") or 0) + int(
             ((syn.get("report") or {}).get("llm") or {}).get("raw_pii_sent") or 0
@@ -561,6 +566,9 @@ class Demo:
             heat = all(isinstance(c.get("value_hit_rate"), int | float) for c in columns)
             check(len(sensitive) >= 5, f"{m.engine}: {len(sensitive)} sensitive columns")
             check(heat and bool(columns), f"{m.engine}: no heat-map data")
+            join_path = customer_id_path(columns)
+            check(join_path is not None, f"{m.engine}: no customer id column to join on")
+            self.ctx.setdefault("join_paths", {})[m.engine] = join_path
             self.c.post(f"/snapshots/{snap_id}/accept")
             snaps.append(
                 {
@@ -669,17 +677,25 @@ class Demo:
 
     # S7 ---------------------------------------------------------------------------------------
     def s7(self) -> tuple[dict[str, Any], str]:
+        runs = self.ctx.get("runs") or []
+        wanted = consistency_pairs(runs, self.ctx.get("join_paths") or {})
         result = self.c.post(
-            f"/job-groups/{self.group['group_id']}/consistency-check", {"sample": 500}
+            f"/job-groups/{self.group['group_id']}/consistency-check",
+            {"pairs": wanted, "sample": CHECK_SAMPLE},
         )
         members = [
-            {"engine": m.get("engine"), "job_id": m.get("job_id"), "form": m.get("form")}
+            {k: m.get(k) for k in ("engine", "job_id", "path", "form")}
             for m in result.get("members") or []
         ]
         pairs = [
             {k: p.get(k) for k in ("left", "right", "checked", "matched", "coverage", "consistent")}
             for p in result.get("pairs") or []
         ]
+        joined = sorted(str(m["job_id"]) for m in members)
+        check(
+            joined == sorted(str(r["job_id"]) for r in runs),
+            f"the check joined {len(members)} members, not this run's S6 jobs",
+        )
         n = len(self.members)
         check(len(members) == n, f"{len(members)} members ({n} expected)")
         check(len(pairs) == n * (n - 1) // 2, f"{len(pairs)} pairs")
@@ -928,6 +944,51 @@ class Demo:
         )
 
 
+def detected_values(record: Mapping[str, Any], findings: Sequence[Mapping[str, Any]]) -> list[str]:
+    """S2's synthetic-leak probes: every string leaf of every top-level field a finding points
+    into — a nested object such as the sample's ``card`` gives its ``pan`` and ``expiry``, never
+    its repr (review S6b r1 B2); a span finding gives its whole field."""
+    keys = {
+        key
+        for f in findings
+        if isinstance(key := _top_key(f.get("locator")), str) and key in record
+    }
+    return sorted({value for key in keys for value in leaves(record[key])})
+
+
+def customer_id_path(columns: Sequence[Mapping[str, Any]]) -> str | None:
+    """The column S7 joins a run on: the snapshot's customer-id column the server would join (a
+    whole-value mapping, not ``keep``, not free text), the key first, then the anchor, then the
+    shortest path — ``consistency._mapped``'s order. ``None`` when the snapshot has none."""
+    usable = [
+        c
+        for c in columns
+        if c.get("entity_type") == JOIN_ENTITY
+        and not c.get("text_column")
+        and (c.get("method") or {}).get("method") != "keep"
+    ]
+    usable.sort(
+        key=lambda c: (not c.get("is_key"), not c.get("anchor"), len(str(c["path"])), c["path"])
+    )
+    return str(usable[0]["path"]) if usable else None
+
+
+def consistency_pairs(
+    runs: Sequence[Mapping[str, Any]], join_paths: Mapping[str, str]
+) -> list[dict[str, str]]:
+    """S7's members: one per S6 job, its id and the customer-id path of the snapshot S5 accepted
+    for its system; the last job submitted (Oracle on a full run) first — the anchor whose target
+    the check samples. Never derived from the group's history: an older run, or a target since
+    reset, is not this run's (review S6b r1 B3)."""
+    pairs: list[dict[str, str]] = []
+    for run in reversed(runs):
+        engine = str(run["engine"])
+        path = join_paths.get(engine)
+        check(bool(path), f"{engine}: no customer id column to join on")
+        pairs.append({"job_id": str(run["job_id"]), "path": str(path)})
+    return pairs
+
+
 def _top_key(locator: Any) -> str | None:
     """The top-level field of a finding's JSON path (``$.aadhaar`` → ``aadhaar``)."""
     path = locator.get("path") if isinstance(locator, dict) else None
@@ -1098,8 +1159,9 @@ def run_steps(
         except DemoError as exc:  # value-free by construction (route template, status, code)
             result = StepResult(sid, title, "ERROR", clock() - start, {}, str(exc))
             stopped = True
-        except (KeyError, IndexError, TypeError, ValueError, httpx.HTTPError) as exc:
-            # an answer of an unexpected shape: the class only (a message could quote a body)
+        except Exception as exc:  # noqa: BLE001 - e.g. Playwright's TimeoutError in S12
+            # an answer of an unexpected shape, a browser that timed out: the class only (a
+            # message could quote a body); the run still writes its report (review S6b r1 N1)
             result = StepResult(sid, title, "ERROR", clock() - start, {}, type(exc).__name__)
             stopped = True
         results.append(result)

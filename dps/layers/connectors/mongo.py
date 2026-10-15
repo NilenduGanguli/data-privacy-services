@@ -13,6 +13,9 @@ and restores each leaf it wrote to the original leaf's BSON type (``mongo_docs.r
 every other value reaches the writer as the driver decoded it.
 ``selection.sample`` keeps a document when ``HMAC-SHA256(seed, BSON({_id}))[:4] < percent·2³²`` —
 a function of the document alone, so the count, every partition and a resumed page read one sample.
+``describe`` and the discovery/key samples use ``$sample``; when the server's pseudo-random cursor
+fails with 28799 (a collection that is mostly deleted records, such as a ``table`` target emptied
+and refilled by every run) twice, the sample is taken by a collection scan (:func:`sample_pipeline`).
 
 Writes (:class:`MongoWriter`). Every document goes through ``make_bson_safe`` (a copy; only
 ``decimal.Decimal`` and ``datetime.date``, which the driver cannot encode, change). A ``table`` load
@@ -58,6 +61,7 @@ from pymongo.errors import (
     ConfigurationError,
     ConnectionFailure,
     DuplicateKeyError,
+    OperationFailure,
     PyMongoError,
     ServerSelectionTimeoutError,
 )
@@ -117,6 +121,41 @@ _CAPS: Final[dict[str, bool]] = {
     "rowid": False,
     "copy": False,
 }
+
+
+#: ``$sample``'s pseudo-random cursor (``$sample`` first, N < 5 % of a collection of > 100
+#: documents) gives up after 100 duplicate documents in a row: "likely a sporadic failure". It is
+#: not sporadic on a collection that is mostly deleted records — a ``table`` target emptied and
+#: refilled by every run: the cursor's random descent lands among them and walks to the same live
+#: document, every time (review S6b r1 B1).
+_RANDOM_CURSOR_DUPLICATES: Final = 28799
+#: Tries of the pseudo-random cursor before a sample is taken without it.
+_RANDOM_CURSOR_TRIES: Final = 2
+#: Leads a ``$sample`` pipeline that must not use the pseudo-random cursor: every document passes
+#: it, but unlike an empty ``$match`` (optimised away) it keeps ``$sample`` off the first stage, so
+#: the server samples by a random sort of what the scan returns — as it does anyway for N ≥ 5 %.
+ALL_DOCUMENTS: Final[dict[str, Any]] = {"$match": {"_id": {"$exists": True}}}
+#: The hint of that pipeline: a collection scan (the ``_id`` index would fetch every document in
+#: key order, at random places on disk).
+NATURAL_ORDER: Final[dict[str, Any]] = {"$natural": 1}
+
+
+def sample_pipeline(
+    flt: dict[str, Any],
+    n: int,
+    *,
+    project: dict[str, Any] | None = None,
+    then: list[dict[str, Any]] | None = None,
+    random_cursor: bool = True,
+) -> list[dict[str, Any]]:
+    """The ``$sample`` aggregation of up to ``n`` documents of ``flt``, projected, then ``then``.
+
+    ``random_cursor=False`` leads with :data:`ALL_DOCUMENTS` when there is no filter (run it with
+    the :data:`NATURAL_ORDER` hint); a filter already keeps ``$sample`` off the first stage.
+    """
+    head = [{"$match": flt}] if flt else ([] if random_cursor else [ALL_DOCUMENTS])
+    tail = [{"$project": project}] if project else []
+    return [*head, {"$sample": {"size": max(1, int(n))}}, *tail, *(then or [])]
 
 
 def mongo_code(exc: BaseException) -> str:
@@ -419,19 +458,31 @@ class MongoConnector:
         project: dict[str, Any] | None = None,
         then: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        pipeline: list[dict[str, Any]] = [{"$match": flt}] if flt else []
-        pipeline.append({"$sample": {"size": max(1, int(n))}})
-        if project:
-            pipeline.append({"$project": project})
-        pipeline += then or []
+        """Up to ``n`` random documents (:func:`sample_pipeline`). When the server's pseudo-random
+        cursor fails (:data:`_RANDOM_CURSOR_DUPLICATES`) :data:`_RANDOM_CURSOR_TRIES` times, the
+        sample is taken without it (a collection scan), under the same ``maxTimeMS``."""
+        size = max(1, int(n))
+        coll = self.read_collection(name)
 
-        async def run() -> list[dict[str, Any]]:
-            cursor = await self.read_collection(name).aggregate(
-                pipeline, comment=self.comment, maxTimeMS=self.max_time_ms
+        async def run(pipeline: list[dict[str, Any]], **extra: Any) -> list[dict[str, Any]]:
+            cursor = await coll.aggregate(
+                pipeline, comment=self.comment, maxTimeMS=self.max_time_ms, **extra
             )
-            return list(await cursor.to_list(length=max(1, int(n))))
+            return list(await cursor.to_list(length=size))
 
-        return await self._guard("sample", run())
+        async def sample() -> list[dict[str, Any]]:
+            for _ in range(_RANDOM_CURSOR_TRIES):
+                try:
+                    return await run(sample_pipeline(flt, size, project=project, then=then))
+                except OperationFailure as exc:  # raised by the aggregate or a getMore
+                    if exc.code != _RANDOM_CURSOR_DUPLICATES:
+                        raise
+                    logger.info("mongo_sample_retry", driver_code=mongo_code(exc))
+            logger.warning("mongo_sample_scan", reason="random_cursor_duplicates")
+            pipeline = sample_pipeline(flt, size, project=project, then=then, random_cursor=False)
+            return await run(pipeline, hint=NATURAL_ORDER)
+
+        return await self._guard("sample", sample())
 
     async def _id_bounds(self, name: str) -> list[Any]:
         """The smallest and largest ``_id`` of the collection (two ``_id`` index lookups)."""

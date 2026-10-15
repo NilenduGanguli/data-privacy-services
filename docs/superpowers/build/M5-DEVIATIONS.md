@@ -1604,3 +1604,41 @@ the bench files (no placeholder).
   driver, the report contract read by `tools/build_deck.py`, the Markdown's last line, helpers, the
   page list, a missing seed); on mutated code (the D4 controls dropped, the driver not stopping)
   5 fail. `tests/console/test_console_pages.py` 9 on the stack; `tests/test_deck.py` 42 → 43.
+
+### S6b review round 1 fixes (lane `fdemo`, 2026-10-16)
+
+- **B1 — MongoDB `$sample` (product, `dps/layers/connectors/mongo.py`).** The server's pseudo-random
+  cursor (`$sample` first, N < 5 % of a collection of > 100 documents) fails with 28799 on a
+  collection that is mostly deleted records: a `table` target emptied by `truncate_insert`
+  (`delete_many`) and refilled by every run. Its random descent lands among the deleted records and
+  walks to the same live document, so a `$sample` of 500 fails every time while 200 and 2 000 (≥ 5 %,
+  no random cursor) pass. `describe` (each run's target check at prepare, the consistency check) and
+  the samples now try the random cursor twice, then sample through `sample_pipeline(…,
+  random_cursor=False)`: a leading `$match {_id: {$exists: true}}` (an empty `$match` is optimised
+  away and the random cursor comes back) with the hint `{$natural: 1}` (a collection scan, not an
+  `_id`-index fetch of every document), under the same `maxTimeMS` and comment. Logged value-free
+  (`mongo_sample_retry` with the driver code, `mongo_sample_scan`). Measured on this lane's MongoDB
+  7.0.40 with `explain`: the plain pipeline plans `$sampleFromRandomCursor`, the fallback a
+  `COLLSCAN` and `$sample`. Tests: `tests/connectors/test_mongo_sample.py` (offline, a fake
+  collection raising 28799 from the aggregate or a getMore: one retry, the fallback, no retry for
+  another code, a failing fallback stays a value-free `source_error`, `describe` through the
+  fallback) and the `mongo` integration test
+  `test_describe_and_sample_survive_a_collection_of_deleted_records` (3 000 × 17 KB documents
+  inserted and deleted next to 12 000 live ones reproduces 28799; `describe`, `sample(500)` and
+  `sample_keys(500)` succeed and the profiler shows each one's scan), which fails on the old code
+  with `source_error: mongo:28799`.
+- **B2 — S2's synthetic probes.** `detected_values(record, findings)` probes every string leaf of
+  every top-level field a finding points into (the nested `card.pan` and `card.expiry`), never a
+  `str()` of a dict; the haystack is the synthetic record's leaves and its JSON without ASCII
+  escapes. Tests: the probe set, a passing synthetic record (0 of 9), and an echoed card number,
+  expiry or e-mail fails S2.
+- **B3 — S7 joins this run's jobs.** S5 records each accepted snapshot's customer-id path
+  (`customer_id_path`: the `CUSTOMER_ID` column the server would join — not `keep`, not free text;
+  key, anchor, shortest path). S7 posts explicit `pairs`, one per S6 job (`consistency_pairs`: the
+  last submitted, Oracle on a full run, first as the anchor) and fails unless the result's member
+  job ids are exactly the S6 job ids; the plan's "customer id path per job". The members' paths are
+  in the report. A `--skip-oracle` rehearsal after a full one, and an older run of the group, no
+  longer change what S7 checks.
+- **N1 — the driver.** Any other exception of a step body (Playwright's `TimeoutError` in S12) is an
+  `ERROR` with its class name only, so the run still writes its reports instead of leaving the
+  previous ones for `build_deck.py --strict`.

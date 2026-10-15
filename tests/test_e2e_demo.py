@@ -211,3 +211,238 @@ def test_main_without_the_seed_files_fails_cleanly(
     )
     assert code == 1
     assert "demo_seed" in capsys.readouterr().out
+
+
+# -- S2: the synthetic-leak probes (review S6b r1 B2) ---------------------------------------------
+
+RECORD: dict[str, Any] = e2e_demo.SAMPLES["json"]
+#: /detect's findings for the console's KYC sample, by path (the CRITICAL card number is nested).
+FINDINGS: list[dict[str, Any]] = [
+    {"entity_type": t, "locator": {"path": p}}
+    for t, p in (
+        ("PERSON", "$.full_name"),
+        ("DATE_OF_BIRTH", "$.dob"),
+        ("AADHAAR", "$.aadhaar"),
+        ("PAN_IN", "$.pan"),
+        ("EMAIL", "$.email"),
+        ("PHONE", "$.phone"),
+        ("CARD_PAN", "$.card.pan"),
+        ("CARD_EXPIRY", "$.card.expiry"),
+        ("ADDRESS", "$.address"),
+    )
+]
+
+
+def test_s2_probes_every_string_leaf_of_a_detected_field_never_a_repr() -> None:
+    probes = e2e_demo.detected_values(RECORD, FINDINGS)
+    assert RECORD["card"]["pan"] in probes and RECORD["card"]["expiry"] in probes
+    assert not any(p.startswith(("{", "[")) for p in probes)  # no dict or list repr
+    assert set(probes) == {
+        RECORD[k] for k in ("full_name", "dob", "aadhaar", "pan", "email", "phone", "address")
+    } | {RECORD["card"]["pan"], RECORD["card"]["expiry"]}
+    # a span finding probes its top-level field's leaves; an unknown or root path probes nothing
+    spans: list[dict[str, Any]] = [
+        {"locator": {"path": "$.notes", "start": 5, "end": 9}},
+        {"locator": {"path": "$"}},
+    ]
+    assert e2e_demo.detected_values(RECORD, spans) == [RECORD["notes"]]
+    assert e2e_demo.detected_values(RECORD, [{"locator": {"path": "$.nope"}}]) == []
+
+
+class FakeDps:
+    """``DpsClient.post``/``get`` answering from a table of routes; the bodies it was sent."""
+
+    def __init__(self, answers: dict[str, Any]) -> None:
+        self.answers = answers
+        self.sent: list[tuple[str, Any]] = []
+
+    def post(self, path: str, body: Any = None) -> Any:
+        self.sent.append((path, body))
+        answer = self.answers[path]
+        return answer(body) if callable(answer) else answer
+
+    def get(self, path: str, **params: Any) -> Any:
+        return self.answers[path]
+
+
+def _demo(c: FakeDps, *, skip_oracle: bool = False) -> e2e_demo.Demo:
+    import argparse
+
+    args = argparse.Namespace(skip_oracle=skip_oracle, tenant="retail-banking-apac")
+    group = {"group_id": "grp_demo", "key_material": {"kid": "k1"}}
+    return e2e_demo.Demo(c, c, None, args, group)  # type: ignore[arg-type]
+
+
+def _playground(synthetic: dict[str, Any]) -> FakeDps:
+    report = {"verification": {"passed": True}, "policy": "retail-kyc", "llm": {"raw_pii_sent": 0}}
+    return FakeDps(
+        {
+            "/detect": {"findings": FINDINGS},
+            "/obfuscate": {"result": {}, "key_material": {}, "reveal_hints": [], "report": report},
+            "/reveal": {"result": RECORD},
+            "/synthesize": {"result": synthetic, "report": {"llm": {"raw_pii_sent": 0}}},
+        }
+    )
+
+
+SYNTHETIC: dict[str, Any] = {
+    "customer_id": "CUST-0000001",
+    "full_name": "Meera Iyer",
+    "dob": "1979-02-11",
+    "aadhaar": "5021 3344 1290",
+    "pan": "BQRPS7731L",
+    "email": "meera.iyer@example.org",
+    "phone": "+91 99887 10234",
+    "card": {"pan": "5500 0000 0000 0004", "expiry": "11/30"},
+    "address": "14 Lake View Road, Pune 411001",
+    "risk_score": 403,
+    "notes": "Prefers e-mail.",
+}
+
+
+def test_s2_passes_a_synthetic_record_without_input_values_and_counts_the_nested_probes() -> None:
+    facts, detail = _demo(_playground(SYNTHETIC)).s2()
+    assert facts["synthetic_input_values"] == 0
+    assert "synthetic carries 0 of 9 detected values" in detail  # card.pan and card.expiry too
+
+
+@pytest.mark.parametrize(
+    "leaked",
+    [
+        pytest.param({"card": {**SYNTHETIC["card"], "pan": RECORD["card"]["pan"]}}, id="card pan"),
+        pytest.param({"card": {**SYNTHETIC["card"], "expiry": RECORD["card"]["expiry"]}}, id="expiry"),
+        pytest.param({"notes": f"call {RECORD['email']}"}, id="email in another field"),
+    ],
+)  # fmt: skip
+def test_s2_fails_when_the_synthetic_record_carries_a_detected_value(
+    leaked: dict[str, Any],
+) -> None:
+    with pytest.raises(StepFailed, match="1 detected input values in the synthetic record"):
+        _demo(_playground({**SYNTHETIC, **leaked})).s2()
+
+
+# -- S7: the consistency check joins this run's S6 jobs (review S6b r1 B3) ------------------------
+
+
+def _column(
+    path: str, entity: str | None, method: str = "fpe_digits", **flags: Any
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "entity_type": entity,
+        "is_key": flags.get("is_key", False),
+        "anchor": flags.get("anchor", False),
+        "text_column": flags.get("text_column", False),
+        "method": {"method": method},
+    }
+
+
+def test_the_join_path_is_the_snapshots_joinable_customer_id_column() -> None:
+    columns = [
+        _column("$._id", None, "keep", is_key=True),
+        _column("$.legacy.customerId", "CUSTOMER_ID"),
+        _column("$.customerId", "CUSTOMER_ID"),
+        _column("$.crmRef", "CUSTOMER_ID", "keep"),  # kept: the server never joins it
+        _column("$.notes", "CUSTOMER_ID", text_column=True),  # span-transformed text
+        _column("$.email", "EMAIL"),
+    ]
+    assert e2e_demo.customer_id_path(columns) == "$.customerId"  # the shortest joinable path
+    assert (
+        e2e_demo.customer_id_path([*columns, _column("$.zz", "CUSTOMER_ID", anchor=True)]) == "$.zz"
+    )
+    assert (
+        e2e_demo.customer_id_path([*columns, _column("$.k", "CUSTOMER_ID", is_key=True)]) == "$.k"
+    )
+    assert e2e_demo.customer_id_path([c for c in columns if "ustomerId" not in c["path"]]) is None
+
+
+RUNS = [
+    {"engine": "postgres", "job_id": "j_pg_run"},
+    {"engine": "mongo", "job_id": "j_mongo_run"},
+    {"engine": "oracle", "job_id": "j_oracle_run"},
+]
+PATHS = {"postgres": "$.customer_id", "mongo": "$.customerId", "oracle": "$.CUSTOMER_ID"}
+
+
+def test_consistency_pairs_are_one_per_s6_job_anchored_on_the_last_submitted() -> None:
+    assert e2e_demo.consistency_pairs(RUNS, PATHS) == [
+        {"job_id": "j_oracle_run", "path": "$.CUSTOMER_ID"},
+        {"job_id": "j_mongo_run", "path": "$.customerId"},
+        {"job_id": "j_pg_run", "path": "$.customer_id"},
+    ]
+    assert e2e_demo.consistency_pairs(RUNS[:2], PATHS) == [  # --skip-oracle
+        {"job_id": "j_mongo_run", "path": "$.customerId"},
+        {"job_id": "j_pg_run", "path": "$.customer_id"},
+    ]
+    with pytest.raises(StepFailed, match="oracle: no customer id column"):
+        e2e_demo.consistency_pairs(RUNS, {k: v for k, v in PATHS.items() if k != "oracle"})
+
+
+def _check_result(job_ids: list[str]) -> dict[str, Any]:
+    n = len(job_ids)
+    return {
+        "members": [{"engine": "x", "job_id": j, "form": "numeric", "path": "$.p"} for j in job_ids],
+        "pairs": [
+            {"left": i, "right": k, "checked": 500, "matched": 500, "coverage": 1.0, "consistent": True}
+            for i in range(n)
+            for k in range(i + 1, n)
+        ],
+        "sampled": 500,
+        "all_members_matched": 500,
+        "consistent_pairs": n * (n - 1) // 2,
+        "total_pairs": n * (n - 1) // 2,
+        "passed": True,
+    }  # fmt: skip
+
+
+def _s7(result: dict[str, Any], *, skip_oracle: bool = False) -> tuple[FakeDps, Any]:
+    c = FakeDps({"/job-groups/grp_demo/consistency-check": result})
+    demo = _demo(c, skip_oracle=skip_oracle)
+    demo.ctx["runs"] = RUNS[:2] if skip_oracle else RUNS
+    demo.ctx["join_paths"] = PATHS
+    return c, demo
+
+
+@pytest.mark.parametrize("skip_oracle", [False, True])
+def test_s7_posts_this_runs_jobs_and_passes_when_the_check_joined_them(skip_oracle: bool) -> None:
+    runs = RUNS[:2] if skip_oracle else RUNS
+    c, demo = _s7(_check_result([r["job_id"] for r in reversed(runs)]), skip_oracle=skip_oracle)
+    facts, _detail = demo.s7()
+    (path, body), = c.sent  # fmt: skip
+    assert path == "/job-groups/grp_demo/consistency-check"
+    assert body == {"pairs": e2e_demo.consistency_pairs(runs, PATHS), "sample": 500}
+    assert sorted(m["job_id"] for m in facts["members"]) == sorted(r["job_id"] for r in runs)
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        pytest.param(["j_oracle_old", "j_mongo_run", "j_pg_run"], id="an older run of the group"),
+        pytest.param(["j_mongo_run", "j_pg_run"], id="a member missing"),
+        pytest.param(
+            ["j_oracle_old", "j_oracle_run", "j_mongo_run", "j_pg_run"], id="one too many"
+        ),
+    ],
+)
+def test_s7_fails_when_the_check_did_not_join_exactly_this_runs_jobs(members: list[str]) -> None:
+    _c, demo = _s7(_check_result(members))
+    with pytest.raises(StepFailed, match="this run's S6 jobs"):
+        demo.s7()
+
+
+# -- the driver: any other exception of a step is an ERROR (review S6b r1 N1) ---------------------
+
+
+def test_an_unforeseen_exception_is_a_value_free_error_and_the_report_is_still_written() -> None:
+    class TimeoutError(Exception):  # noqa: A001 - Playwright's own name, not the builtin
+        pass
+
+    results = run_steps(
+        [
+            ("S11", "admin", _step()),
+            ("S12", "walk", _raise(TimeoutError("waiting for 'main h1' with text Ananya"))),
+        ],
+        echo=lambda _line: None,
+    )
+    assert [r.status for r in results] == ["PASS", "ERROR"]
+    assert results[1].detail == "TimeoutError"

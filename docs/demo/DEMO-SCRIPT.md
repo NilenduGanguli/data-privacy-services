@@ -319,5 +319,6 @@ rotated key is refused.
 - `python tools/demo_seed.py --reset-jobs` cancels the tenant's unfinished jobs, sets its retention to one
   day, runs retention (`POST /admin/retention/run`, waiting for its audit row) and sets retention back to
   thirty days. Retention removes only jobs older than a day (its floor), so a rehearsal from the same day
-  stays listed; that is harmless: the consistency check uses the newest job per target.
+  stays listed; that is harmless: `e2e_demo.py` checks the consistency of its own run's jobs, and the
+  console's check uses the newest job per target.
 - For a clean slate: `docker compose --profile full down -v`, then the "Before the room" commands again.
