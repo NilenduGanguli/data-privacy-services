@@ -2,9 +2,9 @@
 
 Adapted to the merged code (M5 plan Task 0, finish stage): a name that moved is listed where it
 lives now, never dropped — ``validate_run`` lives in ``dps.layers.connectors.targets`` (M2 as built,
-contract §5.3). M4 (the UI scanner) merges after this test: its names are listed in
-:data:`M4_SURFACE` / :data:`M4_ROUTES` and expected missing until then (strict ``xfail``), so the
-M4 merge has to move them into :data:`SURFACE` / :data:`ROUTES` instead of losing them.
+contract §5.3). M4 (the UI scanner) merged into ``fsec`` after this test was written (2026-10-15):
+its names, once a strict ``xfail`` that waited for that merge, are part of :data:`SURFACE` and
+:data:`ROUTES` now (contract §3.5 roles and modules, §9 scan routes).
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from __future__ import annotations
 import importlib
 import inspect
 
-import pytest
 from fastapi.routing import iter_route_contexts
 
 SURFACE: dict[str, tuple[str, ...]] = {
@@ -123,6 +122,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
         "ConnectionSpec",
         "TargetSpec",
         "SpecError",
+        "ScanSpec",  # M4 (contract §9)
     ),
     # moved (M2 as built): validation of a run lives beside the write-mode rules it applies
     "dps.layers.connectors.targets": ("validate_run",),
@@ -152,11 +152,12 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "dps.layers.connectors.jobs_run": ("prepare", "run_partition", "finalize"),
     "dps.layers.connectors.registry": ("open_connector",),
     "dps.layers.api.errors": ("DpsHttpError",),
+    # M4 (contract §3.5, §9): the browser-worker role, the scan handlers and the scan spec
+    "dps.browser_worker": ("build_consumer", "amain", "main"),
+    "dps.layers.scanner": ("scan_job", "scan_finalize_job", "open_runtime"),
+    "dps.layers.scanner.crawler": ("ScanRunner",),
+    "dps.layers.scanner.classify": ("classify_field",),
 }
-
-#: M4's surface (contract §3.5, §9): absent until the ``m4`` lane is merged (see the module doc).
-M4_SURFACE: dict[str, tuple[str, ...]] = {"dps.layers.scanner": ("scan_job",)}
-M4_ROUTES: tuple[str, ...] = ("/api/v1/scans",)
 
 # Names the contract places in a section rather than a file: they must exist in ONE of these
 # modules. M5 imports them from the first module listed; if Task 0 finds them only in the second,
@@ -216,6 +217,16 @@ ROUTES: tuple[str, ...] = (
     "/api/v1/connections",
     "/api/v1/policies/test-recognizer",
     "/api/v1/entities",
+    # M4 (contract §9): the scans API
+    "/api/v1/scans",
+    "/api/v1/scans/{scan_id}",
+    "/api/v1/scans/{scan_id}/pages",
+    "/api/v1/scans/{scan_id}/pages/{page_no}",
+    "/api/v1/scans/{scan_id}/events",
+    "/api/v1/scans/{scan_id}/inventory",
+    "/api/v1/scans/{scan_id}/export",
+    "/api/v1/scans/{scan_id}/cancel",
+    "/api/v1/scans/personas/preview",
 )
 
 
@@ -285,14 +296,3 @@ def test_routes_m5_extends_exist() -> None:
     paths = _route_paths()
     missing = [path for path in ROUTES if path not in paths]
     assert missing == [], f"routes missing (path parameter names may differ): {missing}"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="M4 (UI scanner) is not merged yet; at the M4 merge move M4_SURFACE and M4_ROUTES "
-    "into SURFACE and ROUTES and delete this test",
-)
-def test_m4_surface_lands_with_the_m4_merge() -> None:
-    paths = _route_paths()
-    missing = _missing(M4_SURFACE) + [path for path in M4_ROUTES if path not in paths]
-    assert missing == [], "M4 surface missing: " + ", ".join(missing)
