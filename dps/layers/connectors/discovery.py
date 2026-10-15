@@ -35,6 +35,19 @@ the length (``length_kept``); otherwise the column keeps the policy's method und
 ``length_overflow``, a decision for the reviewer, and an In place or same-table Append run is
 refused at submission until the method is changed (``targets.validate_run``).
 
+**T3 metadata labelling** (M5 Task 8B, spec §5.3; opt-in: the policy lists ``llm_label`` in
+``detect.tiers`` and a real LLM provider is configured). The columns T0–T2 left without an entity
+— not a key, not a row locator, binary data or an ObjectId — are labelled by the LLM gateway from
+value-free metadata only: the column's (leaf) name, its declared type, up to three value shapes,
+its null rate and distinct ratio, its kind and the table's name — never a sampled value, which is
+in memory only and is checked against every prompt before it is sent (the module's leak guard,
+then the gateway's egress verifier). Per column, never per row; at most
+``DPS_LLM_LABEL_MAX_FIELDS`` columns per call. A verdict at ``DPS_LLM_LABEL_MIN_CONFIDENCE`` or
+more sets the column's entity with its confidence capped at 0.85 (T3 never outranks a checksum)
+and below the policy's ``min_score`` changes nothing; the detector list gains ``llm_label`` and the
+suggested methods are recomputed as for any other classification — the reviewer sees and can
+override it as usual. The job records the calls in ``progress.metrics.llm``.
+
 Only value **shapes** (``Xxxxx Xxxxxxx``, ``9999 9999``) are kept; the sample never leaves the
 worker and is dropped as soon as the snapshot is built. Errors carry codes only.
 """
@@ -46,7 +59,7 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
 
@@ -54,6 +67,15 @@ from dps import db, jobs
 from dps.connections import ConnectionStoreError, get_connection, load_credentials
 from dps.engine.batch import KEYLESS_METHODS
 from dps.engine.detect.ensemble import Detector
+from dps.engine.detect.llm_label import (
+    LLM_LABEL_TIER,
+    MAX_SHAPES,
+    SCORE_CAP,
+    FieldMeta,
+    gateway_usable,
+    job_llm_metrics,
+    label,
+)
 from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.detect.structural import (
     CHANNEL_NAMES,
@@ -63,7 +85,8 @@ from dps.engine.detect.structural import (
     normalize_key,
 )
 from dps.engine.policy import MethodSpec, Policy
-from dps.engine.service import EngineError
+from dps.engine.service import EngineError, PrivacyEngine
+from dps.engine.shapes import MAX_SHAPE_CHARS
 from dps.engine.synth.keys import LINK_ENTITIES
 from dps.engine.taxonomy import Sensitivity, entity_info
 from dps.engine.transform import fpe
@@ -98,6 +121,7 @@ from dps.secrets import SealError, SecretUnavailable, open_json
 from dps.snapshots import FREE_TEXT, MIXED_PII, content_hash, create_snapshot
 
 if TYPE_CHECKING:
+    from dps.config import Settings
     from dps.worker import HandlerContext
 
 logger = get_logger(__name__)
@@ -492,13 +516,164 @@ def classify_columns(
                 value_entities=sorted(seen),
             )
         )
+    return _with_anchor(out)
+
+
+def _with_anchor(columns: list[ColumnClassification]) -> list[ColumnClassification]:
+    """Mark the anchor (contract §6.2) when no column is one yet: the first column, by
+    ``ANCHOR_ENTITIES`` priority (ties: the key column, then column order), whose entity is an
+    anchor entity. An anchor already chosen is never moved."""
+    if any(c.anchor for c in columns):
+        return columns
     for anchor_entity in ANCHOR_ENTITIES:
-        candidates = [i for i, c in enumerate(out) if c.entity_type == anchor_entity]
+        candidates = [i for i, c in enumerate(columns) if c.entity_type == anchor_entity]
         if candidates:
-            chosen = sorted(candidates, key=lambda i: (not out[i].is_key, i))[0]
-            out[chosen] = out[chosen].model_copy(update={"anchor": True})
+            chosen = sorted(candidates, key=lambda i: (not columns[i].is_key, i))[0]
+            columns[chosen] = columns[chosen].model_copy(update={"anchor": True})
             break
+    return columns
+
+
+# --- T3 metadata labelling of the columns T0–T2 left unclassified (M5 Task 8B) -------------------
+def leftover_columns(
+    columns: Sequence[ColumnClassification], shape: TableShape
+) -> list[tuple[int, ColumnInfo]]:
+    """``(index, column)`` of every column T3 may label: no entity after T0–T2, not a key, not a
+    row locator, binary data or an ObjectId (``docpaths.forced_keep``: never classified by value)."""
+    infos = {c.path: c for c in shape.columns}
+    out: list[tuple[int, ColumnInfo]] = []
+    for index, col in enumerate(columns):
+        info = infos.get(col.path)
+        if info is None or col.entity_type is not None or col.is_key or info.is_key:
+            continue
+        if docpaths.forced_keep(info):
+            continue
+        out.append((index, info))
     return out
+
+
+def column_meta(
+    index: int, col: ColumnClassification, info: ColumnInfo, shape: TableShape
+) -> FieldMeta:
+    """What the model may learn about one column: its leaf name, declared type, value shapes,
+    kind, null rate, distinct ratio and table name — never a value (spec §5.3)."""
+    leaf, _ = _leaf_and_parent(info)
+    shapes: list[str] = []
+    for s in col.shapes:  # discovery's shapes may end in an ellipsis after 24 characters
+        cut = s[:MAX_SHAPE_CHARS]
+        if cut and cut not in shapes:
+            shapes.append(cut)
+    hints: dict[str, Any] = {
+        "kind": col.kind,
+        "null_rate": round(col.null_rate, 3),
+        "distinct_ratio": round(col.distinct_ratio, 3),
+        "table": shape.object.name,
+    }
+    return FieldMeta(
+        ref=f"col:{index}",
+        name=leaf,
+        data_type=col.data_type,
+        shapes=shapes[:MAX_SHAPES],
+        hints=hints,
+    )
+
+
+async def label_leftover_columns(
+    columns: list[ColumnClassification],
+    shape: TableShape,
+    rows: list[Row],
+    *,
+    policy: Policy,
+    engine: PrivacyEngine,
+    settings: Settings,
+) -> tuple[list[ColumnClassification], int | None]:
+    """T3 for the columns :func:`classify_columns` left unclassified (see the module docstring).
+
+    Returns the columns — a labelled one replaced, every other unchanged — and the labelling calls
+    made: ``None`` when the policy does not list ``llm_label`` (nothing was requested), ``0`` when it
+    does but no call was made (a stub or unconfigured gateway, no leftover column, a prompt the
+    leak guard or the egress verifier stopped). The sampled values of the leftover columns are
+    the ``protected`` originals of every prompt; they stay in memory.
+    """
+    if LLM_LABEL_TIER not in policy.detect.tiers:
+        return columns, None
+    candidates = leftover_columns(columns, shape)
+    if not candidates or not gateway_usable(engine.gateway):
+        return columns, 0
+    values: dict[int, list[str]] = {}
+    protected: set[str] = set()
+    metas: list[FieldMeta] = []
+    for index, info in candidates:
+        texts = [
+            t for t in (to_engine_text(v, info) for v in docpaths.column_values(rows, info)) if t
+        ]
+        values[index] = texts
+        protected.update(texts)
+        metas.append(column_meta(index, columns[index], info, shape))
+    per_call = settings.llm_label_max_fields
+    infos = dict(candidates)
+    out = list(columns)
+    calls = 0
+    for start in range(0, len(metas), per_call):
+        outcome = await label(
+            metas[start : start + per_call],
+            gateway=engine.gateway,
+            settings=settings,
+            protected=sorted(protected),
+        )
+        calls += outcome.llm_calls
+        for verdict in outcome.verdicts:
+            index = int(verdict.ref.removeprefix("col:"))
+            confidence = round(min(verdict.confidence, SCORE_CAP), 3)
+            if index not in infos or confidence < policy.detect.min_score:
+                continue
+            out[index] = _labelled(
+                out[index],
+                infos[index],
+                verdict.entity_type,
+                confidence,
+                values[index],
+                policy=policy,
+                fpe_enabled=engine.fpe_enabled,
+            )
+    return _with_anchor(out), calls
+
+
+def _labelled(
+    col: ColumnClassification,
+    info: ColumnInfo,
+    entity: str,
+    confidence: float,
+    values: Sequence[str],
+    *,
+    policy: Policy,
+    fpe_enabled: bool,
+) -> ColumnClassification:
+    """``col`` classified ``entity`` by T3: detector ``llm_label``, the taxonomy's sensitivity and
+    the methods M2's :func:`suggest_methods` suggests for any column of that entity."""
+    digit_counts = [len(_DIGITS.findall(v)) for v in values]
+    obf, syn, note = suggest_methods(
+        entity,
+        info,
+        policy=policy,
+        fpe_enabled=fpe_enabled,
+        min_digits=min(digit_counts) if digit_counts else None,
+        text_column=False,
+        values=values,
+    )
+    return col.model_copy(
+        update={
+            "entity_type": entity,
+            "confidence": confidence,
+            "sensitivity": entity_info(entity).sensitivity,
+            "detectors": sorted({*col.detectors, LLM_LABEL_TIER}),
+            "suggested": obf,
+            "method": obf,
+            "synthesize_suggested": syn,
+            "synthesize_method": syn,
+            "type_note": note,
+        }
+    )
 
 
 async def _fail(ctx: HandlerContext, job: ClaimedJob, code: str, message: str) -> None:
@@ -519,6 +694,10 @@ def _has_selection(sel: Selection) -> bool:
 
 async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
     """Sample, classify and store one proposed snapshot per object (values never leave the worker).
+
+    M5 Task 8B: when the policy lists ``llm_label``, the columns T0–T2 left unclassified are
+    labelled from value-free metadata (:func:`label_leftover_columns`) before the snapshot is
+    stored, and ``progress.metrics.llm`` records the calls (:func:`job_llm_metrics`).
 
     Failures end the job with a code (``selection_*``, ``object_not_found``,
     ``secret_unavailable``, ``connection_missing``, ``connection_role``, ``policy_invalid``,
@@ -577,6 +756,11 @@ async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
     engine = cast(Engine, connection.engine)
     connector: Connector | None = None
     snapshot_ids: list[str] = []
+    label_calls: int | None = None  # None: the policy does not ask for T3 labelling
+
+    def llm_progress() -> dict[str, Any]:
+        return {} if label_calls is None else {"metrics": {"llm": job_llm_metrics(label_calls)}}
+
     try:
         connector = await open_connector(
             connection,
@@ -601,6 +785,11 @@ async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
                 detector=ctx.engine.detector(policy, locale),
                 fpe_enabled=ctx.engine.fpe_enabled,
             )
+            columns, calls = await label_leftover_columns(
+                columns, shape, rows, policy=policy, engine=ctx.engine, settings=ctx.settings
+            )
+            if calls is not None:
+                label_calls = (label_calls or 0) + calls
             sampled = len(rows)
             del rows
             snapshot = ClassificationSnapshot(
@@ -633,6 +822,7 @@ async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
                 progress={
                     "snapshot_ids": snapshot_ids,
                     "stage": f"{index + 1}/{len(spec.objects)} objects",
+                    **llm_progress(),
                 },
             )
             if not still_ours:
@@ -642,7 +832,7 @@ async def discover_job(ctx: HandlerContext, job: ClaimedJob) -> None:
             job.id,
             phase=JobPhase.discover,
             state=JobState.succeeded,
-            progress={"outcome": "succeeded", "snapshot_ids": snapshot_ids},
+            progress={"outcome": "succeeded", "snapshot_ids": snapshot_ids, **llm_progress()},
             purge_secret=True,
         )
         logger.info("discover_done", job_id=job.id, count=len(snapshot_ids))

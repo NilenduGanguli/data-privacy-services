@@ -255,17 +255,25 @@ class DbScanSink:
         )
 
     async def progress(self, progress: dict[str, Any]) -> bool:
-        """A fenced progress write; ``False`` = the lease is gone (canceled or reaped)."""
+        """A fenced progress write; ``False`` = the lease is gone (canceled or reaped). ``llm``
+        (M5 Task 8B, when T3 labelling was asked for) becomes ``progress.metrics.llm``."""
+        llm = progress.get("llm")
+        written = JobProgress(
+            pages=int(progress.get("pages", 0)),
+            fields=int(progress.get("fields", 0)),
+            blocked_requests=int(progress.get("blocked_requests", 0)),
+            metrics={"llm": dict(llm)} if isinstance(llm, dict) else {},
+        ).model_dump(
+            mode="json",
+            include={"pages", "fields", "blocked_requests"}
+            | ({"metrics"} if isinstance(llm, dict) else set()),
+        )
         return await jobs.advance_job(
             self.ctx.worker_id,
             self.job.id,
             phase=JobPhase.scan,
             state=JobState.running,
-            progress=JobProgress(
-                pages=int(progress.get("pages", 0)),
-                fields=int(progress.get("fields", 0)),
-                blocked_requests=int(progress.get("blocked_requests", 0)),
-            ).model_dump(mode="json", include={"pages", "fields", "blocked_requests"}),
+            progress=written,
         )
 
     async def audit_navigation(self, *, page_no: int, outcome: str) -> None:
@@ -453,15 +461,18 @@ async def finalize_scan(
         evidence_id, policy_name, stored = written
         if stored is not None and stored.outcome in ("succeeded", "failed", "canceled"):
             result = stored.outcome  # type: ignore[assignment]
+    llm = outcome.llm if outcome is not None and isinstance(outcome.llm, dict) else None
     progress = JobProgress(
         outcome=result,
         pages=int(counts["pages_visited"]),
         fields=int(counts["fields"]),
         blocked_requests=sum((counts["blocked"] or {}).values()),
         evidence_id=evidence_id,
+        metrics={"llm": dict(llm)} if llm is not None else {},  # M5 Task 8B (T3 labelling)
     ).model_dump(
         mode="json",
-        include={"outcome", "stage", "pages", "fields", "blocked_requests", "evidence_id"},
+        include={"outcome", "stage", "pages", "fields", "blocked_requests", "evidence_id"}
+        | ({"metrics"} if llm is not None else set()),
     )
     code = errors[0]["code"] if errors and result == "failed" else None
     if not await jobs.advance_job(

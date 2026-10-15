@@ -2,7 +2,9 @@
 the request guard and its scope proxy installed before the first page exists. Every page is
 processed in fresh tabs:
 
-1. visit → extract → classify → risk flags → original and annotated screenshots (masked);
+1. visit → extract → classify (and, when the policy opts in, T3 metadata labelling of the fields
+   left unclassified: one value-free LLM call per page, M5 Task 8B) → risk flags → original and
+   annotated screenshots (masked);
 2. parallel view: fill with the display persona (synthesize) and with tokens of it (obfuscate),
    each in a fresh tab armed before the first value is set and closed after its screenshot;
 3. an obfuscated capture when the page renders personal data or arrived pre-filled;
@@ -45,6 +47,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from dps.config import Settings
+from dps.engine.detect.llm_label import LLM_LABEL_TIER, gateway_usable, job_llm_metrics
 from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.service import PrivacyEngine
 from dps.engine.synth.surrogates import seed_bytes
@@ -61,6 +64,8 @@ from dps.layers.scanner.classify import (
     classify_field,
     classify_fields,
     classify_rendered,
+    label_leftover_fields,
+    page_protected,
     redact_text,
     sensitive_prefilled,
     value_classifier,
@@ -223,6 +228,9 @@ class ScanRunner:
             persona_no=self.display,
         )
         self.outcome = RunOutcome()
+        #: T3 metadata labelling is asked for (M5 Task 8B); the calls it made so far
+        self._t3 = LLM_LABEL_TIER in runtime.policy.detect.tiers
+        self._label_calls = 0
         self.frontier: deque[Target] = deque()
         self.guard: ScanGuard | None = None
         self.context: BrowserContext | None = None
@@ -340,6 +348,7 @@ class ScanRunner:
         finally:
             await close_scan_context(self.context, self.guard)  # never context.close() alone
             self.outcome.websockets_closed = self.guard.websockets_closed
+            self.outcome.llm = self._llm_figures()
         blocked = self.guard.drain_blocked()
         if self.outcome.error_code is None:
             self._blocked_events(blocked)
@@ -579,6 +588,59 @@ class ScanRunner:
             snap.fields, detector=self.detector, min_score=self.rt.policy.detect.min_score
         )
 
+    def _llm_figures(self) -> dict[str, int] | None:
+        """``progress.metrics.llm`` of this scan (``None`` when T3 was not asked for)."""
+        return job_llm_metrics(self._label_calls) if self._t3 else None
+
+    async def _labelled(
+        self,
+        snap: PageSnapshot,
+        classes: dict[str, FieldClassification],
+        rendered: list[RenderedFinding],
+    ) -> dict[str, FieldClassification]:
+        """T3 metadata labelling of the fields the classifiers left without an entity (M5 Task
+        8B): one value-free call per page when the policy opts in and a real LLM provider is
+        configured; the page's own values (:func:`~dps.layers.scanner.classify.page_protected`)
+        stay in this process and are checked against the prompt before it leaves."""
+        if not self._t3 or not gateway_usable(self.engine.gateway):
+            return classes
+        labelled, outcome = await label_leftover_fields(
+            snap.fields,
+            classes,
+            gateway=self.engine.gateway,
+            settings=self.s,
+            policy=self.rt.policy,
+            detector=self.detector,
+            protected=page_protected(snap, detector=self.detector, rendered=rendered),
+        )
+        if outcome is not None:
+            self._label_calls += outcome.llm_calls
+        return labelled
+
+    @staticmethod
+    def _with_labels(
+        classes: dict[str, FieldClassification],
+        snap: PageSnapshot,
+        base: PageSnapshot,
+        labelled: dict[str, FieldClassification],
+    ) -> dict[str, FieldClassification]:
+        """``classes`` of a re-extracted tab with the page's T3 labels carried over to the fields
+        that are the same field as in the first visit (same key and signature), so every capture
+        of the page masks what the inventory says is personal."""
+        expected = {f.key: _signature(f) for f in base.fields}
+        out = dict(classes)
+        for f in snap.fields:
+            label = labelled.get(f.key)
+            current = out.get(f.key)
+            if (
+                label is not None
+                and LLM_LABEL_TIER in label.detectors
+                and (current is None or current.entity_type is None)
+                and expected.get(f.key) == _signature(f)
+            ):
+                out[f.key] = label
+        return out
+
     async def _pipeline(
         self, t: Target, page: Page, response: Response | None, record: PageRecord
     ) -> list[FieldRecord]:
@@ -608,9 +670,9 @@ class ScanRunner:
             return []
         scope = self.rt.spec.scope
         snap, frames = await self._extract(page)
-        classes = self._classify(snap)
-        plans = {f.key: plan_field(f, classes[f.key]) for f in snap.fields}
         rendered = classify_rendered(snap.texts, detector=self.detector)
+        classes = await self._labelled(snap, self._classify(snap), rendered)
+        plans = {f.key: plan_field(f, classes[f.key]) for f in snap.fields}
         prefilled = sensitive_prefilled(snap.fields, classes, self.detector)
         external = [
             u
@@ -656,7 +718,7 @@ class ScanRunner:
                 if done is not None:
                     fills[mode], results[mode] = done
         if rendered or prefilled:
-            await self._capture(t, record)
+            await self._capture(t, record, snap, classes)
         else:
             record.capture_status = "not_needed"
         if t.depth < self.rt.max_depth:
@@ -853,8 +915,16 @@ class ScanRunner:
             draw_overlays(png, boxes, variant=mode), t.page_no, f"filled_{mode}"
         )
 
-    async def _capture(self, t: Target, record: PageRecord) -> None:
-        """The obfuscated capture of a page that renders personal data or arrived pre-filled."""
+    async def _capture(
+        self,
+        t: Target,
+        record: PageRecord,
+        base: PageSnapshot,
+        labelled: dict[str, FieldClassification],
+    ) -> None:
+        """The obfuscated capture of a page that renders personal data or arrived pre-filled
+        (``base``/``labelled``: the first visit's snapshot and classifications, whose T3 labels
+        carry over)."""
         try:
             page, _ = await self._open(t)
         except _NavFailed as exc:
@@ -863,7 +933,7 @@ class ScanRunner:
             return
         try:
             snap, frames = await self._extract(page)
-            classes = self._classify(snap)
+            classes = self._with_labels(self._classify(snap), snap, base, labelled)
             result = await obfuscated_capture(
                 page,
                 frames,
@@ -1049,12 +1119,14 @@ class ScanRunner:
             fields=len(fields),
             blocked=self._guard.blocked_total,
         )
-        ok = await self.sink.progress(
-            {
-                "pages": self.outcome.pages_visited,
-                "fields": self.outcome.fields,
-                "blocked_requests": self._guard.blocked_total,
-            }
-        )
+        progress: dict[str, Any] = {
+            "pages": self.outcome.pages_visited,
+            "fields": self.outcome.fields,
+            "blocked_requests": self._guard.blocked_total,
+        }
+        llm = self._llm_figures()
+        if llm is not None:
+            progress["llm"] = llm
+        ok = await self.sink.progress(progress)
         if not ok:
             raise LeaseLost("lease_lost")

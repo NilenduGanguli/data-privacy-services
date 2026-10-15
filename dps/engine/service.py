@@ -22,6 +22,7 @@ from dps.engine.detect.custom import custom_detector_from
 from dps.engine.detect.ensemble import Detector, DetectorConfig
 from dps.engine.detect.llm_label import (
     LLM_LABEL_TIER,
+    SCORE_CAP,
     LabelVerdict,
     gateway_usable,
     label,
@@ -182,8 +183,9 @@ class RevealResponse(BaseModel):
     report: Report
 
 
-#: T3 never outranks a checksum: a label's score is capped here (spec §5.3).
-T3_SCORE_CAP = 0.85
+#: T3 never outranks a checksum: a label's score is capped here (spec §5.3); the cap lives with
+#: the T3 module, which L2 discovery and L3 classification share (M5 Task 8B).
+T3_SCORE_CAP = SCORE_CAP
 
 
 class Leftovers(list[Finding]):

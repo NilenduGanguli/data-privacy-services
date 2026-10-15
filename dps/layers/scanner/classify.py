@@ -14,6 +14,20 @@ or alternations in all — so a hostile page cannot stall the worker with catast
 backtracking. Inputs tested against a compiled pattern are synthetic and at most
 :data:`MAX_PATTERN_INPUT` characters long (:func:`pattern_accepts`).
 
+**T3 metadata labelling** (M5 Task 8B, spec §5.3 and §8; opt-in: the policy lists ``llm_label``
+in ``detect.tiers`` and a real LLM provider is configured). After every field of a page is
+classified, the fields left without an entity — not a password, hidden or file input — are
+labelled by the LLM gateway in one call per page (at most ``DPS_LLM_LABEL_MAX_FIELDS``), from
+value-free metadata only: the ``name`` (or ``id``) attribute, the label as the inventory stores it
+(detector-redacted), the placeholder's shape, the element and a known input type, the
+autocomplete token from the fixed dictionary and the ``maxlength``/``pattern``-length/``required``
+hints (:func:`leftover_field_meta`). The page's own values — what its fields hold or show, the
+personal data the detectors find in its text, and every token of its text that holds a digit or
+an ``@`` (:func:`page_protected`) — stay in worker memory and are checked against the prompt
+before it is sent; a page label is metadata and is not protected. A verdict sets the field's
+entity at a confidence capped at 0.85 with ``llm_label`` among its detectors and evidence;
+persona attributes and fill formats then follow as for any other classifier.
+
 Nothing here imports Playwright or Pillow (the API imports this module).
 """
 
@@ -22,11 +36,19 @@ from __future__ import annotations
 import importlib
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from dps.engine.detect.ensemble import Detector
+from dps.engine.detect.llm_label import (
+    LLM_LABEL_TIER,
+    SCORE_CAP,
+    FieldMeta,
+    LabelOutcome,
+    gateway_usable,
+    label,
+)
 from dps.engine.detect.structural import (
     CHANNEL_NAMES,
     MIXED_NAME_SCORE,
@@ -37,8 +59,19 @@ from dps.engine.detect.structural import (
 )
 from dps.engine.findings import Finding
 from dps.engine.taxonomy import Sensitivity, entity_info
-from dps.layers.scanner.models import FieldClassification, FieldFacts, RenderedFinding, TextFacts
+from dps.layers.scanner.models import (
+    FieldClassification,
+    FieldFacts,
+    PageSnapshot,
+    RenderedFinding,
+    TextFacts,
+)
 from dps.snapshots import FREE_TEXT, MIXED_PII
+
+if TYPE_CHECKING:
+    from dps.config import Settings
+    from dps.engine.policy import Policy
+    from dps.llm.gateway import LlmGateway
 
 AutocompleteState = Literal["absent", "on", "off", "named", "unknown"]
 
@@ -591,3 +624,164 @@ def sensitive_prefilled(
         if entity is not None:
             out.append((f, entity))
     return out
+
+
+# --- T3 metadata labelling of the fields T0–T2 left unclassified (M5 Task 8B) --------------------
+#: Input types T3 never labels: a credential's value is never read, a hidden input is not shown and
+#: a file input holds no text.
+UNLABELLED_TYPES = frozenset({"password", "hidden", "file"})
+#: The ``type`` values a field record may name in a prompt; any other (page-chosen) value is sent
+#: as ``text``, which is what a browser makes of it.
+_PROMPT_TYPES = frozenset(
+    {
+        "text",
+        "email",
+        "tel",
+        "number",
+        "url",
+        "search",
+        "date",
+        "datetime-local",
+        "month",
+        "week",
+        "time",
+        "color",
+        "range",
+        "checkbox",
+        "radio",
+        "select-one",
+        "select-multiple",
+        "textarea",
+    }
+)
+#: A whitespace-delimited token of page text that holds a digit or an ``@``: an identifier, a
+#: number, a date or an address no detector may name — a value, whatever words surround it.
+_VALUE_TOKEN = re.compile(r"\S*[\d@]\S*")
+
+
+def field_ref(facts: FieldFacts) -> str:
+    """A field's handle in a labelling prompt and its verdict: ``field:<form>/<field_no>``."""
+    return f"field:{facts.form_index}/{facts.field_no}"
+
+
+def _prompt_autocomplete(attr: str | None) -> str:
+    """The autocomplete hint a prompt may carry: a field-name token from the fixed dictionary,
+    ``on`` or ``off``; anything else the page wrote is left out (``""``)."""
+    token, state = autocomplete_token(attr)
+    if token is not None:
+        return token
+    return state if state in ("on", "off") else ""
+
+
+def leftover_field_meta(
+    fields: Sequence[FieldFacts],
+    classes: Mapping[str, FieldClassification],
+    *,
+    detector: Detector,
+) -> list[FieldMeta]:
+    """One value-free :class:`~dps.engine.detect.llm_label.FieldMeta` per field T3 may label: no
+    entity after T0–T2, not a password, hidden or file input, and something to label it by (a
+    name or id, a label or a placeholder). Never a value: the label is redacted as the inventory
+    stores it, the placeholder is sent as its shape only."""
+    out: list[FieldMeta] = []
+    for f in fields:
+        cls = classes.get(f.key)
+        if cls is None or cls.entity_type is not None or f.input_type in UNLABELLED_TYPES:
+            continue
+        name = f.name or f.id or ""
+        label_text = redact_text(f.label, detector) if f.label else None
+        shape = placeholder_shape(f.placeholder)
+        if not (name or label_text or shape):
+            continue
+        kind = f.input_type if f.input_type in _PROMPT_TYPES else "text"
+        out.append(
+            FieldMeta(
+                ref=field_ref(f),
+                name=name,
+                data_type=f"{f.tag}[type={kind}]",
+                label=label_text or None,
+                shapes=[shape] if shape else [],
+                hints={
+                    "autocomplete": _prompt_autocomplete(f.autocomplete),
+                    "maxlength": f.maxlength or 0,
+                    "pattern_len": len(f.pattern or ""),
+                    "required": f.required,
+                },
+            )
+        )
+    return out
+
+
+def page_protected(
+    snap: PageSnapshot, *, detector: Detector, rendered: list[RenderedFinding] | None = None
+) -> list[str]:
+    """The page's own values a labelling prompt must never carry (held in worker memory for this
+    page only): what every field holds or shows (a pre-filled or hidden value, the selected
+    option's value and text when it has a value), the personal data the detectors find in rendered
+    text (spans, and whole texts under a label hint), and every token of rendered or option text
+    that holds a digit or an ``@``. Words of page text are metadata, not values: a label rendered
+    on the page (``Ref code``) or a placeholder option (``Choose…``) is not protected, so the
+    prompt may name it — and the gateway's egress verifier, which looks for protected values in
+    its fixed instructions too, is not handed common words that are no value. ``rendered``: the
+    page's :func:`classify_rendered` findings when the caller has them (else computed here)."""
+    out: set[str] = set()
+    token_sources: list[str] = [t.text for t in snap.texts]
+    for f in snap.fields:
+        out.update(v for v in (f.value, shown_text(f)) if v)
+        for option in f.options:
+            # a selected option is a value when it has one (as ``shown_text`` reads it): a
+            # placeholder option ("Choose…", value "") is page text, not a value
+            if option.selected and option.value.strip():
+                out.update(v for v in (option.value, option.text, option.label) if v)
+            token_sources += [option.value, option.text, option.label]
+    by_node = {(t.frame_index, t.i): t.text for t in snap.texts}
+    found = rendered if rendered is not None else classify_rendered(snap.texts, detector=detector)
+    for r in found:
+        text = by_node.get((r.frame_index, r.i), "")
+        out.add(text[r.start : r.end])
+    for text in token_sources:
+        out.update(_VALUE_TOKEN.findall(text or ""))
+    return sorted(v for v in out if v.strip())
+
+
+async def label_leftover_fields(
+    fields: Sequence[FieldFacts],
+    classes: Mapping[str, FieldClassification],
+    *,
+    gateway: LlmGateway | None,
+    settings: Settings,
+    policy: Policy,
+    detector: Detector,
+    protected: Sequence[str],
+) -> tuple[dict[str, FieldClassification], LabelOutcome | None]:
+    """T3 for the fields of one page that T0–T2 left unclassified (module docstring): one call.
+
+    Returns the classifications by field key — a labelled field replaced, every other unchanged —
+    and the call's :class:`~dps.engine.detect.llm_label.LabelOutcome`: ``None`` when the policy
+    does not list ``llm_label`` (nothing requested); without a usable gateway or a leftover field,
+    an empty outcome (no call). ``protected``: :func:`page_protected` of the page.
+    """
+    labelled = dict(classes)
+    if LLM_LABEL_TIER not in policy.detect.tiers:
+        return labelled, None
+    metas = (
+        leftover_field_meta(fields, classes, detector=detector) if gateway_usable(gateway) else []
+    )
+    if not metas:
+        return labelled, LabelOutcome()
+    outcome = await label(metas, gateway=gateway, settings=settings, protected=protected)
+    keys = {field_ref(f): f.key for f in fields}
+    for verdict in outcome.verdicts:
+        key = keys.get(verdict.ref)
+        confidence = min(SCORE_CAP, math.floor(verdict.confidence * 100) / 100)
+        if key is None or key not in labelled or confidence < policy.detect.min_score:
+            continue
+        before = labelled[key]
+        labelled[key] = FieldClassification(
+            entity_type=verdict.entity_type,
+            sensitivity=str(entity_info(verdict.entity_type).sensitivity),
+            confidence=confidence,
+            detectors=sorted({*before.detectors, LLM_LABEL_TIER}),
+            evidence=[*before.evidence, LLM_LABEL_TIER],
+        )
+    return labelled, outcome

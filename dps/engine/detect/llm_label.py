@@ -23,6 +23,12 @@ Rules (:func:`label_fields`):
   ``llm_label_min_confidence``; ``LlmUnavailable`` / ``LlmCallError`` → no verdicts.
 
 Nothing is logged but counts (``fields``, ``verdicts``) and the fallback reason.
+
+M5 Task 8B wires the same module into L2 discovery (``discovery.label_leftover_columns``: the
+columns T0–T2 left unclassified, by name, declared type, value shapes, rates and table) and L3
+classification (``classify.label_leftover_fields``: the fields left unclassified, by name, redacted
+label, placeholder shape and attribute hints). A label's score is capped at :data:`SCORE_CAP` in
+every layer, and a job or scan records :func:`job_llm_metrics` in ``progress.metrics.llm``.
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ from dps.engine.synth.llm_text import LeakToModelError, assert_placeholder_safe
 from dps.engine.taxonomy import TAXONOMY, is_builtin_entity
 from dps.llm.egress import LlmEgressBlocked
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmUnavailable
-from dps.observability import LLM_LABEL_FIELDS, get_logger
+from dps.observability import LLM_LABEL_FIELDS, LLM_STATS, LlmStats, get_logger
 
 logger = get_logger(__name__)
 
@@ -51,6 +57,8 @@ logger = get_logger(__name__)
 LABEL_PURPOSE = "label"
 #: The tier name a policy lists in ``detect.tiers`` to opt in.
 LLM_LABEL_TIER = "llm_label"
+#: T3 never outranks a checksum: a label's score is capped here in every layer (spec §5.3).
+SCORE_CAP = 0.85
 MAX_SHAPES = 3
 _INDEX = re.compile(r"\[\d+\]")
 #: A field name sent as is: identifier-like (as M1 Task 12's sample keys), no run of four digits.
@@ -313,3 +321,19 @@ async def label_fields(
     """
     outcome = await label(fields, gateway=gateway, settings=settings, protected=protected)
     return outcome.verdicts
+
+
+def job_llm_metrics(calls: int, stats: LlmStats | None = None) -> dict[str, int]:
+    """``progress.metrics.llm`` of a job or a scan (M5 Task 8B; Task 16B's roll-ups read it).
+
+    ``calls``: the labelling calls the job made. ``raw_values`` and ``blocked`` come from the LLM
+    figures of the handler's task (``stats``, else the bound ``LLM_STATS``: ``Consumer._guard``
+    binds a fresh one per handler task) — the raw values a sent prompt carried (``warn`` mode
+    only) and the prompts the egress verifier blocked. Counts only.
+    """
+    bound = stats if stats is not None else LLM_STATS.get()
+    return {
+        "calls": int(calls),
+        "raw_values": bound.raw_values if bound is not None else 0,
+        "blocked": bound.blocked if bound is not None else 0,
+    }
