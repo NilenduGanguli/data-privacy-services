@@ -42,13 +42,17 @@ browser-worker is online, a scan of the demo onboarding site (``/apply``, deny
 ``/logout`` and ``/admin``, the mounted demo session, five ``en_IN`` personas) is accepted with key
 and seed, succeeds with classified fields and the expected risk flags, the demo site's
 ``/__received`` counters (non-GET requests, GET-form submissions, ``/logout`` and ``/admin`` hits)
-do not move while ``non_get_allowed`` is 0, the identity page has its four parallel-view
-screenshots and one is served as a PNG, a masked capture is served, the persona export holds none of
-the demo site's customer values, the evidence pack says 0 submissions, and ``/scanner/new`` is
-served. ``DPS_SMOKE_DEMO_URL`` is the demo site as the browser-worker sees it (default
-``http://demo-site:8410``); the script itself reads the counters at ``DPS_TEST_DEMO_SITE`` (default
-``http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}``). ``DPS_SMOKE_SCAN_TIMEOUT`` (default 300 s)
-bounds the scan. Run with ``DPS_SMOKE_M2=off`` unless the ``sources`` profile is up too.
+do not move while ``non_get_allowed`` is 0 — with two positive controls, so that check cannot pass
+unproven: the site served the scan's pages during it (its ``get`` count moved by at least the
+scan's ``pages_visited``: these are the counters of the site the browser-worker scanned) and the
+request guard stopped at least one non-GET request (the pages tried to send) — the identity page
+has its four parallel-view screenshots and one is served as a PNG, a masked capture is served, the
+persona export holds none of the demo site's customer values, the evidence pack says 0
+submissions, and ``/scanner/new`` is served. ``DPS_SMOKE_DEMO_URL`` is the demo site as the
+browser-worker sees it (default ``http://demo-site:8410``); the script itself reads the counters
+at ``DPS_TEST_DEMO_SITE`` (default ``http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}``).
+``DPS_SMOKE_SCAN_TIMEOUT`` (default 300 s) bounds the scan. Run with ``DPS_SMOKE_M2=off`` unless
+the ``sources`` profile is up too.
 ``--m3`` adds seven Oracle + MongoDB checks after the M2 ones; they need the ``oracle`` and
 ``sources`` profiles and the three-engine demo seed (``python tools/seed_sources.py --target all``):
 ``m3 connections`` (the four demo connections of ``tools/m2_api.M3_CONNECTIONS`` created or reused,
@@ -851,12 +855,30 @@ DEMO_VALUES: tuple[str, ...] = tuple(
 #: The demo site's counters that must not move during a scan: every non-GET request, every
 #: GET-form submission, and every hit on the paths the scan denies.
 SITE_COUNTERS = ("non_get", "form_get", "logout_hits", "admin_hits")
+#: The demo site's count of the pages and files it served: it must move during the scan — the
+#: positive control that the counters read here belong to the site the browser-worker scanned.
+SITE_SERVED = "get"
 
 
 def _received(demo: httpx.Client) -> dict[str, int]:
-    """The demo site's ``/__received`` counters (counts only)."""
+    """The demo site's ``/__received`` counters (counts only); ``get`` only where the site counts
+    what it serves (a site without it fails the D4 check instead of passing it unproven)."""
     body = demo.get("/__received").json()
-    return {name: int(body[name]) for name in SITE_COUNTERS}
+    counts = {name: int(body[name]) for name in SITE_COUNTERS}
+    if SITE_SERVED in body:
+        counts[SITE_SERVED] = int(body[SITE_SERVED])
+    return counts
+
+
+def _sends_blocked(blocked: Any) -> int:
+    """The non-GET requests the request guard stopped during the scan (``blocked_requests`` by
+    method): the demo pages' autosave posts and draft flushes, which the scan provokes by
+    filling."""
+    if not isinstance(blocked, dict):
+        return 0
+    return sum(
+        int(n) for method, n in blocked.items() if str(method).upper() not in ("GET", "HEAD")
+    )
 
 
 def _artefact_png(c: httpx.Client, artefact_id: str | None) -> bool:
@@ -937,12 +959,23 @@ def scanner_checks(
         f"{len(wanted - flags)} expected flag kinds missing",
     )
 
+    # D4 with its positive controls: the site the browser-worker scanned served the scan's pages
+    # (at least one GET per visited page — it sends no-store, so every visit fetches its page —
+    # so these are its counters), its pages tried to send (the guard stopped non-GET requests),
+    # and it received nothing — no non-GET request, no GET-form submission, no denied path.
     after = _received(demo)
     moved = {name: after[name] - before[name] for name in SITE_COUNTERS}
+    served = after.get(SITE_SERVED, 0) - before.get(SITE_SERVED, 0)
+    visited = int(s.get("pages_visited") or 0)
+    sends_blocked = _sends_blocked(s.get("blocked_requests"))
     check(
         "no submission reached the site",
-        not any(moved.values()) and s.get("non_get_allowed") == 0,
+        not any(moved.values())
+        and s.get("non_get_allowed") == 0
+        and served >= max(1, visited)
+        and sends_blocked > 0,
         ", ".join(f"{name} +{n}" for name, n in moved.items())
+        + f"; pages served +{served} ({visited} visited); non-GET blocked {sends_blocked}"
         + f"; non_get_allowed {s.get('non_get_allowed')}, blocked {s.get('blocked_requests')}",
     )
 

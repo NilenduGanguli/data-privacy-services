@@ -285,7 +285,8 @@ services:
 
   # The demo onboarding web app (M4): the scan target of the tests, the smoke test and the demo. It
   # counts every non-GET request and GET-form submission it receives (GET /__received), which is how
-  # D4 (nothing is ever submitted) is proven. Dependency-free Node; no build.
+  # D4 (nothing is ever submitted) is proven, and the GETs it served (`get`, the proof's positive
+  # control: these are the counters of the site that was scanned). Dependency-free Node; no build.
   #   docker compose --profile scanner up -d demo-site     # http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}
   demo-site:
     image: node:22-slim
