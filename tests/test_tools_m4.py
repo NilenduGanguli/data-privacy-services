@@ -38,6 +38,7 @@ class Fake:
 
     def __init__(self) -> None:
         self.received = {"non_get": 7, "form_get": 2, "logout_hits": 1, "admin_hits": 1}
+        self.demo_up = True  # False: nothing listens on the demo site's port (no scanner profile)
         self.during_scan: dict[str, int] = {}
         self.browser_ok = True
         self.browser_after = 0  # readiness polls answered "unknown" before the worker shows up
@@ -49,7 +50,11 @@ class Fake:
 
     # -- the demo site --------------------------------------------------------------------------
     def demo(self, request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET" and request.url.path == "/__received"
+        assert request.method == "GET" and request.url.path in ("/__received", "/health")
+        if not self.demo_up:
+            raise httpx.ConnectError("refused", request=request)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(200, json=self.received)
 
     # -- the app --------------------------------------------------------------------------------
@@ -255,6 +260,37 @@ def test_the_scanner_block_follows_the_switch_and_the_stack() -> None:
     for bad in ("yes", "2", "true"):
         with pytest.raises(SystemExit):
             smoke_test.scanner_wanted(bad, up)
+
+
+def _block(fake: Fake, setting: str | None) -> None:
+    app = httpx.Client(base_url="http://app.test", transport=httpx.MockTransport(fake.app))
+    demo = httpx.Client(base_url="http://demo.test", transport=httpx.MockTransport(fake.demo))
+    with app, demo:
+        smoke_test.scanner_block(app, demo, setting, timeout=5.0, interval=0.0, browser_wait=0.0)
+
+
+def test_by_default_the_block_runs_where_the_demo_site_answers(
+    fake: Fake, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _block(fake, None)  # --profile full or scanner: the demo site answers
+    assert names() == SCANNER_CHECKS
+    fake.demo_up = False
+    smoke_test.results.clear()
+    _block(fake, "auto")  # a stack without the scanner profile: a note, no check, no scan
+    assert names() == []
+    assert len(fake.created) == 1
+    assert "note: no demo site answers" in capsys.readouterr().out
+
+
+def test_on_without_a_demo_site_fails_with_a_verdict_not_a_traceback(
+    fake: Fake, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.demo_up = False
+    with pytest.raises(SystemExit) as stop:
+        _block(fake, "on")
+    assert stop.value.code == 1
+    assert names() == ["demo site answers"] and fake.created == []
+    assert "FAIL  demo site answers" in capsys.readouterr().out
 
 
 def test_the_demo_site_probe_reads_its_health_only() -> None:

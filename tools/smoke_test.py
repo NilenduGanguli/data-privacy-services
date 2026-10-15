@@ -509,13 +509,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         m1_checks(c)
 
         with httpx.Client(base_url=DEMO_FROM_HERE, timeout=5.0) as demo:
-            run_scanner, note = scanner_wanted(
-                os.environ.get("DPS_SMOKE_SCANNER"), lambda: demo_answers(demo)
-            )
-            if run_scanner:
-                scanner_checks(c, demo)
-            else:
-                print(note)
+            scanner_block(c, demo, os.environ.get("DPS_SMOKE_SCANNER"))
 
         root = c.get("/")
         check(
@@ -809,6 +803,19 @@ def scanner_wanted(setting: str | None, demo_up: Callable[[], bool]) -> tuple[bo
         f"note: no demo site answers at {DEMO_FROM_HERE}: the UI-scanner checks are skipped "
         "(DPS_SMOKE_SCANNER=on requires them)"
     )
+
+
+def scanner_block(c: httpx.Client, demo: httpx.Client, setting: str | None, **kw: Any) -> None:
+    """The UI-scanner checks as ``DPS_SMOKE_SCANNER`` asks (:func:`scanner_wanted`): skipped with a
+    note, or run (``kw`` goes to :func:`scanner_checks`); under ``on`` a demo site that does not
+    answer is a failed check, not a traceback."""
+    run, note = scanner_wanted(setting, lambda: demo_answers(demo))
+    if not run:
+        print(note)
+        return
+    if not demo_answers(demo):
+        check("demo site answers", False, f"nothing answers /health at {DEMO_FROM_HERE}")
+    scanner_checks(c, demo, **kw)
 
 
 def demo_answers(demo: httpx.Client) -> bool:
