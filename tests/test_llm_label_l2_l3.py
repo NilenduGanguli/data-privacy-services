@@ -26,6 +26,7 @@ from dps.layers.scanner.classify import (
     label_leftover_fields,
     leftover_field_meta,
     page_protected,
+    prompt_label,
 )
 from dps.layers.scanner.models import FieldFacts, OptionFacts, PageSnapshot, TextFacts
 from dps.layers.scanner.personas_fill import plan_field
@@ -387,11 +388,20 @@ def _record_labels_page(*, rendered: bool) -> tuple[list[FieldFacts], PageSnapsh
 
 
 async def _label_record_page(
-    engine: PrivacyEngine, settings: Settings, *, rendered: bool = True
+    engine: PrivacyEngine,
+    settings: Settings,
+    *,
+    rendered: bool = True,
+    min_score: float | None = None,
 ) -> tuple[FakeGateway, dict[str, dict[str, Any]], dict[str, int]]:
     """Label :func:`_record_labels_page` through the real ``complete()`` (``strict``), the provider
-    faked at ``_stellar``: the prompt's entries by field name and the scan's LLM figures."""
+    faked at ``_stellar``: the prompt's entries by field name and the scan's LLM figures.
+    ``min_score``: the policy's ``detect.min_score`` (else the preset's)."""
     policy = t3_policy()
+    if min_score is not None:
+        policy = policy.model_copy(
+            update={"detect": policy.detect.model_copy(update={"min_score": min_score})}
+        )
     detector = engine.detector(policy, "en_IN")
     fields, snap = _record_labels_page(rendered=rendered)
     classes = classify_fields(fields, detector=detector, min_score=policy.detect.min_score)
@@ -437,6 +447,37 @@ async def test_l3_labels_are_value_free_whatever_their_source(rendered: bool) ->
     assert "label" not in sent["ref_txt"] and sent["ref_txt"]["shapes"] == ["99999999999"]
     if rendered:
         assert sent["close_two"]["label"] == "Close loan 99999999999"
+
+
+@pytest.mark.parametrize("min_score", [0.86, 0.9, 1.0])
+async def test_l3_label_names_are_redacted_whatever_the_policy_min_score(min_score: float) -> None:
+    """R2-B1 (S3b review r2): T2 scores a name 0.85 (Presidio's spaCy default, as ``FakeNer``) and
+    a policy's ``detect.min_score`` may be anything up to 1 — the threshold for what a job
+    transforms, never for what a model may read: a label is redacted for a prompt of every span
+    any tier reports, whatever its score. The name never reaches the provider, the label is still
+    sent and the page's call is still made."""
+    settings = _settings()
+    engine = _ner_engine(settings, NOMINEE)
+    _, sent, figures = await _label_record_page(engine, settings, min_score=min_score)
+    assert sent["nominee_ok"]["label"] == "Nominee <PERSON_NAME> agrees"
+    assert figures == {"calls": 1, "raw_values": 0, "blocked": 0}
+
+
+@pytest.mark.parametrize("min_score", [0.0, 0.6, 0.86, 0.9, 1.0])
+def test_prompt_label_is_redacted_recall_first(min_score: float) -> None:
+    """A label taken from the neighbouring cell of a per-record row (``nearest_text``): the name
+    T2 finds is redacted at any policy ``min_score``; the caller's detector keeps its threshold."""
+    engine = _ner_engine(_settings(), NOMINEE)
+    base = t3_policy()
+    policy = base.model_copy(
+        update={"detect": base.detect.model_copy(update={"min_score": min_score})}
+    )
+    detector = engine.detector(policy, "en_IN")
+    f = field_facts(name="sel_a", label=NOMINEE, label_source="nearest_text")
+    assert prompt_label(f, detector) == "<PERSON_NAME>"
+    f = field_facts(name="nominee_ok", label=f"Nominee {NOMINEE} agrees", label_source="title")
+    assert prompt_label(f, detector) == "Nominee <PERSON_NAME> agrees"
+    assert detector.config.min_score == min_score
 
 
 @pytest.mark.parametrize("ner", ["off", "failed_to_load"])

@@ -1705,6 +1705,7 @@ Details: security review §3.25–§3.27, `docs/superpowers/build/M5-DEVIATIONS.
   verifier (`DPS_LLM_EGRESS_CHECK=strict` in staging/prod); `progress.metrics.llm` of the job counts
   the calls. A scanned field's label (page text) goes into the prompt only when the browser-worker
   runs NER (built with `WITH_NER=1`, `DPS_NER_ENABLED` not `false`, `ner` in the policy's tiers),
-  detector-redacted with its digit/`@` tokens as shapes; without NER, fields are labelled by their
+  redacted of every span any detector tier reports — at any score, whatever the policy's
+  `detect.min_score` — with its digit/`@` tokens as shapes; without NER, fields are labelled by their
   name, type, placeholder shape and hints (security review §3.26).
 

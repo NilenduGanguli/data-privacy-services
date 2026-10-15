@@ -21,13 +21,14 @@ labelled by the LLM gateway in one call per page (at most ``DPS_LLM_LABEL_MAX_FI
 value-free metadata only: the ``name`` (or ``id``) attribute, the placeholder's shape, the element
 and a known input type, the autocomplete token from the fixed dictionary, the
 ``maxlength``/``pattern``-length/``required`` hints and — only when the detector runs NER, never
-from the placeholder fallback — the label, detector-redacted with every token that holds a digit
-or an ``@`` as its shape (:func:`prompt_label`, :func:`leftover_field_meta`): a per-record control
-is labelled with its record, from an attribute or rendered text alike. The page's own values —
-what its fields hold or show, the personal data the detectors find in its text, and every token of
-its text that holds a digit or an ``@`` (:func:`page_protected`) — stay in worker memory and are
-checked against the prompt before it is sent; the words of a page label are metadata and are not
-protected. A verdict sets the field's entity at a confidence capped at 0.85 with ``llm_label``
+from the placeholder fallback — the label, redacted of every span any detector tier reports at
+any score (not only those above the policy's ``detect.min_score``) and with every token that
+holds a digit or an ``@`` as its shape (:func:`prompt_label`, :func:`leftover_field_meta`): a
+per-record control is labelled with its record, from an attribute or rendered text alike. The
+page's own values — what its fields hold or show, the personal data the detectors find in its
+text, and every token of its text that holds a digit or an ``@`` (:func:`page_protected`) — stay
+in worker memory and are checked against the prompt before it is sent; the words of a page label
+are metadata and are not protected. A verdict sets the field's entity at a confidence capped at 0.85 with ``llm_label``
 among its detectors and evidence; persona attributes and fill formats then follow as for any other
 classifier.
 
@@ -36,6 +37,7 @@ Nothing here imports Playwright or Pillow (the API imports this module).
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import math
 import re
@@ -664,6 +666,13 @@ _VALUE_TOKEN = re.compile(r"\S*[\d@]\S*")
 #: A tag :func:`redact_text` wrote in place of a detected value (``<PERSON_NAME>``; no built-in
 #: entity type holds a digit, so a page's own ``<A1234567>`` is no tag and is shaped).
 _REDACTION_TAG = re.compile(r"(<[A-Z][A-Z_]*>)")
+#: The score from which a span any tier reports is redacted from a label a T3 prompt carries:
+#: every span, whatever the policy's ``detect.min_score`` (S3b review r2, R2-B1). The policy's
+#: threshold decides what a job transforms, not what a model may read: T2 scores a name 0.85
+#: (Presidio's spaCy default) and a valid policy may ask for up to 1; and a typed hit that wins
+#: over an overlapping NER hit (``resolve_overlaps``) must not then fall below a floor and take
+#: the name's redaction with it. Over-redaction costs label detail only.
+PROMPT_LABEL_MIN_SCORE = 0.0
 
 
 def field_ref(facts: FieldFacts) -> str:
@@ -676,6 +685,15 @@ def ner_runs(detector: Detector) -> bool:
     around it — with a model that loaded (an NER whose model failed to load finds nothing)."""
     ner = detector.ner
     return ner is not None and detector.config.ner_enabled and bool(getattr(ner, "available", True))
+
+
+def _recall_first(detector: Detector) -> Detector:
+    """``detector`` at :data:`PROMPT_LABEL_MIN_SCORE`: the same tiers, NER adapter, locale and
+    custom detectors, every span reported (the caller's detector is left as it was)."""
+    if detector.config.min_score <= PROMPT_LABEL_MIN_SCORE:
+        return detector
+    config = dataclasses.replace(detector.config, min_score=PROMPT_LABEL_MIN_SCORE)
+    return Detector(config, ner=detector.ner, custom=detector.custom)
 
 
 def _value_token_shape(match: re.Match[str]) -> str:
@@ -695,14 +713,16 @@ def prompt_label(facts: FieldFacts, detector: Detector) -> str | None:
 
     * none from the ``placeholder`` fallback: the placeholder is sent as its shape already;
     * none unless the detector runs NER (:func:`ner_runs`): no other tier finds a bare name;
-    * else the label redacted as the inventory stores it (:func:`redact_text`), every token that
-      still holds a digit or an ``@`` (an identifier no detector names) replaced by its shape —
+    * else the label redacted (:func:`redact_text`) recall-first — every span any tier reports,
+      whatever the policy's ``detect.min_score`` (:data:`PROMPT_LABEL_MIN_SCORE`; a name T2 finds
+      is redacted under a policy threshold above its score too) — and every token that still
+      holds a digit or an ``@`` (an identifier no detector names) replaced by its shape —
       ``Close loan 99999999999`` — so a number in a rendered label no longer blocks the page's
       call either (its digits are protected tokens of the page, :func:`page_protected`).
     """
     if not facts.label or facts.label_source == "placeholder" or not ner_runs(detector):
         return None
-    redacted = redact_text(facts.label, detector)
+    redacted = redact_text(facts.label, _recall_first(detector))
     if not redacted or not ner_runs(detector):  # the model failed to load while reading it
         return None
     return _VALUE_TOKEN.sub(_value_token_shape, redacted)

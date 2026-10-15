@@ -482,9 +482,12 @@ at its seam only (`tests/test_llm_label_l2_l3.py`, `tests/scanner/test_crawler_l
     tier finds a bare person's name. Without NER (the default images: `DPS_NER_ENABLED=false`,
     `WITH_NER=0`) the prompt carries no label at all; the field is still labelled by its
     name, type, placeholder shape and hints, in the same one call;
-  - the label is detector-redacted (`<PERSON_NAME>`), then every token that still holds a digit
-    or an `@` is replaced by its shape (`Close loan 99999999999`); only digit-free redaction
-    tags are kept. A number in a rendered label therefore no longer blocks the page's call.
+  - the label is detector-redacted (`<PERSON_NAME>`) **recall-first**: every span any detector
+    tier reports is redacted, at any score — the policy's `detect.min_score` does not apply to a
+    prompt's label (`classify.PROMPT_LABEL_MIN_SCORE = 0`, S3b review r2, R2-B1, below); then
+    every token that still holds a digit or an `@` is replaced by its shape
+    (`Close loan 99999999999`); only digit-free redaction tags are kept. A number in a rendered
+    label therefore no longer blocks the page's call.
 
   Proof: `tests/test_llm_label_l2_l3.py` (`test_l3_labels_are_value_free_whatever_their_source`,
   `test_l3_labels_are_sent_only_when_ner_runs` — NER off and an NER whose model failed to load —,
@@ -495,6 +498,32 @@ at its seam only (`tests/test_llm_label_l2_l3.py`, `tests/scanner/test_crawler_l
   of the values, one call per page is made, `{calls 1, raw_values 0, blocked 0}`, no write
   reaches the site. All nine were red on the code before the fix. The reviewer's probe on the
   fix: 0 of 4 values sent on its attribute page, and its rendered-label page makes its call.
+
+  **No threshold dependency** (S3b review r2, R2-B1 — corrected 2026-10-15). As first fixed,
+  the label was redacted with the policy's detector, which drops every finding below the
+  policy's `detect.min_score`. T2 scores a person's name 0.85 (Presidio's spaCy default,
+  `NerModelConfiguration.default_score`) and a valid policy may set any `min_score` up to 1, so a
+  custom policy above 0.85 (with the `ner` and `llm_label` tiers and a `WITH_NER` image) sent
+  every name NER found in every label while `ner_runs` held: the reviewer's Chromium probe — a
+  nominees table whose per-row checkboxes take their label from the neighbouring name cell
+  (`nearest_text`) — found 2 of 2 names in the provider's messages at `min_score` 0.9 while
+  `progress.metrics.llm` said `{calls 1, raw_values 0, blocked 0}`. The shipped presets use
+  0.5–0.6. Now the prompt's label is redacted by a copy of the scanner's detector (same tiers,
+  NER adapter, locale and custom recognizers) at score 0 — not at the NER adapter's floor (0.4):
+  a typed hit that wins over an overlapping NER hit (`resolve_overlaps`) may itself score below
+  0.4 (`NHS_NUMBER`/`SWIFT_BIC` 0.3 with context, custom recognizers from 0) and must not take
+  the name's redaction with it. Over-redaction costs label detail only; the policy's threshold
+  still governs what a job transforms and the label the inventory stores. Proof (every case
+  above 0.85 red before the fix, all green after): `tests/test_llm_label_l2_l3.py::
+  test_l3_label_names_are_redacted_whatever_the_policy_min_score` (0.86, 0.9, 1.0, through the
+  real `complete()` under `strict`, the provider faked at `_stellar`: the name never reaches the
+  provider, the label is sent, one call, `{calls 1, raw_values 0, blocked 0}`) and
+  `test_prompt_label_is_redacted_recall_first` (0 to 1; the caller's detector keeps its
+  threshold); end to end, `tests/scanner/test_crawler_llm_label.py::
+  test_names_in_labels_never_reach_the_model_whatever_the_policy_min_score` (the nominees table
+  at 0.6 and 0.9: both labels sent as `<PERSON_NAME>`, 0 name parts sent, one call, no write).
+  The reviewer's probes on the fix: 0 of 2 name parts sent at 0.86 and 0.9, 0 of 2 names on the
+  table at 0.9.
 - **Checked twice before it leaves:** the module's leak guard against the `protected` originals —
   every sampled value of the leftover columns (L2); what the page's fields hold or show, the
   detectors' findings in its text and every token of its text holding a digit or an `@` (L3,

@@ -176,9 +176,19 @@ _PAGE = """<!doctype html><html><head><title>Loans</title></head><body>
 </form></body></html>"""
 #: ``/attrs``: labels from attributes and a hidden target only (the review's probe page);
 #: ``/loans``: the same plus a rendered ``<label for>`` whose digits are protected page tokens
+#: R2-B1 (S3b review r2): made-up nominees, one per table row; each row's checkbox takes its label
+#: from the neighbouring name cell (``nearest_text``)
+NOMINEES = ("Zebulon Quixote", "Ottilie Brackwater")
+_NOMINEE_TABLE = """<!doctype html><html><head><title>Nominees</title></head><body>
+<h1>Nominees on your deposits</h1>
+<form method="post" action="/remove"><table>
+<tr><td>{0}</td><td><input type="checkbox" name="sel_a"></td></tr>
+<tr><td>{1}</td><td><input type="checkbox" name="sel_b"></td></tr>
+</table><button type="submit">Remove</button></form></body></html>"""
 RECORD_PAGES = {
     "/attrs": _PAGE.format(controls=_ATTRIBUTE_LABELS.format(**RECORD_VALUES)),
     "/loans": _PAGE.format(controls=(_ATTRIBUTE_LABELS + _RENDERED_LABEL).format(**RECORD_VALUES)),
+    "/nominees": _NOMINEE_TABLE.format(*NOMINEES),
 }
 
 
@@ -268,6 +278,48 @@ async def test_record_values_in_labels_never_reach_the_model(
         }
     else:
         assert set(labels.values()) == {None}
+    assert writes == []  # D4: nothing submitted
+
+
+@pytest.mark.browser
+@pytest.mark.slow
+@pytest.mark.parametrize("min_score", [0.6, 0.9])
+async def test_names_in_labels_never_reach_the_model_whatever_the_policy_min_score(
+    chromium: Any, scan_settings: Settings, min_score: float
+) -> None:
+    """R2-B1, end to end: a nominees table whose per-row checkboxes are labelled by the name in
+    the neighbouring cell. T2 scores a name 0.85 (``FakeNer``, as Presidio's spaCy default); under
+    a policy whose ``detect.min_score`` is above that, the labels are still sent with the names
+    redacted (a prompt's label is redacted recall-first), the call is made and nothing is
+    submitted."""
+    from dps.layers.scanner.crawler import ScanRunner
+
+    settings = _settings(scan_settings).model_copy(update={"fpe_enabled": False})
+    fake = FakeGateway(settings)
+    engine = PrivacyEngine(settings, gateway=fake)
+    engine.ner = FakeNer(*NOMINEES)
+    with _record_site() as (base, writes):
+        runtime = make_runtime(
+            base, settings, engine, path="/nominees", max_pages=1, max_depth=0, cookies=False
+        )
+        policy = _t3(runtime.policy)
+        runtime.policy = policy.model_copy(
+            update={"detect": policy.detect.model_copy(update={"min_score": min_score})}
+        )
+        sink = MemoryScanSink()
+        outcome = await ScanRunner(
+            settings=settings, engine=engine, runtime=runtime, sink=sink, browser=chromium
+        ).run()
+    fields = {f.name_attr: f for records in sink.fields.values() for f in records}
+    assert {name: f.label_source for name, f in fields.items()} == {
+        "sel_a": "nearest_text",
+        "sel_b": "nearest_text",
+    }
+    sent_text = json.dumps(fake.messages, ensure_ascii=False)
+    assert [p for name in NOMINEES for p in name.split() if p in sent_text] == []
+    assert outcome.llm == {"calls": 1, "raw_values": 0, "blocked": 0} and len(fake.messages) == 1
+    sent = {e["name"]: e.get("label") for e in json.loads(fake.messages[0][1]["content"])}
+    assert sent == {"sel_a": "<PERSON_NAME>", "sel_b": "<PERSON_NAME>"}
     assert writes == []  # D4: nothing submitted
 
 

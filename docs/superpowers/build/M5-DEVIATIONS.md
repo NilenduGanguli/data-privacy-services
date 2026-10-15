@@ -1514,3 +1514,44 @@ reviewer's probe: 4 of 4 made-up values sent, `blocked 0`); the same number in a
   can no longer reach a label). `tests/scanner/helpers.FakeNer` is the T2 stand-in (no spaCy
   model in the lanes).
 - Report `~/.cache/dps-build/reports/S3b-fix-r1.md`.
+
+## S3b review r2 fix — R2-B1: the L3 prompt's label is redacted whatever the policy's `min_score` (finish stage, `fsec`)
+
+Review `~/.cache/dps-build/reports/S3b-review-r2.md`, R2-B1 (P1). The r1 fix redacted the label
+with the scanner's detector, which drops every finding below the policy's `detect.min_score`
+(`Detector.detect`). T2 scores a person's name 0.85 (Presidio's spaCy default; `FakeNer` the
+same) and `DetectConfig.min_score` accepts 0–1, so a valid custom policy above 0.85 (with the
+`ner` and `llm_label` tiers, on a `WITH_NER` image) sent every name NER found in every label —
+`ner_runs` stayed true. The reviewer's Chromium probe (a nominees table, per-row checkboxes
+labelled by the neighbouring name cell, `nearest_text`) found 2 of 2 names in the provider's
+messages at 0.9, with `progress.metrics.llm = {calls 1, raw_values 0, blocked 0}`. Shipped
+presets use 0.5–0.6.
+
+- **`classify.prompt_label`** redacts the label with `_recall_first(detector)`: a copy of the
+  detector (same tiers, NER adapter, locale and custom recognizers) at
+  `classify.PROMPT_LABEL_MIN_SCORE = 0.0` — every span any tier reports, at any score. The
+  caller's detector is not changed; the policy's threshold still governs what a job transforms,
+  the scan's findings, `page_protected` and the labels the inventory stores.
+- **Why 0, not the review's suggested floor of 0.4** (the NER adapter's `score_threshold`, below
+  which Presidio reports nothing): `resolve_overlaps` lets a typed hit of a higher sensitivity
+  tier win over an overlapping NER hit, and typed hits can score below 0.4 (`NHS_NUMBER` and
+  `SWIFT_BIC` 0.3 with context; custom recognizers from 0). Filtering such a winner at 0.4 would
+  drop the name's redaction with it. Lowering the threshold only adds findings (a whole-value
+  finding replaces the whole label), so the prompt's label is never less redacted than before;
+  over-redaction costs label detail only.
+- **Not changed:** `page_protected` and the inventory's stored labels still follow the policy's
+  `min_score` (storage, outside P1 — the review's note on stored attribute labels stands for the
+  owner); r1's N1–N7 and r2's N8–N9 stay open.
+- **Tests** (every case above 0.85 red on `3d257a3`, all green now):
+  `tests/test_llm_label_l2_l3.py` —
+  `test_l3_label_names_are_redacted_whatever_the_policy_min_score` (0.86, 0.9, 1.0; real
+  `complete()` under `strict`, provider faked at `_stellar`: the name never reaches the provider,
+  the label is sent, one call, `{calls 1, raw_values 0, blocked 0}`) and
+  `test_prompt_label_is_redacted_recall_first` (0, 0.6, 0.86, 0.9, 1.0; a `nearest_text` label
+  that is only a name and a `title` label; the caller's detector keeps its threshold);
+  `tests/scanner/test_crawler_llm_label.py::
+  test_names_in_labels_never_reach_the_model_whatever_the_policy_min_score` (real Chromium and
+  `ScanRunner`, the nominees table at 0.6 and 0.9: both labels sent as `<PERSON_NAME>`, 0 name
+  parts sent, one call, no write).
+- Security review §3.26 states the threshold behaviour; HANDOFF §17.1 updated.
+- Report `~/.cache/dps-build/reports/S3b-fix-r2.md`.
