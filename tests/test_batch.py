@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from faker.providers.person.en_IN import Provider as IndiaNames
 
 from dps.config import Settings
 from dps.engine.batch import (
@@ -22,6 +23,7 @@ from dps.engine.batch import (
 )
 from dps.engine.policy import MethodSpec, load_preset
 from dps.engine.service import Payload, PrivacyEngine, RequestOptions
+from dps.engine.synth.personas import ascii_fold
 from dps.engine.synth.surrogates import generate_synthesis_seed
 from dps.engine.transform.apply import ApplyOptions, reveal
 from dps.engine.transform.crypto import KeyMaterial, generate_key_material
@@ -595,3 +597,79 @@ def test_real_ff1_int_and_decimal_columns_keep_their_digits_and_reveal() -> None
     )
     assert _reveal_column(REAL_FF1, key, cols[0], out) == [str(i) for i in ids]
     assert _reveal_column(REAL_FF1, key, cols[1], out) == [format(r["amt"], "f") for r in rows]
+
+
+# --- S8: a table's name columns are one person per row, the notes and the e-mail agree -----------
+PEOPLE = TableShape(
+    object=ObjectRef(owner="bank", name="people"),
+    columns=[
+        ColumnInfo(path="$.customer_id", name="customer_id", data_type="bigint", kind="int"),
+        *(
+            ColumnInfo(path=f"$.{n}", name=n, data_type="varchar(60)", kind="text", length=60)
+            for n in ("first_name", "last_name", "email", "nominee_name")
+        ),
+        ColumnInfo(path="$.notes", name="notes", data_type="text", kind="text"),
+    ],
+    key=["customer_id"],
+    key_source="primary_key",
+)
+#: Invented names; every customer is a "Mr." in the notes, whatever the first name.
+GIVEN = ("Arjun", "Kavya", "Rohan", "Meera", "Vikram", "Ishita", "Karan", "Anjali")
+FAMILY = ("Mehta", "Nair", "Kulkarni", "Iyer", "Rao", "Bose", "Malhotra", "Pillai")
+
+
+def _people_rows() -> list[Row]:
+    return [
+        {
+            "customer_id": 20_000_001 + i,
+            "first_name": GIVEN[i % 8],
+            "last_name": FAMILY[(i * 3) % 8],
+            "email": f"{GIVEN[i % 8].lower()}.{FAMILY[(i * 3) % 8].lower()}@example-mail.in",
+            "nominee_name": f"{GIVEN[(i + 3) % 8]} {FAMILY[(i * 3 + 5) % 8]}",
+            "notes": f"KYC call with {GIVEN[i % 8]}; Mr. {FAMILY[(i * 3) % 8]} prefers e-mail.",
+        }
+        for i in range(24)
+    ]
+
+
+def _people_plan(name: str, entity: str, text: bool = False) -> ColumnPlan:
+    return ColumnPlan(
+        path=f"$.{name}",
+        name=name,
+        entity_type=entity,
+        method=MethodSpec(method="surrogate"),
+        text_column=text,
+        reversible=False,
+        kind="text",
+        length=PEOPLE.column(name).length,
+    )
+
+
+def test_synthetic_rows_name_one_person_in_every_column() -> None:
+    rows = _people_rows()
+    result = BatchTransformer(
+        ENGINE,
+        policy=load_preset("synthetic-realistic"),
+        mode="synthesize",
+        columns=[
+            _people_plan("first_name", "PERSON_NAME"),
+            _people_plan("last_name", "PERSON_NAME"),
+            _people_plan("email", "EMAIL"),
+            _people_plan("nominee_name", "PERSON_NAME"),
+            _people_plan("notes", "FREE_TEXT", text=True),
+        ],
+        shape=PEOPLE,
+        key=None,
+        seed=generate_synthesis_seed(),
+        locale="en_IN",
+    ).transform([dict(r) for r in rows])
+    assert result.verification.passed
+    for row, out in zip(rows, result.rows, strict=True):
+        first, last = out["first_name"], out["last_name"]
+        assert out["email"].startswith(f"{ascii_fold(first)}.{ascii_fold(last)}")
+        assert out["notes"] == f"KYC call with {first}; Mr. {last} prefers e-mail."
+        assert first in IndiaNames.first_names_male  # "Mr." in the row's notes
+        assert out["nominee_name"].split(" ")[0] != first
+        originals = {*row["nominee_name"].split(), row["first_name"], row["last_name"]}
+        written = {first, last, *out["nominee_name"].split()}
+        assert not originals & written

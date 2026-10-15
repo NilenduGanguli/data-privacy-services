@@ -8,8 +8,9 @@ only if every placeholder survives, the rewrite introduces no new detectable val
 name, that the deterministic fill had removed; any failure falls back to the deterministic fill
 (spec §5.6 step 5: "fails closed to the deterministic path"). DPS chooses the surrogates itself
 (after declaring the text's detected values to the engine, so no surrogate reuses one of them
-or a part of a name), so the output is consistent with the rest of the record whether or not the
-model ran.
+or a part of a name, with the gender a title before a name gives: ``Mrs. {PERSON_NAME_2}`` is a
+woman's name), so the output is consistent with the rest of the record whether or not the model
+ran.
 
 Every detected value is replaced by a placeholder, including values the plan keeps: the model
 sees none of them, and the fill step puts a kept value back afterwards.
@@ -26,9 +27,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from dps.engine.detect.names import title_gender
 from dps.engine.findings import Finding, Plan, PlanEntry
 from dps.engine.transform.apply import OutputSegment
 from dps.engine.transform.methods import (
+    NameHint,
     SurrogateProvider,
     TransformContext,
     declare_record,
@@ -130,6 +133,21 @@ def _names(ph: PlaceholderText) -> list[str]:
     ]
 
 
+def _title_hints(ph: PlaceholderText) -> list[NameHint | None]:
+    """For each label, the gender of the first gendered title right before one of its name
+    placeholders in the template (``Mr. {PERSON_NAME_1}``); ``None`` for anything else."""
+    hints: list[NameHint | None] = []
+    for label, (finding, _) in ph.mapping.items():
+        gender = None
+        if finding.entity_type == NAME_ENTITY:
+            for match in re.finditer(re.escape(label), ph.text):
+                gender = title_gender(ph.text, match.start())
+                if gender is not None:
+                    break
+        hints.append(NameHint(gender=gender) if gender is not None else None)
+    return hints
+
+
 def _entry_key(f: Finding) -> tuple[str, int | None, int | None, str]:
     return (f.locator.path, f.locator.start, f.locator.end, f.entity_type)
 
@@ -153,7 +171,9 @@ def _resolve(
     entries: dict[tuple[str, int | None, int | None, str], PlanEntry] = (
         {_entry_key(e.finding): e for e in plan.entries} if plan is not None else {}
     )
-    declare_record(surrogates, anchor, [(f.entity_type, o) for f, o in ph.mapping.values()])
+    declare_record(
+        surrogates, anchor, [(f.entity_type, o) for f, o in ph.mapping.values()], _title_hints(ph)
+    )
     fill = _Fill({}, Counter(), Counter())
     for label, (finding, original) in ph.mapping.items():
         entry = entries.get(_entry_key(finding))

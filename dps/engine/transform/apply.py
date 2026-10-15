@@ -10,7 +10,10 @@
   hints next to the output and a salt-free hash of a 6-digit customer id is no secret at all.
 * Before any field is transformed, the record's detected values are handed to the surrogate
   engine (:func:`~dps.engine.transform.methods.declare_record`), so no surrogate reuses one of
-  them or a part of the record's names (a persona drawing the customer's own surname, say).
+  them or a part of the record's names (a persona drawing the customer's own surname, say). Each
+  person name goes with what the layout says about it (a :class:`NameHint`, never read from the
+  name): the part of a name its field holds, from the key alone (``first_name``, ``LAST_NAME``,
+  ``surname``), so one person's name fields agree; a span's gender, from a title before it.
 
 Reveal hints carry locators, methods, types, the keyed anchor, the key id and the key check value
 — never a value or anything computed from a value without the key (spec §5.5). Reveal checks the
@@ -33,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from dps.engine.detect.names import title_gender
 from dps.engine.findings import Plan, PlanEntry
 from dps.engine.jsonpath import flatten, get_path, set_path
 from dps.engine.policy import Policy
@@ -41,11 +45,13 @@ from dps.engine.transform.crypto import KeyMaterial
 from dps.engine.transform.methods import (
     CipherFactory,
     MethodError,
+    NameHint,
     SurrogateProvider,
     TokenNotBound,
     TransformContext,
     declare_record,
     external_tag,
+    name_field,
     reverse_method,
     run_method,
 )
@@ -64,6 +70,7 @@ ANCHOR_ENTITIES = (
 )
 _INT = re.compile(r"-?[0-9]+")
 _FLOAT = re.compile(r"-?[0-9]+\.[0-9]+")
+_NAME = "PERSON_NAME"
 
 OriginalType = Literal["str", "int", "float"]
 
@@ -189,6 +196,7 @@ def _ctx(
         cipher_factory=options.cipher_factory,
         external=external,
         binding=options.binding_keys[0] if options.binding_keys else None,
+        name_hint=_name_hint(entry),
     )
 
 
@@ -230,10 +238,26 @@ def _read(document: Any, path: str) -> Any:
         raise MethodError("path is not in the document") from None
 
 
-def _record_originals(document: Any, plan: Plan) -> list[tuple[str, str]]:
+def _name_hint(entry: PlanEntry, value: str | None = None) -> NameHint | None:
+    """What the layout says about a person name: the part of a name a whole value's field holds
+    (from its key alone), or the gender of a title right before a span of ``value``."""
+    if entry.finding.entity_type != _NAME:
+        return None
+    loc = entry.finding.locator
+    if loc.whole:
+        return name_field(loc.path)
+    gender = title_gender(value, loc.start or 0) if value is not None else None
+    return NameHint(gender=gender) if gender is not None else None
+
+
+def _record_originals(
+    document: Any, plan: Plan
+) -> tuple[list[tuple[str, str]], list[NameHint | None]]:
     """The record's detected values as ``(entity_type, original)``, read from the input (they
-    are handed to the surrogate engine only, never logged or returned)."""
+    are handed to the surrogate engine only, never logged or returned), and each one's
+    :func:`_name_hint`."""
     originals: list[tuple[str, str]] = []
+    hints: list[NameHint | None] = []
     for entry in plan.entries:
         loc = entry.finding.locator
         try:
@@ -242,7 +266,8 @@ def _record_originals(document: Any, plan: Plan) -> list[tuple[str, str]]:
             continue  # the transform loop below reports a plan that does not fit
         original = value if loc.whole else value[loc.start or 0 : loc.end]
         originals.append((entry.finding.entity_type, original))
-    return originals
+        hints.append(_name_hint(entry, value))
+    return originals, hints
 
 
 def _tokenize_prepass(
@@ -349,7 +374,7 @@ def apply_plan(
     anchor = _keyed_anchor(options.anchor or anchor_for(document, plan), options.key)
     external = _tokenize_prepass(plan, document, options)
     if options.surrogates is not None:
-        declare_record(options.surrogates, anchor, _record_originals(document, plan))
+        declare_record(options.surrogates, anchor, *_record_originals(document, plan))
     kid = options.key.kid if options.key is not None else None
     kcv = (
         options.key.kcv or crypto.key_check_value(options.key)

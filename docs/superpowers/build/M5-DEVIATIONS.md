@@ -1080,6 +1080,99 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
   `in_source` equals the source-vs-target count and the pack needs review), `tests/test_surrogates.py` (PAN now
   `0000`, invalid by design).
 
+## Finish-stage fixes from the live Vertex run
+
+### S8-persona — one person's name fields agree, a title gives the gender, L2 rows too (`fpersona`)
+
+Base: `5cef802` (one persona per person). Finding (live run, Gemini + the engine): under
+`synthetic-realistic`, `{"first_name": "Arjun", "last_name": "Mehta", "email": "arjun.mehta@…"}` came
+out `Alfred / Michael / alfred.williams…`: a single-word name was always a persona's *first* name, so
+the surname field got one, and the two single words, sharing no part, were declared as two people
+(the e-mail followed the first). Measured on `5cef802` with the new tests: the e-mail disagreed with
+the name fields on 300 of 300 rows of a synthesize job, and in text `Mr.`/`Mrs.` were followed by a
+name of the other gender about half the time (`Mr. Lakshmi …`; 138 of 300 job rows).
+
+- **Name fields (from the key alone, never the value).** `methods.name_field(path)` →
+  `NameHint(role, group)`: `first_name`, `given_name`, `fname`, `forename`(s), `firstName`,
+  `FIRSTNAME` → `first`; `last_name`, `lastname`, `lname`, `surname`, `family_name`, `familyname` →
+  `last`; `middle_name`(s) → `middle` (case-insensitive; words split at `_`, case changes and digits,
+  so `custLName` is `last`); `first`/`given`/`middle`/`last`/`family` only under a key that ends in
+  `name` (`$.name.first`). Not `mname` (also a mother's name) and no Spanish keys (`nombre` can hold a
+  full name; `apellido_paterno`/`_materno` are two surnames). The group is the parent path, the key's
+  other words and its trailing number: `first_name`+`last_name` are one person, `nominee_first_name`
+  +`nominee_last_name`, `FIRST_NAME_2`+`LAST_NAME_2` and `people[1].first_name`+`…family_name` others.
+  `apply_plan` puts the hint on `TransformContext.name_hint`; the `surrogate` method then calls the new
+  `SurrogateEngine.name_surrogate(original, locale, anchor, hint)`. `surrogate()` is unchanged (same
+  signature, still a pure function of seed, type, canonical original, declaration and anchor);
+  `name_surrogate` is pure in the same inputs plus the hint. A provider without it (a test double)
+  still gets `surrogate()`.
+- **One person per group.** `declare_record(anchor, originals, hints=())` (additive; protocol
+  `NameAwareSurrogates`): the fields of one group are one name, placed at the first of them. The
+  record's own fields (top-level, no other word in the key: group `$||`) are the record's person and
+  persona even when another person's name is declared first — L1 declares in path order, so
+  `father_name` comes before `first_name`; L2 in column order. This keeps the customer's persona the
+  same across tables and requests whatever other people a record names (P3), and a generic e-mail,
+  phone or birth date stays theirs. Any other group (`nominee_…`, `…_2`, a nested object) is, in
+  declaration order, a person declared before it whose parts it covers, else a new person. Each field
+  gets its part of that person's persona; a middle name is the first name of a same-gender persona at
+  `<person>|middle<n>` that is neither the first nor the last name. So first name, last name and
+  e-mail agree (`Alfred / Williams / alfred.williams…@`), and a customer and a nominee (full names or
+  split fields) stay two people with their own e-mails.
+- **Name words in text follow the declaration.** A single name word elsewhere in the record is the
+  part of its person's name it was declared as: a field's part from its key, else the last name when it
+  ends one of that person's declared names of several words (no comma: `Mehta, Arjun` says nothing),
+  else the first name as before. `Mr. Mehta` in a note next to `last_name: Mehta` → `Mr. Williams`;
+  `Dr. Rohan Kulkarni … Dr. Kulkarni` → `Dr. X Y … Dr. Y`. (Beyond the finding's wording; the old rule
+  turned every surname alone into a first name.)
+- **Titles give the gender** (`PersonaFactory.for_anchor(gender_hint=…)` already existed: no persona
+  change needed). `names.title_gender(text, start)` reads the title right before a name on the same
+  line (`Mr`, `Shri`, `Sri`, `Sr`, `Don`, `Señor`, `Sir`, `Lord`, `Herr` → male; `Mrs`, `Ms`, `Miss`,
+  `Smt`, `Kumari`, `Sushri`, `Sra`, `Srta`, `Doña`, `Señora`, `Señorita`, `Dame`, `Lady`, `Mme`,
+  `Mlle`, `Frau` → female; `Dr`, `Prof`, `Mx`, ranks and `Fr` say nothing; `Sr.` is taken as Señor
+  although it can mean Sister). `apply_plan` (spans, read from the input) and `synthesize_text` (the
+  placeholder template, with or without the model) hand it over as `NameHint(gender=…)`; the person's
+  persona has that gender (the first title wins), so the name, a `GENDER` field and an MRZ's sex agree.
+  Only titles in text: a separate title/salutation column is not read (it is not part of the plan).
+  **Trade-off for the owner (P3):** a persona's gender was a function of its anchor alone; a title now
+  sets it, which changes that persona's *first name* (and e-mail local part) when the drawn gender
+  differed — measured: same anchor with and without `Mrs.`, 300 seeds → last name and birth date equal
+  300/300, first name equal 155/300. So a customer named with a title in one table (CRM notes) and
+  without one in another (customers) can get two first names. Keeping the persona and rewriting the
+  title instead (`Mrs.` → `Mr.` to fit the persona) would keep P3 but changes text outside the
+  detected spans (span positions, `segments`, document rendering); not done — the task chose the
+  gender hint.
+- **Known limit (not changed): a kept `GENDER` column.** Both synthetic presets keep `GENDER`
+  (`keep_non_sensitive`, LOW sensitivity), so a row's real gender stays next to a synthetic first name
+  drawn without it and they disagree about half the time. Reading the kept value as the persona's
+  gender would fix the row at the same P3 cost as titles; a policy that surrogates `GENDER` makes it
+  persona-drawn in L2 (the per-row sweep treats a chance-equal gender as no copy), but the L1 strict
+  sweep then refuses about half the requests (a surrogate equal to the original by chance). Left for
+  an owner decision.
+- **Detection.** The structural detector now also takes the run-together and short keys as names:
+  `firstname`, `lastname`, `givenname`, `familyname`, `forename` (0.9), `middlename` (0.85), `lname`
+  (0.8), `fname` (0.75, also a file name; a person's on a bank's records). Before, `{"fname": …,
+  "lname": …}` and `FIRSTNAME`/`LASTNAME` columns were not detected at all with NER off, so a
+  synthesize run copied the real names. More is detected, nothing less.
+- **Not changed:** records whose layout says nothing about their names (no name-part keys, no gendered
+  titles) get the same surrogates as on `5cef802`; the leakage sweep, `held_by` and `_reveals` are
+  untouched. Schema generation (`schema_gen._generate` → `surrogate(entity, template, …, "row")`) and
+  MOSTLY linked generation declare no record and pass no hints, so a generated spec with `first_name`
+  and `last_name` fields still gets a full `First Last` in each — follow-up for `fspec`, whose worktree
+  holds uncommitted `schema_gen.py` changes (not touched here): call `name_surrogate` with
+  `name_field(f"$.{field.name}")` for `PERSON_NAME` fields.
+- Tests (written first; every one fails on `5cef802`): `tests/test_methods.py` (key → role, groups,
+  routing to `name_surrogate`), `tests/test_surrogates.py` (one person per group in any declaration
+  order, case, middle name, two groups, a group matching a declared person, name words in text,
+  titles → persona gender incl. `GENDER`, purity), `tests/test_names.py` (`title_gender`, incl. a
+  title on the line before), `tests/test_structural.py` (run-together keys), `tests/test_service.py`
+  (the live record under both synthetic presets and eight key spellings, two people's fields, titles
+  in text and in a JSON note decide the gender whatever the name, surnames alone),
+  `tests/test_llm_text.py` (titles with and without the model, gateway faked at `_stellar` so the real
+  `complete()` and the strict egress verifier run), `tests/test_batch.py` (L2 rows),
+  `tests/connectors/test_synthesize_people.py` (marker `pg_source`: a 300-row synthesize job on the
+  lane's source-pg; counts only, all 0 with the fix: e-mail, nominee e-mail, notes, title gender,
+  nominee sharing the first name; source-vs-target name parts, e-mails and keys surviving).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

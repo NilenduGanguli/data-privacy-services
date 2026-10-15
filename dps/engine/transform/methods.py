@@ -19,17 +19,89 @@ import hashlib
 import math
 import re
 import secrets
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import phonenumbers
 from cryptography.exceptions import InvalidTag
 
+from dps.engine.jsonpath import child_path, parse_path
 from dps.engine.policy import METHOD_NAMES
 from dps.engine.transform import crypto, fpe
 from dps.engine.transform.crypto import KeyMaterial
+
+#: The part of a person's name a field holds.
+NameRole = Literal["first", "middle", "last"]
+#: A field key's words run together, lower case → the part of a name it holds.
+_NAME_PART_KEYS: dict[str, NameRole] = {
+    **dict.fromkeys(("firstname", "fname", "givenname", "givennames", "forename", "forenames"),
+                    "first"),
+    **dict.fromkeys(("middlename", "middlenames"), "middle"),  # not "mname": a mother's too
+    **dict.fromkeys(("lastname", "lname", "surname", "familyname"), "last"),
+}  # fmt: skip
+#: A bare key holds a part only under a key that names a name (``name.first``, ``name.family``).
+_BARE_PART_KEYS: dict[str, NameRole] = {
+    "first": "first",
+    "given": "first",
+    "middle": "middle",
+    "last": "last",
+    "family": "last",
+}
+#: The words of a key: ``custLName`` → cust L Name, ``LAST_NAME`` → LAST NAME, ``name2`` → name 2.
+_KEY_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+
+
+@dataclass(frozen=True)
+class NameHint:
+    """What a record's layout says about one of its person names, never read from the name.
+
+    ``role``: the part of a name its field holds (from the key alone: ``last_name``,
+    ``LASTNAME``, ``custLName``, ``surname``, ``family_name`` → ``last``); ``group``: which name
+    fields hold one person's parts (the field's parent and its key without the part words, so
+    ``first_name`` and ``last_name`` are one person and ``nominee_first_name`` another);
+    ``gender``: ``female`` or ``male`` when a title says so (``Mrs.``, ``Shri``).
+    """
+
+    role: NameRole | None = None
+    group: str | None = None
+    gender: str | None = None
+
+
+def _key_words(key: str) -> tuple[list[str], str]:
+    """A key's words in lower case and its trailing number (``LAST_NAME_2`` → last, name; 2)."""
+    words = [w.lower() for w in _KEY_WORD.findall(key)]
+    number: list[str] = []
+    while words and words[-1].isdigit():
+        number.insert(0, words.pop())
+    return words, "_".join(number)
+
+
+def name_field(path: str) -> NameHint | None:
+    """The part of a person's name the field at ``path`` holds, read from its key alone (never
+    its value), with the group of fields that hold the same person's parts: the parent, the
+    key's other words and its number (``FIRST_NAME_2`` and ``LAST_NAME_2`` are a second person).
+    ``None`` for any other key (``name``, ``full_name``, ``nominee_name``, a list item)."""
+    try:
+        segments = parse_path(path)
+    except ValueError:
+        return None
+    if not segments or not isinstance(segments[-1], str):
+        return None
+    parent = "$"
+    for segment in segments[:-1]:
+        parent = child_path(parent, segment) if isinstance(segment, str) else f"{parent}[{segment}]"
+    words, number = _key_words(segments[-1])
+    for n in (1, 2, 3):  # surname, last name, family name; lname, l name
+        role = _NAME_PART_KEYS.get("".join(words[-n:])) if len(words) >= n else None
+        if role is not None:
+            return NameHint(role=role, group=f"{parent}|{'_'.join(words[:-n])}|{number}")
+    above = segments[-2] if len(segments) >= 2 else None
+    bare = _BARE_PART_KEYS.get(words[0]) if len(words) == 1 and not number else None
+    if bare is not None and isinstance(above, str) and _key_words(above)[0][-1:] == ["name"]:
+        return NameHint(role=bare, group=f"{parent}||")
+    return None
 
 
 class SurrogateProvider(Protocol):
@@ -46,13 +118,34 @@ class RecordAwareSurrogates(Protocol):
     def declare_record(self, anchor: str, originals: Iterable[tuple[str, str]]) -> None: ...
 
 
+@runtime_checkable
+class NameAwareSurrogates(Protocol):
+    """A record-aware provider that also takes what the record's layout says about its names
+    (:class:`NameHint`, one per declared value) and fills a field holding one part of a name."""
+
+    def declare_record(
+        self,
+        anchor: str,
+        originals: Iterable[tuple[str, str]],
+        hints: Sequence[NameHint | None] = (),
+    ) -> None: ...
+
+    def name_surrogate(self, original: str, locale: str, anchor: str, hint: NameHint) -> str: ...
+
+
 def declare_record(
-    provider: SurrogateProvider | None, anchor: str, originals: Iterable[tuple[str, str]]
+    provider: SurrogateProvider | None,
+    anchor: str,
+    originals: Iterable[tuple[str, str]],
+    hints: Sequence[NameHint | None] = (),
 ) -> None:
-    """Hand the record's ``(entity_type, original)`` pairs to ``provider`` before any of its
-    fields is synthesised. A provider without ``declare_record`` (a test double) is left alone.
+    """Hand the record's ``(entity_type, original)`` pairs (and, to a provider that takes them,
+    a :class:`NameHint` or ``None`` for each) to ``provider`` before any of its fields is
+    synthesised. A provider without ``declare_record`` (a test double) is left alone.
     """
-    if isinstance(provider, RecordAwareSurrogates):
+    if isinstance(provider, NameAwareSurrogates):
+        provider.declare_record(anchor, originals, hints)
+    elif isinstance(provider, RecordAwareSurrogates):
         provider.declare_record(anchor, originals)
 
 
@@ -97,6 +190,8 @@ class TransformContext:
     external: Mapping[tuple[str, str], str] | None = None
     #: SEC-4: the server-held key binding external tokens to ``key`` (``None`` = no KEK)
     binding: bytes | None = None
+    #: A whole person name whose field holds one part of a name (``last_name``): which part
+    name_hint: NameHint | None = None
 
     def subkey(self, method: str, length: int = crypto.SUBKEY_BYTES) -> bytes:
         """The HKDF subkey for ``method`` and this entity type (and path when field-scoped)."""
@@ -596,6 +691,9 @@ def _noise(value: str, ctx: TransformContext) -> str:
 def _surrogate(value: str, ctx: TransformContext) -> str:
     if ctx.synth is None:
         raise MethodError("surrogate needs a surrogate engine in the context")
+    hint = ctx.name_hint
+    if hint is not None and hint.role is not None and isinstance(ctx.synth, NameAwareSurrogates):
+        return ctx.synth.name_surrogate(value, ctx.locale, ctx.anchor, hint)
     return ctx.synth.surrogate(ctx.entity_type, value, ctx.locale, ctx.anchor)
 
 

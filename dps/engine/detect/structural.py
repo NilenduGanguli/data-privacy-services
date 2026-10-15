@@ -186,6 +186,15 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("given name", "PERSON_NAME", 0.9),
     ("family name", "PERSON_NAME", 0.9),
     ("middle name", "PERSON_NAME", 0.85),
+    # the same keys run together (``FIRSTNAME``, ``lastname``) and their short forms (S8)
+    ("firstname", "PERSON_NAME", 0.9),
+    ("lastname", "PERSON_NAME", 0.9),
+    ("givenname", "PERSON_NAME", 0.9),
+    ("familyname", "PERSON_NAME", 0.9),
+    ("middlename", "PERSON_NAME", 0.85),
+    ("forename", "PERSON_NAME", 0.9),
+    ("lname", "PERSON_NAME", 0.8),
+    ("fname", "PERSON_NAME", 0.75),  # also a file name; a person's on a bank's records
     ("nombre", "PERSON_NAME", 0.85),
     ("apellido", "PERSON_NAME", 0.85),
     # a person's role before "name" says whose name it is (``cardholder_name``, ``payee_name``)

@@ -128,3 +128,27 @@ def test_classify_path_equals_classify_key_without_parents() -> None:
 
     for key in ("ADDR_LINE1", "PIN_CODE", "$.notes", "$.customerId", "line1", "pin"):
         assert classify_path(key) == classify_key(key), key
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "firstname",
+        "FIRSTNAME",
+        "lastname",
+        "LASTNAME",
+        "givenname",
+        "familyname",
+        "middlename",
+        "forename",
+        "fname",
+        "lname",
+        "cust_lname",
+        "$.nominee.fname",
+    ],
+)
+def test_run_together_name_part_keys_are_names(key: str) -> None:
+    # S8: the keys that hold one part of a person's name stand on their own, as their spaced
+    # forms (first_name, last_name, given_name) do; otherwise a synthetic record keeps the value
+    top = classify_key(key)[0]
+    assert top.entity_type == "PERSON_NAME" and top.score >= 0.7
