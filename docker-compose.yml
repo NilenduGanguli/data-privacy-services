@@ -214,6 +214,73 @@ services:
       component: worker
       env: local
 
+  # Claims scan jobs only (M4, contract §3.5/§11.1), profile `scanner` (and `full`). It extends the
+  # worker, so it shares the same database, DPS_JOB_KEK, artefact store, volumes and hardening (the
+  # app seals scan secrets with that KEK and serves screenshots from that store); its own image
+  # carries Playwright 1.55.0 and the Chromium 1187 the base bakes. No host port: /health, /readyz
+  # and /metrics on 9401 inside the network. It never submits anything (D4). Storage states are read
+  # from the stack's tenant-scoped dps-secrets volume, as the app checks them at accept (SEC-2/SEC-5:
+  # DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json); the demo session is a local literal for the
+  # demo site, ref `dps/ui/demo-onboarding` of tenant `default`, copied there by demo-secrets.
+  #   docker compose --profile scanner up -d --build
+  browser-worker:
+    extends:
+      service: worker
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    image: data-privacy-services-browser:${DPS_IMAGE_TAG:-local}
+    command: ["python", "-m", "dps.browser_worker"]
+    profiles: ["scanner", "full"]
+    depends_on:
+      dps-db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      demo-secrets:
+        condition: service_completed_successfully
+    environment:
+      DPS_MIGRATIONS_MODE: "off"                 # the migrate one-shot owns DDL
+      DPS_BROWSER_CONCURRENCY: "2"
+      DPS_BROWSER_METRICS_PORT: "9401"
+      DPS_SCAN_REGISTERED_HOSTS: localhost,127.0.0.1,demo-site
+      DPS_FPE_ENABLED: ${DPS_FPE_ENABLED:-true}   # must match the app's (tokens are made here)
+    shm_size: "1gb"
+    init: true
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9401/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      app: data-privacy-services
+      component: browser-worker
+      env: local
+
+  # The demo onboarding web app (M4): the scan target of the tests, the smoke test and the demo. It
+  # counts every non-GET request and GET-form submission it receives (GET /__received), which is how
+  # D4 (nothing is ever submitted) is proven. Dependency-free Node; no build.
+  #   docker compose --profile scanner up -d demo-site     # http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}
+  demo-site:
+    image: node:22-slim
+    profiles: ["scanner", "full"]
+    command: ["node", "/srv/demo/server.mjs", "--host", "0.0.0.0", "--port", "8410"]
+    volumes:
+      - ./demo/onboarding:/srv/demo:ro
+    ports:
+      - "127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}:8410"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8410/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+    labels:
+      app: data-privacy-services
+      component: demo-site
+
   # Vaultless mock of a bank tokenization service (M5 external_tokenize, contract §11), profiles
   # `tokenizer` and `full`. Same image as the app; the script is mounted read-only. Its token and
   # AES-SIV key are local demo literals. Without it the app starts and reports tokenizer "down".
@@ -360,10 +427,12 @@ services:
   # dps/src/oracle-crm-owner (crm), dps/tgt/oracle-crm-masked (crm_masked),
   # dps/src/oracle-loans-owner (loans) — username, password and dsn — and the MongoDB refs
   # dps/src/mongo-crm and dps/tgt/mongo-crm-uat (uri only: the local replica set has no auth),
-  # all under `default` as well. It also removes the pre-scoping top-level `dps` folder of an
-  # older volume (a top-level folder that is not the caller's tenant is refused as another
-  # tenant's). Demo literals; nothing is committed. `$$` is compose's escape for a literal `$`
-  # (else $d, $1 … would be interpolated from the host environment).
+  # all under `default` as well; M4 adds the scanner's demo session dps/ui/demo-onboarding
+  # (storage_state.json, copied read-only from the repo's committed demo literal), which is why the
+  # `scanner` profile runs this one-shot too. It also removes the pre-scoping top-level `dps`
+  # folder of an older volume (a top-level folder that is not the caller's tenant is refused as
+  # another tenant's). Demo literals; nothing else is committed. `$$` is compose's escape for a
+  # literal `$` (else $d, $1 … would be interpolated from the host environment).
   demo-secrets:
     image: data-privacy-services:${DPS_IMAGE_TAG:-local}
     pull_policy: never
@@ -388,13 +457,16 @@ services:
         m() { mkdir -p "$$d/$$1"; printf %s "mongodb://mongo:27017/$$2?directConnection=true" > "$$d/$$1/uri"; };
         m src/mongo-crm crm;
         m tgt/mongo-crm-uat crm_uat;
+        mkdir -p "$$d/ui/demo-onboarding";
+        cp /seed/ui/demo-onboarding/storage_state.json "$$d/ui/demo-onboarding/storage_state.json";
         chmod -R a+rX /var/run/secrets/dps
     volumes:
       - dps-secrets:/var/run/secrets/dps
+      - ./docker/secrets/default/dps/ui:/seed/ui:ro
     restart: "no"
     read_only: true
     mem_limit: 128m
-    profiles: ["sources", "full"]
+    profiles: ["sources", "scanner", "full"]
     labels:
       app: data-privacy-services
       component: demo-secrets

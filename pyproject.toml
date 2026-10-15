@@ -43,6 +43,7 @@ connectors = [
 ]
 uitest = ["playwright==1.55.0"]  # console check only; matches mcr.microsoft.com/playwright:v1.55.0-noble (M4 pins the same)
 e2e = ["playwright==1.55.0"]                               # console browser check; same pin as M4's [scanner]
+scanner = ["playwright==1.55.0", "pillow>=10.4"]          # M4 browser-worker: Chromium 1187 + overlays (Dockerfile.browser)
 tabular = ["numpy>=2.0", "scipy>=1.13"]                     # M5: Gaussian-copula engine + metrics
 synth-ml = ["mostlyai[local]>=4.5", "pandas>=2.2"]          # M5: optional engine; never in an image
 dev = [

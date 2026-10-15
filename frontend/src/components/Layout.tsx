@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useSettings } from '../hooks/useSettings';
 
 type IconName = 'overview' | 'play' | 'policy' | 'db' | 'scan' | 'report' | 'admin';
@@ -15,6 +15,9 @@ const ICON_PATHS: Record<IconName, JSX.Element> = {
   admin: (<><circle cx="12" cy="12" r="3" /><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.2L14.2 3h-4.4l-.4 2.6a7 7 0 0 0-2 1.2l-2.3-.9-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.2l.4 2.6h4.4l.4-2.6a7 7 0 0 0 2-1.2l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z" /></>),
 };
 
+// The mockups' menu icon (vault.js `icons.menu`): the drawer's toggle below 1100px.
+const MENU_ICON = <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>;
+
 function Icon({ name }: { name: IconName }): JSX.Element {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">{ICON_PATHS[name]}</svg>;
 }
@@ -25,12 +28,29 @@ const NAV: { label: string; items: { to: string; text: string; icon: IconName }[
   { label: 'Govern', items: [{ to: '/reports', text: 'Reports & audit', icon: 'report' }, { to: '/admin', text: 'Admin', icon: 'admin' }] },
 ];
 
+/** The console shell (mockups 01-12). Below 1100px the sidebar is hidden and a menu button in the topbar
+ *  opens it as a drawer over a scrim (vault.js renderSidebar); Escape, a scrim click and any navigation
+ *  close it, and focus returns to the button (S2 console r1 B1). */
 export function Layout(): JSX.Element {
   const { apiKey, setApiKey, rememberKey, setRememberKey, tenant, setTenant, theme, toggleTheme } = useSettings();
   const [show, setShow] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
+  const toggle = useRef<HTMLButtonElement>(null);
+  const side = useRef<HTMLElement>(null);
+  const { pathname } = useLocation();
+  useEffect(() => { setNavOpen(false); }, [pathname]); // a route change closes the drawer
+  useEffect(() => {
+    if (!navOpen) return undefined;
+    const item = side.current?.querySelector<HTMLElement>('.nav-item.active') ?? side.current?.querySelector<HTMLElement>('.nav-item');
+    item?.focus();
+    const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') { setNavOpen(false); toggle.current?.focus(); } };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [navOpen]);
+  const close = (): void => { setNavOpen(false); toggle.current?.focus(); };
   return (
-    <div className="shell">
-      <nav className="sidebar" aria-label="Primary">
+    <div className={`shell${navOpen ? ' nav-open' : ''}`}>
+      <nav className="sidebar" id="sidebar" aria-label="Primary" ref={side}>
         <div className="brand">
           <div className="brand-mark">D</div>
           <div><div className="brand-title">Data Privacy Services</div><div className="brand-sub">Privacy Console</div></div>
@@ -40,7 +60,7 @@ export function Layout(): JSX.Element {
             <div key={g.label}>
               <div className="nav-label">{g.label}</div>
               {g.items.map((i) => (
-                <NavLink key={i.to} to={i.to} end={i.to === '/'} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}><Icon name={i.icon} />{i.text}</NavLink>
+                <NavLink key={i.to} to={i.to} end={i.to === '/'} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`} onClick={() => setNavOpen(false)}><Icon name={i.icon} />{i.text}</NavLink>
               ))}
             </div>
           ))}
@@ -49,6 +69,7 @@ export function Layout(): JSX.Element {
       </nav>
       <div className="main">
         <header className="topbar">
+          <button type="button" className="nav-toggle" ref={toggle} aria-controls="sidebar" aria-expanded={navOpen} aria-label={navOpen ? 'Close navigation' : 'Open navigation'} onClick={() => setNavOpen((v) => !v)}>{MENU_ICON}</button>
           <label className="field"><span className="field-label">Tenant</span>
             <input className="input input-inline" value={tenant} onChange={(e) => setTenant(e.target.value)} placeholder="default" spellCheck={false} /></label>
           <label className="field"><span className="field-label">API key</span>
@@ -64,6 +85,7 @@ export function Layout(): JSX.Element {
         </header>
         <Outlet />
       </div>
+      <div className="nav-scrim" aria-hidden="true" onClick={close} />
     </div>
   );
 }

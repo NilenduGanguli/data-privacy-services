@@ -538,6 +538,52 @@ def _cell(value: Any) -> str:
     return html.escape(str(value))
 
 
+def _scan_section(pack: EvidencePack) -> str:
+    """The "UI scan" section of a scan pack (M4); ``""`` for any other pack."""
+    scan = pack.scan
+    if scan is None:
+        return ""
+    e = _cell
+    blocked = scan.get("blocked_requests") or {}
+    blocked_text = " · ".join(f"{e(m)} {e(n)}" for m, n in sorted(blocked.items())) or "none"
+    entities = (
+        "".join(
+            f"<tr><td>{e(k)}</td><td>{e(v)}</td></tr>"
+            for k, v in sorted((scan.get("by_entity") or {}).items())
+        )
+        or "<tr><td colspan=2 class=muted>No personal field was found.</td></tr>"
+    )
+    flags = (
+        "".join(
+            f"<tr><td class=mono>{e(f.get('code'))}</td><td>{e(f.get('flag'))}</td>"
+            f"<td>{e(f.get('severity'))}</td><td class=mono>{e(f.get('path'))}</td>"
+            f"<td>{e(f.get('entity_types'))}</td></tr>"
+            for f in scan.get("risk_flags") or []
+        )
+        or "<tr><td colspan=5 class=muted>No risk flag was raised.</td></tr>"
+    )
+    validation = (
+        "".join(
+            f"<tr><td>{e(mode)}</td><td>{e(c.get('checked'))}</td><td>{e(c.get('accepted'))}</td>"
+            f"<td>{e(c.get('rejected'))}</td></tr>"
+            for mode, c in sorted((scan.get("validation") or {}).items())
+        )
+        or "<tr><td colspan=4 class=muted>No form was filled.</td></tr>"
+    )
+    captures = scan.get("captures") or {}
+    nothing = int(scan.get("non_get_allowed") or 0) == 0
+    return f"""<h2>UI scan</h2><div class=kpis>
+<div class=kpi>Pages<b>{e(scan.get("pages"))}</b><span class=muted>{e(scan.get("spa_routes"))} SPA routes</span></div>
+<div class=kpi>Forms · fields<b>{e(scan.get("forms"))} · {e(scan.get("fields"))}</b><span class=muted>{e(scan.get("personas"))} personas, shown: {e(scan.get("display_persona"))}</span></div>
+<div class=kpi>Submissions<b class=ok>{e(scan.get("submissions"))}</b><span class=muted>no submit path exists</span></div>
+<div class=kpi>Non-GET requests allowed<b class="{"ok" if nothing else "bad"}">{e(scan.get("non_get_allowed"))}</b><span class=muted>measured from the request log</span></div></div>
+<p>Submissions: {e(scan.get("submissions"))} · Non-GET requests allowed: {e(scan.get("non_get_allowed"))} · Requests to denied paths that left the browser: {e(scan.get("scope_paths_reached", 0))} · Refused routes a page's own click handler ran (no request to refuse): {e(scan.get("scope_routes_reached", 0))} · Blocked: {blocked_text} · Navigations: {e(scan.get("navigations"))} · Captures: {e(captures.get("captured", 0))} captured, {e(captures.get("withheld", 0))} withheld</p>
+<table><tr><th>Entity</th><th>Fields</th></tr>{entities}</table>
+<h2>UI scan — risk flags</h2><table><tr><th>Code</th><th>Flag</th><th>Severity</th><th>Page</th><th>Entities</th></tr>{flags}</table>
+<h2>UI scan — the page's own validation</h2><table><tr><th>Fill</th><th>Fields checked</th><th>Accepted</th><th>Rejected</th></tr>{validation}</table>
+"""
+
+
 def render_html(pack: EvidencePack, *, sha: str) -> str:
     """The printable evidence page (mockup 10's sections M2 can fill); no scripts."""
     e = _cell
@@ -666,7 +712,7 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
 <tr><th>Row counts</th><td>{e(pack.counts.get("rows_read", 0))} read · {e(pack.counts.get("rows_written", 0))} written · {e(pack.counts.get("rows_skipped", 0))} skipped</td></tr>
 <tr><th>Fallbacks</th><td>{e(v.get("fallbacks"))}</td></tr></table>
 {fidelity}
-<h2>7 Regulatory note</h2><p>{note} DPS stores no customer values and no keys; this pack holds counts, hashes, names and key ids only.</p>
+{_scan_section(pack)}<h2>7 Regulatory note</h2><p>{note} DPS stores no customer values and no keys; this pack holds counts, hashes, names and key ids only.</p>
 <h2>8 Signatures</h2><div class=sig><div><b>System attestation</b><br>Data Privacy Services {e(pack.engine_version)}<br><span class=mono>sha256:{e(sha)}</span></div>
 <div><b>Data owner</b><br><br>Signature · Date</div><div><b>Data protection officer</b><br><br>Signature · Date</div><div><b>Change approver</b><br><br>Signature · Date</div></div>
 </main></body></html>"""

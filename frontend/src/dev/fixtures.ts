@@ -70,7 +70,7 @@ export function summary(now: Date, days = 14): SummaryOut {
     layers: {
       api: { requests: 1_920_000, by_mode: { obfuscate: 1_363_200, synthesize: 460_800, detect: 96_000 } },
       conn: { rows: 5_470_000, by_engine: { oracle: 3_446_100, postgres: 875_200, mongo: 1_148_700 }, groups: 1 },
-      ui: { scans: 3, pages: 38, fields: 81, risk_flags: 3, submissions: 0, last_scan: { id: 's_01K7ZRB2M4XQ', pages: 38, fields: 81, personas: 20 } },
+      ui: { scans: 3, pages: 38, fields: 104, personal_fields: 81, risk_flags: 3, submissions: 0, last_scan: { id: 's_01K7ZRB2M4XQ', pages: 38, fields: 104, personas: 20 } },
     },
     posture: { sweeps_passed_pct: 100, key_held_by_caller_pct: 100, snapshots_reviewed_pct: 94, policies_latest_pct: 81, score: 93.75 },
     recent_jobs: [
@@ -124,7 +124,7 @@ export function evidenceItems(now: Date): EvidenceItem[] {
     e('ev_01K7F2E5D5', 'j_01K7F2W8Q4LMF2', 'run', 'failed', 47, 'conn', { mode: 'obfuscate', policy: 'gdpr-pseudonymise', policy_version: 3, ticket: 'CHG-48168', source: 'LOANS.APPLICANTS', target: 'files', write_mode: 'files', rows_written: 0, verification_passed: false, hits: 2 }),
     e('ev_01K7W4DF66', 'j_01K7W4D1T7Y54D', 'run', 'succeeded', 51, 'conn', { mode: 'obfuscate', policy: 'gdpr-pseudonymise', policy_version: 3, ticket: 'CHG-48213', source: 'crm.profiles', target: 'profiles_uat', write_mode: 'table', rows_written: 2_698_402, verification_passed: true, hits: 0 }),
     e('ev_01K7V6WA77', 'j_01K7V6W3P5K26W', 'run', 'succeeded', 66, 'conn', { mode: 'obfuscate', policy: 'pci-dss', policy_version: 2, ticket: 'CHG-48160', source: 'cards_uat.cardholders', target: 'cards_uat.cardholders', write_mode: 'in_place', rows_written: 611_240, verification_passed: true, hits: 0 }),
-    e('ev_01K6MXSC88', 's_01K6MX4B7N2QMX', 'scan', 'succeeded', 170, 'ui', { mode: 'synthesize', policy: 'synthetic-realistic', policy_version: 1, ticket: 'CHG-48102', source: 'onboarding-uat.bank.internal', target: null, verification_passed: true, hits: 0, pages: 38, submissions: 0 }),
+    e('ev_01K6MXSC88', 's_01K6MX4B7N2QMX', 'scan', 'succeeded', 170, 'ui', { mode: 'synthesize', policy: 'synthetic-realistic', policy_version: 1, ticket: 'CHG-48102', source: 'onboarding-uat.bank.internal', target: null, verification_passed: true, hits: 0, pages: 38, forms: 12, personas: 20, submissions: 0 }),
     e('ev_01K6KNON99', 'j_01K6KN0E4M3NON', 'run', 'succeeded', 190, 'conn', { mode: 'synthesize', policy: 'synthetic-strict', policy_version: 1, ticket: 'CHG-48090', source: 'hr.employees', target: 'hr_uat.employees', write_mode: 'table', rows_written: 12_400, verification_passed: true, hits: 0 }),
   ];
 }

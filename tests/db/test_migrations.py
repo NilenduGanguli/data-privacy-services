@@ -45,6 +45,8 @@ async def test_files_are_the_contract_set() -> None:
         "009_grants.sql",
         "010_job_idempotency_fp.sql",
     ]
+    # M4 (030–039): the scanner's value-free tables and the tenant's registered hosts
+    assert [f for f in FILES if "030" <= f < "040"] == ["030_scans.sql", "031_tenant_hosts.sql"]
     # M3 (020–029): the group's latest consistency check
     assert [f for f in FILES if "020" <= f < "030"] == ["020_job_group_last_check.sql"]
     # WP-I: every number once, every file inside a milestone's range (contract §2.2)
@@ -66,6 +68,26 @@ async def test_fresh_database_applies_every_file_once(fresh_db) -> None:  # noqa
         }
         globals_ = {"dps_tenant", "dps_api_key", "dps_worker", "dps_migration_ledger"}
         assert set(db.GLOBAL_TABLES) == globals_ and set(db.TENANT_TABLES) | globals_ <= tables
+    finally:
+        await conn.close()
+
+
+async def test_m4_files_apply_after_m3_and_m5_on_an_existing_database(
+    fresh_db,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP-I (M4 merge): main's databases already ran 020 and 040–045 when 030/031 ship; the runner
+    applies pending files out of number order, and 040 already added ``registered_hosts``."""
+    s = await fresh_db("m4late")
+    shipped = db.migration_files
+    m4 = {"030_scans.sql", "031_tenant_hosts.sql"}
+    monkeypatch.setattr(db, "migration_files", lambda: [p for p in shipped() if p.name not in m4])
+    assert set(await db.run_migrations(s)) == set(FILES) - m4
+    monkeypatch.setattr(db, "migration_files", shipped)
+    assert await db.run_migrations(s) == ["030_scans.sql", "031_tenant_hosts.sql"]
+    conn = await _owner(s)
+    try:
+        assert await conn.fetchval("SELECT to_regclass('\"dps\".dps_scan_event') IS NOT NULL")
     finally:
         await conn.close()
 

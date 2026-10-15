@@ -125,6 +125,15 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-2); flex-wrap: wrap; }
 .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 6px; vertical-align: -1px; }
 @media (max-width: 1100px) { .cols-4 { grid-template-columns: repeat(2, minmax(0,1fr)); } .cols-3 { grid-template-columns: 1fr; } .cols-2 { grid-template-columns: 1fr; } .shell { grid-template-columns: 1fr; } .sidebar { display: none; } }
+/* navigation below 1100px: the sidebar opens as a drawer from a menu button in the topbar (vault.css; S2 console r1 B1) */
+.nav-toggle, .nav-scrim { display: none; }
+@media screen and (max-width: 1100px) {
+  .nav-toggle { display: inline-grid; place-items: center; flex: none; width: 34px; height: 34px; margin-left: -4px; padding: 0; border-radius: var(--r-md); border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink); cursor: pointer; }
+  .nav-toggle:hover { background: var(--surface-2); }
+  .nav-toggle svg { width: 18px; height: 18px; }
+  .shell.nav-open .sidebar { display: flex; position: fixed; top: 0; left: 0; bottom: 0; z-index: 40; width: min(280px, 86vw); height: auto; overflow-y: auto; box-shadow: var(--shadow-lg); }
+  .shell.nav-open .nav-scrim { display: block; position: fixed; inset: 0; z-index: 39; background: rgba(5, 8, 15, .55); }
+}
 
 /* --- console additions (not in the mockups) --- */
 textarea.input { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; min-height: 320px; resize: vertical; }

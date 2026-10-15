@@ -72,10 +72,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 CSP = (
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
     "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 )
 HSTS = "max-age=31536000; includeSubDomains"
+#: How often the API refreshes the ``browser`` readiness from ``dps_worker`` heartbeats.
+BROWSER_PROBE_SECONDS = 15
 #: Room for the multipart envelope (boundaries, part headers, the ``request`` field) on top of
 #: ``max_document_mb``; the documents router re-checks the file itself while reading it.
 DOCUMENT_MULTIPART_OVERHEAD = 1 << 20
@@ -350,6 +353,7 @@ class _JobPlatform:
         self.retry: asyncio.Task[None] | None = None
         self.consumer: Consumer | None = None
         self.worker: asyncio.Task[None] | None = None
+        self.browser_probe: asyncio.Task[None] | None = None
 
     @property
     def configured(self) -> bool:
@@ -362,7 +366,12 @@ class _JobPlatform:
         if not self.configured:
             READINESS.set("db", False, "unconfigured")
             READINESS.set("jobs", False, "unconfigured")
+            READINESS.set("browser", False, "db unconfigured")
             return
+        READINESS.set("browser", False, "unknown")
+        self.browser_probe = asyncio.create_task(
+            _browser_probe_loop(self.app), name="dps-browser-readiness"
+        )
         from dps import db
         from dps.storage import ArtefactService, artefact_store
 
@@ -472,6 +481,9 @@ class _JobPlatform:
 
     async def stop(self) -> None:
         """Drain the embedded worker, flush the audit sink, close the pools."""
+        if self.browser_probe is not None:
+            self.browser_probe.cancel()
+            await asyncio.gather(self.browser_probe, return_exceptions=True)
         if self.retry is not None:
             self.retry.cancel()
             await asyncio.gather(self.retry, return_exceptions=True)
@@ -485,6 +497,34 @@ class _JobPlatform:
 
             with contextlib.suppress(Exception):
                 await db.close_pools()
+
+
+async def refresh_browser_readiness(settings: Settings) -> int:
+    """Set the ``browser`` readiness component from ``dps_worker`` heartbeats (M4): ok when at
+    least one browser-worker was seen within three quarters of a job lease. ``browser`` is
+    informational: ``api-core`` stays the only required component (spec §4)."""
+    from dps import db
+    from dps.layers.scanner.store import ScanStore
+
+    async with db.acquire(None) as conn:
+        n = await ScanStore(settings.pg_schema).browser_workers_online(
+            conn, heartbeat_seconds=3 * settings.job_lease_seconds // 4
+        )
+    READINESS.set("browser", n > 0, f"{n} online" if n else "none online")
+    return n
+
+
+async def _browser_probe_loop(app: FastAPI) -> None:
+    """Refresh the ``browser`` readiness every :data:`BROWSER_PROBE_SECONDS` while the database
+    is up (errors are reported by class name only and retried)."""
+    settings: Settings = app.state.settings
+    while True:
+        if getattr(app.state, "db_state", "") == "up":
+            try:
+                await refresh_browser_readiness(settings)
+            except Exception as exc:  # noqa: BLE001 - informational; the next pass retries
+                READINESS.set("browser", False, "error", error=type(exc).__name__)
+        await asyncio.sleep(BROWSER_PROBE_SECONDS)
 
 
 def create_app(
@@ -698,6 +738,9 @@ def _include_m2_routers(app: FastAPI) -> bool:
     install_error_handlers(app)
     for module in (connections, jobs, snapshots, groups, evidence, artefacts, admin, reports):
         app.include_router(module.router)
+    from dps.layers.api.routers import scans  # M4: the scanner's routes (no Playwright import)
+
+    app.include_router(scans.router)
     # after M0's policies router (create_app): /policies/presets etc. keep their meaning
     app.include_router(policy_store.router)
     app.include_router(reports.evidence_pdf_router)

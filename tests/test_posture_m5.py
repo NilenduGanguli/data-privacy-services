@@ -193,6 +193,28 @@ async def test_posture_report_is_value_free_and_not_enforced_locally() -> None:
     assert report.passed == sum(c.ok for c in report.checks)
 
 
+async def test_posture_report_names_the_scan_host_fallback_where_the_scanner_applies_it() -> None:
+    """S2 console r1 B3: Admin › UI-scanner hosts said "scans are refused" on a local stack that
+    accepts scans of demo-site through ``DPS_SCAN_REGISTERED_HOSTS`` (the fallback for a tenant
+    without hosts on a local or dev deployment). The posture report names that fallback where
+    ``POST /scans`` applies it (``Settings.scan_fallback_hosts``) and nothing elsewhere."""
+    from dps.posture import posture_report
+
+    hosts = "Demo-Site, localhost,,127.0.0.1"
+    for env in ("local", "dev"):
+        settings = Settings(_env_file=None, env=env, scan_registered_hosts=hosts)
+        assert settings.scan_fallback_hosts == ["demo-site", "localhost", "127.0.0.1"]
+        report = await posture_report(settings, environ={})
+        assert report.scan_fallback_hosts == ["demo-site", "localhost", "127.0.0.1"], env
+    default = await posture_report(Settings(_env_file=None, env="local"), environ={})
+    assert default.scan_fallback_hosts == ["localhost", "127.0.0.1", "demo-site"]
+    for env in ("staging", "prod"):
+        settings = _prod(env=env, pg_host="", scan_registered_hosts=hosts)
+        assert settings.scan_fallback_hosts == []
+        report = await posture_report(settings, environ={})
+        assert report.scan_fallback_hosts == [], env
+
+
 async def test_posture_report_passes_a_good_production(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { FidelityPanel } from '../components/FidelityPanel';
 import * as fx from '../dev/fixtures';
 import { html, occurrences, text } from '../test/render';
+import { SCAN_PACK } from '../test/scanPack';
+import type { EvidenceOut } from '../lib/types';
 import { EvidenceSheet } from './EvidencePack';
 
 const NOW = new Date('2026-10-13T10:15:00Z');
@@ -90,5 +92,18 @@ describe('FidelityPanel', () => {
     expect(t3).toContain('Membership-inference proxy not run');
     expect(t3).toContain('holdout too small: 40 rows');
     expect(t3).toContain('no utility label nominated');
+  });
+});
+
+describe('EvidenceSheet for a UI scan (M4 merged into the M5 sheet)', () => {
+  const scanEv = { id: 'ev_01SCANPACK', job_id: 's_01SCANJOB', pack: SCAN_PACK, pack_sha256: '2a16', artefacts: [] } as unknown as EvidenceOut;
+  it('titles the scanned origin and claims no table run', () => {
+    const t = text(html(<EvidenceSheet ev={scanEv} job={null} snapshot={null} onJson={noop} onPdf={noop} />));
+    expect(t).toContain('UI scan demo-site:8410 → captures and exports');
+    expect(t).toContain('0 submissions · 0 non-GET allowed');
+    expect(t).toContain('artefacts only, nothing written to the scanned site');
+    expect(t).toContain('Owns the scanned application and its registered host.');
+    expect(t).not.toContain('Classification snapshot');
+    expect(t).not.toContain('Leakage sweep');
   });
 });

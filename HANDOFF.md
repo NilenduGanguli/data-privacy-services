@@ -6,6 +6,11 @@ run commands, the Oracle and MongoDB rules, traps and measured throughput, §14 
 adaptations to main's newer behaviour and the gates of the merged tree. The `v0.4.0-m3` tag follows
 the verification on main (programme plan §2.5).
 
+**M4 UI scanner (lane `dps-wt-m4`, branch `m4`, 2026-10-14):** browser-worker image, `scanner`
+compose profile with the demo site, scans API and console pages — see §15 (run, verification,
+traps), `docs/technical/api-m4.md` (API as built) and the M4 rows of §1, §4, §5 and §7. `main` (M5 + M3) is merged
+into `m4` ahead of the M4 integration (§15.1); `m4` itself is not yet merged into `main`.
+
 **Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
 — merged with `--no-ff`; the gates of the integrated tree are recorded in §11, and the fixes of the
 integrated verification round 1 (raw PII kept as "not personal"; account numbers and customer ids
@@ -67,9 +72,11 @@ deploy facts — image, ports, env, extras, probes, labels.
 |---|---|---|
 | `data-privacy-services` image | container | FastAPI app + compiled console; one process, port **8400**; non-root uid **10001**. The same image runs three roles: `app` (uvicorn), `worker` (`python -m dps.worker`, M2) and `migrate` (`python -m dps.migrate`, M2) |
 | M2 job platform | API + console | `/api/v1` connections, jobs (discover, run with `table` / `files` / `in_place` / `append`, controls), snapshots, job groups, evidence and artefacts (`docs/technical/api-m2.md`); console pages Data sources & jobs (07), job detail (03), the five-step New-job wizard (06), the evidence pack (10) and the evidence list of Reports (09) |
-| `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents + the job platform; extras `fpe`, `docs`, `db`, `connectors` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` / `e2e` (Playwright 1.55.0 for `tools/console_check.py` and `tests/console/test_console_m2.py`, never in the image) |
+| `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents + the job platform; extras `fpe`, `docs`, `db`, `connectors` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` / `e2e` (Playwright 1.55.0 for `tools/console_check.py` and `tests/console/test_console_m2.py`, never in the image), `scanner` (M4: `playwright==1.55.0` + Pillow; only in the browser image, never in the app image) |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
+| `data-privacy-services-browser` image | container (M4) | `Dockerfile.browser` on `mcr.microsoft.com/playwright:v1.55.0-noble` (Chromium 1187): the **browser-worker** role (`python -m dps.browser_worker`, claims `scan` jobs only), uid 10001, ops port 9401 (in-network); §15 |
+| M4 UI scanner | API + console | `/api/v1/scans…` (create with key and seed returned once, pages, fields, events, inventory, exports, cancel, persona preview; `docs/technical/api-m4.md`); console pages New scan (`/scanner`, mockup 12) and scan detail (`/scanner/scans/:id`, mockup 04: crawl map, navigation log, parallel view, inventory, captures); the demo onboarding site `demo/onboarding/` (Node 22, no dependencies; compose service `demo-site`) |
+| `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable) + with `DPS_SMOKE_SCANNER=1` 11 UI-scanner checks (M4: a scan of the demo site end to end, its `/__received` counters unchanged, parallel view, masked capture, export without demo values, evidence `submissions 0`). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); prints verdicts, never bodies |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §13); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
@@ -101,6 +108,10 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
   `DPS_PG_HOST` is set and the command is `uvicorn` — single-container app runs; compose uses the
   `migrate` one-shot) and
   `CMD uvicorn dps.app:create_app --factory --host 0.0.0.0 --port 8400 --no-access-log`.
+
+The browser-worker has its own image, `Dockerfile.browser` (M4, §15):
+`docker compose --profile scanner build` or `docker build -f Dockerfile.browser -t
+data-privacy-services-browser:local .`.
 
 Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (arm64, M1 lane: the
 `docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB. M2 lane
@@ -293,8 +304,8 @@ stack on this host, so `docker-compose.yml` fixes neither a host port nor an ima
   8400 and `DPS_OCR_PORT` 5016 today; as services arrive, `DPS_DB_PORT` 5441, `DPS_SOURCE_PG_PORT` 5442, `DPS_MINIO_PORT` 9010,
   `DPS_MINIO_CONSOLE_PORT` 9011, `DPS_ORACLE_PORT` 1522, `DPS_MONGO_PORT` 27018, `DPS_OCR_PORT` 5016,
   `DPS_DEMO_SITE_PORT` 8410, `DPS_TOKENIZER_MOCK_PORT` 8420 (worker metrics ports likewise if published);
-- every image compose builds is tagged `${DPS_IMAGE_TAG:-local}` (`data-privacy-services`, later
-  `data-privacy-services-browser`; the OCR mock `${DPS_IMAGE_TAG:-latest}`);
+- every image compose builds is tagged `${DPS_IMAGE_TAG:-local}` (`data-privacy-services`, and from
+  M4 `data-privacy-services-browser`, §15; the OCR mock `${DPS_IMAGE_TAG:-latest}`);
 - tests and tools read endpoints only from `DPS_TEST_*` (contract §12.2), whose defaults follow the same
   port variables; `tools/smoke_test.py` reads `DPS_TEST_APP_URL` / `DPS_APP_PORT`;
 - give each lane its own `COMPOSE_PROJECT_NAME` so containers, networks and volumes stay apart:
@@ -381,6 +392,21 @@ an empty `DPS_PG_HOST` means no metadata database, no jobs and no M2 posture che
 | `DPS_S3_ENDPOINT_URL`, `_REGION`, `_BUCKET`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_FORCE_PATH_STYLE` | —, `us-east-1`, `dps-artefacts`, —, —, `true` | |
 | `DPS_IMAGE_DIGEST` | — | stamped into evidence packs |
 
+**M4 settings (UI scanner; contract §10).** Read by the browser-worker (`python -m dps.browser_worker`,
+Dockerfile.browser) and the scans API; the app image never imports Playwright or Pillow (the
+`scanner` extra: `playwright==1.55.0`, `pillow>=10.4`).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DPS_BROWSER_CONCURRENCY`, `DPS_BROWSER_METRICS_PORT`, `DPS_BROWSER_HEADLESS` | 2 (1..16), 9401, `true` | scans per browser-worker; metrics port 0 disables its ops server; a headed browser is refused in staging/prod |
+| `DPS_SCAN_MAX_PAGES`, `DPS_SCAN_MAX_DEPTH` | 50 (1..500), 3 (0..5) | hard page cap per scan (a scan asking for more is 422 `scope_invalid`); depth when a scan omits it |
+| `DPS_SCAN_PAGE_TIMEOUT_SECONDS`, `DPS_SCAN_JOB_TIMEOUT_SECONDS` | 30, 1800 | |
+| `DPS_SCAN_REGISTERED_HOSTS` | `localhost,127.0.0.1,demo-site` | local/dev fallback; production scans only hosts in `dps_tenant.registered_hosts` |
+| `DPS_SCAN_STORE_UNMASKED_ORIGINALS` | `false` | must stay `false` in staging/prod (an unmasked screenshot holds the page's personal data) |
+| `DPS_SCAN_MAX_PER_TEMPLATE`, `DPS_SCAN_MAX_SPA_CLICKS_PER_PAGE`, `DPS_SCAN_MAX_FIELDS_PER_PAGE` | 3, 25, 400 | crawl budgets: visits per URL template (`/help/faq/{id}`), click-only routes tried per page, fields inventoried per page |
+| `DPS_SCAN_MAX_SKIPPED_ROWS`, `DPS_SCAN_MAX_EVENTS`, `DPS_SCAN_SETTLE_MS` | 200, 2000, 400 | skipped-page rows kept for the crawl map, navigation-log rows per scan, wait after load/fill |
+| `DPS_SCAN_VIEWPORT_WIDTH` / `_HEIGHT`, `DPS_SCAN_SCREENSHOT_MAX_HEIGHT` | 1280 / 900, 12000 | capture geometry (full-page PNGs are cropped to the max height) |
+
 **M5 settings (contract §10; tabular synthesis, tokenization, keys, posture).** All have defaults;
 the posture rules that tighten them in staging/prod arrive with M5's posture task.
 
@@ -425,7 +451,11 @@ Compose-only variables (read by `docker-compose.yml` and the tools, not by the a
 (9011), `DPS_OCR_PORT` (5016), `DPS_ORACLE_PORT` (1522) and `DPS_MONGO_PORT` (27018; the others arrive with their services, §3 "Lane-safe stacks"). The M3 tests read `DPS_TEST_ORACLE_DSN` / `DPS_TEST_ORACLE_USER` / `DPS_TEST_ORACLE_PASSWORD` (default `127.0.0.1:${DPS_ORACLE_PORT:-1522}/FREEPDB1`, `system`, `dps_local_oracle`) and `DPS_TEST_MONGO_URI` (default `mongodb://127.0.0.1:${DPS_MONGO_PORT:-27018}/?directConnection=true`).
 `DPS_SMOKE_REQUIRE_OCR=1` makes `tools/smoke_test.py` fail instead of skipping its OCR checks;
 `DPS_SMOKE_M2=auto|on|off` selects its job-platform checks; `--m3` adds the Oracle + MongoDB
-checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
+checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s). M4: `DPS_DEMO_SITE_PORT` (8410, the
+demo site's host port); `DPS_SMOKE_SCANNER=1` adds the scanner checks, `DPS_SMOKE_DEMO_URL`
+(default `http://demo-site:8410`, the demo site as the browser-worker sees it),
+`DPS_TEST_DEMO_SITE` (default `http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}`, where the script and
+the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
 
 ## 5. Probes and ops surfaces
 
@@ -437,7 +467,9 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   and `engine` — `azure-read-v3.2` or `tesseract-<major.minor>`; probed at
   startup and every `DPS_OCR_PROBE_INTERVAL_SECONDS` while OCR is configured; never required, since
   JSON and text need no OCR), and from M2 `db` (`up` / `down` / `unconfigured`, with `migrations:
-  verified`) and `jobs` (ok when the DB is up, the migrations verify and the KEK is loaded); **503**
+  verified`) and `jobs` (ok when the DB is up, the migrations verify and the KEK is loaded), from M4
+`browser` (`N online` when a browser-worker heartbeat is recent, refreshed every 15 s from
+`dps_worker`; `unknown` for the first seconds after start, `none online` without one); **503**
   only when a required component is down, and only `api-core` is required (it turns false on
   shutdown) — the engine and document routes never depend on the database. A database that is down
   at boot is retried every 10 s; meanwhile the `/api/v1` job-platform routes answer 503 `{"detail",
@@ -471,7 +503,10 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   carries `counts.llm_calls`, `llm_raw_values`, `llm_blocked` when it reached the gateway; the daily
   roll-ups sum them per tenant (migration 044) into the Overview tiles `llm_calls`,
   `raw_pii_sent_to_llm`, `llm_blocked`; a job handler that calls the LLM records the same three in
-  `progress.metrics.llm`.
+  `progress.metrics.llm`. M4 (served by the browser-worker on 9401):
+  `dps_scan_pages_total{outcome}`, `dps_scan_requests_total{decision,method,reason}`,
+  `dps_scan_fields_total{entity_type}`, `dps_scan_fills_total{mode,outcome}` — labels never carry a
+  URL or a value.
 - Audit: one `audit` log line per engine request, rejections included (trace id, route, tenant, key
   id, mode, policy label, outcome, counts, methods, verification, duration — never a value or a key).
   Document routes audit mode `document.detect|obfuscate|synthesize`; the outcome is the error code
@@ -516,6 +551,13 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   with recent jobs, records its counts in `progress.metrics.retention` and writes one `retention.run`
   audit event owned by `_system`. `POST /api/v1/admin/retention/run {"dry_run": true}` (admin key
   granted every tenant) queues an on-demand run.
+- **Browser-worker (M4).** `python -m dps.browser_worker` (image `Dockerfile.browser`) runs M2's
+  `Consumer` with `kinds=(scan,)`, role `browser-worker`, `DPS_BROWSER_CONCURRENCY` scans at a time
+  in one Chromium, one isolated context per scan. Needs `DPS_PG_HOST` and `DPS_JOB_KEK` like the
+  worker. Ops server on `${DPS_HOST}:${DPS_BROWSER_METRICS_PORT}` (9401; 0 = off): `GET /health`,
+  `GET /readyz` (Chromium up — `browser: chromium <version>` — and the consumer claiming),
+  `GET /metrics`. Same SIGTERM drain as the worker; the scan audit rows (`scan.navigate` per page,
+  `scan.finalize`) carry page numbers, durations and counts only.
 
 ## 6. Security posture
 
@@ -527,7 +569,14 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   never its value. With `DPS_PG_HOST` set (M2) it also requires: the job KEK from `DPS_JOB_KEK_FILE`
   (a literal `DPS_JOB_KEK` env var is refused), `DPS_INLINE_SECRETS_ALLOWED=false`,
   `DPS_RLS_ENABLED=true`, `DPS_MIGRATIONS_MODE=verify`, `DPS_AUDIT_STRICT=true`,
-  `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`.
+  `DPS_PG_SSL_ROOT_CERT` set and `DPS_EMBEDDED_WORKER=false`. M4 adds (always, database or not): `DPS_SCAN_STORE_UNMASKED_ORIGINALS=false`
+  and `DPS_BROWSER_HEADLESS=true`. Each process checks its own role
+  (`assert_production_posture(settings, role=…)`): the **browser-worker** (`role="browser-worker"`)
+  gets every rule here and in the M5 list below except those of components it never runs and whose
+  secrets it does not mount — `DPS_API_KEYS`, `DPS_CORS_ORIGINS`, the OCR provider/key and
+  `DPS_TOKENIZER_TOKEN_FILE` — so its deployment can share the app's ConfigMap without those mounts.
+  The app and the worker keep every rule (the worker is checked as `app`: it still needs
+  `DPS_API_KEYS_FILE` mounted in staging/prod).
 - **M5 posture** (`dps/posture.py`, same guard): secrets only as mounted files — a literal
   `DPS_JOB_KEK`, `DPS_JOB_KEK_PREVIOUS`, `DPS_API_KEYS`, `DPS_COIN_CLIENT_ID`/`_SECRET`,
   `DPS_PG_PASSWORD`, `DPS_PG_WORKER_PASSWORD`, `DPS_PG_MIGRATION_PASSWORD`, `DPS_TOKENIZER_TOKEN`,
@@ -632,7 +681,15 @@ directories under each tenant's folder `DPS_SECRET_DIR/<tenant_id>/`: `dps/src/*
 `dps/src/oracle-crm-owner`, `dps/tgt/oracle-crm-masked`, `dps/src/oracle-loans-owner`,
 `dps/src/mongo-crm`, `dps/tgt/mongo-crm-uat` under the demo tenant `default/`; an Oracle ref adds a
 `dsn` file, a Mongo ref a `uri` file), and `DPS_SECRET_DIR/_shared/*` for a secret
-several tenants may use. Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
+several tenants may use. M4 adds the scanner's sessions: `auth.storage_state_ref` names a Playwright
+`storage_state.json` mounted at `DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json` (or a listed
+`_shared/<ref>/`) — **tenant-scoped** like a connection `secret_ref` (SEC-5: `POST /scans` refuses another
+tenant's folder with 403 `secret_ref_foreign_tenant`, an unlisted shared one with 403 `secret_ref_not_shared`;
+the browser-worker resolves it with `dps.secrets.resolve_secret_ref(tenant_id, ref, settings)` and fails
+the scan closed with `secret_unavailable` otherwise); refs follow `dps/ui/<name>`
+(the local demo session is `dps/ui/demo-onboarding`, a committed demo literal for the demo site
+only). The browser-worker needs `DPS_JOB_KEK` (it opens the scan's sealed key, seed, start URL and
+any inline dev storage state, and purges them at the end). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
 set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
 
 Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
@@ -906,7 +963,7 @@ tenant.
 
 M1 documents (done: v0.2.0, §10) → **M2 jobs + PostgreSQL (done: tag `v0.1.0-m2`; Postgres, worker,
 migrations, the jobs API and console)** → integrated on `main` (§11) → **M3 Oracle + MongoDB (lane `m3`, §13;
-integrated on `main`, §14; tag `v0.4.0-m3` pending)** → M4 UI scanner (browser worker image) →
+integrated on `main`, §14; tag `v0.4.0-m3` pending)** → **M4 UI scanner (lane `m4`, §15; main merged into it, §15.1; to be merged into `main`)** →
 M5 hardening + showcase. Each adds a section here.
 
 ## 10. M1 — documents and Layer 1 complete (v0.2.0)
@@ -1367,3 +1424,224 @@ demo seed draws the customers from M3's `tools/seed_model.py` and keeps M5's rul
 a source-vs-target count. Console tests overwrite the tracked screenshots under
 `docs/superpowers/build/m3-shots/` (A-N2). Start main with `DPS_TOKENIZER_MOCK_PORT=8430` while the
 M4 lane holds 8420. Gates and results: `~/.cache/dps-build/reports/I-m3.md`.
+
+## 15. M4 — UI scanner: browser-worker image and the `scanner` profile (lane `dps-wt-m4`)
+
+What M4 adds to the stack (contract §3.5, §11, §11.1): the **browser-worker** role (`python -m
+dps.browser_worker`, claims `scan` jobs only) on its own image, and the **demo-site** (the
+onboarding web app every scanner test, the smoke test and the demo scan). The app needs no change: it
+validates scan hosts against the same default `DPS_SCAN_REGISTERED_HOSTS`
+(`localhost,127.0.0.1,demo-site`) and serves the screenshots from the artefact store it shares with
+both workers.
+
+**Image `Dockerfile.browser`** → `data-privacy-services-browser:${DPS_IMAGE_TAG:-local}`:
+`FROM mcr.microsoft.com/playwright:v1.55.0-noble`, whose `/ms-playwright` holds Chromium build 1187 —
+exactly what `playwright==1.55.0` drives, so the image never runs `playwright install`
+(`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`; the build asserts the installed version is 1.55.0).
+`uv` 0.11.21 (pinned, as the app image) creates `/opt/venv` from the base's `/usr/bin/python3.12`
+(Ubuntu 24.04 has no `ensurepip`) and installs `.[fpe,db,connectors,scanner]` (`scanner` =
+`playwright==1.55.0` + Pillow; `WITH_NER=1` adds `ner` + `en_core_web_sm`); no `docs`/`tabular`
+and no console. It runs as **uid 10001** (`appuser`, as the app image — the base's `pwuser` could not
+write the shared `dps-artefacts`/`dps-exports` volumes, which the app image creates owned by 10001),
+`EXPOSE 9401`, a `urllib` `HEALTHCHECK` on `http://localhost:9401/health` (start period 30 s), `CMD
+["python", "-m", "dps.browser_worker"]`. Size (arm64, 2026-10-13): 4.22 GB, almost all of it the
+Playwright base (3.53 GB: Chromium, Firefox, WebKit and their system libraries).
+
+**Compose (`--profile scanner`, also in `full`):**
+
+| Service | Image | Host port | Notes |
+|---|---|---|---|
+| `browser-worker` | `data-privacy-services-browser:${DPS_IMAGE_TAG:-local}` | none (ops `/health` `/readyz` `/metrics` on 9401 inside the network) | `extends: worker` — the same database, `DPS_JOB_KEK`, artefact store, volumes and hardening (read-only root, `/tmp` tmpfs 512 MiB, `cap_drop: ALL`, `no-new-privileges`); overrides: `DPS_MIGRATIONS_MODE=off` (the `migrate` one-shot owns DDL), `DPS_BROWSER_CONCURRENCY=2`, `DPS_BROWSER_METRICS_PORT=9401`, `DPS_SCAN_REGISTERED_HOSTS=localhost,127.0.0.1,demo-site`, `DPS_FPE_ENABLED` (must equal the app's); secrets: the worker's tenant-scoped `dps-secrets` volume (`DPS_SECRET_DIR=/var/run/secrets/dps`, read-only — the same tree the app checks a `storage_state_ref` against at accept, SEC-2/SEC-5), after `demo-secrets` has run; `shm_size: 1gb`, `init: true`, `mem_limit: 2g` |
+| `demo-site` | `node:22-slim` running `demo/onboarding/server.mjs` (bind-mounted read-only; no build) | `127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}:8410` | `GET /health`; `GET /__received` counts every non-GET request and GET-form submission it ever received (the D4 proof); `mem_limit: 256m`; in-network name `demo-site:8410` |
+
+```bash
+docker compose --profile scanner up -d --build       # + app, worker, dps-db, migrate (default services)
+docker compose --profile scanner ps                  # poll until app, browser-worker, demo-site are healthy
+curl -fsS http://127.0.0.1:${DPS_APP_PORT:-8400}/readyz        # components.browser: {"ok": true, "detail": "1 online"}
+curl -fsS -X POST http://127.0.0.1:${DPS_APP_PORT:-8400}/api/v1/scans \
+  -H 'X-API-KEY: dps_local_dev_key_change_me' -H 'Content-Type: application/json' \
+  -d '{"url":"http://demo-site:8410/apply","scope":{"max_pages":25,"deny":["/logout","/admin"]},
+       "auth":{"storage_state_ref":"dps/ui/demo-onboarding"},"fill":{"personas":5,"locale":"en_IN"}}'
+                                                     # 202 + key material and seed (shown once)
+curl -fsS http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}/__received   # "non_get":0 on a fresh demo-site
+docker compose --profile scanner down
+```
+
+**Demo session.** `docker/secrets/default/dps/ui/demo-onboarding/storage_state.json` is the demo
+site's session cookie (`demo_session`, domain `demo-site`) — a **local demo literal**, committed like
+the compose demo key; it opens nothing but the demo site. The `demo-secrets` one-shot (profiles
+`sources`, `scanner`, `full`) copies it read-only into the stack's `dps-secrets` volume under the demo
+tenant's folder, beside M2's and M3's demo refs; the browser-worker reads that volume like the worker.
+Storage states resolve tenant-scoped (`DPS_SECRET_DIR/<tenant>/<ref>/storage_state.json`, SEC-2 layout,
+through `dps.secrets.resolve_secret_ref`), so ref `dps/ui/demo-onboarding` works for tenant `default`
+(the bootstrap key without `X-DPS-Tenant`); another tenant needs its own folder (`POST /scans` refuses a
+reference into another tenant's folder, SEC-5). Staging/prod mount real storage states the same way,
+from a secret, never from the repo.
+
+**Verified 2026-10-13 on this lane** (`COMPOSE_PROJECT_NAME` `dps-wt-m4`, `DPS_IMAGE_TAG=m4`,
+app 8414, demo-site 8420): `docker compose --profile scanner up -d --build` → app, worker,
+browser-worker, demo-site, dps-db healthy, migrate exited 0; `docker compose exec browser-worker
+python -c "…m.version('playwright')"` → `1.55.0`, running as uid 10001; app `/readyz` `browser: ok, 1
+online`; worker `:9401/readyz` `browser: chromium 140.0.7339.16`; the scan above → `succeeded` in
+68 s (21 pages done, 4 skipped, 63 fields, 9 risk flags, 73 POST + 1 GET blocked by the guard,
+`non_get_allowed` 0, evidence and CSV/JSON exports written; the logged-in `/profile` page was
+scanned, so the mounted storage state was read); the demo site's `/__received` stayed at `non_get
+0, form_get 0, logout_hits 0, admin_hits 0`; a screenshot the browser-worker stored was served by
+the app (`GET /api/v1/artefacts/{id}` → 200 `image/png`); the compose logs (168 lines) carry none of
+the demo values, the session cookie, the scan's key or seed.
+
+**Traps (M4).**
+
+1. Host browser tests need Chromium 1187: `python -m playwright install chromium` once (the host
+   cache may hold other builds — 1148, 1234, 1243 — that belong to other Playwright versions).
+2. Chromium in Docker needs shared memory: compose sets `shm_size: 1gb` and the worker also passes
+   `--disable-dev-shm-usage` (then Chromium uses `/tmp`, the 512 MiB tmpfs it inherits from the
+   worker).
+3. The browser image must run as uid 10001 (see above); with the base's `pwuser` every artefact save
+   fails with a permission error on the shared volume.
+4. Only registered hosts are scanned (`DPS_SCAN_REGISTERED_HOSTS` locally, `dps_tenant.registered_hosts`
+   in production); `http://demo-site:8410` is the in-network address — from the host the demo site is
+   `127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}`, which the browser-worker container cannot reach.
+5. HAR capture is not supported (`capture.har: true` → 422 `har_not_supported`).
+6. The demo site's counters only grow; compare before/after (the tests do) or restart `demo-site`
+   for a fresh `non_get: 0`. With the compose demo-site on the lane's port, host tests use it
+   instead of starting their own `node`.
+7. Never `up --wait` (the `migrate` one-shot exits); poll `docker compose ps`.
+8. Right after `up` (or an app restart) the app's `/readyz` reads `browser: unknown` until its first
+   heartbeat refresh (≤ 15 s). The smoke test waits up to 60 s for it; a script that reads it once
+   must do the same.
+9. On a lane, the demo site's host port is the lane's `DPS_DEMO_SITE_PORT` (8420 on `dps-wt-m4`);
+   reading `127.0.0.1:8410` there reads another stack's counters. `./lane.sh` exports
+   `DPS_TEST_DEMO_SITE` for the tests and the smoke test.
+
+**Smoke and the compose-level scanner gate (Task 24).**
+
+```bash
+docker compose --profile scanner up -d --build                       # poll `docker compose ps` (trap 7)
+DPS_SMOKE_M2=off DPS_SMOKE_SCANNER=1 python tools/smoke_test.py      # 23 Layer 1 + 11 scanner checks
+```
+
+The eleven scanner checks: browser worker online; scan accepted with key and seed (dropped, never
+printed); scan succeeded; ≥ 20 personal fields with `autocomplete_enabled_sensitive`,
+`pii_in_query_string` and `pii_rendered_unmasked` flagged; the demo site's `non_get`, `form_get`,
+`logout_hits` and `admin_hits` unchanged and `non_get_allowed` 0; the identity page's four
+parallel-view screenshots; one served as a PNG; a masked capture served; the persona export (5
+personas) holding none of the demo site's customer values; the evidence pack's `scan.submissions`
+and `scan.non_get_allowed` 0; `/scanner/new` served. With `--profile sources` up too, leave
+`DPS_SMOKE_M2` unset to add the nine job checks. Verified 2026-10-14 on this lane (app 8414,
+demo-site 8420, the app restarted just before the run): **all 34 checks passed** (2 OCR checks
+skipped without `--profile docs`), scan `succeeded` with 21 pages, 63 fields (51 personal), 9 risk
+flags, 3 masked captures, 71 POST + 1 GET blocked, every counter +0; without `DPS_SMOKE_SCANNER` 23
+checks, as before. A scan of the compose logs (app, worker, browser-worker) and of the smoke output
+for the demo site's ten customer values other than the birth date, the name's parts, their digits-only forms and the
+demo session cookie found 0 hits.
+
+
+## 16. M4 pre-merge — main (M5 + M3) merged into lane `m4` (2026-10-14, WP-I)
+
+`git merge main` into `m4` (`b34dd07`, main `6fa2da5`; `4e55da3` adds main's two later docs commits):
+23 files conflicted; both sides kept. Migrations: M2 001–010, M3 020, M4 030–031, M5 040–045 (each
+number once). Compose: one file with profiles `docs`, `sources`, `oracle`, `scanner`, `tokenizer`, `full`
+(browser-worker, demo-site, tokenizer-mock, Oracle, MongoDB beside M2's services); every host port a
+defaulted variable. Console: the scanner pages (`/scanner`, `/scanner/new`, `/scanner/scans/:id`) beside
+M5's Admin, Policies, Reports and Evidence pages; `npm run dev:fixtures` installs M5's fixture server and
+the scanner fixtures on top of it. App: the scans router sits beside admin/reports/policy-store, the
+lifespan runs the browser readiness probe and M5's key refresher.
+
+**Adaptations** (each test-first; commits `fix(integrate): …` / `test(integrate): …`, details in
+`docs/superpowers/build/M4-DEVIATIONS.md` "M4 pre-merge"):
+
+- Migration 031 adds `registered_hosts` `IF NOT EXISTS`: main's databases ran M5's 040 (which adds it
+  too) before 030/031 ship, and the runner applies pending files out of number order.
+- **SEC-5:** a scan's `storage_state_ref` is resolved by main's `resolve_secret_ref(tenant_id, ref,
+  settings)` and checked at `POST /scans` with a connection `secret_ref`'s rule: another tenant's
+  folder 403 `secret_ref_foreign_tenant`, an unlisted `_shared/` one 403 `secret_ref_not_shared`, a
+  hidden or reserved segment 422 `secret_ref_invalid`; `_shared/<ref>` sessions work.
+- **SEC-2:** the browser-worker reads the stack's `dps-secrets` volume (the tree the app checks refs
+  against); `demo-secrets` (now also in profile `scanner`) copies the committed demo session into it
+  under `default/`.
+- **M5 keys:** database keys with scope `scan` drive every scans route (test only; no change needed).
+- **M5 posture:** the browser-worker checks `assert_production_posture(settings, role="browser-worker")`
+  — every M2/M4/M5 rule except the API keys, CORS, OCR and tokenizer-token rules of components it does
+  not run (§6).
+- **M5 policy store:** `policy: "@name[:vN]"` on `POST /scans` resolves at accept; the stored spec pins
+  the body the browser-worker runs; the scan evidence's `policy.version` names it; a relaxed body is
+  `verify_warn_disallowed` (accept and run).
+- **Main's discovery rules in scanner classification:** the shared label dictionary (role names,
+  address lines, document numbers); a contact value next to a channel field is `MIXED_PII`; a field
+  whose shown value carries MEDIUM+ findings is classified by them (`FREE_TEXT` for findings inside
+  text) — never "not personal".
+- **Overview:** the "Layer 3 · UI scanner" card counts personal fields (`layers.ui.personal_fields`),
+  not every field inventoried.
+
+**Traps.** (1) A lane that runs the scanner and the tokenizer needs its own `DPS_TOKENIZER_MOCK_PORT`:
+both default to host port 8420 on `dps-wt-m4` (`.env` sets 8424). (2) `--profile scanner` now runs
+`demo-secrets` too; its storage state lands in the volume, so an edit to the committed demo session
+needs `docker compose up -d demo-secrets` (or `down -v`). (3) A top-level folder in `DPS_SECRET_DIR` that
+is not the tenant's (e.g. an old `dps/` from before SEC-2) makes every ref starting with that segment
+`secret_ref_foreign_tenant`/`secret_unavailable` — remove it. (4) `tests/console/test_console_m2.py`
+needs the connections the smoke test creates (`bank-restore-rw` too): run the smoke test first.
+
+**Verified 2026-10-14 on this lane** (`dps-wt-m4`, `DPS_IMAGE_TAG=m4`, app 8414, demo-site 8420,
+tokenizer-mock 8424; `docker compose --profile full up -d --build`): ruff format/check and mypy clean;
+`pytest -q` with every service up 3413 passed (2 merged tests adapted afterwards); with
+`DPS_TEST_REQUIRE_SERVICES=1`: `docs or ocr` 139 passed (2 need a host tesseract), `oracle or mongo` 162
+passed (1 by design), `browser` 166 passed (27 OCR capture tests need tesseract: 27/27 passed with
+`DPS_TEST_TESSERACT_CMD` running the app image's tesseract), the whole non-browser suite 3254 passed;
+frontend 42 node + 356 Vitest tests and the build; smoke **52/52** (`DPS_SMOKE_SCANNER=1
+DPS_SMOKE_REQUIRE_OCR=1 … --m3`: Layer 1, documents and OCR, the M2 job checks, the three-engine group
+3/3 consistent, the scanner's 11). D4: two more scans of the demo site (synthesize and obfuscate, 21
+pages and 63 fields each, 60 POST + 1 GET blocked) left `/__received` at +0 with `non_get_allowed` 0 and
+`scan.submissions` 0; OCR of every stored screen found no demo value on the filled screens
+(`application_ref` stays readable on `/apply/review`, M4's open N9); the logs of all 15 containers hold
+none of the demo values, the session cookie, the scans' keys or seeds; a console walk of every M1–M5
+page (light/dark, 1440/390 px) had 0 console errors, 0 5xx and no horizontal scroll at 390 px.
+Known flake (main's code), **fixed in S2 fix round 1 (§16.1)**: `tests/connectors/test_synthesize_copula.py::
+test_surrogate_job_on_the_seeded_demo_customers` failed once in ~8 runs with one synthetic
+`national_id` equal to a demo-source one — the demo seed (`tools/seed_model.py`) drew its SSNs and
+Aadhaars from the same never-issued ranges the D-A surrogates use; the run's own identifier check
+compares with the source, so such a run is review-required, never silently written. Reports:
+`~/.cache/dps-build/reports/S2-premerge.md`.
+
+### 16.1 S2 fix round 1 (2026-10-14) — what changes for a build, a deploy or a demo
+
+Details and tests: `docs/superpowers/build/M4-DEVIATIONS.md` and `M4-DEVIATIONS-console.md` "S2 fix
+round 1"; report `~/.cache/dps-build/reports/S2-fix-r1.md`.
+
+- **Demo data model 2** (`tools/seed_model.py` `DEMO_MODEL_VERSION`): demo Aadhaar-shaped ids start with
+  `0` and demo SSNs use area `666`, ranges no D-A surrogate draws, so a synthesize run of the demo can
+  never write a demo value (the seeded-demo D-A tests are deterministic now). Every seed marker carries
+  the model version; **a stack seeded by model 1 is reloaded automatically** (same `--rows`/`--seed`, no
+  `--reset`): the compose `seed-sources` one-shot reloads PostgreSQL `bank` (and `bank_restore`) on the
+  next `docker compose up`, and `python tools/seed_sources.py --target all --rows 20000 --seed 7`
+  reloads Oracle and MongoDB. Anything that cached demo ids (screenshots, notes) shows model-1 values.
+- **Captures:** text in a read same-origin iframe is masked in the frame's viewport, mapped through its
+  content box and cut to what the frame shows; a transformed or zoomed read frame is painted over whole
+  (`FRAME`) — fail closed.
+- **API:** `/jobs/{id}` routes refuse a scan to a key without `scan` (403 `scope_required`); `GET /jobs`
+  lists no scans for such a key. `GET /admin/posture` gains `scan_fallback_hosts` (the
+  `DPS_SCAN_REGISTERED_HOSTS` list on local/dev, `[]` elsewhere); recent-job briefs and evidence
+  summaries of scans name the host (plus `forms`, `personas`).
+- **Console:** below 1100 px a menu button opens the navigation drawer (mockups' `vault.js`); scan
+  rows read "UI scan of <host> · … pages · … forms · … personas · … submissions"; Admin › UI-scanner
+  hosts states the local/dev fallback instead of "scans are refused".
+
+### 16.2 S2 fix round 2 (2026-10-15) — what changes for a build, a deploy or a demo
+
+Details and tests: `docs/superpowers/build/M4-DEVIATIONS.md` and `M4-DEVIATIONS-console.md` "S2 fix
+round 2"; report `~/.cache/dps-build/reports/S2-fix-r2.md`.
+
+- **Captures:** every mask is placed where the full-page screenshot draws the value, using the
+  browser's own position of the page's viewport (CDP `Page.getLayoutMetrics`, `dom.viewport_box`)
+  instead of `scrollX`/`scrollY`: pages whose root snaps (`scroll-snap-type`) and RTL or
+  `vertical-rl` pages wider than the viewport are masked correctly; scroll snapping is switched off
+  while a capture is taken, and a page that scrolls between the measurements and the screenshot is
+  withheld (fail closed). A closed select is classified and masked by what it draws (its selected
+  option's `label` attribute when it has one), and a personal select stays masked in the filled
+  screens (the fill can only pick one of the page's own options). No setting change; the
+  browser-worker image must be rebuilt to carry it.
+- **Reports / Overview:** a UI sweep is a scan's own verification — succeeded = passed, an evidence
+  pack with a verification error (`submission_detected`) = failed and listed under Failed sweeps
+  (`where: "scan"`, linked to the scan); a scan that failed before it crawled (`secret_unavailable`,
+  …) or was canceled is no sweep. The Overview posture counts UI sweeps too. No migration: UI sweeps
+  are read from the job and evidence tables, so past days need no roll-up refresh.

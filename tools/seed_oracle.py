@@ -7,8 +7,9 @@ fills ``CRM.CUSTOMERS``, ``CRM.INTERACTIONS`` (two per customer, ``EVENT_TS`` a 
 microsecond), ``CRM.KYC_DOCUMENTS`` (``DOC_REF = 'K<index>'``, blank-padded by its CHAR(12)),
 ``CRM.ADDRESS_HISTORY`` (key-less), ``CRM.CUSTOMER_EVENTS`` (identity key) and ``LOANS.APPLICANTS``
 (every 4th customer) from :func:`tools.seed_model.seed_customers`, in ``executemany`` batches of
-1000 with typed CLOB binds. ``CRM.DPS_SEED_INFO`` records ``(seed, rows)``: a repeat run with the
-same pair is a no-op, another pair replaces the data. Returns counts only — never a value, never
+1000 with typed CLOB binds. ``CRM.DPS_SEED_INFO`` records ``(seed, rows)`` and the demo data model's
+version (:data:`tools.seed_model.DEMO_MODEL_VERSION`): a repeat run with the same three is a no-op;
+another pair, or an older model, replaces the data. Returns counts only — never a value, never
 the DSN.
 """
 
@@ -20,7 +21,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
-from tools.seed_model import SeedCustomer, seed_customers
+from tools.seed_model import DEMO_MODEL_VERSION, SeedCustomer, seed_customers
 
 BATCH: Final = 1000
 #: Demo owners and their local literal passwords (docker/oracle/initdb/01_crm.sql, contract §11).
@@ -40,8 +41,15 @@ _TS9: Final = "'YYYY-MM-DD\"T\"HH24:MI:SS.FF9'"
 _MARKER_DDL: Final = """
 BEGIN
   EXECUTE IMMEDIATE 'CREATE TABLE CRM.DPS_SEED_INFO (SEED NUMBER(10) NOT NULL,
-    ROWS_N NUMBER(10) NOT NULL, SEEDED_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP NOT NULL)';
+    ROWS_N NUMBER(10) NOT NULL, SEEDED_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP NOT NULL,
+    MODEL_VERSION NUMBER(5) DEFAULT 1 NOT NULL)';
 EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF;
+END;"""
+#: A marker table from before the demo data model had a version: its rows are model 1's.
+_MARKER_VERSION_DDL: Final = """
+BEGIN
+  EXECUTE IMMEDIATE 'ALTER TABLE CRM.DPS_SEED_INFO ADD (MODEL_VERSION NUMBER(5) DEFAULT 1 NOT NULL)';
+EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF;
 END;"""
 _CHANNELS: Final = ("phone", "branch", "email", "chat")
 _EVENTS: Final = ("login", "statement_viewed", "address_changed", "card_blocked")
@@ -203,7 +211,8 @@ def _load(
 def seed_oracle(dsn: str, rows: int, seed: int) -> dict[str, int | str]:
     """Fill the six demo tables for ``rows`` customers; ``{table: rows | "unchanged"}``.
 
-    Idempotent per ``(rows, seed)`` (``CRM.DPS_SEED_INFO``); another pair replaces the data.
+    Idempotent per ``(rows, seed)`` and demo model version (``CRM.DPS_SEED_INFO``); another pair or
+    an older model replaces the data.
     """
     import oracledb
 
@@ -212,9 +221,10 @@ def seed_oracle(dsn: str, rows: int, seed: int) -> dict[str, int | str]:
     try:
         with crm.cursor() as cur:
             cur.execute(_MARKER_DDL)
-            cur.execute("SELECT SEED, ROWS_N FROM CRM.DPS_SEED_INFO")
+            cur.execute(_MARKER_VERSION_DDL)
+            cur.execute("SELECT SEED, ROWS_N, MODEL_VERSION FROM CRM.DPS_SEED_INFO")
             marker = cur.fetchall()
-        if marker == [(seed, rows)]:
+        if marker == [(seed, rows, DEMO_MODEL_VERSION)]:
             return dict.fromkeys(reversed(TABLES), UNCHANGED)
         for table in TABLES:
             owner = loans if table.startswith("LOANS.") else crm
@@ -253,7 +263,10 @@ def seed_oracle(dsn: str, rows: int, seed: int) -> dict[str, int | str]:
         )
         with crm.cursor() as cur:
             cur.execute(
-                "INSERT INTO CRM.DPS_SEED_INFO (SEED, ROWS_N) VALUES (:s, :r)", s=seed, r=rows
+                "INSERT INTO CRM.DPS_SEED_INFO (SEED, ROWS_N, MODEL_VERSION) VALUES (:s, :r, :v)",
+                s=seed,
+                r=rows,
+                v=DEMO_MODEL_VERSION,
             )
         crm.commit()
         return counts

@@ -117,6 +117,15 @@ _SAFE_FIELDS = frozenset(
         "code",
         "checks",
         "lease_lost",
+        # UI scanner (M4): page numbers, crawl depth, guard decisions and resource types, counts,
+        # step names and persona ordinals — never a URL, a label, a page value or a storage state
+        "page_no",
+        "depth",
+        "decision",
+        "resource_type",
+        "blocked",
+        "step",
+        "persona",
         # M5: tabular synthesis, adapters, retention and keys — counts, ids, engine and gate
         # names only (a fitted model, a seed or a token never has a field of its own)
         "columns",
@@ -363,6 +372,18 @@ def record_llm(*, purpose: str, raw_values: int = 0, blocked: bool = False) -> N
     if stats is not None:
         stats.calls += 1
         stats.raw_values += raw_values
+
+
+# M4 UI scanner (labels are outcomes, guard decisions, HTTP methods, reason codes and entity
+# types — never a URL, a host's path or a value)
+SCAN_PAGES = Counter("dps_scan_pages_total", "UI-scanner pages by outcome", ["outcome"])
+SCAN_REQUESTS = Counter(
+    "dps_scan_requests_total", "Requests seen by the scan guard", ["decision", "method", "reason"]
+)
+SCAN_FIELDS = Counter(
+    "dps_scan_fields_total", "Form fields inventoried by entity type", ["entity_type"]
+)
+SCAN_FILLS = Counter("dps_scan_fills_total", "Field fills by mode and outcome", ["mode", "outcome"])
 
 
 def metrics_payload() -> tuple[bytes, str]:
