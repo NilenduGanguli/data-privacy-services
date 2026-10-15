@@ -1350,3 +1350,128 @@ hold on what came in (security review §3.24; each item with a test that fails b
 - Not done here (the next step on `fsec`): Task 8B and the S5 wiring.
 - Commits: `c1d8c36` (merge), `cf4f66f` (Task 0), `dae4665` (the scanner twins), `9bf03d1` (S7,
   posture test); report `~/.cache/dps-build/reports/FSEC-merge-m4.md`.
+
+## Task 8B — T3 metadata labelling in L2 discovery and L3 classification (finish stage, `fsec`)
+
+Finish-stage work (worktree `dps-wt-fsec`, branch `fsec`; programme plan §2.6 F1), on the merged code
+(M0–M5, M4 merged into `fsec`), after cherry-picking `fllm`'s egress fix `0fd76d0` (`5c27637` here:
+before it the verifier blocked every labelling prompt under `strict`, because `USERNAME` in the
+type list has a SWIFT BIC's shape). Every test goes through the real `LlmGateway.complete()` (the
+egress verifier, `strict`) and fakes only the provider seam (`_stellar`). Differences from the plan:
+
+- **L2 entry point:** `discovery.label_leftover_columns(columns, shape, rows, *, policy, engine,
+  settings) -> (columns, calls | None)`, called by `discover_job` right after `classify_columns`
+  (its signature unchanged) and before the snapshot is built, so the content hash covers the
+  labels. `None`: the policy does not list `llm_label` (no `progress.metrics.llm` is written); `0`:
+  asked for, no call made (stub or unconfigured gateway, no leftover column, a prompt the leak
+  guard or the egress verifier stopped).
+- **L2 leftovers** also exclude row locators, binary data and ObjectIds (`docpaths.forced_keep`),
+  besides keys. A document leaf is sent under its leaf name (`$.contacts[*].value` → `value`), not
+  the top-level field name `ColumnInfo.name` holds. Shapes are cut to 24 characters (discovery's
+  shapes end in `…` past 24; `FieldMeta` refuses longer ones).
+- **Several calls for wide tables:** a table with more leftover columns than
+  `DPS_LLM_LABEL_MAX_FIELDS` is labelled in calls of at most that many columns (one call would
+  skip the rest); still per column, never per row. L3 keeps one call per page, as planned.
+- **The policy's bar:** a verdict whose capped confidence (0.85) is below the policy's
+  `detect.min_score` changes nothing, in both layers — as Layer 1 does (`_t3_findings`). The cap
+  moved to `llm_label.SCORE_CAP`; `service.T3_SCORE_CAP` is kept as its alias.
+- **What a label changes (L2):** `entity_type`, `confidence`, `sensitivity` (taxonomy), detector
+  `llm_label`, and the methods `suggest_methods` gives that entity with the sampled values (length
+  rules included): `suggested`/`method`, `synthesize_suggested`/`synthesize_method`, `type_note`.
+  The anchor is set only when no column is one yet (`_with_anchor`, the rule `classify_columns`
+  uses): a label never moves an anchor.
+- **L3 entry points** in `classify.py` (`classify_field` unchanged): `leftover_field_meta`,
+  `page_protected`, `label_leftover_fields(...) -> (classes, LabelOutcome | None)`. The crawler
+  labels right after `classify_fields`, before fill plans, risk flags, metrics and screenshots, so
+  all of them follow the labels. The obfuscated capture re-extracts the page in a fresh tab; the
+  labels carry over to the same field there (`ScanRunner._with_labels`: same key and signature),
+  so a value pre-filled into a field only T3 recognised is masked in that capture too.
+- **A value-free L3 prompt** beyond the plan's list: the `type` attribute only when it is a known
+  input type (else `text`), `autocomplete` only as a dictionary token or `on`/`off` (both are
+  page-chosen text); the label as the inventory stores it (detector-redacted); a field with no
+  name, id, label or placeholder is not sent.
+- **`protected` (L3):** the plan's "pre-filled values and rendered texts" would protect every
+  label rendered on the page (a `<label>` is a text node), so every call would be refused. As
+  built (`page_protected`): what the fields hold or show (pre-filled and hidden values, a selected
+  option that has a value), the detectors' findings in rendered text (spans; whole texts under a
+  label hint), and every token of rendered or option text holding a digit or an `@`. A
+  placeholder option (`Choose…`, empty value) is not a value: protecting it blocked the call on
+  three demo pages (the egress verifier found "choose" in the fixed instructions).
+- **Figures:** `llm_label.job_llm_metrics(calls)` → `{"calls", "raw_values", "blocked"}` (calls
+  from the labelling outcomes; `raw_values`/`blocked` from the handler task's `LLM_STATS`). A
+  discover job writes it with each object's progress and at the end; a scan keeps it in
+  `RunOutcome.llm` (persisted in the finalize plan, so a retried finalize has it), writes it with
+  each page's progress (`DbScanSink.progress`, key `llm`) and at finalize.
+- **Tests:** `tests/test_llm_label_l2_l3.py` (13: the plan's five, plus the value-free meta, the leak
+  guard, chunking, a prompt the verifier stops, the placeholder option, page-chosen attributes),
+  `tests/scanner/test_crawler_llm_label.py` (2 crawls of the demo site with the D4 counters, and
+  the capture carry-over), `tests/connectors/test_discover_job_llm_label.py` (`discover_job` on a
+  real source table: the label in the stored snapshot, `progress.metrics.llm`) and
+  `tests/scanner/test_scan_llm_metrics.py` (a scan's figures with each page, at finalize and after
+  a retried finalize). The paused attempt's test file was kept and extended (`TextFacts` has had a
+  required `label_hint` since M4). Live on the lane's `scanner` stack (security review §3.27): a
+  scan with the tier against a fake Stellar labelled 2 fields, `calls 2, blocked 0`, D4 counters
+  +0, the prompts the model received free of demo values.
+- Commits: `5c27637` (the egress fix cherry-picked), `2e41975` (Task 8B), `ee31fa4` (job-level
+  tests); report `~/.cache/dps-build/reports/S3b-impl.md`.
+- **Known residual, not changed here (owner of `fllm`):** the egress verifier looks for protected
+  originals in the system message too (`0fd76d0` kept it; `tests/test_llm_egress.py` pins it). A
+  protected value that happens to occur inside the fixed instructions — normalised, as a
+  substring: "Personal", "Choose", first names such as "Seth", "Devi", "Abel" (≈0.4–0.7 % of
+  Faker first and last names, ≈5 % of generic words, measured) — blocks that labelling call under
+  `strict`: fail closed (no label, `blocked` counted), never a value sent. A table or page with
+  such a value gets no T3 labels. Measured on the lane's seeded demo `bank` tables (11 tables, 48
+  leftover columns, 500 sampled rows each): the calls of **5 of the 11 tables** were stopped, each
+  by a match inside the fixed instructions (one table also had one in its call data) (probe `~/.cache/dps-build/reports/S3b-impl/probes/
+  l2_t3_demo_tables.py`, `l2_t3_blocked_why.py`; counts only). Direction: exempt the registered
+  constant system prompts from the protected scan (they cannot carry call data; tests already pin
+  them as constants) — the module's leak guard still checks every protected value against the call
+  data first.
+
+## Task 17 S5 — the scanner's SSRF guard, wired (finish stage, `fsec`)
+
+The functions landed with Task 17 before M4 was on the branch; the wiring follows the M4 merge
+(security review §3.25). Differences from the plan:
+
+- **`POST /scans`** runs `netguard.check_scan_url` (in a thread: it resolves the host) after the
+  policy reference resolves and before `validate_scan`; a `NetGuardError` is a 422 with the
+  guard's code and value-free detail, audited as a refused `scan.create`. The model still answers
+  a non-http(s) or userinfo URL first, with `url_invalid`.
+- **The browser-worker checks again** (`scanner.check_start_url`, after the existing-evidence
+  branch, before any browser starts): a host that resolves elsewhere now than at accept (DNS
+  rebinding), or a scan queued before the check existed, fails with the guard's code, key purged,
+  no retry.
+- **Every hop, at crawl time** (beyond the plan: since D-C every connection of a scan context
+  goes through the scope proxy, which — not Chromium — resolves names): the proxy dials an allowed
+  hop only through `ScanGuard._dial_hop`, which resolves the host once
+  (`netguard.resolve_addresses`, on the event loop) and lets it through only when every address
+  passes `forbidden_ip_reason`; the proxy then connects to those addresses itself, so a second
+  lookup cannot answer differently. A refusal is a 403 counted `blocked` / `host_forbidden`
+  (resource type `unrouted`); a name that does not resolve stays a 502. `ScanGuard` gained
+  `allow_loopback` (default `True`; the crawler passes `env == "local"`) and `resolve` (tests).
+- **Chromium flag:** `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`
+  (`browser.RESOLVER_RULES = chromium_resolver_rules([PROXY_HOST])`, `browser.launch_args()`,
+  used by `get_browser`). The plan's rule (the registered hosts excluded) fails every scan: `MAP *`
+  matches IP literals too, so the proxy at 127.0.0.1 becomes unreachable
+  (`ERR_PROXY_CONNECTION_FAILED`, measured); and with every connection on the proxy, the browser
+  needs to resolve none of the registered hosts. One browser per process stays (no per-scan
+  launch). The `chromium` test fixture keeps `LAUNCH_ARGS`: its positive controls use unproxied
+  contexts; `tests/scanner/test_scan_ssrf_browser.py` launches with `launch_args()`.
+- **`forbidden_ip_reason` decides loopback first:** `::1` lies in the reserved `::/8`, so
+  `localhost` (127.0.0.1 and ::1) was refused even in `env=local` — by `check_scan_url`, and for a
+  `::1` connection host (F-08) too.
+- **Tests:** `tests/security/test_scan_ssrf.py` (the proxy: dials the checked address; metadata
+  plain, IPv4-mapped, among other addresses and NAT64-wrapped, on both proxy paths; loopback
+  outside local; an unresolvable name is a 502; the real resolver; the launch flag; `POST /scans`
+  (`db`)), `tests/scanner/test_scan_ssrf_browser.py` (the production launch reaches nothing
+  unproxied, a registered name through the proxy, a metadata answer refused; the browser-worker's
+  re-check (`db`)), `tests/security/test_netguard.py` (+ loopback on both IP versions, `localhost`
+  in local only). Every new test fails on the code before the change (checked on an export of the
+  previous commit). M4's `test_hosts_registered_on_the_admin_page_decide_what_a_tenant_may_scan`
+  registered a made-up name that does not resolve; it now resolves it through a test resolver
+  (the guard refuses an unresolvable registered host, as the plan's `check_scan_url` does).
+- **D4 re-check** (security review §3.27): the browser proofs, a T3 crawl, and live on the lane's
+  rebuilt `scanner` stack the smoke test's scanner block (34/34; `non_get`, `form_get`,
+  `logout_hits`, `admin_hits` +0, `non_get_allowed` 0) and a T3 scan (+0); container logs free of
+  demo values.
+- Commit: `90ed7df`; report `~/.cache/dps-build/reports/S3b-impl.md`.

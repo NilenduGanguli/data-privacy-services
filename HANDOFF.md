@@ -12,7 +12,9 @@ traps), `docs/technical/api-m4.md` (API as built) and the M4 rows of §1, §4, �
 into `m4` ahead of the M4 integration (§15.1); `m4` itself is not yet merged into `main`.
 
 **Finish stream `fsec` (security review, 2026-10-15): `m4` merged into `fsec`** — the review's fixes
-now hold on the scanner's paths too (§17); the scanner's own S5 wiring and Task 8B follow on `fsec`.
+now hold on the scanner's paths too (§17); the scanner's own S5 wiring (SSRF guard at accept, on the
+browser-worker and on every hop) and Task 8B (opt-in T3 labelling in discovery and the scanner)
+followed on `fsec` (§17.1).
 
 **Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
 — merged with `--no-ff`; the gates of the integrated tree are recorded in §11, and the fixes of the
@@ -1677,3 +1679,29 @@ security-review stream for its own review and Task 8B. Three conflicts, both sid
   app 8416, dps-db 5483, source-pg 5484, MinIO 9070/9071, Oracle 1526, Mongo 27022, OCR 5066, demo
   site 8426, tokenizer mock 8436); gates of the merged tree: report
   `~/.cache/dps-build/reports/FSEC-merge-m4.md`.
+
+### 17.1 S5 wiring and Task 8B on `fsec` (2026-10-15) — what changes for a build, a deploy or a demo
+
+Details: security review §3.25–§3.27, `docs/superpowers/build/M5-DEVIATIONS.md` (Task 8B, Task 17 S5).
+
+- **Images:** both images carry the change — rebuild both.
+- **`POST /scans` resolves the start host** (the SSRF guard, S5): the **app** pod must resolve the
+  tenant's registered UAT hosts (a name that does not resolve from the app answers 422
+  `host_forbidden`), and a host that is — or resolves to — a link-local/cloud-metadata, multicast,
+  unspecified or reserved address, a numeric host encoding, or loopback outside `DPS_ENV=local`, is
+  refused (RFC 1918 stays allowed). The browser-worker checks the start URL again before a scan runs.
+- **Browser-worker:** Chromium is launched with `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE
+  127.0.0.1` — it resolves no name itself; the scan's scope proxy (in the browser-worker process)
+  resolves every hop's host through the pod's DNS and dials only addresses that pass the same rule
+  (a refused hop is counted `blocked` / `host_forbidden` in the scan's request log). In compose,
+  `demo-site` resolves to the network's private address (allowed); `localhost`/`127.0.0.1` targets
+  work only with `DPS_ENV=local`.
+- **T3 labelling (opt-in per policy, `detect.tiers` lists `llm_label`):** discover jobs (the
+  **worker**) and scans (the **browser-worker**) now call the LLM gateway when such a policy is used
+  and a real provider is configured — the browser-worker then needs the same LLM settings and
+  secrets as the app (`DPS_LLM_PROVIDER`, Stellar/COIN or Vertex) and egress to the LLM endpoint
+  (OpenShift NetworkPolicy). Without them, or with `stub`, labelling is skipped (behaviour
+  unchanged). Prompts carry metadata and value shapes only and pass the leak guard and the egress
+  verifier (`DPS_LLM_EGRESS_CHECK=strict` in staging/prod); `progress.metrics.llm` of the job counts
+  the calls.
+

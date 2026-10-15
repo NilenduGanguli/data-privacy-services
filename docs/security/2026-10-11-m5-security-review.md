@@ -1,6 +1,7 @@
 # DPS M5 security review (Task 17) — findings, fixes and guard tests
 
-**Branch:** `fsec` (from main `64c46e3`: M0–M3 + M5; M4 merged into `fsec` on 2026-10-15, §3.24) · **Date:** 2026-10-14 ·
+**Branch:** `fsec` (from main `64c46e3`: M0–M3 + M5; M4 merged into `fsec` on 2026-10-15, §3.24) · **Date:** 2026-10-14
+(the scanner's SSRF guard wired, T3 labelling on discovery's and the scanner's paths and the D4 re-check: 2026-10-15, §3.25–§3.27) ·
 **Plan:** `docs/superpowers/plans/2026-10-11-m5-hardening-and-showcase.md` Task 17, programme plan §2.6 F1.
 
 ## 1. Scope and method
@@ -27,7 +28,7 @@ credentials or raw DPS keys tracked; no `.env` tracked; no `dangerouslySetInnerH
 | S2 | secrets | `repr(Settings)` printed 12 secrets; `ApplyOptions`/`TransformContext` printed the SEC-4 binding key and the token cache | every secret setting `Field(default="", repr=False)`; `binding_keys`, `binding`, `external_cache`, `external` `field(repr=False)` | `tests/security/test_secrets_hygiene.py::test_settings_repr_hides_secrets`, `::test_engine_dataclasses_hide_binding_keys_and_token_maps` | fixed + test |
 | S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | two layers (§3.2): the static first filter `regex_guard.check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies), and — review rounds 1 and 2 — the bound: patterns and deny lists run on the `regex` module, each run charged its own CPU (5 ms in the calling thread holding the GIL, then a matcher process), under a per-call allowance of 10 ms + 20 µs per run + 0.5 µs per character per pattern, capped at `DPS_PATTERN_CPU_SECONDS` per request and per NDJSON item (422 `custom_pattern_too_slow` past it); deny lists are matched as a trie; declared-field globs are matched without a regex (`custom.PathGlob`), linear in the path | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py` | fixed + test (rounds 1–2) |
 | S4 | injection (selections) | `validate_selection` / the MongoDB allow-list are the only barrier before SQL/BSON | none needed: the adversarial corpus is refused on both dialects; comments are stripped (M2 design), never reach the statement | `tests/security/test_selection_injection.py` | accepted (control holds) + test |
-| S5 | SSRF (scanner) | no `check_scan_url`: numeric encodings, IPv4-mapped IPv6, metadata IPs and DNS that resolves to link-local were not refused; Chromium resolved any name | `dps.netguard.check_scan_url`, `forbidden_ip_reason` (IPv4-mapped/NAT64/6to4 unwrapped), `check_resolved_host`, `chromium_resolver_rules`; wiring into `POST /scans` and the crawler's launch flags follows the M4 merge (M4 merged into `fsec` 2026-10-15; the wiring is the next step, with Task 8B) | `tests/security/test_netguard.py` | functions + test; wiring pending (next step) |
+| S5 | SSRF (scanner) | no `check_scan_url`: numeric encodings, IPv4-mapped IPv6, metadata IPs and DNS that resolves to link-local were not refused; Chromium resolved any name | `dps.netguard.check_scan_url`, `forbidden_ip_reason` (IPv4-mapped/NAT64/6to4 unwrapped; loopback decided before "reserved", so `::1` follows the environment), `check_resolved_host`, `chromium_resolver_rules`; wired (§3.25): `POST /scans` and the browser-worker run `check_scan_url`, the scope proxy resolves and checks every hop's addresses and dials them itself, Chromium resolves nothing but the proxy's address | `tests/security/test_netguard.py`, `test_scan_ssrf.py`, `tests/scanner/test_scan_ssrf_browser.py` | fixed + test (wired 2026-10-15) |
 | S6 | auth | a route added without `require_scope` would be public | `require_scope`/`require_any_scope` tag their dependency (`__dps_scope__`); the walk uses `iter_route_contexts` (FastAPI 0.143 nests included routers, so the plan's `app.routes` walk saw 2 routes) | `tests/security/test_route_auth.py` | fixed + test |
 | S7 | tenancy | object routes could leak existence across tenants | none needed: RLS + `tenant_of` hold (finder: 27 object routes 404; the scan routes too after the M4 merge, §3.24) | `tests/security/test_cross_tenant.py` (`db`) | accepted (control holds) + test |
 | S8 | key admin | a tenant admin could mint broader keys | `check_grant` (Task 9) | `tests/test_auth_db.py::test_no_privilege_escalation` | fixed (Task 9) |
@@ -45,7 +46,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 |---|---|---|---|---|---|
 | F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 (completed in review round 1, B2) | `tests/api/test_production_resource_gate.py` | fixed + test |
 | F-02 | HIGH | ReDoS via policy-supplied recognizer regex (and, review round 1 B1, via stacked repeats and separated-star declared-field globs; round 2: the bound refused legitimate scans under load and allowed ~250× the legitimate work) | S3, §3.2 | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py` | fixed + test (rounds 1–2) |
-| F-03 | HIGH | S5 scanner SSRF guard missing | S5 (M4 merged into `fsec` 2026-10-15; the wiring is the next step there — a blocking item before `fsec` merges into main) | `tests/security/test_netguard.py` | functions fixed; wiring pending |
+| F-03 | HIGH | S5 scanner SSRF guard missing | S5, wired on the scanner's paths after the M4 merge: see §3.25 | `tests/security/test_netguard.py`, `test_scan_ssrf.py`, `tests/scanner/test_scan_ssrf_browser.py` | fixed + test |
 | F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | `tests/test_ner_dob_precedence.py` | fixed + test |
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
 | F-06 | MED | RLS posture blind to `owner_directory`'s role: with the migration login unset, the API role read every tenant's jobs/connections/policies | see §3.6 | `tests/test_rls_posture_unit.py::test_a_policy_open_to_the_runtime_role_is_named`, `tests/db/test_rls.py::test_migrating_as_the_runtime_role_is_refused_in_every_environment` | fixed + test |
@@ -377,6 +378,10 @@ an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguou
 | `cf4f66f` | Task 0: M4's modules and scan routes join the contract-surface guard |
 | `dae4665` | §3.24: F-02, F-07, F-10, F-14, F-18 and F-21 on the scanner's paths |
 | `9bf03d1` | §3.24: S7 walks a scan's routes; the browser-worker posture test names the allow-list |
+| `5c27637` | `fllm`'s `0fd76d0` cherry-picked: the egress verifier's pattern scan reads call data only (T3 prompts reach the model under `strict`) |
+| `2e41975` | §3.26: Task 8B — T3 labelling in discovery and the scanner (value-free, opt-in) |
+| `90ed7df` | §3.25: S5 / F-03 — the scanner's SSRF guard at accept, on the browser-worker and on every hop; Chromium resolves nothing itself |
+| `ee31fa4` | §3.26: the discover and scan jobs record `progress.metrics.llm` |
 
 Proof beyond the tests: the finders' probes re-run on the fixed branch
 (`~/.cache/dps-build/reports/S3-impl/probes/*.after.out`) — the D3 clone is refused (403, 0 rows
@@ -422,10 +427,73 @@ configures the same logging (root floor, capped libraries; M4's own log scan
 the obfuscated captures' tokens, is wrapped when `wrap_key` is given). The contract-surface guard
 (Task 0) lists M4's modules and scan routes now instead of its strict `xfail`.
 
-Still open for the scanner (next step on `fsec`, with Task 8B): the S5 wiring (`check_scan_url` at
-`POST /scans`, Chromium `--host-resolver-rules`) — note that M4's model-level `url_invalid`
-already answers a non-http(s) scheme or userinfo, before `check_scan_url` would; the scanner part
-of the adversarial sweep and a D4 re-check.
+Still open for the scanner at this point, done next on `fsec`: the S5 wiring (§3.25), Task 8B's
+labelling on the scanner's path (§3.26) and the D4 re-check (§3.27) — M4's model-level
+`url_invalid` still answers a non-http(s) scheme or userinfo before `check_scan_url` would.
+
+### 3.25 S5 / F-03 — the scanner's SSRF guard, wired (2026-10-15)
+
+The functions of Task 17 (§2, S5) are now on every path a scan takes to the network. Four layers,
+each with a test that fails without it:
+
+| Layer | What it refuses | Where | Test |
+|---|---|---|---|
+| Accept | `POST /scans` runs `netguard.check_scan_url` (in a thread: it resolves the host) before any job exists: a numeric host encoding (`0x7f000001`, `2130706433`, `127.1`), a registered host that is — or resolves to — a link-local/cloud-metadata, multicast, unspecified or reserved address (IPv4-mapped, NAT64, 6to4 unwrapped), loopback outside `env=local`, a registered name that does not resolve; `http` when `DPS_EGRESS_TLS_REQUIRED`. 422 with the guard's code (`host_forbidden`, `host_not_registered`) and a value-free detail; audited as a refused `scan.create`; nothing queued | `dps/layers/api/routers/scans.py` | `tests/security/test_scan_ssrf.py::test_post_scans_runs_the_ssrf_guard_before_any_job_exists` (`db`) |
+| Run | the browser-worker checks the start URL again (`scanner.check_start_url`) before any browser starts: a name rebound since accept, or a scan queued before the check existed, fails with the code — key purged, no retry | `dps/layers/scanner/__init__.py` | `tests/scanner/test_scan_ssrf_browser.py::test_the_browser_worker_checks_the_start_url_again_before_any_browser` (`db`) |
+| Every hop | the scope proxy — every connection of a scan context goes through it (D-C) — dials an allowed hop only through `ScanGuard._dial_hop`: the host is resolved once (`netguard.resolve_addresses`, on the event loop) and every address must pass `forbidden_ip_reason`; the proxy then connects to those addresses itself, so a second lookup cannot answer differently (DNS rebinding mid-crawl, a sub-resource of another registered host, an image pointing at a registered name that resolves to `169.254.169.254`). 403, counted `blocked` / `host_forbidden` (resource type `unrouted`); a name that does not resolve stays a 502 | `dps/layers/scanner/proxy.py`, `guard.py`, `crawler.py` (`allow_loopback = env == "local"`) | `tests/security/test_scan_ssrf.py` (positive control: a name that exists only in the guard's resolver is reached at the checked address; metadata plain, IPv4-mapped, among other addresses, NAT64-wrapped, over plain HTTP and as a `CONNECT`; loopback outside local; the real resolver) |
+| Browser | Chromium resolves no name itself: `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1` (`browser.RESOLVER_RULES`, `launch_args()`) — `MAP *` matches IP literals too, so a connection that bypassed the proxy would reach no name and no address but the proxy's | `dps/layers/scanner/browser.py` | `tests/scanner/test_scan_ssrf_browser.py::test_the_production_launch_reaches_nothing_but_through_the_proxy`, `tests/security/test_scan_ssrf.py::test_the_scan_browser_resolves_only_the_proxy_address` |
+
+Measured on the way (both fixed, with tests): the plan's rule — the registered hosts excluded —
+makes every scan fail, because `MAP *` also covers the proxy's address (`ERR_PROXY_CONNECTION_FAILED`
+on every page; with `EXCLUDE 127.0.0.1` a proxied context reaches a registered *name* while an
+unproxied one reaches nothing — `ERR_NAME_NOT_RESOLVED`); and `forbidden_ip_reason` refused `::1`
+as "reserved" (it lies in `::/8`) before asking whether it is loopback, so `localhost` (127.0.0.1
+and ::1) could not be scanned even in `env=local`, nor named as a connection host there (F-08).
+Loopback is decided first now; outside local it is still refused (`test_netguard.py`).
+
+### 3.26 Task 8B — T3 metadata labelling on discovery's and the scanner's paths (privacy, P1)
+
+M5 Task 8B wires M1's labelling module into L2 discovery and L3 classification
+(`docs/superpowers/build/M5-DEVIATIONS.md`, Task 8B). What keeps it inside P1 (no raw value to an
+LLM), each with a test through the real `LlmGateway.complete()` under `strict`, the provider faked
+at its seam only (`tests/test_llm_label_l2_l3.py`, `tests/scanner/test_crawler_llm_label.py`):
+
+- **Opt-in, per column / per field:** only a policy that lists `llm_label` and a real provider
+  (never `stub`); never per row.
+- **Metadata only:** a column's leaf name, declared type, ≤ 3 value shapes (`XX-9999`), kind, null
+  rate, distinct ratio and table name; a field's `name`/`id`, its detector-redacted label, its
+  placeholder's shape, a known input type and dictionary-only autocomplete, `maxlength`,
+  `pattern` length and `required`. Names, labels and refs a detector finds a value in are aliased
+  (`field_N`), as in Layer 1.
+- **Checked twice before it leaves:** the module's leak guard against the `protected` originals —
+  every sampled value of the leftover columns (L2); what the page's fields hold or show, the
+  detectors' findings in its text and every token of its text holding a digit or an `@` (L3,
+  `page_protected`) — then the gateway's egress verifier (`strict` in staging/prod). A prompt that
+  would carry one is never sent (`leak_guard` / `egress_blocked`, counted).
+- **Bounded influence:** a label's confidence is capped at 0.85 (T3 never outranks a checksum),
+  below the policy's `min_score` it changes nothing, only built-in entity types are accepted, a
+  T0–T2 verdict is never changed, and an anchor is never moved. The reviewer sees `llm_label` in
+  the snapshot's detectors and can override it.
+- **Counted:** `progress.metrics.llm = {calls, raw_values, blocked}` on discover and scan jobs (the
+  Task 16B roll-ups read it); `dps_llm_label_fields_total` by outcome.
+
+Residual (open, for the owner; §5): the egress verifier looks for protected originals in the
+fixed system instructions too, so a value that occurs inside them blocks the call (fail closed).
+
+### 3.27 The D4 re-check after S5 and Task 8B (2026-10-15)
+
+S5 put a resolver and a dialler into the scope proxy, a new launch flag on Chromium, and Task 8B an
+LLM call into the per-page pipeline: D4 (the scanner never submits anything) was proven again, on
+counters, never on the absence of an error.
+
+| Proof | Result |
+|---|---|
+| The browser proofs on this branch, real Chromium and counting servers (`tests/scanner/test_no_submit.py`, `test_guard.py` — the D-C proof: beacon, keepalive, SharedWorker, WebSocket, redirect to a foreign host —, `test_crawler.py`, `test_scan_job_e2e.py` through `get_browser` with the new flag) | all pass: the full lane suite with dps-db, source-pg, the demo site and Chromium — 3672 passed, 232 skipped (tests whose services or optional extras were not started for this run), 0 failed |
+| A crawl that labels fields with T3 (provider faked at `_stellar`, egress verifier `strict`): `tests/scanner/test_crawler_llm_label.py` | the demo site's `non_get`, `form_get`, `logout_hits`, `admin_hits` unchanged; no allowed non-GET in the request log |
+| Live, the lane's `scanner` stack rebuilt from this branch: `DPS_SMOKE_SCANNER=1 DPS_SMOKE_M2=off python tools/smoke_test.py` | 34/34 checks (2 OCR checks skipped: no `docs` profile): a 21-page scan of the demo site, 63 fields (51 personal), `non_get +0, form_get +0, logout_hits +0, admin_hits +0; non_get_allowed 0`, the guard blocked 60 POSTs and 1 GET; the evidence pack says 0 submissions; 3 masked captures; the persona export holds 0 demo values |
+| Live T3 scan on the same stack, the browser-worker pointed at a fake Stellar/COIN on the host (`~/.cache/dps-build/reports/S3b-impl/probes/live_t3_scan.py`) | 202, succeeded; `progress.metrics.llm = {calls 2, raw_values 0, blocked 0}`; 2 fields labelled `LOCATION` (detector `llm_label`); demo counters +0; `non_get_allowed` 0; the 2 prompts the model received hold 0 demo values, metadata keys only |
+| Live S5 probe (`probes/live_scan_ssrf.py`) | numeric encodings (3) → 422 `host_forbidden`; a tenant admin registers `169.254.169.254` and its IPv4-mapped form → both still 422 `host_forbidden`, value-free; nothing queued; the tenant's hosts restored |
+| Container logs of the stack (app, worker, browser-worker, demo site) after both scans | 0 demo values (raw or normalised) |
 
 ## 4. Considered and refuted
 
@@ -489,8 +557,10 @@ of the adversarial sweep and a D4 re-check.
   hops (MongoDB members a seed advertises, Oracle listener redirects) are not checked either; the
   egress NetworkPolicy is the backstop.
 - Private (RFC 1918) targets are allowed by design for internal UAT sites and databases.
-- DNS can change between DPS's check and the client's own resolution (rebinding window); the
-  OpenShift egress NetworkPolicy (Task 25) is the network-level backstop.
+- DNS can change between DPS's check and the client's own resolution (rebinding window) for
+  **connections** (F-08: the database drivers resolve the host themselves); the OpenShift egress
+  NetworkPolicy (Task 25) is the network-level backstop. The **scanner** has no such window: its
+  scope proxy dials the very addresses it checked (§3.25).
 - Failed authentications have no tenant and are not audited; they are counted in
   `dps_requests_total{outcome="rejected"}`. DB keys propagate to other replicas within
   `DPS_KEY_CACHE_SECONDS`.
@@ -501,9 +571,27 @@ of the adversarial sweep and a D4 re-check.
 - v1 bind tags (hints issued before F-22) still verify; their `None`/`""` profile ambiguity remains
   for those hints only.
 - `/metrics` is keyless by design (ops scraping); restrict the ops port by NetworkPolicy (Task 25).
-- The scanner SSRF guard (S5): M4 is merged into `fsec` (§3.24) but the wiring is the next step;
-  until then the functions and tests exist and no scanner route calls them (the scanner's own rails
-  — registered hosts, the scope proxy, the request guard — apply).
+- The scanner (S5, §3.25): private (RFC 1918 / unique-local) targets stay allowed by design; a
+  tenant admin can register such a host, and every hop to it is then allowed. Over HTTPS the proxy
+  sees only the tunnel's host, never the path (the request guard and the route see the rest).
+  Unproxied contexts of the scan browser can still reach 127.0.0.1 directly (the proxy's own
+  address must stay resolvable); no scan context is ever made without the proxy
+  (`browser.new_scan_context`).
+- T3 labelling (§3.26): the egress verifier looks for protected originals in the fixed system
+  instructions too (`fllm`'s `0fd76d0` kept that, and `tests/test_llm_egress.py` pins it), so a
+  sampled or page value that happens to occur inside them — normalised, as a substring:
+  "Personal", "Choose", short first names such as "Seth", "Devi", "Abel" (measured ≈0.4–0.7 % of
+  Faker first and last names, ≈5 % of generic words) — blocks that table's or page's labelling
+  call under `strict`: fail closed (no label; `blocked` counted), never a value sent. On the lane's
+  seeded demo `bank` tables it stopped the calls of 5 of 11 tables, each by a match inside the
+  fixed instructions (one table also matched in its call data). Direction for the owner: exempt the registered constant system prompts from
+  the protected scan (the module's leak guard checks every protected value against the call data
+  before the verifier runs, so nothing the call carries goes unchecked).
+- T3 labelling, L3: a value rendered on the page that no detector names, holding no digit and no
+  `@` (a bare first name in a cell without a header hint), is not protected; it could reach a
+  prompt only inside a field's own label or `name` that the same detectors did not redact. The
+  egress verifier's pattern scan, the label redaction and NER (when enabled) are the remaining
+  nets; opt in on sites whose labels carry no customer data.
 
 ## 6. Re-running the review
 
@@ -530,4 +618,11 @@ P=/Users/neelu/.cache/dps-build/reports/S3-review-r2/probes
 ./lane.sh python $P/concurrency_false_refusal.py && ./lane.sh python $P/gil_busy_false_refusal.py
 ./lane.sh python $P/probe_e2e_false_refusal.py 18519      # real uvicorn server on a free port
 ./lane.sh python -c "import os,runpy;[os.environ.pop(k) for k in list(os.environ) if k.startswith('DPS_') and not k.startswith('DPS_TEST_')];runpy.run_path('$P/probe_budget_scaling.py',run_name='__main__')"
+# the scanner's SSRF guard and T3 labelling (§3.25, §3.26; the db cases need the lane's dps-db,
+# the browser ones Chromium and the demo site, which the fixture starts with node)
+./lane.sh pytest -q tests/security/test_scan_ssrf.py tests/security/test_netguard.py \
+  tests/scanner/test_scan_ssrf_browser.py tests/test_llm_label_l2_l3.py \
+  tests/scanner/test_crawler_llm_label.py
+# the D4 re-check (§3.27): the no-submit proofs, then a live scan on the lane's scanner stack
+./lane.sh pytest -q -m browser tests/scanner/test_no_submit.py tests/scanner/test_guard.py
 ```
