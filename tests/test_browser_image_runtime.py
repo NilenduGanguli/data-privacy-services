@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_image_runtime import STORE_PROBE
+from tests.test_image_runtime import MACHINES, STORE_PROBE
 
 IMAGE = os.environ.get("DPS_TEST_BROWSER_IMAGE", "")
 APP_IMAGE = os.environ.get("DPS_TEST_IMAGE", "")
@@ -44,7 +44,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 PROBE = r"""
-import asyncio, importlib, importlib.metadata, json, os, pathlib
+import asyncio, importlib, importlib.metadata, json, os, pathlib, platform
 
 def writable(path):
     p = pathlib.Path(path) / ".dps-write-probe"
@@ -87,6 +87,7 @@ async def chromium():
 
 print(json.dumps({
     "uid": os.getuid(), "gid": os.getgid(), "home": os.environ.get("HOME"), "umask": umask(),
+    "machine": platform.machine(),
     "playwright": importlib.metadata.version("playwright"),
     "modules": mods, "chromium": asyncio.run(chromium()),
     "write": {p: writable(p) for p in ("/tmp", "/app", "/app/dps", "/opt/venv/lib",
@@ -124,6 +125,9 @@ def _run(image: str, user: str | None, volumes: list[str], *args: str) -> str:
 def test_an_arbitrary_uid_runs_chromium_and_writes_only_tmp_and_the_volumes() -> None:
     out = _run(IMAGE, f"{UID}:0", ["/app/var/artefacts", "/app/var/exports"], "python", "-c", PROBE)
     facts = json.loads(out.strip().splitlines()[-1])
+    assert facts["machine"] in MACHINES.values(), facts["machine"]
+    if PLATFORM:  # an amd64 run really runs the amd64 build (Chromium under emulation)
+        assert facts["machine"] == MACHINES[PLATFORM], (PLATFORM, facts["machine"])
     assert (facts["uid"], facts["gid"]) == (int(UID), 0)
     # The entrypoint's umask (what the process creates stays group-writable) and HOME on the
     # /tmp scratch mount (Chromium, fontconfig and Playwright write under ~).

@@ -24,6 +24,9 @@ IMAGE = os.environ.get("DPS_TEST_IMAGE", "")
 PLATFORM = os.environ.get("DPS_TEST_IMAGE_PLATFORM", "")
 #: An OpenShift-style UID: high, absent from /etc/passwd, group 0.
 UID = "1000770000"
+#: What ``platform.machine()`` says inside a container of each platform the tests may be asked for:
+#: an amd64 run (under emulation on an arm64 Mac) must really run the amd64 build.
+MACHINES = {"linux/amd64": "x86_64", "linux/arm64": "aarch64", "linux/arm64/v8": "aarch64"}
 
 pytestmark = pytest.mark.skipif(
     not IMAGE or shutil.which("docker") is None,
@@ -60,7 +63,7 @@ def _docker_run(*args: str, entrypoint: str | None = None, timeout: int = 180) -
 
 
 PROBE = r"""
-import importlib, json, os, pathlib, shutil, subprocess
+import importlib, json, os, pathlib, platform, shutil, subprocess
 
 def writable(path):
     p = pathlib.Path(path) / ".dps-write-probe"
@@ -82,7 +85,7 @@ for name in ("dps.app", "numpy", "scipy", "fastfpe", "asyncpg", "sqlglot", "pyar
 tess = subprocess.run(["tesseract", "--version"], capture_output=True, text=True)
 print(json.dumps({
     "uid": os.getuid(), "gid": os.getgid(), "home": os.environ.get("HOME"),
-    "modules": mods, "tesseract": tess.returncode == 0,
+    "machine": platform.machine(), "modules": mods, "tesseract": tess.returncode == 0,
     "write": {p: writable(p) for p in ("/tmp", "/app", "/app/dps", "/app/frontend/dist",
                                        "/app/tools", "/app/var/artefacts", "/app/var/exports",
                                        "/usr/local/lib/python3.12/site-packages")},
@@ -100,6 +103,9 @@ print(json.dumps({
 
 def test_an_arbitrary_uid_reads_the_code_and_writes_only_tmp_and_the_volumes() -> None:
     facts = json.loads(_docker_run("-c", PROBE, entrypoint="python").strip().splitlines()[-1])
+    assert facts["machine"] in MACHINES.values(), facts["machine"]
+    if PLATFORM:
+        assert facts["machine"] == MACHINES[PLATFORM], (PLATFORM, facts["machine"])
     assert (facts["uid"], facts["gid"]) == (int(UID), 0)
     assert facts["home"] == "/tmp" and facts["home_writable"] is True
     assert all(v is True for v in facts["modules"].values()), facts["modules"]
