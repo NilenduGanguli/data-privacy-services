@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { resolveConnections } from '../lib/paging';
 import { api, ApiError, type Auth } from '../lib/api';
 import { checkErrorText, sharedEntities } from '../lib/groups';
 import { isTerminal } from '../lib/jobs';
@@ -34,9 +35,14 @@ export function useJobGroup(auth: Auth, groupId: string | null): {
   const conns = useRef(new Map<string, Promise<Connection | null>>());
   const snaps = useRef(new Map<string, Promise<ClassificationSnapshot | null>>());
 
+  // read from GET /connections, not by id: a member's connection deleted since is absent (null), and
+  // the browser logs no failed request (S1-M4 console r1 B1)
   const connection = useCallback((id: string | null | undefined): Promise<Connection | null> => {
     if (!id) return Promise.resolve(null);
-    if (!conns.current.has(id)) conns.current.set(id, api.connections.get(auth, id).catch(() => null));
+    if (!conns.current.has(id)) {
+      conns.current.set(id, resolveConnections((cursor) => api.connections.list(auth, 200, cursor), [id])
+        .then((found) => found.get(id) ?? null).catch(() => null));
+    }
     return conns.current.get(id)!;
   }, [auth]);
   const snapshot = useCallback((id: string | null | undefined): Promise<ClassificationSnapshot | null> => {

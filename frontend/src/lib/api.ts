@@ -192,7 +192,7 @@ export const api = {
 
   // M2: connections, jobs, snapshots, job groups, evidence, artefacts (contract §9).
   connections: {
-    list: (a: Auth, limit = 100) => json<Page<Connection>>(`/api/v1/connections${qs({ limit })}`, a),
+    list: (a: Auth, limit = 100, cursor?: string) => json<Page<Connection>>(`/api/v1/connections${qs({ limit, cursor })}`, a),
     get: (a: Auth, id: string) => json<Connection>(`/api/v1/connections/${enc(id)}`, a),
     create: (a: Auth, spec: ConnectionSpec) => post<Connection>('/api/v1/connections', a, spec),
     update: (a: Auth, id: string, patch: Partial<ConnectionSpec>) =>

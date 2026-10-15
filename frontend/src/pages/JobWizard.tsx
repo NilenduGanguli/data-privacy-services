@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError } from '../lib/api';
+import { resolveConnections } from '../lib/paging';
 import {
-  buildRunSpec, draftForStorage, emptyDraft, engineName, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, sourceObject, specPreview, writeModeLabel,
+  buildRunSpec, draftForStorage, emptyDraft, engineName, fmtClock, fmtCount, fqn, isWriteConfirmed, newDraftId, shortId, sourceObject, specPreview, writeModeLabel,
   type Step, type WizardDraft,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, Connection, RunOut } from '../lib/types';
@@ -106,7 +107,14 @@ export function JobWizard(): JSX.Element {
     (async () => {
       try {
         const snap = await api.snapshots.get(auth, deepSnapshot);
-        const conn = await api.connections.get(auth, snap.connection_id);
+        // from the list: a connection deleted since the discovery is absent, never a failed request
+        const found = await resolveConnections((cursor) => api.connections.list(auth, 200, cursor), [snap.connection_id]);
+        const conn = found.get(snap.connection_id);
+        if (conn === null) {
+          if (live) setLinkError(`its connection was deleted (${shortId(snap.connection_id)}). Start a new discovery from a saved connection to review this table.`);
+          return;
+        }
+        if (conn === undefined) throw new Error('the connection of this snapshot could not be found');
         const test = conn.last_test?.ok ? conn.last_test : await api.connections.test(auth, conn.id, { role: 'source' });
         if (!live) return;
         const dot = snap.object_ref.indexOf('.');

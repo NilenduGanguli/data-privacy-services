@@ -188,3 +188,22 @@ describe('EvidenceSheet for a UI scan (M4 merged into the M5 sheet)', () => {
     expect(t).not.toContain('Leakage sweep');
   });
 });
+
+describe('EvidenceSheet — a long schema-qualified name wraps in the Summary (S1-M4 console r1 B3)', () => {
+  // an Oracle-style name has no break opportunity ("_" and "." are none): only overflow-wrap breaks it
+  const TARGET = 'CRM_MASKED_ARCHIVE.CUSTOMER_ADDRESS_HISTORY_SYNTHETIC_20261015';
+  const POLICY = 'gdpr_pseudonymise_retail_banking_apac_customer_master_v3';
+  const base = packs.ev_01K7ZQ9QA1;
+  const ev: EvidenceOut = {
+    ...base,
+    pack: { ...base.pack, target: { ...base.pack.target, write_mode: 'table', object: TARGET }, policy: { ...base.pack.policy, name: POLICY } },
+  };
+
+  it('prints the target and the policy in bold inside the lead paragraph', () => {
+    expect(TARGET.length).toBeGreaterThanOrEqual(60);
+    const out = html(<EvidenceSheet ev={ev} job={null} snapshot={null} onJson={noop} onPdf={noop} />);
+    const lead = out.slice(out.indexOf('<p class="lead">'), out.indexOf('</p>', out.indexOf('<p class="lead">')));
+    expect(lead).toContain(`<b>${TARGET}</b>`);
+    expect(lead).toContain(`<b>${POLICY}</b>`);
+  });
+});

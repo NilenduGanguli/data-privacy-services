@@ -8,10 +8,13 @@ import { usePoll } from '../hooks/usePoll';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError, saveBlob, type Auth } from '../lib/api';
 import {
-  errorText, etaSeconds, filterJobs, fmtClock, fmtCompact, fmtCount, fmtDuration, fmtWhen, isTerminal, jobsCsv, jobTargetText,
-  jobWriteMode, needsDecision, NO_FILTERS, ownerOf, progressPct, pushSample, shortId, statusBucket, tableJobs, writeModeLabel,
+  errorText, etaSeconds, filterJobs, fmtClock, fmtCompact, fmtCount, fmtDuration, fmtWhen, isTerminal, jobsCountText, jobsCsv, jobTargetText,
+  jobWriteMode, needsDecision, NO_FILTERS, ownerOf, progressPct, pushSample, shortId, STATUS_STATES, statusBucket, tableJobs, writeModeLabel,
   writeModeTone, type JobFilters, type StatusBucket,
 } from '../lib/jobs';
+import {
+  JOBS_PAGE, loadJobsByState, loadJobsWindow, loadOlderJobs, mergeJobs, type JobsFetcher, type JobsWindow,
+} from '../lib/paging';
 import type { ClassificationSnapshot, Connection, Job, JobGroup, JobStats } from '../lib/types';
 
 const ALERT_WAIT_S = 300;
@@ -194,7 +197,14 @@ export function Jobs(): JSX.Element {
   const [connections, setConnections] = useState<Connection[]>([]);
 
   const [anyActive, setAnyActive] = useState(true);
-  const list = usePoll(() => api.jobs.list(auth, { limit: 200 }), anyActive ? 5000 : 30000, () => true, [auth]);
+  // S1-M4 console r1 B2: every job of the 7 days the head names (GET /jobs page by page, re-read every
+  // 30 s), the newest page re-read every 5 s while a job runs, and older pages on request
+  const fetchJobs = useCallback<JobsFetcher>((p) => api.jobs.list(auth, p), [auth]);
+  const windowed = usePoll(() => loadJobsWindow(fetchJobs), 30000, () => true, [fetchJobs]);
+  const list = usePoll(() => api.jobs.list(auth, { limit: JOBS_PAGE }), anyActive ? 5000 : 30000, () => true, [auth]);
+  const [older, setOlder] = useState<JobsWindow | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  useEffect(() => { setOlder(null); }, [auth]);
   const snaps = usePoll(() => api.snapshots.list(auth, { status: 'proposed', limit: 200 }), anyActive ? 5000 : 30000, () => true, [auth]);
   const stats = usePoll(() => api.jobs.stats(auth), 10000, () => true, [auth]);
   const [updated, setUpdated] = useState<string | null>(null);
@@ -204,6 +214,15 @@ export function Jobs(): JSX.Element {
   useEffect(() => { loadGroups(); }, [loadGroups]);
   useEffect(() => { api.connections.list(auth, 200).then((p) => setConnections(p.items)).catch(() => setConnections([])); }, [auth]);
   useEffect(() => { setAnyActive(tableJobs(list.data?.items ?? []).some((j) => !isTerminal(j))); }, [list.data]);
+  const more = older ? older.more : windowed.data ? windowed.data.more : null;
+  async function loadOlder(): Promise<void> {
+    if (!more) return;
+    setLoadingOlder(true);
+    try {
+      const next = await loadOlderJobs(fetchJobs, more);
+      setOlder((o) => ({ items: [...(o?.items ?? []), ...next.items], more: next.more }));
+    } catch { /* the button stays; the next click retries */ } finally { setLoadingOlder(false); }
+  }
   useEffect(() => {
     if (!stats.data) return;
     const now = new Date().toISOString();
@@ -212,13 +231,26 @@ export function Jobs(): JSX.Element {
     setUpdated(fmtClock(now));
   }, [stats.data]);
 
-  const jobs = tableJobs(list.data?.items ?? []);
+  const jobs = useMemo(
+    () => tableJobs(mergeJobs(list.data?.items ?? [], windowed.data?.items ?? [], older?.items ?? [])),
+    [list.data, windowed.data, older],
+  );
+  // a Status filter over a list that is not complete asks the server (GET /jobs?state=…)
+  const serverStatus = filters.status && filters.status !== 'review' && more !== null ? filters.status : '';
+  const byStatus = usePoll(
+    () => (serverStatus ? loadJobsByState(fetchJobs, STATUS_STATES[serverStatus]) : Promise.resolve(null)),
+    30000, () => !!serverStatus, [fetchJobs, serverStatus],
+  );
   const proposedSnaps = snaps.data?.items ?? [];
   const proposed = useMemo(() => new Set(proposedSnaps.map((s) => s.id)), [proposedSnaps]);
   const snapById = useMemo(() => new Map(proposedSnaps.map((s) => [s.id, s])), [proposedSnaps]);
   const groupNames = useMemo(() => new Map((groups ?? []).map((g) => [g.id, g.name])), [groups]);
   const engines = useMemo(() => Object.fromEntries(connections.map((c) => [c.id, c.engine])) as Record<string, string>, [connections]);
-  const shown = useMemo(() => filterJobs(jobs, filters, { proposed, engines }), [jobs, filters, proposed, engines]);
+  const listed = useMemo(
+    () => (serverStatus && byStatus.data ? mergeJobs(jobs, tableJobs(byStatus.data)) : jobs),
+    [jobs, serverStatus, byStatus.data],
+  );
+  const shown = useMemo(() => filterJobs(listed, filters, { proposed, engines }), [listed, filters, proposed, engines]);
   const anyFilter = JSON.stringify(filters) !== JSON.stringify(NO_FILTERS);
 
   const count = (pred: (j: Job) => boolean) => jobs.filter(pred).length;
@@ -245,7 +277,10 @@ export function Jobs(): JSX.Element {
       <HealthStrip stats={stats.data} error={stats.error} queue={queue} tput={tput} updated={updated} />
 
       <section className="card" aria-labelledby="hj">
-        <div className="card-head"><div className="card-title" id="hj">All jobs</div><span className="faint sm">Showing {shown.length} of {jobs.length} jobs</span></div>
+        <div className="card-head"><div className="card-title" id="hj">All jobs</div>
+          <span className="faint sm">{jobsCountText(shown.length, jobs.length, more !== null)}
+            {more !== null && <> · <button className="linkbtn" type="button" disabled={loadingOlder} onClick={() => void loadOlder()}>{loadingOlder ? 'Loading older jobs…' : 'Load older jobs'}</button></>}
+          </span></div>
         {loadError && <div className="err" style={{ marginBottom: 12 }}>Could not load jobs: {loadError}</div>}
         <div className="filters" role="search" aria-label="Filter jobs">
           <div className="search">
@@ -294,7 +329,7 @@ export function Jobs(): JSX.Element {
             ))}
             {!shown.length && list.data && (
               <tr className="emptyrow"><td colSpan={7} className="empty">
-                {jobs.length ? <><div className="t">No jobs match these filters</div><p>Try a different status or owner, or start a job for the data you are looking for.</p></>
+                {jobs.length ? <><div className="t">No jobs match these filters</div><p>{more !== null ? `Searched the newest ${fmtCount(jobs.length)} jobs: load older jobs to search further, ` : 'Try a different status or owner, '}or start a job for the data you are looking for.</p></>
                   : <><div className="t">No jobs yet</div><p>Connect a PostgreSQL, Oracle or MongoDB source and protect a table in five steps.</p></>}
                 <div className="rowx" style={{ justifyContent: 'center' }}>
                   {jobs.length > 0 && <button className="btn btn-sm" type="button" onClick={clear}>Clear filters</button>}

@@ -9,10 +9,11 @@ import { usePoll } from '../hooks/usePoll';
 import { api, ApiError } from '../lib/api';
 import { columnLabel } from '../lib/engines';
 import { joinsText, targetOf } from '../lib/groups';
+import { resolveConnections } from '../lib/paging';
 import {
-  engineName, errorText, evidenceSoFar, fmtClock, fmtCompact, fmtCount, heatTone, isTerminal, jobTargetText, jobWriteMode,
+  connectionLabel, errorText, evidenceSoFar, fmtClock, fmtCompact, fmtCount, heatTone, isTerminal, jobWriteMode,
   jobHref, methodFor, methodText, needsDecision, parseKeyFile, partitionPct, progressPct, shortId, shortType, stepperState, typeNoteShort,
-  writeModeLabel, type DetailStep,
+  jobTitle, writeModeLabel, type DetailStep,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, ColumnClassification, Connection, Job, JobGroupOut, PartitionView } from '../lib/types';
 
@@ -180,8 +181,9 @@ function EvidenceCard({ job, joins }: { job: Job; joins: ReturnType<typeof joins
   );
 }
 
-/** Snapshots a discover job produced, with the way into the review. */
-function SnapshotsCard({ snapshots }: { snapshots: ClassificationSnapshot[] }): JSX.Element {
+/** Snapshots a discover job produced, with the way into the review — not for a snapshot whose
+ * connection was deleted since: the review reads that connection (S1-M4 console r1 B1). */
+export function SnapshotsCard({ snapshots, connections = new Map() }: { snapshots: ClassificationSnapshot[]; connections?: Map<string, Connection | null> }): JSX.Element {
   return (
     <div className="card">
       <div className="card-head"><div className="card-title">Classification snapshots</div></div>
@@ -194,7 +196,9 @@ function SnapshotsCard({ snapshots }: { snapshots: ClassificationSnapshot[] }): 
               <td className="mono">{s.object_ref}</td>
               <td>{s.columns.length} · {s.columns.filter((c) => c.entity_type).length} classified{decide ? ` · ${decide} to decide` : ''}</td>
               <td><span className={`chip ${s.status === 'proposed' ? 'amber' : s.status === 'accepted' ? 'emerald' : 'slate'}`}>{s.status === 'proposed' ? 'awaiting review' : s.status}</span></td>
-              <td>{s.status === 'proposed' && <Link className="btn btn-sm btn-primary" to={`/data-sources/jobs/new?snapshot=${encodeURIComponent(s.id)}`}>Review and accept</Link>}</td>
+              <td>{s.status === 'proposed' && (connections.get(s.connection_id) === null
+                ? <span className="faint sm">Its connection was deleted ({shortId(s.connection_id)}): start a new discovery to review this table.</span>
+                : <Link className="btn btn-sm btn-primary" to={`/data-sources/jobs/new?snapshot=${encodeURIComponent(s.id)}`}>Review and accept</Link>)}</td>
             </tr>
           );
         })}
@@ -216,7 +220,8 @@ export function JobDetail(): JSX.Element {
     2000, () => partitionsLive && !terminal, [auth, jobId, j?.phase, terminal],
   );
   const [snapshots, setSnapshots] = useState<ClassificationSnapshot[]>([]);
-  const [conns, setConns] = useState<{ source?: Connection; target?: Connection }>({});
+  // the job's connections, from GET /connections: one deleted since is absent (null), never a 404
+  const [conns, setConns] = useState<Map<string, Connection | null>>(new Map());
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -233,13 +238,17 @@ export function JobDetail(): JSX.Element {
     Promise.all(snapIds.map((id) => api.snapshots.get(auth, id).catch(() => null)))
       .then((list) => setSnapshots(list.filter((s): s is ClassificationSnapshot => !!s)));
   }, [auth, snapIds]);
+  const snapConns = snapshots.map((s) => s.connection_id).join(',');
   useEffect(() => {
     if (!j) return;
-    const src = j.connection_id ? api.connections.get(auth, j.connection_id).catch(() => undefined) : Promise.resolve(undefined);
-    const tgt = j.target_connection_id ? api.connections.get(auth, j.target_connection_id).catch(() => undefined) : Promise.resolve(undefined);
-    Promise.all([src, tgt]).then(([source, target]) => setConns({ source, target }));
+    let live = true;
+    const ids = [j.connection_id, j.target_connection_id, ...snapConns.split(',')];
+    resolveConnections((cursor) => api.connections.list(auth, 200, cursor), ids)
+      .then((found) => { if (live) setConns(found); })
+      .catch(() => undefined);
+    return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth, j?.connection_id, j?.target_connection_id]);
+  }, [auth, j?.connection_id, j?.target_connection_id, snapConns]);
 
   // a grouped job: the group (name, last check) and the other members' targets
   const groupId = j?.group_id ?? null;
@@ -288,8 +297,10 @@ export function JobDetail(): JSX.Element {
 
   const snapshot = j.kind === 'run' ? snapshots[0] : undefined;
   const wm = jobWriteMode(j);
-  const target = jobTargetText(j);
-  const title = `${engineName(conns.source?.engine)} · ${j.object_ref ?? '—'}${j.kind === 'discover' ? '' : wm === 'in_place' ? ' · rewritten in place' : ` → ${target}`}`;
+  const source = j.connection_id ? conns.get(j.connection_id) : undefined;
+  // a deleted connection's engine is still the snapshot's (the snapshot was read from it)
+  const engine = source?.engine ?? snapshots.find((s) => s.connection_id === j.connection_id)?.engine;
+  const title = jobTitle(j, engine);
   const policy = (j.plan as Record<string, any> | null)?.policy_name ?? (typeof j.spec?.policy === 'string' ? j.spec.policy : undefined) ?? snapshot?.policy_name;
   const failed = j.state === 'failed' || j.state === 'dead';
   const canPause = j.kind === 'run' && j.phase === 'partitions' && (j.state === 'waiting' || j.state === 'running');
@@ -306,9 +317,9 @@ export function JobDetail(): JSX.Element {
       </div>
       <div className="page-head">
         <div style={{ minWidth: 0 }}>
-          <div className="rowx" style={{ alignItems: 'flex-start' }}><EngineBadge engine={conns.source?.engine} /><h1 style={{ overflowWrap: 'anywhere' }}>{title}</h1></div>
+          <div className="rowx" style={{ alignItems: 'flex-start' }}><EngineBadge engine={engine} /><h1 style={{ overflowWrap: 'anywhere' }}>{title}</h1></div>
           <p>
-            {j.kind === 'discover' ? <>Discovery · connection <span className="mono">{conns.source?.name ?? shortId(j.connection_id)}</span></>
+            {j.kind === 'discover' ? <>Discovery · connection <span className="mono">{connectionLabel(j.connection_id, conns)}</span></>
               : <>Mode <b>{j.mode}</b> · {writeModeLabel(wm, j.spec?.target?.table_load)}{policy ? <> · policy <b>{policy}</b></> : null}</>}
             {j.purpose?.ticket && <> · purpose {j.purpose.ticket}{j.purpose.legal_basis ? ` (${j.purpose.legal_basis})` : ''}</>}
             {j.group_id && (others.length
@@ -356,7 +367,7 @@ export function JobDetail(): JSX.Element {
 
       {j.kind === 'discover' ? (
         <div className="col" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {snapshots.length > 0 && <SnapshotsCard snapshots={snapshots} />}
+          {snapshots.length > 0 && <SnapshotsCard snapshots={snapshots} connections={conns} />}
           {!snapshots.length && <div className="card"><p className="muted" style={{ margin: 0 }}>{terminal ? 'This discovery produced no snapshot.' : `Sampling · ${j.progress.stage || 'waiting for a worker'}`}</p></div>}
           {snapshots[0] && <ClassificationCard snapshot={snapshots[0]} mode={j.mode ?? 'obfuscate'} />}
         </div>

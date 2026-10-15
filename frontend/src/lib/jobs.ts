@@ -75,6 +75,22 @@ export function engineBadge(engine: string | undefined | null): 'PG' | 'ORA' | '
   }
 }
 
+/** A job's connection in words (S1-M4 console r1 B1): its name, or — once it was deleted (a finished
+ * job keeps its history) — "connection deleted (c_…)"; its short id while it is not resolved yet. */
+export function connectionLabel(id: string | null | undefined, resolved: Map<string, { name: string } | null>): string {
+  if (!id) return '—';
+  const conn = resolved.get(id);
+  if (conn === null) return `connection deleted (${shortId(id)})`;
+  return conn ? conn.name : shortId(id);
+}
+
+/** A job's head title: engine · object, then where it wrote (`engine` from its source connection, or
+ * from its snapshot once that connection was deleted). */
+export function jobTitle(j: Job, engine: string | null | undefined): string {
+  const wm = jobWriteMode(j);
+  return `${engineName(engine)} · ${j.object_ref ?? '—'}${j.kind === 'discover' ? '' : wm === 'in_place' ? ' · rewritten in place' : ` → ${jobTargetText(j)}`}`;
+}
+
 /** Engine name in words. */
 export function engineName(engine: string | undefined | null): string {
   return ({ postgres: 'PostgreSQL', oracle: 'Oracle', mongo: 'MongoDB', s3: 'S3', pvc: 'PVC' } as Record<string, string>)[engine ?? ''] ?? (engine || '—');
@@ -767,6 +783,23 @@ export function filterJobs(jobs: Job[], f: JobFilters, ctx: { proposed: Set<stri
     }
     return true;
   });
+}
+
+/** The job states of a Status bucket the server can filter on (`GET /jobs?state=`); "review" needs the
+ * proposed snapshots, so it is never asked of the server. */
+export const STATUS_STATES: Record<Exclude<StatusBucket, 'review'>, Job['state'][]> = {
+  running: ['queued', 'running', 'waiting', 'paused'],
+  completed: ['succeeded'],
+  failed: ['failed', 'dead'],
+  canceled: ['canceled'],
+};
+
+/** The Jobs card's count (S1-M4 console r1 B2): the loaded list is all the jobs only when no older
+ * page is left (`more` false); otherwise it is the newest `loaded` jobs, and the page says so. */
+export function jobsCountText(shown: number, loaded: number, more: boolean): string {
+  return more
+    ? `Showing ${fmtCount(shown)} of the newest ${fmtCount(loaded)} jobs · counts are over these`
+    : `Showing ${fmtCount(shown)} of ${fmtCount(loaded)} ${loaded === 1 ? 'job' : 'jobs'}`;
 }
 
 /** Append a sample to a ring buffer of at most `max` samples (the API keeps no history). */
