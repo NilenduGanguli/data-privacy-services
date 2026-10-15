@@ -200,7 +200,7 @@ nothing is registered. Patterns run under the request's CPU budget like every po
 | `ddl_too_large` · `sample_too_large` · `too_many_rows` | 413 | schema limits (above) |
 | `invalid_seed` · `invalid_rows` · `unique_exhausted` | 422 | a bad `seed`, `rows < 1`, or a `unique` field that ran out of values |
 | `invalid_recognizer` | 422 | the recognizer test (above) |
-| `custom_pattern_too_slow` | 422 | a policy pattern (custom recognizer or deny list) ran past the call's CPU budget — 1 s plus 50 µs per pattern run plus 1 µs per character per pattern scanned (S3 review round 1): every engine route, NDJSON item, document and the recognizer test; an L2 job (or partition) fails with this code, without retries |
+| `custom_pattern_too_slow` | 422 | a policy pattern (custom recognizer or deny list) ran past the call's CPU budget — 10 ms plus 20 µs per pattern run plus 0.5 µs per character per pattern scanned, at most `DPS_PATTERN_CPU_SECONDS` (5 s) per request and per NDJSON item, each run charged its own CPU so other requests never cause it (S3 review rounds 1–2): every engine route, NDJSON item (each item has its own budget), document and the recognizer test; an L2 job (or partition) fails with this code, without retries, and a post-write sample that could not run makes the verification `review_required` |
 | `ndjson_invalid` | 400 / 422 | an NDJSON envelope or line that is not valid (400), or nesting deeper than 100 (422) |
 | `ndjson_too_large` | 413 | more than `DPS_NDJSON_MAX_ITEMS` items |
 | `idempotency_key_invalid` | 422 | the header does not match `[A-Za-z0-9_.:-]{1,128}` |

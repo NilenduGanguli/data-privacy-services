@@ -1261,3 +1261,51 @@ blocking defects; each is fixed test-first (`docs/security/2026-10-11-m5-securit
   Open from that review: N1 (Oracle `https_proxy` in a DSN), N4 (L2 `ApplyOptions` without
   `tokenize_allowed`, not exploitable today), N5 (option keys echoed), N6 (the header test's name),
   N8 (T8B, the D4 sweep lens, the SEC-2..5 record: F1 stream items outside this round).
+
+## Security review round 2 fixes R2-B1, R2-B2 (finish stage, `fsec`)
+
+The independent re-review of round 1 (`~/.cache/dps-build/reports/S3-review-r2.md`) found the
+round-1 pattern budget wrong in two ways; both are fixed test-first in `c371d2f`
+(`docs/security/2026-10-11-m5-security-review.md` §3.2, §5). Differences from round 1 and the plans:
+- **R2-B1 (the clock):** round 1 said the budget was "CPU time of the calling thread; the matcher
+  releases the GIL". It was not: the `regex` timeout counts the **process** CPU, and with
+  `concurrent=True` any thread running Python starved the matcher, so legitimate scans were refused
+  under ordinary load. Now `PatternBudget.run` runs a pattern in the calling thread **holding the
+  GIL** for at most `SLICE_SECONDS` (5 ms), and continues a longer run in a **matcher process**
+  (new `dps/engine/detect/pattern_process.py` — a pool of `DPS_PATTERN_PROCESSES` children of the
+  new standalone `pattern_child.py`, started on first use with `python -I` and an empty
+  environment), where the `regex` timeout is that run's own CPU; a pattern whose last such run
+  predicts it would outgrow the slice again starts there directly. `run` now returns **spans**
+  (`list[tuple[int, int]]`), not `regex.Match` objects (the matcher process sends spans back);
+  `PolicyCustomDetector.scan` reads `text[start:end]`. A matcher that dies or hangs is replaced and
+  its run refused (`PatternTooSlow`, fail closed). New settings in `dps/config.py`:
+  `pattern_cpu_seconds` (5.0) and `pattern_processes` (2); `create_app` and the worker's `main`
+  size the pool.
+- **R2-B2 (the allowance):** `BUDGET_BASE_SECONDS` 1.0 → 0.01, `BUDGET_PER_CALL_SECONDS` (50 µs) →
+  `BUDGET_PER_RUN_SECONDS` (20 µs), `BUDGET_PER_CHAR_SECONDS` 1 µs → 0.5 µs. `PatternBudget` gains
+  `ceiling` (an API request's total: `call_scope(pattern_ceiling=…)`, set by `_CallScope` from
+  `DPS_PATTERN_CPU_SECONDS`), `run_cap` (every run, L2 included: `bind_call_scope(pattern_run_cap=…)`
+  in `Consumer._guard`), and `for_stream()` / `item()` / `budget_scope()`: the NDJSON runner gives
+  every item its own budget drawn from the stream's, so an item spends only its own earnings plus
+  the stream's base. Deny lists are compiled by `custom.compile_deny_list` as a trie of exact
+  character classes (`deny_list_pattern`, case-sensitive classes taken from the matcher's own
+  case-insensitive comparison, cached per term set) instead of one flat case-insensitive
+  alternation — same spans (differential test), a flat cost per character.
+- **Post-write sample:** `jobs_run.verification_outcome` treats a post-write sample that returned
+  `{"error": code}` (a refused pattern, a target error) as `review_required` (fail closed, like the
+  identifier check); the evidence page says the sample did not run instead of "found personal data".
+- **Tests:** new `tests/security/test_pattern_budget_load.py` (4 of 5 fail on round 1's code) and
+  `tests/security/test_pattern_matcher.py`; `test_regex_guard.py` follows the renamed constant and
+  the spans API (and gains the request ceiling); `test_custom_entity_bounds.py`'s bare `Consumer`
+  gets its `settings` (the guard reads the run cap); `test_no_values_in_logs_m5.py` scans the two
+  new modules; `test_post_sample_review.py` gains the fail-closed case.
+- **N-r2-1 (non-blocking, partly fixed):** `check_pattern` also refuses the two constructs the
+  `regex` module reads differently from `re` — an unescaped `{` that is not a repeat count (a
+  fuzzy-match constraint there) and an unescaped `[` inside a set (a POSIX class there); the
+  `\s`/`\x1c`–`\x1f` and combining-mark differences are documented (§5), not changed.
+- **Trie bound:** a deny list whose trie would need more than 4x its characters of construction
+  work (only lists made of the Turkish i's, whose case matches overlap without being equal, can)
+  is matched by the flat alternation instead — never an unbounded build outside any budget.
+- Still open from the round-2 review: N-r2-2 (the matcher's per-run cost on short texts, about
+  2 µs: to measure on the 1M-row benchmark), N-r2-3 (production status is per tenant: recorded in
+  §5).

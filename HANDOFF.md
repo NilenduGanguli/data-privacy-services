@@ -337,6 +337,7 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_VERTEX_PROJECT` / `DPS_VERTEX_LOCATION` | — / `global` | laptop path; needs the `vertex` extra and ADC |
 | `DPS_MAX_PAYLOAD_MB` / `DPS_MAX_TEXT_CHARS` / `DPS_MAX_ITEMS` | 8 / 1,000,000 / 10,000 | 413 beyond (JSON-route body bytes by header or while streaming, `payload_too_large`; text characters, documents' canonical text included; JSON leaf values) |
 | `DPS_RATE_LIMIT_ENABLED` / `_RPS` / `_BURST` | `true` / 50 / 100 | token bucket per API key, per process; 429 + `Retry-After` |
+| `DPS_PATTERN_CPU_SECONDS` / `DPS_PATTERN_PROCESSES` | 5 / 2 | (S3 review F-02, round 2) policy patterns — custom recognizers and deny lists: the most CPU one API request, or one NDJSON item, may spend on them in total, and the longest any single run may take (L2 jobs included); past it 422 `custom_pattern_too_slow`. Matcher processes per server process for runs that outgrow the 5 ms in-thread slice (single-threaded children, about 17 MB each, started on first use): long pattern runs never use more CPUs than this, and wait for a free one when all are busy |
 | `DPS_AUDIT_ENABLED` | `true` | `false` only locally; refused in staging/prod |
 | `DPS_OCR_PROVIDER` | `""` (the image: `auto`) | M1 documents — `""`/`off`: no OCR; `azure`: Read v3.2 (the compose mock, the org gateway, Azure) when endpoint and key are set, else none; `tesseract`: the local CLI (`/readyz` `ocr: tesseract_missing` without the binary); `auto` (the image's `ENV`): azure when endpoint and key are set, else tesseract when `DPS_TESSERACT_CMD` is on `PATH`, else none. Staging/prod: azure (also via `auto`) needs a key and an `https` endpoint; `auto` that resolves to none is refused; Tesseract is allowed (local, no egress) |
 | `DPS_TESSERACT_CMD` / `DPS_TESSERACT_LANGS` / `DPS_TESSERACT_TIMEOUT_SECONDS` | `tesseract` / `eng` / 60 | local OCR: the binary (name on `PATH` or a path), its languages (`eng`, `eng+spa`, …; the image ships `eng` only) and one page's time limit (the process group is killed beyond it: `ocr_timeout`). Page image on stdin, TSV on stdout; Tesseract's stderr is never read (it can echo recognised text). `DPS_OCR_MAX_CONCURRENCY` bounds parallel runs. `/readyz` `ocr.engine` is `tesseract-<major.minor>` |
@@ -583,19 +584,34 @@ checks, bounded by `DPS_SMOKE_M3_TIMEOUT` (600 s).
   Idempotency-Key` (keys travel in headers, not cookies).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a
   500 `internal error` with only the exception class logged.
-- **Policy patterns cannot pin a CPU** (S3 review F-02/S3, round 1 B1). Custom-recognizer patterns
-  and deny lists run on the `regex` package (a core dependency since round 1; `VERSION0` = the `re`
-  syntax and semantics, plus a matching timeout), never on `re`. Every call — an HTTP request
-  (`dps.app._CallScope`) or a worker handler task (`Consumer._guard`) — gets one CPU budget for its
-  policy patterns: 1 s, plus 50 µs per pattern run and 1 µs per character per pattern scanned
-  (`dps/engine/detect/regex_guard.py`, `BUDGET_*`). A pattern that runs past it is stopped and the
-  call refused: 422 `custom_pattern_too_slow` (engine routes, NDJSON items, documents, the recognizer
-  test); an L2 job or partition fails with that code and is not retried; a post-write sample records
-  it as its `error`. The static filter (`check_pattern`: no nested repeats, backreferences, bounds
-  over 1000, patterns over 512 characters) still refuses the classic shapes when a policy is
-  validated. Declared-field globs are matched without a regex (`custom.PathGlob`, linear). A bank
-  recognizer that is quadratic on long tokens (`\w+@\w+` on a base64 blob) can be refused on large
-  inputs — rewrite it with bounded repeats.
+- **Policy patterns are bounded per call, on their own CPU** (S3 review F-02/S3, rounds 1 and 2).
+  Custom-recognizer patterns and deny lists run on the `regex` package (a core dependency since
+  round 1; `VERSION0` = the `re` syntax plus a matching timeout), never on `re`. A run starts in the
+  calling thread holding the GIL for at most 5 ms; a run that needs longer continues in a matcher
+  process (`dps/engine/detect/pattern_process.py`: `DPS_PATTERN_PROCESSES` single-threaded children
+  of `pattern_child.py`, `python -I`, empty environment, started on first use, replaced if they die
+  — the run is then refused). Each run is charged its own CPU, so a legitimate scan is never refused
+  because other requests are busy (round 2, R2-B1: the `regex` timeout counts the whole process's
+  CPU). Every call — an HTTP request (`dps.app._CallScope`), each NDJSON item, a worker handler task
+  (`Consumer._guard`) — gets 10 ms plus 20 µs per pattern run and 0.5 µs per character per pattern
+  scanned (`regex_guard.BUDGET_*`; real patterns cost 0.002–0.1 µs per character); an API request
+  and each NDJSON item at most `DPS_PATTERN_CPU_SECONDS` (5 s) in total; an NDJSON item only what
+  it earned plus the stream's 10 ms base; no single run, L2 included, longer than
+  `DPS_PATTERN_CPU_SECONDS`. Past it the call is refused: 422 `custom_pattern_too_slow` (engine
+  routes, NDJSON items, documents, the recognizer test); an L2 job or partition fails with that code
+  and is not retried; a post-write sample that could not run (that code, or a target error) makes
+  the verification `review_required`. Measured (round 2): a stacked pattern on 2 KB is refused
+  after about 11 ms; a 1000-pattern policy is refused at the 5 s ceiling from about 10 KB of text
+  (round 1 let 1 MB run 1001 CPU-seconds); the linear twin of that policy answers in about 4 s on
+  1 MB. Deny lists are matched as a trie (`custom.deny_list_pattern`, exact flat-alternation
+  results), about 0.03 µs per character for 1000 names. The static filter (`check_pattern`: no
+  nested repeats, backreferences, bounds over 1000, patterns over 512 characters; since round 2 no
+  unescaped `{` that is not a repeat count and no unescaped `[` inside a set — `regex` would read a
+  fuzzy match or a POSIX class there) still refuses the classic shapes when a policy is validated. Declared-field globs are matched without a regex
+  (`custom.PathGlob`, linear). A bank recognizer that is quadratic on long tokens (`\w+@\w+` on a
+  base64 blob) can be refused on large inputs — rewrite it with bounded repeats. `regex` differs from
+  `re` in a few Unicode details (`\s` and the ASCII separators `\x1c`–`\x1f`; combining marks in
+  `\w`): security review §5.
 - **Custom entity tiers are per call** (S3 review F-10, round 1 B3): the tiers a policy declares
   (`sensitivity` on a custom recognizer or declared field) live in the request's or job handler's
   own registry (`dps.engine.call_scope`), never in a process-wide one, so no tenant can fill a

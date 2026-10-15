@@ -25,7 +25,7 @@ credentials or raw DPS keys tracked; no `.env` tracked; no `dangerouslySetInnerH
 |---|---|---|---|---|---|
 | S1 | logs/errors | 422 bodies echoed input; pydantic's `union_tag_invalid` and value-quoting validators still echoed it after M0's handler (finder F5: an SSN as `pk_strategy.kind`, as `supported_entity`, as a method) | `dps/layers/api/validation.py`: `{"detail": [{"loc","msg","type"}], "code": "invalid_request"}`; quoting messages replaced (`dps.errors.safe_error_items`); non-identifier `loc` parts shown as `<key>`; the engine's 400 `invalid policy`, the policy store's `invalid_policy`, the recognizer test and connection validation use the same scrubbing; `custom.py`, `policy.py`, `jsonpath.py` validators name the rule, never the value | `tests/security/test_validation_errors.py` | fixed + test |
 | S2 | secrets | `repr(Settings)` printed 12 secrets; `ApplyOptions`/`TransformContext` printed the SEC-4 binding key and the token cache | every secret setting `Field(default="", repr=False)`; `binding_keys`, `binding`, `external_cache`, `external` `field(repr=False)` | `tests/security/test_secrets_hygiene.py::test_settings_repr_hides_secrets`, `::test_engine_dataclasses_hide_binding_keys_and_token_maps` | fixed + test |
-| S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | two layers (§3.2): the static first filter `regex_guard.check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies), and — review round 1 B1 — the bound: patterns and deny lists run on the `regex` module under a per-call CPU budget linear in what they scan (422 `custom_pattern_too_slow` past it); declared-field globs are matched without a regex (`custom.PathGlob`), linear in the path | `tests/security/test_regex_guard.py` | fixed + test (round 1) |
+| S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | two layers (§3.2): the static first filter `regex_guard.check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies), and — review rounds 1 and 2 — the bound: patterns and deny lists run on the `regex` module, each run charged its own CPU (5 ms in the calling thread holding the GIL, then a matcher process), under a per-call allowance of 10 ms + 20 µs per run + 0.5 µs per character per pattern, capped at `DPS_PATTERN_CPU_SECONDS` per request and per NDJSON item (422 `custom_pattern_too_slow` past it); deny lists are matched as a trie; declared-field globs are matched without a regex (`custom.PathGlob`), linear in the path | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py` | fixed + test (rounds 1–2) |
 | S4 | injection (selections) | `validate_selection` / the MongoDB allow-list are the only barrier before SQL/BSON | none needed: the adversarial corpus is refused on both dialects; comments are stripped (M2 design), never reach the statement | `tests/security/test_selection_injection.py` | accepted (control holds) + test |
 | S5 | SSRF (scanner) | no `check_scan_url`: numeric encodings, IPv4-mapped IPv6, metadata IPs and DNS that resolves to link-local were not refused; Chromium resolved any name | `dps.netguard.check_scan_url`, `forbidden_ip_reason` (IPv4-mapped/NAT64/6to4 unwrapped), `check_resolved_host`, `chromium_resolver_rules`; wiring into `POST /scans` and the crawler's launch flags lands **with the M4 merge** (no scanner on this branch yet) | `tests/security/test_netguard.py` | functions + test; wiring at M4 merge |
 | S6 | auth | a route added without `require_scope` would be public | `require_scope`/`require_any_scope` tag their dependency (`__dps_scope__`); the walk uses `iter_route_contexts` (FastAPI 0.143 nests included routers, so the plan's `app.routes` walk saw 2 routes) | `tests/security/test_route_auth.py` | fixed + test |
@@ -44,7 +44,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 | Id | Sev | Finding | Fix | Test | Status |
 |---|---|---|---|---|---|
 | F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 (completed in review round 1, B2) | `tests/api/test_production_resource_gate.py` | fixed + test |
-| F-02 | HIGH | ReDoS via policy-supplied recognizer regex (and, review round 1 B1, via stacked repeats and separated-star declared-field globs) | S3, §3.2 | `tests/security/test_regex_guard.py` | fixed + test (round 1) |
+| F-02 | HIGH | ReDoS via policy-supplied recognizer regex (and, review round 1 B1, via stacked repeats and separated-star declared-field globs; round 2: the bound refused legitimate scans under load and allowed ~250× the legitimate work) | S3, §3.2 | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py` | fixed + test (rounds 1–2) |
 | F-03 | HIGH | S5 scanner SSRF guard missing | S5 (wiring at the M4 merge: a blocking item of that merge) | `tests/security/test_netguard.py` | functions fixed; wiring pending M4 |
 | F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | `tests/test_ner_dob_precedence.py` | fixed + test |
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
@@ -94,37 +94,96 @@ admin-made untagged holder, the retry rule, and the reviewer's re-point/delete p
 cases: every patch and the delete are 403, nothing changes, and a counting listener at the
 requested endpoint receives no connection).
 
-### 3.2 F-02 / S3 — policy patterns cannot pin a CPU (review round 1, B1)
+### 3.2 F-02 / S3 — policy patterns: a bounded allowance, charged on each run's own CPU (review rounds 1 and 2)
 
 The first fix was the static filter alone. It refuses only nested repeats, so stacked repeats over
 the same characters still backtracked polynomially (`\w*\w*\w*\w*\w*!` and `.*a.*a.*a.*b` > 20 s on
 500 characters; through `/policies/test-recognizer`, `/detect` and `/obfuscate`, no answer within
 45 s on 400 characters), and a declared-field glob with separated stars (`$.*a*a*a*a*a*a*a*a*a*b`,
-compiled to a regex the filter never saw) took > 20 s on a 63-character name. Fix as built:
+compiled to a regex the filter never saw) took > 20 s on a 63-character name. Round 1 bounded each
+call with the `regex` module's matching `timeout`; review round 2 found that this bound used the
+wrong clock (R2-B1) and was far too generous (R2-B2):
 
-- **Matching under a budget.** Policy patterns and deny lists run on the `regex` module in
-  `VERSION0` (the `re` syntax and semantics; spans are identical, test
-  `test_policy_patterns_match_exactly_like_re`) with a matching `timeout`, never on `re`, which
-  cannot be interrupted. Each call — an API request (the app's `_CallScope` middleware) or a worker
-  handler task — owns one `PatternBudget` (`dps.engine.call_scope`) shared by all its detectors:
-  1 s of CPU, plus 50 µs per pattern run and 1 µs per character per pattern scanned (a linear
-  pattern runs one to two orders of magnitude under that rate). A pattern that runs past what is
-  left is stopped and the call is refused: 422 `custom_pattern_too_slow` on every engine route,
-  NDJSON item, document and the recognizer test; a job fails (or a partition, or the post-write
-  sample records the code) with it, without retries. Nothing is skipped silently.
+- R2-B1: the `regex` timeout counts the CPU of the whole **process**, and a matcher that releases
+  the GIL (`concurrent=True`) is starved by any thread running Python. Legitimate scans were
+  refused whenever other requests were busy: 4/4, 8/8 and 12/12 concurrent 1000-name deny-list
+  scans of 400 KB, every 10–50 ms scan beside one busy Python thread, and on a real uvicorn server 2
+  of 3 deny-list `/detect` requests while four ordinary requests ran.
+- R2-B2: 1 s per call plus 1 µs per character per pattern, accrued over a whole NDJSON stream. A
+  1 MB `/detect` with 1000 patterns, one of them stacked, ran 1001.5 CPU-seconds before its 422
+  (the same request with linear patterns: 3.97 s); every ~2 KB request with one stacked pattern
+  burned about 1 s.
+
+Fix as built (round 2):
+
+- **Each run is charged its own CPU, and stopped on it alone.** A run starts in the calling thread
+  **holding the GIL** (`concurrent=False`) for at most 5 ms (`regex_guard.SLICE_SECONDS`): no other
+  Python thread runs meanwhile, so the process clock of the timeout is the run's own, and no run
+  holds the GIL longer than that (the event loop keeps its turns). A run that needs longer
+  continues in a **matcher process** (`dps.engine.detect.pattern_process`, child
+  `pattern_child.py`): a pool of
+  `DPS_PATTERN_PROCESSES` (default 2) single-threaded children started on first use
+  (`python -I`, an empty environment, no output), one run at a time, where the `regex` timeout is
+  exactly that run's CPU. A pattern whose last such run predicts it would outgrow the slice again
+  starts there directly. So a refusal depends on the run's own work only, never on other requests;
+  long pattern runs occupy at most `DPS_PATTERN_PROCESSES` CPUs per server process however many
+  arrive (others wait for a free child); a child that dies or hangs is replaced and its run refused
+  (fail closed).
+- **A small allowance with a ceiling.** Every call — an API request (`_CallScope`), each NDJSON item,
+  a worker handler task — starts with 10 ms and earns, for every pattern it runs on a text, 20 µs +
+  0.5 µs per character (`regex_guard.BUDGET_*`). Measured legitimate cost (the build Mac): 1.2–2.3 µs
+  per run on a short text; 0.002–0.1 µs per character for realistic bank patterns (the
+  case-insensitive e-mail class is the dearest); about 0.03 µs per character for a 1000-name deny
+  list. An API request and each NDJSON item may spend at most `DPS_PATTERN_CPU_SECONDS` (default
+  5 s) in total; an NDJSON item spends only what it earned itself plus the stream's 10 ms base, never
+  what earlier items earned (`PatternBudget.for_stream` / `item`); no single run anywhere — L2 jobs
+  included — takes longer than `DPS_PATTERN_CPU_SECONDS`. A pattern past what is left is stopped
+  and the call refused: 422 `custom_pattern_too_slow` on every engine route, NDJSON item, document
+  and the recognizer test; an L2 job (or partition) fails with it, without retries (now truly
+  deterministic: the charge is the run's own CPU); a post-write sample that could not run makes the
+  verification `review_required` — fail closed, as the identifier check already did. Nothing is
+  skipped silently.
+- **Deny lists as a trie.** A deny list is one pattern shaped as a trie of its terms
+  (`custom.deny_list_pattern`, compiled per term set once): every edge is the exact set of text
+  characters some terms accept at that place — as the matcher's own case-insensitive comparison
+  decides, which is not transitive for the Turkish i's (`I`~`i`, `I`~`ı`, `i`~`İ`, never `ı`~`i`) —
+  and edges never share a character, so the matcher follows one path per position: 0.034 µs per
+  character for 1000 names against 0.68 µs for the flat alternation, with the flat alternation's
+  exact spans (a differential test).
 - **The static filter stays** as the first layer: it refuses the classic shapes when a policy is
-  validated, with a clear message (and now also a pattern the `regex` module cannot compile).
+  validated, with a clear message (and also a pattern the `regex` module cannot compile, and —
+  round 2, N-r2-1 — an unescaped `{` that is not a repeat count or an unescaped `[` inside a set,
+  which `regex` would read as a fuzzy match or a POSIX class).
 - **Globs without a regex.** `custom.PathGlob` cuts the glob and the path at `.`, `[` and `]` and
   matches each name by finding its literal pieces in order (leftmost placement is optimal for `*`):
   linear in the path whatever the stars. A differential test checks it against the old regex
   semantics on 6000 random globs and paths.
 
-Proof: `tests/security/test_regex_guard.py` runs the four stacked patterns of the review and two
-the `regex` module's literal pre-checks cannot skip, the separated-star glob, and the reviewer's
-route probe in a child process with a hard time limit (a regression to a backtracking matcher fails
-instead of hanging). Probes (`~/.cache/dps-build/reports/S3-fix-r1/probes/`): the review's route
-probe answers in 0.01 s on all three routes; `\d+\d+\d+[x!]` on 2000 characters answers 422
-`custom_pattern_too_slow` in 1.01 s on each route; the 63-character glob matches in < 1 ms.
+Proof:
+- `tests/security/test_pattern_budget_load.py`: eight concurrent 400 KB deny-list scans beside a
+  spinning Python thread are all answered; through the app, six deny-list requests beside four
+  ordinary 1 MB requests and a spinning thread all answer 200 and the attack still answers 422; a
+  1000-pattern policy on 50 KB answers 200 when linear and is refused at the ceiling (2 s in the
+  test) when one pattern is stacked; an NDJSON attack item after 120 benign items is refused on its
+  own allowance. On round 1's code four of these five fail (refusals; 51 s; the attack item ran
+  11 s and passed) — `~/.cache/dps-build/reports/S3-fix-r2/failfirst-base.log`.
+- `tests/security/test_pattern_matcher.py`: a matcher process gives `re`'s spans (astral characters
+  and lone surrogates included), runs that leave the thread keep their spans, a run is charged its
+  own CPU beside a busy thread, the run cap holds without a ceiling, a matcher killed mid-run
+  refuses its run and is replaced, an item spends only its own earnings, routing, and the deny-list
+  trie (differential, deep lists, cost).
+- `tests/security/test_regex_guard.py` (round 1): the stacked patterns, the separated-star glob and
+  the reviewer's route probe, in a child process with a hard time limit.
+- Probes (`~/.cache/dps-build/reports/S3-fix-r2/probes/`, the reviewer's round-2 probes re-run):
+  0 refusals for 1, 4, 8 and 12 concurrent deny-list scans (round 1: all refused); 3/3 scans beside
+  a busy Python thread answered (round 1: 3/3 refused); on a real uvicorn server every deny-list
+  request answers 200 with 1, 2 or 4 ordinary requests in flight (round 1: 2 of 3 refused with 4);
+  `/detect` attacks are refused after 0.14 s (1 pattern, 100 KB; round 1: 1.2 s), 0.56 s (100 ×
+  10 KB; 2.1 s) and at the 5 s ceiling for 1000 patterns on 10 KB, 50 KB and 1 MB (round 1: 11.6 s,
+  51.7 s and 1001.5 CPU-seconds), while the linear twins answer 200 (1000 patterns on 1 MB: 3.9 s;
+  round 1: 4.0 s). With the lane's Linux image (Python 3.12, uid 10001, read-only root, no
+  network) running this branch's code, a matcher process returns `re`'s spans, stops the attack at
+  its 0.3 s limit, and eight concurrent deny-list scans beside a spinning thread all answer.
 
 ### 3.4 F-04 — a stronger detector never weakens protection
 
@@ -313,6 +372,7 @@ an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguou
 | `4d2b234` | this review document (round 0) |
 | `be2b326` | review round 1 B2: F-01 completed — holders of a production credential |
 | `e7882af` | review round 1 B1 + B3: F-02/S3 per-call pattern budget and the glob matcher; F-10 registry per call |
+| `c371d2f` | review round 2 R2-B1 + R2-B2: each pattern run charged its own CPU (in-thread slice, then matcher processes), the capped per-call allowance with per-item NDJSON budgets, deny lists as a trie, the post-write sample failing closed, and N-r2-1's refusals |
 
 Proof beyond the tests: the finders' probes re-run on the fixed branch
 (`~/.cache/dps-build/reports/S3-impl/probes/*.after.out`) — the D3 clone is refused (403, 0 rows
@@ -339,14 +399,40 @@ Presidio model a birth date is transformed in 8/8 runs.
 
 ## 5. Residual risks
 
-- Policy patterns (review round 1 B1): the static filter is a heuristic; the bound is the per-call
-  CPU budget (1 s + 50 µs per pattern run + 1 µs per character per pattern). The custom-pattern CPU
-  of one call is therefore linear in what it scans times the number of patterns — up to about 1000
-  CPU-seconds for a 1,000,000-character text against a policy's 1000 patterns, the same order as
-  the legitimate work of such a request — and is then refused. Input length caps alone do **not**
-  bound it (the earlier text said they did: `max_text_chars` is 1,000,000). A legitimate pattern
-  that is quadratic on long tokens (`\w+@\w+` over a long base64 blob, say) can be refused on large
-  inputs; the error tells the owner to simplify it. Rate limits bound how many such calls arrive.
+- Policy patterns (review rounds 1–2): the static filter is a heuristic; the bound is the per-call
+  allowance, charged on each run's own CPU (§3.2). What one request with a stacked pattern can
+  spend, measured through `/detect`: 10 ms + 20 µs + 0.5 µs per character per pattern — about 11 ms
+  on a 2 KB text (round 1: about 1 s), 0.06 s on 100 KB (round 1: 1.2 s) — and never more than
+  `DPS_PATTERN_CPU_SECONDS` (5 s), which 1000-pattern policies reach from about 10 KB of text
+  (1000 × 10 KB, × 50 KB, × 1 MB: refused at 5 s; round 1: 11.6 s, 51.7 s, 1001.5 s). Against the
+  legitimate work of the same request the allowance is 5–250 times the measured per-character cost
+  of real patterns (0.5 µs earned, 0.002–0.1 µs spent), and more on tiny texts, where the 10 ms
+  base dominates. At the rate limit (50 requests/s per key) one `detect` key can therefore make a
+  replica spend about 0.5 CPU-second per second with 2 KB single-pattern requests, and up to 5 CPU-
+  seconds per request with large policies — but every run past 5 ms executes in the matcher
+  processes, so all such runs together occupy at most `DPS_PATTERN_PROCESSES` CPUs per server
+  process (default 2), plus 5 ms GIL slices in request threads; other tenants' long pattern runs
+  then queue for a matcher process (latency, not refusal), and their short runs are unaffected. An
+  NDJSON stream spends at most its items' own allowances plus one 10 ms base. Legitimate requests
+  are refused only when a pattern costs more than about 0.25 µs per character, or a policy's total
+  work passes the ceiling (1000 patterns over 1 MB of text are charged about 2.7 CPU-seconds and
+  answer 200 in 3.9 s, inside the 5 s default; raise `DPS_PATTERN_CPU_SECONDS` for heavier
+  policies); the error tells the owner to
+  simplify the pattern or send less text per call. The allowance and the ceiling are this round's
+  calibration (for the owner to confirm); a deployment tightens or relaxes them through the two
+  settings.
+- Policy patterns run on the `regex` module (`VERSION0`), not `re` (review round 2 N-r2-1): the
+  syntax is `re`'s, and the two constructs the engine would read differently are refused when a
+  policy is validated (`check_pattern`): an unescaped `{` that is not a repeat count (a fuzzy-match
+  constraint there, `(?:ACCT1234){e<=2}`) and an unescaped `[` inside a set (`[[:digit:]]`, a POSIX
+  class there) — escape them. Two Unicode details still differ (open): `\s` does not match the
+  ASCII separators FS, GS, RS and US (`\x1c`–`\x1f`, which `re` treats as whitespace) — write
+  `[\s\x1c-\x1f]` where legacy extracts use them; `\w` and `\b` include combining marks, so a
+  span may run one character further than under `re` (more is masked, never less).
+- Production credentials are per tenant (review round 2 N-r2-3): a `_shared/` secret ref that is a
+  production credential in tenant A is not one in tenant B, so a B `jobs` key can still re-point a B
+  connection that names it — only when an operator shares one production login across tenants
+  (do not).
 - Connections (review round 1 B2): a production credential needs `admin` wherever it is named,
   changed or deleted, but a `jobs` key may still name any of its tenant's **non-production**
   `secret_ref`s in a new connection with an endpoint of its choice (that login then reaches that
@@ -389,4 +475,10 @@ DPS_TEST_REQUIRE_SERVICES=1 ./lane.sh pytest -q -m db tests/security/test_cross_
 PYTHONPATH=. DPS_TEST_REQUIRE_SERVICES=1 ./lane.sh pytest -q -s -p tests.fixtures.services \
   -p tests.fixtures.db -p tests.fixtures.sources -c pyproject.toml --rootdir=. \
   /Users/neelu/.cache/dps-build/reports/S3-review-r1/probes/test_probe_f01_repoint.py
+# review round 2 (R2-B1, R2-B2): load, scale and matcher tests; the reviewer's probes re-run
+./lane.sh pytest -q tests/security/test_pattern_budget_load.py tests/security/test_pattern_matcher.py
+P=/Users/neelu/.cache/dps-build/reports/S3-review-r2/probes
+./lane.sh python $P/concurrency_false_refusal.py && ./lane.sh python $P/gil_busy_false_refusal.py
+./lane.sh python $P/probe_e2e_false_refusal.py 18519      # real uvicorn server on a free port
+./lane.sh python -c "import os,runpy;[os.environ.pop(k) for k in list(os.environ) if k.startswith('DPS_') and not k.startswith('DPS_TEST_')];runpy.run_path('$P/probe_budget_scaling.py',run_name='__main__')"
 ```
