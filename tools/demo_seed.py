@@ -1,7 +1,7 @@
 """Seed the ten-minute demo on a running DPS stack (M5 Task 26). Idempotent.
 
     python tools/demo_seed.py [--base-url http://127.0.0.1:8400] [--admin-key KEY]
-        [--tenant retail-banking-apac] [--rows 20000] [--skip-sources] [--skip-oracle]
+        [--tenant retail-banking-apac] [--rows 20000] [--skip-sources] [--skip-oracle] [--reseed]
         [--reset-jobs] [--out-dir var/demo]
 
 1. Waits for ``/readyz`` (``--ready-seconds``, default 300: Oracle Free needs ~3 min at first start).
@@ -15,7 +15,8 @@
 4. Source data: ``tools/seed_sources.py --target postgres|oracle|mongo --rows N --seed 7`` (the
    shared demo customer space; idempotent per its marker). ``--rows`` defaults to 20 000, the rows the
    compose ``seed-sources`` one-shot loads, because the seed refuses other parameters on a seeded
-   schema.
+   schema; ``--reseed`` reloads a source seeded with other parameters (``--reset``; the test suite
+   leaves 200 rows in Oracle and MongoDB).
 5. Connections by name (created when missing) with the compose ``demo-secrets`` refs, which that
    one-shot writes for the demo tenant too (refs are tenant-scoped, SEC-2): ``bank-pg`` and
    ``bank-uat`` (PostgreSQL ``bank`` read, ``bank_uat`` written), ``crm-oracle`` and ``crm-masked``
@@ -342,13 +343,17 @@ class Seeder:
                 str(self.args.rows),
                 "--seed",
                 str(SEED),
+                *(["--reset"] if self.args.reseed else []),
             ]
             done = self.runner(argv, capture_output=True, text=True, check=False, timeout=1800)
-            if done.returncode != 0:
+            if done.returncode == 3:
                 raise SeedError(
-                    f"tools/seed_sources.py --target {target} exited {done.returncode} "
-                    "(another --rows or --seed on a seeded schema exits 3: see its docstring)"
+                    f"tools/seed_sources.py --target {target} exited 3: the source was seeded "
+                    "with other parameters (the test suite leaves 200 rows); run again with "
+                    "--reseed to reload it"
                 )
+            if done.returncode != 0:
+                raise SeedError(f"tools/seed_sources.py --target {target} exited {done.returncode}")
             lines = [ln for ln in (done.stdout or "").splitlines() if ":" in ln]
             unchanged = bool(lines) and all(
                 "unchanged" in ln or "already seeded" in ln for ln in lines
@@ -475,6 +480,12 @@ def parse_args(argv: Sequence[str] | None, env: Mapping[str, str]) -> argparse.N
     p.add_argument("--rows", type=int, default=DEFAULT_ROWS)
     p.add_argument("--skip-sources", action="store_true")
     p.add_argument("--skip-oracle", action="store_true")
+    p.add_argument(
+        "--reseed",
+        action="store_true",
+        help="reload the source data (seed_sources --reset): after the test suite, which leaves "
+        "200 rows in Oracle and MongoDB",
+    )
     p.add_argument("--reset-jobs", action="store_true")
     p.add_argument("--out-dir", default=str(DEFAULT_OUT))
     p.add_argument("--ready-seconds", type=float, default=300.0)

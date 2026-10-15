@@ -753,3 +753,38 @@ def test_cli_builds_the_deck(tmp_path: Path) -> None:
         ]
     )
     assert code == 0 and out.stat().st_size > 0
+
+
+# -- the committed deck (Task 26 S6b: built from a complete rehearsal) ----------------------------
+COMMITTED = ROOT / "docs" / "demo" / "dps-showcase.pptx"
+
+
+def test_the_committed_deck_is_a_complete_keynote_safe_build() -> None:
+    """``docs/demo/dps-showcase.pptx`` as committed: twelve slides with titles and the script's
+    notes, no placeholder (it was built ``--strict`` from a complete rehearsal), no chart part or
+    graphic frame, only Helvetica Neue and Arial, no CRITICAL entity in its words, under 20 MB.
+    Rebuild it (``python tools/build_deck.py --strict``) after editing a Slide block."""
+    if not COMMITTED.is_file():
+        pytest.fail("docs/demo/dps-showcase.pptx is missing: rehearse, then build it --strict")
+    prs = Presentation(str(COMMITTED))
+    slides = list(prs.slides)
+    assert len(slides) == 12
+    notes = build_deck.script_notes(SCRIPT)
+    for number, slide in enumerate(slides, start=1):
+        assert slide.shapes.title is not None and slide.shapes.title.text.strip()
+        assert slide.notes_slide.notes_text_frame.text == notes[number], f"slide {number} notes"
+        assert not [n for n in _names(slide) if n.startswith("placeholder:")], number
+    with zipfile.ZipFile(COMMITTED) as z:
+        names = z.namelist()
+        assert not [n for n in names if n.startswith(("ppt/charts/", "ppt/embeddings/"))]
+        xml = {n: z.read(n).decode("utf-8") for n in names if n.endswith(".xml")}
+    for name, text in xml.items():
+        if name.startswith("ppt/slides/slide"):
+            assert "<p:graphicFrame" not in text, name
+        faces = set(re.findall(r'typeface="([^"]*)"', text))
+        assert faces <= ALLOWED_FONTS | {""} | {f for f in faces if f.startswith("+m")}, name
+    words = [t for slide in slides for t in _texts(slide, chrome=True)]
+    words += [slide.notes_slide.notes_text_frame.text for slide in slides]
+    found = Detector(DetectorConfig()).detect(text="\n".join(words)).findings
+    assert not [f.entity_type for f in found if f.sensitivity is Sensitivity.CRITICAL]
+    assert COMMITTED.stat().st_size < 20 * 1024 * 1024

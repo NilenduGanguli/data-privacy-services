@@ -1511,3 +1511,96 @@ with the browser-worker and the demo site, the smoke's scanner block and the con
   `sends_blocked` absent); four moved counts are rose (`non_get` 2, `form_get` 1, `admin_hits` 1,
   `non_get_allowed` 1). On the code before the change 20 of the 42 failed (the new cases and every
   test that builds from the complete fixture report).
+
+## Task 26 — The ten-minute demo: seed, automated run, console check, deck (finish stage S6b, lane `fdemo`, 2026-10-15)
+
+Finish-stage work (programme plan §2.6 F3) on lane `fdemo` after the `fimg` merge (Task 24, the
+scanner in the `full` stack). Rehearsal on this lane's `--profile full` stack: `tools/demo_seed.py`,
+then `tools/e2e_demo.py --console` at `37ec781`: S1–S12 all PASS, the whole run 3:25 (the API path
+S1–S11 3:12); `docs/demo/dps-showcase.pptx` built `--strict` from that report, its screenshots and
+the bench files (no placeholder).
+
+- **The demo tenant needs its own secret refs.** Refs are tenant-scoped (SEC-2, SEC-5), so the
+  plan's connections and the scan's stored session cannot resolve for `retail-banking-apac` from
+  the `default/` folder. The compose `demo-secrets` one-shot now copies the whole demo tree
+  (`default/dps/…`, incl. `dps/ui/demo-onboarding`) to `retail-banking-apac/dps/…`; a test runs the
+  one-shot's script and resolves every demo connection's ref and the session for the demo tenant.
+  A running stack takes it with `docker compose --profile full up -d demo-secrets`.
+- **Connections as built.** Step 5's single `crm-oracle` (read as `dps_ro`, write as `crm_masked`)
+  and `profiles-mongo` (source + target) cannot exist: one connection has one credential, `DPS_RO`
+  cannot write and `CRM_MASKED` cannot read `CRM`, and a MongoDB connection names one database. The
+  seed makes seven, one per role, with the compose demo refs: `bank-pg` / `bank-uat`, `crm-oracle` /
+  `crm-masked`, `profiles-mongo` / `profiles-uat`, `exports-minio`. Sources are tagged `production`.
+- **`--rows` defaults to 20 000** (plan: 2 000): the compose `seed-sources` one-shot loads 20 000
+  customers with seed 7 and `seed_sources.py` refuses other parameters on a seeded schema (exit 3).
+  `--reseed` (beyond the plan) reloads (`--reset`) a source seeded with other parameters — the test
+  suite leaves 200 rows in Oracle and MongoDB; without it the seed stops with that remedy.
+- **Keys.** `demo-console` has every scope (`*`) for the demo tenant (the plan's "(tenant, `*`)");
+  keys last 90 days. A key in the file that no longer authenticates (401) is replaced and the other
+  active keys of its name are disabled (nobody holds them any more). The job group's file holds
+  `group_id`, `name`, `tenant`, `key_material` and `synthesis_seed`; a group whose file is lost
+  cannot be used again (DPS keeps no key), so a new `crm-uat-refresh-<n>` is made.
+- **Policies.** The recognizer's "deny `EMP-000000`" is the console's allow list (the matched texts
+  it never reports, as the Policies fixture and mockup 05's live test treat the seeded id); the
+  declared field keeps the mockup's path `LOANS.APPLICANTS.EMPLOYER_NAME`. v2 is published once
+  (`CHG-48213`); a rerun reuses it.
+- **`--reset-jobs`.** Retention's floor is one day, so it removes only demo jobs older than a day;
+  the seed also cancels the tenant's unfinished jobs. A retention job belongs to the system tenant,
+  which no tenant's `/jobs/{id}` reads (404, and `_system` is refused as reserved): the seed and S11
+  wait for the job's `retention.run` audit row instead (`outcome` `ok` / `dry_run`).
+- **e2e_demo as built.**
+  - The demo runs as the `demo-console` key with `X-DPS-Tenant: retail-banking-apac`; only S11's
+    retention run uses `--admin-key` (it sweeps every tenant, so it needs a key for every tenant).
+  - S2 uses the console's own KYC sample (`frontend/src/lib/samples.json`, as the Playground) and
+    checks the synthetic record against the values the detector found (non-sensitive fields such as
+    `risk_score` are kept by design).
+  - S4 uses the console's committed synthetic scan `demo/documents/kyc-scanned.pdf` ("Load demo KYC
+    scan") instead of rendering one; its checks are the plan's (OCR pages, `%PDF`, 0 extractable
+    characters, 0 originals in the OCR re-read).
+  - S5 discovers under `@retail-kyc`. **Product gap found:** a run without `policy` resolves its
+    snapshot's policy *name* as a preset, so a snapshot discovered under a tenant policy fails
+    every run with `policy_invalid`; the demo's runs name `@retail-kyc` again (the API resolves it
+    to the same stored version). Left for the owner (not fixed here: L2 + Task 15, outside the demo).
+  - S6 runs with `partition_rows` 5 000 (four partitions per job, two at a time) into
+    `bank_uat.customers_demo`, `crm_uat.profiles_demo` and `CRM_MASKED.CUSTOMERS_DEMO`; partitions
+    report `done`. Besides the plan's checks every pack must carry the group's key id.
+  - S8 writes `bank_uat.customers_synthetic` (plan: schema `synth_demo`, which the demo source does
+    not have; `dps_writer` owns `bank_uat`), with the inline policy `synthetic-realistic` plus
+    `synthesize.utility_label` `$.segment`, so the pack reports utility and the MIA proxy (slide 9);
+    `privacy.nndr.measured` is a count (≥ 1), not a flag.
+  - S9 passes only on the smoke's D4 rule with both positive controls (as the `fimg` merge asked):
+    no counter moved, `non_get_allowed` 0, `get` moved ≥ pages visited, ≥ 1 send blocked; facts
+    `scan.*`, `received.*`, `sends_blocked`. It also checks the persona CSV export holds none of
+    the demo site's values.
+  - S10 also scans the report, audit and PDF bodies for the S2 record, the SSN and the demo site's
+    values (0 required).
+  - S12's pages are recognised by their own heading as built (`main h1`; the evidence page by its
+    eyebrow): "Protection posture", "Try the engine", "Policies", "Jobs", the job title (with `→`),
+    "Scan …", "Evidence and audit", "evidence pack", "Admin" — the sidebar names every section, so
+    matching any text would pass on any page. The key goes to `sessionStorage['dps.apiKey']`
+    (the console's default, O5), the tenant and theme to `localStorage`. The Playground screenshot
+    runs **Obfuscate** (slide 5 speaks of tokens and the key card) and masks the card's data-key
+    text with an ink box: no screenshot or deck carries key material.
+  - The JSON report lists every scripted step (a skipped one `SKIP`, the steps after a failure
+    `NOT RUN`) and S12 only with `--console`; the Markdown's last line is the whole run's wall time,
+    and its verdict line gives the API path (S1–S11) separately.
+- **`tests/console/test_console_pages.py`** opens the demo tenant's newest succeeded run, scan (its
+  first page with both filled screens) and evidence pack, read through the API, so it does not
+  depend on a report file; it also fails on any request to another origin.
+- **Deck.** Keynote 14.4 could not be driven headless here: `open` through AppleScript returned no
+  document or timed out (AppleEvent -1712) and `open -a Keynote` opened nothing, with or without a
+  restart of Keynote — as in S6a, most likely a dialog that needs a person (osascript has no
+  assistive access to look). Visual QA instead: LibreOffice headless → PDF → page images, all
+  twelve read (no overflow, every bar and diagram drawn, fonts as named). `tests/test_deck.py`
+  gains a test of the committed deck itself (twelve slides, notes equal the script's Slide blocks,
+  no placeholder, no chart part or graphic frame, only Helvetica Neue and Arial, no CRITICAL entity,
+  under 20 MB) — S6a's N2: a deck that is not a complete `--strict` build cannot be committed. The
+  Keynote PDF review stays with the owner.
+- **Slide 1** shows "v0.2.0": the version the stack reports (`api-core`); rebuild after Task 28
+  sets 1.0.0 (rehearse, then `build_deck.py --strict`).
+- Tests: `tests/test_demo_seed.py` 10 (idempotent second run, key replacement and retirement, a
+  lost group file, skip flags, a failed and a reseeded source, reset, an unreachable stack, the
+  demo tenant's refs resolving), `tests/test_e2e_demo.py` 22 (the D4 rule and its controls, the
+  driver, the report contract read by `tools/build_deck.py`, the Markdown's last line, helpers, the
+  page list, a missing seed); on mutated code (the D4 controls dropped, the driver not stopping)
+  5 fail. `tests/console/test_console_pages.py` 9 on the stack; `tests/test_deck.py` 42 → 43.

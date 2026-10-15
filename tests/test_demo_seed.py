@@ -314,8 +314,21 @@ def test_skip_flags(tmp_path: Path) -> None:
     assert runner2.argv == []
 
 
-def test_a_failed_source_seed_fails_the_run(tmp_path: Path) -> None:
+def test_a_failed_source_seed_fails_the_run_and_names_the_remedy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # exit 3: the schema was seeded with other parameters (the test suite leaves 200 rows)
     assert _run(FakeDps(), tmp_path, runner=Recorder(returncode=3)) != 0
+    assert "--reseed" in capsys.readouterr().out
+
+
+def test_reseed_reloads_the_sources(tmp_path: Path) -> None:
+    runner = Recorder()
+    assert _run(FakeDps(), tmp_path, "--reseed", runner=runner) == 0
+    assert len(runner.argv) == 3 and all("--reset" in a for a in runner.argv)
+    plain = Recorder()
+    assert _run(FakeDps(), tmp_path / "b", runner=plain) == 0
+    assert not any("--reset" in a for a in plain.argv)
 
 
 def test_reset_jobs_cancels_runs_retention_and_restores_thirty_days(tmp_path: Path) -> None:

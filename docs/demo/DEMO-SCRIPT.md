@@ -1,13 +1,13 @@
 # The ten-minute demo: presenter script
 
-> **Status: draft, finish stage S6a (2026-10-14).** Written against the console and API as built on `main`
-> plus the M4 scanner branch; every console label below was checked again on 2026-10-15 against the
-> merged console (lane `fdemo` with `fimg`: M4 as merged on `main`, Task 24's `full` stack). Finish
-> stage S6b runs the real rehearsal (`tools/demo_seed.py`,
-> `tools/e2e_demo.py --console`), confirms every label and timing below against the running stack, and
-> rebuilds the deck from that run. This script never quotes a figure that was not measured: where a beat
-> says "read it off the screen", the number comes from the live stack or from the deck slide built from
-> the rehearsal.
+> **Status: final, finish stage S6b (2026-10-15).** Drafted in S6a against the console and API as built;
+> every console label below was checked against the merged console (lane `fdemo` with `fimg`: M4 as
+> merged on `main`, Task 24's `full` stack). S6b ran the real rehearsal on that stack —
+> `tools/demo_seed.py`, then `tools/e2e_demo.py --console` at commit `37ec781`: every step S1 to S12
+> PASS, the whole run 3:25 (the API path S1 to S11 3:12) — and built `docs/demo/dps-showcase.pptx`
+> from it. This script
+> never quotes a figure that was not measured: where a beat says "read it off the screen", the number
+> comes from the live stack or from the deck slide built from the rehearsal.
 
 **Audience:** bank management: the CIO office, data protection, platform and data owners.
 **Promise of the ten minutes:** one Privacy Engine, three entry points, two outcomes, and every claim
@@ -47,11 +47,20 @@ Run everything from the repository root, inside the project's virtual environmen
 docker compose --profile full up --build -d
 # poll readiness; never `docker compose --wait` (the stack has one-shot services)
 until curl -fsS http://127.0.0.1:8400/readyz >/dev/null; do sleep 5; done
-python tools/demo_seed.py                  # idempotent: tenant, keys, connections, policies, job group
+python tools/demo_seed.py                  # idempotent: tenant, keys, sources, connections, policies, job group
 python tools/e2e_demo.py --console         # dress rehearsal: every step PASS, total under 10:00
 python tools/build_deck.py --strict        # the deck from this rehearsal; fails if any input is missing
 ```
 
+- What the seed makes (tenant `retail-banking-apac`): the keys `demo-console` (every scope, for the
+  console), `crm-uat-provisioner` and `qa-onboarding-scanner` in `var/demo/demo-keys.json` (mode 600,
+  git-ignored); the connections `bank-pg` and `bank-uat` (PostgreSQL `bank` read, `bank_uat` written),
+  `crm-oracle` and `crm-masked` (Oracle `CRM` read, `CRM_MASKED` written), `profiles-mongo` and
+  `profiles-uat` (MongoDB `crm` read, `crm_uat` written) and `exports-minio`; the policy `retail-kyc`
+  (v2, change ticket `CHG-48213`); the job group `crm-uat-refresh`, whose key and seed exist only in
+  `var/demo/group-crm-uat-refresh.json` (mode 600). The rehearsal writes the masked copies
+  `bank_uat.customers_demo`, `crm_uat.profiles_demo` and `CRM_MASKED.CUSTOMERS_DEMO` and the
+  synthetic companion `bank_uat.customers_synthetic`.
 - Oracle Free needs about three minutes on a first start. If it is slow, rehearse with
   `python tools/e2e_demo.py --console --skip-oracle` and present the PostgreSQL and MongoDB pair in the join.
   Such a rehearsal cannot rebuild the deck with `--strict` (slide 8 needs all three pairs): keep the deck
@@ -117,8 +126,9 @@ layer cards. Point at the tile **Raw PII sent to LLM**.
 
 **Show, step by step:**
 1. Sidebar **Playground** ("Try the engine"), input **JSON**: the sample KYC record of a fictional customer
-   with checksum-valid identifiers is already there. Policy: `gdpr-pseudonymise` (or `retail-kyc` when the
-   selector lists it).
+   with checksum-valid identifiers is already there. Policy: `gdpr-pseudonymise` (the selector lists the
+   shipped presets; the rehearsal ran the same record under the tenant policy `@retail-kyc` through the
+   API).
 2. **Detect only**: the findings pane lights up; hover an entity chip to show the detector and the score.
 3. **Obfuscate**: the output keeps formats (the Aadhaar number keeps its last four digits, the e-mail keeps
    its domain). Point at the card **Key material · returned once, never stored**.
@@ -169,10 +179,11 @@ the diff from v1 to v2 with its change ticket.
 ## 4:00 · Data sources (3 minutes)
 
 **Show, step by step:**
-1. Sidebar **Data sources & jobs**, **New job**: connect to the saved Oracle connection `crm-oracle`, pick the
-   customers table, **Run discovery**.
+1. Sidebar **Data sources & jobs**, **New job**: connect to the saved Oracle connection `crm-oracle` (read
+   only, as `DPS_RO`), pick `CRM.CUSTOMERS`, **Run discovery**.
 2. The **Column heat-map**: review every column, accept one override, **Accept snapshot**.
-3. Target **Copy to a table** in the UAT schema, job group `crm-uat-refresh`, run. On the job page watch
+3. Target **Copy to a table** through `crm-masked` (the `CRM_MASKED` UAT schema), job group
+   `crm-uat-refresh` with its key from `var/demo/group-crm-uat-refresh.json`, run. On the job page watch
    **Partitions** commit, then open the **Evidence pack** (label "pseudonymised — still personal data").
    If the worker is slow, open the rehearsal's finished job from the report instead of waiting.
 4. On the job page, **Cross-system joins** then **Open consistency check**: the same group key across the
@@ -298,10 +309,15 @@ rotated key is refused.
 | The scan times out | Re-run with one persona; or show slide 10, the rehearsal's scan. |
 | The evidence PDF renders slowly | Use the HTML evidence page and **Print** from the browser. |
 | The console shows 401 or an empty page | Re-paste the `demo-console` key and check the Tenant field reads `retail-banking-apac`. |
+| `demo_seed.py` stops: `seed_sources.py` exited 3 | The source was seeded with other parameters (the test suite leaves 200 rows in Oracle and MongoDB): `python tools/demo_seed.py --reseed`. |
+| A job fails `secret_unavailable` | The demo tenant's secrets are missing from the volume: `docker compose --profile full up -d demo-secrets`, then run the job again. |
+| `e2e_demo.py` stops at a step | `reports/e2e-demo-report.md` names the step and a value-free reason; fix it, then rehearse again (later steps were not run). |
 | The stack is down | Switch to the deck: slides 5 to 11 carry the rehearsal's measured results. |
 
 ## Reset between rehearsals
 
-- `python tools/demo_seed.py --reset-jobs` sets the tenant's retention to one day, runs retention
-  (`POST /admin/retention/run`) so the demo jobs go, and sets retention back to thirty days.
+- `python tools/demo_seed.py --reset-jobs` cancels the tenant's unfinished jobs, sets its retention to one
+  day, runs retention (`POST /admin/retention/run`, waiting for its audit row) and sets retention back to
+  thirty days. Retention removes only jobs older than a day (its floor), so a rehearsal from the same day
+  stays listed; that is harmless: the consistency check uses the newest job per target.
 - For a clean slate: `docker compose --profile full down -v`, then the "Before the room" commands again.

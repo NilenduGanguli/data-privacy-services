@@ -2030,3 +2030,54 @@ recreates its container and drops its logs: save `docker compose logs` first whe
 evidence. (3) The demo site's `get` counts every GET it serves, from any client: the check needs at
 least `pages_visited` of them, so stray GETs cannot make another site's counters pass, but a browser
 tab left on the site inflates `pages served`.
+
+## 19. M5 Task 26 — the ten-minute demo: seed, automated run, console check, showcase deck (finish stage, lane `fdemo`, 2026-10-15)
+
+**What changes for a build, a deploy or a demo.**
+- The compose `demo-secrets` one-shot also copies the demo refs (the whole `default/dps/…` tree, the
+  scanner's stored session included) to the demo tenant's folder `retail-banking-apac/dps/…` of the
+  `dps-secrets` volume: refs are tenant-scoped (SEC-2/SEC-5), and the demo tenant's connections and
+  scans use the same refs. A running stack picks it up with
+  `docker compose --profile full up -d demo-secrets`.
+- `python tools/demo_seed.py` (idempotent; `--base-url`, `--admin-key`, `--tenant`, `--rows 20000`,
+  `--skip-sources`, `--skip-oracle`, `--reseed`, `--reset-jobs`) seeds tenant `retail-banking-apac`:
+  three keys (`demo-console` every scope, `crm-uat-provisioner`, `qa-onboarding-scanner`) whose raw
+  values go only to `var/demo/demo-keys.json` (mode 600, git-ignored); the three source engines
+  (`tools/seed_sources.py`, seed 7); seven connections (`bank-pg`/`bank-uat`,
+  `crm-oracle`/`crm-masked`, `profiles-mongo`/`profiles-uat`, `exports-minio`); the policy
+  `retail-kyc` v2 (`CHG-48213`); the job group `crm-uat-refresh`, whose key material and seed exist
+  only in `var/demo/group-crm-uat-refresh.json` (mode 600).
+- `python tools/e2e_demo.py [--console] [--skip-scanner] [--skip-oracle]` runs the demo story S1–S11
+  (S12 = the console walk) as the `demo-console` key and writes `reports/e2e-demo-report.md`, the
+  `dps.e2e-demo.v1` JSON that `tools/build_deck.py` reads, and `reports/demo-screens/<page>-<theme>.png`
+  (all git-ignored). Endpoints come from `DPS_BASE_URL`/`DPS_TEST_APP_URL`/`DPS_APP_PORT` and the
+  demo site's counters from `DPS_TEST_DEMO_SITE`/`DPS_DEMO_SITE_PORT`, as for the smoke.
+- `docs/demo/dps-showcase.pptx` is committed, built `--strict` from a complete rehearsal;
+  `tests/test_deck.py` checks the committed file (twelve slides, notes = the script's Slide blocks, no
+  placeholder, Keynote-safe parts and fonts). Rebuild after editing a Slide block of
+  `docs/demo/DEMO-SCRIPT.md`, and after Task 28 (slide 1 prints the stack's version).
+
+**Verified (lane `fdemo`, `--profile full`, ports 8418…):** `demo_seed.py` then
+`e2e_demo.py --console` at `37ec781`: S1–S12 PASS in 3:25 (API path 3:12); 20 000-row runs on
+PostgreSQL, MongoDB and Oracle under the group key (4 partitions each, verified), 3/3 pairs
+consistent (500 of 500), copula companion (fidelity ≥ 0.85, exact-row matches 0, NNDR above its
+target, MIA and utility reported), a scan with the demo site's non-GET, GET-form, `/logout` and
+`/admin` counters unmoved while it served 175 GETs and the guard blocked 60 sends;
+`tests/console/test_console_pages.py` 9 passed; `dps_llm_raw_pii_sent_total` 0. Source vs target
+(counts only): `bank_uat.customers_demo`, `crm_uat.profiles_demo`, `CRM_MASKED.CUSTOMERS_DEMO`:
+0 same-row survivors and 0 set-equal names, e-mails, mobiles, national ids, tax ids and notes
+(customer ids 4 and shifted birth dates: domain collisions); `bank_uat.customers_synthetic`: 0
+customer ids, e-mails, national ids and tax ids equal to a source value (the pack's own
+identifier check: national ids and tax ids 0 in the source); its names, mobiles and birth dates meet source values only as surrogate-domain
+collisions (the demo source comes from the same fictional ranges). Log and artefact scan: 0 hits of
+the demo keys, the group key and seed, the bootstrap key, the KEK, the sample records and 2 000
+sampled source values per personal column.
+
+**Traps.** (1) After the test suite Oracle and MongoDB hold 200 rows: `demo_seed.py` stops with
+`seed_sources.py` exit 3; run it with `--reseed`. (2) A retention job belongs to the system tenant:
+`GET /jobs/{id}` answers 404 for every tenant (and `_system` is reserved); wait for its
+`retention.run` audit row (`/admin/audit?tenants=*&action=retention.run`). (3) A run without
+`policy` resolves its snapshot's policy name as a preset, so a snapshot discovered under a tenant
+policy (`@name`) fails every run with `policy_invalid` unless the run names `@name` again (open
+product gap, reported to the owner). (4) Keynote 14.4 does not open a deck through AppleScript
+without a person (AppleEvent -1712): review the Keynote PDF export by hand.
