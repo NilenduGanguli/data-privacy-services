@@ -144,8 +144,9 @@ NUMERIC_KINDS = frozenset({"int", "decimal", "float"})
 EXACT_MIN, CONTAIN_MIN = 4, 8
 #: Low-cardinality attributes the surrogate engine draws from the record's persona and may
 #: draw equal to the original (M0 ``surrogates._IDENTITY_OK``; the schema-generation sweep's
-#: ``SWEEP_EXEMPT``): a surrogate ``Female`` for a ``Female`` is chance, not a copy, so it is not
-#: a fixed point. An unequal one is still searched for in the row's other outputs.
+#: ``SWEEP_EXEMPT`` holds them too, with the city and card-expiry lists it draws at volume): a
+#: surrogate ``Female`` for a ``Female`` is chance, not a copy, so it is not a fixed point. An
+#: unequal one is still searched for in the row's other outputs.
 CHANCE_EQUAL_ENTITIES = frozenset({"GENDER", "NATIONALITY"})
 _MAX_HITS = 50
 _HIDDEN = ConfigDict(hide_input_in_errors=True)

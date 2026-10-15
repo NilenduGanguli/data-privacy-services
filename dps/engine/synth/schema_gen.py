@@ -8,9 +8,10 @@ issued identifiers; nothing is drawn from real data. The spec is a reviewable, r
 Synthesis from a sample also passes a predicate that flags a value holding one of the sample's
 sensitive values (``execute_spec(avoid=...)``), and the executor steers around such a value
 instead of writing it: a drawn value is drawn again, a sequence skips it, and an entity value
-takes the row's whole persona with it, so name, e-mail and birth date still agree. The sample
-only ever shapes what is *not* produced: a row that held no sample value is the same with or
-without the sample (a sequence that skipped one stays shifted from there on).
+takes the row's whole persona with it, so name, e-mail and birth date still agree. An ID-like
+key's own sampled values are avoided the same way, per field (``execute_spec(avoid_in=...)``).
+The sample only ever shapes what is *not* produced: a row that held no sample value is the same
+with or without the sample (a sequence that skipped one stays shifted from there on).
 
 Two entity types are relative to today, as everywhere in the surrogate engine: ``AGE`` agrees with
 the row's date of birth as of the day of execution, and ``CARD_EXPIRY`` lies one to four years
@@ -34,7 +35,7 @@ import random
 import re
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn
 
@@ -603,38 +604,58 @@ def _row_seed(seed: bytes, spec_hash: str, row: int) -> bytes:
 
 
 class _Steering:
-    """What ``execute_spec(avoid=...)`` steers (``STEERING``) and what it has spent.
+    """What ``execute_spec(avoid=..., avoid_in=...)`` steers (``STEERING``) and what it has spent.
 
     A field a ``rule`` constraint writes is not steered: the rule overwrites it in every row, so
     its generated values never reach the output. Once a value is kept although it holds a sample
-    value, the sweep will refuse the run, so nothing is steered any more (``lost``).
+    value, the sweep will refuse the run, so nothing is steered any more (``lost``). A value kept
+    although only its own field's ``avoid_in`` test flags it (an ID-like key's sampled value,
+    which the sweep may not look for) stops the steering of that field alone.
     """
 
-    def __init__(self, spec: GeneratorSpec, avoid: Callable[[Any], bool] | None) -> None:
+    def __init__(
+        self,
+        spec: GeneratorSpec,
+        avoid: Callable[[Any], bool] | None,
+        avoid_in: Mapping[str, Callable[[Any], bool]] | None = None,
+    ) -> None:
         rewritten = {c.field for c in spec.constraints if isinstance(c, RuleConstraint)}
         self.avoid = avoid
-        self.how: dict[str, str] = (
-            {}
-            if avoid is None
-            else {
-                f.name: STEERING[f.generator]
-                for f in spec.fields
-                if f.generator in STEERING and f.name not in rewritten
-            }
-        )
+        # an entity's persona is drawn again only for the sweep's sake (``_new_persona``)
+        self.own = {
+            f.name: avoid_in[f.name]
+            for f in spec.fields
+            if avoid_in and f.name in avoid_in and STEERING.get(f.generator) in ("redraw", "skip")
+        }
+        self.how: dict[str, str] = {
+            f.name: STEERING[f.generator]
+            for f in spec.fields
+            if f.generator in STEERING
+            and f.name not in rewritten
+            and (avoid is not None or f.name in self.own)
+        }
         self.offsets: dict[str, int] = {}  # sequence steps skipped so far, per field
         self.redraws = 0
         self.lost = False
 
     def holds(self, field: FieldSpec, value: Any) -> bool:
-        """True when ``field`` is steered and ``value`` holds a sample value."""
-        return (
-            self.avoid is not None
-            and not self.lost
-            and field.name in self.how
-            and value is not None
-            and self.avoid(value)
-        )
+        """True when ``field`` is steered and ``value`` holds a sample value (or, for a field
+        with an ``avoid_in`` test, equals one of its own sampled values)."""
+        if self.lost or field.name not in self.how or value is None:
+            return False
+        if self.avoid is not None and self.avoid(value):
+            return True
+        own = self.own.get(field.name)
+        return own is not None and own(value)
+
+    def give_up(self, field: FieldSpec, value: Any) -> None:
+        """``value`` is kept although it could not get away from the sample: the sweep will refuse
+        it when the guard flags it, so nothing is steered any more; otherwise only its field
+        avoided it, and that field alone is no longer steered."""
+        if self.avoid is not None and self.avoid(value):
+            self.lost = True
+        else:
+            self.how.pop(field.name, None)
 
 
 def _skip(field: FieldSpec, row: int, value: Any, steer: _Steering) -> Any:
@@ -644,7 +665,7 @@ def _skip(field: FieldSpec, row: int, value: Any, steer: _Steering) -> Any:
     skipped = 0
     while steer.holds(field, value):
         if skipped == MAX_SAMPLE_REDRAWS:
-            steer.lost = True
+            steer.give_up(field, value)
             break
         skipped += 1
         value = _sequence(field.params, row + offset + skipped)
@@ -698,18 +719,22 @@ def execute_spec(
     rows: int,
     seed: bytes,
     avoid: Callable[[Any], bool] | None = None,
+    avoid_in: Mapping[str, Callable[[Any], bool]] | None = None,
 ) -> SchemaResult:
-    """Generate ``rows`` rows. Deterministic in (spec, seed, rows, avoid); CPU-bound (run in a
-    thread).
+    """Generate ``rows`` rows. Deterministic in (spec, seed, rows, avoid, avoid_in); CPU-bound (run
+    in a thread).
 
     ``avoid`` (synthesis from a sample: ``schema_profile.sample_guard``) is true for a value that
     holds one of the sample's sensitive values; the executor steers around such a value as
     ``STEERING`` says, up to ``MAX_SAMPLE_REDRAWS`` new draws, so an ID, a date or an e-mail that
     happens to hold a sampled one is replaced before the sample sweep sees it. A value still
-    holding one after that is kept and the sweep refuses the run. ``sample_redraws`` counts the
-    draws steering discarded. Without ``avoid`` the rows are exactly those of the spec and seed
-    alone; with it, a row differs from them only where it held a sample value (and a skipping
-    sequence, from there on).
+    holding one after that is kept and the sweep refuses the run. ``avoid_in`` (field name →
+    test; ``schema_profile.sample_ids``) is true for a value that field must not take: an ID-like
+    key's own sampled values, steered the same way (not for an ``entity`` field); one it cannot
+    get away from is kept and that field is no longer steered (the sweep need not refuse it).
+    ``sample_redraws`` counts the draws steering discarded. Without ``avoid`` and ``avoid_in`` the
+    rows are exactly those of the spec and seed alone; with them, a row differs from them only
+    where it held a sample value (and a skipping sequence, from there on).
     """
     if rows < 1:
         raise SchemaError("invalid_rows", "rows must be at least 1")
@@ -718,7 +743,7 @@ def execute_spec(
     seen: dict[str, set[str]] = {f.name: set() for f in spec.fields if f.unique}
     used: Counter[str] = Counter()
     nulls = retries = 0
-    steer = _Steering(spec, avoid)
+    steer = _Steering(spec, avoid, avoid_in)
     out: list[dict[str, Any]] = []
     for row in range(rows):
         row_seed = _row_seed(seed, spec_hash, row)
@@ -748,7 +773,7 @@ def execute_spec(
                         )
                 elif how == "redraw" and steer.holds(field, value):
                     if redrawn == MAX_SAMPLE_REDRAWS:
-                        steer.lost = True
+                        steer.give_up(field, value)
                         break
                     redrawn += 1
                 else:

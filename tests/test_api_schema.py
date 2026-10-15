@@ -287,6 +287,10 @@ def test_a_realistic_sample_is_not_refused_by_accident(client: TestClient) -> No
         ("balance", 1004.0),  # a sampled ID as an amount
         ("email", "c1002@example.org"),  # a sampled ID inside an e-mail address
         ("opened", "2016-09-02"),  # a sampled date
+        ("segment", "1001, 1002"),  # two sampled IDs (review r1, B1: 200 with S8's first rule)
+        ("segment", "1003 1004"),  # the same, without the comma
+        ("opened", "2016-09-02 10:15:00"),  # a sampled date in a space-separated datetime
+        ("balance", "1001.00"),  # a sampled ID as a numeric string
     ],
 )
 def test_a_sample_value_forced_into_the_output_is_refused(
@@ -334,3 +338,56 @@ def test_a_spec_literal_holding_a_sample_value_is_refused(
     r = client.post("/api/v1/schema/synthesize", headers=FULL, json={"sample": LIVE, "rows": 10})
     assert r.status_code == 422 and r.json()["code"] == "leakage"
     assert "rohan" not in r.text
+
+
+def test_a_sampled_mobile_with_a_country_code_is_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r1 (B1): a sampled mobile written the way DPS's own PHONE generator writes one
+    (``+91 9810010012``) answered 200 with the number in the body. An all-digit original of nine
+    or more digits is found anywhere in the digits again (M0's rule)."""
+    mobiles = ["9810010012", "9820020023", "9830030034", "9840040045"]
+    sample = [dict(row, mobile=m) for row, m in zip(LIVE, mobiles, strict=True)]
+    real = schema_router.execute_spec
+
+    def leaky(*args: Any, **kwargs: Any) -> Any:
+        result = real(*args, **kwargs)
+        result.rows[3]["mobile"] = "+91-98200-20023"
+        result.rows[5]["segment"] = "+91 9810010012"
+        return result
+
+    ok = client.post("/api/v1/schema/synthesize", headers=FULL, json={"sample": sample, "rows": 50})
+    assert ok.status_code == 200, ok.text
+    monkeypatch.setattr(schema_router, "execute_spec", leaky)
+    r = client.post("/api/v1/schema/synthesize", headers=FULL, json={"sample": sample, "rows": 20})
+    assert r.status_code == 422 and r.json()["code"] == "leakage"
+    assert not [m for m in mobiles if m[-5:] in r.text]
+
+
+def test_an_id_like_key_does_not_repeat_the_sample(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r1 (N3): a generic ``id`` key is not swept, so a ``sequence`` proposed near the
+    sample wrote the sampled IDs into every run, and nothing refused them. With a sample, an
+    ID-like key avoids its sampled values (no 422: steered, not swept)."""
+    sample = [dict(row, id=7001 + i) for i, row in enumerate(LIVE)]
+    real = schema_router.propose_spec
+
+    async def near(*args: Any, **kwargs: Any) -> Any:
+        spec, info = await real(*args, **kwargs)
+        fields = [
+            f.model_copy(
+                update={"generator": "sequence", "params": {"start": 7000}, "unique": True}
+            )
+            if f.name == "id"
+            else f
+            for f in spec.fields
+        ]
+        return spec.model_copy(update={"fields": fields}), info
+
+    monkeypatch.setattr(schema_router, "propose_spec", near)
+    r = client.post("/api/v1/schema/synthesize", headers=FULL, json={"sample": sample, "rows": 10})
+    body = r.json()
+    assert r.status_code == 200, r.text
+    assert [row["id"] for row in body["rows"]][:3] == [7000, 7005, 7006]
+    assert body["report"]["sample_redraws"] >= 4

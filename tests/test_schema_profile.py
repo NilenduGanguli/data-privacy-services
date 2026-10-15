@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import random
 import re
 import time
 from collections.abc import Sequence
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 
 import pytest
@@ -36,6 +37,7 @@ from dps.engine.synth.schema_profile import (
     propose_spec,
     render_prompt,
     sample_guard,
+    sample_ids,
     verify_against_sample,
 )
 from dps.engine.verify import (
@@ -826,16 +828,22 @@ def test_live_sample_with_presidio_keeps_names_and_types() -> None:
 #: Values that hold a sampled ID of LIVE_SAMPLE (1001..1004) only inside a longer run of digits:
 #: a date, an amount, a code. None of them is a copy.
 ACCIDENTAL: list[Any] = ["2010-01-04", "2001-10-03", 21001.5, 1001.25, "x10012", 41003, "1001-2020"]
-#: Copies: an ID (a value, an integral float, full-width digits, inside a code or an e-mail), a
-#: sampled date (also inside a datetime), a sampled name (re-cased, inside text) and an e-mail.
+#: Copies: an ID (a value, an integral float or numeric string, full-width digits, inside a code
+#: or an e-mail, next to another ID across a space), a sampled date (also inside a datetime, after
+#: a ``T`` or before a space), a sampled name (re-cased, inside text) and an e-mail.
 LEAKS: list[Any] = [
     1001,
     1002.0,
     "１００３",
     "CUST-1003",
     "a1004@example.com",
+    "1001, 1002",
+    "1003 1004",
+    "1001.00",
+    "1,002.00",
     "2019-04-11",
     "2016-09-02T08:00:00+00:00",
+    "2016-09-02 10:15:00",
     "met ARJUN MEHTA today",
     "priya.nair@example.in",
 ]
@@ -851,8 +859,9 @@ def _one(name: str = "v", **field: Any) -> GeneratorSpec:
 
 def test_the_sample_sweep_matches_numbers_as_whole_digit_runs() -> None:
     """Live run at 100 rows: a sampled ID 1001 was "found" inside generated dates (2010-01-04) and
-    amounts (21001.5). An all-digit original now counts only as a whole run of digits (separators
-    removed, as everywhere in the sweep); every copy still fails, and the guard the executor
+    amounts (21001.5). A short all-digit original now counts only from a break to a break (the
+    edge of a run of digits, or whitespace: review r1 found ``1001, 1002`` and a space-separated
+    datetime let through by whole runs alone); every copy still fails, and the guard the executor
     steers with flags exactly what the sweep refuses."""
     result = profile_from_sample(LIVE_SAMPLE, DETECTOR)
     assert [f.entity_type for f in result.profile.fields][0] == "CUSTOMER_ID"
@@ -890,13 +899,34 @@ def test_the_guard_flags_exactly_what_the_sweep_refuses() -> None:
     assert flagged == refused and any(flagged) and not all(flagged)
 
 
+def _naive_found(needle: str, raw: str) -> bool:
+    """The sample sweep's rule the slow way, for one original in one output string: a numeric
+    string that is a whole number (``1,001.00``) is read as it; a text original, or an all-digit one
+    of nine or more digits, is a substring of the normalised string (M0); a shorter all-digit one
+    must start and end at a break, the edge of a run of digits or whitespace in the raw string."""
+    number = re.fullmatch(r"\s*([+-]?)(\d[\d,]*)\.0+\s*", raw)
+    if number:
+        raw = number.group(1) + number.group(2).replace(",", "")
+    words = [normalise(word) for word in raw.split()]
+    hay = "".join(words)
+    if re.fullmatch(r"[0-9]+", needle) is None or len(needle) >= 9:
+        return needle in hay
+    breaks = {0, len(hay), *itertools.accumulate(len(word) for word in words)}
+    for start in range(len(hay) - len(needle) + 1):
+        end = start + len(needle)
+        if hay[start:end] != needle:
+            continue
+        left = start in breaks or hay[start - 1] not in "0123456789"
+        right = end in breaks or hay[end] not in "0123456789"
+        if left and right:
+            return True
+    return False
+
+
 def _naive_sweep(rows: list[dict[str, Any]], result: ProfileResult) -> Verification:
     """The sample sweep the slow way: every original against every output string (M0's
-    ``verify_output`` loop) with the whole-digit-run rule for all-digit originals."""
-    strings = [
-        (path, normalise(text))
-        for path, _key, text in output_strings(schema_profile._canonical(rows))
-    ]
+    ``verify_output`` loop) with the digit rule of :func:`_naive_found`."""
+    strings = list(output_strings(schema_profile._canonical(rows)))
     hits: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     checked = 0
@@ -905,9 +935,8 @@ def _naive_sweep(rows: list[dict[str, Any]], result: ProfileResult) -> Verificat
         if len(needle) < SWEEP_MIN_LEN:
             continue
         checked += 1
-        whole = re.fullmatch(r"[0-9]+", needle) is not None
-        for path, hay in strings:
-            found = needle in re.findall(r"[0-9]+", hay) if whole else needle in hay
+        for path, _key, text in strings:
+            found = _naive_found(needle, text)
             if found and (path, finding.entity_type) not in seen:
                 seen.add((path, finding.entity_type))
                 hits.append({"path": path, "entity_type": finding.entity_type})
@@ -940,6 +969,41 @@ def test_the_indexed_sweep_equals_the_naive_one() -> None:
     assert verify_against_sample(rows, text_only) == verify_output(
         schema_profile._sweep_originals(text_only), canonical
     )
+
+
+#: A PHONE column: sampled mobiles of ten digits (fictitious).
+MOBILES = ["9810010012", "9820020023", "9830030034", "9840040045"]
+
+
+def test_a_long_number_is_found_wherever_its_digits_are() -> None:
+    """Review r1 (B1): once all-digit originals had to be whole runs of digits, a sampled mobile
+    written with a country code (``+91 9810010012``, ``+91-98100-10012``: DPS's own PHONE format)
+    was no longer refused, nor were two sampled IDs next to each other (``1001 1002``). An
+    all-digit original of nine digits or more (longer than a date's eight, so nothing generated
+    holds one by accident) is found anywhere in the digits, as in M0; a shorter one where it
+    starts and ends at a run's edge or at whitespace, so ``2010-01-04`` and ``21001.5`` still do
+    not hold ``1001``."""
+    sample = [{"cust_id": 1001 + i, "mobile": m} for i, m in enumerate(MOBILES)]
+    result = profile_from_sample(sample, DETECTOR)
+    assert [f.entity_type for f in result.profile.fields] == ["CUSTOMER_ID", "PHONE"]
+    guard = sample_guard(result)
+    assert guard is not None
+    copies = [
+        "+91 9810010012",
+        "+91-98100-10012",
+        "(+91) 98200 20023",
+        "09830030034",
+        "tel:+919840040045;ext=1",
+        "1001 1002",
+        "IDs 1003,  1004",
+        "1001\t2020",
+    ]
+    for value in copies:
+        assert not verify_against_sample([{"v": value}], result).passed, value
+        assert guard(value), value
+    others = ["+91 98100 10013", "2010-01-04", 21001.5, "1001-2020", "x10012", "981001001"]
+    assert verify_against_sample([{"v": v} for v in others], result).passed
+    assert [v for v in others if guard(v)] == []
 
 
 def test_the_executor_draws_again_what_holds_a_sample_value() -> None:
@@ -1174,6 +1238,62 @@ def test_the_live_sample_synthesizes_20_runs_of_100_rows(detector: Detector) -> 
     assert refused == 0
 
 
+def test_an_id_like_key_avoids_its_sampled_values() -> None:
+    """Review r1 (N3): an ID-like key the detector does not type (``id``, ``order_ref``) is not
+    swept, so a generated ``id`` could equal a sampled one — a real identifier in synthetic data —
+    and a ``sequence`` started near the sample wrote them all. With a sample, such a field avoids
+    its own sampled values exactly (values shorter than ``SWEEP_MIN_LEN`` excepted, like the
+    sweep). One that cannot (its range is the sample's) keeps them without stopping the steering
+    of the swept fields, and nothing is refused for it (it is not swept)."""
+    sample = [
+        {"id": 5001 + i, "order_ref": f"R-700{i}", "cust_id": 1001 + i, "n": 1 + i}
+        for i in range(4)
+    ]
+    result = profile_from_sample(sample, DETECTOR)
+    by = {f.name: f for f in result.profile.fields}
+    assert by["id"].entity_type is None and by["order_ref"].entity_type is None
+    assert not result.stats["id"].originals and not result.stats["order_ref"].originals
+    ids = sample_ids(result)
+    assert set(ids) == {"id", "order_ref", "cust_id"}  # ``n`` is no key; 1..4 are too short
+    assert sample_ids(profile_from_sample([{"id": 7}, {"id": 8}], DETECTOR)) == {}
+    spec = GeneratorSpec(
+        name="t",
+        locale="en_IN",
+        fields=[
+            FieldSpec(name="id", generator="sequence", params={"start": 4999}, unique=True),
+            FieldSpec(name="order_ref", generator="pattern", params={"template": "R-7009"}),
+            FieldSpec(name="cust_id", generator="integer", params={"min": 1001, "max": 1010}),
+        ],
+    )
+    plain = execute_spec(spec, rows=30, seed=bytes(32))
+    assert {r["id"] for r in plain.rows} >= {5001, 5004}
+    assert {r["order_ref"] for r in plain.rows} & {"R-7000", "R-7003"}
+    out = execute_spec(spec, rows=30, seed=bytes(32), avoid=sample_guard(result), avoid_in=ids)
+    assert [r["id"] for r in out.rows][:4] == [4999, 5000, 5005, 5006]
+    assert not {r["order_ref"] for r in out.rows} & {f"R-700{i}" for i in range(4)}
+    assert not {r["cust_id"] for r in out.rows} & {1001, 1002, 1003, 1004}
+    assert verify_against_sample(out.rows, result).passed
+    unsampled = plain.rows[0]["id"], out.rows[0]["id"]
+    assert unsampled == (4999, 4999)  # the rows differ only where a sampled value was in the way
+    doomed = spec.model_copy(
+        update={
+            "fields": [
+                FieldSpec(name="id", generator="integer", params={"min": 5001, "max": 5004}),
+                spec.fields[2],
+            ]
+        }
+    )
+    kept = execute_spec(doomed, rows=40, seed=bytes(32), avoid=sample_guard(result), avoid_in=ids)
+    assert {r["id"] for r in kept.rows} <= {5001, 5002, 5003, 5004}  # kept, not refused
+    assert not {r["cust_id"] for r in kept.rows} & {1001, 1002, 1003, 1004}  # still steered
+    assert kept.sample_redraws < 40 + schema_gen.MAX_SAMPLE_REDRAWS * 2
+    assert verify_against_sample(kept.rows, result).passed
+
+
+#: Wide decimal columns (name, precision, scale) whose bound has more than 28 significant digits.
+WIDE_DECIMALS = [("g", 38, 10), ("h", 38, 18), ("i", 30, 10)]
+
+
 def test_declared_bounds_are_kept_exactly() -> None:
     """``NUMBER(3)`` became ``integer{max: 1000}`` (999 rounded to two significant figures) and
     ``NUMBER(5,2)`` ``decimal{max: 1000.0}``: values the columns cannot hold. Declared DDL and JSON
@@ -1181,14 +1301,16 @@ def test_declared_bounds_are_kept_exactly() -> None:
     the bound (``NUMBER(18,2)``'s bound is no float), integer fields inside fractional bounds."""
     ddl = (
         "create table t (a NUMBER(3), b NUMBER(5,2), c numeric(20), d int, e NUMBER(18,2), "
-        "f DECIMAL(20,12))"
+        "f DECIMAL(20,12), g NUMBER(38,10), h DECIMAL(38,18), i NUMBER(30,10))"
     )
     by = {f.name: f for f in heuristic_spec(profile_from_ddl(ddl), locale="en_US").fields}
     assert (by["a"].generator, by["a"].params) == ("integer", {"min": 0, "max": 999})
     assert (by["b"].generator, by["b"].params) == ("decimal", {"min": 0, "max": 999.99, "scale": 2})
     assert by["c"].params == {"min": 0, "max": 10**20 - 1}
     assert by["d"].params == {"min": 0, "max": 1000}  # no declared bound: the default range
-    tops = {"e": Decimal("9999999999999999.99"), "f": Decimal("99999999.999999999999")}
+    with localcontext(prec=100):  # review r1 (B2): 28-digit arithmetic rounded these up
+        wide = {n: Decimal(10) ** (p - s) - Decimal(1).scaleb(-s) for n, p, s in WIDE_DECIMALS}
+    tops = {"e": Decimal("9999999999999999.99"), "f": Decimal("99999999.999999999999"), **wide}
     for name, top in tops.items():  # the largest float whose decimal form is not above the bound
         high = by[name].params["max"]
         assert Decimal(str(high)) <= top < Decimal(str(math.nextafter(high, math.inf))), name

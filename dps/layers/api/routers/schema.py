@@ -2,8 +2,9 @@
 
 Profiling (DDL parsing, detection over a sample), execution and the sample's leakage sweep are
 CPU-bound and run in worker threads. With a sample, the executor steers around any generated value
-that holds one of the sample's sensitive values (``schema_profile.sample_guard``; the draws it
-discarded are the report's ``sample_redraws``), and the sweep fails closed on what is left: when
+that holds one of the sample's sensitive values (``schema_profile.sample_guard``), and an ID-like
+key around its own sampled values (``schema_profile.sample_ids``; the draws they discarded are the
+report's ``sample_redraws``), and the sweep fails closed on what is left: when
 a generated row holds a value of a sample field DPS judged sensitive, nothing is returned (422
 ``leakage``). Size limits are coded: 413 ``ddl_too_large`` / ``sample_too_large`` /
 ``too_many_rows``. ``/schema/synthesize`` honours ``Idempotency-Key`` (contract §9); a replay is
@@ -38,6 +39,7 @@ from dps.engine.synth.schema_profile import (
     profile_from_sample,
     propose_spec,
     sample_guard,
+    sample_ids,
     verify_against_sample,
 )
 from dps.engine.synth.surrogates import (
@@ -130,9 +132,12 @@ def _execute(
     spec: GeneratorSpec, rows: int, seed: bytes, sample: ProfileResult | None
 ) -> SchemaResult:
     """Execution, in a worker thread. With a sample the executor steers around the sample's
-    sensitive values; the guard is built here too (it normalises every sampled value)."""
+    sensitive values, and an ID-like key around its own sampled values; the guards are built here
+    too (they normalise every sampled value)."""
+    if sample is None:
+        return execute_spec(spec, rows=rows, seed=seed)
     return execute_spec(
-        spec, rows=rows, seed=seed, avoid=sample_guard(sample) if sample is not None else None
+        spec, rows=rows, seed=seed, avoid=sample_guard(sample), avoid_in=sample_ids(sample)
     )
 
 

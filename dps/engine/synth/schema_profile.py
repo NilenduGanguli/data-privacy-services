@@ -17,11 +17,13 @@ spans its orders of magnitude instead) and declared JSON Schema / DDL bounds exa
 
 Synthesis from a sample never returns a sample's sensitive value: the executor steers around any
 generated value that holds one (:func:`sample_guard`, ``execute_spec(avoid=...)``), and
-:func:`verify_against_sample` refuses what is left. An all-digit original is matched as a whole
-run of digits, so a sampled ID is not "found" inside a generated date or amount; types generated
-from a small fixed space (gender, nationality, city, card expiry: ``SWEEP_EXEMPT``) are not looked
-for; and a field whose key the detector flags is never categorical (its values are swept, so DPS
-must not write them back).
+:func:`verify_against_sample` refuses what is left. A short all-digit original is matched from a
+break to a break (the edge of a run of digits, or whitespace), so a sampled ID is not "found"
+inside a generated date or amount, and one of ``LONG_DIGITS`` digits or more anywhere, as in M0;
+types generated from a small fixed space (gender, nationality, city, card expiry:
+``SWEEP_EXEMPT``) are not looked for; a field whose key the detector flags is never categorical
+(its values are swept, so DPS must not write them back); and an ID-like key avoids its own
+sampled values, swept or not (:func:`sample_ids`, ``execute_spec(avoid_in=...)``).
 
 Every profile turns into a spec that validates: field names become unique identifiers nesting at
 most four levels (a name that cannot be one, or that collides, is aliased ``field_N``), at most
@@ -32,6 +34,8 @@ falls back to ``text``. DDL is scanned in linear time (comments and quoted text 
 
 from __future__ import annotations
 
+import bisect
+import itertools
 import json
 import math
 import re
@@ -40,7 +44,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any, Literal, NoReturn, TypeGuard
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
@@ -141,8 +145,22 @@ _PLACEHOLDER_VALUE = re.compile(
     r"|(?i:placeholder|redacted|masked)(?:[ _-]?\d{1,3})?"
 )
 _PATTERN_LITERALS = set("Aa9X\\")
-#: A run of digits in a normalised string (the sample sweep matches all-digit originals whole).
+#: A run of digits in a normalised string (the sample sweep matches short all-digit originals at
+#: a run's edges or at whitespace: :class:`_SampleValues`).
 _DIGIT_RUN = re.compile(r"[0-9]+")
+#: An all-digit original of at least this many digits is found anywhere in the digits, as in M0:
+#: it is longer than a date's eight digits, so no generated date, amount or code holds one by
+#: accident, and a copy of a mobile, an Aadhaar, a card or an account number written with a
+#: country code or in groups (``+91 98100 10012``) is still refused.
+LONG_DIGITS = 9
+#: A string that is a whole number with a zero fraction (``1001.00``, ``1,001.0``): the sweep
+#: reads it as that integer, as it reads an integral float (:func:`_canon`).
+_INTEGRAL_TEXT = re.compile(r"\s*([+-]?)(\d[\d,]*)\.0+\s*")
+#: The last word of a key that names an identifier or a reference (``id``, ``order_ref``,
+#: ``invoiceNo``, ``account_number``): with a sample, such a field avoids its sampled values
+#: (:func:`sample_ids`), swept or not.
+_ID_WORDS = frozenset({"id", "ids", "key", "ref", "no", "nbr", "num", "number", "seq", "pk"})
+_KEY_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 _CONSTRAINTS: TypeAdapter[list[Constraint]] = TypeAdapter(list[Constraint])
 
 SPEC_SYSTEM = (
@@ -206,6 +224,9 @@ class FieldStats(BaseModel):
     date_min: str | None = None
     date_max: str | None = None
     originals: list[str] = Field(default_factory=list)  # sensitive sample values (leakage checks)
+    id_values: list[str] = Field(
+        default_factory=list
+    )  # an ID-like key's values (:func:`sample_ids`)
 
 
 class ProfileResult(BaseModel):
@@ -661,10 +682,13 @@ def _column_top(digits: int, scale: int, *, integer: bool) -> int | float:
     """The largest value a numeric column with ``digits`` integer digits and ``scale`` decimals
     holds: exact for an integer column (``NUMBER(3)`` → 999), and for a decimal one the largest
     float whose decimal form is not above it (``NUMBER(5,2)`` → 999.99; ``NUMBER(18,2)``'s
-    9999999999999999.99 is no float and becomes 9999999999999998.0, never 1e16)."""
+    9999999999999999.99 is no float and becomes 9999999999999998.0, never 1e16). The bound is
+    computed with every digit it has (``NUMBER(38,10)`` has 38): the default 28-digit context
+    rounded wide ones up to ``10**digits``."""
     if integer:
         return 10**digits - 1
-    exact = Decimal(10) ** digits - Decimal(1).scaleb(-scale)
+    with localcontext(prec=digits + scale + 2):
+        exact = Decimal(10) ** digits - Decimal(1).scaleb(-scale)
     top = float(exact)
     while Decimal(repr(top)) > exact:
         top = math.nextafter(top, -math.inf)
@@ -844,6 +868,8 @@ def profile_from_sample(
                 st.enum_counts = dict(counts)
         if entity is not None or sensitive_name:
             st.originals = [_canon(v) for v in present]
+        if ftype in ("integer", "string") and _id_like(parts[-1]):
+            st.id_values = sorted({_canon(v) for v in present})
         fields.append(profile)
         stats[fname] = st
     structure = StructureProfile(source="sample", name=name, fields=fields, rows_sampled=len(rows))
@@ -1254,15 +1280,36 @@ def _sweep_originals(result: ProfileResult) -> list[tuple[Finding, str]]:
     return originals
 
 
+def _words(text: str) -> tuple[str, list[int]]:
+    """An output string as the sample sweep reads it: normalised (a whole number with a zero
+    fraction read as its integer), and the positions in it where whitespace separated two words
+    (the end of each word). Normalising word by word gives the same string as normalising it
+    whole: whitespace normalises to nothing and decomposition never crosses it."""
+    if "." in text and (number := _INTEGRAL_TEXT.fullmatch(text)):
+        text = number.group(1) + number.group(2).replace(",", "")
+    words = text.split()
+    if len(words) < 2:  # one word: no cut inside it
+        return normalise(text), []
+    normalised = [normalise(word) for word in words]
+    return "".join(normalised), list(itertools.accumulate(len(word) for word in normalised))
+
+
 class _SampleValues:
     """The sample's sensitive values as the sweep looks for them, shared by the executor's guard
     (:func:`sample_guard`) and the sweep (:func:`verify_against_sample`), so the two agree on every
-    value. Both read a value after :func:`~dps.engine.verify.normalise` (an integral float as its
-    integer, :func:`_canon`) and skip originals shorter than ``SWEEP_MIN_LEN``. An all-digit
-    original (an ID, a date's digits) is found only as a whole run of digits, with no digit next
-    to it; any other original as a substring, as in M0. Text originals are indexed by their first
-    ``SWEEP_MIN_LEN`` characters, so a value costs one lookup per position, whatever the size of
-    the sample (the M0 sweep compares every original with every output string)."""
+    value. Both read a value as :func:`_words` does (an integral float as its integer,
+    :func:`_canon`) and skip originals shorter than ``SWEEP_MIN_LEN``.
+
+    An all-digit original (an ID, a date's digits) shorter than ``LONG_DIGITS`` is found where it
+    starts and ends at a break: the edge of a run of digits, or whitespace between two digits in
+    the output string. So sampled ID ``1001`` is found in ``1001``, ``1001.0``, ``1001.00``,
+    ``CUST-1001``, ``x1001@…``, ``1001 1002``, ``1001, 1002`` (and ``10.01``, the same digits), and
+    sampled date ``2016-09-02`` in ``2016-09-02 10:15:00``; not inside ``2010-01-04``,
+    ``21001.5``, ``1001.25`` or ``1001-2020``, where ``-``, ``/``, ``.``, ``:`` or ``,`` join it
+    to other digits as in a date, an amount or a range. A longer one (a mobile, a card) and any
+    other original are found as substrings, as in M0. Text originals and long digit ones are
+    indexed by their first ``SWEEP_MIN_LEN`` characters, so a value costs one lookup per position,
+    whatever the size of the sample (the M0 sweep compares every original with every string)."""
 
     def __init__(self, originals: list[tuple[Finding, str]]) -> None:
         self.findings: list[Finding] = []
@@ -1276,7 +1323,7 @@ class _SampleValues:
             slot = len(self.needles)
             self.needles.append(needle)
             self.findings.append(finding)
-            if _DIGIT_RUN.fullmatch(needle):
+            if len(needle) < LONG_DIGITS and _DIGIT_RUN.fullmatch(needle):
                 digits.setdefault(needle, []).append(slot)
             else:
                 index.setdefault(needle[:SWEEP_MIN_LEN], []).append(slot)
@@ -1287,24 +1334,45 @@ class _SampleValues:
         return bool(self.needles)
 
     def _windows(self, hay: str) -> Iterator[int]:
-        """The text originals ``hay`` holds (an original may be yielded more than once)."""
+        """The text and long digit originals ``hay`` holds (one may be yielded more than once)."""
         for i in range(len(hay) - SWEEP_MIN_LEN + 1):
             for slot in self._index.get(hay[i : i + SWEEP_MIN_LEN], ()):
                 if hay.startswith(self.needles[slot], i):
                     yield slot
 
-    def found(self, hay: str) -> set[int]:
-        """Every original the normalised string ``hay`` holds."""
-        out = {slot for run in _DIGIT_RUN.findall(hay) for slot in self._digits.get(run, ())}
-        out.update(self._windows(hay))
-        return out
+    def _tokens(self, hay: str, cuts: list[int]) -> Iterator[int]:
+        """The short all-digit originals ``hay`` holds: a span of a run of digits from a break to a
+        break (the run's edges, and the whitespace ``cuts`` inside it)."""
+        if not self._digits:
+            return
+        if not cuts:  # one word: the whole runs only
+            for whole in _DIGIT_RUN.findall(hay):
+                yield from self._digits.get(whole, ())
+            return
+        for run in _DIGIT_RUN.finditer(hay):
+            start, end = run.span()
+            if end - start < SWEEP_MIN_LEN:
+                continue
+            inside = cuts[bisect.bisect_right(cuts, start) : bisect.bisect_left(cuts, end)]
+            marks = [start, *inside, end]
+            for i, left in enumerate(marks):
+                for right in marks[i + 1 :]:
+                    if right - left >= LONG_DIGITS:
+                        break
+                    if right - left >= SWEEP_MIN_LEN:
+                        yield from self._digits.get(hay[left:right], ())
+
+    def found(self, text: str) -> set[int]:
+        """Every original the output string ``text`` holds."""
+        hay, cuts = _words(text)
+        return {*self._tokens(hay, cuts), *self._windows(hay)}
 
     def __call__(self, value: Any) -> bool:
         """The guard: true when a generated ``value`` holds one of the originals."""
         if value is None or isinstance(value, bool):
             return False
-        hay = normalise(_canon(value))
-        if any(run in self._digits for run in _DIGIT_RUN.findall(hay)):
+        hay, cuts = _words(_canon(value))
+        if next(self._tokens(hay, cuts), None) is not None:
             return True
         return next(self._windows(hay), None) is not None
 
@@ -1317,6 +1385,39 @@ def sample_guard(result: ProfileResult) -> Callable[[Any], bool] | None:
     return values if values else None
 
 
+def _id_like(key: str) -> bool:
+    """True for a key whose last word names an identifier or a reference (``_ID_WORDS``)."""
+    words = _KEY_WORD.findall(key)
+    return bool(words) and words[-1].lower() in _ID_WORDS
+
+
+class _SampleIds:
+    """One ID-like key's sampled values (normalised): true for a generated value equal to one."""
+
+    def __init__(self, values: frozenset[str]) -> None:
+        self.values = values
+
+    def __call__(self, value: Any) -> bool:
+        return value is not None and normalise(_canon(value)) in self.values
+
+
+def sample_ids(result: ProfileResult) -> dict[str, Callable[[Any], bool]]:
+    """For synthesis from a sample: each ID-like key's test for its own sampled values
+    (``execute_spec(avoid_in=...)``), so a generated ``id``, ``order_ref`` or ``invoiceNo`` does
+    not equal a sampled one — a real identifier in synthetic data — whether or not the sweep looks
+    for the field's values (a key the detector does not type is not swept, so nothing would refuse
+    it). Values shorter than ``SWEEP_MIN_LEN`` are not avoided (row numbers, as the sweep skips
+    them). A field that cannot avoid them keeps them, and is no longer steered."""
+    out: dict[str, Callable[[Any], bool]] = {}
+    for name, stats in result.stats.items():
+        values = frozenset(
+            needle for v in stats.id_values if len(needle := normalise(v)) >= SWEEP_MIN_LEN
+        )
+        if values:
+            out[name] = _SampleIds(values)
+    return out
+
+
 def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> Verification:
     """Leakage sweep of generated rows against the sample's sensitive values: every key and value
     of the rows is searched, and a hit is reported once per output path and entity type, in the
@@ -1324,19 +1425,21 @@ def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> 
 
     ``SWEEP_EXEMPT`` types (gender, nationality, city, card expiry) are not looked for: they are
     generated from a small fixed space, so a coincidence says nothing (see ``SWEEP_EXEMPT``). An
-    all-digit original (an ID, a date's digits) is found only as a whole run of digits once
-    separators are removed, and an integral float as its integer: sampled ID ``1001`` is found in
-    a generated ``1001``, ``1001.0``, ``CUST-1001`` or ``x1001@…`` (and in ``10.01``, the same
-    digits), not inside ``2010-01-04``, ``21001.5`` or ``1001.25``. Every other original is found
-    as a substring, as in M0. The executor steers around every value :func:`sample_guard` flags,
-    so a hit here is a spec literal or a value that could not get away from the sample: the route
-    refuses the run (422 ``leakage``).
+    all-digit original shorter than ``LONG_DIGITS`` (an ID, a date's digits) is found where it
+    starts and ends at the edge of a run of digits or at whitespace, and an integral float or a
+    whole-number string as its integer: sampled ID ``1001`` is found in a generated ``1001``,
+    ``1001.0``, ``1001.00``, ``CUST-1001``, ``x1001@…`` or ``1001, 1002`` (and in ``10.01``, the
+    same digits), not inside ``2010-01-04``, ``21001.5`` or ``1001.25``. A longer one (a mobile:
+    ``+91 98100 10012``) and every other original are found as substrings, as in M0. The
+    executor steers around every value :func:`sample_guard` flags, so a hit here is a spec
+    literal or a value that could not get away from the sample: the route refuses the run (422
+    ``leakage``).
     """
     values = _SampleValues(_sweep_originals(result))
     found: list[tuple[int, int, str]] = []
     if values:
         for position, (path, _key, text) in enumerate(output_strings(_canonical(rows))):
-            found += [(slot, position, path) for slot in values.found(normalise(text))]
+            found += [(slot, position, path) for slot in values.found(text)]
     hits: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for slot, _position, path in sorted(found):
