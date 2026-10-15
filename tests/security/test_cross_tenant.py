@@ -1,7 +1,8 @@
 """S7: every object route answers 404 for another tenant's id, and a key cannot select a tenant
 it is not granted (403). Tenant ``ta`` owns a connection, an accepted snapshot, a queued run job
-(with partitions route), a job group, a policy with a version, and an evidence pack with its
-artefacts; a key granted only ``tb`` — with every scope — sees none of them."""
+(with partitions route), a job group, a policy with a version, an evidence pack with its
+artefacts and (M4, merged into ``fsec``) a queued scan with its pages, events, inventory and
+export; a key granted only ``tb`` — with every scope — sees none of them."""
 
 from __future__ import annotations
 
@@ -116,6 +117,9 @@ def test_object_routes_answer_404_across_tenants(db_settings: Settings, tmp_path
             )
             assert policy.status_code == 201, policy.text
             record = _save_evidence(db_settings, Path(settings.artefact_dir), "ta", job_id)
+            scan = c.post("/api/v1/scans", json={"url": "http://127.0.0.1:8410/apply"}, headers=TA)
+            assert scan.status_code == 202, scan.text
+            scan_id = scan.json()["scan"]["id"]
 
             owned = [
                 ("GET", f"/api/v1/connections/{src}"),
@@ -134,6 +138,14 @@ def test_object_routes_answer_404_across_tenants(db_settings: Settings, tmp_path
                 ("GET", f"/api/v1/artefacts/{record.json_artefact_id}"),
                 ("GET", "/api/v1/policies/ta-policy"),
                 ("GET", "/api/v1/policies/ta-policy/versions/1"),
+                # M4: a scan is a job of kind scan; its sub-resources are the scan's
+                ("GET", f"/api/v1/scans/{scan_id}"),
+                ("GET", f"/api/v1/scans/{scan_id}/pages"),
+                ("GET", f"/api/v1/scans/{scan_id}/events"),
+                ("GET", f"/api/v1/scans/{scan_id}/inventory"),
+                ("GET", f"/api/v1/scans/{scan_id}/inventory?format=csv"),
+                ("GET", f"/api/v1/jobs/{scan_id}"),
+                ("POST", f"/api/v1/scans/{scan_id}/cancel"),
             ]
             for method, path in owned:  # the owner sees them (the walk is meaningful)
                 if method == "GET":
@@ -143,7 +155,12 @@ def test_object_routes_answer_404_across_tenants(db_settings: Settings, tmp_path
                 r = c.request(method, path, json=body, headers=TB)
                 assert r.status_code == 404, f"{method} {path} answered {r.status_code}"
             listed = c.get("/api/v1/jobs", headers=TB).json()["items"]
-            assert all(item["id"] != job_id for item in listed)
+            assert all(item["id"] not in (job_id, scan_id) for item in listed)
+            assert c.get("/api/v1/scans", headers=TB).json()["items"] == []
+            export = f"/api/v1/scans/{scan_id}/export"  # not finalized: 409 for its owner only
+            assert c.get(export, headers=TA).status_code == 409
+            assert c.get(export, headers=TB).status_code == 404
+            assert c.get(f"/api/v1/scans/{scan_id}/pages/1", headers=TB).status_code == 404
             assert (
                 c.get(
                     f"/api/v1/connections/{src}", headers={**TB, "X-DPS-Tenant": "ta"}
