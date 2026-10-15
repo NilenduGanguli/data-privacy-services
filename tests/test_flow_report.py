@@ -71,9 +71,8 @@ def test_every_route_the_app_serves_is_in_the_table() -> None:
     served = _app_routes() - NOT_IN_SECTION_9
     expected = {(m, t) for m, t, _ in EXPECT}
     assert served - expected == set(), "routes without a flow row"
-    # Rows the app does not serve yet: only M4's scanner routes, before the M4 merge.
-    extra = expected - served
-    assert all(t.startswith(flow_report.SCAN_PREFIX) for _, t in extra), extra
+    # M4 is merged: every row is a route the app serves (the scanner rows match its templates).
+    assert expected - served == set(), "flow rows the app does not serve"
 
 
 def test_every_row_belongs_to_a_named_group() -> None:
@@ -152,8 +151,12 @@ def test_the_key_comes_from_the_environment_the_demo_keys_or_the_local_literal(
 class FakeStack:
     """Answers every request with its route's expected status and a plausible body."""
 
-    def __init__(self, *, browser: bool) -> None:
+    def __init__(self, *, browser: bool, browser_details: list[str] | None = None) -> None:
         self.browser = browser
+        #: ``/readyz`` answers ``browser: {ok: false, detail: <next>}`` while details remain (a
+        #: freshly started app reads "unknown" until its first heartbeat refresh), then ``browser``.
+        self.browser_details = list(browser_details or [])
+        self.readyz = 0
         self.expect = {(m, t): s for m, t, s in EXPECT}
         self.patterns = [
             (m, t, re.compile("^" + re.sub(r"\{[a-z_]+\}", r"[^/]+", t) + "$"))
@@ -174,7 +177,12 @@ class FakeStack:
         self.seen.append((method, template))
         status = self.expect[(method, template)]
         if template == "/readyz":
-            components = {"db": {"ok": True}, "browser": {"ok": self.browser}}
+            self.readyz += 1
+            if self.browser_details:
+                browser = {"ok": False, "detail": self.browser_details.pop(0)}
+            else:
+                browser = {"ok": self.browser, "detail": "1 online" if self.browser else "none"}
+            components = {"db": {"ok": True}, "browser": browser}
             return _response(200, {"ready": True, "components": components})
         if status == 204:
             return _response(204)
@@ -226,14 +234,16 @@ class FakeStack:
         return bodies.get(template, {"ok": True})
 
 
-def _run(stack: FakeStack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, str]:
+def _run(
+    stack: FakeStack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str
+) -> tuple[int, str]:
     class _Client(DpsClient):
         _transport = httpx.MockTransport(stack)
 
     monkeypatch.setattr(flow_report.time, "sleep", lambda _s: None)
     out = tmp_path / "flow-report.md"
     code = flow_report.main(
-        ["--base-url", "http://dps.test", "--out", str(out)], client_factory=_Client
+        ["--base-url", "http://dps.test", "--out", str(out), *extra], client_factory=_Client
     )
     return code, out.read_text(encoding="utf-8")
 
@@ -260,6 +270,47 @@ def test_without_a_browser_worker_the_scanner_calls_are_skipped(
     assert not any(t.startswith(flow_report.SCAN_PREFIX) for _, t in stack.seen)
     scan_rows = sum(1 for _, t, _ in EXPECT if t.startswith(flow_report.SCAN_PREFIX))
     assert report.count("skipped: /readyz reports no browser worker") == scan_rows
+
+
+def test_the_full_stack_gate_requires_the_scanner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--require-scanner`` (the DoD run on ``--profile full``): without a browser worker every
+    scanner call is "not run" and the report fails — it cannot pass without the scanner."""
+    monkeypatch.setattr(flow_report, "BROWSER_WAIT_SECONDS", 0.0)
+    stack = FakeStack(browser=False)
+    code, report = _run(stack, tmp_path, monkeypatch, "--require-scanner")
+    assert code == 1 and "**Verdict: FAIL**" in report
+    assert not any(t.startswith(flow_report.SCAN_PREFIX) for _, t in stack.seen)
+    scan_rows = sum(1 for _, t, _ in EXPECT if t.startswith(flow_report.SCAN_PREFIX))
+    assert report.count("not run: no browser worker online (--require-scanner)") == scan_rows
+    assert "skipped" not in report.split("## Route groups")[0].lower()
+    assert "UNEXPECTED  POST /api/v1/scans: expected 202" in capsys.readouterr().out
+
+
+def test_a_fresh_stack_is_given_time_for_its_browser_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Right after ``up`` the app reads ``browser: unknown`` until its first heartbeat refresh
+    (HANDOFF §15 trap 8): the flow re-reads ``/readyz`` (unrecorded) instead of skipping the
+    scanner calls, with or without ``--require-scanner``."""
+    for extra in ((), ("--require-scanner",)):
+        stack = FakeStack(browser=True, browser_details=["unknown", "unknown", "unknown"])
+        code, report = _run(stack, tmp_path, monkeypatch, *extra)
+        assert code == 0, extra
+        assert {(m, t) for m, t, _ in EXPECT} <= set(stack.seen)
+        assert report.count("| `/readyz` |") == 1  # the polls are not rows
+        assert stack.readyz >= 4
+
+
+def test_without_the_switch_no_browser_worker_skips_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stack without the ``scanner`` profile ("none online") is not waited for."""
+    stack = FakeStack(browser=False, browser_details=["none online"])
+    code, report = _run(stack, tmp_path, monkeypatch)
+    assert code == 0 and "**Verdict: PASS**" in report
+    assert stack.readyz == 2  # the recorded one, then one fresh read before the scanner calls
 
 
 def test_an_unexpected_status_fails_the_run_and_names_the_route(

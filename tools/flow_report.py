@@ -16,8 +16,12 @@ reruns never collide; tenant policies and tenant records cannot be deleted and s
 For each call the report lists the method, the **route template**, the expected and the actual
 status, the duration and the response's top-level key names — never a value, an id, a key, a
 token or a body. The run exits 1 when any call's status differs from :data:`EXPECT`, or a call
-could not run because an earlier one failed; scanner calls without a browser worker are reported
-as skipped and do not fail the run.
+could not run because an earlier one failed. The scanner calls run when ``/readyz`` reports a
+browser worker online; right after ``up`` it reads ``unknown`` until the app's first heartbeat
+refresh, so the flow re-reads it (unrecorded, every 3 s, up to ``DPS_FLOW_BROWSER_WAIT_SECONDS``,
+default 60). Without a browser worker they are reported as skipped and do not fail the run —
+except under ``--require-scanner`` (the gate on ``--profile full``, which runs the browser worker),
+where each is "not run" and the run fails.
 
 Keys: ``DPS_API_KEY`` (else ``DPS_BOOTSTRAP_API_KEY``, else the compose stack's local bootstrap
 literal) is taken to be an operator key — every tenant, every scope. ``--demo-keys [PATH]`` runs as
@@ -189,6 +193,9 @@ RUN_ROWS = 500
 #: Two members of one job group: the consistency check needs two distinct targets (M3).
 RUN_TARGETS = ("customers_flow", "customers_flow_b")
 SCAN_URL = os.environ.get("DPS_FLOW_SCAN_URL") or "http://demo-site:8410/"
+#: How long the scanner calls wait for ``/readyz``'s ``browser`` component (the app refreshes it
+#: from worker heartbeats every 15 s; a freshly started app reads ``unknown`` until then).
+BROWSER_WAIT_SECONDS = float(os.environ.get("DPS_FLOW_BROWSER_WAIT_SECONDS") or "60")
 PURPOSE = {"ticket": "FLOW-0001", "legal_basis": "legitimate interest - route coverage report"}
 #: A fictional customer (made-up values; identifiers only pass their checksums).
 SAMPLE = {
@@ -321,10 +328,13 @@ def render(rows: Sequence[Row], *, meta: Mapping[str, str]) -> str:
 class Flow:
     """Runs the calls in order and records one :class:`Row` per call (polls are not rows)."""
 
-    def __init__(self, client: DpsClient, *, tenant_key: bool, stamp: str) -> None:
+    def __init__(
+        self, client: DpsClient, *, tenant_key: bool, stamp: str, require_scanner: bool = False
+    ) -> None:
         self.c = client
         self.tenant_key = tenant_key
         self.stamp = stamp
+        self.require_scanner = require_scanner
         self.expect = {(m, t): s for m, t, s in EXPECT}
         if tenant_key:
             self.expect.update(TENANT_KEY_EXPECT)
@@ -431,7 +441,7 @@ class Flow:
     # -- the flow ------------------------------------------------------------------------------
     def run(self) -> list[Row]:
         """Every group in dependency order; returns the rows."""
-        ready = self.ops()
+        self.ops()
         self.layer1()
         self.m1()
         conns = self.connections()
@@ -440,22 +450,47 @@ class Flow:
         self.reports()
         self.policy_store()
         self.admin()
-        if (ready.get("browser") or {}).get("ok"):
+        if self.browser_online():
             self.scans()
         else:
             for method, template, _ in EXPECT:
-                if template.startswith(SCAN_PREFIX):
+                if not template.startswith(SCAN_PREFIX):
+                    continue
+                if self.require_scanner:
+                    self.not_run(method, template, "no browser worker online (--require-scanner)")
+                else:
                     self.skip(method, template, "/readyz reports no browser worker (M4)")
         self.cleanup(conns)
         del group
         return self.rows
 
-    def ops(self) -> dict[str, Any]:
+    def readiness(self) -> dict[str, Any]:
+        """``/readyz``'s components, read without recording a row (``{}`` when unreadable)."""
+        try:
+            data = self.c.raw("GET", "/readyz").json()
+        except (DemoError, ValueError):
+            return {}
+        components = data.get("components") if isinstance(data, dict) else None
+        return components if isinstance(components, dict) else {}
+
+    def browser_online(self) -> bool:
+        """Whether a browser worker serves the scanner calls: ``/readyz``'s ``browser`` component,
+        read fresh and re-read every 3 s while it says ``unknown`` (a freshly started app) or,
+        under ``--require-scanner``, until it is ok — for up to :data:`BROWSER_WAIT_SECONDS`."""
+        deadline = time.monotonic() + BROWSER_WAIT_SECONDS
+        while True:
+            browser = self.readiness().get("browser") or {}
+            if browser.get("ok"):
+                return True
+            waiting = self.require_scanner or browser.get("detail") == "unknown"
+            if not waiting or time.monotonic() >= deadline:
+                return False
+            time.sleep(3.0)
+
+    def ops(self) -> None:
         self.call("GET", "/health")
-        ready = self.body(self.call("GET", "/readyz"))
+        self.call("GET", "/readyz")
         self.call("GET", "/metrics")
-        components: dict[str, Any] = ready.get("components") or {}
-        return components
 
     def layer1(self) -> None:
         self.call("POST", "/api/v1/detect", json={"data": SAMPLE})
@@ -902,6 +937,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--key-name", default="demo-console", help="the key to use from --demo-keys")
     p.add_argument("--tenant-key", action="store_true", help="the key is tenant-scoped")
     p.add_argument("--tenant", default=None, help="X-DPS-Tenant for every call")
+    p.add_argument(
+        "--require-scanner",
+        action="store_true",
+        help="fail when no browser worker serves the scanner calls (the --profile full gate)",
+    )
     return p.parse_args(argv)
 
 
@@ -917,12 +957,17 @@ def main(
     started = time.monotonic()
     with client_factory(url, key, tenant=args.tenant, timeout=120.0) as client:
         del key
-        flow = Flow(client, tenant_key=tenant_key, stamp=stamp)
+        flow = Flow(
+            client, tenant_key=tenant_key, stamp=stamp, require_scanner=args.require_scanner
+        )
         rows = flow.run()
     meta = {
         "Stack": url,
         "Key": source + (" (tenant-scoped)" if tenant_key else " (operator: every tenant)"),
         "Tenant header": args.tenant or "none (the key's default tenant)",
+        "Scanner calls": "required (--require-scanner)"
+        if args.require_scanner
+        else "when a browser worker is online",
         "Wall time": f"{time.monotonic() - started:.1f} s",
     }
     out = Path(args.out)

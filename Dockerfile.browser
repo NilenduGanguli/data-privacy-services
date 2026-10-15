@@ -26,13 +26,36 @@ RUN uv venv --python /usr/bin/python3.12 /opt/venv \
       && /opt/venv/bin/python -m spacy download en_core_web_sm; \
     else uv pip install --python /opt/venv/bin/python --no-cache ".[fpe,db,connectors,scanner]"; fi \
  && /opt/venv/bin/python -c "import importlib.metadata as m; assert m.version('playwright') == '1.55.0'"
-# uid 10001 like the app image: compose mounts the same artefact and export volumes (owned by
-# 10001) into app, worker and browser-worker. /app stays root-owned and read-only to the process.
-RUN useradd --create-home --uid 10001 appuser \
+# uid 10001 like the app image: compose mounts the same artefact and export volumes into app,
+# worker and browser-worker. Arbitrary UID and a read-only root, by the app image's rules (M5
+# Task 24; OpenShift runs the image as a random UID in group 0):
+# - the image user 10001 has group 0 as its primary group, so compose's process creates group-0
+#   files like OpenShift's does;
+# - /app/var (the artefact and export volumes) belongs to uid 10001 and group 0, writable by both,
+#   and its directories are setgid; with the entrypoint's umask 0002 and the object store's 0660
+#   objects (dps/storage.py OBJECT_MODE) the app, under any UID of group 0, serves the screenshots
+#   this worker stores, and a later browser-worker UID reads and replaces them;
+# - the code under /app is readable by group 0 and writable by nobody but root, and so is the
+#   virtualenv (uv leaves its /opt/venv/.lock mode 0666: the find drops that write bit, a 0-byte
+#   change in this layer);
+# - HOME=/tmp: Chromium, fontconfig and Playwright write under ~, i.e. the /tmp scratch mount.
+# /ms-playwright stays as the base image ships it (mode 0777 throughout, so every UID can run the
+# browsers; a recursive chgrp/chmod there copies every browser file into a new layer, measured
+# +1.46 GB): the browser-worker must therefore always run with a read-only root filesystem.
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh \
+ && useradd --create-home --uid 10001 --gid 0 appuser \
  && mkdir -p /app/var/artefacts /app/var/exports \
- && chown -R appuser /app/var
+ && chown -R 10001:0 /app/var \
+ && chgrp -R 0 /app && chmod -R g+rX,g-w /app && chmod -R g=u /app/var \
+ && find /app/var -type d -exec chmod g+s {} + \
+ && find /opt/venv -xdev -perm /022 ! -type l -exec chmod go-w {} +
+ENV HOME=/tmp
 USER 10001
 EXPOSE 9401
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9401/health', timeout=3).status==200 else 1)"
+# The entrypoint sets umask 0002 (keep it on OpenShift: set `args`, not `command`); it runs
+# migrations only for an app command, never here.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["python", "-m", "dps.browser_worker"]

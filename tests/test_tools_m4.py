@@ -225,10 +225,56 @@ def test_browser_readiness_is_awaited_on_a_fresh_stack(fake: Fake) -> None:
     assert fake.ready_polls == 3
 
 
-def test_scanner_block_runs_only_when_asked() -> None:
-    assert smoke_test.scanner_wanted("1") is True
-    for setting in (None, "", "0", "yes", "on"):
-        assert smoke_test.scanner_wanted(setting) is False
+def test_the_scanner_block_follows_the_switch_and_the_stack() -> None:
+    """``DPS_SMOKE_SCANNER`` (M5 Task 24 at the M4 merge, like ``DPS_SMOKE_M2``): ``auto``
+    (default) runs the block when the demo site answers — only the ``scanner`` and ``full``
+    profiles run it — so a plain smoke run on ``full`` covers the scanner; ``on`` (M4's ``1``)
+    runs it whatever the stack (a stack without the scanner then fails); ``off`` (``0``) skips it.
+    """
+    probes: list[str] = []
+
+    def up() -> bool:
+        probes.append("up")
+        return True
+
+    def down() -> bool:
+        probes.append("down")
+        return False
+
+    for setting in (None, "", "auto", " AUTO "):
+        assert smoke_test.scanner_wanted(setting, up) == (True, "")
+        run, note = smoke_test.scanner_wanted(setting, down)
+        assert run is False and note.startswith("note:") and "DPS_SMOKE_SCANNER=on" in note
+    probes.clear()
+    for setting in ("1", "on", "ON"):
+        assert smoke_test.scanner_wanted(setting, down) == (True, "")
+    for setting in ("0", "off", "Off"):
+        run, note = smoke_test.scanner_wanted(setting, up)
+        assert run is False and "DPS_SMOKE_SCANNER=off" in note
+    assert probes == []  # on and off never probe the demo site
+    for bad in ("yes", "2", "true"):
+        with pytest.raises(SystemExit):
+            smoke_test.scanner_wanted(bad, up)
+
+
+def test_the_demo_site_probe_reads_its_health_only() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def health(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={"status": "ok"})
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    with httpx.Client(base_url="http://demo.test", transport=httpx.MockTransport(health)) as demo:
+        assert smoke_test.demo_answers(demo) is True
+    assert seen == [("GET", "/health")]
+    with httpx.Client(base_url="http://demo.test", transport=httpx.MockTransport(refused)) as demo:
+        assert smoke_test.demo_answers(demo) is False
+    unwell = httpx.MockTransport(lambda request: httpx.Response(503))
+    with httpx.Client(base_url="http://demo.test", transport=unwell) as demo:
+        assert smoke_test.demo_answers(demo) is False
 
 
 def test_demo_site_address_is_lane_safe() -> None:

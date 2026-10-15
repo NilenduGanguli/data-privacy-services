@@ -1230,5 +1230,50 @@ Finish-stage work (programme plan §2.6 F2, orchestration stream S4), built on `
   Like `smoke_test.py`, the tools import `tools.demo_client` with the repository root on `sys.path`
   (the plan: `tools/` on `sys.path`); `demo_client` itself imports nothing from the repository, so
   F3's tools may use either form.
+- **M4 slot-in (merge of `m4` into `fimg`, 2026-10-15; report
+  `~/.cache/dps-build/reports/FIMG-merge-m4.md`).** `m4` (`cbbac38`: M4 with main up to `144cc65`
+  merged into it and S2 fix rounds 1–2) merged with `--no-ff` (`83bc5f3`); one conflict
+  (`HANDOFF.md`), both sides kept: M4's §15/§16 keep their numbers, this task's record moved to §17.
+  Then, test first:
+  - `Dockerfile.browser` gets the app image's arbitrary-UID lines (the HANDOFF §8 recipe:
+    `--gid 0`, `docker/entrypoint.sh` with `umask 0002` as `ENTRYPOINT`, `chgrp -R 0 /app && chmod
+    -R g+rX,g-w /app && chmod -R g=u /app/var`, setgid `/app/var`, `ENV HOME=/tmp`; `chown -R
+    10001:0 /app/var` as in the app image). `test_the_browser_image_is_arbitrary_uid_safe` failed on
+    the merged file and passes now. **Added (not in the recipe):** uv leaves `/opt/venv/.lock` mode
+    `0666` (world-writable, found by the new runtime test); the permissions step drops group and
+    other write bits in the virtualenv (`find /opt/venv -perm /022 … chmod go-w`, touching only that
+    0-byte file: the layer is 86 kB). `/ms-playwright` stays untouched (0777, +1.46 GB otherwise),
+    so the read-only root stays mandatory for the browser-worker.
+  - New `tests/test_browser_image_runtime.py` (opt-in `DPS_TEST_BROWSER_IMAGE`; with `DPS_TEST_IMAGE`
+    also the app image): as uid 1000770000:0, read-only, `cap_drop ALL`, Chromium starts through the
+    scanner's own `get_browser` and takes a screenshot; `HOME=/tmp`, umask `0002`, the extras import,
+    `/app`, `/opt/venv` and `/ms-playwright` are not writable, the volumes are; through
+    `LocalObjectStore` a new UID reads, streams and replaces what uid 10001 stored, and the app image
+    does the same with what the browser image stored. Red on `m4`'s image (umask `0022`;
+    `storage_error: PermissionError` for the second UID), green on the rebuilt one.
+  - **Smoke (deviation from M4's opt-in switch):** M4 ran the eleven scanner checks only under
+    `DPS_SMOKE_SCANNER=1`, so a plain `python tools/smoke_test.py` on `--profile full` (DoD 5) never
+    covered the scanner. `DPS_SMOKE_SCANNER` now works like `DPS_SMOKE_M2`: `auto` (default) runs
+    the block when the demo site answers `/health` at `DPS_TEST_DEMO_SITE` (only the `scanner` and
+    `full` profiles run it), `on` (or M4's `1`) runs it whatever the stack (a missing browser worker
+    or demo site fails), `off` (or `0`) skips it; any other value stops the run. M4's
+    `test_scanner_block_runs_only_when_asked` became `test_the_scanner_block_follows_the_switch_and_the_stack`
+    plus a probe test. The `full` gate is `DPS_SMOKE_REQUIRE_OCR=1 DPS_SMOKE_REQUIRE_M5=1
+    DPS_SMOKE_SCANNER=on python tools/smoke_test.py --m3`.
+  - **Flow report (review S4 r2 N5):** `--require-scanner` (the `full` gate) turns the scanner rows
+    into "not run" failures when no browser worker is online, instead of skips. The scanner block
+    reads `/readyz` fresh (unrecorded) and re-reads it every 3 s for up to
+    `DPS_FLOW_BROWSER_WAIT_SECONDS` (60) while it says `unknown` (a freshly started app, HANDOFF §15
+    trap 8) or, under the switch, until it is ok; a stack without the `scanner` profile ("none
+    online") is not waited for. The coverage test no longer allows rows the app does not serve (M4
+    is merged: the ten scanner templates match the app's routes).
+  - `tests/test_compose_m5.py`: `full` must hold `browser-worker` and `demo-site`; the browser-worker
+    test no longer skips. Review S4 r2 R2-2: `.dockerignore` keeps `tools/dev` (the owner's push
+    automation and LaunchAgent) out of the image (test first). R2-3: the Dockerfile comment and the
+    runtime test's docstring no longer claim Kubernetes emptyDirs inherit the image's ownership
+    (kubelet creates them, group-owned by the pod's `fsGroup`). R2-1: HANDOFF §8's re-permission
+    command (the one-time fix for `0600` objects of older images, above) is now the review's measured
+    one (`--cap-add CHOWN --cap-add FOWNER`, `find` limited to the two volumes); the old one stopped
+    with `Operation not permitted` under the worker's `cap_drop: [ALL]`.
 - **Contract:** unchanged (the plan lists no contract change for Task 24; HANDOFF §2, §3, §6 and §8
   carry the build and run facts).

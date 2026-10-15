@@ -74,11 +74,11 @@ deploy facts — image, ports, env, extras, probes, labels.
 | M2 job platform | API + console | `/api/v1` connections, jobs (discover, run with `table` / `files` / `in_place` / `append`, controls), snapshots, job groups, evidence and artefacts (`docs/technical/api-m2.md`); console pages Data sources & jobs (07), job detail (03), the five-step New-job wizard (06), the evidence pack (10) and the evidence list of Reports (09) |
 | `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents + the job platform; extras `fpe`, `docs`, `db`, `connectors` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` / `e2e` (Playwright 1.55.0 for `tools/console_check.py` and `tests/console/test_console_m2.py`, never in the image), `scanner` (M4: `playwright==1.55.0` + Pillow; only in the browser image, never in the app image) |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `data-privacy-services-browser` image | container (M4) | `Dockerfile.browser` on `mcr.microsoft.com/playwright:v1.55.0-noble` (Chromium 1187): the **browser-worker** role (`python -m dps.browser_worker`, claims `scan` jobs only), uid 10001, ops port 9401 (in-network); §15 |
+| `data-privacy-services-browser` image | container (M4) | `Dockerfile.browser` on `mcr.microsoft.com/playwright:v1.55.0-noble` (Chromium 1187): the **browser-worker** role (`python -m dps.browser_worker`, claims `scan` jobs only), uid 10001 (primary group 0) or any arbitrary UID in group 0 with a read-only root (the app image's rules, §2), ops port 9401 (in-network); §15, §17 |
 | M4 UI scanner | API + console | `/api/v1/scans…` (create with key and seed returned once, pages, fields, events, inventory, exports, cancel, persona preview; `docs/technical/api-m4.md`); console pages New scan (`/scanner`, mockup 12) and scan detail (`/scanner/scans/:id`, mockup 04: crawl map, navigation log, parallel view, inventory, captures); the demo onboarding site `demo/onboarding/` (Node 22, no dependencies; compose service `demo-site`) |
-| `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable) + with `DPS_SMOKE_SCANNER=1` 11 UI-scanner checks (M4: a scan of the demo site end to end, its `/__received` counters unchanged, parallel view, masked capture, export without demo values, evidence `submissions 0`). `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); `--m3` adds 7 Oracle + MongoDB checks (§13); the M5 block (8 checks, always last: policy store hashes, report tiles, posture, a DB key minted, used, disabled and refused, the bank-tokenizer round trip, scrubbed 422s, `no-store` on `/api/`) skips its database and tokenizer checks when `/readyz` says they are down and fails on a skip under `DPS_SMOKE_REQUIRE_M5=1`; prints verdicts, never bodies |
+| `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable) + 11 UI-scanner checks (M4: a scan of the demo site end to end, its `/__received` counters unchanged, parallel view, masked capture, export without demo values, evidence `submissions 0`) — `DPS_SMOKE_SCANNER=auto` (default) runs them when the demo site answers (the `scanner` and `full` profiles), `on` (or `1`) whatever the stack, so a missing browser worker fails, `off` never. `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); `--m3` adds 7 Oracle + MongoDB checks (§13); the M5 block (8 checks, always last: policy store hashes, report tiles, posture, a DB key minted, used, disabled and refused, the bank-tokenizer round trip, scrubbed 422s, `no-store` on `/api/`) skips its database and tokenizer checks when `/readyz` says they are down and fails on a skip under `DPS_SMOKE_REQUIRE_M5=1`; prints verdicts, never bodies |
 | `tools/demo_client.py` | module | M5 Task 24: `DpsClient(base_url, api_key, *, tenant=None, timeout=60.0)` with `get/post/patch/delete/raw/download/wait_job/as_tenant` (paths under `/api/v1` unless they name `/api/…` or an ops route) and `load_keys(path)` (the demo key file, refused when other users can read or write it); errors (`DemoError`: `status`, `code`) carry the method, the route template and the status only — shared by the flow report and the demo tools |
-| `tools/flow_report.py` | script | M5 Task 24: calls every route of contract §9 once against a running stack (`EXPECT`: method, route template, expected status) and writes `reports/flow-report.md` (git-ignored): route templates, statuses, durations, response key names and error codes — never a value, an id or a key; exit 1 when a status or a relied-on outcome (job succeeded, connection test ok, consistency passed) differs; scanner calls skip without a browser worker (§17) |
+| `tools/flow_report.py` | script | M5 Task 24: calls every route of contract §9 once against a running stack (`EXPECT`: method, route template, expected status) and writes `reports/flow-report.md` (git-ignored): route templates, statuses, durations, response key names and error codes — never a value, an id or a key; exit 1 when a status or a relied-on outcome (job succeeded, connection test ok, consistency passed) differs; scanner calls wait for a freshly started app's `browser` readiness and skip without a browser worker — `--require-scanner` (the `full` gate) fails instead (§17) |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §13); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
@@ -133,7 +133,20 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
 
 The browser-worker has its own image, `Dockerfile.browser` (M4, §15):
 `docker compose --profile scanner build` or `docker build -f Dockerfile.browser -t
-data-privacy-services-browser:local .`.
+data-privacy-services-browser:local .`. It follows the same arbitrary-UID rules (merged into
+`fimg`, §17): user 10001 with primary group 0, `docker/entrypoint.sh` as `ENTRYPOINT` (`umask
+0002`; it never migrates for this command), `/app` group 0 readable and never group-writable,
+`/app/var` group-writable with setgid directories, `ENV HOME=/tmp` — so the screenshots it stores
+are `0660` group 0 in `2775` directories and the app serves them under any UID of group 0.
+`/ms-playwright` stays as the Playwright base ships it (`0777` throughout; a recursive
+`chgrp`/`chmod` there would copy every browser file into a new layer, measured +1.46 GB), so the
+browser-worker **must** run with a read-only root (compose inherits `read_only: true` from `worker`;
+OpenShift `readOnlyRootFilesystem: true`). Checked by `DPS_TEST_BROWSER_IMAGE=data-privacy-services-browser:<tag>
+pytest -q tests/test_browser_image_runtime.py` (uid 1000770000:0, `--read-only`, `--cap-drop ALL`:
+Chromium starts through the scanner's own `get_browser` and takes a screenshot, `HOME=/tmp`, umask
+`0002`, the extras import, `/app`, `/opt/venv` and `/ms-playwright` are not writable, the volumes
+are; through `LocalObjectStore` a new UID reads, streams and replaces what uid 10001 stored, and
+with `DPS_TEST_IMAGE` set as well the app image does the same with what the browser image stored).
 
 Sizes on 2026-10-11 (arm64): 407 MB; with `WITH_NER=1` 775 MB. On 2026-10-12 (arm64, M1 lane: the
 `docs` extra and Tesseract 5.5 with `eng`): 644 MB, of which the apt layer is 107 MB. M2 lane
@@ -168,9 +181,11 @@ app, worker, migrate, dps-db (default), the OCR mock (`docs`), source-pg, MinIO,
 seed one-shots, MongoDB (`sources`), Oracle Free (`oracle`; ~2.7 GB) and the bank tokenizer mock
 (`tokenizer`); M4's browser-worker and demo-site join through their `scanner`/`full` profiles. Poll
 `/readyz` until `"ready": true` and `docker compose ps` until the one-shots exited 0 (never `up
---wait`); then `DPS_SMOKE_REQUIRE_OCR=1 DPS_SMOKE_REQUIRE_M5=1 python tools/smoke_test.py [--m3]`
-(`--m3` after `python tools/seed_sources.py --target all --rows 20000 --seed 7`) and `python
-tools/flow_report.py`. Under `full` the app starts after the tokenizer mock is healthy
+--wait`); then `DPS_SMOKE_REQUIRE_OCR=1 DPS_SMOKE_REQUIRE_M5=1 DPS_SMOKE_SCANNER=on python
+tools/smoke_test.py [--m3]` (`--m3` after `python tools/seed_sources.py --target all --rows 20000
+--seed 7`; without `DPS_SMOKE_SCANNER` the eleven scanner checks still run because the demo site
+answers, `on` makes a missing scanner a failure) and `python tools/flow_report.py
+--require-scanner` (the scanner calls are then required, not skipped). Under `full` the app starts after the tokenizer mock is healthy
 (`depends_on … required: false`, like the OCR mock), because `/readyz` probes the tokenizer once at
 startup. Every role of the app image gets `DPS_SYNTH_TABULAR_ENGINE=copula`,
 `DPS_KEY_CACHE_SECONDS=5` (a key minted through `/admin/keys` reaches every replica within 5 s; the
@@ -648,11 +663,13 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
   staging/prod, `DPS_ALLOW_INSECURE_COIN_MINT=true` (record the approval with the deployment).
   Prefer `DPS_COIN_CA_FILE` with the proxy's CA whenever it can be obtained.
-- **Container runtime (M5 Task 24):** the image runs as uid 10001 with group 0 or as any arbitrary
-  UID in group 0 (OpenShift's restricted SCC); compose runs every role of the image (app, worker,
-  migrate, tokenizer-mock, seed-sources) with a read-only root, `cap_drop: [ALL]` and
-  `no-new-privileges`, and a `/tmp` tmpfs where the role writes scratch files (app, worker,
-  seed-sources; `migrate` and `tokenizer-mock` write nothing). The exception is the local
+- **Container runtime (M5 Task 24):** both images run as uid 10001 with group 0 or as any arbitrary
+  UID in group 0 (OpenShift's restricted SCC); compose runs every role of the app image (app, worker,
+  migrate, tokenizer-mock, seed-sources) and the browser-worker with a read-only root, `cap_drop:
+  [ALL]` and `no-new-privileges`, and a `/tmp` tmpfs where the role writes scratch files (app,
+  worker, seed-sources, browser-worker — Chromium's profile and `HOME`; `migrate` and
+  `tokenizer-mock` write nothing). The browser-worker's read-only root is mandatory: the Playwright
+  base ships `/ms-playwright` mode `0777`. The exception is the local
   `demo-secrets` one-shot, which runs as root to write the demo secret files. The process can
   write `/tmp` (also `HOME`) and the `/app/var` artefact and export volumes only — never the code,
   site-packages or `/etc` (group 0 reads them; `tests/test_image_runtime.py` checks it on a built
@@ -730,16 +747,13 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
 ## 8. Traps
 
 - **Images and the local stack (M5 Task 24):**
-  - M4's `Dockerfile.browser` must get the same arbitrary-UID lines when M4 and this change meet on
-    one branch — `tests/test_images.py::test_the_browser_image_is_arbitrary_uid_safe` fails until
-    then (measured on branch `m4`'s image: an arbitrary UID runs Chromium but cannot write the
-    artefact volume): `useradd … --uid 10001 --gid 0`, then after its last `COPY`
-    `COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh`, `RUN chmod 0755
-    /usr/local/bin/entrypoint.sh && chgrp -R 0 /app && chmod -R g+rX,g-w /app && chmod -R g=u
-    /app/var && find /app/var -type d -exec chmod g+s {} +`, `ENV HOME=/tmp`, `ENTRYPOINT
-    ["/usr/local/bin/entrypoint.sh"]` (checked: an image built from `m4` with these lines runs
-    Chromium as uid 10001 and as uid 1000770000:0, read-only, `cap_drop ALL`, and writes the
-    volume; its permissions layer is 20 kB).
+  - `Dockerfile.browser` carries the app image's arbitrary-UID lines since M4 met this change on
+    branch `fimg` (§17): `useradd … --uid 10001 --gid 0`, the entrypoint with its `umask 0002`,
+    `chgrp -R 0 /app && chmod -R g+rX,g-w /app && chmod -R g=u /app/var && find … chmod g+s`,
+    `ENV HOME=/tmp`. Without them (branch `m4`'s image, measured) an arbitrary UID runs Chromium but
+    gets `HOME=/` and `umask 0022`, and cannot read or replace the objects another UID stored
+    (`storage_error: PermissionError`). `tests/test_images.py::test_the_browser_image_is_arbitrary_uid_safe`
+    pins the lines, `tests/test_browser_image_runtime.py` checks a built image.
   - Leave `/ms-playwright` alone: the Playwright base image ships it mode `0777` throughout (every
     UID can run — and, on a writable root, modify — the browsers), and a recursive `chgrp`/`chmod`
     there (the plan's wording) copies every browser file into a new layer (measured: +1.46 GB, 4.24
@@ -752,10 +766,13 @@ endpoint. Residual: a `jobs` key may still *create* a connection that names any 
     other UID then fails with `storage_error` (measured). Objects stored by any image before the
     `fimg` review fix (up to `74625d6`) are `0600`: a later UID cannot read them (measured: `GET
     /artefacts/{id}` and the Evidence page's `GET /evidence/{id}/html` answer 502
-    `storage_error`). Re-permission once — `docker compose run --rm --no-deps --user 0 --entrypoint
-    sh worker -c 'chgrp -R 0 /app/var/artefacts /app/var/exports && chmod -R g+rwX
-    /app/var/artefacts /app/var/exports && find /app/var -type d -exec chmod g+s {} +'` — or `down
-    -v` locally.
+    `storage_error`). Re-permission once (measured, review S4 r2 R2-1: root needs `CHOWN` and
+    `FOWNER` back, which the worker's `cap_drop: [ALL]` removes, and `find` must not touch the
+    read-only `/app/var` itself) — `docker compose run --rm --no-deps --user 0 --cap-add CHOWN
+    --cap-add FOWNER --entrypoint sh worker -c 'chgrp -R 0 /app/var/artefacts /app/var/exports &&
+    chmod -R g+rwX /app/var/artefacts /app/var/exports && find /app/var/artefacts /app/var/exports
+    -type d -exec chmod g+s {} +'` (volumes written only by compose's uid 10001: the same with
+    `--user 10001` and no `--cap-add`) — or `down -v` locally.
   - On OpenShift keep the image `ENTRYPOINT` (set `args`, not `command`): it sets `umask 0002`.
   - `docker compose exec` does not pass through the entrypoint (its shells show umask `0022`); the
     services' own processes run with `0002` (`/proc/1/status`).

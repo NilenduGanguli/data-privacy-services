@@ -70,9 +70,16 @@ def test_the_full_profile_is_every_service() -> None:
     for name, service in services.items():
         if service.get("profiles"):
             assert "full" in service["profiles"], name
-    assert {"tokenizer-mock", "azure-ocr-mock", "source-pg", "minio", "oracle", "mongo"} <= set(
-        services
-    )
+    assert {
+        "tokenizer-mock",
+        "azure-ocr-mock",
+        "source-pg",
+        "minio",
+        "oracle",
+        "mongo",
+        "browser-worker",  # M4, merged: `full` runs the scanner and its demo site
+        "demo-site",
+    } <= set(services)
 
 
 def test_every_role_of_the_app_image_runs_in_full() -> None:
@@ -103,9 +110,7 @@ def test_the_app_waits_for_the_tokenizer_mock_when_it_runs() -> None:
 def test_a_browser_worker_inherits_the_worker_settings() -> None:
     """M4's ``browser-worker`` extends ``worker`` (or carries the shared settings itself)."""
     services = _services()
-    worker = services.get("browser-worker")
-    if worker is None:
-        pytest.skip("the browser-worker service arrives with the M4 merge")
+    worker = services["browser-worker"]
     inherits = (worker.get("extends") or {}).get("service") == "worker"
     env = worker.get("environment") or {}
     assert inherits or all(env.get(k) == v for k, v in M5_ENV.items())
@@ -140,6 +145,17 @@ def test_local_demo_outputs_never_get_committed() -> None:
         assert _ignored(path), path
     for path in ("dps/layers/reports/new_module.py", "tools/flow_report.py", "docs/demo/x.md"):
         assert not _ignored(path), path
+
+
+def test_developer_tooling_never_reaches_an_image() -> None:
+    """``tools/dev`` holds the owner's push automation and a macOS LaunchAgent with host paths;
+    the image's ``COPY tools`` must not carry them (review S4 r2, R2-2)."""
+    ignored = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text("utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    assert "tools/dev" in ignored
 
 
 def test_local_demo_outputs_never_reach_a_build_context() -> None:

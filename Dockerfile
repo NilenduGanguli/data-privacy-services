@@ -71,9 +71,10 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 # Arbitrary UID (OpenShift runs the image as a random UID in group 0) and a read-only root:
 # - the image user 10001 has group 0 as its primary group, so compose's processes create group-0
 #   files like OpenShift's do;
-# - /app/var (the local artefact and export volumes; named volumes and emptyDirs inherit this
-#   ownership and mode) belongs to uid 10001 and group 0, writable by both, and its directories
-#   are setgid: what any UID creates in them stays group 0. With the entrypoint's umask 0002 new
+# - /app/var (the local artefact and export volumes; Docker named volumes inherit this ownership
+#   and mode, Kubernetes emptyDirs and PVCs do not: kubelet creates those, group-owned by the
+#   pod's fsGroup on OpenShift) belongs to uid 10001 and group 0, writable by both, and its
+#   directories are setgid: what any UID creates in them stays group 0. With the entrypoint's umask 0002 new
 #   directories are 2775, and the object store creates every artefact and export object 0660
 #   (dps/storage.py OBJECT_MODE: owner and group, never other users), so a later UID (a redeploy,
 #   another namespace UID) reads, replaces and adds to what the previous one stored;

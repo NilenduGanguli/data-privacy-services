@@ -15,6 +15,11 @@ Environment:
   configured metadata database; ``off`` skips them (the plain ``docker compose up`` stack has the
   database but not the ``sources`` profile's demo source, so those checks cannot pass there); ``on``
   runs them whatever ``/readyz`` says.
+- ``DPS_SMOKE_SCANNER``: ``auto`` (default) runs the UI-scanner checks (M4) when the demo onboarding
+  site answers at ``DPS_TEST_DEMO_SITE`` — only the ``scanner`` and ``full`` profiles run it, so a
+  plain run against ``--profile full`` covers the scanner; ``on`` (or ``1``) runs them whatever the
+  stack (a missing browser worker or demo site fails: the M4 and ``full`` gates); ``off`` (or
+  ``0``) skips them.
 
 Waits for ``/health``, then runs the checks in order, prints a one-line verdict per check and exits
 non-zero on the first failure. Never prints a request or response body, a value or a key: a
@@ -31,8 +36,9 @@ dry-run in-place job on ``bank_restore.contacts`` and the worker count. They are
 key material a run returns is never printed or kept. ``DPS_SMOKE_JOB_TIMEOUT`` (default 180 s)
 bounds each run.
 
-``DPS_SMOKE_SCANNER=1`` adds eleven UI-scanner checks (M4) against ``docker compose --profile
-scanner``: the browser-worker is online, a scan of the demo onboarding site (``/apply``, deny
+Eleven UI-scanner checks (M4) follow the M1 ones against ``docker compose --profile scanner`` (or
+``full``) — by default when the demo site answers, always under ``DPS_SMOKE_SCANNER=on``: the
+browser-worker is online, a scan of the demo onboarding site (``/apply``, deny
 ``/logout`` and ``/admin``, the mounted demo session, five ``en_IN`` personas) is accepted with key
 and seed, succeeds with classified fields and the expected risk flags, the demo site's
 ``/__received`` counters (non-GET requests, GET-form submissions, ``/logout`` and ``/admin`` hits)
@@ -78,7 +84,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -502,9 +508,14 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         m1_checks(c)
 
-        if scanner_wanted(os.environ.get("DPS_SMOKE_SCANNER")):
-            with httpx.Client(base_url=DEMO_FROM_HERE, timeout=5.0) as demo:
+        with httpx.Client(base_url=DEMO_FROM_HERE, timeout=5.0) as demo:
+            run_scanner, note = scanner_wanted(
+                os.environ.get("DPS_SMOKE_SCANNER"), lambda: demo_answers(demo)
+            )
+            if run_scanner:
                 scanner_checks(c, demo)
+            else:
+                print(note)
 
         root = c.get("/")
         check(
@@ -777,9 +788,36 @@ def m2_checks(c: httpx.Client) -> None:
 # -- M4: the UI scanner (profile `scanner`) ------------------------------------------------------
 
 
-def scanner_wanted(setting: str | None) -> bool:
-    """Whether to run the scanner checks: only when ``DPS_SMOKE_SCANNER`` is exactly ``1``."""
-    return setting == "1"
+def scanner_wanted(setting: str | None, demo_up: Callable[[], bool]) -> tuple[bool, str]:
+    """Whether to run the UI-scanner checks, and the note printed when they are skipped.
+
+    ``setting`` is ``DPS_SMOKE_SCANNER`` (case-insensitive; empty = ``auto``): ``auto`` runs them
+    when the demo onboarding site answers (``demo_up``: only the ``scanner`` and ``full`` profiles
+    run it), so a plain run against ``--profile full`` covers the scanner; ``on`` (or ``1``, M4's
+    switch) runs them whatever the stack, so a missing browser worker or demo site fails; ``off``
+    (or ``0``) skips them. ``on`` and ``off`` never probe the demo site.
+    """
+    choice = (setting or "auto").strip().lower()
+    choice = {"1": "on", "0": "off"}.get(choice, choice)
+    if choice not in ("auto", "on", "off"):
+        raise SystemExit("DPS_SMOKE_SCANNER must be auto, on or off")
+    if choice == "off":
+        return False, "note: DPS_SMOKE_SCANNER=off: the UI-scanner checks are skipped"
+    if choice == "on" or demo_up():
+        return True, ""
+    return False, (
+        f"note: no demo site answers at {DEMO_FROM_HERE}: the UI-scanner checks are skipped "
+        "(DPS_SMOKE_SCANNER=on requires them)"
+    )
+
+
+def demo_answers(demo: httpx.Client) -> bool:
+    """Whether the demo onboarding site answers its ``/health`` (it runs in the ``scanner`` and
+    ``full`` profiles only, published on the lane's ``DPS_DEMO_SITE_PORT``)."""
+    try:
+        return demo.get("/health").status_code == 200
+    except httpx.HTTPError:
+        return False
 
 
 def demo_from_here(env: Mapping[str, str]) -> str:

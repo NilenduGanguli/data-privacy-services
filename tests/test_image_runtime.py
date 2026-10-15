@@ -4,8 +4,9 @@ Opt-in: ``DPS_TEST_IMAGE=data-privacy-services:<tag> pytest -q tests/test_image_
 (``DPS_TEST_IMAGE_PLATFORM=linux/amd64`` checks an amd64 build under emulation). Each check starts
 a throw-away container the way OpenShift's restricted SCC does — a random UID whose only group is 0,
 ``--read-only`` with a ``/tmp`` tmpfs, no capabilities — and the artefact and export directories as
-fresh volumes (they inherit the image's ownership and mode, as compose's named volumes and
-OpenShift's emptyDirs do). Nothing here needs the stack.
+fresh volumes (they inherit the image's ownership and mode, as compose's named volumes do;
+OpenShift's emptyDirs and PVCs do not — kubelet creates them, group-owned by the pod's
+``fsGroup``). Nothing here needs the stack.
 """
 
 from __future__ import annotations
