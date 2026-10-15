@@ -319,7 +319,7 @@ export function JobDetail(): JSX.Element {
         <div style={{ minWidth: 0 }}>
           <div className="rowx" style={{ alignItems: 'flex-start' }}><EngineBadge engine={engine} /><h1 style={{ overflowWrap: 'anywhere' }}>{title}</h1></div>
           <p>
-            {j.kind === 'discover' ? <>Discovery · connection <span className="mono">{connectionLabel(j.connection_id, conns)}</span></>
+            {j.kind === 'discover' ? <>Discovery · {source === null ? connectionLabel(j.connection_id, conns) : <>connection <span className="mono">{connectionLabel(j.connection_id, conns)}</span></>}</>
               : <>Mode <b>{j.mode}</b> · {writeModeLabel(wm, j.spec?.target?.table_load)}{policy ? <> · policy <b>{policy}</b></> : null}</>}
             {j.purpose?.ticket && <> · purpose {j.purpose.ticket}{j.purpose.legal_basis ? ` (${j.purpose.legal_basis})` : ''}</>}
             {j.group_id && (others.length

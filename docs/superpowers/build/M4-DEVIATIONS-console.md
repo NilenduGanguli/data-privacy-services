@@ -131,6 +131,10 @@ failed on the merged code, 7 of 10; the other 3 guard the unchanged wording).
 Tests first: `src/lib/paging.test.ts` (8, a two-page fixture with failed jobs on page 2, the window stop, the
 cap, the state query, the documented query strings, the list-only connection lookup), `src/pages/JobDetail.test.tsx`
 (3, a static render of the head and the snapshots card for a deleted connection), `src/pages/EvidencePack.test.tsx`
-(+2, a 62-character target and a 56-character policy inside the lead; the CSS rules). On `8ea220a` all
-failed except the lead-content render.
+(+1, a 62-character target and a 56-character policy inside the lead) and `tests/evidence_layout.test.ts` (2, the
+CSS rules; a node test, since the console's `tsc` has no Node types). On `8ea220a` all failed except the
+lead-content render. Live on the rebuilt stack: the three job pages whose connections were deleted and their
+wizard deep links read 0 console errors and 0 HTTP errors at 1440 dark and 390 light; Jobs reads "Showing 988 of
+988 jobs" and "Failed (27)" (the API's failed table jobs; the Overview's 28 adds one failed UI scan); the three
+38-character packs scroll 0 px at 390/375/360.
 

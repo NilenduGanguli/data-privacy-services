@@ -30,7 +30,9 @@ describe('a job whose connection was deleted', () => {
     expect(jobTitle(discover, undefined)).toBe('— · bank.customers'); // what the page showed before
   });
 
-  it('words the connection as deleted, with its short id', () => {
+  it('words the connection as deleted, with its short id, once', () => {
+    const head = html(<p>Discovery · {connectionLabel(discover.connection_id, deleted)}</p>);
+    expect(text(head)).toBe('Discovery · connection deleted (c_01M504…9R)');
     expect(connectionLabel(discover.connection_id, deleted)).toBe('connection deleted (c_01M504…9R)');
     const live = new Map<string, Connection | null>([[discover.connection_id!, { name: 'bank-pg-ro' } as Connection]]);
     expect(connectionLabel(discover.connection_id, live)).toBe('bank-pg-ro');
