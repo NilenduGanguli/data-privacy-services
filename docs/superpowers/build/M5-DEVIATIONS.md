@@ -1204,7 +1204,11 @@ name of the other gender about half the time (`Mr. Lakshmi …`; 138 of 300 job 
 - **Known limits (review r1, not changed):** a key with a word after `name` (`first_name_en`) gets no
   role (N3, detected as a full name, as on `5cef802`); a prefixed own group (`cust_first_name`) is not
   the record's own group, so a person-name key sorting before it still owns the record persona (N4,
-  the pre-existing first-declared rule).
+  the pre-existing first-declared rule). Seen while re-running the review's probes, pre-existing on
+  `5cef802`/`e437f48` and outside name parts: with NER off, a `<role>_name` key whose role word is not
+  in the structural list (`agent_name`, `officer_name`, `witness_name`) scores only `name` 0.55, so an
+  untitled full name in it is not detected and is kept in a synthetic record with verification
+  passing; follow-up: more bank roles before `name`, or a lexicon name detector when NER is off.
 - Tests for r1 (48 new cases, each fails on `e437f48`): `tests/test_structural.py` (every key spelling
   that gets a role is detected by `classify_key` and `classify_path`, also as an L2 column name;
   neighbours that are not names stay undetected, a guard that passes on both), `tests/test_methods.py`
