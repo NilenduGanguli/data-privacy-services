@@ -42,6 +42,7 @@ from dps.engine.transform.apply import ApplyOptions, RevealHint, apply_plan
 from dps.engine.transform.crypto import KeyMaterial, b32, hmac_bytes
 from dps.engine.verify import collect_originals, normalise, verify_output
 from dps.layers.scanner.classify import (
+    PLACEHOLDER_OPTION,
     autocomplete_token,
     compile_html_pattern,
     pattern_accepts,
@@ -563,7 +564,7 @@ def sample_for_pattern(pattern: str | None, rng: random.Random) -> str | None:
     return value if pattern_accepts(compiled, value) else None
 
 
-_PLACEHOLDER_OPTION = re.compile(r"^\W*(choose|select|pick|please|--)", re.IGNORECASE)
+_PLACEHOLDER_OPTION = PLACEHOLDER_OPTION  # one rule for the fill and the captures (classify)
 
 
 def _usable(o: OptionFacts) -> bool:

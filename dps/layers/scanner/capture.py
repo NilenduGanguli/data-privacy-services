@@ -78,7 +78,7 @@ from dps.engine.taxonomy import entity_info
 from dps.engine.transform.apply import ApplyOptions, apply_plan
 from dps.engine.transform.crypto import KeyMaterial
 from dps.engine.verify import collect_originals, normalise, verify_output
-from dps.layers.scanner.classify import classify_rendered
+from dps.layers.scanner.classify import classify_rendered, draws_placeholder, shown_texts
 from dps.layers.scanner.dom import (
     REPLACE_TEXT_JS,
     SCROLL_JS,
@@ -407,16 +407,19 @@ def _flat(text: str) -> tuple[str, list[int]]:
 
 
 def _shown(f: FieldFacts) -> list[str]:
-    """What a field shows: its value, or what a select draws for its selected options (each one's
-    label attribute, else its text: ``OptionFacts.drawn``; S2 captures-privacy r2 B3)."""
-    if f.tag == "select":
-        return [o.drawn for o in f.options if o.selected and o.drawn]
-    return [f.value] if f.value else []
+    """What a field shows: its value, or what a select draws (``classify.shown_texts``: a
+    customizable select's button, each selected option's label else its text, whatever its value
+    and wherever it sits; S2 captures-privacy r2 B3, r3 B1)."""
+    return shown_texts(f)
 
 
 def shown_values(fields: Sequence[tuple[FieldFacts, str]]) -> list[tuple[str, str]]:
-    """``(value, entity)`` for what each field shows (memory only: these are page values)."""
-    return [(shown, entity) for f, entity in fields for shown in _shown(f)]
+    """``(value, entity)`` for what each field shows (memory only: these are page values) — not
+    a select's drawn placeholder ("Choose…", ``classify.draws_placeholder``): that select is boxed,
+    but its placeholder is no value to hunt for elsewhere on the page."""
+    return [
+        (shown, entity) for f, entity in fields if not draws_placeholder(f) for shown in _shown(f)
+    ]
 
 
 def _needles(values: list[tuple[str, str]]) -> dict[str, str]:
@@ -940,6 +943,9 @@ async def obfuscated_capture(
         for finding, original in originals
         if (finding.locator.path, finding.locator.start, finding.locator.end) not in kept
     ]
+    # a select cannot show a token: it is boxed, and every copy of what it draws is swept, as the
+    # masked capture sweeps it (S2 captures-privacy r3 B1)
+    values += shown_values(selects)
     if sweep_copies(after.texts, after.fields, values) is None:
         return CaptureResult(status="withheld", reason="residual")
     plan_masks = _MaskPlan(

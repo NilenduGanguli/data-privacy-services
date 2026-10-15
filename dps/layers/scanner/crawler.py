@@ -58,6 +58,7 @@ from dps.layers.scanner.classify import (
     classify_field,
     classify_fields,
     classify_rendered,
+    draws_placeholder,
     redact_text,
     sensitive_prefilled,
     value_classifier,
@@ -635,7 +636,9 @@ class ScanRunner:
                 done = await self._fill_and_capture(t, mode, snap, classes, plans, record)
                 if done is not None:
                     fills[mode], results[mode] = done
-        if rendered or prefilled:
+        # a personal select that draws only its placeholder is masked, but is no value the page
+        # arrived with: it alone needs no obfuscated capture (S2 captures-privacy r3 B1)
+        if rendered or any(not draws_placeholder(f) for f, _ in prefilled):
             await self._capture(t, record)
         else:
             record.capture_status = "not_needed"

@@ -193,6 +193,29 @@ EXTRACT_JS = (
   window.__dpsSnap = null;
   const fields = [], forms = new Map(), texts = [], links = [], clickables = [];
   let truncated = false, clickOrdinal = 0, budget = TEXT_BUDGET;
+  // What a closed select draws (S2 captures-privacy r3 B1): a customizable select (computed
+  // ``appearance: base-select``, or a <button> / <selectedcontent> in it) draws its button — a
+  // <selectedcontent> clone of the selected option's content, or the author's own text — read
+  // first; then the label of every selected option (its label attribute, else its text),
+  // whatever its value and wherever it sits: the option list stops at 300, the selected ones are
+  // read apart. More text than can be checked marks the extraction truncated (no capture).
+  const DRAWN = ':scope > button, selectedcontent';
+  const selectDrawn = (el) => {
+    const custom = getComputedStyle(el).appearance === 'base-select' || !!el.querySelector(DRAWN);
+    const raw = custom ? Array.from(el.querySelectorAll(DRAWN)).map((b) => b.innerText || b.textContent || '') : [];
+    const chosen = Array.from(el.selectedOptions);
+    if (chosen.length > 300) truncated = true;
+    for (const o of chosen.slice(0, 300)) raw.push(o.label);
+    const drawn = [];
+    for (const t of raw) {
+      if (t.length > TEXT_CAP) truncated = true;
+      budget -= Math.min(t.length, TEXT_CAP);
+      if (budget < 0) { truncated = true; break; }
+      const c = clean(t.slice(0, TEXT_CAP));
+      if (c && !drawn.includes(c)) drawn.push(c);
+    }
+    return [custom, drawn];
+  };
   // rects are in this frame's viewport: the caller adds where that viewport is in the document
   // (``viewport_box`` for the top frame, the content box for a child frame)
   const onField = (el, inShadow) => {
@@ -214,6 +237,7 @@ EXTRACT_JS = (
     const [label, source] = resolveLabel(el);
     const r = el.getBoundingClientRect();
     const secret = type === 'password' || type === 'file' || type === 'checkbox' || type === 'radio';
+    const [custom, drawn] = tag === 'select' ? selectDrawn(el) : [false, null];
     fields.push({ key, field_no: n, form_index: formIndex, frame_index: frameIndex, in_shadow: inShadow, tag, input_type: type,
       name: el.getAttribute('name'), id: el.getAttribute('id'), label: label.slice(0, 200), label_source: source,
       placeholder: el.getAttribute('placeholder'), title: el.getAttribute('title'), aria_label: el.getAttribute('aria-label'),
@@ -223,6 +247,7 @@ EXTRACT_JS = (
       visible: type !== 'hidden' && visible(el), inputmode: el.getAttribute('inputmode'),
       // an option's label is what a select draws for it (its label attribute, else its text)
       options: tag === 'select' ? Array.from(el.options).slice(0, 300).map((o) => ({ value: o.value, text: clean(o.text), label: clean(o.label), disabled: o.disabled, selected: o.selected })) : [],
+      drawn, custom_select: custom,
       value: secret || tag === 'select' ? null : (el.value || null),
       checked: type === 'checkbox' || type === 'radio' ? el.checked : null,
       rect: { x: r.left, y: r.top, w: r.width, h: r.height }, selector: describe(el, inShadow) });
@@ -396,10 +421,12 @@ REPLACE_TEXT_JS = r"""
 #: The capture's census of every string a read frame renders NOW, separate from (and wider than)
 #: the classification text list: every rendered text node (``rendered``: a visible parent, or one
 #: with no box of its own whose text has client rects) with no minimum length and no ``button``
-#: exclusion (only ``script``/``style``/``noscript``/``template``/``title`` and a ``textarea``'s
-#: source text, whose shown value is a field, are left out), every visible ``<option>`` (its text
-#: and its ``label``; a listbox shows its options, a closed select's are not rendered and the label
-#: its selected option draws is swept as the field's shown value, ``OptionFacts.drawn``), and the
+#: exclusion (only ``script``/``style``/``noscript``/``template``/``title``, a ``textarea``'s
+#: source text and the text of a select's options are left out — what those show is a field's;
+#: a customizable select's ``<button>`` and ``<selectedcontent>`` text is read, S2
+#: captures-privacy r3 B1c), every visible ``<option>`` (its text and its ``label``; a listbox
+#: shows its options, a closed select's are not rendered and what it draws is swept as the
+#: field's shown value, ``FieldFacts.drawn``), and the
 #: strings the browser draws from attributes of a visible
 #: element (M4 verify r1 B5): the label of a button-type ``<input>``, an ``<optgroup>`` label, the
 #: ``alt`` of an ``<img>`` or ``<input type=image>`` (shown when the image is broken), and the
@@ -417,7 +444,11 @@ CENSUS_JS = (
 """
         + r"""
   const TEXT_CAP = __TEXT_CAP__, TEXT_BUDGET = __TEXT_BUDGET__;
-  const SKIP = 'script,style,noscript,template,title,textarea,select';
+  const SKIP = 'script,style,noscript,template,title,textarea';
+  // a closed select draws its options itself (what it shows is a field's), except the text of a
+  // customizable select's button — a <selectedcontent> clone or the author's text, drawn as real
+  // text (S2 captures-privacy r3 B1c); whether it is drawn at all, ``rendered`` decides
+  const optionText = (parent) => !!parent.closest('select') && !parent.closest('select > button, select selectedcontent');
   const LABELLED = new Set(['button', 'submit', 'reset']);
   const shown = new Map();
   const visible = (el) => {
@@ -446,7 +477,7 @@ CENSUS_JS = (
     while (node && !over) {
       if (node.nodeType === Node.TEXT_NODE) {
         const parent = node.parentElement;
-        if (parent && !parent.closest(SKIP) && rendered(node, parent, visible)) add(node, node.nodeValue, false);
+        if (parent && !parent.closest(SKIP) && !optionText(parent) && rendered(node, parent, visible)) add(node, node.nodeValue, false);
       } else {
         const el = node, tag = el.localName;
         if (tag === 'option') {

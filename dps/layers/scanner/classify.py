@@ -368,14 +368,54 @@ def _named(names: set[str], phrases: frozenset[str]) -> bool:
     )
 
 
-def shown_text(facts: FieldFacts) -> str:
-    """What a field shows: an input's or a textarea's value; for a select, what it draws for its
-    selected option — the option's label attribute when it has one, else its text
-    (``OptionFacts.drawn``; S2 captures-privacy r2 B3)."""
+#: The mask label of a customizable select that draws text nothing classifies (it is boxed whole).
+SELECT_LABEL = "SELECT"
+#: An option's text that reads as a placeholder ("Choose…", "Select one", "-- Please select --"):
+#: the fill never picks it (``personas_fill._usable``), and a select that draws only such text from
+#: options without a value shows no value (:func:`draws_placeholder`).
+PLACEHOLDER_OPTION = re.compile(r"^\W*(choose|select|pick|please|--)", re.IGNORECASE)
+
+
+def shown_texts(facts: FieldFacts) -> list[str]:
+    """Every string a field shows (page data, memory only): an input's or a textarea's value; for
+    a select, what its closed box draws (S2 captures-privacy r3 B1) — a customizable select's
+    button text, then the label of each selected option (its label attribute, else its text;
+    ``OptionFacts.drawn``, r2 B3), **whatever the option's value** (whether it is a real choice
+    is the fill's rule, ``personas_fill._usable``; a drawn placeholder is shown too) and wherever
+    it sits in a long list (``FieldFacts.drawn``, read by the extraction; facts built without it
+    read ``options``)."""
     if facts.tag == "select":
-        chosen = [o for o in facts.options if o.selected and o.value.strip()]
-        return chosen[0].drawn if chosen else ""
-    return facts.value or ""
+        drawn = (
+            facts.drawn
+            if facts.drawn is not None
+            else [o.drawn for o in facts.options if o.selected]
+        )
+        return list(dict.fromkeys(s for s in drawn if s.strip()))
+    return [facts.value] if facts.value else []
+
+
+def shown_text(facts: FieldFacts) -> str:
+    """What a field shows first (:func:`shown_texts`), ``""`` when it shows nothing."""
+    shown = shown_texts(facts)
+    return shown[0] if shown else ""
+
+
+def draws_placeholder(facts: FieldFacts) -> bool:
+    """Whether a classic select draws nothing but its placeholder: no option it lists is selected
+    with a value (each selected one has an empty or blank ``value`` or is disabled) and every string
+    it draws reads as a placeholder (:data:`PLACEHOLDER_OPTION`, "Choose…").
+
+    Such a select is still masked when it is personal (:func:`sensitive_prefilled`); a placeholder
+    is only no *value* of the page: its text is not swept for elsewhere on the page and it alone
+    does not make the page arrive pre-filled. A value behind an empty ``value`` (S2 captures-privacy
+    r3 B1a), an option selected past the listed ones (B1b) and anything a customizable select draws
+    (B1c) are never placeholders."""
+    if facts.tag != "select" or facts.custom_select:
+        return False
+    if any(o.selected and o.value.strip() and not o.disabled for o in facts.options):
+        return False
+    shown = shown_texts(facts)
+    return bool(shown) and all(PLACEHOLDER_OPTION.match(text) for text in shown)
 
 
 def _sensitive(entity: str) -> bool:
@@ -458,11 +498,11 @@ def classify_fields(
                 evidence=["mixed:value_next_to_channel"],
             )
             continue
-        shown = shown_text(f)
-        if shown.strip():
+        for shown in shown_texts(f):
             found = _shown_classification(detector, shown, min_score)
             if found is not None:
                 classes[f.key] = found
+                break
     return classes
 
 
@@ -567,27 +607,41 @@ def placeholder_shape(text: str | None) -> str | None:
     )
 
 
+def _detected(detector: Detector, texts: list[str]) -> str | None:
+    """The entity of the first detector hit in ``texts`` (``None`` without one)."""
+    for text in texts:
+        hits = detector.detect(text=text).findings
+        if hits:
+            return hits[0].entity_type
+    return None
+
+
 def sensitive_prefilled(
     fields: list[FieldFacts],
     classes: dict[str, FieldClassification],
     detector: Detector,
 ) -> list[tuple[FieldFacts, str]]:
     """``(field, entity)`` for every field that *shows* a value a capture must hide: an input or
-    textarea pre-filled with a value, and a select with a real option selected, when the field is
-    classified or the detectors find something in what it shows. Password values are never read
-    (``FieldFacts.value`` is ``None`` for them)."""
+    textarea pre-filled with a value, and a select that draws something (:func:`shown_texts`:
+    whatever its option's value, wherever the option sits — S2 captures-privacy r3 B1a/B1b), when
+    the field is classified or the detectors find something in what it shows; and a customizable
+    select whenever it draws text (labelled :data:`SELECT_LABEL` when nothing classifies it): it
+    draws author content — a clone of the selected option's markup, or the author's own button —
+    so it is boxed whole, fail closed (B1c). Password values are never read (``FieldFacts.value``
+    is ``None`` for them)."""
     out: list[tuple[FieldFacts, str]] = []
     for f in fields:
         if not f.visible:
             continue
-        shown = shown_text(f)
-        if not shown.strip():
+        shown = shown_texts(f)
+        if not shown:
             continue
         cls = classes.get(f.key)
         entity = cls.entity_type if cls is not None else None
         if entity is None:
-            hits = detector.detect(text=shown).findings
-            entity = hits[0].entity_type if hits else None
+            entity = _detected(detector, shown)
+        if entity is None and f.tag == "select" and f.custom_select:
+            entity = SELECT_LABEL
         if entity is not None:
             out.append((f, entity))
     return out
