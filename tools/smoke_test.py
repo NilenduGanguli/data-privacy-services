@@ -31,6 +31,18 @@ dry-run in-place job on ``bank_restore.contacts`` and the worker count. They are
 key material a run returns is never printed or kept. ``DPS_SMOKE_JOB_TIMEOUT`` (default 180 s)
 bounds each run.
 
+``DPS_SMOKE_SCANNER=1`` adds eleven UI-scanner checks (M4) against ``docker compose --profile
+scanner``: the browser-worker is online, a scan of the demo onboarding site (``/apply``, deny
+``/logout`` and ``/admin``, the mounted demo session, five ``en_IN`` personas) is accepted with key
+and seed, succeeds with classified fields and the expected risk flags, the demo site's
+``/__received`` counters (non-GET requests, GET-form submissions, ``/logout`` and ``/admin`` hits)
+do not move while ``non_get_allowed`` is 0, the identity page has its four parallel-view
+screenshots and one is served as a PNG, a masked capture is served, the persona export holds none of
+the demo site's customer values, the evidence pack says 0 submissions, and ``/scanner/new`` is
+served. ``DPS_SMOKE_DEMO_URL`` is the demo site as the browser-worker sees it (default
+``http://demo-site:8410``); the script itself reads the counters at ``DPS_TEST_DEMO_SITE`` (default
+``http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}``). ``DPS_SMOKE_SCAN_TIMEOUT`` (default 300 s)
+bounds the scan. Run with ``DPS_SMOKE_M2=off`` unless the ``sources`` profile is up too.
 ``--m3`` adds seven Oracle + MongoDB checks after the M2 ones; they need the ``oracle`` and
 ``sources`` profiles and the three-engine demo seed (``python tools/seed_sources.py --target all``):
 ``m3 connections`` (the four demo connections of ``tools/m2_api.M3_CONNECTIONS`` created or reused,
@@ -53,7 +65,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -476,6 +488,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         m1_checks(c)
 
+        if scanner_wanted(os.environ.get("DPS_SMOKE_SCANNER")):
+            with httpx.Client(base_url=DEMO_FROM_HERE, timeout=5.0) as demo:
+                scanner_checks(c, demo)
+
         root = c.get("/")
         check(
             "console served",
@@ -740,6 +756,179 @@ def m2_checks(c: httpx.Client) -> None:
         "m2 workers online",
         stats.get("workers_online", 0) >= 1,
         f"{stats.get('workers_online')} online",
+    )
+
+
+# -- M4: the UI scanner (profile `scanner`) ------------------------------------------------------
+
+
+def scanner_wanted(setting: str | None) -> bool:
+    """Whether to run the scanner checks: only when ``DPS_SMOKE_SCANNER`` is exactly ``1``."""
+    return setting == "1"
+
+
+def demo_from_here(env: Mapping[str, str]) -> str:
+    """The demo site as this script reaches it (a lane's compose publishes it on its own port)."""
+    explicit = env.get("DPS_TEST_DEMO_SITE")
+    if explicit:
+        return explicit.rstrip("/")
+    return f"http://127.0.0.1:{env.get('DPS_DEMO_SITE_PORT') or '8410'}"
+
+
+#: The demo site as the browser-worker sees it (the scan's start URL host).
+DEMO_FROM_WORKER = (os.environ.get("DPS_SMOKE_DEMO_URL") or "http://demo-site:8410").rstrip("/")
+DEMO_FROM_HERE = demo_from_here(os.environ)
+SCAN_TIMEOUT = float(os.environ.get("DPS_SMOKE_SCAN_TIMEOUT") or "300")
+#: The demo site's customer values (made up), which no export may carry. The birth date is left out:
+#: a generated persona may share a date, and a date is not identifying on its own.
+DEMO_VALUES: tuple[str, ...] = tuple(
+    str(v)
+    for k, v in json.loads(
+        (Path(__file__).resolve().parents[1] / "demo/onboarding/data.json").read_text("utf-8")
+    ).items()
+    if k != "dob"
+)
+#: The demo site's counters that must not move during a scan: every non-GET request, every
+#: GET-form submission, and every hit on the paths the scan denies.
+SITE_COUNTERS = ("non_get", "form_get", "logout_hits", "admin_hits")
+
+
+def _received(demo: httpx.Client) -> dict[str, int]:
+    """The demo site's ``/__received`` counters (counts only)."""
+    body = demo.get("/__received").json()
+    return {name: int(body[name]) for name in SITE_COUNTERS}
+
+
+def _artefact_png(c: httpx.Client, artefact_id: str | None) -> bool:
+    """Whether the app serves ``artefact_id`` as a PNG."""
+    if not artefact_id:
+        return False
+    r = c.get(f"/api/v1/artefacts/{artefact_id}", headers=H)
+    return r.status_code == 200 and r.content[:4] == b"\x89PNG"
+
+
+def _browser_ready(c: httpx.Client, wait: float, interval: float) -> dict[str, Any]:
+    """``/readyz``'s ``browser`` component, polled for up to ``wait`` seconds: the app refreshes it
+    from worker heartbeats every 15 s, so a stack that has just come up still reads ``unknown``."""
+    deadline = time.monotonic() + wait
+    while True:
+        browser: dict[str, Any] = c.get("/readyz").json()["components"].get("browser", {})
+        if browser.get("ok") or time.monotonic() >= deadline:
+            return browser
+        time.sleep(interval)
+
+
+def scanner_checks(
+    c: httpx.Client,
+    demo: httpx.Client,
+    *,
+    timeout: float = SCAN_TIMEOUT,
+    interval: float = 3.0,
+    browser_wait: float = 60.0,
+) -> None:
+    """The eleven UI-scanner checks (module docstring); ``demo`` reads the demo site's counters."""
+    browser = _browser_ready(c, browser_wait, interval)
+    check("browser worker online", bool(browser.get("ok")), str(browser.get("detail")))
+
+    before = _received(demo)
+    created = c.post(
+        "/api/v1/scans",
+        headers=H,
+        json={
+            "url": f"{DEMO_FROM_WORKER}/apply",
+            "scope": {"max_pages": 25, "max_depth": 3, "deny": ["/logout", "/admin"]},
+            "auth": {"storage_state_ref": "dps/ui/demo-onboarding"},
+            "mode": "synthesize",
+            "fill": {"personas": 5, "locale": "en_IN"},
+        },
+    )
+    body = created.json() if created.status_code == 202 else {}
+    check(
+        "scan accepted, key and seed returned once",
+        created.status_code == 202
+        and bool((body.get("key_material") or {}).get("dek"))
+        and bool((body.get("synthesis_seed") or {}).get("seed")),
+        f"HTTP {created.status_code}",
+    )
+    body.pop("key_material", None)  # never kept or printed
+    body.pop("synthesis_seed", None)
+    sid = body["scan"]["id"]
+
+    detail: dict[str, Any] = {}
+    deadline = time.monotonic() + timeout
+    while True:
+        detail = c.get(f"/api/v1/scans/{sid}", headers=H).json()
+        if detail["scan"]["state"] in TERMINAL or time.monotonic() >= deadline:
+            break
+        time.sleep(interval)
+    s = detail.get("summary", {})
+    check(
+        "scan succeeded",
+        detail["scan"]["state"] == "succeeded",
+        f"{detail['scan']['state']}: {s.get('pages_visited')} pages, {s.get('fields')} fields, "
+        f"{s.get('personal_fields')} personal",
+    )
+    flags = {f["flag"] for f in s.get("risk_flags", [])}
+    wanted = {"autocomplete_enabled_sensitive", "pii_in_query_string", "pii_rendered_unmasked"}
+    check(
+        "classification and risk flags",
+        s.get("personal_fields", 0) >= 20 and flags >= wanted,
+        f"{s.get('personal_fields')} personal fields, {len(s.get('risk_flags', []))} risk flags, "
+        f"{len(wanted - flags)} expected flag kinds missing",
+    )
+
+    after = _received(demo)
+    moved = {name: after[name] - before[name] for name in SITE_COUNTERS}
+    check(
+        "no submission reached the site",
+        not any(moved.values()) and s.get("non_get_allowed") == 0,
+        ", ".join(f"{name} +{n}" for name, n in moved.items())
+        + f"; non_get_allowed {s.get('non_get_allowed')}, blocked {s.get('blocked_requests')}",
+    )
+
+    pages = c.get(f"/api/v1/scans/{sid}/pages", params={"limit": 200}, headers=H).json()["items"]
+    ident = next((p for p in pages if p["url_redacted"].endswith("/apply/identity")), {})
+    shots = ident.get("artefacts", {})
+    parallel = {"original", "annotated", "filled_synthesize", "filled_obfuscate"}
+    check(
+        "parallel view captured",
+        parallel <= set(shots),
+        f"{len(parallel & set(shots))}/4 screenshots of the identity page",
+    )
+    check("screenshot served", _artefact_png(c, shots.get("filled_synthesize")))
+    masked = [p["artefacts"]["masked_capture"] for p in pages if "masked_capture" in p["artefacts"]]
+    check(
+        "masked capture served",
+        s.get("captures", 0) >= 1 and bool(masked) and _artefact_png(c, masked[0]),
+        f"{s.get('captures')} captures, {len(masked)} masked",
+    )
+
+    export = c.get(f"/api/v1/scans/{sid}/export", params={"format": "json"}, headers=H)
+    text = export.text.lower() if export.status_code == 200 else ""
+    found = sum(1 for v in DEMO_VALUES if v.lower() in text)
+    check(
+        "persona export",
+        export.status_code == 200 and export.json().get("personas") == 5 and found == 0,
+        f"HTTP {export.status_code}, {found} demo values found",
+    )
+
+    evidence = c.get("/api/v1/evidence", params={"job_id": sid}, headers=H).json().get("items", [])
+    pack = (
+        c.get(f"/api/v1/evidence/{evidence[0]['id']}", headers=H).json()["pack"] if evidence else {}
+    )
+    scan_block = pack.get("scan") or {}
+    check(
+        "evidence: submissions 0",
+        bool(scan_block)
+        and scan_block.get("submissions") == 0
+        and scan_block.get("non_get_allowed") == 0,
+        f"{len(evidence)} packs",
+    )
+    console = c.get("/scanner/new")
+    check(
+        "scanner console served",
+        console.status_code == 200 and b'<div id="root">' in console.content,
+        f"HTTP {console.status_code}",
     )
 
 

@@ -90,5 +90,28 @@ def test_three_engines_share_one_customer_space() -> None:
         lines = [ln for ln in again.splitlines() if ": " in ln and " done in " not in ln]
         assert len(lines) == 7 and all(ln.endswith(": unchanged") for ln in lines)
         assert "already seeded" in _seed("--target", "postgres", "--schema", SCHEMA)
+        # S2 gates r1 B1: data of an older demo model (marker version 1) is replaced, once
+        with oracledb.connect(user="crm", password="crm", dsn=oracle_dsn()) as ora:  # demo login
+            with ora.cursor() as cur:
+                cur.execute("UPDATE CRM.DPS_SEED_INFO SET MODEL_VERSION = 1")
+            ora.commit()
+        client = pymongo.MongoClient(mongo_uri())
+        try:
+            client["crm"]["dps_seed_info"].update_one({"_id": "seed"}, {"$unset": {"version": 1}})
+        finally:
+            client.close()
+        upgraded = _seed("--target", "oracle") + _seed("--target", "mongo")
+        lines = [ln for ln in upgraded.splitlines() if ": " in ln and " done in " not in ln]
+        assert len(lines) == 7 and not any(ln.endswith(": unchanged") for ln in lines)
+        with oracledb.connect(user="crm", password="crm", dsn=oracle_dsn()) as ora:
+            with ora.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM CRM.CUSTOMERS WHERE COUNTRY = 'IN' "
+                    "AND NATIONAL_ID NOT LIKE '0%'"
+                )
+                assert cur.fetchone() == (0,)  # model 2: no Aadhaar in a surrogate range
+        settled = _seed("--target", "oracle") + _seed("--target", "mongo")
+        lines = [ln for ln in settled.splitlines() if ": " in ln and " done in " not in ln]
+        assert len(lines) == 7 and all(ln.endswith(": unchanged") for ln in lines)
     finally:
         asyncio.run(_drop_schema(pg_dsn))

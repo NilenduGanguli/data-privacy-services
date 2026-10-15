@@ -215,7 +215,7 @@ export function OverviewView({ tenant, ready, summary, degraded, policyLabel }: 
         <section className="card layer">
           <div className="card-head"><div className="card-title"><Link to="/scanner">Layer 3 · UI scanner</Link></div><span className="chip emerald">never submits</span></div>
           <div className="kpi"><div className="value">{count(ui.scans ?? 0)}</div>
-            <div className="delta">scans · {count(ui.pages ?? 0)} pages · {count(ui.fields ?? 0)} personal data fields · {count(ui.risk_flags ?? 0)} risk flags</div></div>
+            <div className="delta">scans · {count(ui.pages ?? 0)} pages · {count(ui.personal_fields ?? ui.fields ?? 0)} personal data fields · {count(ui.risk_flags ?? 0)} risk flags</div></div>
           <div className="more muted">{last ? <>Last scan: {count(last.pages ?? 0)} pages, {count(last.personas ?? 0)} personas, {count(ui.submissions ?? 0)} submitted{last.id ? <> (<Link className="mono" to={`/scanner/scans/${encodeURIComponent(last.id)}`}>{shortId(last.id)}</Link>)</> : null}.</> : 'No scan in this window.'}</div>
         </section>
       </div>

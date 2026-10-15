@@ -3,9 +3,18 @@
 Every personal value is produced by the M0 surrogate engine (seeded with
 ``sha256("dps-demo-<seed>")``, the M2 demo seed) from a per-customer template original, anchored on
 the customer (``CUSTOMER_ID:<hash>``), so it is rule-valid and never real: RFC 2606 e-mails,
-Aadhaar-shaped numbers UIDAI never issues (leading ``1``), SSNs in the never-issued 9xx area,
-HMRC's example NINO prefix ``QQ``, check-digit-valid CURPs, rule-valid PANs and fictional phone
-ranges. Customer ``i`` has id ``10_000_001 + i`` (8 digits, so ``fpe_digits`` has ≥ 6 free digits)
+check-digit-valid CURPs, rule-valid PANs and fictional phone ranges.
+
+The national ids sit in never-issued ranges that **no D-A surrogate draws from** (S2 gates r1 B1):
+a synthesize run of the demo table must never write a value the demo source holds, or its post-write
+identifier check (rightly) asks for review and the seeded-demo D-A tests fail at random. So the
+Aadhaar-shaped numbers start with ``0`` (UIDAI never issues 0 or 1; AADHAAR and 12-digit
+NATIONAL_ID surrogates start with ``1``), the SSNs are in area ``666`` (never issued; SSN and ITIN
+surrogates take area 9xx, 9-digit NATIONAL_ID surrogates ``000``), the NINOs carry HMRC's example
+prefix ``QQ`` (never a surrogate prefix), every CURP has ``X`` as its third letter (no inconvenient
+word that CURP surrogates start with has one) and the PANs a sequence number ``0001``-``9999``
+(surrogates: ``0000``). :data:`DEMO_MODEL_VERSION` marks what a seeded schema holds; the seed tools
+reload a schema seeded by an older model. Customer ``i`` has id ``10_000_001 + i`` (8 digits, so ``fpe_digits`` has ≥ 6 free digits)
 and every attribute of customer ``i`` depends only on ``(i, seed)`` — not on ``rows`` and not on
 the other customers — so the same customer carries the same name, e-mail, phone, birth date and
 national id in every target. That is what lets the three-way consistency join line up.
@@ -22,6 +31,15 @@ from datetime import date, datetime, timedelta
 from typing import Any, Final
 
 CUSTOMER_ID_BASE: Final = 10_000_000
+#: The demo data model's version, stored with every seed marker (PG ``_dps_seed_info``, Oracle
+#: ``CRM.DPS_SEED_INFO``, MongoDB ``dps_seed_info``): a schema seeded by an older model is reloaded.
+#: 2: national ids moved out of every range a D-A surrogate draws (S2 gates r1 B1).
+DEMO_MODEL_VERSION: Final = 2
+#: Area 666 SSNs: groups 01-99 x serials 0001-9999.
+_SSN_666_SPACE: Final = 99 * 9_999
+#: A prime that does not divide :data:`_SSN_666_SPACE` (3**4 * 11**2 * 101): customer ids map to
+#: distinct SSNs for any run of fewer than 989,901 consecutive customers.
+_SSN_STRIDE: Final = 104_729
 #: (country, locale, weight %) — the M2 demo bank's customer mix.
 COUNTRIES: Final = (
     ("IN", "en_IN", 60),
@@ -140,16 +158,29 @@ def _phone_template(country: str, cid: int) -> str:
     return f"+52 55 {cid % 10_000:04d} {cid // 10_000 % 10_000:04d}"
 
 
+def demo_ssn(customer_id: int, seed_bytes: bytes) -> str:
+    """An SSN in area ``666`` (never issued, and drawn by no surrogate), distinct per customer id
+    for any run of fewer than 989,901 consecutive ids; the offset depends on the demo seed."""
+    offset = int.from_bytes(hashlib.sha256(seed_bytes + b"|ssn").digest()[:8], "big")
+    x = (customer_id * _SSN_STRIDE + offset) % _SSN_666_SPACE
+    return f"666-{1 + x // 9_999:02d}-{1 + x % 9_999:04d}"
+
+
 def _national_id(
     engine: Any, country: str, locale: str, anchor: str, cid: int, persona: Any, dob: date,
-    rng: random.Random,
+    rng: random.Random, seed_bytes: bytes,
 ) -> str:  # fmt: skip
-    if country == "IN":  # 12 digits, leading 1, Verhoeff check digit
-        return str(engine.surrogate("AADHAAR", f"{2 + cid % 8}{cid % 10**11:011d}", locale, anchor))
-    if country == "US":  # the 9xx area is never issued
-        template = f"{100 + cid % 800:03d}-{10 + cid % 89:02d}-{1000 + cid % 9000:04d}"
-        return str(engine.surrogate("SSN", template, locale, anchor))
-    if country == "GB":  # HMRC's example prefix QQ is never issued
+    if country == "IN":  # 12 digits, leading 0 (never issued; surrogates take 1), Verhoeff valid
+        from dps.engine.detect.checksums import verhoeff_check_digit
+
+        drawn = str(
+            engine.surrogate("AADHAAR", f"{2 + cid % 8}{cid % 10**11:011d}", locale, anchor)
+        )
+        body = "0" + re.sub(r"\D", "", drawn)[1:11]
+        return body + verhoeff_check_digit(body)
+    if country == "US":  # area 666 is never issued (surrogates take 9xx and 000)
+        return demo_ssn(cid, seed_bytes)
+    if country == "GB":  # HMRC's example prefix QQ is never issued (nor a surrogate prefix)
         return f"QQ{rng.randrange(1_000_000):06d}{rng.choice('ABCD')}"
     return curp_for(persona, dob, rng)
 
@@ -173,7 +204,7 @@ def seed_customers(rows: int, seed: int = 7) -> Iterator[SeedCustomer]:
             engine.surrogate("DATE_OF_BIRTH", f"{1950 + i % 50}-06-15", locale, anchor)
         )
         persona = engine.persona(anchor, locale)
-        national_id = _national_id(engine, country, locale, anchor, cid, persona, dob, rng)
+        national_id = _national_id(engine, country, locale, anchor, cid, persona, dob, rng, sb)
         tax_id = pan_for(persona, f"CUSTOMER:{cid}") if country == "IN" else None
         email = str(engine.surrogate("EMAIL", f"person{i}@example.com", locale, anchor))
         mobile = str(engine.surrogate("PHONE", _phone_template(country, cid), locale, anchor))

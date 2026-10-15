@@ -57,20 +57,35 @@ EGRESS_URLS = (
 )
 
 
+#: The process roles (contract §3.5) the guard knows. ``app`` (the default) and ``worker`` get every
+#: rule; the ``browser-worker`` (M4) runs no HTTP API, no documents OCR and no external tokenizer (a
+#: scan makes its tokens with the scan key only), so it is never refused for their settings or the
+#: secrets it does not mount: API keys, CORS origins, the OCR key and the tokenizer token.
+ROLES = ("app", "worker", "browser-worker")
+BROWSER_WORKER = "browser-worker"
+
+
 class PostureError(RuntimeError):
     """The configuration violates the production posture."""
 
 
-def posture_problems(settings: Settings) -> list[str]:
-    """Return every violation for ``settings`` (empty outside staging/prod)."""
+def posture_problems(settings: Settings, *, role: str = "app") -> list[str]:
+    """Return every violation for ``settings`` in ``role`` (empty outside staging/prod).
+
+    Raises:
+        ValueError: ``role`` is not one of :data:`ROLES`.
+    """
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}")
     if not settings.is_production:
         return []
+    serves = role != BROWSER_WORKER  # the API, OCR and the tokenizer
     problems: list[str] = []
     if not settings.auth_enabled:
         problems.append("DPS_AUTH_ENABLED must be true")
     if settings.bootstrap_api_key:
         problems.append("DPS_BOOTSTRAP_API_KEY must be unset")
-    if not settings.api_keys:
+    if serves and not settings.api_keys:
         problems.append("DPS_API_KEYS (or DPS_API_KEYS_FILE) must be set")
     if settings.llm_provider == "stub":
         problems.append("DPS_LLM_PROVIDER=stub is not allowed")
@@ -98,11 +113,17 @@ def posture_problems(settings: Settings) -> list[str]:
             problems.append(f"{env_name} must be https in staging/prod")
     if not settings.audit_enabled:
         problems.append("DPS_AUDIT_ENABLED must be true")
+    # M4 (contract §10): an unmasked original screenshot holds the page's personal data, and a
+    # headed browser needs a display server the production images never have.
+    if settings.scan_store_unmasked_originals:
+        problems.append("DPS_SCAN_STORE_UNMASKED_ORIGINALS must be false")
+    if not settings.browser_headless:
+        problems.append("DPS_BROWSER_HEADLESS must be true")
     # M1 (contract §10): the OCR key travels in a header and the pages are customer documents,
     # so azure OCR needs a key and TLS. The message names the setting, never the URL.
     # ``auto`` resolving to azure sends the key and the pages just the same.
     engine = settings.ocr_engine
-    if settings.ocr_provider == "azure" or engine == "azure":
+    if serves and (settings.ocr_provider == "azure" or engine == "azure"):
         if not settings.azure_vision_key:
             problems.append(
                 "DPS_AZURE_VISION_KEY (or DPS_AZURE_VISION_KEY_FILE) is required for azure OCR"
@@ -111,12 +132,12 @@ def posture_problems(settings: Settings) -> list[str]:
             problems.append("DPS_AZURE_VISION_ENDPOINT must be an https URL")
     # Local Tesseract (provider tesseract, or auto without Azure) has no egress and is allowed;
     # auto that resolves to nothing would silently leave scanned pages unread.
-    if settings.ocr_provider == "auto" and engine == "none":
+    if serves and settings.ocr_provider == "auto" and engine == "none":
         problems.append(
             "OCR is enabled (auto) but neither an Azure endpoint nor tesseract is available"
         )
     problems.extend(_m2_problems(settings))
-    problems.extend(_m5_problems(settings, os.environ))
+    problems.extend(_m5_problems(settings, os.environ, serves=serves))
     return list(dict.fromkeys(problems))
 
 
@@ -174,11 +195,15 @@ def _strict_verification_problems(settings: Settings) -> list[str]:
     return problems
 
 
-def _m5_problems(settings: Settings, environ: Mapping[str, str]) -> list[str]:
+def _m5_problems(
+    settings: Settings, environ: Mapping[str, str], *, serves: bool = True
+) -> list[str]:
     """M5 (spec §10): secrets from files, TLS-only egress, explicit CORS, strict verification.
 
     The KEK rule applies wherever a worker runs (``pg_host`` set, contract §10); the audit and
-    embedded-worker rules are M2's (:func:`_m2_problems`), for the same reason.
+    embedded-worker rules are M2's (:func:`_m2_problems`), for the same reason. ``serves=False``
+    (the browser-worker) skips the rules of components that role does not run: the tokenizer
+    token and the CORS origins.
     """
     problems = [
         f"{name} must be provided as {name}_FILE (a mounted secret), not a literal "
@@ -192,9 +217,9 @@ def _m5_problems(settings: Settings, environ: Mapping[str, str]) -> list[str]:
         elif _kek_bytes(settings.job_kek) != 32:  # the settings validator already refuses it
             problems.append("DPS_JOB_KEK must be base64 of exactly 32 bytes")
     problems += _egress_problems(settings)
-    if settings.tokenizer_provider == "http" and not settings.tokenizer_token:
+    if serves and settings.tokenizer_provider == "http" and not settings.tokenizer_token:
         problems.append("DPS_TOKENIZER_TOKEN_FILE must be set when the tokenizer is enabled")
-    if "*" in settings.cors_origin_list:
+    if serves and "*" in settings.cors_origin_list:
         problems.append(
             "DPS_CORS_ORIGINS must list origins explicitly (or be empty for same-origin only)"
         )
@@ -230,9 +255,9 @@ def _m2_problems(settings: Settings) -> list[str]:
     return problems
 
 
-def assert_production_posture(settings: Settings) -> None:
-    """Raise :class:`PostureError` naming every violation."""
-    problems = posture_problems(settings)
+def assert_production_posture(settings: Settings, *, role: str = "app") -> None:
+    """Raise :class:`PostureError` naming every violation of ``role`` (see :data:`ROLES`)."""
+    problems = posture_problems(settings, role=role)
     if problems:
         raise PostureError("production posture violated: " + "; ".join(problems))
 
@@ -275,6 +300,8 @@ class PostureReport(BaseModel):
     total: int
     checked_at: datetime
     checks: list[PostureCheck]
+    #: the hosts a tenant with no registered host may scan (local/dev only; Admin shows them)
+    scan_fallback_hosts: list[str] = []
 
 
 async def _tenant_warn_policies(principal: Principal | None) -> list[str]:
@@ -417,6 +444,7 @@ async def posture_report(
         total=len(checks),
         checked_at=datetime.now(UTC),
         checks=checks,
+        scan_fallback_hosts=settings.scan_fallback_hosts,
     )
 
 

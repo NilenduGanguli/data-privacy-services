@@ -111,6 +111,13 @@ describe('api.reports and evidence downloads', () => {
     await expect(api.evidence.json(auth, 'ev_2')).rejects.toMatchObject({ code: 'artefact_not_found' });
   });
 
+  it("saves a scan's pack (no JSON artefact) in its canonical form", async () => {
+    record(() => Response.json({ id: 'ev_3', artefacts: [], pack: { job_kind: 'scan', scan: { submissions: 0 }, b: 1, a: 2 } }));
+    const pack = await api.evidence.json(auth, 'ev_3');
+    expect(pack.filename).toBe('evidence-ev_3.json');
+    expect(await pack.blob.text()).toBe('{"a":2,"b":1,"job_kind":"scan","scan":{"submissions":0}}');
+  });
+
   it('keeps only a base name from Content-Disposition', () => {
     expect(dispositionName('attachment; filename="../../etc/x.pdf"')).toBe('x.pdf');
     expect(dispositionName(null)).toBeNull();
