@@ -775,7 +775,9 @@ class OracleConnector:
 
         One statement (``FETCH FIRST :batch``) and one pooled session per page, ``arraysize =
         prefetchrows = batch``; CHAR keys bind typed and padded, TIMESTAMP(7-9) keys as FF9 text,
-        ROWID keys through ``CHARTOROWID``.
+        ROWID keys through ``CHARTOROWID``. The page's length and the next page's bound are taken
+        before the page is handed on: the consumer owns the list it gets and may empty it (S1-M3
+        engines r3 B1: read again afterwards, an emptied page ended the read after one page).
         """
         where, query, binds = self._compile(shape, selection, params)
         cols = self._projection(shape, selection)
@@ -812,10 +814,11 @@ class OracleConnector:
             if not raw:
                 return
             rows = [self._row(plan.columns, r) for r in raw]
-            yield rows
-            if len(rows) < size:
-                return
+            last_page = len(rows) < size
             after = tuple(rows[-1][k.name] for k in keys)
+            yield rows
+            if last_page:
+                return
 
     async def lookup_values(
         self, shape: TableShape, join: ColumnInfo, values: list[Any], attributes: list[ColumnInfo]

@@ -647,11 +647,15 @@ class MongoConnector:
                     "key_type_mixed",
                     "a document _id has another BSON type than the collection key: discover again",
                 )
+            # the page's length and the next bound are taken before the page is handed on: the
+            # consumer owns the list it gets (``docs`` itself without a sample) and may empty it
+            # (S1-M3 engines r3 B1: read again afterwards, an emptied page ended the read)
             after = docs[-1]["_id"]
+            last_page = len(docs) < batch
             out = [d for d in docs if keep(d["_id"])] if keep else docs
             if out:
                 yield out
-            if len(docs) < batch:
+            if last_page:
                 return
 
     async def _read_unkeyed(
@@ -677,10 +681,11 @@ class MongoConnector:
                 docs: list[dict[str, Any]] = await self._guard("read", cursor.to_list(length=batch))
                 if not docs:
                     return
+                last_page = len(docs) < batch  # before the consumer gets (and may empty) it
                 out = [d for d in docs if keep(d["_id"])] if keep else docs
                 if out:
                     yield out
-                if len(docs) < batch:
+                if last_page:
                     return
         finally:
             await cursor.close()

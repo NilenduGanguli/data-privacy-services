@@ -1748,3 +1748,146 @@ live probes and their counts in `~/.cache/dps-build/reports/S1-M3-fix-r2/`).
   digits) with any source value (about 0.5 % of runs at the demo's 10 000 retail rows; now rows aligned
   on the kept FF9 `LAST_CONTACT_AT`, every column row by row, the text columns also against any
   value).
+
+## M3 post-merge verification round 3 fix (`S1-M3-engines-r3.md` B1) — S8-idcheck on `fidcheck`
+
+One blocking finding of the round-3 engines lens (`main` @ `d2fdc3f`, still present at `5cef802`), fixed
+on `fidcheck` (a feeder of `fllm`) with tests that failed on the tree as built: the new and changed
+tests were run against an export of `5cef802` (21 + 2 failed, `~/.cache/dps-build/s8-idcheck/logs/
+before-fix-*-at-HEAD.log`) and pass on the fix. Live proofs and their counts:
+`~/.cache/dps-build/reports/S8-idcheck/`.
+
+- **engines B1 — the D-A post-write identifier check read one 5 000-row page on Oracle and MongoDB
+  but reported `whole_table`.** `identifier_check.py` emptied every page it had counted
+  (`rows.clear()` in `key_floor`, `_tally_target` and the source loop); Oracle's and MongoDB's
+  `read_partition` read that same list again after the consumer resumed them (`len(rows) < size`,
+  `len(docs) < batch`, also in MongoDB's key-less `_read_unkeyed`) and stopped. A real identifier
+  past row 5 000 of a target, or whose source row lay past row 5 000, was never flagged and the pack
+  said `passed`; an append's `key_floor` was the first page's largest key. Fixed in three layers:
+  1. **Connectors.** Oracle and MongoDB take a page's length and the next page's bound before they
+     yield it: a yielded page is the consumer's to empty or rewrite (protocol docstring in
+     `base.py`; contract §12.3). PostgreSQL already yielded a fresh list.
+  2. **The check pages each side itself** (`_every_row`): every read starts after the last key read
+     (`after_key`), and a side ends only when a read after that key returns no row — how a connector
+     pages inside one read is no longer taken as the end of the object (one extra, empty read per
+     side). `key_floor` reads the key column the same way. The check no longer empties pages.
+  3. **It says what it read and fails closed.** The result carries `rows_read: {target, source}`
+     (`source` null in place; contract §7.1 evidence model); `checked` still counts the values read.
+     A read that cannot finish raises `IncompleteCheck` (a `ConnectorError`,
+     `identifier_check_incomplete`, value-free detail): a read that does not advance past its start
+     key, a row without its key, a key-less MongoDB collection (one cursor, no `after_key`) read
+     short of `count()`, a SQL column the object does not list (a read projects only listed
+     columns, so it would have counted as a clean column). Finalize's `_best_effort` records
+     `{"error": "identifier_check_incomplete"}` and every written identifier column becomes a review
+     column; no scope is claimed. In prepare (`key_floor` of a synthesize append) the job fails
+     before it writes.
+  - **Beyond the finding:** a MongoDB shape is inferred from a 500-document sample
+    (`DESCRIBE_SAMPLE_MAX`), and a written identifier leaf the target's (or the source's) sample
+    missed was skipped as if it held nothing (`checked` 0, never flagged). It is now read as the
+    other side describes it, else as its key names it (the path's top-level field, read as text —
+    what `to_engine_text` makes of every non-`char` kind). SQL shapes come from the catalogue: no
+    fallback there (see 3).
+  - **Deviation (fail-closed cost):** a key-less MongoDB collection that gains documents while the
+    check reads it fails closed (review) — a count cannot tell a short read from a concurrent insert.
+    Keyed objects need no count: the empty read after the last key is the proof. Packs sealed before
+    the fix keep their counts (sealed and hashed by design).
+  - **Tests:** `tests/test_identifier_check.py` (the fake now pages as Oracle did, reading its own
+    yielded list after the consumer resumes it; a read that stops after one page is paged on by the
+    check, hits past page 1 on both sides found, 6 + 5 reads; a read that does not advance —
+    restarting at the first row, with or without its own paging — fails closed on either side; a
+    row without its key; a key-less read held to the count, short on either side; a document leaf
+    a sampled shape missed is read through the other shape or its key, in place too; a SQL column
+    the object lacks fails closed on either side and in place; `rows_read` of whole-table, append
+    and in-place checks; `key_floor` over every page; `_best_effort` turns an incomplete check into
+    `{"error": "identifier_check_incomplete"}`), `tests/test_identifier_check_documents.py` (its
+    fake now honours `after_key`; `rows_read` counts documents),
+    `tests/connectors/conformance.py::test_paging_does_not_depend_on_what_the_consumer_does_with_a_page`
+    (int, text and key-less tables, 53 rows in pages of 7, the consumer empties every row and the
+    page: every row once, in the database's order — failed on Oracle and MongoDB for all three key
+    kinds; PostgreSQL skips key-less, `no_key`), `tests/connectors/test_identifier_check_engines.py`
+    (scratch 20 000-row target and source on PostgreSQL, Oracle and MongoDB with the real
+    `CHECK_BATCH`; one source account number at target row 15 000 / source row 18 000, one issuable
+    source national id at 17 500 / 19 000: both flagged with counts of exactly 1, `checked` =
+    `rows_read` = 20 000 on both sides; `key_floor` = 20 000; an append check after a floor of 5 000
+    reads exactly 15 000 rows; a ROWID-paged Oracle target and a key-less MongoDB collection give the
+    same counts — as built Oracle and MongoDB said `checked` 5 000, `in_source` 0) and
+    `tests/connectors/test_identifier_check_runs.py` (Oracle demo customers and MongoDB profiles,
+    synthesize → created table → finalize in process, `CHECK_BATCH` 128: every pack column's
+    `checked` equals its values in the target, `rows_read` equals both sides' rows — as built
+    `TAX_ID` said 71 of 1 821, `$.kyc.taxId` 68 of 355).
+  - **Verification** (`9fe68f4`, lane stack `dps-wt-fidcheck`, report
+    `~/.cache/dps-build/reports/S8-idcheck-impl.md`): ruff and mypy clean; M3 gate (`oracle or mongo`)
+    188 passed, 1 skipped; M2 gate (`db or pg_source or s3`) 438 + 437 passed in two runs, the only
+    other outcomes being environment preconditions or the known intermittent fail-closed `leakage`
+    of a PostgreSQL obfuscate run (both pass on rerun; code paths this fix does not touch); smoke
+    `--m3` 39 passed (OCR skipped). On the deployed image (app and worker files = HEAD), 20 000-row
+    synthesize runs say `checked` = the target's values for every identifier column — Oracle
+    `CUSTOMERS` `NATIONAL_ID` 20 000 / 20 000 and `TAX_ID` 11 989 / 11 989, `KYC_DOCUMENTS`
+    `DOC_NUMBER` 20 000 / 20 000, MongoDB `$.accounts[*].iban` 20 000 / 20 000 and `$.kyc.taxId`
+    11 989 / 11 989 (as built: 5 000, 2 994, 5 000, 5 000, 3 002) — with `rows_read` 20 000 / 20 000
+    and `in_source` equal to an independent count (0). One source identifier planted after every
+    pseudonymised key of a 40 001-row Oracle and MongoDB target (`table_load: upsert`) gives
+    `in_source` 1, `review_required`, not `passed`.
+
+### S8-idcheck fix round 1 — the check reads a column as the object spells it (review r1 probes)
+
+The S8-idcheck review r1 (paused before its report; probes and outputs in
+`~/.cache/dps-build/reports/S8-idcheck-review-r1/`) found, on `fidcheck` @ `794007e`, that the
+check still read a column as a person's selection. Fixed with tests that failed on that tree (9 unit
+and 2 engine tests, `~/.cache/dps-build/s8-idcheck/logs/r1-engines-before-fix.log`); live proofs in
+`~/.cache/dps-build/reports/S8-idcheck-fix-r1/`.
+
+- **Finding — a column the selection rules spell differently was never read, or failed finalize.**
+  `_every_row` passed `Selection(columns=fields)`. On Oracle `read_projection` folds a listed column
+  to upper case (the Wega rule) and keeps only shape columns whose name equals the folded one, while
+  `validate_selection` accepts it (it compares upper-cased names): a quoted mixed-case or lower-case
+  column (`"NationalId"`, `"acctNo"`) was left out of every read — `checked` 0, `whole_table`,
+  `passed`; live, a source national id and account number planted in an 801-row target were not
+  flagged (job `j_01M50693MJ7PDV59C16T5CR7VR`). A name the validator refuses (Oracle `"Tax Id"`,
+  MongoDB `tax-id`) raised `SelectionError`, not a `ConnectorError`: finalize's `_best_effort` let
+  it through, finalize failed on every retry and the job ended `dead` without an evidence pack
+  (`j_01M506EKR5N1KCPSB65QE9GZF5`). A MongoDB top-level field whose name holds a dot (`acct.no`)
+  passed the validator and was projected as the field before the dot: never read, `checked` 0.
+- **Fix** (`identifier_check._read_request`, `_projected`; `jobs_run._best_effort`):
+  1. A SQL read lists no column: it reads the shape narrowed to its key and the identifier columns,
+     names the catalogue gave, which the connector projects and quotes as spelt (Oracle `qcol`).
+  2. MongoDB projects plain top-level names only (one segment of the validator's path syntax); a
+     field a projection cannot name (a hyphen, a dot, a space) is read from whole documents.
+  3. Fail closed: a SQL row without one of the requested columns (a SQL row holds every column it
+     projects; a NULL is a value) raises `IncompleteCheck` — a projection mismatch can no longer
+     count as a clean column.
+  4. `_best_effort` records a `SelectionError` as `{"error": code}` like a connector error: every
+     written identifier column is reviewed and the pack is written (the key purge with it), instead
+     of a finalize retried until the job is dead.
+- **Deviations:** a MongoDB check of a field with a hyphen or dot reads whole documents (more bytes
+  than a projection; plain names and `key_floor` are unchanged). A PostgreSQL column whose name the
+  connector cannot quote (`PG_IDENT`: a space) still cannot be read — the run's own read of such a
+  table fails first — and would now be recorded as `{"error": "selection_identifier_invalid"}`
+  (review) rather than a dead job. Contract §7.1 and HANDOFF §8 amended.
+- **Tests:** `tests/test_identifier_check.py` — the fake now reads as each engine's connector reads
+  (SQL: `validate_selection` + `read_projection`; MongoDB: the validator + the top-level
+  projection; whole rows without a list); Oracle `NationalId`, `acct_no`, `Tax Id` and
+  `NATIONAL_ID` + `acctNo` with an upper-case and a mixed-case key (`RowKey`): flagged, `checked` =
+  rows, `key_floor` over the mixed-case key (as built: `checked` 0, or `SelectionError`); a SQL read
+  without the identifier column fails closed on either side (as built: `checked` 0, passed);
+  MongoDB `tax-id`, `acct.no` and a mixed list read from whole documents (as built:
+  `SelectionError`, or `checked` 0); `_best_effort` maps a `SelectionError` to `{"error":
+  "selection_identifier_invalid"}` (as built: raised). `tests/connectors/test_identifier_check_engines.py`
+  — Oracle `"RowKey"` / `"acctNo"` / `"National Id"` and MongoDB `acct.no` / `tax-id`, 20 000-row
+  scratch target and source each, the planted values at target rows 15 000 and 17 500: both flagged,
+  `checked` = `rows_read` = 20 000, Oracle `key_floor` 20 000 and an append after a floor of 5 000
+  reads 15 000 rows (as built: `SelectionError` on both engines).
+- **Verification** (lane stack `dps-wt-fidcheck`, report `~/.cache/dps-build/reports/S8-idcheck-impl.md`
+  §9): ruff and mypy clean; the whole suite with the lane's services up 3 569 passed, 86 skipped,
+  0 failed; the identifier engine and run tests with services required 7 passed; smoke `--m3` 39
+  passed (OCR skipped). On the rebuilt image (app and worker `identifier_check.py` and `jobs_run.py`
+  identical to the tree), synthesize `table` runs from Oracle tables with `"NationalId"` /
+  `"acctNo"` and `"National Id"` / `"Acct No"` say `checked` 400 = the target's 400 values, and after
+  one source national id and account number are planted in each target, an `upsert` run says
+  `checked` 801, `in_source` 1 (= an independent count), `issuable` 1 for the national id,
+  `review_required`, not `passed` (as built: `checked` 0, `passed`); the upper-case control is
+  unchanged. A MongoDB run whose identifier is `$['tax-id']` succeeds with a pack: `checked` 300 =
+  its 300 documents, `rows_read` 300 / 300 (as built: finalize failed until the job was dead, no
+  pack). The 20 000-row planted-hit proof (Oracle and MongoDB, hits at target rows 15 000 and
+  17 500) still flags both columns with `checked` = `rows_read` = 20 000. App and worker logs since
+  the image started: 0 of 92 192 demo values and 800 probe values, 7 / 7 probe job ids, no traceback.

@@ -885,7 +885,24 @@ cannot restart an admin's failed production run.
     integer key (`plan.prepare.identifier_floor`, `scope: written_rows`): the target's own rows
     are not the run's output (`bank_perf.transactions` holds 1 000 seed rows with the source's
     IBAN). Fewer rows after that key than the run wrote → every row (`scope: whole_table`,
-    `scope_reason: rows_below_floor`). Files targets record `not_run: files_target`. Tools that need *rule-valid* PANs (the demo seed, the
+    `scope_reason: rows_below_floor`). Files targets record `not_run: files_target`. **Every row
+    on every engine** (S8-idcheck, 2026-10-15; S1-M3 engines r3 B1): the check (and the append's
+    `key_floor`) pages each side itself — each read starts after the last key it read, and a side
+    ends only when a read after that key returns no row — so a connector's own paging can never
+    shorten it (Oracle and MongoDB used to stop after one 5 000-row page while the pack said
+    `whole_table`); the pack says what was read (`rows_read: {target, source}`; `checked` counts
+    the values read). A read that cannot finish (no progress past a key, a row without its key,
+    a key-less MongoDB collection read short of its count, a SQL column the object lacks) is
+    `{"error": "identifier_check_incomplete"}`: every written identifier column is reviewed, no
+    scope is claimed. **Columns as the object spells them** (S8-idcheck fix r1): a column list is a
+    person's selection (Oracle folds it to upper case), so a check read lists none — SQL reads the
+    shape narrowed to its key and the identifier columns, quoted as the catalogue spells them
+    (quoted mixed-case Oracle columns were never read: `checked` 0, passed); MongoDB projects plain
+    top-level names and reads whole documents for any other (a hyphen was refused, a dot projected
+    the field before it). A SQL row without a requested column is `identifier_check_incomplete`; a
+    finalize step the selection validator refuses is `{"error": "selection_…"}` in the pack instead
+    of a finalize retried until the job is dead. Packs sealed before the fix keep their counts; no
+    setting or migration — the worker image must be rebuilt to carry it. Tools that need *rule-valid* PANs (the demo seed, the
     demo documents, the eval corpus) draw them themselves (`evaluation.corpus.rule_valid_pan`).
 - **M3 stack traps.**
   - `docker compose up --wait` fails on the exited one-shots (contract §11): start, then poll

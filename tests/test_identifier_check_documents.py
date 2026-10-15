@@ -20,12 +20,14 @@ from dps.layers.connectors.identifier_check import check_identifiers, identifier
 
 
 class _Docs:
-    """A connector over in-memory documents (the projection is top-level fields)."""
+    """A connector over in-memory documents (the projection is top-level fields), one page in
+    ``_id`` order after ``after_key`` as the connector protocol reads (the identifier check
+    pages on after the last ``_id`` it read until a read returns nothing)."""
 
     engine = "mongo"
 
     def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self.rows = rows
+        self.rows = sorted(rows, key=lambda r: r["_id"])
 
     async def read_partition(
         self,
@@ -38,7 +40,13 @@ class _Docs:
         batch: int,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         assert set(selection.columns) <= {"_id", "kyc", "accounts", "segment"}
-        yield [{k: v for k, v in r.items() if k in {*selection.columns, "_id"}} for r in self.rows]
+        page = [
+            {k: v for k, v in r.items() if k in {*selection.columns, "_id"}}
+            for r in self.rows
+            if after_key is None or r["_id"] > after_key[0]
+        ]
+        if page:
+            yield page
 
 
 SHAPE = TableShape(
@@ -106,4 +114,5 @@ def test_the_check_reads_each_leaf_value() -> None:
     assert (pan["checked"], pan["issuable"], pan["in_source"]) == (2, 0, 0)
     assert (iban["checked"], iban["in_source"]) == (3, 1)
     assert out["review_columns"] == ["$.accounts[*].iban"]
+    assert out["rows_read"] == {"target": 2, "source": 2}  # documents, not leaf values
     assert "GB82" not in repr(out) and "ABCPK" not in repr(out)  # counts only
