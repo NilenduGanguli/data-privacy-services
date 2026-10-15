@@ -217,3 +217,59 @@ async def test_a_canceled_ledgered_run_recovers_a_batch_its_dead_holder_never_ch
     ledger = f'SELECT count(*) FROM "{source_pg.schema}".dps_write_ledger WHERE job_id = $1'
     assert await source_pg.admin.fetchval(ledger, job.id) == 0
     assert await _usage("t1") - usage_before == changed
+
+
+async def test_a_holder_that_wakes_after_the_cancel_finalize_cannot_change_its_pack(
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: RegisterSource,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``table`` holder commits a batch, the job is canceled and the holder stalls past its lease
+    before its checkpoint: the cancel finalize releases it (as the reaper does) before it reads the
+    counts, so the holder, waking later, can no longer checkpoint into the sealed pack — the job's
+    progress keeps equal to its pack. (Without a ledger nothing but the target records that batch:
+    the pack counts the batches that were checkpointed.)"""
+    obj = await source_pg.customers_table(rows=2000, name="cxl_stale")
+    src = await register_source("t1", name="cxl-stale-src")
+    uat = await register_source(
+        "t1", ref="dps/src/test-pg-rw", roles={"target"}, name="cxl-stale-uat"
+    )
+    snap = await discover_and_accept(handler_ctx, "t1", src.id, obj)
+    target = {
+        "write_mode": "table",
+        "connection_id": uat.id,
+        "object": {"owner": source_pg.schema, "name": "cxl_stale_out"},
+    }
+    sub = await submit_run(
+        run_spec(src.id, obj, snap.id, target),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    _cancel_after_commit(monkeypatch, [sub.job.id])
+    real_checkpoint = jobs.checkpoint
+    stalled: dict[str, Any] = {}
+
+    async def stalling_checkpoint(worker_id: str, partition_id: int, **kw: Any) -> bool:
+        if not stalled:  # the holder stalls before this checkpoint; its lease runs out
+            stalled.update(worker=worker_id, partition=partition_id, batch=kw)
+            async with db.acquire_queue(None) as conn:
+                await conn.execute(
+                    f"UPDATE {db.schema_ident()}.dps_job_partition SET lease_expires_at = "
+                    "now() - interval '1 second' WHERE id = $1",
+                    partition_id,
+                )
+            raise jobs_run._Lost()
+        return await real_checkpoint(worker_id, partition_id, **kw)
+
+    monkeypatch.setattr(jobs, "checkpoint", stalling_checkpoint)
+    job = await drive(handler_ctx, "t1", sub.job.id)
+    assert job.state == JobState.canceled
+    rows, _ = await _pack_rows(job)
+    assert rows == job.progress.rows_written
+    # the holder wakes up after the pack was sealed: its checkpoint is refused
+    assert not await real_checkpoint(stalled["worker"], stalled["partition"], **stalled["batch"])
+    after = await jobs.get_job("t1", job.id)
+    assert after is not None and after.progress.rows_written == rows

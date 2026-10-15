@@ -1571,6 +1571,20 @@ async def _live_canceled(job_id: str) -> int:
         )
 
 
+async def _fence_canceled(job_id: str) -> None:
+    """Release the canceled partitions of ``job_id`` whose holder's lease ran out, as the reaper
+    does: a holder that wakes after the cancel finalize sealed the pack can no longer checkpoint
+    into it (S1-M4 regression r1 B1; a batch it committed to a ledgered target is recorded from
+    the ledger before the ledger is cleared)."""
+    async with db.acquire_queue(None) as conn:
+        await conn.execute(
+            f"UPDATE {db.schema_ident()}.dps_job_partition SET locked_by = NULL, "
+            "lease_expires_at = NULL WHERE job_id = $1 AND state = 'canceled' "
+            "AND locked_by IS NOT NULL AND lease_expires_at <= now()",
+            job_id,
+        )
+
+
 async def _existing_evidence(job: JobInternal) -> str | None:
     """A pack an interrupted earlier finalize of this job already stored (packs are immutable)."""
     async with db.acquire_queue(job.tenant_id) as conn:
@@ -2118,6 +2132,8 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         ):
             raise _Lost()
         return
+    if requested == "canceled":
+        await _fence_canceled(job.id)
     parts = await _partitions(job)
     failed = [p for p in parts if p.state in ("failed", "dead")]
     outcome: str
@@ -2252,7 +2268,7 @@ async def _clear_ledger(
     source_conn: Connection,
     target_conn: Connection | None,
     snapshot: ClassificationSnapshot | None,
-    parts: list[_Partition],
+    parts: Sequence[_Partition] = (),
 ) -> dict[str, Any]:
     """Delete the job's write-ledger rows (contract §4.2 ``clear_ledger``: by job id, from the
     ledger owner of the target). The writer takes the source shape the run was planned from (the

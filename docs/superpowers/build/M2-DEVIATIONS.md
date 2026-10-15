@@ -2085,6 +2085,7 @@ recorded it. Live, 3 of 3: packs 1 000 / 3 000 / 4 000 rows, targets 2 000 / 4 0
 |---|---|---|
 | `dps/jobs.py` `checkpoint` | fenced on the holder (`locked_by = worker`) and `state IN ('running', 'canceled')`: the holder records the batch it committed under its lease (usage charged in the same transaction), then `partition_control` answers `cancel` and it abandons, as before; another worker and an abandoned partition (`locked_by` NULL) still match nothing | option (a) of the finding: the evidence, the job and Reports count what reached the target; `_finalize` already waits for canceled partitions with live leases (`_live_canceled`) |
 | `dps/jobs.py` `record_ledger_batches` (new), `dps/layers/connectors/jobs_run.py` `_clear_ledger` / `_finalize` | before a cancel (or success) finalize clears a ledgered plan's write ledger, every **canceled** partition's ledger mark is read; a mark ahead of the partition's checkpoint (a holder that died or lost its lease between its write and its checkpoint) is recorded first — the ledger is authoritative, as on a resume — only for a partition no live holder owns, with its usage; the finalize then re-reads the partitions and the job's progress for the pack | clearing deleted the only record of such a batch |
+| `dps/layers/connectors/jobs_run.py` `_fence_canceled` | once no canceled partition holds a live lease, the cancel finalize releases the canceled partitions whose holder's lease ran out (what the reaper does on its next pass) before it reads the counts | a holder that stalled past its lease and woke after the pack was sealed could still checkpoint into the canceled partition (its `locked_by` was still set): the job's progress would then differ from its pack. Without a ledger nothing but the target records such a batch, so the pack counts the batches that were checkpointed (the crash limit of a non-ledgered load) |
 | `tests/db/test_partitions_queue.py` `test_partition_control_and_cancel` | the holder's checkpoint after cancel now records (another worker's does not; after `abandon_partition` nobody's does) | the old assertion encoded the defect |
 | contract §3.1 (amendment 2026-10-15), §3.2 signature list; `docs/technical/api-m2.md` (Cancel) | the rule above | contract kept in step |
 
@@ -2092,5 +2093,7 @@ Tests first (`tests/connectors/test_run_cancel_counts.py`, the writer patched to
 commits a batch, two partitions running): a PG `table` load, a ledgered `in_place` run, and a ledgered run
 whose holder dies before its checkpoint (lease expired): pack `counts.rows_written` = job progress = sum of
 partitions = rows in (or changed in) the target, ledger cleared, `dps_tenant_usage` charged by exactly those
-rows. On `8ea220a`: 3 failed (0 vs 400, 200 vs 600, 0 vs 400).
+rows. On `8ea220a`: 3 failed (0 vs 400, 200 vs 600, 0 vs 400). A fourth test (added with `_fence_canceled`): a
+`table` holder that stalls past its lease before its checkpoint and wakes after the cancel finalize is refused,
+and the job's progress keeps equal to its pack (failed on `a0027b2`, the commit before the fence).
 
