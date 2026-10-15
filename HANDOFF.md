@@ -74,11 +74,11 @@ deploy facts — image, ports, env, extras, probes, labels.
 | M2 job platform | API + console | `/api/v1` connections, jobs (discover, run with `table` / `files` / `in_place` / `append`, controls), snapshots, job groups, evidence and artefacts (`docs/technical/api-m2.md`); console pages Data sources & jobs (07), job detail (03), the five-step New-job wizard (06), the evidence pack (10) and the evidence list of Reports (09) |
 | `dps` package | Python 3.12, version 0.2.0 (M1) | Layer 1 engine + API + documents + the job platform; extras `fpe`, `docs`, `db`, `connectors` (baked in; the app needs `docs` from M1 Task 10 on), `ner` (build-arg `WITH_NER=1`), `vertex`, `uitest` / `e2e` (Playwright 1.55.0 for `tools/console_check.py` and `tests/console/test_console_m2.py`, never in the image), `scanner` (M4: `playwright==1.55.0` + Pillow; only in the browser image, never in the app image) |
 | `frontend/dist` | built inside the image | never committed (`.gitignore`, `.dockerignore`) |
-| `data-privacy-services-browser` image | container (M4) | `Dockerfile.browser` on `mcr.microsoft.com/playwright:v1.55.0-noble` (Chromium 1187): the **browser-worker** role (`python -m dps.browser_worker`, claims `scan` jobs only), uid 10001 (primary group 0) or any arbitrary UID in group 0 with a read-only root (the app image's rules, §2), ops port 9401 (in-network); §15, §17 |
+| `data-privacy-services-browser` image | container (M4) | `Dockerfile.browser` on `mcr.microsoft.com/playwright:v1.55.0-noble` (Chromium 1187): the **browser-worker** role (`python -m dps.browser_worker`, claims `scan` jobs only), uid 10001 (primary group 0) or any arbitrary UID in group 0 with a read-only root (the app image's rules, §2), ops port 9401 (in-network); §15, §18 |
 | M4 UI scanner | API + console | `/api/v1/scans…` (create with key and seed returned once, pages, fields, events, inventory, exports, cancel, persona preview; `docs/technical/api-m4.md`); console pages New scan (`/scanner`, mockup 12) and scan detail (`/scanner/scans/:id`, mockup 04: crawl map, navigation log, parallel view, inventory, captures); the demo onboarding site `demo/onboarding/` (Node 22, no dependencies; compose service `demo-site`) |
 | `tools/smoke_test.py` | script | M0's 15 Layer 1 checks + 10 for documents, OCR and schema (M1; the two OCR checks skip when `/readyz` says OCR is not ready, fail under `DPS_SMOKE_REQUIRE_OCR=1`) + 9 job-platform checks when `/readyz` reports the metadata database (M2; rerunnable) + 11 UI-scanner checks (M4: a scan of the demo site end to end, its `/__received` counters unchanged, parallel view, masked capture, export without demo values, evidence `submissions 0`) — `DPS_SMOKE_SCANNER=auto` (default) runs them when the demo site answers (the `scanner` and `full` profiles), `on` (or `1`) whatever the stack, so a missing browser worker or demo site fails, `off` never. `DPS_SMOKE_M2=off` skips the job checks — the plain `docker compose up` stack has the metadata database but no demo source, so they cannot pass there (`on` forces them); `--m3` adds 7 Oracle + MongoDB checks (§13); the M5 block (8 checks, always last: policy store hashes, report tiles, posture, a DB key minted, used, disabled and refused, the bank-tokenizer round trip, scrubbed 422s, `no-store` on `/api/`) skips its database and tokenizer checks when `/readyz` says they are down and fails on a skip under `DPS_SMOKE_REQUIRE_M5=1`; prints verdicts, never bodies |
 | `tools/demo_client.py` | module | M5 Task 24: `DpsClient(base_url, api_key, *, tenant=None, timeout=60.0)` with `get/post/patch/delete/raw/download/wait_job/as_tenant` (paths under `/api/v1` unless they name `/api/…` or an ops route) and `load_keys(path)` (the demo key file, refused when other users can read or write it); errors (`DemoError`: `status`, `code`) carry the method, the route template and the status only — shared by the flow report and the demo tools |
-| `tools/flow_report.py` | script | M5 Task 24: calls every route of contract §9 once against a running stack (`EXPECT`: method, route template, expected status) and writes `reports/flow-report.md` (git-ignored): route templates, statuses, durations, response key names and error codes — never a value, an id or a key; exit 1 when a status or a relied-on outcome (job succeeded, connection test ok, consistency passed) differs; scanner calls wait for a freshly started app's `browser` readiness and skip without a browser worker — `--require-scanner` (the `full` gate) fails instead (§17) |
+| `tools/flow_report.py` | script | M5 Task 24: calls every route of contract §9 once against a running stack (`EXPECT`: method, route template, expected status) and writes `reports/flow-report.md` (git-ignored): route templates, statuses, durations, response key names and error codes — never a value, an id or a key; exit 1 when a status or a relied-on outcome (job succeeded, connection test ok, consistency passed) differs; scanner calls wait for a freshly started app's `browser` readiness and skip without a browser worker — `--require-scanner` (the `full` gate) fails instead (§18) |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §13); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
@@ -134,7 +134,7 @@ Tag semver + git sha. The image (app, worker and migrate all run it):
 The browser-worker has its own image, `Dockerfile.browser` (M4, §15):
 `docker compose --profile scanner build` or `docker build -f Dockerfile.browser -t
 data-privacy-services-browser:local .`. It follows the same arbitrary-UID rules (merged into
-`fimg`, §17): user 10001 with primary group 0, `docker/entrypoint.sh` as `ENTRYPOINT` (`umask
+`fimg`, §18): user 10001 with primary group 0, `docker/entrypoint.sh` as `ENTRYPOINT` (`umask
 0002`; it never migrates for this command), `/app` group 0 readable and never group-writable,
 `/app/var` group-writable with setgid directories, `ENV HOME=/tmp` — so the screenshots it stores
 are `0660` group 0 in `2775` directories and the app serves them under any UID of group 0.
@@ -759,7 +759,7 @@ cannot restart an admin's failed production run.
 
 - **Images and the local stack (M5 Task 24):**
   - `Dockerfile.browser` carries the app image's arbitrary-UID lines since M4 met this change on
-    branch `fimg` (§17): `useradd … --uid 10001 --gid 0`, the entrypoint with its `umask 0002`,
+    branch `fimg` (§18): `useradd … --uid 10001 --gid 0`, the entrypoint with its `umask 0002`,
     `chgrp -R 0 /app && chmod -R g+rX,g-w /app && chmod -R g=u /app/var && find … chmod g+s`,
     `ENV HOME=/tmp`. Without them (branch `m4`'s image, measured) an arbitrary UID runs Chromium but
     gets `HOME=/` and `umask 0022`, and cannot read or replace the objects another UID stored
@@ -1720,7 +1720,7 @@ round 2"; report `~/.cache/dps-build/reports/S2-fix-r2.md`.
   …) or was canceled is no sweep. The Overview posture counts UI sweeps too. No migration: UI sweeps
   are read from the job and evidence tables, so past days need no roll-up refresh.
 
-## 17. M5 Task 24 — images, the `full` stack, the smoke M5 block, the flow report (finish stage, lane `fimg`, 2026-10-14)
+## 18. M5 Task 24 — images, the `full` stack, the smoke M5 block, the flow report (finish stage, lane `fimg`, 2026-10-14)
 
 Built on `main` as merged so far (M0–M3 + M5; M4 not yet merged) in `dps-wt-fimg` (branch `fimg`;
 `.env`: `DPS_IMAGE_TAG=fimg`, app 8417, dps-db 5493, source-pg 5494, MinIO 9080/9081, Oracle 1527,
@@ -1796,12 +1796,13 @@ group, never other users; an S3 upload's spool in the temp directory stays `0600
   outputs (1.08 MB) found 0 of the usual needles and no `PermissionError`, `StorageError` or
   traceback.
 
-### 17.1 M4 slot-in — `m4` merged into `fimg` (2026-10-15)
+### 18.1 M4 slot-in — `m4` merged into `fimg` (2026-10-15)
 
 `git merge --no-ff m4` (`83bc5f3`; `m4` at `cbbac38`: M4 with `main` up to `144cc65` merged into it and
 S2 fix rounds 1–2, the commit `main` merged as `5959a75`). One conflict, this file: both sides kept —
-M4's §15 and §16 keep their numbers, this task's record moved from §15 to §17. Adaptations
-(`d8c629c`, `58fd122`, `78f0017`; details in `docs/superpowers/build/M5-DEVIATIONS.md` "Task 24", report
+M4's §15 and §16 keep their numbers, this task's record moved from §15 to §17 (now §18: main's
+own §17 records the M4 integration). Adaptations (`d8c629c`, `58fd122`, `78f0017`; details in
+`docs/superpowers/build/M5-DEVIATIONS.md` "Task 24", report
 `~/.cache/dps-build/reports/FIMG-merge-m4.md`):
 
 - `Dockerfile.browser` follows §2's arbitrary-UID rules (the recipe §8 carried) and drops the write
