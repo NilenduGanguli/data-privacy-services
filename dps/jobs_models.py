@@ -1,4 +1,4 @@
-"""Pydantic specs for connections, discovery, runs and retention (contract §3.3, §5).
+"""Pydantic specs for connections, discovery, runs, scans and retention (contract §3.3, §5, §9).
 
 Every model hides its input in validation errors (``hide_input_in_errors``): a selection's bound
 values, inline credentials and caller key material are customer data or secrets, and pydantic's
@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from dps.engine.policy import MethodSpec
+from dps.engine.synth.personas import SUPPORTED_LOCALES
 from dps.engine.taxonomy import Sensitivity
 from dps.layers.connectors.base import (  # noqa: F401 - re-exported (contract §1)
     Engine,
@@ -277,6 +278,110 @@ class DiscoverSpec(BaseModel):
         return self
 
 
+#: A path glob of a scan scope (``/apply/*``); checked again by ``urls.validate_glob``.
+PATH_GLOB = r"^/[A-Za-z0-9._~\-/*{}]*$"
+_SCAN = ConfigDict(extra="forbid", hide_input_in_errors=True)
+PathGlob = Annotated[str, Field(pattern=PATH_GLOB, max_length=200)]
+
+
+class ScanScope(BaseModel):
+    """Where a scan may go (contract §9; M4 adds ``iframes``, ``shadow_dom``, ``spa_clicks``)."""
+
+    model_config = _SCAN
+    same_origin: bool = True
+    max_pages: int | None = Field(default=None, ge=1)  # None -> scan_max_pages; > cap -> 422
+    max_depth: int | None = Field(default=None, ge=0, le=5)  # None -> scan_max_depth
+    allow: list[PathGlob] = Field(default_factory=list, max_length=50)
+    deny: list[PathGlob] = Field(default_factory=list, max_length=100)
+    iframes: bool = True  # same-origin iframes (mockup 12 switch)
+    shadow_dom: bool = True  # open shadow roots (mockup 12 switch)
+    spa_clicks: bool = True  # click in-scope links that have no plain href
+
+
+class ScanAuth(BaseModel):
+    """A logged-in session for the scan: a mounted ``storage_state.json`` reference or, in dev
+    only, an inline storage state that is sealed into ``key_enc`` and never stored in the spec row.
+
+    The reference is a connection ``secret_ref`` (SEC-2/SEC-5): tenant-relative
+    (``DPS_SECRET_DIR/<tenant>/<ref>/``) or ``_shared/<ref>``, checked for the caller's tenant at
+    accept (``dps.secrets.check_secret_ref``) and resolved by ``dps.secrets.resolve_secret_ref``.
+    """
+
+    model_config = _SCAN
+    storage_state_ref: str | None = Field(default=None, pattern=SECRET_REF_PATTERN)
+    storage_state: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self) -> ScanAuth:
+        if self.storage_state_ref is not None and self.storage_state is not None:
+            raise ValueError("give storage_state_ref or storage_state, not both")
+        if self.storage_state_ref is not None and ".." in self.storage_state_ref.split("/"):
+            raise ValueError("storage_state_ref must not contain '..'")
+        return self
+
+
+class FillSpec(BaseModel):
+    """How forms are filled in the parallel view (never submitted)."""
+
+    model_config = _SCAN
+    personas: int = Field(default=1, ge=1, le=50)
+    locale: str = "en_US"  # one of SUPPORTED_LOCALES
+    display_persona: int = Field(default=1, ge=1)  # screenshots + dps_scan_field.fill_* use it
+
+    @model_validator(mode="after")
+    def _rules(self) -> FillSpec:
+        if self.locale not in SUPPORTED_LOCALES:
+            raise ValueError(f"fill.locale must be one of {list(SUPPORTED_LOCALES)}")
+        if self.display_persona > self.personas:
+            raise ValueError("fill.display_persona must not exceed fill.personas")
+        return self
+
+
+class CaptureSpec(BaseModel):
+    """Screenshots on or off. ``har=true`` is refused at accept time (a HAR holds bodies)."""
+
+    model_config = _SCAN
+    screenshots: bool = True
+    har: bool = False
+
+
+class ScanConsistency(ConsistencySpec):
+    """:class:`ConsistencySpec` for a scan: the same fields, extra keys refused (decision D4: no
+    level of a scan spec accepts an unknown key). ``RunSpec`` keeps the M2 model unchanged."""
+
+    model_config = _SCAN
+
+
+class ScanPurpose(Purpose):
+    """:class:`Purpose` for a scan, extra keys refused (see :class:`ScanConsistency`)."""
+
+    model_config = _SCAN
+
+
+class ScanSpec(BaseModel):
+    """``POST /api/v1/scans`` (contract §9). There is no submit field anywhere in this model, and
+    extra keys are refused at every level (decision D4).
+
+    Both filled screens are produced whenever ``parallel_view`` is true, so every scan generates
+    (or accepts) **both** a key and a synthesis seed and returns both once; ``mode`` selects how
+    obfuscated captures replace rendered data (tokens with a reversible map for ``obfuscate``,
+    persona surrogates for ``synthesize``), the parallel view's default side and the evidence
+    label.
+    """
+
+    model_config = _SCAN
+    url: str = Field(min_length=8, max_length=2048)
+    scope: ScanScope = Field(default_factory=ScanScope)
+    auth: ScanAuth = Field(default_factory=ScanAuth)
+    mode: Literal["obfuscate", "synthesize"] = "synthesize"
+    fill: FillSpec = Field(default_factory=FillSpec)
+    parallel_view: bool = True
+    capture: CaptureSpec = Field(default_factory=CaptureSpec)
+    consistency: ScanConsistency = Field(default_factory=ScanConsistency)
+    policy: str | dict[str, Any] | None = None  # None -> settings.default_policy
+    purpose: ScanPurpose | None = None
+
+
 class RetentionSpec(BaseModel):
     """Retention job spec."""
 
@@ -292,6 +397,9 @@ class JobSecret(BaseModel):
     synthesis_seed: dict[str, Any] | None = None
     scan_auth: dict[str, Any] | None = None
     tabular_model: str | None = None
+    scan_start_url: str | None = (
+        None  # M4: the raw start URL (may carry a query); purged with the key
+    )
 
 
 class SealedSelection(BaseModel):

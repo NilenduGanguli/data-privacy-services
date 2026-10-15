@@ -23,7 +23,7 @@ import os
 import re
 import secrets
 import tempfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from pathlib import Path
@@ -526,16 +526,32 @@ class ArtefactService:
             raise StorageError("storage_not_found")
         return row, self.store.stream(row.object_key)
 
-    async def delete_for_job(self, tenant_id: str, job_id: str) -> int:
+    async def delete_for_job(
+        self,
+        tenant_id: str,
+        job_id: str,
+        *,
+        kinds: Collection[str] | None = None,
+        ids: Collection[str] | None = None,
+        keep: Collection[str] = (),
+    ) -> int:
         """Delete every object and row of the job; returns the number of artefacts removed.
 
-        Objects go first (deletes are idempotent), so an interrupted call is completed by the
-        next one instead of leaving rows that point at nothing.
+        ``kinds`` / ``ids`` narrow the deletion to those kinds / artefact ids; ``keep`` names ids
+        that are never deleted (an evidence pack's artefacts). Objects go first (deletes are
+        idempotent), so an interrupted call is completed by the next one instead of leaving rows
+        that point at nothing.
         """
         async with self._acquire(tenant_id) as conn:
             rows = await conn.fetch(
-                f"SELECT id, object_key FROM {_schema()}.dps_artefact WHERE job_id = $1",
+                f"SELECT id, object_key FROM {_schema()}.dps_artefact WHERE job_id = $1 "
+                "AND ($2::text[] IS NULL OR kind = ANY($2::text[])) "
+                "AND ($3::text[] IS NULL OR id = ANY($3::text[])) "
+                "AND NOT (id = ANY($4::text[]))",
                 job_id,
+                None if kinds is None else list(kinds),
+                None if ids is None else list(ids),
+                list(keep),
             )
             for r in rows:
                 await self.store.delete(r["object_key"])

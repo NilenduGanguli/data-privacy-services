@@ -67,8 +67,21 @@ export function sweepSeries(sweeps: SweepDay[], layer: Layer, outcome: Outcome):
 
 const column = (path: string): string => path.replace(/^\$\./, '').replace(/^\$/, '');
 
+/** The report layer a failed sweep belongs to: a job's partitions are Connectors, a scan is the
+ *  UI scanner, an API call is API (S2 console r2 B1). */
+export function failedSweepLayer(f: FailedSweep): Exclude<Layer, 'all'> {
+  return f.where === 'job' ? 'conn' : f.where === 'scan' ? 'ui' : 'api';
+}
+
 /** Where a sweep failed and what that means, in words (no value is ever available to show). */
 export function failedSweepText(f: FailedSweep): { where: string; what: string } {
+  if (f.where === 'scan') {
+    // a UI sweep is the scan's own verification; one that failed is not "failed closed"
+    const what = f.error_code === 'submission_detected'
+      ? 'The scan\'s request log holds a request that is not a GET and that the guard allowed. The scan was marked failed and its key purged.'
+      : `The scan's verification failed (${f.error_code}). The scan was marked failed and its key purged.`;
+    return { where: `UI scan ${shortId(f.job_id)}`, what };
+  }
   const where = f.where === 'job'
     ? `${shortId(f.job_id)}${f.partitions.length ? ` · ${f.partitions.map((n) => `p${n}`).join(', ')}` : ''}`
     : f.route ?? 'API request';
@@ -183,8 +196,10 @@ export const LAYER_LABEL: Record<string, string> = { api: 'API', conn: 'Connecto
  *  deployment has no `/reports/evidence` (a backend before M5). */
 export function fromSummary(s: EvidenceSummary): EvidenceItem {
   const [policy, version] = (s.policy ?? '').split(/@v| v/);
+  const isScan = s.job_id.startsWith('s_');
   return {
-    id: s.id, job_id: s.job_id, job_kind: 'run', outcome: s.outcome, created_at: s.created_at, pack_sha256: '', layer: 'conn',
+    // a UI scan's job id is `s_…` (dps/ids.py PREFIX_SCAN, M4); the M2 list carries no job kind
+    id: s.id, job_id: s.job_id, job_kind: isScan ? 'scan' : 'run', outcome: s.outcome, created_at: s.created_at, pack_sha256: '', layer: isScan ? 'ui' : 'conn',
     summary: {
       mode: s.mode, policy: policy || null, policy_version: version ?? null, ticket: s.ticket, source: s.source_object, target: s.target,
       write_mode: s.write_mode, rows_written: s.rows_written, verification_passed: s.passed, hits: s.hits,

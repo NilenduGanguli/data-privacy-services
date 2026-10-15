@@ -54,7 +54,13 @@ from dps import db, jobs
 from dps.connections import ConnectionStoreError, get_connection, load_credentials
 from dps.engine.batch import KEYLESS_METHODS
 from dps.engine.detect.ensemble import Detector
-from dps.engine.detect.structural import classify_path, normalize_key
+from dps.engine.detect.structural import (
+    CHANNEL_NAMES,
+    MIXED_NAME_SCORE,
+    MIXED_VALUE_NAMES,
+    classify_path,
+    normalize_key,
+)
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.keys import LINK_ENTITIES
@@ -129,15 +135,9 @@ TEXT_SPAN_MIN_RATE = 0.05
 KEPT_HIT_MIN_RATE = 0.05
 #: ``hmac_pseudonym``'s output length: a mixed value in a bounded column at least this long.
 PSEUDONYM_LENGTH = 16
-#: Name evidence that a column is a polymorphic contact value: its name, next to a column that
-#: says which channel each row is (``contacts(channel, value)``).
-MIXED_VALUE_NAMES = frozenset(
-    {"value", "val", "contact", "contact value", "contact detail", "contact details", "detail"}
-)
-CHANNEL_NAMES = frozenset(
-    {"channel", "contact channel", "contact type", "contact method", "medium", "channel type"}
-)
-MIXED_NAME_SCORE = 0.7
+# Name evidence that a column is a polymorphic contact value — its name next to a column that says
+# which channel each row is (``contacts(channel, value)``): ``MIXED_VALUE_NAMES``, ``CHANNEL_NAMES``
+# and ``MIXED_NAME_SCORE`` live in ``dps.engine.detect.structural``, shared with the UI scanner (M4).
 _TEXT_KINDS = frozenset({"text", "lob_text"})
 #: Column kinds whose catalogue length bounds what is written back (``varchar(n)``, ``char(n)``).
 _BOUNDED_KINDS = frozenset({"text", "char"})

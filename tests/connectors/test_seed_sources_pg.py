@@ -7,7 +7,8 @@ import asyncio
 import pytest
 
 from tests.fixtures.sources import SourcePg
-from tools.seed_sources import TABLES, main, satellite_schemas, seed
+from tools.seed_model import DEMO_MODEL_VERSION
+from tools.seed_sources import MARKER, TABLES, main, satellite_schemas, seed
 
 pytestmark = [pytest.mark.integration, pytest.mark.pg_source]
 
@@ -80,5 +81,43 @@ async def test_seed_is_idempotent_and_resettable(
             main, ["--target", "postgres", "--dsn", source_pg.dsn, "--schema", source_pg.schema]
         )
         assert conflict == 3  # seeded with other parameters
+    finally:
+        await _drop_satellites(source_pg)
+
+
+async def test_a_schema_seeded_by_an_older_demo_model_is_reloaded(source_pg: SourcePg) -> None:
+    """S2 gates r1 B1: the demo national ids moved out of the D-A surrogate ranges (model 2). A
+    stack seeded before (a marker without a version, or version 1) is reloaded on the next seed —
+    the compose one-shot then fixes existing stacks — and its restore copy with it; a current
+    marker is "already seeded" again. Counts only."""
+    schema = f'"{source_pg.schema}"'
+    nid = f"SELECT count(*) FROM {schema}.customers WHERE id_type = 'AADHAAR' AND national_id LIKE '0%'"
+    try:
+        first = await seed(source_pg.dsn, rows=120, seed=7, schema=source_pg.schema)
+        assert not first.already and not first.reloaded
+        assert await source_pg.admin.fetchval(f"SELECT version FROM {schema}.{MARKER}") == 2
+        assert DEMO_MODEL_VERSION == 2
+        aadhaar = await source_pg.admin.fetchval(
+            f"SELECT count(*) FROM {schema}.customers WHERE id_type = 'AADHAAR'"
+        )
+        assert aadhaar > 30 and await source_pg.admin.fetchval(nid) == aadhaar
+        # a marker table from before the version column existed (model 1)
+        await source_pg.admin.execute(f"ALTER TABLE {schema}.{MARKER} DROP COLUMN version")
+        await source_pg.admin.execute(f"UPDATE {schema}.customers SET national_id = 'x'")
+        old = await seed(
+            source_pg.dsn, rows=120, seed=7, schema=source_pg.schema, restore_copy=True
+        )
+        assert old.reloaded and not old.already and old.restored
+        assert old.counts == first.counts
+        assert await source_pg.admin.fetchval(nid) == aadhaar  # the current model's rows
+        restore, _ = satellite_schemas(source_pg.schema)
+        copied = await source_pg.admin.fetchval(
+            f"SELECT count(*) FROM \"{restore}\".customers WHERE national_id LIKE '0%'"
+        )
+        assert copied == aadhaar
+        await source_pg.admin.execute(f"UPDATE {schema}.{MARKER} SET version = 1")
+        assert (await seed(source_pg.dsn, rows=120, seed=7, schema=source_pg.schema)).reloaded
+        again = await seed(source_pg.dsn, rows=120, seed=7, schema=source_pg.schema)
+        assert again.already and not again.reloaded
     finally:
         await _drop_satellites(source_pg)

@@ -10,6 +10,8 @@ frontend/dist
 docs
 demo
 tests
+# local storage states and other secret_ref folders (compose bind-mounts them; never in a layer)
+docker/secrets
 .pytest_cache
 .mypy_cache
 .ruff_cache

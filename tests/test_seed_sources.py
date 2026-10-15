@@ -53,8 +53,8 @@ def test_the_same_seed_gives_the_same_rows(data) -> None:  # noqa: ANN001
 
 def test_identifiers_are_rule_valid_fakes(data) -> None:  # noqa: ANN001
     formats = {
-        "AADHAAR": re.compile(r"^[2-9]\d{11}$|^1\d{11}$"),
-        "SSN": re.compile(r"^9\d{2}-\d{2}-\d{4}$"),  # the 9xx area is never issued as an SSN
+        "AADHAAR": re.compile(r"^0\d{11}$"),  # never issued, and no surrogate starts with 0
+        "SSN": re.compile(r"^666-\d{2}-\d{4}$"),  # never issued; surrogates take 9xx and 000
         "NINO": re.compile(r"^QQ\d{6}[A-D]$"),  # HMRC's example prefix, never issued
         "CURP": re.compile(r"^[A-Z]{4}\d{6}[HM][A-Z]{5}[0-9A-Z]\d$"),
     }
@@ -64,7 +64,7 @@ def test_identifiers_are_rule_valid_fakes(data) -> None:  # noqa: ANN001
         seen.add(kind)
         assert formats[kind].fullmatch(value), kind
         if kind == "AADHAAR":
-            assert value[0] == "1"  # UIDAI never issues numbers starting with 0 or 1
+            assert value[0] == "0"  # UIDAI never issues numbers starting with 0 or 1
             assert verhoeff_check_digit(value[:-1]) == value[-1]
         if kind == "CURP":
             assert curp.is_valid(value)

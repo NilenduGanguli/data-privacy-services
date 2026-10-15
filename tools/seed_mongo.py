@@ -5,8 +5,9 @@
 Fills ``crm.profiles`` (nested documents, an array of sub-documents, BSON ``Int64`` and
 ``Decimal128``; ``customerId = "CUST-<id>"``, the prefixed form mockup 07 shows) from
 :func:`tools.seed_model.seed_customers`, in ``insert_many`` batches of 1000, with a unique index on
-``customerId``. ``crm.dps_seed_info`` records ``(seed, rows)``: a repeat run with the same pair is a
-no-op, another pair replaces the data. Returns counts only — never a value, never the URI.
+``customerId``. ``crm.dps_seed_info`` records ``(seed, rows)`` and the demo data model's version
+(:data:`tools.seed_model.DEMO_MODEL_VERSION`): a repeat run with the same three is a no-op; another
+pair, or an older model, replaces the data. Returns counts only — never a value, never the URI.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, Final
 
-from tools.seed_model import SeedCustomer, demo_seed_bytes, seed_customers
+from tools.seed_model import DEMO_MODEL_VERSION, SeedCustomer, demo_seed_bytes, seed_customers
 
 DATABASE: Final = "crm"
 COLLECTION: Final = "profiles"
@@ -65,7 +66,16 @@ def seed_mongo(uri: str, rows: int, seed: int) -> dict[str, int | str]:
     try:
         db = client[DATABASE]
         marker = db[MARKER].find_one({"_id": "seed"})
-        if marker is not None and (marker.get("seed"), marker.get("rows")) == (seed, rows):
+        current = (seed, rows, DEMO_MODEL_VERSION)
+        if (
+            marker is not None
+            and (
+                marker.get("seed"),
+                marker.get("rows"),
+                marker.get("version", 1),  # a marker without a version holds model 1's documents
+            )
+            == current
+        ):
             return {name: UNCHANGED}
         db[MARKER].delete_many({})
         profiles = db[COLLECTION]
@@ -86,7 +96,9 @@ def seed_mongo(uri: str, rows: int, seed: int) -> dict[str, int | str]:
             profiles.insert_many(batch, ordered=True)
             total += len(batch)
         profiles.create_index("customerId", unique=True, name="customerId_unique")
-        db[MARKER].insert_one({"_id": "seed", "seed": seed, "rows": rows})
+        db[MARKER].insert_one(
+            {"_id": "seed", "seed": seed, "rows": rows, "version": DEMO_MODEL_VERSION}
+        )
         return {name: total}
     finally:
         client.close()

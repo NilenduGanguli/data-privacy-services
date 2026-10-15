@@ -9,6 +9,7 @@ import {
   typeNoteShort, writeModeLabel, verificationText, verificationTone,
 } from '../lib/jobs';
 import type { ClassificationSnapshot, EvidenceOut, Job } from '../lib/types';
+import { isScanPack, scanPackTitle, ScanPackSections, ScanPackSummary, Sec } from '../components/scanner/ScanEvidence';
 
 const LABEL_OBFUSCATE = 'pseudonymised — still personal data';
 
@@ -17,15 +18,6 @@ function apiMessage(e: unknown): string {
 }
 
 const text = (v: unknown): string => (v === null || v === undefined || v === '' ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v));
-
-function Sec({ n, title, right, keep, children }: { n: number; title: string; right?: React.ReactNode; keep?: boolean; children: React.ReactNode }): JSX.Element {
-  return (
-    <section className={`sec${keep ? ' keep' : ''}`} aria-labelledby={`s${n}`}>
-      <h2 id={`s${n}`}><span className="n">{n}</span> {title}{right && <span className="r">{right}</span>}</h2>
-      {children}
-    </section>
-  );
-}
 
 /** The evidence pack (mockup 10): the sealed, value-free record of one job, printable as the PDF
  *  look; Download JSON is the sealed artefact, Download PDF the server-rendered archival copy. */
@@ -103,6 +95,8 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
   const fallbacks = (v.fallbacks ?? {}) as Record<string, number>;
   const fbTotal = Object.values(fallbacks).reduce((a, b) => a + Number(b), 0);
   const day = new Date(p.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  // a UI scan's pack (M4) has a `scan` block and no columns, partitions or row counts
+  const scan = isScanPack(p);
   const outcomeWords = p.outcome === 'succeeded' || unfinished ? '' : p.outcome === 'dry_run' ? ' This was a dry run: nothing was written.' : ` The job ended ${p.outcome}.`;
 
   return (
@@ -121,11 +115,13 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
         <header className="doc-head">
           <div style={{ minWidth: 0, flex: '1 1 420px' }}>
             <div className="eyebrow">Data Privacy Services · evidence pack</div>
-            <h1 id="doc-title">{engineName(src.engine)} {text(src.object)} → {targetText}</h1>
+            <h1 id="doc-title">{scan ? scanPackTitle(p) : <>{engineName(src.engine)} {text(src.object)} → {targetText}</>}</h1>
             <div className="jid">Job {p.job_id} · {p.mode ?? p.job_kind} · purpose {p.purpose?.ticket ?? '—'}</div>
           </div>
           <div className="seal">
-            {passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : unfinished ? <span className={`chip ${verificationTone(false, hits, review, p.outcome)}`}>{verificationText(false, hits, review, p.outcome, firstError)}</span> : <span className={`chip ${verificationTone(false, hits, review)}`}>verification {verificationText(false, hits, review)}</span>}
+            {scan
+              ? <span className={`chip ${passed && Number(p.scan?.non_get_allowed ?? 0) === 0 ? 'emerald' : 'rose'}`}>{fmtCount(Number(p.scan?.submissions ?? 0))} submissions · {fmtCount(Number(p.scan?.non_get_allowed ?? 0))} non-GET allowed</span>
+              : passed ? <span className="chip emerald">verified · {fmtCount(hits)} leaks</span> : unfinished ? <span className={`chip ${verificationTone(false, hits, review, p.outcome)}`}>{verificationText(false, hits, review, p.outcome, firstError)}</span> : <span className={`chip ${verificationTone(false, hits, review)}`}>verification {verificationText(false, hits, review)}</span>}
             <span>Sealed {fmtUtc(p.created_at)}</span>
             <span>Pack <span className="mono">{p.id}</span> · sha256 <span className="mono">{shortSha(ev.pack_sha256)}</span></span>
             <span className={`chip ${synth ? 'violet' : 'teal'}`}>{p.label}</span>
@@ -138,11 +134,12 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
           <div><div className="l">Purpose</div><div className="v">{p.purpose?.ticket ?? '—'}</div></div>
           <div><div className="l">Legal basis</div><div className="v">{p.purpose?.legal_basis ?? '—'}</div></div>
           <div><div className="l">Job group</div><div className="v">{p.group_id ? <span className="mono">{p.group_id}</span> : 'none'}</div></div>
-          <div><div className="l">Mode · write</div><div className="v">{p.mode ?? '—'} · {writeModeLabel(tgt.write_mode, tgt.table_load)}</div></div>
+          <div><div className="l">Mode · write</div><div className="v">{p.mode ?? '—'} · {scan ? 'artefacts only, nothing written to the scanned site' : writeModeLabel(tgt.write_mode, tgt.table_load)}</div></div>
           <div><div className="l">Outcome</div><div className="v">{p.outcome}</div></div>
           <div><div className="l">Pack kept until</div><div className="v">{job?.expires_at ? fmtUtc(job.expires_at, false) : 'the tenant retention period'}</div></div>
         </div>
 
+        {scan ? <><ScanPackSummary p={p} /><ScanPackSections p={p} sha={ev.pack_sha256} /></> : <>
         <Sec n={1} title="Summary">
           <p className="lead">
             On {day} DPS read {fmtCount(counts.rows_read ?? 0)} {recordNoun(src.engine, Number(counts.rows_read ?? 0))} from {engineName(src.engine)} <b>{text(src.object)}</b>, {synth ? 'replaced' : 'protected'} the personal data in {p.columns.length} of its {totalCols} columns under policy <b>{p.policy?.name || '—'}</b>, and wrote {fmtCount(counts.rows_written ?? 0)} {recordNoun(src.engine, Number(counts.rows_written ?? 0))} to <b>{targetText}</b>{p.purpose?.ticket ? ` for change ${p.purpose.ticket}` : ''}.{' '}
@@ -230,6 +227,8 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
           </tbody></table></div>
         </Sec>
 
+        </>}
+
         {(p.fidelity || p.privacy) && (
           <Sec n={6} title="Synthetic fidelity and privacy" right="measured on the deterministic preview">
             <FidelityPanel fidelity={p.fidelity ?? null} privacy={p.privacy ?? null} utility={p.utility ?? null} tabular={p.tabular ?? null} rowsWritten={Number(counts.rows_written ?? 0)} />
@@ -248,7 +247,7 @@ export function EvidenceSheet({ ev, job, snapshot, onJson, onPdf }: {
         <Sec n={8} title="Signatures">
           <div className="sig">
             <div><div className="role">System attestation</div><div className="who">Data Privacy Services {p.engine_version}</div><div className="what">Generated and hashed at {fmtUtc(p.created_at)}.</div><div className="line"><span className="mono">sha256:{ev.pack_sha256}</span></div></div>
-            <div><div className="role">Data owner</div><div className="who">{text(p.snapshot?.accepted_by)}</div><div className="what">Accepted the classification snapshot{p.snapshot?.accepted_at ? ` at ${fmtUtc(p.snapshot.accepted_at, false)}` : ''}.</div><div className="line"><span>Signature</span><span>Date</span></div></div>
+            <div><div className="role">Data owner</div><div className="who">{text(p.snapshot?.accepted_by)}</div><div className="what">{scan ? 'Owns the scanned application and its registered host.' : <>Accepted the classification snapshot{p.snapshot?.accepted_at ? ` at ${fmtUtc(p.snapshot.accepted_at, false)}` : ''}.</>}</div><div className="line"><span>Signature</span><span>Date</span></div></div>
             <div><div className="role">Data protection officer</div><div className="who">&nbsp;</div><div className="what">Confirms purpose, legal basis and retention.</div><div className="line"><span>Signature</span><span>Date</span></div></div>
             <div><div className="role">Change approver</div><div className="who">&nbsp;</div><div className="what">Approves the release of the output under {p.purpose?.ticket ?? 'the change'}.</div><div className="line"><span>Signature</span><span>Date</span></div></div>
           </div>

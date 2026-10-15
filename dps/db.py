@@ -41,6 +41,11 @@ TENANT_TABLES: tuple[str, ...] = (
     "dps_artefact",
     "dps_evidence",
     "dps_audit_log",
+    # M4 (030): the UI scanner's value-free page, field, request-count and navigation-log rows
+    "dps_scan_page",
+    "dps_scan_field",
+    "dps_scan_request",
+    "dps_scan_event",
     "dps_tenant_usage",  # M5 (040)
     "dps_report_daily",  # M5 (041)
     "dps_report_entity_daily",

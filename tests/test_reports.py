@@ -423,3 +423,87 @@ async def test_run_counters_come_from_the_partitions_as_the_worker_keeps_them(  
     assert out.tiles["values_protected"] == 600 and out.trend[-1].obfuscated == 600
     assert out.layers["conn"]["rows"] == 500
     assert out.layers["conn"]["by_engine"] == {"postgres": 500}
+
+
+# --- S2 console r2 B1: one meaning of a UI sweep on the tile, the chart, the card and Overview ---
+async def _scan(
+    tenant: str, state: str, *, error_code: str | None = None, pack: dict[str, Any] | None = None
+) -> str:
+    """A finished scan job (``state``), with its evidence pack when ``pack`` is given."""
+    job = await jobs.create_job(
+        tenant_id=tenant, kind=JobKind.scan, phase=JobPhase.scan, mode="synthesize", spec={}
+    )
+    s = db.schema_ident()
+    async with db.acquire(tenant) as conn:
+        await conn.execute(
+            f"UPDATE {s}.dps_job SET state = $2, finished_at = now(), error_code = $3, "
+            "error = $3 WHERE id = $1",
+            job.id,
+            state,
+            error_code,
+        )
+        if pack is not None:
+            body = {
+                "pack_version": "dps.evidence.v1",
+                "id": f"ev_{job.id}",
+                "tenant_id": tenant,
+                "job_id": job.id,
+                "job_kind": "scan",
+                "mode": "synthesize",
+                "source": {"kind": "ui", "origin": "https://uat.bank.example"},
+                "scan": {"pages": 3, "submissions": 0, "non_get_allowed": 0},
+                **pack,
+            }
+            await conn.execute(
+                f"INSERT INTO {s}.dps_evidence (id, tenant_id, job_id, pack, pack_sha256) "
+                "VALUES ($1, $2, $3, $4::jsonb, 'abc')",
+                body["id"],
+                tenant,
+                job.id,
+                body,
+            )
+    return job.id
+
+
+async def _scans(tenant: str) -> dict[str, str]:
+    """A scan that succeeded (its sweep passed); one whose own verification failed
+    (``submission_detected``: the request log held a non-GET the guard allowed); one that failed
+    before it crawled (``secret_unavailable``: no pack, nothing swept); one canceled."""
+    passed = {"outcome": "succeeded", "verification": {"passed": True}, "errors": []}
+    caught = {
+        "outcome": "failed",
+        "verification": {"passed": False},
+        "errors": [{"code": "submission_detected", "where": "guard"}],
+    }
+    canceled = {"outcome": "canceled", "verification": {"passed": True}, "errors": []}
+    return {
+        "passed": await _scan(tenant, "succeeded", pack=passed),
+        "caught": await _scan(tenant, "failed", error_code="submission_detected", pack=caught),
+        "setup": await _scan(tenant, "failed", error_code="secret_unavailable"),
+        "canceled": await _scan(tenant, "canceled", pack=canceled),
+    }
+
+
+def test_a_ui_sweep_means_the_same_on_every_reports_surface(reports_app) -> None:  # noqa: ANN001
+    """S2 console r2 B1. A scan that fails before it sweeps anything (``secret_unavailable``: no
+    pack) counted as a failed UI sweep on the tile and the chart, while the Failed sweeps card never
+    listed a scan and the Overview posture left scans out. Now a UI sweep is a scan's own
+    verification: a scan that succeeded passed; a scan whose evidence records a verification error
+    failed and is listed; a scan that failed before crawling or was canceled is no sweep. The
+    tile's UI failures equal the card's, and the Overview posture counts the same sweeps."""
+    ids = reports_app.portal.call(functools.partial(_scans, "r1"))
+    r = reports_app.get("/api/v1/reports/jobs", params={"days": 14}, headers=H)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ui = [x for x in body["sweeps"] if x["layer"] == "ui"]
+    listed = [f for f in body["failed_sweeps"] if f["where"] == "scan"]
+    assert sum(x["failed"] for x in ui) == len(listed) == 1, (ui, listed)
+    assert sum(x["passed"] for x in ui) == 1
+    [caught] = listed
+    assert caught["job_id"] == ids["caught"] and caught["error_code"] == "submission_detected"
+    assert caught["day"] == _today().isoformat() and caught["partitions"] == []
+    assert body["totals"]["sweeps_failed"] == 1 + 1  # the leakage partition and the caught scan
+    summary = reports_app.get("/api/v1/reports/summary", params={"days": 14}, headers=H).json()
+    # API 2/2, partitions 2 of 3, UI 1 of 2: 5 of 7 sweeps passed
+    assert summary["posture"]["sweeps_passed_pct"] == round(100 * 5 / 7, 1)
+    _clean(r.text)
