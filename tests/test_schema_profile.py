@@ -832,15 +832,21 @@ ACCIDENTAL: list[Any] = ["2010-01-04", "2001-10-03", 21001.5, 1001.25, "x10012",
 #: Copies: an ID (a value, an integral float or numeric string, full-width digits, inside a code
 #: or an e-mail, next to another ID across a space or any separator that never joins the digits of
 #: a date, an amount or a range: ``;``, ``|``, ``_``, quotes, brackets, ``#``, ``+``, a zero-width
-#: space), a sampled date (also inside a datetime, after a ``T`` or before a space or an ``_``, or
-#: in a ``;`` list), a sampled name (re-cased, inside text) and an e-mail.
+#: space, or a comma before anything but a group of two or three digits, as in a CSV cell or a
+#: compact JSON list), a sampled date (also inside a datetime, after a ``T`` or before a space or an
+#: ``_``, or in a ``;`` list), a sampled name (re-cased, inside text) and an e-mail.
 LEAKS: list[Any] = [
     1001,
     1002.0,
     "１００３",
+    "１００４．００",  # a full-width whole number (review r2, B2)
     "CUST-1003",
     "a1004@example.com",
     "1001, 1002",
+    "1001,1002",  # a CSV list in a cell (review r2, B1)
+    "[1001,1002]",  # a compact JSON list
+    "1001,1002.00",  # not a grouped whole number: a list
+    "1001,10\u0966\u0968",  # 1001,1002 with Devanagari digits: a digit counts in any script
     "1003 1004",
     "1001.00",
     "1,002.00",
@@ -862,9 +868,19 @@ LEAKS: list[Any] = [
     "met ARJUN MEHTA today",
     "priya.nair@example.in",
 ]
-#: Joined like a date, an amount or a range (``-`` ``/`` ``.`` ``:`` ``,``, also full-width), so not
-#: read as two IDs: documented trade-offs, not refused.
-JOINED: list[Any] = ["1003-07", "1003/1004", "1001,1002", "[1001,1002]", "１００１－２０２０"]
+#: Joined like a date, an amount or a range (``-`` ``/`` ``.`` ``:``, also full-width, and a comma
+#: before a group of exactly two or three digits: thousands, lakh, a decimal comma), so not read as
+#: two IDs: documented trade-offs, not refused.
+JOINED: list[Any] = [
+    "1003-07",
+    "1003/1004",
+    "１００１－２０２０",
+    "10,01,002",  # lakh grouping
+    "1001,25",  # a decimal comma
+    "1001,250.50",  # thousands
+    "48,250.50",
+    "1001,\u0968\u096b",  # 1001,25 with Devanagari digits
+]
 
 
 def _seeds(count: int) -> list[bytes]:
@@ -881,8 +897,10 @@ def test_the_sample_sweep_matches_numbers_as_whole_digit_runs() -> None:
     edge of a run of digits, or whitespace: review r1 found ``1001, 1002`` and a space-separated
     datetime let through by whole runs alone; or any other character that never joins the digits
     of a date, an amount or a range: its re-check found ``1001;1002``, ``["1001","1002"]`` and
-    ``TXN_4821_1003`` let through); every copy still fails, and the guard the executor steers with
-    flags exactly what the sweep refuses."""
+    ``TXN_4821_1003`` let through; review r2 found the lists ``1001,1002`` and ``[1001,1002]``, so a
+    comma joins only before a group of exactly two or three digits, and a full-width ``1004.00``,
+    so a whole number is read after NFKC); every copy still fails, and the guard the executor
+    steers with flags exactly what the sweep refuses."""
     result = profile_from_sample(LIVE_SAMPLE, DETECTOR)
     assert [f.entity_type for f in result.profile.fields][0] == "CUSTOMER_ID"
     assert verify_against_sample([{"v": v} for v in [*ACCIDENTAL, *JOINED]], result).passed
@@ -920,20 +938,41 @@ def test_the_guard_flags_exactly_what_the_sweep_refuses() -> None:
     assert flagged == refused and any(flagged) and not all(flagged)
 
 
+def _groups_digits(text: str, comma: int) -> bool:
+    """True when the comma at ``text[comma]`` comes before exactly two or three digits (of any
+    script) and then no digit: it groups a number (``1,001``, ``10,01,002``, ``1001,25``)."""
+    end = comma + 1
+    while end < len(text) and text[end].isdecimal():
+        end += 1
+    return end - comma - 1 in (2, 3)
+
+
 def _naive_found(needle: str, raw: str) -> bool:
-    """The sample sweep's rule the slow way, for one original in one output string: a numeric
-    string that is a whole number (``1,001.00``) is read as it; a text original, or an all-digit one
-    of nine or more digits, is a substring of the normalised string (M0); a shorter all-digit one
-    must start and end at a break, the edge of a run of digits or a character of the raw string
-    (read after NFKC) that is neither a letter, a digit nor one of ``-`` ``/`` ``.`` ``:`` ``,``."""
-    number = re.fullmatch(r"\s*([+-]?)(\d[\d,]*)\.0+\s*", raw)
-    if number:
-        raw = number.group(1) + number.group(2).replace(",", "")
+    """The sample sweep's rule the slow way, for one original in one output string read after
+    NFKC: a string that is a whole number (``1,001.00``, every comma before a group of two or three
+    digits) is read as it; a text original, or an all-digit one of nine or more digits, is a
+    substring of the normalised string (M0); a shorter all-digit one must start and end at a break,
+    the edge of a run of digits or a character that is neither a letter, a digit nor one of ``-``
+    ``/`` ``.`` ``:``, nor a comma that groups a number (:func:`_groups_digits`)."""
+    text = unicodedata.normalize("NFKC", raw)
+    body = text.strip()
+    sign = body[:1] if body[:1] in ("+", "-") else ""
+    whole, dot, zeros = body[len(sign) :].partition(".")
+    groups = whole.split(",")
+    if (
+        dot
+        and zeros
+        and set(zeros) == {"0"}
+        and groups[0].isdecimal()
+        and all(len(group) in (2, 3) and group.isdecimal() for group in groups[1:])
+    ):
+        text = sign + "".join(groups)
     words: list[str] = []  # each character on its own, so every break is between two of them
     cuts: list[int] = []
-    for ch in unicodedata.normalize("NFKC", raw):
+    for i, ch in enumerate(text):
         words.append(normalise(ch))
-        if ch == "_" or not (ch.isalnum() or ch in "-/.:,"):
+        joiner = ch in "-/.:" or (ch == "," and _groups_digits(text, i))
+        if ch == "_" or not (ch.isalnum() or joiner):
             cuts.append(len(words) - 1)  # before and after this character
             cuts.append(len(words))
     hay = "".join(words)
@@ -960,12 +999,13 @@ def test_the_sweep_reads_a_string_as_normalise_does() -> None:
     rng = random.Random(3)
     alphabet = (
         "aZ09_-/.:,;| \t\"'[](){}#+@"
-        "\u00e9\u0301\u0345\u1fb3\u2121\u2460\u00bc\u00df\uff11\uff0d\uff0c\u200b\u0130"
+        "\u00e9\u0301\u0345\u1fb3\u2121\u2460\u00bc\u00df\uff11\uff0d\uff0c\uff0e\u200b\u0130"
+        "\u0967"
     )
     for _ in range(3000):
         text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
-        if schema_profile._INTEGRAL_TEXT.fullmatch(text):  # read as an integer instead
-            continue
+        if schema_profile._INTEGRAL_TEXT.fullmatch(unicodedata.normalize("NFKC", text)):
+            continue  # a whole number (also full-width: review r2, B2) is read as an integer
         assert schema_profile._words(text)[0] == normalise(text), ascii(text)
 
 
@@ -998,9 +1038,11 @@ def test_the_indexed_sweep_equals_the_naive_one() -> None:
     sample = [dict(r, ref=f"R{rng.randint(10, 99)}-{1001 + i}") for i, r in enumerate(LIVE_SAMPLE)]
     result = profile_from_sample(sample, DETECTOR)
     pool: list[Any] = [*ACCIDENTAL, *LEAKS, *JOINED, "Pune", "Navi Mumbai", "xx", "", 0, 3.5, None]
-    pool += [True, *(str(v) for row in sample for v in row.values())]
+    pool += [True, "25", "250", "\u0967\u0966\u0966\u0969"]  # 1003 in Devanagari digits
+    pool += [str(v) for row in sample for v in row.values()]
     pool += [r["ref"].lower() for r in sample]
-    seps = [" ", " ", ";", "_", "|", "-", "/", ",", ".", ":", '","', "\u200b", "－", "\u0345"]
+    seps = [" ", " ", ";", "_", "|", "-", "/", ",", ",", ".", ":", '","', "\u200b", "－", "\u0345"]
+    seps += ["\uff0c"]  # a full-width comma: a comma after NFKC
     rows: list[dict[str, Any]] = []
     for i in range(300):
         picks = rng.sample(pool, 4)

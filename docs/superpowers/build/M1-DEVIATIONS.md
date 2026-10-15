@@ -1795,7 +1795,8 @@ M1 plan's Tasks 12 and 13 where they differ.
     word (the concatenation equals `normalise` of the whole string). As built in `ec74985`, every
     other separator joined digits, not only `-`, `/`, `.`, `:` and a comma with no space after it
     as this entry first said; the re-check below (B1) makes every character other than a letter,
-    a digit or one of those five joiners a break.
+    a digit or one of those five joiners a break (and fix round 2 a comma a joiner only before a
+    group of exactly two or three digits).
   - A string that is a whole number with a zero fraction (`1001.00`, `1,001.0`) is read as that
     integer, as an integral float already was.
   - Not refused, by design: `1003-07` and `1003/1004` (joined like a date or a range, the class of
@@ -1916,8 +1917,10 @@ M1 plan's Tasks 12 and 13 where they differ.
     `normalise` of the whole value (a combining U+0345 is a break but folds to a letter).
   - Adding cuts only adds candidate spans: this is a superset of the round-1 rule, and still not
     M0. Dates, amounts and ranges stay joined: `2010-01-04`, `21001.5`, `1001.25`, `1001-2020`,
-    `1003-07`, `1003/1004`, `1001,1002` and `[1001,1002]` are not refused (the documented
-    trade-off; a comma with no space is ambiguous with thousands separators).
+    `1003-07` and `1003/1004` are not refused (the documented trade-off). As built in `c5b5fc2`,
+    every comma joined too, so the lists `1001,1002` and `[1001,1002]` were not refused either
+    (read as thousands separators); fix round 2 below (B1) makes a comma a joiner only before a
+    group of exactly two or three digits, as in thousands, lakh or a decimal comma.
 - **B2: `_Steering.give_up` stopped all steering of a field that could not avoid its own
   values.** An ID-like key whose sampled values fill its range (`id` 1000..1099 gives `integer`
   1000..1100) exhausts its own `avoid_in` test on its first row; `give_up` then removed the field
@@ -1946,7 +1949,8 @@ M1 plan's Tasks 12 and 13 where they differ.
       `(1001)(1002)`, `#1001#1002`, `1001+1002`, two IDs across a zero-width space,
       `2016-09-02;2019-04-11`, `2016-09-02_10:15:00` and `[2016-09-02]10:15`.
     - A new `JOINED` list holds the documented trade-offs, which must pass: `1003-07`, `1003/1004`,
-      `1001,1002`, `[1001,1002]`, and a full-width `1001-2020`.
+      a full-width `1001-2020`, and, until fix round 2 moved them to `LEAKS`, `1001,1002` and
+      `[1001,1002]`.
     - `_naive_found` follows the new break set character by character, after NFKC. The indexed
       sweep must still equal it on 300 random rows, which are now joined by random separators.
     - `test_the_sweep_reads_a_string_as_normalise_does`: 3 000 random strings over scripts,
@@ -1980,3 +1984,90 @@ M1 plan's Tasks 12 and 13 where they differ.
   venv, lane `dps-db` and OCR mock up) gave 3 294 passed, 354 skipped and 5 failed. The five are
   the pre-existing, unrelated failures that the review's baseline lists: two scanner captures,
   two crawlers and playground NER coverage.
+
+## Fix round 2 for S8-spec (review `S8-spec-review-r2` at `c5b5fc2`)
+
+- **B1: a comma before four or more digits joined them, so comma-joined lists of IDs held sampled
+  IDs that were neither steered nor refused.** `_BREAK` kept every comma as a joiner, so a CSV
+  list in a cell (`1001,1002`) or a compact JSON integer list (`[1001,1002]`, as `JSON.stringify`
+  and `json.dumps(..., separators=(",", ":"))` write it) was read as one number. M0 and `e1f3a3a`
+  refused both. Through the route, a 600-row sample with `dddd,dddd` and `[dddd,dddd]` columns
+  answered 200 with `verification.passed`, and 110-123 of 1 000 generated values per column held a
+  sampled customer ID as a list element (1 149-1 226 of 10 000). The rule now
+  (`schema_profile._BREAK`, shared by the guard and the sweep):
+  - A comma joins digits only before a group of exactly two or three digits that no digit follows:
+    thousands (`1,001`, `48,250.50`), lakh (`10,01,002`) or a decimal comma (`1001,25`). Before
+    anything else (four or more digits, one digit, a space, a bracket, the end) it is a break,
+    read as a list. The one number among those forms, a one-place decimal comma (`1001,5`), is
+    read strictly too. No amount generator writes a decimal comma; a `pattern` copied from such a
+    sample shape could, and a generated value holding a sampled ID is then drawn again.
+  - Digits are counted in any script (`\d`, on the NFKC text), because `normalise` folds every
+    decimal digit to ASCII. So `1001,10०२` is the list `1001,1002`, and `1001,२५` is the decimal
+    `1001,25`. An exhaustive check over all code points found that, after NFKC, exactly the
+    characters `\d` matches normalise to an ASCII digit. The reviewer's prototype used `[0-9]`,
+    which reads both of these mixed-script forms the other way. On ASCII text the two agree.
+  - The whole-number reading (`_INTEGRAL_TEXT`) accepts the same grouping only, so each comma must
+    come before a group of two or three digits. `1001,1002.00` was read as the integer 10 011 002;
+    it is now a list, and `1001` is found.
+  - Still joined, by design: a comma before exactly two or three digits next to an ID (`[1001,25]`,
+    `1001,100`) reads as grouping or a decimal comma. This is the documented trade-off, the same
+    class as `1003-07` and `1003/1004`.
+- **B2: the whole-number check ran before NFKC.** A full-width `１００４．００` (full stop U+FF0E)
+  was read as the digit run `100400`, not as the integer 1004. It passed through the route (200;
+  M0 refuses it), while `1004.00` gave 422. `_words` now applies NFKC first, so the whole-number
+  check sees ASCII. This matches what `api-m1.md` ("full-width forms count as their ASCII ones")
+  and the `_words` docstring already said.
+- **Docs.** The comma sentences now match the rule in the module docstring, `_BREAK`,
+  `_INTEGRAL_TEXT`, `_words`, `_SampleValues`, `verify_against_sample`, `api-m1.md`, and the
+  round-1 entry and its re-check above.
+- **Tests (written first; 6 failed on `c5b5fc2`).**
+  - `tests/test_schema_profile.py` keeps 65 cases.
+    - `LEAKS` gains `1001,1002`, `[1001,1002]`, `1001,1002.00`, `1001,10०२` and a full-width
+      `１００４．００`.
+    - `JOINED` loses the two lists and gains `10,01,002`, `1001,25`, `1001,250.50`, `48,250.50`
+      and `1001,२५`.
+    - `_naive_found` reads the string after NFKC first, whole-number check included (with its own
+      grouping test, not the regex). It treats a comma as a break unless exactly two or three
+      decimal digits, and then no digit, follow it.
+    - The differential sweep adds plain and full-width commas, two- and three-digit groups and a
+      Devanagari ID to its pool.
+    - The normalisation property skips strings whose NFKC form is a whole number. Its alphabet
+      gains a full-width full stop and a Devanagari digit.
+  - `tests/test_api_schema.py` goes from 27 to 31 cases.
+    - Three planted forms (`1001,1002`, `[1003,1004]` and a full-width `１００４．００`) each give
+      422 `leakage` with no echo.
+    - `test_comma_lists_of_ids_do_not_repeat_a_sampled_id` uses a 300-row sample with a CSV-list
+      column and a compact-JSON-list column of customer IDs, and asks for 500 rows. It answers
+      200, both columns are `pattern`, and none of the 2 000 generated list elements is a sampled
+      ID.
+- **Measured (the review's probes, re-run in process through the real route; values never
+  printed).**
+  - Wide bank sample (`r2_wide`). From 600 rows to 1 000: 200 3/3, with 0 list values holding a
+    sampled ID (110-123 per column before). From 600 rows to 10 000: 200 2/2, 0 (1 149-1 226
+    before), 7.0-7.2 s. From 200 rows to 1 000: 200 3/3, 0 (33-56 before). Same-column equality
+    is 0 in every run.
+  - Acceptance (`r2_accept`). Stub and model, NER off and on, 20 x 100: 20/20 each. 300 x 100,
+    stub and model: 300/300 each. That is 0 refusals in 680 calls. There are 0 sampled-ID tokens,
+    0 same-column equal values, and 0 sample values in the provider messages (the LLM is faked at
+    `LlmGateway._stellar`).
+  - Planted copies (`r2_planted`, NER off and on). All 39 real-copy forms give 422 `leakage` with
+    no echo. That is the review's 34 plus `1003,1004`, `[1003,1004]`, a Devanagari `1003,1004`,
+    `1003,1004.00` and a full-width `１００４．００`. All 4 model literals give 422. The joined
+    forms (`1003-07`, `1003/1004`, a full-width `／`, `10,03,002`, `1003,25`, `1003,250.50`) and
+    the 3 accidents give 200, as documented.
+  - Separator forms (`p13`): `json_list_int` and `comma_nospace` are now refused, and the guard
+    equals the sweep on every case.
+  - Code and list columns (`p14`): 200 3/3, 0 tokens. Dense `id` (`p16`): 200 3/3, 0 `id`s equal
+    to a sampled `cust_id`.
+  - Realistic samples (`p5`), 1 000 rows to 10 000: 200 3/3 in 3.55-3.6 s, and with mobile and
+    PAN in 4.5-4.6 s.
+  - Doomed sample (`p10`): 422 with no echo in 0.04 s (100 rows) and 0.28 s (10 000 rows).
+  - No sample (`p6`): the executor is byte-identical to `e1f3a3a`.
+  - Log scan of the raw in-process app output (5 model calls with NER and the planted calls):
+    0 of 24 sampled values. The positive control, the probe's own source, gives 24 of 24.
+  - Probes and outputs are in `reports/S8-spec-fix-r2/`.
+- **Gates.** `ruff format --check`, `ruff check` and `mypy dps` are clean. The three schema files
+  give 133 passed. The M1 gate (`DPS_TEST_REQUIRE_SERVICES=1`, `-m "docs or ocr"`) gives 139
+  passed and 2 skipped. The full suite (lane venv, lane `dps-db` and OCR mock up) gives 3 298
+  passed, 354 skipped and 5 failed in 849 s. The five failures equal the review's baseline:
+  two scanner captures, two crawlers and playground NER coverage.

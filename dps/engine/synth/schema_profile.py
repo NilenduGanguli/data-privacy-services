@@ -19,8 +19,9 @@ Synthesis from a sample never returns a sample's sensitive value: the executor s
 generated value that holds one (:func:`sample_guard`, ``execute_spec(avoid=...)``), and
 :func:`verify_against_sample` refuses what is left. A short all-digit original is matched from a
 break to a break (the edge of a run of digits, or any character but a letter, a digit or a joiner
-of a date, an amount or a range: ``-`` ``/`` ``.`` ``:`` ``,``), so a sampled ID is not "found"
-inside a generated date or amount, and one of ``LONG_DIGITS`` digits or more anywhere, as in M0;
+of a date, an amount or a range: ``-`` ``/`` ``.`` ``:``, and ``,`` before a group of exactly two
+or three digits), so a sampled ID is not "found" inside a generated date or amount but is in a
+list (``1001,1002``), and one of ``LONG_DIGITS`` digits or more anywhere, as in M0;
 types generated from a small fixed space (gender, nationality, city, card expiry:
 ``SWEEP_EXEMPT``) are not looked for; a field whose key the detector flags is never categorical
 (its values are swept, so DPS must not write them back); and an ID-like key avoids its own
@@ -152,17 +153,22 @@ _PATTERN_LITERALS = set("Aa9X\\")
 _DIGIT_RUN = re.compile(r"[0-9]+")
 #: A break between two digits for the sample sweep (read after NFKC; captured, so a break's own
 #: normalised text stays in the string): any run of characters that are neither a letter nor a
-#: digit, except the joiners of a date, an amount or a range (``-`` ``/`` ``.`` ``:`` ``,``) —
-#: whitespace, ``_`` ``;`` ``|`` quotes, brackets, ``#``, ``+``, ``@``, a zero-width space.
-_BREAK = re.compile(r"((?:[^\w\-/.:,]|_)+)")
+#: digit, except the joiners of a date, an amount or a range (``-`` ``/`` ``.`` ``:``, and a comma
+#: before a group of exactly two or three digits: ``1,001``, ``10,01,002``, a decimal ``1001,25``)
+#: — whitespace, ``_`` ``;`` ``|`` quotes, brackets, ``#``, ``+``, ``@``, a zero-width space, and a
+#: comma before anything else, read as a list (``1001,1002``, ``[1001,1002]``; a one-place decimal
+#: comma ``1001,5`` is read strictly too: no amount generator writes one). Digits are counted in
+#: any script (``\d``), as ``normalise`` folds every decimal digit to ASCII.
+_BREAK = re.compile(r"((?:[^\w\-/.:,]|_|,(?!\d{2,3}(?!\d)))+)")
 #: An all-digit original of at least this many digits is found anywhere in the digits, as in M0:
 #: it is longer than a date's eight digits, so no generated date, amount or code holds one by
 #: accident, and a copy of a mobile, an Aadhaar, a card or an account number written with a
 #: country code or in groups (``+91 98100 10012``) is still refused.
 LONG_DIGITS = 9
-#: A string that is a whole number with a zero fraction (``1001.00``, ``1,001.0``): the sweep
+#: A string that is a whole number with a zero fraction (``1001.00``, ``1,001.0``, each comma before
+#: a group of two or three digits as in ``_BREAK``; read after NFKC, so full-width too): the sweep
 #: reads it as that integer, as it reads an integral float (:func:`_canon`).
-_INTEGRAL_TEXT = re.compile(r"\s*([+-]?)(\d[\d,]*)\.0+\s*")
+_INTEGRAL_TEXT = re.compile(r"\s*([+-]?)(\d+(?:,\d{2,3})*)\.0+\s*")
 #: The last word of a key that names an identifier or a reference (``id``, ``order_ref``,
 #: ``invoiceNo``, ``account_number``): with a sample, such a field avoids its sampled values
 #: (:func:`sample_ids`), swept or not.
@@ -1290,14 +1296,16 @@ def _sweep_originals(result: ProfileResult) -> list[tuple[Finding, str]]:
 def _words(text: str) -> tuple[str, list[int]]:
     """An output string as the sample sweep reads it: normalised (a whole number with a zero
     fraction read as its integer), and the positions in it where a break separated two pieces (the
-    end of each piece). The string is read after NFKC (a full-width hyphen-minus is a ``-``) and
-    cut at every ``_BREAK`` character. Each piece, a break included, is normalised on its own, so the
+    end of each piece). The string is read after NFKC, whole-number check included (a full-width
+    hyphen-minus is a ``-``, a full-width ``1004.00`` the integer 1004), and cut at every
+    ``_BREAK``. Each piece, a break included, is normalised on its own, so the
     concatenation is ``normalise`` of the whole string: normalisation works character by character
     (canonical reordering moves only combining marks, never across a letter or a digit), and a
     string normalises as its NFKC form does."""
+    text = unicodedata.normalize("NFKC", text)
     if "." in text and (number := _INTEGRAL_TEXT.fullmatch(text)):
         text = number.group(1) + number.group(2).replace(",", "")
-    pieces = _BREAK.split(unicodedata.normalize("NFKC", text))
+    pieces = _BREAK.split(text)
     if len(pieces) == 1:  # no break: one word, no cut inside it
         return normalise(text), []
     normalised = [piece for piece in map(normalise, pieces) if piece]
@@ -1313,13 +1321,16 @@ class _SampleValues:
     An all-digit original (an ID, a date's digits) shorter than ``LONG_DIGITS`` is found where it
     starts and ends at a break: the edge of a run of digits, or between two digits of the output
     string any character that is neither a letter, a digit nor one of the joiners ``-``, ``/``,
-    ``.``, ``:`` and ``,`` (``_BREAK``: whitespace, ``_``, ``;``, ``|``, quotes, brackets, ``#``,
-    ``+``, a zero-width space; read after NFKC). So sampled ID ``1001`` is found in ``1001``,
-    ``1001.0``, ``1001.00``, ``CUST-1001``, ``x1001@…``, ``1001 1002``, ``1001, 1002``,
-    ``1001;1002``, ``["1001","1002"]`` or ``TXN_4821_1001`` (and ``10.01``, the same digits), and
-    sampled date ``2016-09-02`` in ``2016-09-02 10:15:00`` or ``2016-09-02_10:15:00``; not inside
-    ``2010-01-04``, ``21001.5``, ``1001.25``, ``1001-2020``, ``1001-07`` or ``1001,1002``, where a
-    joiner binds it to other digits as in a date, an amount or a range. A longer one (a mobile, a
+    ``.``, ``:`` and a comma before a group of exactly two or three digits (``_BREAK``:
+    whitespace, ``_``, ``;``, ``|``, quotes, brackets, ``#``, ``+``, a zero-width space, a comma
+    before anything else; read after NFKC, digits of any script). So sampled ID ``1001`` is found
+    in ``1001``, ``1001.0``, ``1001.00`` (also full-width), ``CUST-1001``, ``x1001@…``,
+    ``1001 1002``, ``1001, 1002``, ``1001,1002``, ``[1001,1002]``, ``1001;1002``,
+    ``["1001","1002"]`` or ``TXN_4821_1001`` (and ``10.01``, the same digits), and sampled date
+    ``2016-09-02`` in ``2016-09-02 10:15:00`` or ``2016-09-02_10:15:00``; not inside
+    ``2010-01-04``, ``21001.5``, ``1001.25``, ``1001-2020``, ``1001-07``, ``10,01,002`` or
+    ``1001,25``, where a joiner binds it to other digits as in a date, an amount (thousands or lakh
+    grouping, a decimal comma) or a range. A longer one (a mobile, a
     card) and any other original are found as substrings, as in M0. Text originals and long digit
     ones are indexed by their first ``SWEEP_MIN_LEN`` characters, so a value costs one lookup per
     position, whatever the size of the sample (the M0 sweep compares every original with every
@@ -1442,11 +1453,12 @@ def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> 
     generated from a small fixed space, so a coincidence says nothing (see ``SWEEP_EXEMPT``). An
     all-digit original shorter than ``LONG_DIGITS`` (an ID, a date's digits) is found where it
     starts and ends at the edge of a run of digits or at a break (any character but a letter, a
-    digit or a joiner ``-`` ``/`` ``.`` ``:`` ``,``), and an integral float or a whole-number
-    string as its integer: sampled ID ``1001`` is found in a generated ``1001``, ``1001.0``,
-    ``1001.00``, ``CUST-1001``, ``x1001@…``, ``1001, 1002``, ``1001;1002`` or ``TXN_4821_1001``
-    (and in ``10.01``, the same digits), not inside ``2010-01-04``, ``21001.5`` or ``1001.25``
-    (see :class:`_SampleValues`). A longer one (a mobile:
+    digit or a joiner ``-`` ``/`` ``.`` ``:``, or ``,`` before a group of exactly two or three
+    digits), and an integral float or a whole-number string (also full-width) as its integer:
+    sampled ID ``1001`` is found in a generated ``1001``, ``1001.0``, ``1001.00``, ``CUST-1001``,
+    ``x1001@…``, ``1001, 1002``, ``1001,1002``, ``[1001,1002]``, ``1001;1002`` or
+    ``TXN_4821_1001`` (and in ``10.01``, the same digits), not inside ``2010-01-04``, ``21001.5``,
+    ``1001.25``, ``10,01,002`` or ``1001,25`` (see :class:`_SampleValues`). A longer one (a mobile:
     ``+91 98100 10012``) and every other original are found as substrings, as in M0. The
     executor steers around every value :func:`sample_guard` flags, so a hit here is a spec
     literal or a value that could not get away from the sample: the route refuses the run (422

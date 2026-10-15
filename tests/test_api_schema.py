@@ -291,8 +291,11 @@ def test_a_realistic_sample_is_not_refused_by_accident(client: TestClient) -> No
         ("opened", "2016-09-02"),  # a sampled date
         ("segment", "1001, 1002"),  # two sampled IDs (review r1, B1: 200 with S8's first rule)
         ("segment", "1003 1004"),  # the same, without the comma
+        ("segment", "1001,1002"),  # two sampled IDs in a CSV cell (review r2, B1)
+        ("segment", "[1003,1004]"),  # the same as a compact JSON list
         ("opened", "2016-09-02 10:15:00"),  # a sampled date in a space-separated datetime
         ("balance", "1001.00"),  # a sampled ID as a numeric string
+        ("balance", "１００４．００"),  # the same, full-width (review r2, B2)
     ],
 )
 def test_a_sample_value_forced_into_the_output_is_refused(
@@ -424,6 +427,43 @@ def test_code_and_list_columns_do_not_repeat_a_sampled_id(client: TestClient) ->
         token
         for row in body["rows"]
         for column in ("txn_ref", "related")
+        for token in re.findall(r"[0-9]+", str(row[column]))
+    ]
+    assert len(tokens) > 1000
+    assert len(set(tokens) & {str(i) for i in ids}) == 0  # a count: no value in a message
+
+
+def test_comma_lists_of_ids_do_not_repeat_a_sampled_id(client: TestClient) -> None:
+    """Review r2 (B1): every comma joined the digits around it, as in ``48,250``, so a CSV list in
+    a cell (``1001,1002``) or a compact JSON list (``[1001,1002]``) was read as one number, and a
+    sampled customer ID listed in it was neither steered nor refused (110-123 values per column at
+    1 000 rows, 200 with ``verification.passed``). A comma joins digits only before a group of
+    exactly two or three (thousands, lakh, a decimal comma): a listed ID is a token, so such a value
+    is drawn again and none is left. Samples are fictitious."""
+    rng = random.Random(21)
+    ids = rng.sample(range(1000, 10000), 300)
+    sample = [
+        {
+            "cust_id": cust_id,
+            "related_csv": ",".join(str(i) for i in rng.sample(ids, 2)),
+            "related_json": json.dumps(rng.sample(ids, 2), separators=(",", ":")),
+        }
+        for cust_id in ids
+    ]
+    r = client.post(
+        "/api/v1/schema/synthesize",
+        headers=FULL,
+        json={"sample": sample, "rows": 500, "locale": "en_IN"},
+    )
+    body = r.json()
+    assert r.status_code == 200, r.text
+    generators = {f["name"]: f["generator"] for f in body["spec"]["fields"]}
+    assert generators["related_csv"] == generators["related_json"] == "pattern"
+    assert body["report"]["verification"]["passed"] and body["report"]["sample_redraws"] > 0
+    tokens = [
+        token
+        for row in body["rows"]
+        for column in ("related_csv", "related_json")
         for token in re.findall(r"[0-9]+", str(row[column]))
     ]
     assert len(tokens) > 1000
