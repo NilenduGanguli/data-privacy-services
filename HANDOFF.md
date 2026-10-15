@@ -11,6 +11,9 @@ compose profile with the demo site, scans API and console pages — see §15 (ru
 traps), `docs/technical/api-m4.md` (API as built) and the M4 rows of §1, §4, §5 and §7. `main` (M5 + M3) is merged
 into `m4` ahead of the M4 integration (§15.1); `m4` itself is not yet merged into `main`.
 
+**Finish stream `fsec` (security review, 2026-10-15): `m4` merged into `fsec`** — the review's fixes
+now hold on the scanner's paths too (§17); the scanner's own S5 wiring and Task 8B follow on `fsec`.
+
 **Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
 — merged with `--no-ff`; the gates of the integrated tree are recorded in §11, and the fixes of the
 integrated verification round 1 (raw PII kept as "not personal"; account numbers and customer ids
@@ -647,8 +650,8 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   and each NDJSON item at most `DPS_PATTERN_CPU_SECONDS` (5 s) in total; an NDJSON item only what
   it earned plus the stream's 10 ms base; no single run, L2 included, longer than
   `DPS_PATTERN_CPU_SECONDS`. Past it the call is refused: 422 `custom_pattern_too_slow` (engine
-  routes, NDJSON items, documents, the recognizer test); an L2 job or partition fails with that code
-  and is not retried; a post-write sample that could not run (that code, or a target error) makes
+  routes, NDJSON items, documents, the recognizer test); an L2 job or partition — and a scan (the
+  crawl stops; §17) — fails with that code and is not retried; a post-write sample that could not run (that code, or a target error) makes
   the verification `review_required`. Measured (round 2): a stacked pattern on 2 KB is refused
   after about 11 ms; a 1000-pattern policy is refused at the 5 s ceiling from about 10 KB of text
   (round 1 let 1 MB run 1001 CPU-seconds); the linear twin of that policy answers in about 4 s on
@@ -1645,3 +1648,32 @@ round 2"; report `~/.cache/dps-build/reports/S2-fix-r2.md`.
   (`where: "scan"`, linked to the scan); a scan that failed before it crawled (`secret_unavailable`,
   …) or was canceled is no sweep. The Overview posture counts UI sweeps too. No migration: UI sweeps
   are read from the job and evidence tables, so past days need no roll-up refresh.
+
+## 17. `m4` merged into finish stream `fsec` (2026-10-15)
+
+`git merge --no-ff m4` on branch `fsec` (merge commit `c1d8c36`): the UI scanner comes to the
+security-review stream for its own review and Task 8B. Three conflicts, both sides kept (contract,
+`dps/layers/connectors/discovery.py`, `dps/posture.py`). What changes for a build, a deploy or a demo
+(details: security review §3.24, `docs/superpowers/build/M5-DEVIATIONS.md` "M4 merged into `fsec`"):
+
+- **Images:** both images (`data-privacy-services`, `data-privacy-services-browser`) carry the merged
+  code; the browser image installs the core dependency `regex` (policy patterns) through
+  `pyproject.toml` like the app image — rebuild both.
+- **Browser-worker:** sizes its pattern matcher processes from `DPS_PATTERN_PROCESSES` (default 2;
+  single-threaded children started on first use) like the app and the worker. A scan whose policy
+  pattern runs past `DPS_PATTERN_CPU_SECONDS` ends `failed` with `custom_pattern_too_slow` at once (no
+  retry; key purged; a failed evidence pack names the code).
+- **Posture:** `DPS_TOKENIZER_PROFILES` is required (with the tokenizer enabled, staging/prod) for
+  the app and the worker only; the browser-worker never tokenizes and boots without it.
+- **Data at rest:** a scan's policy body (inline, or an `@name` reference resolved at accept) is
+  sealed with the job KEK in `dps_job.spec_enc`; `dps_job.spec.policy` holds its value-free label
+  `{sealed, name, version, sha256}` (`dps.rekey` re-seals `spec_enc` of every job kind). Scans accepted
+  before this change keep their body in `spec` and still run.
+- **API:** `POST /scans` honours `Idempotency-Key` across a KEK rotation and removes a scan whose
+  creation audit a strict sink refused (503 `audit_unavailable`); uncoded scan-spec refusals are the
+  app's scrubbed 422 (`{"detail": [{loc, msg, type}], "code": "invalid_request"}`); the scan CSVs guard
+  `+`/`-` cells like the L2 export; `dps_scan_fields_total` labels custom entity types `custom`.
+- **Lane `fsec` stack:** `docker compose --profile full up -d` from `dps-wt-fsec` (ports in its `.env`:
+  app 8416, dps-db 5483, source-pg 5484, MinIO 9070/9071, Oracle 1526, Mongo 27022, OCR 5066, demo
+  site 8426, tokenizer mock 8436); gates of the merged tree: report
+  `~/.cache/dps-build/reports/FSEC-merge-m4.md`.

@@ -1,6 +1,6 @@
 # DPS M5 security review (Task 17) — findings, fixes and guard tests
 
-**Branch:** `fsec` (from main `64c46e3`: M0–M3 + M5; M4 merges later) · **Date:** 2026-10-14 ·
+**Branch:** `fsec` (from main `64c46e3`: M0–M3 + M5; M4 merged into `fsec` on 2026-10-15, §3.24) · **Date:** 2026-10-14 ·
 **Plan:** `docs/superpowers/plans/2026-10-11-m5-hardening-and-showcase.md` Task 17, programme plan §2.6 F1.
 
 ## 1. Scope and method
@@ -23,13 +23,13 @@ credentials or raw DPS keys tracked; no `.env` tracked; no `dangerouslySetInnerH
 
 | # | Area | Finding (as designed before M5) | Fix | Test | Status |
 |---|---|---|---|---|---|
-| S1 | logs/errors | 422 bodies echoed input; pydantic's `union_tag_invalid` and value-quoting validators still echoed it after M0's handler (finder F5: an SSN as `pk_strategy.kind`, as `supported_entity`, as a method) | `dps/layers/api/validation.py`: `{"detail": [{"loc","msg","type"}], "code": "invalid_request"}`; quoting messages replaced (`dps.errors.safe_error_items`); non-identifier `loc` parts shown as `<key>`; the engine's 400 `invalid policy`, the policy store's `invalid_policy`, the recognizer test and connection validation use the same scrubbing; `custom.py`, `policy.py`, `jsonpath.py` validators name the rule, never the value | `tests/security/test_validation_errors.py` | fixed + test |
+| S1 | logs/errors | 422 bodies echoed input; pydantic's `union_tag_invalid` and value-quoting validators still echoed it after M0's handler (finder F5: an SSN as `pk_strategy.kind`, as `supported_entity`, as a method) | `dps/layers/api/validation.py`: `{"detail": [{"loc","msg","type"}], "code": "invalid_request"}`; quoting messages replaced (`dps.errors.safe_error_items`); non-identifier `loc` parts shown as `<key>`; the engine's 400 `invalid policy`, the policy store's `invalid_policy`, the recognizer test and connection validation use the same scrubbing; `custom.py`, `policy.py`, `jsonpath.py` validators name the rule, never the value | `tests/security/test_validation_errors.py`; scans: `tests/security/test_scanner_paths.py` (§3.24) | fixed + test |
 | S2 | secrets | `repr(Settings)` printed 12 secrets; `ApplyOptions`/`TransformContext` printed the SEC-4 binding key and the token cache | every secret setting `Field(default="", repr=False)`; `binding_keys`, `binding`, `external_cache`, `external` `field(repr=False)` | `tests/security/test_secrets_hygiene.py::test_settings_repr_hides_secrets`, `::test_engine_dataclasses_hide_binding_keys_and_token_maps` | fixed + test |
 | S3 | injection (policy) | policy-supplied regexes run with no ReDoS guard: `(a+)+$` (6 characters) pinned a CPU on ~40 characters, on every request using a stored policy | two layers (§3.2): the static first filter `regex_guard.check_pattern` (length ≤ 512, no backreferences/conditionals, bounds ≤ 1000, no unbounded repeat inside a repeat bounded above 3, no empty alternative inside such a repeat) run by `PatternSpecModel` (so `/policies/test-recognizer`, drafts and inline policies), and — review rounds 1 and 2 — the bound: patterns and deny lists run on the `regex` module, each run charged its own CPU (5 ms in the calling thread holding the GIL, then a matcher process), under a per-call allowance of 10 ms + 20 µs per run + 0.5 µs per character per pattern, capped at `DPS_PATTERN_CPU_SECONDS` per request and per NDJSON item (422 `custom_pattern_too_slow` past it); deny lists are matched as a trie; declared-field globs are matched without a regex (`custom.PathGlob`), linear in the path | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py` | fixed + test (rounds 1–2) |
 | S4 | injection (selections) | `validate_selection` / the MongoDB allow-list are the only barrier before SQL/BSON | none needed: the adversarial corpus is refused on both dialects; comments are stripped (M2 design), never reach the statement | `tests/security/test_selection_injection.py` | accepted (control holds) + test |
-| S5 | SSRF (scanner) | no `check_scan_url`: numeric encodings, IPv4-mapped IPv6, metadata IPs and DNS that resolves to link-local were not refused; Chromium resolved any name | `dps.netguard.check_scan_url`, `forbidden_ip_reason` (IPv4-mapped/NAT64/6to4 unwrapped), `check_resolved_host`, `chromium_resolver_rules`; wiring into `POST /scans` and the crawler's launch flags lands **with the M4 merge** (no scanner on this branch yet) | `tests/security/test_netguard.py` | functions + test; wiring at M4 merge |
+| S5 | SSRF (scanner) | no `check_scan_url`: numeric encodings, IPv4-mapped IPv6, metadata IPs and DNS that resolves to link-local were not refused; Chromium resolved any name | `dps.netguard.check_scan_url`, `forbidden_ip_reason` (IPv4-mapped/NAT64/6to4 unwrapped), `check_resolved_host`, `chromium_resolver_rules`; wiring into `POST /scans` and the crawler's launch flags follows the M4 merge (M4 merged into `fsec` 2026-10-15; the wiring is the next step, with Task 8B) | `tests/security/test_netguard.py` | functions + test; wiring pending (next step) |
 | S6 | auth | a route added without `require_scope` would be public | `require_scope`/`require_any_scope` tag their dependency (`__dps_scope__`); the walk uses `iter_route_contexts` (FastAPI 0.143 nests included routers, so the plan's `app.routes` walk saw 2 routes) | `tests/security/test_route_auth.py` | fixed + test |
-| S7 | tenancy | object routes could leak existence across tenants | none needed: RLS + `tenant_of` hold (finder: 27 object routes 404) | `tests/security/test_cross_tenant.py` (`db`) | accepted (control holds) + test |
+| S7 | tenancy | object routes could leak existence across tenants | none needed: RLS + `tenant_of` hold (finder: 27 object routes 404; the scan routes too after the M4 merge, §3.24) | `tests/security/test_cross_tenant.py` (`db`) | accepted (control holds) + test |
 | S8 | key admin | a tenant admin could mint broader keys | `check_grant` (Task 9) | `tests/test_auth_db.py::test_no_privilege_escalation` | fixed (Task 9) |
 | S9 | exports | audit CSV cells starting `= + - @` run in spreadsheets | `csv_cell` (Task 11); the L2 `files` CSV export lacked it — finding F-07 | `tests/test_admin_api.py::test_audit_csv_is_streamed_and_formula_safe` | fixed (Task 11); F-07 see §3 |
 | S10 | PDF | Paragraph mini-markup from pack strings | `pdf_text` escaping (Task 14) | `tests/test_evidence_pdf.py::test_markup_is_escaped_and_unicode_folded` | fixed (Task 14) |
@@ -45,7 +45,7 @@ Severity as confirmed. "Test" fails without the fix (the finders' probes showed 
 |---|---|---|---|---|---|
 | F-01 | HIGH | Production-write admin gate (D3) bypassable: a `jobs` key cloned the production connection without its tag (same `secret_ref`) and rewrote production in place (40/40 rows) | see §3.1 (completed in review round 1, B2) | `tests/api/test_production_resource_gate.py` | fixed + test |
 | F-02 | HIGH | ReDoS via policy-supplied recognizer regex (and, review round 1 B1, via stacked repeats and separated-star declared-field globs; round 2: the bound refused legitimate scans under load and allowed ~250× the legitimate work) | S3, §3.2 | `tests/security/test_regex_guard.py`, `test_pattern_budget_load.py`, `test_pattern_matcher.py` | fixed + test (rounds 1–2) |
-| F-03 | HIGH | S5 scanner SSRF guard missing | S5 (wiring at the M4 merge: a blocking item of that merge) | `tests/security/test_netguard.py` | functions fixed; wiring pending M4 |
+| F-03 | HIGH | S5 scanner SSRF guard missing | S5 (M4 merged into `fsec` 2026-10-15; the wiring is the next step there — a blocking item before `fsec` merges into main) | `tests/security/test_netguard.py` | functions fixed; wiring pending |
 | F-04 | HIGH | With NER on, a date of birth was downgraded to `DATE` (`keep`) and returned in clear | see §3.4 | `tests/test_ner_dob_precedence.py` | fixed + test |
 | F-05 | MED | S11 no-store (reported by four finders) | S11 | `tests/security/test_headers.py` | fixed |
 | F-06 | MED | RLS posture blind to `owner_directory`'s role: with the migration login unset, the API role read every tenant's jobs/connections/policies | see §3.6 | `tests/test_rls_posture_unit.py::test_a_policy_open_to_the_runtime_role_is_named`, `tests/db/test_rls.py::test_migrating_as_the_runtime_role_is_refused_in_every_environment` | fixed + test |
@@ -373,6 +373,10 @@ an identifier (`^[A-Z][A-Z0-9_]{0,63}$`), which also makes v1's split unambiguou
 | `be2b326` | review round 1 B2: F-01 completed — holders of a production credential |
 | `e7882af` | review round 1 B1 + B3: F-02/S3 per-call pattern budget and the glob matcher; F-10 registry per call |
 | `c371d2f` | review round 2 R2-B1 + R2-B2: each pattern run charged its own CPU (in-thread slice, then matcher processes), the capped per-call allowance with per-item NDJSON budgets, deny lists as a trie, the post-write sample failing closed, and N-r2-1's refusals |
+| `c1d8c36` | `m4` merged into `fsec` (§3.24): the F-11 posture rule belongs to the serving roles |
+| `cf4f66f` | Task 0: M4's modules and scan routes join the contract-surface guard |
+| `dae4665` | §3.24: F-02, F-07, F-10, F-14, F-18 and F-21 on the scanner's paths |
+| `9bf03d1` | §3.24: S7 walks a scan's routes; the browser-worker posture test names the allow-list |
 
 Proof beyond the tests: the finders' probes re-run on the fixed branch
 (`~/.cache/dps-build/reports/S3-impl/probes/*.after.out`) — the D3 clone is refused (403, 0 rows
@@ -381,6 +385,47 @@ changed), `(a+)+$` is refused before it runs, the oracle makes 0 tokenizer calls
 profile, every key-bearing answer is `no-store`, `repr(Settings)` shows 0/13 secrets, 1000-recognizer
 requests add 0 metric series, a previous-KEK blob opens in the rotation window, and with the real
 Presidio model a birth date is transformed in 8/8 runs.
+
+### 3.24 The M4 merge (2026-10-15): the fixes on the scanner's paths
+
+`m4` (the UI scanner, with main as of `144cc65` merged into it) was merged into `fsec` with
+`--no-ff` (merge commit `c1d8c36`; three conflicts, each kept both sides: the contract's migration
+table and scan-spec paragraph, `discovery.py`'s imports, and `posture.py`, where the F-11 rule now
+belongs to the roles that serve — the app and the worker — as the tokenizer token rule already
+did: a scan's fill has no tokenizer adapter, so `external_tokenize` fails closed there). Each fix of
+this review that has a twin on the scanner's paths was checked there; the twins that did not hold
+were fixed, each with a test that fails without the fix (`tests/security/test_scanner_paths.py`,
+`tests/scanner/test_scan_pattern_budget.py`):
+
+| Fix | Scanner path | As merged | Fix | Test |
+|---|---|---|---|---|
+| F-02 | a policy pattern (custom recognizer, deny list) that runs past its budget during a crawl | `PatternTooSlow` escaped the scan handler: the job stayed `running` until its lease expired and the reaper retried it, each attempt burning the pattern's CPU again | `ScanRunner.run` stops the crawl and records `RunOutcome.error_code`; the scan ends `failed` with `custom_pattern_too_slow` at once (no retry, key purged, a failed evidence pack naming the code; request counts saved, nothing runs a pattern again); the browser-worker sizes its matcher processes from `DPS_PATTERN_PROCESSES` like the app and the worker | `test_scan_pattern_budget.py` (both cases), `test_scanner_paths.py::test_the_browser_worker_sizes_its_matcher_processes` |
+| F-07 | the scan inventory CSV and the export CSV (labels come from the scanned site, which may be hostile) | `+`/`-` followed by a digit was never guarded: `-2+3+cmd\|' /C calc'!A0` reached the CSV as a formula | the L2 export's rule: `+`/`-` followed by more than a number or phone shape gets the apostrophe (a lone sign too, as M4 chose) | `test_scan_csv_cells_are_guarded_at_least_like_the_l2_export` (differential against the L2 export's guard) |
+| F-10 | `dps_scan_fields_total{entity_type}` on the anonymous `/metrics` | a field classified with a policy's custom entity type put the caller-chosen name on `/metrics` | `crawler.count_field_metrics` labels it `custom` (`taxonomy.metric_entity_label`) | `test_a_custom_entity_type_is_counted_as_custom_on_the_scan_metrics`, `test_every_scan_field_counter_goes_through_the_bounded_label` |
+| F-14 | `POST /scans` returns the scan's key and seed once | a strict audit sink refusing `scan.create` (503) left the scan queued under a key nobody held; its `Idempotency-Key` replay then returned it without the key | the scan is removed (`jobs.discard_unannounced`) before the 503; a retry gets a fresh scan and its key | `test_a_refused_scan_creation_audit_leaves_no_scan_behind` |
+| F-18 | a scan's policy body — inline, or an `@name` reference resolved at accept | stored in clear in `dps_job.spec` and returned by `GET /scans`, `GET /scans/{id}`, `GET /jobs`, `GET /jobs/{id}` (deny-list terms included) | `redact_scan_spec` stores the value-free label; `POST /scans` seals the body in `spec_enc` (the run jobs' `SealedSelection` blob, `dps.layers.scanner.seal_scan_policy`); `open_runtime`, the finalize of a canceled scan and its evidence reopen it (`stored_policy`) | `test_a_scan_policy_body_never_rests_in_clear_and_the_worker_reopens_it`; M4's `test_scans_api.py` and `test_scan_policy_refs.py` now read the body from `spec_enc` |
+| F-21 | `POST /scans` `Idempotency-Key` replays during a KEK rotation | a replay admitted under the previous KEK was refused as `idempotency_key_reused` (the fingerprint is keyed by the KEK) | the fingerprints under `DPS_JOB_KEK_PREVIOUS` are compared too, as on the jobs routes | `test_a_scan_admitted_under_the_previous_kek_replays_during_the_rotation` |
+| F-11 | the browser-worker's production posture | the merged F-11 rule refused a browser-worker that shares the app's tokenizer configuration (M4's posture test failed) | the allow-list rule applies to the roles that serve (app, worker); a scan never calls the tokenizer | `tests/scanner/test_browser_worker_posture.py` (the app and the worker still name `DPS_TOKENIZER_PROFILES`) |
+
+Held without a change (tests kept or extended): S1 — a scan spec refusal never echoes the input
+(the app's scrubbed 422 for uncoded refusals, `{"detail": [{loc, msg, type}], "code":
+"invalid_request"}` — M4's codeless 422 became this one; or a scan code whose detail names the code
+only: `test_a_scan_spec_refusal_never_echoes_the_input`); S6 — every `/api/v1/scans*` route declares
+`scan` (`test_route_auth.py` walks them); S7 — another tenant's scan and its pages, events,
+inventory, export, cancel and `/jobs/{id}` answer 404 (`test_cross_tenant.py` extended); S11 —
+every scans answer is `no-store`; S2 — M4 adds no secret setting; F-06 — the scan tables carry
+`tenant_isolation` only (the RLS posture check passes at boot); F-09/S13 — the browser-worker
+configures the same logging (root floor, capped libraries; M4's own log scan
+`tests/test_no_values_in_logs_m4.py`). Not applicable: F-01/F-08 (no connection), F-12/F-19/F-22
+(a scan's fill never tokenizes externally), F-13 (`/jobs/{id}/retry` refuses scans:
+`job_not_retryable`), F-20 (a scan's seed draws synthetic personas only; the DEK, which reverses
+the obfuscated captures' tokens, is wrapped when `wrap_key` is given). The contract-surface guard
+(Task 0) lists M4's modules and scan routes now instead of its strict `xfail`.
+
+Still open for the scanner (next step on `fsec`, with Task 8B): the S5 wiring (`check_scan_url` at
+`POST /scans`, Chromium `--host-resolver-rules`) — note that M4's model-level `url_invalid`
+already answers a non-http(s) scheme or userinfo, before `check_scan_url` would; the scanner part
+of the adversarial sweep and a D4 re-check.
 
 ## 4. Considered and refuted
 
@@ -456,13 +501,17 @@ Presidio model a birth date is transformed in 8/8 runs.
 - v1 bind tags (hints issued before F-22) still verify; their `None`/`""` profile ambiguity remains
   for those hints only.
 - `/metrics` is keyless by design (ops scraping); restrict the ops port by NetworkPolicy (Task 25).
-- The scanner SSRF guard (S5) is wired at the M4 merge; until then the functions and tests exist but
-  no scanner route calls them (there is no scanner on this branch).
+- The scanner SSRF guard (S5): M4 is merged into `fsec` (§3.24) but the wiring is the next step;
+  until then the functions and tests exist and no scanner route calls them (the scanner's own rails
+  — registered hosts, the scope proxy, the request guard — apply).
 
 ## 6. Re-running the review
 
 ```bash
 ./lane.sh pytest -q tests/security tests/test_no_values_in_logs_m5.py tests/test_contract_surface.py
+# the M4 merge (§3.24): the fixes on the scanner's paths (the db cases need the lane's dps-db)
+./lane.sh pytest -q tests/security/test_scanner_paths.py tests/scanner/test_scan_pattern_budget.py \
+  tests/scanner/test_browser_worker_posture.py
 DPS_TEST_REQUIRE_SERVICES=1 ./lane.sh pytest -q -m db tests/security/test_cross_tenant.py \
   tests/api/test_production_resource_gate.py
 ./lane.sh python /Users/neelu/.cache/dps-build/reports/S3-<lens>/<probe>.py   # the finders' probes

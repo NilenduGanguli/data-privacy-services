@@ -1309,3 +1309,44 @@ round-1 pattern budget wrong in two ways; both are fixed test-first in `c371d2f`
 - Still open from the round-2 review: N-r2-2 (the matcher's per-run cost on short texts, about
   2 µs: to measure on the 1M-row benchmark), N-r2-3 (production status is per tenant: recorded in
   §5).
+
+## M4 merged into `fsec` — the security review's fixes on the scanner's paths (finish stage, `fsec`)
+
+Not a plan task: the merge that brings the UI scanner (`m4`, which already contains main as of
+`144cc65`) into `fsec` for its security review and Task 8B — `git merge --no-ff m4` (`c1d8c36`), three
+conflicts, both sides kept: the contract (M4's migration row with `dps_scan_event` beside the M5
+row with `046_job_group_kcv.sql`; M4's scan-spec paragraph beside the S5 paragraph),
+`discovery.py` (both import sets) and `posture.py` (F-11's allow-list rule gated by `serves`, like
+M4's tokenizer-token rule: the browser-worker never tokenizes). Then this stream's work was made to
+hold on what came in (security review §3.24; each item with a test that fails before it):
+
+- **F-02:** `RunOutcome.error_code` (new field); `ScanRunner.run` catches `PatternTooSlow`, clears
+  the frontier, saves the request counts and skips the redacted blocked-request events (no pattern
+  may run again: the call's allowance is spent); `scan_job` finalizes such a crawl as `failed`
+  (also a refusal that escapes `run`), and `finalize_scan` records `{"code":
+  "custom_pattern_too_slow", "where": "crawl"}` — no retry. `browser_worker.amain` calls
+  `configure_pattern_processes(settings.pattern_processes)` after the posture check.
+- **F-07:** `inventory._guard_cell` (both scan CSVs) uses the L2 export's `_SIGNED_DATA` rule; a lone
+  sign stays guarded (M4's choice).
+- **F-10:** `crawler.count_field_metrics` labels custom entity types `custom` on
+  `dps_scan_fields_total`.
+- **F-14 / F-21 (`POST /scans`):** a refused `scan.create` audit removes the scan
+  (`jobs.discard_unannounced`) before the 503; idempotency fingerprints under the previous KEK are
+  compared (`request_fingerprint_alternates`, `create_job(idempotency_alternates=…)`).
+- **F-18:** `redact_scan_spec` stores `policy_label(body)` for a policy body; `POST /scans` seals the
+  body in `spec_enc` (`dps.layers.scanner.seal_scan_policy`, `SealedSelection`, AAD
+  `dps_job.spec:<id>`); `dps.layers.scanner.stored_policy` reopens it for `open_runtime`,
+  `_policy_name` and the finalize without a runtime (`secret_unavailable` when it cannot be
+  opened). M4's `test_scans_api.py::test_policy_references_resolve_at_accept_and_pin_the_version`
+  reads the tuned body from `spec_enc` now, and `test_scan_policy_refs._claimed` seals it as the API
+  does.
+- **S1 (held):** M4's uncoded model refusals are the app's scrubbed 422 since the merge (`code:
+  invalid_request` added); `test_uncoded_model_refusals_stay_field_lists`, the contract and
+  `docs/technical/api-m4.md` say so.
+- **Task 0:** `tests/test_contract_surface.py` moves `M4_SURFACE`/`M4_ROUTES` into `SURFACE`/`ROUTES`
+  (more M4 names: the browser-worker entry points, the scan handlers, `ScanSpec`, `ScanRunner`,
+  `classify_field`, every scans route) and drops the strict `xfail` that waited for this merge.
+- **S7:** `tests/security/test_cross_tenant.py` walks a scan's routes too (control holds).
+- Not done here (the next step on `fsec`): Task 8B and the S5 wiring.
+- Commits: `c1d8c36` (merge), `cf4f66f` (Task 0), `dae4665` (the scanner twins), `9bf03d1` (S7,
+  posture test); report `~/.cache/dps-build/reports/FSEC-merge-m4.md`.
