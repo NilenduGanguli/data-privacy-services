@@ -19,13 +19,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from dps import db, jobs
 from dps.audit import AuditEvent
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_from_caller
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.errors import CodedError
 from dps.ids import PREFIX_EVIDENCE, new_id
 from dps.jobs import ClaimedJob, JobPhase, JobState
-from dps.jobs_models import JobProgress, JobSecret, ScanSpec
+from dps.jobs_models import JobProgress, JobSecret, ScanSpec, SealedSelection, is_policy_label
 from dps.layers.connectors.evidence import pack_sha256, render_html
 from dps.layers.scanner.inventory import build_export, build_scan_evidence
 from dps.layers.scanner.personas_fill import persona_values
@@ -39,7 +40,14 @@ from dps.layers.scanner.runtime import (
 from dps.layers.scanner.store import ScanStore, StoredEvidence
 from dps.layers.scanner.urls import CrawlScope, Origin, UrlError, canonical
 from dps.observability import get_logger
-from dps.secrets import SealError, SecretUnavailable, open_sealed, resolve_secret_ref
+from dps.secrets import (
+    SealError,
+    SecretUnavailable,
+    open_json,
+    open_sealed,
+    resolve_secret_ref,
+    seal_json,
+)
 
 if TYPE_CHECKING:
     from dps.layers.scanner.models import FieldRecord, PageRecord, RequestCount, ScanEvent
@@ -57,6 +65,7 @@ __all__ = [
     "open_runtime",
     "scan_finalize_job",
     "scan_job",
+    "seal_scan_policy",
 ]
 
 logger = get_logger(__name__)
@@ -90,6 +99,38 @@ def _storage_state(tenant_id: str, ref: str, ctx: HandlerContext) -> dict[str, A
     return state
 
 
+def seal_scan_policy(kek: bytes, job_id: str, policy: object) -> bytes | None:
+    """``spec_enc`` of a scan whose policy is a body — inline, or an ``@name`` reference resolved
+    at accept — sealed with the job KEK (AAD ``dps_job.spec:<id>``, the run jobs' blob): deny and
+    allow-list terms are often the sensitive terms themselves, so ``dps_job.spec`` keeps only the
+    value-free label :func:`~dps.layers.scanner.models.redact_scan_spec` writes (S3 security
+    review F-18). ``None`` for a policy name (nothing to seal)."""
+    if not isinstance(policy, dict):
+        return None
+    return seal_json(kek, SealedSelection(policy=policy), aad=f"dps_job.spec:{job_id}")
+
+
+def stored_policy(ctx: HandlerContext, job: ClaimedJob) -> str | dict[str, Any] | None:
+    """The scan's policy as ``POST /scans`` accepted it: a name (or nothing: the default), or the
+    body sealed in ``spec_enc`` when the stored spec holds its label (F-18).
+
+    Raises :class:`ScanSetupError` ``secret_unavailable`` when a label's sealed body cannot be
+    opened (no ``spec_enc``, another KEK, a tampered blob).
+    """
+    policy = (job.spec or {}).get("policy")
+    if not is_policy_label(policy):
+        return policy if isinstance(policy, str | dict) else None
+    if job.spec_enc is None:
+        raise ScanSetupError("secret_unavailable")
+    try:
+        sealed = open_json(ctx.kek, job.spec_enc, SealedSelection, aad=f"dps_job.spec:{job.id}")
+    except SealError:
+        raise ScanSetupError("secret_unavailable") from None
+    if sealed.policy is None:
+        raise ScanSetupError("secret_unavailable")
+    return sealed.policy
+
+
 async def open_runtime(ctx: HandlerContext, job: ClaimedJob, store: ScanStore) -> ScanRuntime:
     """The :class:`ScanRuntime` of a claimed scan job, from its sealed secret and value-free spec.
 
@@ -110,6 +151,7 @@ async def open_runtime(ctx: HandlerContext, job: ClaimedJob, store: ScanStore) -
     data = json.loads(json.dumps(job.spec))
     data.pop("url_origin", None)
     data["url"] = secret.scan_start_url
+    data["policy"] = stored_policy(ctx, job)  # F-18: a sealed body comes back from spec_enc
     ref = (data.get("auth") or {}).get("storage_state_ref")
     data["auth"] = {"storage_state_ref": ref} if ref else {}
     for added in _ADDED_CONSISTENCY:
@@ -289,7 +331,12 @@ async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
     except LeaseLost:
         logger.info("scan_lease_lost", job_id=job.id)  # canceled or reaped: the new owner finalizes
         return
-    await finalize_scan(ctx, job, runtime, store=store, outcome=outcome, result="succeeded")
+    except PatternTooSlow as exc:  # S3 review F-02: deterministic, a retry would refuse again
+        outcome = RunOutcome(error_code=exc.code)
+    if outcome.error_code is not None:
+        logger.info("scan_refused", job_id=job.id, error_code=outcome.error_code)
+    result: Literal["succeeded", "failed"] = "failed" if outcome.error_code else "succeeded"
+    await finalize_scan(ctx, job, runtime, store=store, outcome=outcome, result=result)
 
 
 async def scan_finalize_job(ctx: HandlerContext, job: ClaimedJob) -> None:
@@ -378,6 +425,9 @@ async def finalize_scan(
     if counts["non_get_allowed"]:
         result = "failed"
         errors.append({"code": "submission_detected", "where": "guard"})
+    if outcome is not None and outcome.error_code:  # the crawl ended on a refusal (F-02)
+        result = "failed"
+        errors.append({"code": outcome.error_code, "where": "crawl"})
     if stored is not None:
         evidence_id, policy_name = stored.id, None
         if stored.outcome in ("succeeded", "failed", "canceled"):
@@ -449,8 +499,8 @@ def _policy_name(ctx: HandlerContext, job: ClaimedJob, runtime: ScanRuntime | No
     if runtime is not None:
         return runtime.policy.name
     try:
-        return ctx.engine.policy((job.spec or {}).get("policy")).name
-    except (EngineError, CodedError):
+        return ctx.engine.policy(stored_policy(ctx, job)).name
+    except (EngineError, CodedError, ScanSetupError):
         return ""
 
 
@@ -515,9 +565,9 @@ async def _write_pack(
     policy: dict[str, str] | None = None
     if runtime is None:
         try:
-            p = ctx.engine.policy((job.spec or {}).get("policy"))
+            p = ctx.engine.policy(stored_policy(ctx, job))
             policy = {"name": p.name, "hash": p.config_hash(), "version": str(p.version)}
-        except (EngineError, CodedError):
+        except (EngineError, CodedError, ScanSetupError):
             policy = None
     evidence_id = new_id(PREFIX_EVIDENCE)
     pack = build_scan_evidence(

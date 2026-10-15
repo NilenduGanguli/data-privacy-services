@@ -17,6 +17,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
@@ -424,8 +425,16 @@ def inventory_csv(rows: Sequence[InventoryRow]) -> bytes:
     return write_csv(INVENTORY_HEADER, out)
 
 
+#: ``+``/``-`` followed only by a number or phone shape is data (``+91 98451 20377``, ``-5``); the
+#: L2 export's rule (S3 security review F-07, ``dps.layers.connectors.files``).
+_SIGNED_DATA = re.compile(r"[+-][0-9 ().\-]*")
+
+
 def _guard_cell(value: Any) -> str:
-    """A CSV cell that a spreadsheet cannot read as a formula; ``+91 98451 20377`` stays as is."""
+    """A CSV cell that a spreadsheet cannot read as a formula: a leading apostrophe for ``=``,
+    ``@``, TAB, CR, a lone sign, or ``+``/``-`` followed by more than a number or phone shape
+    (``-2+3+cmd|…`` is a formula; ``+91 98451 20377`` and ``-5`` stay as they are). Field labels
+    come from the scanned site, which may be hostile (S3 security review F-07)."""
     if value is None:
         return ""
     text = str(value)
@@ -434,7 +443,7 @@ def _guard_cell(value: Any) -> str:
     first = text[0]
     if first in ("=", "@", "\t", "\r"):
         return "'" + text
-    if first in ("+", "-") and (len(text) == 1 or not text[1].isdigit()):
+    if first in ("+", "-") and (len(text) == 1 or not _SIGNED_DATA.fullmatch(text)):
         return "'" + text
     return text
 

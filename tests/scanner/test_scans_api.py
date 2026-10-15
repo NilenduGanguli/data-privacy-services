@@ -147,6 +147,9 @@ def test_policy_references_resolve_at_accept_and_pin_the_version(api_client: Any
     published body at accept time, so the job spec — which the browser-worker runs and the
     evidence names — holds exactly that version; the policy store's refusal codes come back as
     they are, audited, and another tenant cannot name the policy."""
+    from dps.jobs_models import SealedSelection
+    from dps.secrets import open_json
+    from tests.fixtures.db import TEST_KEK
     from tests.test_policy_store import NAME, _adopt_and_tune
 
     c, sink = api_client
@@ -154,8 +157,15 @@ def test_policy_references_resolve_at_accept_and_pin_the_version(api_client: Any
     active = _create(c, {"url": URL, "policy": f"@{NAME}"})
     assert active.status_code == 202, active.text
     stored = active.json()["scan"]["spec"]["policy"]
-    assert (stored["name"], stored["version"]) == (NAME, 2)
-    assert stored["detect"]["min_score"] == 0.55  # the tuned v2 body, not the preset's
+    # S3 security review F-18: the spec keeps the body's value-free label; the body is sealed
+    assert (stored["name"], stored["version"], stored["sealed"]) == (NAME, 2, True)
+    scan_id = active.json()["scan"]["id"]
+    row = _sql(
+        c.app.state.settings, "t1", "SELECT spec_enc FROM {s}.dps_job WHERE id = $1", scan_id
+    )
+    body = open_json(TEST_KEK, row["spec_enc"], SealedSelection, aad=f"dps_job.spec:{scan_id}")
+    assert body.policy is not None
+    assert body.policy["detect"]["min_score"] == 0.55  # the tuned v2 body, not the preset's
     pinned = _create(c, {"url": URL, "policy": f"@{NAME}:v1"})
     assert pinned.status_code == 202, pinned.text
     assert pinned.json()["scan"]["spec"]["policy"]["version"] == 1
@@ -221,7 +231,9 @@ def test_model_refusals_carry_the_contract_code(
 @pytest.mark.db
 def test_uncoded_model_refusals_stay_field_lists(api_client: Any) -> None:
     """An unknown key (decision D4), a wrong ``mode`` or a body mixing a coded refusal with an
-    uncoded one keeps FastAPI's ``[{type, loc, msg}]`` 422 (no code, no input echoed)."""
+    uncoded one keeps the field list of the app's 422 — ``{"detail": [{loc, msg, type}], "code":
+    "invalid_request"}`` since the S1 handler of the security review (no scan-specific code, no
+    input echoed)."""
     c = _client(api_client)
     for body in (
         {"url": URL, "scope": {"submit": True}},
@@ -232,7 +244,8 @@ def test_uncoded_model_refusals_stay_field_lists(api_client: Any) -> None:
         r = _create(c, body)
         assert r.status_code == 422, r.text
         out = r.json()
-        assert "code" not in out and isinstance(out["detail"], list)
+        assert out["code"] == "invalid_request" and isinstance(out["detail"], list)
+        assert all(set(item) == {"loc", "msg", "type"} for item in out["detail"])
         assert "ananya" not in r.text
     assert c.post("/api/v1/scans", json={"url": URL}, headers=JOBS).status_code == 403
     bad = c.post("/api/v1/scans", json={"url": URL, "fill": {"personas": 51}}, headers=JOBS)

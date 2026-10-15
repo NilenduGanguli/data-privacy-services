@@ -34,6 +34,7 @@ import re
 import secrets
 import time
 from collections import Counter, deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -44,8 +45,10 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from dps.config import Settings
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.service import PrivacyEngine
 from dps.engine.synth.surrogates import seed_bytes
+from dps.engine.taxonomy import metric_entity_label
 from dps.layers.scanner.browser import close_scan_context, new_scan_context
 from dps.layers.scanner.capture import (
     capture_screen,
@@ -163,6 +166,15 @@ class Target:
 
 def _signature(f: FieldFacts) -> tuple[Any, ...]:
     return (f.tag, f.input_type, f.name, f.id, f.label)
+
+
+def count_field_metrics(classes: Iterable[FieldClassification]) -> None:
+    """``dps_scan_fields_total`` for every personal field of a page; a custom entity type (a
+    policy's own name) is labelled ``custom``, so caller-chosen names never reach the anonymous
+    ``/metrics`` (S3 security review F-10, as ``dps_findings_total`` does)."""
+    for c in classes:
+        if c.entity_type:
+            SCAN_FIELDS.labels(metric_entity_label(c.entity_type)).inc()
 
 
 def _same_page(a: str, b: str) -> bool:
@@ -317,10 +329,20 @@ class ScanRunner:
             for target in self.frontier:
                 self._mark_budget(target)
             self.frontier.clear()
+        except PatternTooSlow as exc:
+            # S3 security review F-02: a policy pattern ran past its CPU budget. That is
+            # deterministic (each run is charged its own CPU), so the crawl stops and the scan
+            # fails with the code — nothing is skipped silently. Nothing below may run a pattern
+            # again (the call's allowance is spent): what was recorded is kept, the request counts
+            # are saved, blocked requests get no redacted navigation-log entry.
+            self.outcome.error_code = exc.code
+            self.frontier.clear()
         finally:
             await close_scan_context(self.context, self.guard)  # never context.close() alone
             self.outcome.websockets_closed = self.guard.websockets_closed
-        self._blocked_events(self.guard.drain_blocked())
+        blocked = self.guard.drain_blocked()
+        if self.outcome.error_code is None:
+            self._blocked_events(blocked)
         counts = self.guard.drain_counts()
         if self._pending or self._events or counts:
             await self.sink.save_batch(
@@ -622,9 +644,7 @@ class ScanRunner:
         ]
         record.rendered_findings = dict(Counter(r.entity_type for r in rendered))
         record.risk_flags = flags
-        for c in classes.values():
-            if c.entity_type:
-                SCAN_FIELDS.labels(c.entity_type).inc()
+        count_field_metrics(classes.values())
         if self.rt.spec.capture.screenshots:
             await self._original(t, page, frames, snap, rendered, prefilled, record)
         await self._close(page)
