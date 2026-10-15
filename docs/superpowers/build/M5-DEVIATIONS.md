@@ -1233,7 +1233,8 @@ Finish-stage work (programme plan §2.6 F2, orchestration stream S4), built on `
 - **M4 slot-in (merge of `m4` into `fimg`, 2026-10-15; report
   `~/.cache/dps-build/reports/FIMG-merge-m4.md`).** `m4` (`cbbac38`: M4 with main up to `144cc65`
   merged into it and S2 fix rounds 1–2) merged with `--no-ff` (`83bc5f3`); one conflict
-  (`HANDOFF.md`), both sides kept: M4's §15/§16 keep their numbers, this task's record moved to §17.
+  (`HANDOFF.md`), both sides kept: M4's §15/§16 keep their numbers, this task's record moved to §17
+  (§18 since S4b below: main took §17).
   Then, test first:
   - `Dockerfile.browser` gets the app image's arbitrary-UID lines (the HANDOFF §8 recipe:
     `--gid 0`, `docker/entrypoint.sh` with `umask 0002` as `ENTRYPOINT`, `chgrp -R 0 /app && chmod
@@ -1280,5 +1281,45 @@ Finish-stage work (programme plan §2.6 F2, orchestration stream S4), built on `
     command (the one-time fix for `0600` objects of older images, above) is now the review's measured
     one (`--cap-add CHOWN --cap-add FOWNER`, `find` limited to the two volumes); the old one stopped
     with `Operation not permitted` under the worker's `cap_drop: [ALL]`.
+- **S4b — the scanner in the `full` stack (finish-stage work, orchestration stream S4b, 2026-10-15;
+  report `~/.cache/dps-build/reports/S4b-impl.md`, HANDOFF §18.2).** Merges `4eeac2a` (main up to
+  `40d8b34`: the M3 post-merge and M4 integration fixes the images now ship) and `5c54dda` (main's
+  docs commit `8ea220a`). Main took HANDOFF §17 for its own M4 integration record, so this task's
+  record (the M4 slot-in above says §17) is §18 since `93d4b4d`. Then, test first:
+  - **The smoke's D4 check gets two positive controls (`f39df5b`; not in the plan or M4's Task 24).**
+    "The demo site's counters do not move and `non_get_allowed` is 0" also holds for the counters of
+    a site the scan never visited (the smoke reads `DPS_TEST_DEMO_SITE` from the host, the
+    browser-worker scans `DPS_SMOKE_DEMO_URL` inside the network; a stale port or another lane's
+    demo site breaks the link silently) and for a scan whose pages never tried to send. Added: the
+    demo site counts the GETs it served (`get`: pages and files, `/health` and `/__received`
+    excluded — an additive key; every reader compares named keys, checked across `tests/` and
+    `tools/`), and the check needs `get` to move by at least the scan's `pages_visited` (and ≥ 1;
+    the site sends `no-store`, so each visit fetches its page) and the scan summary's
+    `blocked_requests` to hold at least one non-GET request. A site without `get` fails the check.
+    Red first: four cases in `tests/test_tools_m4.py` (then a fifth, `20 < 21 visited`, when the
+    control was tightened from "moved" to "≥ pages visited") and
+    `tests/scanner/test_demo_site.py::test_received_counts_the_pages_and_files_it_served`.
+    Measured on every smoke run: `pages served +175 (21 visited)`, 60–61 POSTs blocked.
+  - **The local mocks run unprivileged (`7561e89`; review S4 r2 R2-4, not in the plan).** The OCR
+    mock's image declares no user (root): compose runs it as uid 10001 in group 0 (like the app
+    image) with a read-only root, a 128 MiB `/tmp` tmpfs for pytesseract, `cap_drop: [ALL]` and
+    `no-new-privileges`. The demo site runs as the `node` image's own user (uid 1000; it writes
+    nothing and shares no volume, so group 0 is not needed) with the same hardening. The data
+    stores keep their images' users (they own their data directories; Oracle Free needs uid 54321)
+    and the `demo-secrets` one-shot stays root (it writes the secrets volume). Red first:
+    `tests/test_compose_m5.py::test_the_local_mocks_run_unprivileged_with_a_read_only_root`.
+  - **The image runtime tests check the architecture they run (`9db127f`; not in the plan).** Under
+    `DPS_TEST_IMAGE_PLATFORM` the probes of both images must report `platform.machine()` `x86_64`
+    (`linux/amd64`) or `aarch64` (`linux/arm64`), so an amd64 claim cannot rest on a native image
+    that answered instead (the classic image store runs a mismatched image with only a warning).
+    Red first: the probes did not report the machine (`KeyError`).
+  - Verified at `5c54dda` (HANDOFF §18.2): both images built for amd64; the runtime tests 6/6 per
+    architecture; the whole suite with every service up 3688 passed; the `full` stack as arm64 uid
+    10001, as the amd64 builds under uid 1000770000:0 (read-only, `cap_drop ALL`) on the same
+    volumes, and back — smoke 59/60 each (only S11, lane `fsec`), flow `--require-scanner` PASS
+    92/0, every artefact and pack readable across the UID changes.
+  - Left open: S11 (`no-store` on `/api/`) is red until `fsec` merges; `mypy tools/smoke_test.py`
+    still reports 3 pre-existing errors (2 from main, 1 in M4's scanner block; the gate is
+    `mypy dps`).
 - **Contract:** unchanged (the plan lists no contract change for Task 24; HANDOFF §2, §3, §6 and §8
   carry the build and run facts).
