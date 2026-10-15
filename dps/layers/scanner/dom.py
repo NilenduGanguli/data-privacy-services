@@ -193,26 +193,30 @@ EXTRACT_JS = (
   window.__dpsSnap = null;
   const fields = [], forms = new Map(), texts = [], links = [], clickables = [];
   let truncated = false, clickOrdinal = 0, budget = TEXT_BUDGET;
-  // What a closed select draws (S2 captures-privacy r3 B1): a customizable select (computed
+  // What a select draws (S2 captures-privacy r3 B1): a customizable select (computed
   // ``appearance: base-select``, or a <button> / <selectedcontent> in it) draws its button — a
   // <selectedcontent> clone of the selected option's content, or the author's own text — read
-  // first; then the label of every selected option (its label attribute, else its text),
-  // whatever its value and wherever it sits: the option list stops at 300, the selected ones are
-  // read apart. More text than can be checked marks the extraction truncated (no capture).
+  // first; then the label of every selected option, whatever its value and wherever it sits: the
+  // option list stops at 300, the selected ones are read apart. A listbox (``size > 1`` or
+  // ``multiple``) draws every option in its box, selected or not, so all of them are read (S1-M4
+  // captures-privacy r1 B3). An option's label is HTML's "label of an option": its label
+  // attribute when that is not empty, else its text — ``o.label`` alone is "" for
+  // ``label=""`` while the select draws the text (r1 B1). More text than can be checked marks
+  // the extraction truncated (no capture).
   const DRAWN = ':scope > button, selectedcontent';
-  const selectDrawn = (el) => {
+  const selectDrawn = (el, listbox) => {
     const custom = getComputedStyle(el).appearance === 'base-select' || !!el.querySelector(DRAWN);
     const raw = custom ? Array.from(el.querySelectorAll(DRAWN)).map((b) => b.innerText || b.textContent || '') : [];
-    const chosen = Array.from(el.selectedOptions);
-    if (chosen.length > 300) truncated = true;
-    for (const o of chosen.slice(0, 300)) raw.push(o.label);
-    const drawn = [];
+    const chosen = Array.from(listbox ? el.options : el.selectedOptions);
+    if (!listbox && chosen.length > 300) truncated = true;
+    for (const o of listbox ? chosen : chosen.slice(0, 300)) raw.push(o.label || o.text);
+    const drawn = [], seen = new Set();
     for (const t of raw) {
       if (t.length > TEXT_CAP) truncated = true;
       budget -= Math.min(t.length, TEXT_CAP);
       if (budget < 0) { truncated = true; break; }
       const c = clean(t.slice(0, TEXT_CAP));
-      if (c && !drawn.includes(c)) drawn.push(c);
+      if (c && !seen.has(c)) { seen.add(c); drawn.push(c); }
     }
     return [custom, drawn];
   };
@@ -237,7 +241,8 @@ EXTRACT_JS = (
     const [label, source] = resolveLabel(el);
     const r = el.getBoundingClientRect();
     const secret = type === 'password' || type === 'file' || type === 'checkbox' || type === 'radio';
-    const [custom, drawn] = tag === 'select' ? selectDrawn(el) : [false, null];
+    const listbox = tag === 'select' && (el.multiple || el.size > 1);
+    const [custom, drawn] = tag === 'select' ? selectDrawn(el, listbox) : [false, null];
     fields.push({ key, field_no: n, form_index: formIndex, frame_index: frameIndex, in_shadow: inShadow, tag, input_type: type,
       name: el.getAttribute('name'), id: el.getAttribute('id'), label: label.slice(0, 200), label_source: source,
       placeholder: el.getAttribute('placeholder'), title: el.getAttribute('title'), aria_label: el.getAttribute('aria-label'),
@@ -247,7 +252,7 @@ EXTRACT_JS = (
       visible: type !== 'hidden' && visible(el), inputmode: el.getAttribute('inputmode'),
       // an option's label is what a select draws for it (its label attribute, else its text)
       options: tag === 'select' ? Array.from(el.options).slice(0, 300).map((o) => ({ value: o.value, text: clean(o.text), label: clean(o.label), disabled: o.disabled, selected: o.selected })) : [],
-      drawn, custom_select: custom,
+      drawn, custom_select: custom, listbox,
       value: secret || tag === 'select' ? null : (el.value || null),
       checked: type === 'checkbox' || type === 'radio' ? el.checked : null,
       rect: { x: r.left, y: r.top, w: r.width, h: r.height }, selector: describe(el, inShadow) });

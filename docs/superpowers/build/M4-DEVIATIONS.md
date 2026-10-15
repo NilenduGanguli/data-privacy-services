@@ -1834,3 +1834,53 @@ own unit test. Re-run of the final module on the pre-fix code (`932075a` with th
     `annotated`, both `filled_*` and `masked_capture` read 0 (4 cases × 2 modes). Every value is made up.
   - Not changed: the known limits of the doc (a select a script fills after the page was read is the
     select form of "an input value a script sets after the page was read"; S2 r3 N3).
+
+## S1-M4 post-merge verification r1 — fix (main, after the M4 merge; captures-privacy r1 B1-B3, adaptations r1 A1-A2)
+
+Three more select shapes drew values no capture masked on main @ `8ea220a` (made-up values, OCR-proven by
+the verifiers in the masked capture, both obfuscated captures, every stored crawler screen and the deployed
+image):
+
+- **B1 / A1 — an empty `label` attribute (regression of `40d8b34`).** `<option label="" selected>` draws its
+  text (HTML's "label of an option" is the label attribute only when it is not empty), but `EXTRACT_JS`'s
+  `selectDrawn` read the `label` IDL attribute alone, which is `""`: `FieldFacts.drawn` was empty, so the
+  select was neither classified by what it draws (an e-mail under a neutral label was "not personal",
+  against 27cf286's discovery rule) nor masked, even under "Account number". `selectDrawn` now reads
+  `o.label || o.text`, as `OptionFacts.drawn` did (`cbbac38` masked these pages). A whitespace-only label is
+  a label (HTML) and draws nothing readable: it is read as drawn (nothing), the control of the fix.
+- **B2 / A2 — the placeholder rule was a prefix.** `draws_placeholder` took any drawn text that *started* with
+  pick/please/select/choose/`--` for "Choose…" whenever no listed option was selected with a value, so real
+  values ("Pickering Zebulon", "Pleasence Quorra", "-- Ottoline Brackwater --", "pickering…@…") behind an
+  empty value, a disabled option or an option past the 300 listed were boxed but no longer swept, and their
+  other copies on the page stayed readable (the disabled case regressed against `cbbac38`). The rule is now
+  exact: a select draws its placeholder only when every string it draws is the label of a selected option
+  **it lists** whose `value` is empty or blank (disabled or not: `<option value="" disabled selected>` is
+  the classic placeholder) and each string is, whole, a short placeholder phrase
+  (`classify.PLACEHOLDER_TEXT` / `is_placeholder_text`: a choosing verb, "please" before it, filler words
+  such as "one", "an option", "from the list" and punctuation only; at most 40 characters, no digit, no
+  "@"; or no letter or digit at all). A selected option with a value (disabled or not), text drawn beyond
+  the listed options' labels, a customizable select and a listbox are never placeholders. The fill keeps
+  its own broad prefix rule (`PLACEHOLDER_OPTION`, `personas_fill._usable`): it only decides which option
+  the fill never picks. "Select your country" is now a value (swept; it takes an obfuscated capture):
+  over-masking, accepted.
+- **B3 — a listbox (pre-existing since M4).** A select with `size > 1` or `multiple` draws every option in
+  its box; only selected options counted as shown, so a listbox classified ACCOUNT_NUMBER or PERSON_NAME
+  with nothing selected was never boxed (the census classifies listbox options with the detectors only,
+  which miss names and bare account numbers). `EXTRACT_JS` records `FieldFacts.listbox`
+  (`el.multiple || el.size > 1`) and reads the label of **every** option of a listbox into
+  `FieldFacts.drawn` (no 300 cap; the text budget still marks an oversized extraction `truncated`: no
+  capture); `classify.shown_texts` returns all of them (facts built without `drawn` read every listed
+  option), so `sensitive_prefilled` boxes a visible listbox whole whenever it is classified personal or a
+  detector finds a value among its options, whatever is selected, and `shown_values` sweeps every option
+  it lists. A listbox is also classified by what it shows (`classify_fields`), like a closed select.
+- Tests first (`tests/scanner/test_capture_select_shapes.py`, 42 tests, made-up values, counting server):
+  draws_placeholder / sweep / listbox unit cases; real Chromium extraction (label="" under "Account
+  number", "Beneficiary name" and a neutral label with and without a value; the whitespace-label control;
+  listboxes incl. 400 options); the masked capture leaves 0 pixels of the select's background (10 pages);
+  OCR of the masked capture and both obfuscated captures (17 pages incl. a customizable select without a
+  button and a same-origin frame, with the controls `ph_control_copy`, `ph_valued_copy`,
+  `listbox_names_selected`); the whitespace label draws nothing; `ScanRunner`, both modes: every stored
+  screen reads 0 (4 pages × 2 modes, incl. a fill that keeps or picks a label-less option). On `8ea220a`
+  37 failed and 5 passed (the 3 controls, the whitespace control and the selected-listbox pixel control).
+- Docs: `api-m4.md` (the label "when it is not empty", listboxes, the exact placeholder rule).
+

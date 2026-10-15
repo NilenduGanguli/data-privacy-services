@@ -564,7 +564,7 @@ def sample_for_pattern(pattern: str | None, rng: random.Random) -> str | None:
     return value if pattern_accepts(compiled, value) else None
 
 
-_PLACEHOLDER_OPTION = PLACEHOLDER_OPTION  # one rule for the fill and the captures (classify)
+_PLACEHOLDER_OPTION = PLACEHOLDER_OPTION  # the fill's rule (captures: classify.PLACEHOLDER_TEXT)
 
 
 def _usable(o: OptionFacts) -> bool:

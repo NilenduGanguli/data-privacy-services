@@ -370,25 +370,38 @@ def _named(names: set[str], phrases: frozenset[str]) -> bool:
 
 #: The mask label of a customizable select that draws text nothing classifies (it is boxed whole).
 SELECT_LABEL = "SELECT"
-#: An option's text that reads as a placeholder ("Choose…", "Select one", "-- Please select --"):
-#: the fill never picks it (``personas_fill._usable``), and a select that draws only such text from
-#: options without a value shows no value (:func:`draws_placeholder`).
+#: An option's text that starts like a placeholder ("Choose…", "Select one", "-- Please select --"):
+#: the fill never picks it (``personas_fill._usable``; a broad rule is safe there — the fill picks
+#: another option). It decides nothing a capture masks: that is :data:`PLACEHOLDER_TEXT`.
 PLACEHOLDER_OPTION = re.compile(r"^\W*(choose|select|pick|please|--)", re.IGNORECASE)
+#: A drawn text that is a placeholder, whole (S1-M4 captures-privacy r1 B2 / adaptations r1 A2): a
+#: short phrase of a choosing verb ("choose", "select", "pick"; "please" before it), filler words
+#: only ("one", "an option", "from the list" …) and punctuation — no digit, no "@", no other
+#: word — or text with no letter or digit at all ("--"). A real value that merely starts with
+#: those letters ("Pickering …", "-- Ottoline … --", "pickering…@…") is no placeholder.
+PLACEHOLDER_TEXT = re.compile(
+    r"^[\W_]*(?:(?:please\s+)?(?:choose|select|pick)"
+    r"(?:\s+(?:one|a|an|the|your|option|options|item|items|value|from|list|below|here|now))*"
+    r"[\W_]*)?$",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_MAX = 40
 
 
 def shown_texts(facts: FieldFacts) -> list[str]:
     """Every string a field shows (page data, memory only): an input's or a textarea's value; for
-    a select, what its closed box draws (S2 captures-privacy r3 B1) — a customizable select's
-    button text, then the label of each selected option (its label attribute, else its text;
-    ``OptionFacts.drawn``, r2 B3), **whatever the option's value** (whether it is a real choice
-    is the fill's rule, ``personas_fill._usable``; a drawn placeholder is shown too) and wherever
-    it sits in a long list (``FieldFacts.drawn``, read by the extraction; facts built without it
-    read ``options``)."""
+    a select, what its box draws (S2 captures-privacy r3 B1) — a customizable select's button
+    text, then the label of each selected option (``OptionFacts.drawn``: its label attribute when
+    that is not empty, else its text; r2 B3, S1-M4 r1 B1), **whatever the option's value**
+    (whether it is a real choice is the fill's rule, ``personas_fill._usable``; a drawn
+    placeholder is shown too) and wherever it sits in a long list; a listbox (``size > 1`` or
+    ``multiple``) draws the label of every option, selected or not (S1-M4 r1 B3). Read from
+    ``FieldFacts.drawn`` (the extraction); facts built without it read ``options``."""
     if facts.tag == "select":
         drawn = (
             facts.drawn
             if facts.drawn is not None
-            else [o.drawn for o in facts.options if o.selected]
+            else [o.drawn for o in facts.options if o.selected or facts.listbox]
         )
         return list(dict.fromkeys(s for s in drawn if s.strip()))
     return [facts.value] if facts.value else []
@@ -400,22 +413,42 @@ def shown_text(facts: FieldFacts) -> str:
     return shown[0] if shown else ""
 
 
+def is_placeholder_text(text: str) -> bool:
+    """Whether a drawn text is, whole, a placeholder phrase (:data:`PLACEHOLDER_TEXT`): short, no
+    digit, no "@"."""
+    return (
+        len(text) <= _PLACEHOLDER_MAX
+        and "@" not in text
+        and not any(ch.isdigit() for ch in text)
+        and PLACEHOLDER_TEXT.match(text) is not None
+    )
+
+
 def draws_placeholder(facts: FieldFacts) -> bool:
-    """Whether a classic select draws nothing but its placeholder: no option it lists is selected
-    with a value (each selected one has an empty or blank ``value`` or is disabled) and every string
-    it draws reads as a placeholder (:data:`PLACEHOLDER_OPTION`, "Choose…").
+    """Whether a classic closed select draws nothing but its placeholder: every string it draws is
+    the label of a selected option **it lists** whose ``value`` is empty or blank (disabled or
+    not: ``<option value="" disabled selected>Choose…</option>``), and each one is, whole, a
+    placeholder phrase (:func:`is_placeholder_text`: "Choose…", "-- Select --", "Please select").
 
     Such a select is still masked when it is personal (:func:`sensitive_prefilled`); a placeholder
     is only no *value* of the page: its text is not swept for elsewhere on the page and it alone
-    does not make the page arrive pre-filled. A value behind an empty ``value`` (S2 captures-privacy
-    r3 B1a), an option selected past the listed ones (B1b) and anything a customizable select draws
-    (B1c) are never placeholders."""
-    if facts.tag != "select" or facts.custom_select:
+    does not make the page arrive pre-filled. Never a placeholder (S1-M4 captures-privacy r1 B2,
+    adaptations r1 A2): a real value that merely starts like one ("Pickering …", "-- Ottoline … --",
+    "pickering…@…"), whatever its option's value; a selected option with a value, disabled or not;
+    text drawn beyond the listed options' labels (an option selected past the 300 listed, S2 r3
+    B1b); anything a customizable select (B1c) or a listbox (B3) draws."""
+    if facts.tag != "select" or facts.custom_select or facts.listbox:
         return False
-    if any(o.selected and o.value.strip() and not o.disabled for o in facts.options):
+    chosen = [o for o in facts.options if o.selected]
+    if any(o.value.strip() for o in chosen):
         return False
+    listed = {o.drawn for o in chosen}
     shown = shown_texts(facts)
-    return bool(shown) and all(PLACEHOLDER_OPTION.match(text) for text in shown)
+    return (
+        bool(shown)
+        and all(text in listed for text in shown)
+        and all(is_placeholder_text(text) for text in shown)
+    )
 
 
 def _sensitive(entity: str) -> bool:
@@ -623,8 +656,10 @@ def sensitive_prefilled(
 ) -> list[tuple[FieldFacts, str]]:
     """``(field, entity)`` for every field that *shows* a value a capture must hide: an input or
     textarea pre-filled with a value, and a select that draws something (:func:`shown_texts`:
-    whatever its option's value, wherever the option sits — S2 captures-privacy r3 B1a/B1b), when
-    the field is classified or the detectors find something in what it shows; and a customizable
+    whatever its option's value, wherever the option sits — S2 captures-privacy r3 B1a/B1b; an
+    option with an empty ``label`` draws its text — S1-M4 r1 B1; a listbox draws every option,
+    so it is boxed whole whatever is selected — r1 B3), when the field is classified or the
+    detectors find something in what it shows; and a customizable
     select whenever it draws text (labelled :data:`SELECT_LABEL` when nothing classifies it): it
     draws author content — a clone of the selected option's markup, or the author's own button —
     so it is boxed whole, fail closed (B1c). Password values are never read (``FieldFacts.value``

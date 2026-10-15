@@ -408,15 +408,18 @@ def _flat(text: str) -> tuple[str, list[int]]:
 
 def _shown(f: FieldFacts) -> list[str]:
     """What a field shows: its value, or what a select draws (``classify.shown_texts``: a
-    customizable select's button, each selected option's label else its text, whatever its value
-    and wherever it sits; S2 captures-privacy r2 B3, r3 B1)."""
+    customizable select's button, each selected option's label — its label attribute when not
+    empty, else its text — whatever its value and wherever it sits, and every option of a listbox;
+    S2 captures-privacy r2 B3, r3 B1, S1-M4 r1 B1/B3)."""
     return shown_texts(f)
 
 
 def shown_values(fields: Sequence[tuple[FieldFacts, str]]) -> list[tuple[str, str]]:
     """``(value, entity)`` for what each field shows (memory only: these are page values) — not
-    a select's drawn placeholder ("Choose…", ``classify.draws_placeholder``): that select is boxed,
-    but its placeholder is no value to hunt for elsewhere on the page."""
+    a select's drawn placeholder (a whole placeholder phrase such as "Choose…" from a listed option
+    without a value, ``classify.draws_placeholder``): that select is boxed, but its placeholder is
+    no value to hunt for elsewhere on the page. A real value that merely starts like a placeholder
+    is swept (S1-M4 captures-privacy r1 B2)."""
     return [
         (shown, entity) for f, entity in fields if not draws_placeholder(f) for shown in _shown(f)
     ]

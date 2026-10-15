@@ -315,11 +315,16 @@ are masked like any other page, and a page that scrolls between the measurements
 is withheld. A closed select is masked by what it draws, whatever its selected option's `value`
 (an empty or blank one included: whether an option is a real choice is the fill's rule, not the
 capture's) and wherever that option sits in a long list (the inventory reads the first 300 options;
-the selected ones are always read): its selected option's `label` attribute when it has one, else
-its text. A select classified personal is masked even while it draws its placeholder ("Choose…"),
-and every copy of a value a select draws is boxed elsewhere on the page (a placeholder — options
-without a value whose text reads "Choose…", "Select…" — is no value: it is not swept and it alone
-takes no obfuscated capture). A customizable select
+the selected ones are always read): its selected option's `label` attribute when it is not empty,
+else its text (`label=""` draws the text). A listbox (`size` above 1 or `multiple`) draws every
+option in its box, selected or not: it is boxed whole whenever it is classified personal or the
+detectors find a value among its options, whatever is selected, and every option it lists is swept
+(all of them, not only the first 300). A select classified personal is masked even while it draws
+its placeholder ("Choose…"), and every copy of a value a select draws is boxed elsewhere on the page
+(a placeholder is no value: it is not swept and it alone takes no obfuscated capture — but only a
+whole short placeholder phrase such as "Choose…", "-- Select --" or "Please select one", without a
+digit or an "@", drawn by a listed option without a value; a real value that merely starts with
+those letters, such as "Pickering …", is a value). A customizable select
 (`appearance: base-select`, or a `<button>`/`<selectedcontent>` in it) draws its button — a clone of
 the selected option's content or the author's own text, not the label — so its button text is read
 and swept, and the select is boxed whole (`SELECT`) whenever it draws text, even when nothing

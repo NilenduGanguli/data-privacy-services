@@ -72,8 +72,8 @@ class Rect(BaseModel):
 
 # --- DOM facts: page data, worker memory only (never logged, never persisted as such) ---------
 class OptionFacts(BaseModel):
-    """One ``<option>`` of a select. ``label`` is the option's ``label`` IDL attribute — its label
-    attribute, else its text — which is what a select draws for it (``drawn``)."""
+    """One ``<option>`` of a select. ``label`` is the option's ``label`` IDL attribute (its label
+    attribute when present, else its text); what a select draws for it is ``drawn``."""
 
     model_config = _HIDDEN
     value: str = _page()
@@ -84,8 +84,9 @@ class OptionFacts(BaseModel):
 
     @property
     def drawn(self) -> str:
-        """What a select draws for this option: a closed select shows its selected option's label
-        attribute when it has one (S2 captures-privacy r2 B3), else the option's text."""
+        """What a select draws for this option, HTML's "label of an option": its label attribute
+        when that is not empty (S2 captures-privacy r2 B3), else the option's text — an empty
+        ``label=""`` draws the text (S1-M4 captures-privacy r1 B1)."""
         return self.label or self.text
 
 
@@ -117,15 +118,20 @@ class FieldFacts(BaseModel):
     visible: bool
     inputmode: str | None
     options: list[OptionFacts] = Field(default_factory=list, repr=False)  # the first 300
-    #: A select: what its closed box draws, as the extraction read it (S2 captures-privacy r3 B1)
-    #: — a customizable select's button text first (its ``<selectedcontent>`` clone of the selected
-    #: option's content, or the author's own text), then the label of every selected option,
-    #: whatever its value and wherever it sits (``options`` stops at 300). ``None``: not read by
-    #: an extraction (facts built in memory); ``classify.shown_texts`` then reads ``options``.
+    #: A select: what its box draws, as the extraction read it (S2 captures-privacy r3 B1) — a
+    #: customizable select's button text first (its ``<selectedcontent>`` clone of the selected
+    #: option's content, or the author's own text), then the label (``OptionFacts.drawn``) of every
+    #: selected option, whatever its value and wherever it sits (``options`` stops at 300); a
+    #: listbox: the label of every option, selected or not (S1-M4 captures-privacy r1 B3).
+    #: ``None``: not read by an extraction (facts built in memory); ``classify.shown_texts`` then
+    #: reads ``options``.
     drawn: list[str] | None = _page(None)
     #: A customizable select (``appearance: base-select``, or a ``<button>`` / ``<selectedcontent>``
     #: in it): it draws author content, so a capture boxes it whenever it draws text.
     custom_select: bool = False
+    #: A listbox (``size > 1`` or ``multiple``): it draws every option in its box, selected or not
+    #: (S1-M4 captures-privacy r1 B3).
+    listbox: bool = False
     value: str | None = _page(None)  # pre-filled value (never read for password inputs)
     checked: bool | None = None
     rect: Rect | None = None  # document coordinates in the top-level page
