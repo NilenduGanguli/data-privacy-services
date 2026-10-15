@@ -1762,3 +1762,87 @@ group, never other users; an S3 upload's spool in the temp directory stays `0600
   git). A scan of the stack's current container logs and of the saved smoke, flow and export
   outputs (1.08 MB) found 0 of the usual needles and no `PermissionError`, `StorageError` or
   traceback.
+
+### 17.1 M4 slot-in — `m4` merged into `fimg` (2026-10-15)
+
+`git merge --no-ff m4` (`83bc5f3`; `m4` at `cbbac38`: M4 with `main` up to `144cc65` merged into it and
+S2 fix rounds 1–2, the commit `main` merged as `5959a75`). One conflict, this file: both sides kept —
+M4's §15 and §16 keep their numbers, this task's record moved from §15 to §17. Adaptations
+(`d8c629c`, `58fd122`, `78f0017`; details in `docs/superpowers/build/M5-DEVIATIONS.md` "Task 24", report
+`~/.cache/dps-build/reports/FIMG-merge-m4.md`):
+
+- `Dockerfile.browser` follows §2's arbitrary-UID rules (the recipe §8 carried) and drops the write
+  bits uv leaves on `/opt/venv/.lock` (`0666`); `tests/test_browser_image_runtime.py` checks a built
+  image (red on `m4`'s image: umask `0022`, `storage_error: PermissionError` for a second UID).
+- `tools/smoke_test.py`: `DPS_SMOKE_SCANNER` `auto` (default; the eleven scanner checks run when the
+  demo site answers, i.e. under `scanner` and `full`), `on`/`1` (a missing browser worker or demo
+  site fails), `off`/`0`.
+- `tools/flow_report.py`: `--require-scanner` (the `full` gate); the scanner block waits up to 60 s
+  for a freshly started app's `browser` readiness instead of skipping; every flow row is a route the
+  app serves (the console's `/` and SPA fallback, served when `frontend/dist` is built, are not §9
+  routes).
+- `.dockerignore` keeps `tools/dev` out of the image; §8's re-permission command is the measured one.
+
+**Verified 2026-10-15 on this lane** (`docker compose --profile full up --build -d`: 15 services,
+browser-worker and demo-site included; `/readyz` ready with every component ok but `ner`
+(patterns-only by design), `browser: 1 online`):
+
+- Gates: ruff format/check, `mypy dps` (150 files) clean; with every service up
+  `DPS_TEST_REQUIRE_SERVICES=1 DPS_TEST_TESSERACT_CMD=<the app image's tesseract> pytest -q` 3581
+  passed, 14 skipped, 1 failed — the flow report's route check, which counted the console routes of
+  a built `frontend/dist`; fixed in `58fd122`. By marker: `docs or ocr` 139 passed (2 need a host
+  tesseract), `db or pg_source or s3` 409, `oracle or mongo` 162 (1 by design), `browser` 238. The
+  other skips: the opt-in image runtime tests (run separately below), `ml` (MOSTLY not installed),
+  NER (no spaCy model). Frontend: `npm ci`, 44 node + 366 Vitest tests, `npm run typecheck`,
+  `npm run build` (bundle check clean). The M3 console tests rewrote the 54 tracked shots under
+  `docs/superpowers/build/m3-shots/` (A-N2); restored from git, not committed.
+- Images: `docker compose --profile full build` (arm64; browser image 4.24 GB, of which the
+  permissions layer is 86 kB) and `docker build --platform linux/amd64 -f Dockerfile.browser` (665 s
+  cold under emulation). `DPS_TEST_BROWSER_IMAGE=… DPS_TEST_IMAGE=… pytest -q
+  tests/test_browser_image_runtime.py tests/test_image_runtime.py` 6 passed on arm64; the browser
+  runtime test 2 passed on amd64 (the cross-image case needs an amd64 app image of this commit).
+- Stack as uid 10001: `DPS_SMOKE_SCANNER=on DPS_SMOKE_REQUIRE_OCR=1 DPS_SMOKE_REQUIRE_M5=1
+  python tools/smoke_test.py --m3` 59/60 (Layer 1, M1, the scanner's 11, M2's 9, M3's 7, M5 7/8:
+  the only failure is `api responses are not cacheable`, S11 on `fsec`); the same without
+  `DPS_SMOKE_SCANNER` (auto) 59/60 with the scanner block run; `python tools/flow_report.py
+  --require-scanner` PASS, 92 calls, 0 skipped (the ten scanner calls ran; cancel 409
+  `not_cancelable`). With the demo site stopped, auto prints a note and skips the block; `on` fails
+  with `demo site answers`.
+- Every role of both images as uid 1000770000:0 (compose override with `user:` on app, worker,
+  migrate, tokenizer-mock, seed-sources and browser-worker; all read-only) on the volumes uid 10001
+  wrote: `/readyz` ready, browser 1 online, the browser-worker's processes run with umask `0002`
+  and `HOME=/tmp`; all 103 artefacts of the first run (76 screenshots and 3 captures the
+  browser-worker stored) answered 200, as did their 10 evidence packs (html and pdf; read slowly —
+  a burst meets the API's 50 requests/s limit with 429); smoke `--m3`
+  59/60 (S11), flow `--require-scanner` PASS 92/0. Back as uid 10001: all 215 artefacts and 20
+  packs of both runs answered 200. The volumes held only `2775` directories and `660` files, group
+  0, of both UIDs.
+- D4: the demo site's `/__received` counters did not move during any smoke, flow or probe scan
+  (`non_get_allowed` 0; 60 POST + 1 GET blocked per smoke scan). The whole test suite moves them by
+  +8 non-GET, +2 form GETs, +1 `/logout`, +1 `/admin` — exactly its own positive control
+  (`test_positive_control_the_demo_counts_what_it_receives`), as on lane `m4`.
+- OCR (the app image's tesseract) of every stored screen of a smoke scan: the filled screens
+  (12 synthesize, 12 obfuscate) show no demo value and the scan's own personas (positive control);
+  the 3 masked captures show none except `application_ref` on `/apply/review` (M4's known N9, not a
+  detected entity), as on lane `m4`.
+- Logs and artefacts: every container log of the stack and every saved tool output (74 sources,
+  6.97 MB) and the artefact and export volumes (0.8 MB) hold 0 of: the smoke/flow sample record,
+  the SSN probe, the bootstrap key, the tokenizer token and key, the demo KEK, the demo site's
+  customer values and session cookie, a probe scan's DEK and seed, 2 000 sampled source values per
+  personal column of PostgreSQL, Oracle and MongoDB, raw `dps_` keys, `tk_` tokens; no traceback in
+  any container; `dps-db` and `source-pg` log only the integration suite's deliberate refusals
+  (append-only, RLS, grants, check constraints, bad passwords, a read-only transaction).
+  `dps_llm_raw_pii_sent_total` stayed 0.
+- Source vs target (counts only, after the last smoke): `bank_uat.customers_smoke` (20 000),
+  `customers_flow` and `customers_flow_b` (500 each) — 0 same-row survivors in every personal
+  column and 0 target values equal to any source value in names, e-mails, mobiles, national ids,
+  tax ids and notes; Oracle `CRM_MASKED.CUSTOMERS_SMOKE` and MongoDB `crm_uat.profiles_smoke`
+  (20 000 each) — 0 for every personal column; FF1 customer ids equal another customer's id 6 times
+  in 20 000 and shifted birth dates fall on occupied days (domain collisions only).
+
+**Traps.** (1) With `init: true` the browser-worker's PID 1 is `docker-init` (umask `0022` in
+`/proc/1/status`); its own processes (the worker, the Playwright driver, Chromium) run with `0002`.
+(2) Under `DPS_SMOKE_SCANNER=auto` the smoke decides by the demo site on `DPS_TEST_DEMO_SITE` (or
+`127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}`): run it with the lane's variables, or another stack's demo
+site decides. (3) `tests/test_flow_report.py` builds the app in-process; a built `frontend/dist`
+adds the console routes, which are not flow rows.

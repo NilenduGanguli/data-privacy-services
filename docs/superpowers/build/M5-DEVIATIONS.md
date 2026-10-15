@@ -1259,14 +1259,19 @@ Finish-stage work (programme plan §2.6 F2, orchestration stream S4), built on `
     or demo site fails), `off` (or `0`) skips it; any other value stops the run. M4's
     `test_scanner_block_runs_only_when_asked` became `test_the_scanner_block_follows_the_switch_and_the_stack`
     plus a probe test. The `full` gate is `DPS_SMOKE_REQUIRE_OCR=1 DPS_SMOKE_REQUIRE_M5=1
-    DPS_SMOKE_SCANNER=on python tools/smoke_test.py --m3`.
+    DPS_SMOKE_SCANNER=on python tools/smoke_test.py --m3`. `scanner_block` (`78f0017`) wraps the
+    decision: under `on` a demo site that does not answer is the failed check `demo site answers`
+    (M4's `=1` raised a `ConnectError` traceback there); the success path keeps eleven checks.
   - **Flow report (review S4 r2 N5):** `--require-scanner` (the `full` gate) turns the scanner rows
     into "not run" failures when no browser worker is online, instead of skips. The scanner block
     reads `/readyz` fresh (unrecorded) and re-reads it every 3 s for up to
     `DPS_FLOW_BROWSER_WAIT_SECONDS` (60) while it says `unknown` (a freshly started app, HANDOFF §15
     trap 8) or, under the switch, until it is ok; a stack without the `scanner` profile ("none
     online") is not waited for. The coverage test no longer allows rows the app does not serve (M4
-    is merged: the ten scanner templates match the app's routes).
+    is merged: the ten scanner templates match the app's routes), and it leaves out the console's
+    `GET /` and SPA fallback, which the app registers only when `frontend/dist` is built (`58fd122`:
+    the first run of the whole suite on this lane after `npm run build` failed on them; the test had
+    only ever run without a dist).
   - `tests/test_compose_m5.py`: `full` must hold `browser-worker` and `demo-site`; the browser-worker
     test no longer skips. Review S4 r2 R2-2: `.dockerignore` keeps `tools/dev` (the owner's push
     automation and LaunchAgent) out of the image (test first). R2-3: the Dockerfile comment and the
