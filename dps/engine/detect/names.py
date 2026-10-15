@@ -54,6 +54,17 @@ TITLES = frozenset(
         "mme", "mlle", "herr", "frau",
     }
 )  # fmt: skip
+#: The titles that say a gender (``Dr``, ``Mx``, ``Prof`` and ranks say none).
+TITLE_GENDER: dict[str, str] = {
+    **dict.fromkeys(("mr", "shri", "shree", "sri", "sir", "lord", "sr", "don", "señor", "herr"),
+                    "male"),
+    **dict.fromkeys(("mrs", "ms", "miss", "smt", "shrimati", "kumari", "km", "sushri", "dame",
+                     "lady", "sra", "srta", "doña", "dña", "señora", "señorita", "mme", "mlle",
+                     "frau"), "female"),
+}  # fmt: skip
+#: A title word right before a name: only dots and spaces between, on the same line (``\Z``:
+#: ``$`` would also match before a line break, so a title ending the line before would count).
+_TITLE_TAIL = re.compile(r"(?<![^\W_])([^\W\d_]+)(?:\.[ \t]*|[ \t]+)\Z")
 
 #: Lead-ins that name the person on their own (one name word is enough).
 _STRONG_LEADIN = re.compile(
@@ -219,6 +230,13 @@ def _title_before(text: str, words: list[_Word], first: int) -> bool:
     title = words[first - 1]
     between = text[title.start + len(title.core) : words[first].start]
     return _is_title(title) and between.strip(". ") == "" and "\n" not in between
+
+
+def title_gender(text: str, start: int) -> str | None:
+    """``female`` or ``male`` when a gendered title (``Mrs.``, ``Shri``, ``Sra.``) stands right
+    before ``text[start:]`` (a name), else ``None``. Reads the title, never the name."""
+    title = _TITLE_TAIL.search(text, max(0, start - 32), start)  # the longest title is 9
+    return TITLE_GENDER.get(title.group(1).casefold()) if title is not None else None
 
 
 def _cue(text: str, words: list[_Word], run: list[int], n_names: int) -> tuple[str, float] | None:

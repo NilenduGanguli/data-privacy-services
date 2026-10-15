@@ -1080,6 +1080,193 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
   `in_source` equals the source-vs-target count and the pack needs review), `tests/test_surrogates.py` (PAN now
   `0000`, invalid by design).
 
+## Finish-stage fixes from the live Vertex run
+
+### S8-persona — one person's name fields agree, a title gives the gender, L2 rows too (`fpersona`)
+
+Base: `5cef802` (one persona per person). Finding (live run, Gemini + the engine): under
+`synthetic-realistic`, `{"first_name": "Arjun", "last_name": "Mehta", "email": "arjun.mehta@…"}` came
+out `Alfred / Michael / alfred.williams…`: a single-word name was always a persona's *first* name, so
+the surname field got one, and the two single words, sharing no part, were declared as two people
+(the e-mail followed the first). Measured on `5cef802` with the new tests: the e-mail disagreed with
+the name fields on 300 of 300 rows of a synthesize job, and in text `Mr.`/`Mrs.` were followed by a
+name of the other gender about half the time (`Mr. Lakshmi …`; 138 of 300 job rows).
+
+- **Name fields (from the key alone, never the value).** `methods.name_field(path)` →
+  `NameHint(role, group)`: `first_name`, `given_name`, `fname`, `forename`(s), `firstName`,
+  `FIRSTNAME` → `first`; `last_name`, `lastname`, `lname`, `surname`, `family_name`, `familyname` →
+  `last`; `middle_name`(s) → `middle` (case-insensitive; words split at `_`, case changes and digits,
+  so `custLName` is `last`); `first`/`given`/`middle`/`last`/`family` only under a key that ends in
+  `name` (`$.name.first`). Not `mname` (also a mother's name) and no Spanish keys (`nombre` can hold a
+  full name; `apellido_paterno`/`_materno` are two surnames). The group is the parent path, the key's
+  other words and its trailing number: `first_name`+`last_name` are one person, `nominee_first_name`
+  +`nominee_last_name`, `FIRST_NAME_2`+`LAST_NAME_2` and `people[1].first_name`+`…family_name` others.
+  `apply_plan` puts the hint on `TransformContext.name_hint`; the `surrogate` method then calls the new
+  `SurrogateEngine.name_surrogate(original, locale, anchor, hint)`. `surrogate()` is unchanged (same
+  signature, still a pure function of seed, type, canonical original, declaration and anchor);
+  `name_surrogate` is pure in the same inputs plus the hint. A provider without it (a test double)
+  still gets `surrogate()`.
+- **One person per group.** `declare_record(anchor, originals, hints=())` (additive; protocol
+  `NameAwareSurrogates`): the fields of one group are one name, placed at the first of them. The
+  record's own fields (top-level, no other word in the key: group `$||`) are the record's person and
+  persona even when another person's name is declared first — L1 declares in path order, so
+  `father_name` comes before `first_name`; L2 in column order. This keeps the customer's persona the
+  same across tables and requests whatever other people a record names (P3), and a generic e-mail,
+  phone or birth date stays theirs. Any other group (`nominee_…`, `…_2`, a nested object) is, in
+  declaration order, a person declared before it whose parts it covers, else a new person. Each field
+  gets its part of that person's persona; a middle name is the first name of a same-gender persona at
+  `<person>|middle<n>` that is neither the first nor the last name. So first name, last name and
+  e-mail agree (`Alfred / Williams / alfred.williams…@`), and a customer and a nominee (full names or
+  split fields) stay two people with their own e-mails.
+- **Name words in text follow the declaration.** A single name word elsewhere in the record is the
+  part of its person's name it was declared as: a field's part from its key, else the last name when it
+  ends one of that person's declared names of several words (no comma: `Mehta, Arjun` says nothing),
+  else the first name as before. `Mr. Mehta` in a note next to `last_name: Mehta` → `Mr. Williams`;
+  `Dr. Rohan Kulkarni … Dr. Kulkarni` → `Dr. X Y … Dr. Y`. (Beyond the finding's wording; the old rule
+  turned every surname alone into a first name.)
+- **Titles give the gender** (`PersonaFactory.for_anchor(gender_hint=…)` already existed: no persona
+  change needed). `names.title_gender(text, start)` reads the title right before a name on the same
+  line (`Mr`, `Shri`, `Sri`, `Sr`, `Don`, `Señor`, `Sir`, `Lord`, `Herr` → male; `Mrs`, `Ms`, `Miss`,
+  `Smt`, `Kumari`, `Sushri`, `Sra`, `Srta`, `Doña`, `Señora`, `Señorita`, `Dame`, `Lady`, `Mme`,
+  `Mlle`, `Frau` → female; `Dr`, `Prof`, `Mx`, ranks and `Fr` say nothing; `Sr.` is taken as Señor
+  although it can mean Sister). `apply_plan` (spans, read from the input) and `synthesize_text` (the
+  placeholder template, with or without the model) hand it over as `NameHint(gender=…)`; the person's
+  persona has that gender (the first title wins), so the name, a `GENDER` field and an MRZ's sex agree.
+  Only titles in text: a separate title/salutation column is not read (it is not part of the plan).
+  **Trade-off for the owner (P3):** a persona's gender was a function of its anchor alone; a title now
+  sets it, which changes that persona's *first name* (and e-mail local part) when the drawn gender
+  differed — measured: same anchor with and without `Mrs.`, 300 seeds → last name and birth date equal
+  300/300, first name equal 155/300. So a customer named with a title in one table (CRM notes) and
+  without one in another (customers) can get two first names. Keeping the persona and rewriting the
+  title instead (`Mrs.` → `Mr.` to fit the persona) would keep P3 but changes text outside the
+  detected spans (span positions, `segments`, document rendering); not done — the task chose the
+  gender hint.
+- **Known limit (not changed): a kept `GENDER` column.** Both synthetic presets keep `GENDER`
+  (`keep_non_sensitive`, LOW sensitivity), so a row's real gender stays next to a synthetic first name
+  drawn without it and they disagree about half the time. Reading the kept value as the persona's
+  gender would fix the row at the same P3 cost as titles; a policy that surrogates `GENDER` makes it
+  persona-drawn in L2 (the per-row sweep treats a chance-equal gender as no copy), but the L1 strict
+  sweep then refuses about half the requests (a surrogate equal to the original by chance). Left for
+  an owner decision.
+- **Detection** (extended by review r1 B2 below). The structural detector now also takes the
+  run-together and short keys as names:
+  `firstname`, `lastname`, `givenname`, `familyname`, `forename` (0.9), `middlename` (0.85), `lname`
+  (0.8), `fname` (0.75, also a file name; a person's on a bank's records). Before, `{"fname": …,
+  "lname": …}` and `FIRSTNAME`/`LASTNAME` columns were not detected at all with NER off, so a
+  synthesize run copied the real names. More is detected, nothing less.
+- **Not changed:** records whose layout says nothing about their names (no name-part keys, no gendered
+  titles, no single name word after a declared name of several words) get the same surrogates as on
+  `5cef802`; the leakage sweep, `held_by` and `_reveals` are untouched. Schema generation
+  (`schema_gen._generate` → `surrogate(entity, template, …, "row")`) and MOSTLY linked generation
+  declare no record and pass no hints, so a generated spec with `first_name`
+  and `last_name` fields still gets a full `First Last` in each — follow-up for `fspec`, whose worktree
+  holds uncommitted `schema_gen.py` changes (not touched here): call `name_surrogate` with
+  `name_field(f"$.{field.name}")` for `PERSON_NAME` fields.
+- Tests (written first; every one fails on `5cef802`): `tests/test_methods.py` (key → role, groups,
+  routing to `name_surrogate`), `tests/test_surrogates.py` (one person per group in any declaration
+  order, case, middle name, two groups, a group matching a declared person, name words in text,
+  titles → persona gender incl. `GENDER`, purity), `tests/test_names.py` (`title_gender`, incl. a
+  title on the line before), `tests/test_structural.py` (run-together keys), `tests/test_service.py`
+  (the live record under both synthetic presets and eight key spellings, two people's fields, titles
+  in text and in a JSON note decide the gender whatever the name, surnames alone),
+  `tests/test_llm_text.py` (titles with and without the model, gateway faked at `_stellar` so the real
+  `complete()` and the strict egress verifier run), `tests/test_batch.py` (L2 rows),
+  `tests/connectors/test_synthesize_people.py` (marker `pg_source`: a 300-row synthesize job on the
+  lane's source-pg; counts only, all 0 with the fix: e-mail, nominee e-mail, notes, title gender,
+  nominee sharing the first name; source-vs-target name parts, e-mails and keys surviving).
+- **Review r1 B1 — a person's key is their name in name order.** A group's fields were joined in
+  declaration order to key its person (`record-person|<canon>`): L1 declares in path order, so
+  `nominee_family_name` sorted before `nominee_given_name` and the nominee was keyed on
+  "Nair Priya", while `nominee_first_name`/`_last_name` or a full `nominee_name` were keyed on
+  "Priya Nair" — the same nominee became a different synthetic person by key spelling or column order
+  (P3; measured: 0/50 seeds, and 0/400 L2 rows against a `JOINT_HOLDER_NAME` in another table). Now
+  the fields are joined first, middle, last (stable): 50/50 and 400/400 in both orders. The record's
+  own group was never affected (its persona is the anchor's).
+- **Review r1 B2 — one table for a name part's role and its detection.** `name_field` gave roles to
+  keys the detector did not take with NER off (`given_names`, `forenames`, `first_names`,
+  `middle_names`, `f_name`/`l_name`, `FName`/`LName`, `custFName`, `surName`, `foreName`,
+  `FIRSTNAME2`, and a bare `first`/`given`/`middle`/`last`/`family` under a key ending in `name`), so a
+  synthesize run kept those real names (L1, verification passing; L2 classified them `keep`). The
+  table now lives in `structural.NAME_PART_KEYS` (+ `BARE_NAME_PART_KEYS`, `key_words`, `name_part`):
+  `methods.name_field` reads its role from it and `classify_key` (so `classify_path`, L1's ensemble,
+  L2 discovery and the scanner) detects `PERSON_NAME` from it at the key's score (0.9; `middlename(s)`
+  0.85; `lname` 0.8; `fname` 0.75; a bare part under a name key 0.85, evidence `path:name part`) —
+  every key that gets a role is detected, by construction. `firstnames` joined the table. The phrase
+  rules are unchanged (they still also match a part word followed by more words, e.g. `first_name_en`,
+  which gets no role). Not detected, as before: `$.first`, `$.last`, `$.address.last`, `file_name`,
+  `$.name.last_updated`, `$.username.first`.
+- **Open owner decisions (review r1 N1, N2):** the P3 cost of titles measured on L2 by the review —
+  two tables under one `CUSTOMER_ID` anchor: untitled customers' first names agree 266/266, titled
+  (`Mr.`/`Mrs.` in the customers table's notes) 58–67/134; last names 400/400. And "first title wins"
+  through surname coverage: `Mrs. Mehta called on behalf of her husband` next to `first_name: Arjun,
+  last_name: Mehta` gives the customer a female persona. Both follow from reading titles as the
+  person's gender; the alternative (keep the persona, rewrite the title) is described above.
+- **Known limits (review r1, not changed):** a key with a word after `name` (`first_name_en`) gets no
+  role (N3, detected as a full name, as on `5cef802`); a prefixed own group (`cust_first_name`) is not
+  the record's own group, so a person-name key sorting before it still owns the record persona (N4,
+  the pre-existing first-declared rule).
+- **Known limits: name keys still missed with NER off** (pre-existing on `5cef802`/`e437f48`; the
+  default image has no NER, so a value under such a key is kept in a synthetic record and verification
+  passes). Owner follow-up: a lexicon-backed person-name detector when NER is off, or per-system key
+  lists.
+  - `<role>_name` keys whose role word is not in the structural list (`agent_name`, `officer_name`,
+    `witness_name`) score only `name` 0.55: an untitled full name in them is not detected under
+    synthetic-realistic (synthetic-strict takes 0.55).
+  - Abbreviated name parts: `FIRST_NM`, `LAST_NM`, `CUST_FRST_NM`, `CUST_LST_NM`, `GIVEN_NM`, `SURNM`,
+    `FIRSTNM`/`LASTNM`, `MID_INIT` — not detected at all.
+  - Other languages: `vorname`/`nachname`, `prenom`/`nom`, `apellidos` — not detected; `nombre` and
+    `apellido` are detected (0.85) but get no part.
+  - SAP's second surname `NAME_LST2` scores `name` 0.55 (a trailing number would also read as a
+    second person, so it is not simply a table entry).
+  - Covered since review r1 B3 (below): plural surnames, SAP's `NAME_FIRST`/`NAME_LAST` order,
+    Siebel's `FST_NAME`/`MID_NAME` and `LST_NAME`.
+- Tests for r1 (48 new cases, each fails on `e437f48`): `tests/test_structural.py` (every key spelling
+  that gets a role is detected by `classify_key` and `classify_path`, also as an L2 column name;
+  neighbours that are not names stay undetected, a guard that passes on both), `tests/test_methods.py`
+  (the new spellings' roles), `tests/test_surrogates.py` (a nominee declared family-first, given-first
+  or as a full name is one synthetic name, 40 seeds), `tests/test_service.py` (the same nominee under
+  three key spellings and as a full name with one seed and anchor; seven layouts with NER off keep no
+  original and agree with the e-mail), `tests/test_batch.py` (Oracle-style `NOMINEE_FAMILY_NAME`
+  before `NOMINEE_GIVEN_NAME` is the `JOINT_HOLDER_NAME` of another table under the row's anchor),
+  `tests/test_discovery_classify.py` (plural, split and camel name-part columns are `PERSON_NAME` with
+  a synthesize method other than `keep`).
+- **Review r1 B3 — plural surnames and name-first keys.** The shared table had plural forms for first
+  and middle names but none for last names, and nothing for the name-first order of SAP's business
+  partner (`BUT000.NAME_FIRST`/`NAME_LAST`/`NAME_MIDDLE`, run together `NAMEFIRST`…): `surnames`,
+  `last_names`, `lastnames`, `family_names`, `familynames` scored nothing, `NAME_FIRST`/`NAME_LAST`
+  only `name` 0.55, and none got a part. With NER off a synthesize run copied the real names with
+  verification passing (L1: both of SAP's names, or the plural surname, kept 40/40 under both synthetic
+  presets; a 200-row L2 job on the lane's source-pg wrote `NAME_FIRST`, `NAME_LAST`, `surnames` and
+  `last_names` equal to the source row's in 200/200 rows each), and when classified as names anyway
+  (synthetic-strict discovery at 0.55, or a reviewer's override) the last-name column held a first
+  name (99/100 rows) and the e-mail did not agree (0/100). Pre-existing on `5cef802`/`e437f48`, not a
+  regression; `def4fe1`'s "every name-part key is detected" overclaimed. `NAME_PART_KEYS` now also
+  has `lastnames`, `surnames`, `familynames` (last, 0.9); `namefirst`, `namegiven` (first, 0.85),
+  `namemiddle` (middle, 0.85), `namelast`, `namefamily` (last, 0.85); and the short forms of
+  Siebel's `S_CONTACT.FST_NAME`/`MID_NAME` and `LST_NAME`: `fstname` (first), `midname` (middle),
+  `lstname` (last), 0.85.
+  `name_part` already joins a key's last two words, so `NAME_FIRST` is `namefirst` and the words before
+  it say whose name it is: `CUST_NAME_LAST` → group `cust`, `NAME_FIRST` → the record's own group (with
+  `FIRST_NAME`), `NAME_FIRST_2` → a second person. Still not names: `$.username_first`,
+  `$.name_first_seen`, `$.NAME_LAST_UPDATED`, `$.name_lastly`, `$.list_names`, `$.midnight`. Measured on the fix
+  (counts only): L1 0/40 kept and e-mail agreeing 40/40 for `NAME_FIRST`/`NAME_LAST`,
+  `first_names`/`last_names` and `first_name`/`surnames` under both presets; L2 rows planned as names
+  0/100 last-name columns with a first name, e-mail agreeing 100/100; the same 200-row L2 job 0/200
+  equal to the source in all 11 name columns, 0 rows holding any source name part, verification
+  passed; detection sweep of 2,625 keys × 6 path shapes against `b18abc7`: 15 keys changed, all to
+  `PERSON_NAME` 0.85/0.9 from nothing or `name` 0.55, nothing lost. Also dropped the `lru_cache` on
+  `_name_part_candidate` (review N2): it kept raw keys and paths for the life of the process, and an
+  L1 path can hold a value (a document keyed by an account number).
+- Tests for B3 (written first; 67 cases fail on `b18abc7`, 10 guard cases pass on both):
+  `tests/test_structural.py` (32 spellings detected by `classify_key` and `classify_path`, also as L2
+  column names; 6 neighbours stay undetected), `tests/test_methods.py` (18 roles; the groups of
+  `NAME_FIRST`, `CUST_NAME_LAST`, `NAME_FIRST_2`; 4 neighbours get no part), `tests/test_service.py`
+  (six more layouts with NER off keep no original and agree with the e-mail; `NAME_FIRST`/
+  `NAME_LAST`/`EMAIL`, `first_names`/`last_names`, `first_name`/`surnames` under both synthetic
+  presets), `tests/test_discovery_classify.py` (the B3 columns are `PERSON_NAME`, not `keep`, under
+  both presets), `tests/test_batch.py` (SAP `BUT000` rows planned as names: each column holds the row
+  persona's part and the e-mail agrees, both presets).
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).

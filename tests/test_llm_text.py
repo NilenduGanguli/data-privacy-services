@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -10,11 +12,13 @@ from dps.engine.findings import Finding
 from dps.engine.planner import build_plan
 from dps.engine.policy import resolve_policy
 from dps.engine.synth.llm_text import (
+    PLACEHOLDER_RE,
     LeakToModelError,
     assert_placeholder_safe,
     synthesize_text,
     to_placeholders,
 )
+from dps.engine.synth.surrogates import SurrogateEngine
 from dps.llm.gateway import LlmCallError, LlmGateway, LlmResult
 from dps.observability import LLM_RAW_PII
 
@@ -330,3 +334,67 @@ async def test_the_record_values_are_declared_before_any_surrogate() -> None:
         ("EMAIL", "ann.k@example-mail.in"),
         ("PERSON_NAME", "Ann Smith"),
     ]
+
+
+# --- S8: a title gives its person's synthetic name a gender, with and without the model ---------
+class ProviderSeamGateway(LlmGateway):
+    """The real ``complete`` (availability, the strict egress verifier, counters) with only the
+    provider call scripted: ``reply`` maps the prompt the verifier let out to the model's text."""
+
+    def __init__(self, reply: Callable[[str], str]) -> None:
+        super().__init__(
+            Settings(
+                _env_file=None,
+                llm_provider="stellar",
+                stellar_base_url="https://stellar.test",
+                coin_url="https://coin.test",
+                llm_egress_check="strict",
+            )
+        )
+        self.reply = reply
+        self.sent: list[list[dict[str, str]]] = []
+
+    async def _stellar(
+        self, messages: list[dict[str, str]], temperature: float, max_tokens: int
+    ) -> LlmResult:
+        self.sent.append(messages)
+        return LlmResult(text=self.reply(messages[-1]["content"]), provider="stellar", model="t")
+
+
+TITLED = "Mrs. Arjun Mehta thanked Mr. Priya Nair."  # the title decides, never the name
+
+
+@pytest.mark.parametrize("rewrite", [False, True])
+async def test_a_title_gives_its_person_s_name_that_gender(rewrite: bool) -> None:
+    from faker.providers.person.en_IN import Provider as IndiaNames
+
+    def swap(prompt: str) -> str:
+        her, him = PLACEHOLDER_RE.findall(prompt)
+        return f"Mr. {{{him[0]}_{him[1]}}} was thanked by Mrs. {{{her[0]}_{her[1]}}}."
+
+    findings = _findings(TITLED)
+    assert (
+        to_placeholders(TITLED, findings).text
+        == "Mrs. {PERSON_NAME_1} thanked Mr. {PERSON_NAME_2}."
+    )
+    for i in range(12):
+        gw = ProviderSeamGateway(swap)
+        out, info = await synthesize_text(
+            TITLED,
+            findings,
+            surrogates=SurrogateEngine(bytes([i]) * 32, default_locale="en_IN"),
+            locale="en_IN",
+            anchor="r1",
+            gateway=gw,
+            llm_rewrite=rewrite,
+        )
+        assert info["llm_used"] is rewrite and info["fallback"] is None
+        if rewrite:
+            match = re.fullmatch(r"Mr\. (\S+) \S+ was thanked by Mrs\. (\S+) \S+\.", out)
+            assert "Arjun" not in _all_sent(gw) and "Nair" not in _all_sent(gw)  # P1
+        else:
+            match = re.fullmatch(r"Mrs\. (\S+) \S+ thanked Mr\. (\S+) \S+\.", out)
+            assert not gw.sent
+        assert match is not None, out
+        male, female = (match[1], match[2]) if rewrite else (match[2], match[1])
+        assert male in IndiaNames.first_names_male and female in IndiaNames.first_names_female

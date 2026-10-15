@@ -10,7 +10,9 @@ from dps.engine.transform.crypto import generate_key_material
 from dps.engine.transform.methods import (
     METHODS,
     MethodError,
+    NameHint,
     TransformContext,
+    name_field,
     reverse_method,
     run_method,
 )
@@ -423,3 +425,155 @@ def test_date_shift_keeps_sub_microsecond_digits() -> None:
     assert zero.value is not None and zero.value.endswith(".000000123")
     plain = run_method("date_shift", "2025-01-01T10:00:00.123456", c)  # the M0 path, unchanged
     assert plain.value is not None and plain.value.endswith(".123456") and len(plain.value) == 26
+
+
+# --- S8: a field's key says which part of a person's name it holds (never its value) ---------
+@pytest.mark.parametrize(
+    ("path", "role"),
+    [
+        ("$.first_name", "first"),
+        ("$.FIRST_NAME", "first"),
+        ("$.firstName", "first"),
+        ("$.FirstName", "first"),
+        ("$.firstname", "first"),
+        ("$.given_name", "first"),
+        ("$.GivenName", "first"),
+        ("$.fname", "first"),
+        ("$.forename", "first"),
+        ("$.middle_name", "middle"),
+        ("$.MIDDLENAME", "middle"),
+        ("$.last_name", "last"),
+        ("$.LAST_NAME", "last"),
+        ("$.lastName", "last"),
+        ("$.LASTNAME", "last"),
+        ("$.lname", "last"),
+        ("$.LName", "last"),
+        ("$.surname", "last"),
+        ("$.Surname", "last"),
+        ("$.family_name", "last"),
+        ("$.familyName", "last"),
+        ("$.familyname", "last"),
+        ("$['Last Name']", "last"),
+        ("$.name.first", "first"),
+        ("$.name.last", "last"),
+        ("$.name.family", "last"),
+        ("$.customer.first_name", "first"),
+        # review r1 B2: plural, split short and camel forms, and a number run on
+        ("$.first_names", "first"),
+        ("$.firstNames", "first"),
+        ("$.given_names", "first"),
+        ("$.forenames", "first"),
+        ("$.fore_name", "first"),
+        ("$.middle_names", "middle"),
+        ("$.f_name", "first"),
+        ("$.FName", "first"),
+        ("$.custFName", "first"),
+        ("$.l_name", "last"),
+        ("$.custLName", "last"),
+        ("$.surName", "last"),
+        ("$.FIRSTNAME2", "first"),
+        ("$.name.given", "first"),
+        ("$.name.middle", "middle"),
+        ("$.customer.name.family", "last"),
+        # review r1 B3: plural surnames, SAP's name-first order and Siebel's short forms
+        ("$.surnames", "last"),
+        ("$.last_names", "last"),
+        ("$.LASTNAMES", "last"),
+        ("$.lastNames", "last"),
+        ("$.family_names", "last"),
+        ("$.familynames", "last"),
+        ("$.NAME_FIRST", "first"),
+        ("$.NAME_GIVEN", "first"),
+        ("$.NAME_MIDDLE", "middle"),
+        ("$.NAME_LAST", "last"),
+        ("$.NAME_FAMILY", "last"),
+        ("$.NameFirst", "first"),
+        ("$.namelast", "last"),
+        ("$.NAMEMIDDLE", "middle"),
+        ("$.CUST_NAME_LAST", "last"),
+        ("$.FST_NAME", "first"),
+        ("$.MID_NAME", "middle"),
+        ("$.LST_NAME", "last"),
+    ],
+)
+def test_a_name_field_s_role_comes_from_its_key(path: str, role: str) -> None:
+    hint = name_field(path)
+    assert hint is not None and hint.role == role and hint.gender is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "$.name",
+        "$.full_name",
+        "$.customer_name",
+        "$.nominee_name",
+        "$.username",
+        "$.user_name",
+        "$.nickname",
+        "$.mname",  # a middle name, or a mother's name
+        "$.first",  # not under a key that names a name: "first" is no name part
+        "$.address.last",
+        "$.name.last_updated",
+        "$.lname_flag",
+        "$.filename",
+        "$.username_first",
+        "$.name_first_seen",
+        "$.NAME_LAST_UPDATED",
+        "$.list_names",
+        "$.last_login",
+        "$.names[0]",
+        "$",
+        "not a path",
+    ],
+)
+def test_other_keys_hold_no_name_part(path: str) -> None:
+    assert name_field(path) is None
+
+
+def test_the_fields_of_one_person_share_a_group_and_another_person_s_do_not() -> None:
+    def group(path: str) -> str | None:
+        hint = name_field(path)
+        assert hint is not None
+        return hint.group
+
+    one = {group(p) for p in ("$.first_name", "$.middle_name", "$.last_name", "$.surname")}
+    assert len(one) == 1
+    assert len({group("$.FIRST_NAME"), group("$.LastName"), group("$.lname")}) == 1
+    others = [
+        "$.nominee_first_name",
+        "$.FIRST_NAME_2",
+        "$.customer.first_name",
+        "$.people[0].first_name",
+        "$.people[1].first_name",
+        "$.name.first",
+    ]
+    assert len({group(p) for p in others} | one) == len(others) + 1
+    assert group("$.nominee_first_name") == group("$.nominee_last_name")
+    assert group("$.FIRST_NAME_2") == group("$.SURNAME_2")
+    assert group("$.people[1].first_name") == group("$.people[1].family_name")
+    assert group("$.name.first") == group("$.name.last")
+    # review r1 B3: SAP's name-first keys are the record's own person; the words before them say
+    # whose name it is, as the words before first_name do
+    assert {group("$.NAME_FIRST"), group("$.NAME_LAST"), group("$.surnames")} == one
+    assert group("$.CUST_NAME_LAST") == group("$.CUST_FIRST_NAME") != group("$.NAME_LAST")
+    assert group("$.NAME_FIRST_2") == group("$.LAST_NAME_2") == group("$.FIRST_NAME_2")
+
+
+class NameSynth(FakeSynth):
+    def name_surrogate(self, original: str, locale: str, anchor: str, hint: NameHint) -> str:
+        return f"<{hint.role}:{anchor}>"
+
+    def declare_record(self, anchor: str, originals: object, hints: object = ()) -> None:
+        pass
+
+
+def test_a_name_field_s_surrogate_is_its_part_of_the_name() -> None:
+    last = NameHint(role="last", group="$||")
+    c = ctx("PERSON_NAME", synth=NameSynth(), mode="synthesize", name_hint=last)
+    assert run_method("surrogate", "Mehta", c).value == "<last:rec-1>"
+    # a span, a full name or a provider without name fields: the plain surrogate
+    plain = ctx("PERSON_NAME", synth=NameSynth(), mode="synthesize")
+    assert run_method("surrogate", "Arjun Mehta", plain).value == "<PERSON_NAME:rec-1>"
+    old = ctx("PERSON_NAME", synth=FakeSynth(), mode="synthesize", name_hint=last)
+    assert run_method("surrogate", "Mehta", old).value == "<PERSON_NAME:rec-1>"

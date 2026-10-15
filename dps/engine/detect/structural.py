@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import Literal
 
 from dps.engine.jsonpath import parse_path
 
@@ -186,6 +187,16 @@ _RULES: tuple[tuple[str, str, float], ...] = (
     ("given name", "PERSON_NAME", 0.9),
     ("family name", "PERSON_NAME", 0.9),
     ("middle name", "PERSON_NAME", 0.85),
+    # the same keys run together (``FIRSTNAME``, ``lastname``) and their short forms (S8); a key
+    # ending in one of them, in any spelling, is also one by NAME_PART_KEYS below
+    ("firstname", "PERSON_NAME", 0.9),
+    ("lastname", "PERSON_NAME", 0.9),
+    ("givenname", "PERSON_NAME", 0.9),
+    ("familyname", "PERSON_NAME", 0.9),
+    ("middlename", "PERSON_NAME", 0.85),
+    ("forename", "PERSON_NAME", 0.9),
+    ("lname", "PERSON_NAME", 0.8),
+    ("fname", "PERSON_NAME", 0.75),  # also a file name; a person's on a bank's records
     ("nombre", "PERSON_NAME", 0.85),
     ("apellido", "PERSON_NAME", 0.85),
     # a person's role before "name" says whose name it is (``cardholder_name``, ``payee_name``)
@@ -305,7 +316,95 @@ def classify_key(key: str) -> list[KeyCandidate]:
             current = best.get(entity)
             if current is None or score > current.score:
                 best[entity] = KeyCandidate(entity, score, f"key:{phrase}")
+    part = _name_part_candidate(key)
+    current = best.get("PERSON_NAME")
+    if part is not None and (current is None or part.score > current.score):
+        best["PERSON_NAME"] = part
     return sorted(best.values(), key=lambda c: -c.score)
+
+
+# -- a part of a person's name (S8): one table for detection and for synthesis --------------------
+
+#: The part of a person's name a field holds.
+NameRole = Literal["first", "middle", "last"]
+#: A key's last words run together, lower case → the part of a person's name the field holds and
+#: how strongly the key alone says its value is a name (``fname`` is also a file name). Synthesis
+#: fills such a field with that part of a persona (``methods.name_field``) and detection reads the
+#: same table (:func:`classify_key`), so every field synthesis gives a part is detected, in any
+#: spelling: ``given_names``, ``FName``, ``custLName``, ``surName``, ``FIRSTNAME2`` (S8 review r1
+#: B2: with NER off, a key with a part but no detection kept its real name in a synthetic record).
+#: Also the plural surnames and the name-first order of SAP's business partner (``BUT000``:
+#: ``NAME_FIRST``, ``NAME_LAST``; the words before them say whose name it is, ``CUST_NAME_LAST``)
+#: and the short forms of Siebel's ``S_CONTACT.FST_NAME`` / ``MID_NAME`` and ``LST_NAME`` (review
+#: r1 B3: none had a part or a score above ``name`` 0.55, so a synthesize run copied the real names).
+NAME_PART_KEYS: dict[str, tuple[NameRole, float]] = {
+    **dict.fromkeys(
+        ("firstname", "firstnames", "givenname", "givennames", "forename", "forenames"),
+        ("first", 0.9),
+    ),
+    **dict.fromkeys(("namefirst", "namegiven", "fstname"), ("first", 0.85)),
+    "fname": ("first", 0.75),
+    **dict.fromkeys(("middlename", "middlenames"), ("middle", 0.85)),  # not "mname": a mother's too
+    **dict.fromkeys(("namemiddle", "midname"), ("middle", 0.85)),
+    **dict.fromkeys(
+        ("lastname", "lastnames", "surname", "surnames", "familyname", "familynames"),
+        ("last", 0.9),
+    ),
+    **dict.fromkeys(("namelast", "namefamily", "lstname"), ("last", 0.85)),
+    "lname": ("last", 0.8),
+}
+#: A bare key holds a part only under a key that names a name (``name.first``, ``name.family``).
+BARE_NAME_PART_KEYS: dict[str, NameRole] = {
+    "first": "first",
+    "given": "first",
+    "middle": "middle",
+    "last": "last",
+    "family": "last",
+}
+#: Score of a bare part under a key that names a name: as strong as an address context rule.
+_BARE_PART_SCORE = 0.85
+#: The words of a key: ``custLName`` → cust L Name, ``LAST_NAME`` → LAST NAME, ``name2`` → name 2.
+_KEY_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+
+
+def key_words(key: str) -> tuple[list[str], str]:
+    """A key's words in lower case and its trailing number (``LAST_NAME_2`` → last, name; 2)."""
+    words = [w.lower() for w in _KEY_WORD.findall(key)]
+    number: list[str] = []
+    while words and words[-1].isdigit():
+        number.insert(0, words.pop())
+    return words, "_".join(number)
+
+
+def name_part(key: str, parent: str | None = None) -> tuple[NameRole, int, float] | None:
+    """The part of a person's name a field named ``key`` holds, read from the key alone (never its
+    value): the part, how many of the key's last words name it (the words before them say whose
+    name it is: ``nominee_first_name``) and how strongly the key says the value is a name. A bare
+    ``first``/``given``/``middle``/``last``/``family`` holds a part only under a ``parent`` key
+    ending in "name" (``name.first``). ``None`` for any other key (``name``, ``full_name``)."""
+    words, number = key_words(key)
+    for n in (1, 2, 3):  # surname, last name, family name; lname, l name
+        found = NAME_PART_KEYS.get("".join(words[-n:])) if len(words) >= n else None
+        if found is not None:
+            return found[0], n, found[1]
+    bare = BARE_NAME_PART_KEYS.get(words[0]) if len(words) == 1 and not number else None
+    if bare is not None and parent is not None and key_words(parent)[0][-1:] == ["name"]:
+        return bare, 1, _BARE_PART_SCORE
+    return None
+
+
+def _name_part_candidate(key: str) -> KeyCandidate | None:
+    """``PERSON_NAME`` when the field ``key`` names (a path, a column, a form field) holds a part
+    of a person's name (:func:`name_part`, a path's parent segment the context of a bare part)."""
+    segments = _named_segments(key)
+    leaf = segments[-1] if segments else _last_segment(key)
+    found = name_part(leaf, segments[-2] if len(segments) >= 2 else None)
+    if found is None:
+        return None
+    _, n, score = found
+    rule = "".join(key_words(leaf)[0][-n:])
+    evidence = f"key:{rule}" if rule in NAME_PART_KEYS else "path:name part"
+    return KeyCandidate("PERSON_NAME", score, evidence)
 
 
 # -- document paths: the parent segments say what a generic leaf holds ----------------------------

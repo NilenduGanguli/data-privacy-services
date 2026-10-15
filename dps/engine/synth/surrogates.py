@@ -41,7 +41,8 @@ Guarantees beyond the plan's generators:
   construction, the first that does not reveal its own original is kept and the sweep rules on
   it. A record's declaration changes a surrogate only when a draw collides, so the same seed
   still gives the same fake across records and requests everywhere else.
-* **One persona per person.** The record's persona belongs to the first name it declared;
+* **One persona per person.** The record's persona belongs to the first name it declared (to
+  its own name fields when it has them: see "Name fields and titles");
   every other person it declares (a nominee, the people a call note mentions) gets a persona of
   their own, anchored at ``anchor|person:<key>`` where the key is a seeded digest of the first
   name declared for them (never the name). A declared name is the same person as an earlier one
@@ -55,6 +56,26 @@ Guarantees beyond the plan's generators:
   only as a whole word). A value that names no other person, and every other persona field
   (phone, birth date, address, ...), keeps the record's persona; so does every value of a record
   that declared one person or none.
+* **Name fields and titles** (:class:`~dps.engine.transform.methods.NameHint`, from the record's
+  layout, never from a value). The fields that hold one person's name parts (``first_name``,
+  ``middle_name`` and ``last_name``; ``nominee_first_name`` and ``nominee_last_name`` are
+  another person) are one name, placed where the first of them was declared: ``Arjun`` and
+  ``Mehta`` are the person ``Arjun Mehta``. The fields at the top of the record with no other
+  word in their keys are the record's own person and its persona, even when another person's
+  name was declared first (``father_name`` sorts before ``first_name``); any other group
+  (``nominee_…``, ``…_2``, a nested object) is, in declaration order, a person declared before
+  it whose parts it covers, else a new one. Each field gets its part of that person's persona (a
+  middle name is the first name of a persona of the same gender at ``|middle<n>``, never the
+  person's first or last name), so the fields and the e-mail agree. A single name word elsewhere
+  in the record (``Mr. Mehta`` in a note) is the part of its person's name it was declared as:
+  the field's part, else the last name when it ends one of the person's declared full names
+  (``Rohan Kulkarni`` … ``Dr. Kulkarni``), else the first name. A person a gendered title names
+  (``Mr``, ``Mrs``, ``Ms``, ``Miss``, ``Shri``, ``Smt``, ``Sra``) gets a persona of that gender
+  (the first title wins); without one the persona's gender is drawn. The gender changes that
+  persona's first name (so its e-mail, a ``GENDER`` field and an MRZ's sex follow); its last
+  name, birth date and address have sub-seeds of their own, so a person titled in one record and
+  not in another can differ in the first name only. A record whose layout says nothing about its
+  names is unchanged.
 * **Reshaped identifiers are a keyed derangement** (``reshape.py``): identifiers of unmapped
   types (a derangement of an *issued* space maps real numbers onto other real ones, which is why
   every government identifier with a never-issued range is drawn from it instead), CVVs, sort codes, IFSC branch codes, amounts, diagnosis codes and BICs keep their
@@ -84,7 +105,7 @@ import random
 import re
 import secrets
 import unicodedata
-from collections.abc import Callable, Container, Iterable
+from collections.abc import Callable, Container, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -113,6 +134,7 @@ from dps.engine.synth.personas import (
 )
 from dps.engine.synth.reshape import Reshaper, code_letters
 from dps.engine.transform.crypto import b64u, unb64u
+from dps.engine.transform.methods import NameHint, NameRole
 from dps.engine.verify import SWEEP_MIN_LEN, name_parts, normalise
 
 SEED_ALG = "dps.synth.v1"
@@ -176,14 +198,23 @@ _MIN_HELD = 3
 @dataclass(frozen=True)
 class _Person:
     """One person a record declared: the key of their persona's anchor (a seeded digest of the
-    first name declared for them, never the name) and the parts of every name declared for them."""
+    first name declared for them, never the name), the parts of every name declared for them and
+    the gender a title gave one of them."""
 
     key: str
     parts: frozenset[str]
+    gender: str | None = None
 
 
 #: The cache key of a record's people's persona anchors: anchor, locale, name parts, people.
 _PeopleKey = tuple[str, str, frozenset[str], tuple[_Person, ...]]
+#: The person a persona anchor belongs to (``<record>|person:<key>``, then any suffix).
+_PERSON_ANCHOR = re.compile(r"\|person:([0-9a-f]+)(?=\||$)")
+#: The group of a record's own name fields: ``first_name``/``last_name`` at the top of the record
+#: (:func:`~dps.engine.transform.methods.name_field`), no other word, no number.
+_OWN_GROUP = "$||"
+#: A group's name fields are one name in name order, whatever order they were declared in.
+_NAME_ORDER: dict[NameRole | None, int] = {"first": 0, "middle": 1, "last": 2}
 
 
 def _covers(parts: frozenset[str], name: frozenset[str]) -> bool:
@@ -205,26 +236,38 @@ def _best(people: tuple[_Person, ...], score: Callable[[_Person], int]) -> int:
 class _Record:
     """What a record declared: its names' parts and its normalised values (no raw values), the
     values indexed by their first ``_MIN_DECLARED`` characters so a check is linear in the
-    surrogate's length, not in the size of the record; and the people its names stand for, in
-    declaration order, with each declared name's normalised form mapped to its person."""
+    surrogate's length, not in the size of the record; the people its names stand for, in
+    declaration order, with each declared name's normalised form and each group of name fields
+    mapped to its person; and the part of its person's name each declared name word is
+    (``roles``, by person and normalised word: see :func:`_people`)."""
 
     parts: frozenset[str] = frozenset()
     index: dict[str, tuple[str, ...]] = field(default_factory=dict)
     people: tuple[_Person, ...] = ()
     names: dict[str, int] = field(default_factory=dict)
+    groups: dict[str, int] = field(default_factory=dict)
+    roles: dict[tuple[int, str], NameRole] = field(default_factory=dict)
 
     @classmethod
     def of(
         cls,
         parts: frozenset[str],
         values: Iterable[str],
-        people: tuple[_Person, ...] = (),
-        names: dict[str, int] | None = None,
+        people: _People | None = None,
     ) -> _Record:
         index: dict[str, tuple[str, ...]] = {}
         for value in set(values):
             index[value[:_MIN_DECLARED]] = (*index.get(value[:_MIN_DECLARED], ()), value)
-        return cls(parts=parts, index=index, people=people, names=names or {})
+        if people is None:
+            return cls(parts=parts, index=index)
+        return cls(
+            parts=parts,
+            index=index,
+            people=people.people,
+            names=people.names,
+            groups=people.groups,
+            roles=people.roles,
+        )
 
     def held_by(self, canon: str, value: str) -> bool:
         """True when ``value`` holds another of the record's values or a part of its names."""
@@ -235,9 +278,13 @@ class _Record:
                     return True
         return holds_name_part(value, self.parts)
 
-    def named(self, name: str) -> int:
-        """The person ``name`` stands for: by its normalised form when it was declared, else the
-        one whose parts it shares the most of, by length; 0 (the record's own) when none."""
+    def named(self, name: str, group: str | None = None) -> int:
+        """The person ``name`` stands for: its group of name fields' when one was declared, else
+        by its normalised form when it was declared, else the one whose parts it shares the most
+        of, by length; 0 (the record's own) when none."""
+        found = self.groups.get(group) if group is not None else None
+        if found is not None:
+            return found
         found = self.names.get(normalise(name))
         if found is not None:
             return found
@@ -259,17 +306,62 @@ class _Record:
 _NOTHING = _Record()
 
 
-def _people(seed: bytes, names: Iterable[str]) -> tuple[tuple[_Person, ...], dict[str, int]]:
-    """The people a record's declared ``names`` stand for, in declaration order, and each
-    name's normalised form mapped to its person. A name is the first earlier person whose parts
-    cover its own, or whose parts it covers (:func:`_covers`); any other name is a new person,
-    keyed by a seeded digest of its normalised form. A name without a letter stands for nobody."""
+@dataclass(frozen=True)
+class _People:
+    """The people a record's declared names stand for (:func:`_people`)."""
+
+    people: tuple[_Person, ...]
+    names: dict[str, int]
+    groups: dict[str, int]
+    roles: dict[tuple[int, str], NameRole]
+
+
+def _people(seed: bytes, names: Sequence[tuple[str, NameHint | None]]) -> _People:
+    """The people a record's declared ``names`` stand for, in declaration order; each name's
+    normalised form, and each group of name fields, mapped to its person; and the part of its
+    person's name each name word was declared as.
+
+    A name is the first earlier person whose parts cover its own, or whose parts it covers
+    (:func:`_covers`); any other name is a new person, keyed by a seeded digest of its
+    normalised form. The name fields of one group (``first_name``, ``last_name``) are one name,
+    in name order (first, middle, last: ``nominee_family_name`` sorts before
+    ``nominee_given_name``, yet the nominee is the same person as a ``nominee_name`` holding
+    their full name), placed at the first of them; the record's own fields (top-level, no other
+    word: group ``$||``) come first, so they are the record's persona even when another person's
+    name was declared before them (``father_name`` sorts before ``first_name``). A name without
+    a letter stands for nobody; a person's gender is the first a title gave.
+
+    Roles, by person and normalised word: a name field's value is the part its key names (from
+    the key alone); the first and the last word of a name of several words (without a comma:
+    ``Mehta, Arjun`` says nothing) are that person's first and last name. A field's part wins
+    over a word's place; otherwise the first declaration wins.
+    """
+    members: dict[str, list[tuple[str, NameRole | None]]] = {}
+    for name, hint in names:
+        if hint is not None and hint.group is not None:
+            members.setdefault(hint.group, []).append((name, hint.role))
+    order = list(names)
+    own = next((k for k, (_, h) in enumerate(order) if h and h.group == _OWN_GROUP), None)
+    if own is not None:  # the record's own name fields are its own person, declared first
+        order.insert(0, order.pop(own))
     people: list[_Person] = []
     index: dict[str, int] = {}
-    for name in names:
-        canon, parts = normalise(name), name_parts([name])
+    groups: dict[str, int] = {}
+    keyed: dict[tuple[int, str], NameRole] = {}
+    placed: dict[tuple[int, str], NameRole] = {}
+    for name, hint in order:
+        group = hint.group if hint is not None else None
+        if group is not None and group in groups:
+            continue  # placed with the group's first field
+        if group is not None:  # first, middle, last: a person's key is their name's, in any layout
+            ordered = sorted(members[group], key=lambda entry: _NAME_ORDER.get(entry[1], 3))
+            whole = " ".join(member for member, _ in ordered)
+        else:
+            whole = name
+        canon, parts = normalise(whole), name_parts([whole])
         if not parts:
             continue
+        gender = hint.gender if hint is not None else None
         i = index.get(canon)
         if i is None:
             i = next(
@@ -280,12 +372,36 @@ def _people(seed: bytes, names: Iterable[str]) -> tuple[tuple[_Person, ...], dic
                 ),
                 len(people),
             )
-            index[canon] = i
+        index.setdefault(canon, i)
         if i == len(people):
-            people.append(_Person(f"{seed_int(seed, f'record-person|{canon}'):016x}", parts))
+            key = f"{seed_int(seed, f'record-person|{canon}'):016x}"
+            people.append(_Person(key, parts, gender))
         else:
-            people[i] = _Person(people[i].key, people[i].parts | parts)
-    return tuple(people), index
+            person = people[i]
+            people[i] = _Person(person.key, person.parts | parts, person.gender or gender)
+        if group is not None:
+            groups[group] = i
+            for member, role in members[group]:
+                index.setdefault(normalise(member), i)
+                if role is not None:
+                    keyed.setdefault((i, normalise(member)), role)
+            continue
+        words = name.split()
+        if len(words) > 1 and "," not in name:
+            placed.setdefault((i, normalise(words[0])), "first")
+            placed.setdefault((i, normalise(words[-1])), "last")
+    return _People(tuple(people), index, groups, {**placed, **keyed})
+
+
+def _gender(record: _Record, anchor: str) -> str | None:
+    """The gender a title gave the person whose persona ``anchor`` is (``|person:<key>`` in it,
+    else the record's own), or ``None``."""
+    if not record.people:
+        return None
+    found = _PERSON_ANCHOR.search(anchor)
+    if found is None:
+        return record.people[0].gender
+    return next((p.gender for p in record.people if p.key == found.group(1)), None)
 
 
 class SynthesisSeed(BaseModel):
@@ -433,7 +549,7 @@ class SurrogateEngine:
         self._seed = seed
         self._default_locale = normalise_locale(default_locale)
         self._personas = PersonaFactory(seed)
-        self._cache: dict[tuple[str, str, frozenset[str]], Persona] = {}
+        self._cache: dict[tuple[str, str, frozenset[str], str | None], Persona] = {}
         self._anchors: dict[_PeopleKey, tuple[str, ...]] = {}
         self._records: dict[str, _Record] = {}
         self._reshaper = Reshaper(seed)
@@ -491,25 +607,37 @@ class SurrogateEngine:
             "SORT_CODE": lambda o, loc, a, r: self._reshape("SORT_CODE", o, r, False),
         }
 
-    def declare_record(self, anchor: str, originals: Iterable[tuple[str, str]]) -> None:
-        """Declare the record's detected values, as ``(entity_type, original)`` pairs.
+    def declare_record(
+        self,
+        anchor: str,
+        originals: Iterable[tuple[str, str]],
+        hints: Sequence[NameHint | None] = (),
+    ) -> None:
+        """Declare the record's detected values, as ``(entity_type, original)`` pairs, with what
+        the record's layout says about each person name (``hints``, by position; ``None`` or
+        missing for a value it says nothing about).
 
         Call it before synthesising any field of the record, so every field draws on the same
-        personas: the first ``PERSON_NAME`` declared is the record's persona, every other person
-        named gets their own (see "One persona per person" in the module docstring). It replaces
-        what was declared for ``anchor`` before (a record's surrogates depend on that record's
-        values, never on another's); the engine's own retries of the record (``anchor|retry1``,
-        ``anchor|mrz2``) and its people's personas (``anchor|person:<key>``) inherit it. Only
-        normalised forms, name parts and seeded digests are kept, and only in this engine.
+        personas: the record's own name fields (``first_name``/``last_name`` at its top), else the
+        first ``PERSON_NAME`` declared, are the record's persona, every other person named gets
+        their own (see "One persona per person" and "Name fields and titles" in the module
+        docstring). It replaces what was declared for ``anchor`` before (a record's
+        surrogates depend on that record's values, never on another's); the engine's own retries
+        of the record (``anchor|retry1``, ``anchor|mrz2``) and its people's personas
+        (``anchor|person:<key>``) inherit it. Only normalised forms, name parts, seeded digests,
+        field groups, name-word roles and genders are kept, and only in this engine.
         """
         pairs = list(originals)
-        names = [original for entity, original in pairs if entity == _NAME]
-        people, named = _people(self._seed, names)
+        given = list(hints)
+        names = [
+            (original, given[i] if i < len(given) else None)
+            for i, (entity, original) in enumerate(pairs)
+            if entity == _NAME
+        ]
         record = _Record.of(
-            name_parts(names),
+            name_parts(name for name, _ in names),
             (canon for _, original in pairs if len(canon := normalise(original)) >= _MIN_DECLARED),
-            people=people,
-            names=named,
+            people=_people(self._seed, names),
         )
         if record.parts or record.index:
             self._records[anchor] = record
@@ -526,15 +654,20 @@ class SurrogateEngine:
                 return _NOTHING
             anchor = anchor.rsplit("|", 1)[0]
 
-    def persona(self, anchor: str, locale: str, avoid: Iterable[str] = ()) -> Persona:
+    def persona(
+        self, anchor: str, locale: str, avoid: Iterable[str] = (), gender: str | None = None
+    ) -> Persona:
         """The record's persona (cached), sharing no part with the record's declared names or
-        with the names in ``avoid``. The record's other people have theirs at their own anchors
+        with the names in ``avoid``, of the gender a title gave its person (else ``gender``, else
+        drawn). The record's other people have theirs at their own anchors
         (:meth:`_people_anchors`)."""
         loc = normalise_locale(locale)
-        parts = self._declared(anchor).parts | name_parts(avoid)
-        key = (anchor, loc, parts)
+        record = self._declared(anchor)
+        parts = record.parts | name_parts(avoid)
+        hint = _gender(record, anchor) or gender
+        key = (anchor, loc, parts, hint)
         if key not in self._cache:
-            self._cache[key] = self._personas.for_anchor(anchor, loc, avoid=parts)
+            self._cache[key] = self._personas.for_anchor(anchor, loc, avoid=parts, gender_hint=hint)
         return self._cache[key]
 
     def _people_anchors(self, anchor: str, loc: str) -> tuple[str, ...]:
@@ -563,11 +696,20 @@ class SurrogateEngine:
         self._anchors[key] = tuple(anchors)
         return self._anchors[key]
 
-    def _named(self, anchor: str, loc: str, name: str) -> str:
-        """The persona anchor of the person ``name`` stands for (``anchor`` for the record's)."""
+    def _named(
+        self, anchor: str, loc: str, name: str, hint: NameHint | None
+    ) -> tuple[str, NameRole | None]:
+        """The persona anchor of the person ``name`` stands for (``anchor`` for the record's;
+        a name field: its group's person) and the part of their name it is: the field's (from
+        its key), else, for a single word, the part the record declared that word as for that
+        person (``None``: none said)."""
         record = self._declared(anchor)
-        person = record.named(name) if len(record.people) > 1 else 0
-        return self._people_anchors(anchor, loc)[person] if person else anchor
+        group = hint.group if hint is not None else None
+        person = record.named(name, group) if len(record.people) > 1 else 0
+        role = hint.role if hint is not None else None
+        if role is None and len(name.split()) <= 1:
+            role = record.roles.get((person, normalise(name)))
+        return (self._people_anchors(anchor, loc)[person] if person else anchor), role
 
     def _holder(self, anchor: str, loc: str, text: str) -> str:
         """The persona anchor of the person whose name ``text`` holds (``anchor`` for nobody's)."""
@@ -583,6 +725,18 @@ class SurrogateEngine:
         draws on) and (for persona fields) the anchor: it never depends on what this engine was
         asked before.
         """
+        return self._draw(entity_type, original, locale, anchor, None)
+
+    def name_surrogate(self, original: str, locale: str, anchor: str, hint: NameHint) -> str:
+        """A ``PERSON_NAME`` surrogate for a field that holds one part of a name (``hint``, from
+        the field's key: ``first_name``, ``last_name``): that part of the persona of the person
+        the field's group names. The same guarantees as :meth:`surrogate`, the hint (never read
+        from a value) one more input."""
+        return self._draw(_NAME, original, locale, anchor, hint)
+
+    def _draw(
+        self, entity_type: str, original: str, locale: str, anchor: str, hint: NameHint | None
+    ) -> str:
         if not original.strip():
             return original
         loc = normalise_locale(locale or self._default_locale)
@@ -592,7 +746,7 @@ class SurrogateEngine:
         for attempt in range(_ATTEMPTS):
             salt = "" if attempt == 0 else f"|retry{attempt}"
             rng = random.Random(seed_int(self._seed, f"{entity_type}|{canon}{salt}"))
-            value = self._generate(entity_type, original, loc, anchor + salt, rng)
+            value = self._generate(entity_type, original, loc, anchor + salt, rng, hint)
             if entity_type in _IDENTITY_OK:
                 return value
             if _reveals(canon, value):
@@ -631,10 +785,18 @@ class SurrogateEngine:
 
     # -- generators -----------------------------------------------------------------------------
     def _generate(
-        self, entity: str, original: str, loc: str, anchor: str, rng: random.Random
+        self,
+        entity: str,
+        original: str,
+        loc: str,
+        anchor: str,
+        rng: random.Random,
+        hint: NameHint | None = None,
     ) -> str:
         if entity in _REDACT:
             return REDACTED
+        if entity == _NAME:
+            return self._person_name(original, loc, anchor, rng, hint)
         generator = self._generators.get(entity)
         if generator is not None:
             return generator(original, loc, anchor, rng)
@@ -642,13 +804,41 @@ class SurrogateEngine:
         # script), except the short codes of an identifier (CUST-, MH14: see code_letters)
         return self._reshape(entity, original, rng, True, keep=code_letters(original) or None)
 
-    def _person_name(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
-        # the persona of the person it names (the record's first name: the record's persona);
-        # never a part of the name it replaces, even when the record's names were not declared
-        # (declared names include it, so this is then that person's persona)
-        p = self.persona(self._named(anchor, loc, original), loc, avoid=(original,))
-        name = p.first_name if len(original.split()) <= 1 else p.full_name
+    def _person_name(
+        self,
+        original: str,
+        loc: str,
+        anchor: str,
+        rng: random.Random,
+        hint: NameHint | None = None,
+    ) -> str:
+        # the persona of the person it names (the record's first name: the record's persona; a
+        # name field: its group's person), and the part of the name it is (a name field's, from
+        # its key; a single word's, as the record declared it); never a part of the name it
+        # replaces, even when the record's names were not declared (declared names include it,
+        # so this is then that person's persona)
+        person, role = self._named(anchor, loc, original, hint)
+        p = self.persona(person, loc, avoid=(original,))
+        if role == "last":
+            name = p.last_name
+        elif role == "middle":
+            name = self._middle_name(person, loc, original, p)
+        elif role == "first" or len(original.split()) <= 1:
+            name = p.first_name
+        else:
+            name = p.full_name
         return name.upper() if original.isupper() else name
+
+    def _middle_name(self, anchor: str, loc: str, original: str, p: Persona) -> str:
+        """A middle name for ``p``: the first name of a persona of the same gender at
+        ``anchor|middle<n>`` that is neither ``p``'s first nor last name (else the last drawn)."""
+        taken = {normalise(p.first_name), normalise(p.last_name)}
+        name = p.first_name
+        for attempt in range(_ATTEMPTS):
+            name = self.persona(f"{anchor}|middle{attempt}", loc, (original,), p.gender).first_name
+            if normalise(name) not in taken:
+                break
+        return name
 
     def _date_of_birth(self, original: str, loc: str, anchor: str, rng: random.Random) -> str:
         parsed = _parse_date(original)
