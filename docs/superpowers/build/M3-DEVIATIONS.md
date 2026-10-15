@@ -1815,3 +1815,16 @@ before-fix-*-at-HEAD.log`) and pass on the fix. Live proofs and their counts:
     synthesize → created table → finalize in process, `CHECK_BATCH` 128: every pack column's
     `checked` equals its values in the target, `rows_read` equals both sides' rows — as built
     `TAX_ID` said 71 of 1 821, `$.kyc.taxId` 68 of 355).
+  - **Verification** (`9fe68f4`, lane stack `dps-wt-fidcheck`, report
+    `~/.cache/dps-build/reports/S8-idcheck-impl.md`): ruff and mypy clean; M3 gate (`oracle or mongo`)
+    188 passed, 1 skipped; M2 gate (`db or pg_source or s3`) 438 + 437 passed in two runs, the only
+    other outcomes being environment preconditions or the known intermittent fail-closed `leakage`
+    of a PostgreSQL obfuscate run (both pass on rerun; code paths this fix does not touch); smoke
+    `--m3` 39 passed (OCR skipped). On the deployed image (app and worker files = HEAD), 20 000-row
+    synthesize runs say `checked` = the target's values for every identifier column — Oracle
+    `CUSTOMERS` `NATIONAL_ID` 20 000 / 20 000 and `TAX_ID` 11 989 / 11 989, `KYC_DOCUMENTS`
+    `DOC_NUMBER` 20 000 / 20 000, MongoDB `$.accounts[*].iban` 20 000 / 20 000 and `$.kyc.taxId`
+    11 989 / 11 989 (as built: 5 000, 2 994, 5 000, 5 000, 3 002) — with `rows_read` 20 000 / 20 000
+    and `in_source` equal to an independent count (0). One source identifier planted after every
+    pseudonymised key of a 40 001-row Oracle and MongoDB target (`table_load: upsert`) gives
+    `in_source` 1, `review_required`, not `passed`.
