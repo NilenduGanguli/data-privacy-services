@@ -277,7 +277,8 @@ def test_each_worker_handler_task_gets_its_own_call_scope() -> None:
         )
 
     async def main() -> None:
-        consumer = object.__new__(Consumer)  # _guard needs no consumer state
+        consumer = object.__new__(Consumer)  # _guard needs only the settings (pattern run cap)
+        consumer.settings = Settings(_env_file=None)  # type: ignore[call-arg]
         await asyncio.gather(
             asyncio.create_task(
                 consumer._guard(handler("JOB_A_ID", Sensitivity.HIGH), tenant_id="ta")

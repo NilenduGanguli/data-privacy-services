@@ -37,6 +37,8 @@ M5 = [
     "dps/engine/metrics.py",
     "dps/engine/transform/external.py",
     "dps/engine/detect/regex_guard.py",
+    "dps/engine/detect/pattern_process.py",
+    "dps/engine/detect/pattern_child.py",
     "dps/layers/connectors/tabular.py",
     "dps/layers/connectors/identifier_check.py",
     "dps/auth_db.py",

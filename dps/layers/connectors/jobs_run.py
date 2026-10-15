@@ -1709,9 +1709,12 @@ def verification_outcome(
     ``incomplete`` when the job ended ``failed`` or ``canceled`` without a hit (its sweep saw only
     what was written before it stopped, often nothing: a run refused at prepare is never "passed
     · 0 leaks"); ``review_required`` when the post-write sample found personal data in a column the
-    snapshot called not personal; else ``passed``. Only ``passed`` passes.
+    snapshot called not personal — or could not run at all (S3 review round 2: a refused policy
+    pattern, an unreachable target; ``{"error": code}``), which fails closed like the identifier
+    check; else ``passed``. Only ``passed`` passes.
     """
-    review = int((post_sample or {}).get("kept_column_hits") or 0) > 0
+    post = post_sample or {}
+    review = int(post.get("kept_column_hits") or 0) > 0 or bool(post.get("error"))
     if hits or leakage:
         return False, "failed", review
     if outcome not in ("succeeded", "dry_run"):

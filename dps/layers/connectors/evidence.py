@@ -554,6 +554,11 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
             f"<span class='chip bad'>not verified · job {e(pack.outcome)}"
             f"{f' ({e(first)})' if first else ''}</span>"
         )
+    elif v.get("review_required") and not hits and post.get("error"):
+        status = (
+            "<span class='chip warn'>review required · the post-write sample did not run "
+            f"({e(post.get('error'))})</span>"
+        )
     elif v.get("review_required") and not hits:
         status = (
             f"<span class='chip warn'>review required · {e(post.get('kept_column_hits', 0))} "
@@ -562,13 +567,21 @@ def render_html(pack: EvidencePack, *, sha: str) -> str:
     else:
         status = f"<span class='chip bad'>verification failed · {e(hits)} hits</span>"
     sweep_failed = bool(hits) or (not passed and not v.get("review_required"))
-    kept_note = (
-        f"<tr><th>Review required</th><td class=warn>The post-write sample found personal data in "
-        f"{e(', '.join(post.get('kept_columns') or []))}, which the snapshot kept as not "
-        "personal. Reclassify these columns and run again before using the output.</td></tr>"
-        if v.get("review_required")
-        else ""
-    )
+    if v.get("review_required") and post.get("error"):
+        # S3 review round 2: a sample that could not run is no clean sample (fail closed)
+        kept_note = (
+            "<tr><th>Review required</th><td class=warn>The post-write sample did not run "
+            f"({e(post.get('error'))}), so nothing checked the written output for personal data "
+            "in columns kept as not personal. Check the output before using it.</td></tr>"
+        )
+    elif v.get("review_required"):
+        kept_note = (
+            "<tr><th>Review required</th><td class=warn>The post-write sample found personal data "
+            f"in {e(', '.join(post.get('kept_columns') or []))}, which the snapshot kept as not "
+            "personal. Reclassify these columns and run again before using the output.</td></tr>"
+        )
+    else:
+        kept_note = ""
     sel = pack.source.get("selection") or {}
     cols = (
         "".join(

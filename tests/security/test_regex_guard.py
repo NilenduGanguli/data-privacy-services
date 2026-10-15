@@ -30,8 +30,8 @@ from dps.engine.detect.custom import (
 )
 from dps.engine.detect.regex_guard import (
     BUDGET_BASE_SECONDS,
-    BUDGET_PER_CALL_SECONDS,
     BUDGET_PER_CHAR_SECONDS,
+    BUDGET_PER_RUN_SECONDS,
     PatternBudget,
     PatternTooSlow,
     UnsafePattern,
@@ -287,9 +287,7 @@ def test_the_budget_is_linear_in_what_is_scanned() -> None:
     budget = PatternBudget()
     assert budget.left == pytest.approx(BUDGET_BASE_SECONDS)
     budget.earn(10_000, 3)
-    expected = BUDGET_BASE_SECONDS + 3 * (
-        BUDGET_PER_CALL_SECONDS + BUDGET_PER_CHAR_SECONDS * 10_000
-    )
+    expected = BUDGET_BASE_SECONDS + 3 * (BUDGET_PER_RUN_SECONDS + BUDGET_PER_CHAR_SECONDS * 10_000)
     assert budget.left == pytest.approx(expected)
     spent = PatternBudget(base_seconds=0.0)
     with pytest.raises(PatternTooSlow) as refused:  # nothing left: refused before it runs
@@ -297,7 +295,10 @@ def test_the_budget_is_linear_in_what_is_scanned() -> None:
     assert refused.value.code == "custom_pattern_too_slow" and refused.value.status == 422
     assert "123" not in refused.value.detail
     spent.earn(3, 1)
-    assert [m.group(0) for m in spent.run(compile_policy_pattern(r"\d+"), "123")] == ["123"]
+    assert spent.run(compile_policy_pattern(r"\d+"), "123") == [(0, 3)]
+    capped = PatternBudget(ceiling=0.5)  # R2-B2: an API request's budget never exceeds its cap
+    capped.earn(10_000_000, 1000)
+    assert capped.left == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(
@@ -326,8 +327,7 @@ def test_policy_patterns_match_exactly_like_re(pattern: str) -> None:
     compiled = compile_policy_pattern(pattern)
     for text in texts:
         want = [(m.start(), m.end()) for m in re.finditer(pattern, text)]
-        got = [(m.start(), m.end()) for m in PatternBudget().run(compiled, text)]
-        assert got == want, (pattern, text)
+        assert PatternBudget().run(compiled, text) == want, (pattern, text)
 
 
 def _old_path_glob(pattern: str) -> re.Pattern[str]:
@@ -373,3 +373,35 @@ def test_declared_globs_match_exactly_like_the_regex_form() -> None:
         assert path_glob(glob).fullmatch(path) is (
             _old_path_glob(glob).fullmatch(path) is not None
         ), (glob, path)
+
+
+@pytest.mark.parametrize(
+    "pattern,rule",
+    [
+        (r"(?:ACCT1234){e<=2}", "repeat count"),
+        (r"\bID{x}\d+", "repeat count"),
+        (r"\d{}", "repeat count"),
+        (r"[[:digit:]]+", "inside a set"),
+        (r"[a[b]", "inside a set"),
+    ],
+)
+def test_constructs_the_engine_reads_differently_from_re_are_refused(
+    pattern: str, rule: str
+) -> None:
+    """Review round 2 (N-r2-1): ``re`` reads these literally, the ``regex`` module as a fuzzy match
+    or a POSIX class — refused with the rule, never the pattern."""
+    with pytest.raises(UnsafePattern, match=rule) as caught:
+        check_pattern(pattern)
+    assert "ACCT" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"\{\d+\}", r"a{2,3}", r"a{,3}", r"a{3,}", r"x{2}", r"[\[\]]", r"[]a]", r"[^]a]+", r"\[x\]"],
+)
+def test_escaped_braces_brackets_and_repeat_counts_pass(pattern: str) -> None:
+    check_pattern(pattern)
+    want = [m.span() for m in re.finditer(pattern, "{12} aa aaa x xx [x] ]a a] b")]
+    assert PatternBudget().run(compile_policy_pattern(pattern), "{12} aa aaa x xx [x] ]a a] b") == (
+        want
+    )

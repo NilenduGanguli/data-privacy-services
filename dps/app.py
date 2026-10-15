@@ -41,6 +41,8 @@ from dps.auth import (
 )
 from dps.config import Settings, get_settings
 from dps.engine.call_scope import call_scope
+from dps.engine.detect.pattern_process import configure_pattern_processes
+from dps.engine.detect.regex_guard import DEFAULT_CPU_SECONDS
 from dps.engine.service import PrivacyEngine
 from dps.layers.api import validation
 from dps.layers.api.common import TRACE_HEADER, CodedHTTPException
@@ -199,16 +201,18 @@ class _ReplayHeader:
 class _CallScope:
     """Binds a fresh engine call scope for every HTTP request (S3 review round 1 B1/B3,
     :mod:`dps.engine.call_scope`): the custom entity tiers its policies declare and the CPU budget
-    of its policy patterns belong to that request alone — every route, present or added later."""
+    of its policy patterns belong to that request alone — every route, present or added later.
+    The budget is capped at ``DPS_PATTERN_CPU_SECONDS`` (review round 2, R2-B2)."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, *, pattern_cpu_seconds: float = DEFAULT_CPU_SECONDS) -> None:
         self.app = app
+        self.pattern_cpu_seconds = pattern_cpu_seconds
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        with call_scope():
+        with call_scope(pattern_ceiling=self.pattern_cpu_seconds):
             await self.app(scope, receive, send)
 
 
@@ -502,6 +506,7 @@ def create_app(
     settings = settings or get_settings()
     configure_logging(settings.log_level, json_output=settings.env != "local")
     assert_production_posture(settings)
+    configure_pattern_processes(settings.pattern_processes)  # S3 review round 2 (R2-B1)
     static_store = StaticKeyStore.from_settings(settings)
     db_store = _db_key_store(settings)
     key_store: KeyStore = static_store
@@ -634,7 +639,7 @@ def create_app(
     app.state.kek = None
 
     # add_middleware prepends: the last one added is the outermost.
-    app.add_middleware(_CallScope)
+    app.add_middleware(_CallScope, pattern_cpu_seconds=settings.pattern_cpu_seconds)
     app.add_middleware(_ReplayHeader)
     app.add_middleware(_ValueFreeErrors)
     app.add_middleware(

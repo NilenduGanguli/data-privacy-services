@@ -143,6 +143,11 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_rps: float = 50.0
     rate_limit_burst: int = 100
+    # --- policy patterns (S3 review F-02, rounds 1-2): the most CPU one API request (or one NDJSON
+    # item) may spend on custom recognizer patterns and deny lists, and the longest any single run
+    # may take (L2 jobs included); and how many matcher processes run the long runs ---
+    pattern_cpu_seconds: float = Field(default=5.0, gt=0, le=600)
+    pattern_processes: int = Field(default=2, ge=1, le=64)
 
     # --- engine ---
     default_policy: str = "gdpr-pseudonymise"

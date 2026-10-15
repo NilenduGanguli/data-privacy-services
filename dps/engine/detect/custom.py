@@ -11,14 +11,19 @@ Deny-list entries and patterns are often the sensitive terms themselves, so vali
 never echo the input (``hide_input_in_errors``) and a bad regex is reported without its text.
 
 Patterns and deny lists run on the ``regex`` module under the call's CPU budget
-(:mod:`dps.engine.detect.regex_guard`, S3 review round 1 B1): a pattern that backtracks past it
-refuses the call (``custom_pattern_too_slow``) instead of pinning a CPU. Declared-field globs are
-matched without any regex (:class:`PathGlob`): linear in the path whatever the stars.
+(:mod:`dps.engine.detect.regex_guard`, S3 review rounds 1 and 2): a pattern that backtracks past it
+refuses the call (``custom_pattern_too_slow``) instead of pinning a CPU. A deny list is one pattern
+shaped as a trie of its terms (:func:`deny_list_pattern`, review round 2): at each position the
+matcher follows one path, so its cost per character does not grow with the number of terms.
+Declared-field globs are matched without any regex (:class:`PathGlob`): linear in the path
+whatever the stars.
 """
 
 from __future__ import annotations
 
+import functools
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +238,125 @@ def path_glob(pattern: str) -> PathGlob:
     return PathGlob(pattern)
 
 
+#: Trie levels before a deny list's remaining term endings are listed flat (the matcher's parser
+#: nests one group per level and refuses deep nesting).
+_TRIE_DEPTH = 48
+#: Work allowed to build a trie, as a multiple of the terms' characters: a plain trie needs 1x;
+#: the Turkish i's (whose case matches overlap without being equal) copy some branches, and a list
+#: made of nothing else could copy them at every level — past this it is matched flat instead.
+_TRIE_WORK_FACTOR = 4
+_TRIE_WORK_BASE = 1000
+
+
+class _TrieTooLarge(Exception):
+    """The trie of a deny list would grow past its work bound (:data:`_TRIE_WORK_FACTOR`)."""
+
+
+#: Every character that has other case forms, as the matcher sees them (built on first use).
+_CASED: dict[str, str] = {}
+_CASED_CLASS = r"[\p{Cased}\p{Changes_When_Casefolded}\p{Changes_When_Casemapped}]"
+
+
+def _cased() -> str:
+    text = _CASED.get("all")
+    if text is None:
+        everything = "".join(map(chr, range(0xD800))) + "".join(map(chr, range(0xE000, 0x110000)))
+        text = _CASED.setdefault("all", "".join(regex.findall(_CASED_CLASS, everything)))
+    return text
+
+
+@functools.lru_cache(maxsize=16384)
+def _matches(char: str) -> frozenset[str]:
+    """Every character a deny-list ``char`` matches case-insensitively — as the matcher decides,
+    not from a case table: its relation is not transitive for the Turkish i's (``I`` matches
+    ``i`` and ``ı``, ``i`` matches ``I`` and ``İ``, ``ı`` never matches ``i``)."""
+    probe = compile_policy_pattern(re.escape(char), regex.IGNORECASE)
+    return frozenset(m.group() for m in probe.finditer(_cased())) | {char}
+
+
+def _alternation(terms: Iterable[str]) -> str:
+    """The flat form: longest first, so the longest term that ends at a word boundary wins."""
+    return "|".join(re.escape(t) for t in sorted(terms, key=lambda t: (-len(t), t)))
+
+
+def deny_list_pattern(terms: Iterable[str]) -> str:
+    """A deny list as one pattern: its terms as a trie of exact character classes (compile it
+    **without** ``IGNORECASE``: :func:`compile_deny_list`).
+
+    It matches exactly what the case-insensitive flat alternation of the terms (longest first)
+    between ``(?<!\\w)`` and ``(?!\\w)`` matches — the same longest term at the same place, the
+    flat form being DPS's deny-list semantics since M0. Each edge of the trie is the set of text
+    characters that one or more terms accept at that place, as the matcher's case-insensitive
+    comparison decides (:func:`_matches`), and the edges of a node never share a character, so at
+    each position the matcher follows a single path instead of trying every term: its cost per
+    character stays flat however many terms there are (a 1000-name list: about 0.05 µs per
+    character, against 0.7 µs for the flat form; S3 review round 2, R2-B2). Below
+    :data:`_TRIE_DEPTH` levels the remaining endings are listed flat (case-insensitive, longest
+    first).
+    """
+    unique = sorted(set(terms))
+    budget = [_TRIE_WORK_BASE + _TRIE_WORK_FACTOR * sum(len(t) for t in unique)]
+    return rf"(?<!\w)(?:{_emit(unique, 0, budget)})(?!\w)"
+
+
+def _emit(suffixes: list[str], depth: int, budget: list[int]) -> str:
+    """The trie below one node (``suffixes``: what the terms that reached it still need).
+
+    Raises:
+        _TrieTooLarge: building it would pass the work bound (``budget``, decremented in place).
+    """
+    ends_here = "" in suffixes
+    rest = [s for s in suffixes if s]
+    if not rest:
+        return ""
+    budget[0] -= len(rest)
+    if budget[0] < 0:
+        raise _TrieTooLarge
+    if depth >= _TRIE_DEPTH:
+        body = f"(?i:{_alternation(rest)})"
+    else:
+        by_first: dict[str, set[str]] = {}
+        for suffix in rest:
+            by_first.setdefault(suffix[0], set()).add(suffix[1:])
+        # each text character, and the first characters (of terms) that accept it
+        accepts: dict[str, set[str]] = {}
+        for char in by_first:
+            for text_char in _matches(char):
+                accepts.setdefault(text_char, set()).add(char)
+        regions: dict[frozenset[str], list[str]] = {}
+        for text_char, chars in accepts.items():
+            regions.setdefault(frozenset(chars), []).append(text_char)
+        branches = []
+        for accepted, text_chars in sorted(regions.items(), key=lambda kv: min(kv[1])):
+            edge = (
+                re.escape(text_chars[0])
+                if len(text_chars) == 1
+                else "[" + "".join(re.escape(c) for c in sorted(text_chars)) + "]"
+            )
+            tails = sorted(set().union(*(by_first[c] for c in accepted)))
+            branches.append(edge + _emit(tails, depth + 1, budget))
+        body = branches[0] if len(branches) == 1 else "(?:" + "|".join(branches) + ")"
+    # a term may end here: a longer one is tried first (greedy), as in the flat form
+    return f"(?:{body})?" if ends_here else body
+
+
+def compile_deny_list(terms: Iterable[str]) -> regex.Pattern[str]:
+    """Compile a deny list for :meth:`~dps.engine.detect.regex_guard.PatternBudget.run`
+    (:func:`deny_list_pattern`; the flat case-insensitive form if the trie would be too large or
+    cannot be compiled). Cached by its terms: a policy's detector is rebuilt for every request and
+    NDJSON item."""
+    return _compile_deny_list(tuple(terms))
+
+
+@functools.lru_cache(maxsize=128)
+def _compile_deny_list(terms: tuple[str, ...]) -> regex.Pattern[str]:
+    try:
+        return compile_policy_pattern(deny_list_pattern(terms))
+    except (_TrieTooLarge, RecursionError, regex.error):
+        flat = rf"(?<!\w)(?:{_alternation(terms)})(?!\w)"
+        return compile_policy_pattern(flat, regex.IGNORECASE)
+
+
 _UNREGISTERED = object()
 
 
@@ -311,11 +435,7 @@ class PolicyCustomDetector:
             for pat in rec.patterns:
                 self._patterns.append((rec, pat, compile_policy_pattern(pat.regex), allowed))
             if rec.deny_list:
-                alternation = "|".join(
-                    re.escape(w) for w in sorted(rec.deny_list, key=len, reverse=True)
-                )
-                deny = rf"(?<!\w)(?:{alternation})(?!\w)"
-                self._deny.append((rec, compile_policy_pattern(deny, regex.IGNORECASE), allowed))
+                self._deny.append((rec, compile_deny_list(rec.deny_list), allowed))
 
     @property
     def text_entities(self) -> frozenset[str]:
@@ -347,33 +467,33 @@ class PolicyCustomDetector:
         budget.earn(len(text), len(self._patterns) + len(self._deny))
         hits: list[Hit] = []
         for rec, pat, compiled, allowed in self._patterns:
-            for m in budget.run(compiled, text):
-                if m.end() == m.start() or m.group(0) in allowed:
+            for start, end in budget.run(compiled, text):
+                if end == start or text[start:end] in allowed:
                     continue
                 score = pat.score
-                before = text[max(0, m.start() - CONTEXT_WINDOW) : m.start()]
+                before = text[max(0, start - CONTEXT_WINDOW) : start]
                 window = f"{before} {key_hint or ''}".lower()
                 if any(w.lower() in window for w in rec.context):
                     score = min(1.0, score + CONTEXT_BONUS)
                 hits.append(
                     Hit(
                         rec.supported_entity,
-                        m.start(),
-                        m.end(),
+                        start,
+                        end,
                         round(score, 3),
                         f"custom:{rec.name}",
                         f"custom-pattern:{pat.name}",
                     )
                 )
         for rec, compiled, allowed in self._deny:
-            for m in budget.run(compiled, text):
-                if m.group(0) in allowed:
+            for start, end in budget.run(compiled, text):
+                if text[start:end] in allowed:
                     continue
                 hits.append(
                     Hit(
                         rec.supported_entity,
-                        m.start(),
-                        m.end(),
+                        start,
+                        end,
                         DENY_LIST_SCORE,
                         f"custom:{rec.name}",
                         "deny-list",
