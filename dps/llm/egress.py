@@ -11,6 +11,13 @@ own leak guard; this is a second, independent check at the single egress point,
   e-mail address or a valid phone number — outside DPS placeholders (``{EMAIL_1}``) and that is
   not a value *shape* (only ``x``/``X``/``9`` and punctuation: what M1's labelling prompts send).
 
+The pattern scan reads the non-system messages only. A system message is DPS's own fixed
+instructions — every caller builds it from constants (the labelling, rewrite and spec prompts) and
+puts call data in the user message — and an instruction can look like a value: the labelling
+prompt's entity-type list holds ``USERNAME``, which has a SWIFT BIC's shape (a valid ISO country,
+``NA``, in positions 5-6), and blocked every labelling call. Protected originals are still looked
+for in every message.
+
 Each distinct value counts once. Under ``DPS_LLM_EGRESS_CHECK=strict`` (required in staging/prod)
 a prompt with any raw value is never sent (:class:`LlmEgressBlocked`); under ``warn`` it is sent
 and counted on the alarm counters. Only counts and purposes are logged — never the prompt.
@@ -66,10 +73,13 @@ def residual_values(
             continue
         if needle in words or (len(needle) >= _SUBSTRING_MIN and needle in hay):
             found.add(needle)
-    for hit in [*scan_text(clean), *scan_phones(clean, region=region)]:
+    data = PLACEHOLDER.sub(
+        " ", "\n".join(str(m.get("content", "")) for m in messages if m.get("role") != "system")
+    )
+    for hit in [*scan_text(data), *scan_phones(data, region=region)]:
         if not (hit.validated or hit.entity_type in SELF_IDENTIFYING):
             continue
-        raw = clean[hit.start : hit.end]
+        raw = data[hit.start : hit.end]
         if _SHAPE.fullmatch(raw):
             continue  # a value shape (xxx.x@x.xx, 9999), not a value
         found.add(normalise(raw) or raw)
