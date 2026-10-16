@@ -137,3 +137,87 @@ def test_names_in_a_json_notes_field_become_span_findings() -> None:
 )
 def test_title_gender_reads_the_title_before_a_name(text: str, gender: str | None) -> None:
     assert title_gender(text, len(text) - len("Arjun")) == gender
+
+
+# --- FINAL r1 synthetic B3: a surname that is also a cue STOPWORD ------------------------------
+#: Faker surnames of the persona pools that are name-cue STOPWORDS (``Date`` en_IN; ``Le``,
+#: ``Best``, ``Branch``, ``Holder`` en_US): a cue-opened run ended at them, so the span held the
+#: first name only and the leakage sweep never learnt the surname.
+STOPWORD_SURNAMES = ("Date", "Le", "Best", "Branch", "Holder")
+
+
+@pytest.mark.parametrize("surname", STOPWORD_SURNAMES)
+@pytest.mark.parametrize(
+    ("template", "cue"),
+    [
+        ("Branch visit: Mr. Rahul {s} confirmed the nominee details.", "cue:title"),
+        ("Branch visit: Mrs. Priya {s}.", "cue:title"),
+        ("Dear Anita {s},\nthanks for your mail.", "cue:lead-in"),
+        ("Account holder Vikram {s} requested a new card.", "cue:lead-in"),
+        ("Spoke to Dr. Meera {s}'s assistant about the loan.", "cue:title"),
+        ("NEFT/Arjun {s}/salary", "cue:narration"),
+    ],
+)
+def test_a_stopword_surname_after_a_cued_name_is_part_of_it(
+    surname: str, template: str, cue: str
+) -> None:
+    text = template.format(s=surname)
+    hits = scan_names(text)
+    names = [text[h.start : h.end] for h in hits]
+    assert len(hits) == 1 and names[0].endswith(surname), (names, text)
+    assert hits[0].evidence == cue
+
+
+@pytest.mark.parametrize("surname", STOPWORD_SURNAMES)
+def test_a_stopword_surname_right_after_a_title_is_a_name(surname: str) -> None:
+    text = f"Escalated to Mrs. {surname} at the branch."
+    assert [text[h.start : h.end] for h in scan_names(text)] == [surname]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Branch Office (branch@example.com) opens at 10.",
+        "Main Branch (+91 22 2345 6789) is the head office.",
+        "Best regards, Branch Holder Services",
+        "Date: 2026-03-14",
+        "Visit Our Branch (branch@example.com) today.",
+    ],
+)
+def test_stopword_headings_stay_undetected(text: str) -> None:
+    assert scan_names(text) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("Please ask Mr. Rao Branch Office for the form.", "Rao"),  # a heading follows
+        ("Mr. Rahul Date Of Birth was missing.", "Rahul"),
+    ],
+)
+def test_a_stopword_that_opens_a_heading_is_no_surname(text: str, name: str) -> None:
+    assert [text[h.start : h.end] for h in scan_names(text)] == [name]
+
+
+@pytest.mark.parametrize("surname", STOPWORD_SURNAMES)
+@pytest.mark.parametrize("policy", ["synthetic-realistic", "synthetic-strict", "obfuscate"])
+def test_l1_never_keeps_a_stopword_surname(surname: str, policy: str) -> None:
+    import asyncio
+
+    from dps.config import Settings
+    from dps.engine.service import Payload, PrivacyEngine, RequestOptions
+
+    engine = PrivacyEngine(Settings(_env_file=None, llm_provider="stub", ner_enabled=False))
+    kept = 0
+    for i, (title, first) in enumerate(
+        [("Mr.", "Rahul"), ("Mrs.", "Priya"), ("Dr.", "Meera"), ("Mr.", "Vikram")]
+    ):
+        text = f"Branch visit {i}: {title} {first} {surname} confirmed the nominee details."
+        if policy == "obfuscate":
+            for preset in ("gdpr-pseudonymise", "dpdp-pseudonymise"):
+                out = engine.obfuscate(Payload(text=text), preset, RequestOptions()).result
+                kept += f" {surname} confirmed" in str(out) or first in str(out)
+        else:
+            res = asyncio.run(engine.synthesize(Payload(text=text), policy, RequestOptions()))
+            kept += f" {surname} confirmed" in str(res.result) or first in str(res.result)
+    assert kept == 0

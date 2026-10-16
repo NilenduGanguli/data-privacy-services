@@ -11,12 +11,17 @@ own leak guard; this is a second, independent check at the single egress point,
   e-mail address or a valid phone number — outside DPS placeholders (``{EMAIL_1}``) and that is
   not a value *shape* (only ``x``/``X``/``9`` and punctuation: what M1's labelling prompts send).
 
-The pattern scan reads the non-system messages only. A system message is DPS's own fixed
-instructions — every caller builds it from constants (the labelling, rewrite and spec prompts) and
-puts call data in the user message — and an instruction can look like a value: the labelling
-prompt's entity-type list holds ``USERNAME``, which has a SWIFT BIC's shape (a valid ISO country,
-``NA``, in positions 5-6), and blocked every labelling call. Protected originals are still looked
-for in every message.
+A system message that *equals* one of DPS's registered fixed prompts (:func:`fixed_system_prompts`:
+the labelling, rewrite and spec instructions, built from constants; call data goes in the user
+message) is not scanned at all: an instruction can look like a value. The labelling prompt's
+entity-type list holds ``USERNAME``, which has a SWIFT BIC's shape and blocked every labelling call,
+and its type names (``PASSPORT``, ``AADHAAR``, ``ACCOUNT_NUMBER``, ``PRIVATE_KEY``) are also common
+category codes: a sampled ID type ``PASSPORT`` or a product ``ACCOUNT`` is a protected original,
+and T3 never reached the provider on typical KYC data (FINAL r1 privacy-ops B1). Any other system
+text is scanned in full, like call data.
+
+A protected value written only in ``x``, ``X``, ``9`` and punctuation (``999``) is not looked for:
+it cannot be told apart from the value shapes DPS sends (``"shapes": ["999"]``).
 
 Each distinct value counts once. Under ``DPS_LLM_EGRESS_CHECK=strict`` (required in staging/prod)
 a prompt with any raw value is never sent (:class:`LlmEgressBlocked`); under ``warn`` it is sent
@@ -25,6 +30,7 @@ and counted on the alarm counters. Only counts and purposes are logged — never
 
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 from collections.abc import Sequence
@@ -51,6 +57,27 @@ class LlmEgressBlocked(LlmCallError):
     """
 
 
+@functools.cache
+def fixed_system_prompts() -> frozenset[str]:
+    """DPS's own fixed system prompts (constants, no call data): the T3 labelling instructions,
+    the M0 text rewrite and the M1 generator-spec proposer."""
+    from dps.engine.detect.llm_label import system_prompt
+    from dps.engine.synth.llm_text import REWRITE_SYSTEM
+    from dps.engine.synth.schema_profile import SPEC_SYSTEM
+
+    return frozenset({system_prompt(), REWRITE_SYSTEM, SPEC_SYSTEM})
+
+
+def _scanned(messages: list[dict[str, str]]) -> str:
+    """Every message's text but a registered fixed system prompt's."""
+    fixed = fixed_system_prompts()
+    return "\n".join(
+        str(m.get("content", ""))
+        for m in messages
+        if not (m.get("role") == "system" and str(m.get("content", "")) in fixed)
+    )
+
+
 def _words(text: str) -> set[str]:
     folded = unicodedata.normalize("NFKD", text).casefold()
     return {normalise(w) for w in _WORD.findall(folded)}
@@ -63,19 +90,15 @@ def residual_values(
 
     ``region`` is the default region for national-format phone numbers.
     """
-    text = "\n".join(str(m.get("content", "")) for m in messages)
-    clean = PLACEHOLDER.sub(" ", text)
-    hay, words = normalise(clean), _words(clean)
+    data = PLACEHOLDER.sub(" ", _scanned(messages))
+    hay, words = normalise(data), _words(data)
     found: set[str] = set()
     for value in protected:
         needle = normalise(str(value))
-        if len(needle) < MIN_PROTECTED:
-            continue
+        if len(needle) < MIN_PROTECTED or _SHAPE.fullmatch(str(value).strip()):
+            continue  # too short to say anything, or a value shape (``999``) DPS sends itself
         if needle in words or (len(needle) >= _SUBSTRING_MIN and needle in hay):
             found.add(needle)
-    data = PLACEHOLDER.sub(
-        " ", "\n".join(str(m.get("content", "")) for m in messages if m.get("role") != "system")
-    )
     for hit in [*scan_text(data), *scan_phones(data, region=region)]:
         if not (hit.validated or hit.entity_type in SELF_IDENTIFYING):
             continue

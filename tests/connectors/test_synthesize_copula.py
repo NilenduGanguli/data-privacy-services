@@ -312,7 +312,9 @@ async def test_copula_job_on_a_table_with_a_declared_foreign_key(
     assert "$.relationship_manager_id" not in ev.pack.tabular["columns"]
     methods = {c["path"]: c["method"] for c in ev.pack.columns}
     assert methods["$.relationship_manager_id"] == "key_pseudonym", methods
-    assert _label(job, "relationship_manager_id") == f"KEY|{schema}.employees.employee_id"
+    # FINAL r1 synthetic B2: keyed like its parent key (no snapshot of employees here: the
+    # join identifier its key's name says, as discovery names it)
+    assert _label(job, "relationship_manager_id") == "EMPLOYEE_ID"
     overlap = await source_pg.admin.fetchval(
         f'SELECT count(*) FROM (SELECT {NON_KEY} FROM "{schema}".customers '
         f'INTERSECT SELECT {NON_KEY} FROM "{schema}".customers_synth) q'
@@ -449,3 +451,67 @@ async def test_a_plan_conflict_fails_prepare_without_retrying(
     assert job.error_code == "plan_conflict", job.error_code
     internal = await load_job_internal(job.id)
     assert internal is not None and internal.attempts == 1, "retried"
+
+
+async def test_an_unclassified_foreign_key_joins_its_classified_parent_under_one_seed(
+    handler_ctx: HandlerContext, source_pg: SourcePg, register_source: RegisterSource
+) -> None:
+    """FINAL r1 synthetic B2: the parent key ``employees.employee_id`` is classified
+    ``EMPLOYEE_ID`` (keyed by that entity), the child's declared foreign key
+    ``relationship_manager_id`` has no entity type. Synthesized under one seed, every synthetic
+    customer's relationship manager must be a synthetic employee (it was keyed ``KEY|…`` and
+    joined none: 0 of 20,000 in the live demo)."""
+    schema = source_pg.schema
+    employees = await source_pg.table(
+        "employees",
+        "employee_id bigint PRIMARY KEY, branch_code varchar(11) NOT NULL",
+        [(50_000_001 + i, f"BR{i % 5:03d}") for i in range(EMPLOYEES)],
+    )
+    ddl = CUSTOMERS_DDL.replace(
+        "relationship_manager_id bigint,",
+        f'relationship_manager_id bigint REFERENCES "{schema}".employees,',
+    )
+    records = [
+        (100_000_000 + (i * 7919) % 900_000_000, *r[1:12], 50_000_001 + i % EMPLOYEES, *r[13:])
+        for i, r in enumerate(customers_records(600))
+    ]
+    customers = await source_pg.table("customers", ddl, records)
+    src = await register_source("t1")
+    uat = await register_source("t1", ref="dps/src/test-pg-rw", roles={"target"}, name="uat")
+    emp_snap = await discover_and_accept(handler_ctx, "t1", src.id, employees)
+    key = next(c for c in emp_snap.columns if c.name == "employee_id")
+    assert key.entity_type == "EMPLOYEE_ID"  # the parent key is a classified join identifier
+    cust_snap = await discover_and_accept(handler_ctx, "t1", src.id, customers)
+    rm = next(c for c in cust_snap.columns if c.name == "relationship_manager_id")
+    assert rm.entity_type is None  # the child's foreign key is not (as on the demo table)
+    sub, emp_job = await _run(
+        handler_ctx,
+        src,
+        uat,
+        source_pg,
+        employees,
+        emp_snap.id,
+        "employees_synth",
+        options={"tabular": "none"},
+    )
+    assert emp_job.state == JobState.succeeded, (emp_job.error_code, emp_job.error)
+    _, cust_job = await _run(
+        handler_ctx,
+        src,
+        uat,
+        source_pg,
+        customers,
+        cust_snap.id,
+        "customers_synth",
+        consistency={"synthesis_seed": sub.synthesis_seed},
+    )
+    assert cust_job.state == JobState.succeeded, (cust_job.error_code, cust_job.error)
+    assert _label(cust_job, "relationship_manager_id") == _label(emp_job, "employee_id")
+    rows, joined = await source_pg.admin.fetchrow(
+        f'SELECT count(*), count(e.employee_id) FROM "{schema}".customers_synth c '
+        f'LEFT JOIN "{schema}".employees_synth e ON e.employee_id = c.relationship_manager_id'
+    )
+    assert rows == 600 and joined == rows, (rows, joined)
+    real = set(await _ints(source_pg, f'"{schema}".employees', "employee_id"))
+    fk = set(await _ints(source_pg, f'"{schema}".customers_synth', "relationship_manager_id"))
+    assert fk and not fk & real  # pseudonyms only, no real key

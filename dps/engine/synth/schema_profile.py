@@ -3,7 +3,8 @@
 P1 holds: the LLM never sees a value. :func:`render_prompt` sends only structure — field names
 (for a sample, a key the detector flags or that is not identifier-like is sent as ``field_N``,
 since a key can be data such as a person's name or an e-mail address; the alias lives in the prompt
-only, and the profile, the spec and the generated rows keep the caller's names), inferred types,
+only, and the profile, the spec and the generated rows keep the caller's names — except a key that
+holds one of the sample's swept values, which is ``field_N`` everywhere), inferred types,
 value *shapes* (``XX-9999``), orders of magnitude, null and distinct rates, DPS's own entity
 verdicts, and for a categorical field only how many labels it has (``enum_size``). The labels
 themselves (``FieldProfile.enum``: ≤ 12 distinct, letters only, each seen at least twice, nothing
@@ -55,6 +56,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from dps.engine.detect.ensemble import Detector
 from dps.engine.detect.structural import classify_key
 from dps.engine.findings import Finding, Locator
+from dps.engine.jsonpath import flatten
 from dps.engine.shapes import value_shape
 from dps.engine.synth.llm_text import LeakToModelError, assert_placeholder_safe
 from dps.engine.synth.schema_gen import (
@@ -309,6 +311,15 @@ class _Namer:
         self._taken.add(candidate)
         parts = candidate.split(".")
         self._prefixes.update(".".join(parts[:i]) for i in range(1, len(parts)))
+        return candidate
+
+    def alias(self, index: int) -> str:
+        """A fresh ``field_N`` name (a key that is a sampled value never names a field)."""
+        candidate, extra = f"field_{index}", 1
+        while not self._free(candidate):
+            extra += 1
+            candidate = f"field_{index}_{extra}"
+        self._taken.add(candidate)
         return candidate
 
 
@@ -818,6 +829,7 @@ def profile_from_sample(
     columns = {key: [flat.get(key) for flat in flats] for key in keys}
     fields: list[FieldProfile] = []
     stats: dict[str, FieldStats] = {}
+    raw: dict[str, tuple[int, str]] = {}  # field name -> (index, the caller's key)
     namer = _Namer()
     for index, (key, values) in enumerate(columns.items(), start=1):
         parts = key.split(".")
@@ -885,8 +897,38 @@ def profile_from_sample(
             st.id_values = sorted({_canon(v) for v in present})
         fields.append(profile)
         stats[fname] = st
+        raw[fname] = (index, key)
     structure = StructureProfile(source="sample", name=name, fields=fields, rows_sampled=len(rows))
-    return ProfileResult(profile=structure, stats=stats)
+    return _alias_value_keys(ProfileResult(profile=structure, stats=stats), raw, namer)
+
+
+def _alias_value_keys(
+    result: ProfileResult, raw: dict[str, tuple[int, str]], namer: _Namer
+) -> ProfileResult:
+    """A key that holds one of the sample's swept values (an e-mail or a name of a row used as a
+    key) names its field ``field_N`` in the profile, the spec and the generated rows (FINAL r1
+    l1-docs: e1f3a3a kept the caller's name, so a sampled e-mail with dots came back as a nested
+    key path in every row and in the spec, while the sweep read each level's key on its own).
+    Any other key keeps the caller's name; the model sees ``field_N`` for a flagged key anyway."""
+    values = _SampleValues(_sweep_originals(result))
+    if not values:
+        return result
+    renamed: dict[str, str] = {}
+    for field in result.profile.fields:
+        index, key = raw[field.name]
+        if values.found(key) or values.found(field.name):
+            renamed[field.name] = namer.alias(index)
+    if not renamed:
+        return result
+    fields = [
+        p.model_copy(update={"name": renamed[p.name], "prompt_alias": False})
+        if p.name in renamed
+        else p
+        for p in result.profile.fields
+    ]
+    stats = {renamed.get(n, n): st for n, st in result.stats.items()}
+    profile = result.profile.model_copy(update={"fields": fields})
+    return ProfileResult(profile=profile, stats=stats)
 
 
 # -- proposers ------------------------------------------------------------------------------------
@@ -1444,6 +1486,20 @@ def sample_ids(result: ProfileResult) -> dict[str, Callable[[Any], bool]]:
     return out
 
 
+def _key_paths(node: Any, path: str = "$", keys: tuple[str, ...] = ()) -> Iterator[tuple[str, str]]:
+    """``(path, joined keys)`` of every leaf nested under two or more object keys: the field name
+    the generated rows nest at its dots (each key is also swept on its own, as a key)."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = flatten({key: None}, path)[0][0]  # the path syntax of ``output_strings``
+            yield from _key_paths(value, child, (*keys, str(key)))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _key_paths(value, f"{path}[{index}]", keys)
+    elif len(keys) >= 2:
+        yield path, ".".join(keys)
+
+
 def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> Verification:
     """Leakage sweep of generated rows against the sample's sensitive values: every key and value
     of the rows is searched, and a hit is reported once per output path and entity type, in the
@@ -1467,8 +1523,14 @@ def verify_against_sample(rows: list[dict[str, Any]], result: ProfileResult) -> 
     values = _SampleValues(_sweep_originals(result))
     found: list[tuple[int, int, str]] = []
     if values:
-        for position, (path, _key, text) in enumerate(output_strings(_canonical(rows))):
+        canonical = _canonical(rows)
+        position = -1
+        for position, (path, _key, text) in enumerate(output_strings(canonical)):
             found += [(slot, position, path) for slot in values.found(text)]
+        # FINAL r1 l1-docs: the key path a leaf is nested at, joined as its field name is (a
+        # sampled ``rohan.k@example.in`` written as keys ``rohan`` > ``k_example`` > ``in``)
+        for offset, (path, joined) in enumerate(_key_paths(canonical), start=position + 1):
+            found += [(slot, offset, path) for slot in values.found(joined)]
     hits: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for slot, _position, path in sorted(found):

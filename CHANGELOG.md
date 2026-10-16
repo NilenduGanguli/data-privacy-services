@@ -128,6 +128,18 @@ at fidelity 0.970, 0 exact rows, NNDR 1.50 and 0 real identifiers in 20 000 rows
   only before a group of two or three; full-width forms read as ASCII), so realistic samples no
   longer fail as leakage while real copies are still refused; the D-A identifier check reads every
   row on every engine and each column as the object spells it.
+- *Final verification fixes* (FINAL r1, 2026-10-16): an L2 run whose policy is an inline body or a
+  stored `@name` reaches `succeeded` with its evidence pack and policy version (finalize reads the
+  sealed policy body instead of its value-free label; every engine, obfuscate and synthesize); a
+  MongoDB `table` or named `append` writes into an existing empty or sparse collection (a sampled
+  shape is no DDL; `_id` is every collection's key); a declared foreign key without an entity type
+  joins its classified parent key under one seed (keyed like the parent: `EMPLOYEE_ID`, not
+  `KEY|…`); a surname that is also a name-cue stopword (`Date`, `Le`, `Best`, `Branch`, `Holder`,
+  `Sales`) right after a cued name or a title is part of the name in every layer; schema synthesis
+  names a sample key that is one of the sample's sensitive values `field_N` everywhere and its sweep
+  reads each leaf's joined key path; T3 labelling under strict egress reaches the provider on
+  typical KYC data (DPS's fixed system prompts are not scanned, a value shape is no value, and L2
+  hints carry rates at two decimals).
 
 ### Known limitations
 
@@ -154,6 +166,14 @@ Privacy and synthesis (owner decisions recorded by the verifications):
   N in kept columns" chip counts sampled and pseudonymised columns.
 - An `in_place` synthesize of a table whose classified column has a declared foreign key fails
   closed only after its partition retries, instead of a coded refusal at submit.
+- A declared foreign key takes its parent key's label from the parent table's accepted snapshot on
+  the run's own source connection; a parent discovered through another connection, or reviewed
+  differently after the child ran, can still key the two sides apart (the join then fails; no real
+  key is written either way).
+- T3 under `strict` egress still skips a labelling call (fail closed, `blocked` counted, no value
+  sent) when a sampled value equals a word of the call data itself: a field or table name, or a
+  number in a declared type such as `varchar(120)`. On the seeded demo `bank` every table reaches
+  the provider (10 of 10; 5 of 10 before this fix).
 
 Platform and operations:
 

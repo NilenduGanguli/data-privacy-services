@@ -487,3 +487,60 @@ def test_a_dense_id_next_to_a_swept_id_is_not_refused(client: TestClient) -> Non
         assert r.status_code == 200, r.text
         assert body["report"]["verification"]["passed"]
         assert len({row["id"] for row in body["rows"]} & set(cust)) == 0
+
+
+# -- FINAL r1 l1-docs: a sampled e-mail used as a key ---------------------------------------------
+def _norm(text: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", text.lower())
+
+
+@pytest.mark.parametrize(
+    ("key", "planted"),
+    [
+        ("rohan.k@example.in", False),  # dotted local part: the field names nest at the dots
+        ("rohank@example.in", True),  # undotted, a sampled value of another column too
+        ("Kavya Raghunathan", False),  # a sampled name (no dot)
+    ],
+)
+@pytest.mark.parametrize("fmt", ["json", "csv"])
+def test_a_sampled_value_used_as_a_key_never_comes_back(
+    client: TestClient, key: str, planted: bool, fmt: str
+) -> None:
+    """A sampled e-mail as a key came back in all 20 rows as a three-level key path, in the
+    spec's field name and in the CSV header, while the sweep said passed: it read each nesting
+    level's key on its own (the regression of e1f3a3a, which kept the caller's name)."""
+    sample = [dict(r, **{key: i}) for i, r in enumerate(LIVE)]
+    if planted:
+        sample = [dict(r, contact=key) for r in sample]
+    r = client.post(
+        "/api/v1/schema/synthesize",
+        headers=FULL,
+        json={"sample": sample, "rows": 20, "locale": "en_IN", "format": fmt},
+    )
+    assert _norm(key) not in _norm(r.text)
+    assert r.status_code in (200, 422), r.text
+    if r.status_code == 200:
+        assert r.json()["report"]["verification"]["passed"] is True
+    else:
+        assert r.json()["code"] == "leakage"
+    spec = client.post("/api/v1/schema/generator-spec", headers=FULL, json={"sample": sample})
+    assert spec.status_code == 200, spec.text
+    assert _norm(key) not in _norm(json.dumps(spec.json()["spec"]))
+
+
+def test_a_nested_key_path_that_spells_a_sampled_value_is_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep reads a leaf's joined key path (the spec field name) too: a sampled e-mail spelt
+    over three nesting levels is a leak however it got there (422, nothing echoed)."""
+    real = schema_router.execute_spec
+
+    def nested(*args: Any, **kwargs: Any) -> Any:
+        result = real(*args, **kwargs)
+        result.rows[4]["rohan"] = {"k_example": {"in": 1}}
+        return result
+
+    monkeypatch.setattr(schema_router, "execute_spec", nested)
+    r = client.post("/api/v1/schema/synthesize", headers=FULL, json={"sample": LIVE, "rows": 10})
+    assert r.status_code == 422 and r.json()["code"] == "leakage"
+    assert "rohan" not in r.text

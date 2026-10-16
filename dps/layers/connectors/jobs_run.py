@@ -146,13 +146,15 @@ from dps.layers.connectors.targets import (
     build_column_plans,
     check_projected_methods,
     column_at,
+    declared_references,
     kept_attribute,
+    parent_key_label,
     pseudonym_columns,
     resolve_target,
 )
 from dps.observability import LEASES_LOST, ROWS_WRITTEN, get_logger
 from dps.secrets import SealError, SecretUnavailable, open_json, seal_json
-from dps.snapshots import get_snapshot
+from dps.snapshots import accepted_snapshot, get_snapshot
 from dps.storage import ObjectStore, StorageError
 
 if TYPE_CHECKING:
@@ -274,6 +276,27 @@ async def _open(ctx: HandlerContext, job: JobInternal, conn: Connection, action:
     return await open_connector(
         conn, ctx.settings, action=action, kek=ctx.kek, job_id=job.id, credentials=creds
     )
+
+
+async def _parent_labels(
+    tenant_id: str, source_conn: Connection, shape: TableShape, projection: list[str]
+) -> dict[str, str]:
+    """reference → the label its parent key is keyed by (FINAL r1 synthetic B2), from each
+    referenced table's accepted snapshot on the run's source connection; a parent with none is
+    left out (``targets._reference_label`` then names it)."""
+    out: dict[str, str] = {}
+    references = declared_references(shape, projection)
+    if not references:
+        return out
+    async with db.acquire_queue(tenant_id) as conn:
+        for reference in sorted(references):
+            parent = await accepted_snapshot(
+                tenant_id, source_conn.id, reference.rsplit(".", 1)[0], conn=conn
+            )
+            label = parent_key_label(reference, parent)
+            if label is not None:
+                out[reference] = label
+    return out
 
 
 def _policy(ctx: HandlerContext, spec: RunSpec, name: str) -> Policy:
@@ -541,6 +564,11 @@ async def _prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
             pk_strategy=spec.target.pk_strategy,
             projection=projection,
             shape=shape,
+            parents=(
+                await _parent_labels(job.tenant_id, source_conn, shape, projection)
+                if spec.mode == "synthesize"
+                else None
+            ),
         )
         store: ObjectStore | None = None
         target_shape: TableShape | None = None
@@ -2154,6 +2182,9 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
     else:
         outcome = "failed" if failed else "succeeded"
     spec = RunSpec.model_validate(job.spec)  # the redacted spec: templates and ids only
+    # what ran (FINAL r1 B1): since F-18 the row keeps only the label of an inline or stored
+    # policy, so the post-write review and the pack's policy version take the opened spec
+    opened = _finalize_spec(ctx, job)
     plan = RunPlan.model_validate(job.plan) if job.plan else None
     source_conn, target_conn = await _connections(job, spec)
     async with db.acquire_queue(job.tenant_id) as conn:
@@ -2166,8 +2197,12 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
         if mode == "files" and target_conn is not None:
             files = await _write_manifest(ctx, job, spec, plan, target_conn, parts)
         elif mode != "files":
-            post_sample = await _best_effort(
-                _post_sample(ctx, job, spec, plan, source_conn, target_conn, snapshot)
+            post_sample = (
+                await _best_effort(
+                    _post_sample(ctx, job, opened, plan, source_conn, target_conn, snapshot)
+                )
+                if opened is not None
+                else {"error": "secret_unavailable"}  # fails closed: review required
             )
         if spec.mode == "synthesize":
             ids = (
@@ -2207,6 +2242,7 @@ async def _finalize(ctx: HandlerContext, job: ClaimedJob) -> None:
             ctx,
             job,
             spec,
+            opened,
             plan,
             snapshot,
             source_conn,
@@ -2278,6 +2314,20 @@ async def _best_effort(step: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         return {"error": exc.code}
     except (SecretUnavailable, SealError):
         return {"error": "secret_unavailable"}
+    except PrepareFailure as exc:  # FINAL r1 B1: e.g. policy_invalid fails the same way again
+        return {"error": exc.code}
+
+
+def _finalize_spec(ctx: HandlerContext, job: JobInternal) -> RunSpec | None:
+    """The opened spec (the sealed selection and F-18 policy body put back) for finalize's
+    informational steps, or ``None`` when its sealed blob cannot be opened (a row without
+    ``spec_enc`` that needs it, or a KEK that no longer opens it): those steps then record
+    ``{"error": "secret_unavailable"}``, which fails closed (review required) instead of retrying
+    the job dead. The terminal advance purges ``key_enc`` only; ``spec_enc`` stays for retries."""
+    try:
+        return _spec(ctx, job)
+    except (SecretUnavailable, SealError):
+        return None
 
 
 async def _clear_ledger(
@@ -2338,6 +2388,7 @@ async def _store_evidence(
     ctx: HandlerContext,
     job: JobInternal,
     spec: RunSpec,
+    opened: RunSpec | None,
     plan: RunPlan | None,
     snapshot: ClassificationSnapshot | None,
     source_conn: Connection,
@@ -2413,9 +2464,13 @@ async def _store_evidence(
         for p in parts
     ]
     policy_version: str | None = None
-    if plan is not None:
+    if plan is not None and opened is not None:  # the policy that ran (FINAL r1 B1)
         with contextlib.suppress(PrepareFailure):
-            policy_version = str(_policy(ctx, spec, plan.policy_name).version)
+            policy_version = str(_policy(ctx, opened, plan.policy_name).version)
+    elif isinstance(spec.policy, dict) and is_policy_label(spec.policy):
+        label_version = spec.policy.get("version")  # the F-18 label names it (value-free)
+        if isinstance(label_version, int):
+            policy_version = str(label_version)
     inputs = EvidenceInputs(
         job=job,
         spec=job.spec,

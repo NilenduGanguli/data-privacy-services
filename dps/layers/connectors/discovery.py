@@ -563,10 +563,12 @@ def column_meta(
         cut = s[:MAX_SHAPE_CHARS]
         if cut and cut not in shapes:
             shapes.append(cut)
+    # two decimals (FINAL r1 privacy-ops B1): a third digit made a bare 3-digit word ("0.162"
+    # holds "162") that the egress verifier counted as a protected sampled number
     hints: dict[str, Any] = {
         "kind": col.kind,
-        "null_rate": round(col.null_rate, 3),
-        "distinct_ratio": round(col.distinct_ratio, 3),
+        "null_rate": round(col.null_rate, 2),
+        "distinct_ratio": round(col.distinct_ratio, 2),
         "table": shape.object.name,
     }
     return FieldMeta(

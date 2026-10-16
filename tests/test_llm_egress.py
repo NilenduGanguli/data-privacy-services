@@ -228,19 +228,31 @@ _ROWS = [
 
 
 def test_system_prompts_carry_no_call_data() -> None:
-    """The verifier's pattern scan skips system messages: each must be a fixed constant."""
+    """The verifier skips a registered fixed system prompt: each must be a fixed constant."""
+    from dps.llm.egress import fixed_system_prompts
+
+    for messages in (_label_prompt({"a": "x1"}), _spec_prompt(_ROWS), _rewrite_prompt("hi")):
+        assert messages[0]["content"] in fixed_system_prompts()
     assert _label_prompt({"a": "x1"})[0] == _label_prompt({"beneficiary_nm": "QX-7Z"})[0]
     assert _spec_prompt(_ROWS)[0] == _spec_prompt([{"z": "q"}, {"z": "r"}])[0]
     assert _rewrite_prompt("{PERSON_NAME_1}")[0] == _rewrite_prompt("hi {DATE_1}")[0]
 
 
 def test_instructions_that_look_like_values_do_not_block() -> None:
+    from dps.engine.detect.llm_label import system_prompt
+
     # the labelling prompt's type list holds USERNAME: a SWIFT BIC's shape (country NA)
-    system = [{"role": "system", "content": "Entity types: SWIFT_BIC, USERNAME, VOTER_ID"}]
+    system = [{"role": "system", "content": system_prompt()}]
+    assert "USERNAME" in system[0]["content"]
     assert residual_values([*system, {"role": "user", "content": "{PERSON_NAME_1}"}]) == 0
-    # the same token in call data still counts, and protected values count in any message
+    # the same token in call data still counts
     assert residual_values([*system, {"role": "user", "content": "bic USERNAME"}]) == 1
-    assert residual_values(system, protected=["USERNAME"]) == 1
+    # FINAL r1 privacy-ops B1: only a registered fixed prompt is exempt; other system text is
+    # scanned in full (patterns and protected values)
+    adhoc = [{"role": "system", "content": "Entity types: SWIFT_BIC, USERNAME, VOTER_ID"}]
+    assert residual_values(adhoc) == 1
+    assert residual_values(adhoc, protected=["USERNAME"]) == 1
+    assert residual_values(system, protected=["USERNAME"]) == 0
 
 
 @pytest.mark.parametrize(

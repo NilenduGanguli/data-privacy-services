@@ -302,6 +302,25 @@ async def get_snapshot(
     return _row(row) if row else None
 
 
+async def accepted_snapshot(
+    tenant_id: str,
+    connection_id: str,
+    object_ref: str,
+    *,
+    conn: asyncpg.Connection | None = None,
+) -> ClassificationSnapshot | None:
+    """The accepted snapshot of ``object_ref`` on ``connection_id`` (at most one), or None."""
+    async with _using(tenant_id, conn) as c:
+        row = await c.fetchrow(
+            f"SELECT {_COLS} FROM {db.schema_ident()}.dps_snapshot WHERE tenant_id = $1 "
+            "AND connection_id = $2 AND object_ref = $3 AND status = 'accepted'",
+            tenant_id,
+            connection_id,
+            object_ref,
+        )
+    return _row(row) if row else None
+
+
 async def list_snapshots(
     tenant_id: str,
     *,

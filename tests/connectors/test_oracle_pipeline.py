@@ -718,3 +718,44 @@ async def test_unpivot_pivot_or_match_recognize_cannot_remap_a_column(
     )
     failed = await drive(handler_ctx, "t1", disc.id)
     assert (failed.state, failed.error_code) == (JobState.failed, "selection_query_alias")
+
+
+async def test_an_inline_policy_run_on_oracle_finalizes_with_its_pack(
+    handler_ctx: HandlerContext,
+    oracle_conn: Any,
+    oracle_schema: OracleTestSchema,
+    register_oracle: RegisterOracle,
+) -> None:
+    """FINAL r1 B1: the job row keeps only the label of an inline policy (F-18); finalize opens
+    the sealed body, so the run ends succeeded with a pack that names the policy and version."""
+    from tests.connectors.test_run_sealed_policy import inline_policy
+
+    owner = oracle_schema.owner
+    create_customers(oracle_conn, owner, 400)
+    conn = await register_oracle("t1", roles={"source", "target"}, name="ora-inline")
+    obj = ObjectRef(owner=owner, name="CUSTOMERS")
+    snap = await discover_and_accept(handler_ctx, "t1", conn.id, obj)
+    target = {
+        "write_mode": "table",
+        "connection_id": conn.id,
+        "object": {"owner": owner, "name": "CUSTOMERS_INLINE"},
+    }
+    policy = inline_policy("gdpr-pseudonymise", name="ora-inline-kyc", version=5)
+    sub = await submit_run(
+        run_spec(conn.id, obj, snap.id, target, policy=policy),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    job = await drive(handler_ctx, "t1", sub.job.id)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    src, out = f'"{owner}"."CUSTOMERS"', f'"{owner}"."CUSTOMERS_INLINE"'
+    assert _count(oracle_conn, f"SELECT COUNT(*) FROM {out}") == 400
+    for column in ("EMAIL", "FULL_NAME"):
+        assert _survivors(oracle_conn, src, out, column) == 0, column
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None and ev.pack.outcome == "succeeded"
+    assert ev.pack.policy["name"] == "ora-inline-kyc" and ev.pack.policy["version"] == "5"
+    assert "error" not in ev.pack.verification["post_sample"]
+    assert await db_key_enc(job.id) is None

@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,6 +51,7 @@ from dps.auth import Principal
 from dps.config import Settings
 from dps.connections import Connection, holds_production_credentials
 from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
+from dps.engine.detect.structural import classify_key
 from dps.engine.policy import MethodSpec, resolve_policy
 from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSEUDONYM_LIMIT
 from dps.engine.taxonomy import Sensitivity, entity_info
@@ -214,6 +215,38 @@ def _label(reference: str) -> str:
     return f"KEY|{reference}"
 
 
+def parent_key_label(reference: str, parent: ClassificationSnapshot | None) -> str | None:
+    """The label the referenced key ``owner.table.column`` is keyed by in its own table's
+    synthesize run, read from that table's accepted snapshot (``parent``): its entity type when
+    classified (:func:`_identifiers` keys a classified key by its entity), else
+    ``KEY|reference``. ``None`` when ``parent`` does not show the column (FINAL r1 synthetic B2:
+    a foreign key takes its parent's label, so the tables of one seed still join)."""
+    if parent is None:
+        return None
+    name = reference.rsplit(".", 1)[-1]
+    column = next((c for c in parent.columns if c.name == name), None)
+    if column is None:
+        return None
+    return str(column.entity_type) if column.entity_type is not None else _label(reference)
+
+
+def _reference_label(reference: str) -> str:
+    """The label of a declared foreign key whose parent has no accepted snapshot: the join
+    identifier its key's name says (as discovery names ``employee_id`` ``EMPLOYEE_ID``), else
+    ``KEY|reference``."""
+    candidates = classify_key(reference.rsplit(".", 1)[-1])
+    if candidates and candidates[0].entity_type in LINK_ENTITIES:
+        return candidates[0].entity_type
+    return _label(reference)
+
+
+def declared_references(shape: TableShape, projection: Iterable[str]) -> set[str]:
+    """The keys (``owner.table.column``) the projected columns of ``shape`` declare as foreign
+    keys."""
+    wanted = set(projection)
+    return {c.references for c in shape.columns if c.references and c.name in wanted}
+
+
 def _identifiers(
     snapshot: ClassificationSnapshot,
     *,
@@ -221,6 +254,7 @@ def _identifiers(
     pk_strategy: PkStrategy | dict[str, Any] | None,
     projection: list[str] | set[str],
     shape: TableShape | None = None,
+    parents: Mapping[str, str] | None = None,
 ) -> list[tuple[ColumnClassification, str | None]]:
     """D-A: the projected columns a synthesize run would copy although they identify someone,
     each with the label its pseudonym is keyed by (``None``: the entity type).
@@ -231,7 +265,12 @@ def _identifiers(
       writes, labelled ``KEY|owner.table.column``, and every unclassified **declared foreign
       key** (``ColumnInfo.references``, from ``shape``: the live shape at prepare, else the
       snapshot's) labelled by the key it references — so a real key never sits next to a
-      pseudonymised identifier, and the tables of one job group still join.
+      pseudonymised identifier, and the tables of one job group still join;
+    * (FINAL r1 synthetic B2) a declared foreign key takes the label its parent key is keyed by
+      (``parents``: reference → :func:`parent_key_label`, from the parent's accepted snapshot):
+      the entity type of a classified parent key, so an unclassified foreign key to
+      ``employees.employee_id`` (``EMPLOYEE_ID``) joins the synthetic employees. Without the
+      parent's snapshot an unclassified one takes :func:`_reference_label`.
 
     Keys the target generates (``append`` + ``generate``) are not written at all; in place an
     unclassified key is the row being rewritten (and a sensitive one is refused), and foreign
@@ -252,18 +291,19 @@ def _identifiers(
         is_key = c.is_key or c.name in keys
         if is_key and generated:
             continue
-        if c.entity_type is not None:
-            if method_for_column(c, "synthesize").method == "keep" and _identifies(c, keys):
-                out.append((c, None))
-            continue
-        if write_mode == "in_place":
-            continue
         try:
             reference = live.column(c.name).references
         except KeyError:
             reference = None
+        parent = (parents or {}).get(reference) if reference else None
+        if c.entity_type is not None:
+            if method_for_column(c, "synthesize").method == "keep" and _identifies(c, keys):
+                out.append((c, parent))
+            continue
+        if write_mode == "in_place":
+            continue
         if reference:
-            out.append((c, _label(reference)))
+            out.append((c, parent or _reference_label(reference)))
         elif is_key:
             out.append((c, _label(f"{owner}.{live.object.name}.{c.name}")))
     return out
@@ -307,9 +347,11 @@ def pseudonym_columns(
     pk_strategy: PkStrategy | dict[str, Any] | None,
     projection: list[str],
     shape: TableShape | None = None,
+    parents: Mapping[str, str] | None = None,
 ) -> list[PseudonymColumn]:
     """D-A: the identifier columns a synthesize run replaces by keyed pseudonyms (none in
-    obfuscate mode); ``shape`` is the live shape at prepare (its declared foreign keys).
+    obfuscate mode); ``shape`` is the live shape at prepare (its declared foreign keys) and
+    ``parents`` the labels of the keys they reference (:func:`parent_key_label`).
 
     Raises:
         PrepareFailure: ``synthesize_pseudonym_unsupported`` — an identifier column whose type
@@ -319,7 +361,12 @@ def pseudonym_columns(
         return []
     out: list[PseudonymColumn] = []
     for c, label in _identifiers(
-        snapshot, write_mode=write_mode, pk_strategy=pk_strategy, projection=projection, shape=shape
+        snapshot,
+        write_mode=write_mode,
+        pk_strategy=pk_strategy,
+        projection=projection,
+        shape=shape,
+        parents=parents,
     ):
         p = _pseudonym_of(c, shape or snapshot.shape, label)
         if p is None:
@@ -951,11 +998,19 @@ def _check_existing(
     source_shape: TableShape,
     columns: list[str],
     planned: set[str],
+    *,
+    sampled: bool = False,
 ) -> None:
+    """Every written column exists in the target and takes the source kind. A ``sampled``
+    target (a MongoDB collection: its shape comes from at most 500 documents, not DDL) has no
+    missing column — a leaf its documents do not show yet is written as it is — and only the
+    leaves it shows are kind-checked (FINAL r1 l2-engines B2)."""
     for name in columns:
         try:
             target_col = target_shape.column(name)
         except KeyError:
+            if sampled:
+                continue
             raise PrepareFailure(
                 "target_invalid", f"the target has no column {source_shape.column(name).path}"
             ) from None
@@ -968,9 +1023,14 @@ def _check_existing(
             )
 
 
-def _target_plans(plans: list[ColumnPlan], target_shape: TableShape) -> list[ColumnPlan]:
+def _target_plans(
+    plans: list[ColumnPlan], target_shape: TableShape, *, sampled: bool = False
+) -> list[ColumnPlan]:
     out = []
     for p in plans:
+        if sampled and column_at(target_shape, p.path, p.name) is None:
+            out.append(p)  # a leaf the sampled documents do not show keeps the source's
+            continue
         t = _at(target_shape, p.path, p.name)
         out.append(
             p.model_copy(
@@ -1093,13 +1153,16 @@ def resolve_target(
                 column_types=types,
             )
             return resolved, _unbounded_plans(plans, source_shape)
-        _check_existing(target_shape, source_shape, projection, planned)
-        if not target_shape.key or set(target_shape.key) != set(source_shape.key):
+        sampled = conn.engine == "mongo"
+        _check_existing(target_shape, source_shape, projection, planned, sampled=sampled)
+        # every collection is keyed on its unique ``_id``, whatever its documents show
+        target_key = ["_id"] if sampled else target_shape.key
+        if not target_key or set(target_key) != set(source_shape.key):
             raise PrepareFailure(
                 "target_invalid",
                 "the target needs a primary key or unique index on exactly the key columns",
             )
-        out = _target_plans(plans, target_shape)
+        out = _target_plans(plans, target_shape, sampled=sampled)
         _check_lengths(out, source_shape)
         resolved = ResolvedTarget(
             **common,
@@ -1120,8 +1183,9 @@ def resolve_target(
     else:
         write_columns = [n for n in projection if not (generated and n in source_shape.key)]
         checked = write_columns
-    _check_existing(target_shape, source_shape, checked, planned)
-    out = _target_plans(plans, target_shape)
+    sampled = conn.engine == "mongo"
+    _check_existing(target_shape, source_shape, checked, planned, sampled=sampled)
+    out = _target_plans(plans, target_shape, sampled=sampled)
     _check_lengths(out, source_shape)
     resolved = ResolvedTarget(
         **common,

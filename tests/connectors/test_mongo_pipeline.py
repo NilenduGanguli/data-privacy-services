@@ -305,3 +305,155 @@ async def test_mongo_append_generate_on_the_same_collection(
     assert crossed_out == crossed > 0
     ev = await get_evidence("t1", job.progress.evidence_id or "")
     assert ev is not None and ev.pack.verification["passed"]
+
+
+async def test_an_inline_policy_run_on_mongo_finalizes_with_its_pack(
+    handler_ctx: HandlerContext, mongo_client: Any, mongo_db: str, register_mongo: RegisterMongo
+) -> None:
+    """FINAL r1 B1: the job row keeps only the label of an inline policy (F-18); finalize opens
+    the sealed body, so the run ends succeeded with a pack that names the policy and version."""
+    from tests.connectors.test_run_sealed_policy import inline_policy
+
+    source = seed_profiles(mongo_client, mongo_db, "profiles", rows=400)
+    conn = await register_mongo("t1", database=mongo_db, roles={"source", "target"}, name="mdb")
+    obj = ObjectRef(name="profiles")
+    snap = await discover_and_accept(handler_ctx, "t1", conn.id, obj, overrides=ADDRESS_REVIEW)
+    target = {"write_mode": "table", "connection_id": conn.id, "object": {"name": "profiles_in"}}
+    policy = inline_policy("gdpr-pseudonymise", name="mongo-inline-kyc", version=6)
+    sub = await submit_run(
+        run_spec(conn.id, obj, snap.id, target, source={"partition_rows": 1000}, policy=policy),
+        tenant_id="t1",
+        principal=LOCAL_PRINCIPAL,
+        settings=handler_ctx.settings,
+        kek=handler_ctx.kek,
+    )
+    job = await drive(handler_ctx, "t1", sub.job.id, loops=4000)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    out = list(mongo_client[mongo_db]["profiles_in"].find({}))
+    assert len(out) == 400
+    for path in TEXT_LEAVES:
+        anywhere = survivors(source, out, path)
+        assert anywhere == 0, (path, anywhere)
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None and ev.pack.outcome == "succeeded"
+    assert ev.pack.policy["name"] == "mongo-inline-kyc" and ev.pack.policy["version"] == "6"
+    assert "error" not in ev.pack.verification["post_sample"]
+    assert await db_key_enc(job.id) is None
+
+
+# -- FINAL r1 l2-engines B2: an existing collection is no DDL ---------------------------------
+#: A collection's shape is sampled (``describe``: at most 500 documents), so a leaf its documents
+#: do not show yet is no missing column, and ``_id`` is every collection's unique key.
+SMALL = 300
+
+
+async def _small_source(
+    ctx: HandlerContext, client: Any, database: str, register: RegisterMongo
+) -> tuple[list[dict[str, Any]], Connection, Any]:
+    source = seed_profiles(client, database, "profiles", rows=SMALL)
+    conn = await register("t1", database=database, roles={"source", "target"}, name="mdb")
+    snap = await discover_and_accept(
+        ctx, "t1", conn.id, ObjectRef(name="profiles"), overrides=ADDRESS_REVIEW
+    )
+    return source, conn, snap
+
+
+@pytest.mark.parametrize("load", ["truncate_insert", "upsert"])
+async def test_a_table_load_into_an_existing_empty_collection(
+    handler_ctx: HandlerContext,
+    mongo_client: Any,
+    mongo_db: str,
+    register_mongo: RegisterMongo,
+    load: str,
+) -> None:
+    source, conn, snap = await _small_source(handler_ctx, mongo_client, mongo_db, register_mongo)
+    mongo_client[mongo_db].create_collection("profiles_pre")  # exists, holds no document
+    target = {
+        "write_mode": "table",
+        "connection_id": conn.id,
+        "object": {"name": "profiles_pre"},
+        "table_load": load,
+    }
+    job = await _run(handler_ctx, conn, ObjectRef(name="profiles"), snap.id, target)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    out = list(mongo_client[mongo_db]["profiles_pre"].find({}))
+    assert len(out) == SMALL and {d["_id"] for d in out} == {d["_id"] for d in source}
+    by_id = {d["_id"]: d for d in source}
+    assert_masked(source, out, [(by_id[d["_id"]], d) for d in out])
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None and ev.pack.verification["passed"], ev and ev.pack.verification
+
+
+async def _append_into(
+    ctx: HandlerContext, client: Any, database: str, register: RegisterMongo, existing: list[Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
+    """A named append (new ``_id``s) into ``profiles_app`` holding ``existing`` documents."""
+    source, conn, snap = await _small_source(ctx, client, database, register)
+    client[database].create_collection("profiles_app")
+    if existing:
+        client[database]["profiles_app"].insert_many(existing)
+    target = {
+        "write_mode": "append",
+        "connection_id": conn.id,
+        "object": {"name": "profiles_app"},
+        "pk_strategy": {"kind": "generate"},
+        "confirm_write": True,
+        "expected_rows": SMALL,
+    }
+    job = await _run(ctx, conn, ObjectRef(name="profiles"), snap.id, target)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    before = {d["_id"] for d in existing}
+    appended = [d for d in client[database]["profiles_app"].find({}) if d["_id"] not in before]
+    return source, appended, job
+
+
+async def test_a_named_append_into_an_empty_collection(
+    handler_ctx: HandlerContext, mongo_client: Any, mongo_db: str, register_mongo: RegisterMongo
+) -> None:
+    source, appended, job = await _append_into(
+        handler_ctx, mongo_client, mongo_db, register_mongo, []
+    )
+    assert len(appended) == SMALL and not {d["_id"] for d in appended} & {d["_id"] for d in source}
+    by_balance = {balance(d): d for d in source}
+    pairs = [(by_balance[balance(d)], d) for d in appended if balance(d) in by_balance]
+    assert len(pairs) == SMALL
+    assert_masked(source, appended, pairs)
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None and ev.pack.verification["passed"], ev and ev.pack.verification
+
+
+async def test_a_named_append_into_a_collection_whose_documents_lack_a_leaf(
+    handler_ctx: HandlerContext, mongo_client: Any, mongo_db: str, register_mongo: RegisterMongo
+) -> None:
+    # one document without tags, accounts or kyc: the sample shows none of those leaves
+    sparse = [{"segment": "retail", "notes": "migrated record"}]
+    source, appended, _ = await _append_into(
+        handler_ctx, mongo_client, mongo_db, register_mongo, sparse
+    )
+    assert len(appended) == SMALL
+    by_balance = {balance(d): d for d in source}
+    pairs = [(by_balance[balance(d)], d) for d in appended if balance(d) in by_balance]
+    assert len(pairs) == SMALL
+    assert_masked(source, appended, pairs)
+    assert mongo_client[mongo_db]["profiles_app"].count_documents({}) == SMALL + 1
+
+
+async def test_an_incompatible_leaf_the_target_shows_is_still_refused(
+    handler_ctx: HandlerContext, mongo_client: Any, mongo_db: str, register_mongo: RegisterMongo
+) -> None:
+    """A leaf the target's documents do show keeps the kind check (fails closed, no write)."""
+    source, conn, snap = await _small_source(handler_ctx, mongo_client, mongo_db, register_mongo)
+    kind = type(source[0]["riskScore"]).__name__
+    assert kind in ("int", "Int64", "float", "Decimal128"), kind
+    mongo_client[mongo_db]["profiles_bad"].insert_one({"riskScore": "high"})  # a text leaf
+    target = {
+        "write_mode": "append",
+        "connection_id": conn.id,
+        "object": {"name": "profiles_bad"},
+        "pk_strategy": {"kind": "generate"},
+        "confirm_write": True,
+        "expected_rows": SMALL,
+    }
+    job = await _run(handler_ctx, conn, ObjectRef(name="profiles"), snap.id, target)
+    assert job.state == JobState.failed and job.error_code == "target_invalid", job.error
+    assert mongo_client[mongo_db]["profiles_bad"].count_documents({}) == 1

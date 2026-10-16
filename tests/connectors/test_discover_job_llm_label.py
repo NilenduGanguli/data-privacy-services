@@ -147,3 +147,105 @@ async def test_discover_job_without_the_tier_records_no_llm_figures(
     done = await jobs.get_job("t1", job.id)
     assert done is not None and done.state == JobState.succeeded
     assert "llm" not in done.progress.metrics
+
+
+#: The seeded demo ``bank`` tables (``tools/seed_sources.py``).
+BANK_TABLES = (
+    "accounts",
+    "addresses",
+    "cards",
+    "contacts",
+    "customers",
+    "employees",
+    "kyc_documents",
+    "loan_applicants",
+    "loans",
+    "transactions",
+)
+
+
+class AnySeam(LlmGateway):
+    """A configured provider that answers every labelling prompt with no verdict."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.messages: list[list[dict[str, str]]] = []
+
+    async def _stellar(
+        self, messages: list[dict[str, str]], temperature: float, max_tokens: int
+    ) -> LlmResult:
+        self.messages.append(messages)
+        return LlmResult(text="[]", provider="stellar", model="t")
+
+
+@pytest.mark.parametrize("table", BANK_TABLES)
+async def test_t3_reaches_the_provider_on_every_seeded_bank_table(
+    migrated_db: Any,
+    handler_ctx: HandlerContext,
+    source_pg: SourcePg,
+    register_source: Any,
+    kek: bytes,
+    table: str,
+) -> None:
+    """FINAL r1 privacy-ops B1: under strict egress, T3 was blocked on 5 of the 10 demo tables (a
+    sampled ``channel``, ``doc_type``, ``product``, ``id_type`` or ``segment`` code is also a word
+    of the labelling instructions' type list; a sampled risk score matched a rate's digits or a
+    value shape). Every table with leftover columns now reaches the provider, value-free."""
+    import os
+
+    seeded = await source_pg.admin.fetchval("SELECT to_regclass($1)", f"bank.{table}")
+    if seeded is None:
+        message = "the demo bank is not seeded (docker compose --profile sources up seed-sources)"
+        if os.environ.get("DPS_TEST_REQUIRE_SERVICES") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    conn = await register_source("t1")
+    settings = handler_ctx.settings.model_copy(
+        update={
+            "llm_provider": "stellar",
+            "stellar_base_url": "https://stellar.test",
+            "coin_url": "https://coin.test",
+            "llm_egress_check": "strict",
+        }
+    )
+    seam = AnySeam(settings)
+    ctx = dataclasses.replace(
+        handler_ctx,
+        settings=settings,
+        engine=PrivacyEngine(
+            settings, gateway=seam, cipher_factory=handler_ctx.engine.cipher_factory
+        ),
+    )
+    from dps.layers.connectors.base import ObjectRef
+
+    obj = ObjectRef(owner="bank", name=table)
+    spec = DiscoverSpec(connection_id=conn.id, objects=[obj], policy=POLICY, sample_rows=500)
+    job_id = new_id(PREFIX_JOB)
+    await jobs.create_job(
+        tenant_id="t1",
+        kind=JobKind.discover,
+        phase=JobPhase.discover,
+        job_id=job_id,
+        spec=redact_spec(spec, engine="postgres"),
+        connection_id=conn.id,
+        object_ref=obj.fqn(),
+        sealed_selection=seal_json(
+            kek, SealedSelection(policy=POLICY), aad=f"dps_job.spec:{job_id}"
+        ),
+    )
+    [claimed] = await jobs.claim_jobs(ctx.worker_id, kinds=(JobKind.discover,), batch=1)
+    token = LLM_STATS.set(LlmStats())
+    try:
+        await discover_job(ctx, claimed)
+    finally:
+        LLM_STATS.reset(token)
+    done = await jobs.get_job("t1", job_id)
+    assert done is not None and done.state == JobState.succeeded, done.error_code
+    llm = done.progress.metrics.get("llm") or {}
+    assert llm.get("blocked") == 0, (table, llm)
+    snap = await snapshots.get_snapshot("t1", done.progress.snapshot_ids[0])
+    assert snap is not None
+    leftovers = [c for c in snap.columns if c.entity_type is None and not c.is_key]
+    if leftovers:
+        assert llm.get("calls", 0) >= 1 and len(seam.messages) == llm["calls"], (table, llm)
+        assert llm.get("raw_values") == 0

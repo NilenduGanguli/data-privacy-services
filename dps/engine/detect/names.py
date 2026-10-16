@@ -131,6 +131,16 @@ STOPWORDS = frozenset(
         "atención", "banco", "correo", "teléfono", "dirección", "nombre", "cuenta", "tarjeta",
     }
 )  # fmt: skip
+#: STOPWORDS that are also surnames of the persona pools (Faker ``en_IN`` ``Date``; ``en_US`` and
+#: ``en_CA`` ``Best``, ``Branch``, ``Holder``, ``Le``; ``es``/``pt`` ``Sales``). In a surname
+#: position — right after a title, or right after a name word of the run — such a word is part of
+#: the name, unless a capitalised non-name word follows it (a heading: ``Branch Office``). FINAL
+#: r1 synthetic B3: the run ended at it, so the span held the first name only and the leakage sweep
+#: never learnt the surname, which survived synthesis and obfuscation verified.
+SURNAME_STOPWORDS = frozenset({"date", "le", "best", "branch", "holder", "sales"})
+#: Cues before a name: only a run they open takes a stopword surname (a cue after the name —
+#: contact details, a possessive — could have made ``Main Branch`` a name).
+_BEFORE_CUES = frozenset({"cue:title", "cue:lead-in", "cue:narration"})
 #: Lower-case particles allowed between name words (``Juan de la Cruz``, ``Ali bin Hassan``).
 PARTICLES = frozenset(
     {"de", "da", "das", "do", "dos", "del", "della", "di", "du", "la", "le", "van", "von", "der",
@@ -186,18 +196,64 @@ def _is_particle(w: _Word) -> bool:
     return w.core in PARTICLES and not w.dot
 
 
-def _runs(text: str, words: list[_Word]) -> list[list[int]]:
-    """Maximal runs of name words (indices into ``words``), split at anything but a space."""
+def _is_surname_stopword(w: _Word) -> bool:
+    core = w.core
+    return (
+        len(core) > 1
+        and core[0].isupper()
+        and core.casefold() in SURNAME_STOPWORDS
+        and (any(c.islower() for c in core[1:]) or core.isupper())
+    )
+
+
+def _gap(text: str, words: list[_Word], i: int) -> str:
+    """The text between ``words[i - 1]`` and ``words[i]``."""
+    return text[words[i - 1].start + len(words[i - 1].core) : words[i].start] if i else ""
+
+
+def _heading_follows(text: str, words: list[_Word], i: int) -> bool:
+    """A capitalised word that is no name word right after ``words[i]`` (``Branch Office``)."""
+    w = words[i]
+    if i + 1 >= len(words) or w.dot or w.possessive:
+        return False
+    nxt, gap = words[i + 1], _gap(text, words, i + 1)
+    if gap.strip() != "" or "\n" in gap:
+        return False
+    return bool(nxt.core) and nxt.core[0].isupper() and not _is_name_word(nxt)
+
+
+def _surname_position(
+    text: str, words: list[_Word], i: int, current: list[int], pending: list[int]
+) -> str | None:
+    """``"title"`` or ``"name"`` when ``words[i]``, a stopword surname, directly follows a title
+    or a name word of the current run (one space, same line), else ``None``."""
+    if i == 0 or not _is_surname_stopword(words[i]) or _heading_follows(text, words, i):
+        return None
+    gap = _gap(text, words, i)
+    if gap == "" or gap.strip(". ") != "" or "\n" in gap:
+        return None
+    if current and not pending and current[-1] == i - 1:
+        return "name"
+    return "title" if not current and _is_title(words[i - 1]) else None
+
+
+def _runs(text: str, words: list[_Word], soft: set[int] | None = None) -> list[list[int]]:
+    """Maximal runs of name words (indices into ``words``), split at anything but a space. A
+    stopword surname right after a name word joins the run and is put in ``soft``: only a cue
+    before the run keeps it (:data:`SURNAME_STOPWORDS`)."""
     runs: list[list[int]] = []
     current: list[int] = []
     pending: list[int] = []  # particles waiting for the next name word
     for i, w in enumerate(words):
-        gap = text[words[i - 1].start + len(words[i - 1].core) : w.start] if i else ""
+        gap = _gap(text, words, i)
         joined = bool(current) and gap.strip(". ") == "" and "\n" not in gap and gap != ""
         if current and not joined:
             runs.append(current)
             current, pending = [], []
-        if _is_name_word(w):
+        position = _surname_position(text, words, i, current, pending)
+        if position == "name" and soft is not None:
+            soft.add(i)
+        if _is_name_word(w) or position is not None:
             current += [*pending, i]
             pending = []
             ends = w.possessive or (w.dot and len(w.core) > 1)
@@ -264,11 +320,19 @@ def scan_names(text: str) -> list[Hit]:
     """``PERSON_NAME`` hits for names with a cue next to them (see the module docstring)."""
     words = _words(text)
     hits: list[Hit] = []
-    for run in _runs(text, words):
+    soft: set[int] = set()
+    for run in _runs(text, words, soft):
         names = [i for i in run if not _is_particle(words[i])]
         if all(len(words[i].core) == 1 for i in names):
             continue  # initials alone are not a name
         cue = _cue(text, words, run, len(names))
+        cut = next((n for n, i in enumerate(run) if i in soft), None)
+        if cut is not None and (cue is None or cue[0] not in _BEFORE_CUES):
+            run = run[:cut]  # a stopword surname only extends a run a cue before it opened
+            names = [i for i in run if not _is_particle(words[i])]
+            if all(len(words[i].core) == 1 for i in names):
+                continue
+            cue = _cue(text, words, run, len(names))
         if cue is None:
             continue
         # At most MAX_NAME_WORDS name words: the first ones after a title or lead-in, the last

@@ -591,11 +591,17 @@ async def test_wide_tables_are_labelled_in_calls_of_at_most_the_field_cap() -> N
     assert engine.gateway is fake
 
 
-async def test_a_prompt_the_egress_verifier_stops_is_never_sent_and_is_counted() -> None:
+async def test_a_prompt_the_egress_verifier_stops_is_never_sent_and_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Fail closed, under ``strict``: a prompt the egress verifier stops never leaves; the columns
     stay as T0–T2 left them and ``progress.metrics.llm.blocked`` counts it. Here a sampled value
-    ("Personal") is a word of the fixed instructions, where the verifier looks for protected
-    values too — a known false positive (the call is skipped, never a value sent)."""
+    ("Personal") is a word of the labelling instructions, and the verifier is made to scan them
+    (no registered fixed prompt): since FINAL r1 privacy-ops B1 a registered fixed system prompt is
+    not scanned, so this false positive no longer happens on its own."""
+    import dps.llm.egress as egress
+
+    monkeypatch.setattr(egress, "fixed_system_prompts", lambda: frozenset())
     shape = _cols("kind_desc", "seg_cd")
     rows = [
         {"acct_id": i, "kind_desc": ["Personal", "Business"][i % 2], "seg_cd": f"S{i % 3}"}

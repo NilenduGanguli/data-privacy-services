@@ -305,13 +305,27 @@ async def test_stub_provider_never_calls() -> None:
     assert info["llm_calls"] == 0 and info["source"] == "heuristic"
 
 
-async def test_leak_guard_blocks_the_call() -> None:
+async def test_leak_guard_blocks_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [
         {"full_name": "Status", "status": "ACTIVE"},
         {"full_name": "Status", "status": "CLOSED"},
     ]
+    result = profile_from_sample(rows, DETECTOR)
+    # FINAL r1 l1-docs: a key holding a sampled value (the name "Status") is aliased, so it no
+    # longer reaches the prompt at all ...
+    assert [f.name for f in result.profile.fields] == ["full_name", "field_2"]
+    assert "status" not in render_prompt(result.profile)[1]["content"].lower()
+    # ... and the guard still blocks a prompt that would hold one
+    real = schema_profile.render_prompt
+
+    def leaky(profile: Any) -> Any:
+        messages = real(profile)
+        messages[1]["content"] += " Status"
+        return messages
+
+    monkeypatch.setattr(schema_profile, "render_prompt", leaky)
     gateway = RecordingGateway("{}")
-    spec, info = await propose_spec(profile_from_sample(rows, DETECTOR), gateway, locale="en_US")
+    spec, info = await propose_spec(result, gateway, locale="en_US")
     assert info["fallback"] == "leak_guard" and info["llm_calls"] == 0 and gateway.messages == []
     assert spec.source == "heuristic"
 

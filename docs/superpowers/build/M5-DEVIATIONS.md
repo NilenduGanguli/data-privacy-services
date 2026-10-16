@@ -2768,3 +2768,81 @@ the merged code differs from the plans:
 - **Version 1.0.0** in `pyproject.toml`, `dps/__init__.py`, `frontend/package.json` and its lock
   (`npm version 1.0.0 --no-git-tag-version`); `CHANGELOG.md` dated, with the finish stage and the
   live-Vertex fixes; no tag (the final verification runs the Definition of Done first).
+
+## FINAL r1 fix round — the v1.0.0 candidate's blocking findings (2026-10-16, `main`)
+
+The final verification (reports `~/.cache/dps-build/reports/FINAL-*-r1.md`) found seven blocking
+defects on `45be8ac`; each fix has a test that fails on `45be8ac` and passes now.
+
+- **B1 (gates, l2-engines, synthetic, deploy-demo): a run under an inline or `@name` policy died in
+  finalize.** Since F-18 `dps_job.spec` keeps only the policy's label; `_finalize` validated that
+  redacted spec, so the post-write review asked the engine for the label as a policy
+  (`policy_invalid`) on every retry until the job was dead, with all rows written and no pack.
+  `_finalize` now opens the spec (`_finalize_spec` → `_spec`: the F-18 body and the selection
+  literals from `spec_enc`, which only finalize's own terminal advance purges) for the post-write
+  review and the pack's `policy.version`; the evidence and the audit keep the redacted
+  `job.spec`. The identifier check and the ledger clear keep the redacted spec on purpose (they
+  read connection ids and object names only, so they run even if the seal cannot be opened).
+  A seal that cannot be opened at finalize is reported, not retried: the post-write review becomes
+  `{"error": "secret_unavailable"}` (`review_required`, fails closed) and the version is read from
+  the label. `_best_effort` also turns a `PrepareFailure` into `{"error": code}`, so no
+  informational step can dead-letter a written job again. Tests:
+  `tests/test_finalize_sealed_policy.py` (unit), `tests/connectors/test_run_sealed_policy.py`
+  (PG: inline and `@name` obfuscate, copula synthesize with `utility_label` → `utility.run` and
+  `membership_inference.run`, `@name` synthesize), one inline run each in
+  `test_oracle_pipeline.py` and `test_mongo_pipeline.py`.
+- **B2 (l2-engines): MongoDB existing collections checked as DDL.** `targets._check_existing`
+  and `_target_plans` take `sampled=True` for a MongoDB target: a leaf the sampled documents do not
+  show is written as it is (no column DDL), a leaf they show keeps the kind check (an incompatible
+  one is still refused, `target_invalid`), and a `table` load is keyed on `_id` whatever the
+  sample shows. Tests: `test_mongo_pipeline.py` (truncate_insert and upsert into an existing empty
+  collection, a named append into an empty and into a sparse collection, the kind refusal).
+- **Synthetic B2: a foreign key without an entity type did not join its classified parent.**
+  Prepare now reads, per declared reference, the parent table's accepted snapshot on the run's
+  source connection (`snapshots.accepted_snapshot`, `jobs_run._parent_labels`) and keys the
+  foreign key by the label the parent key's own run uses (`targets.parent_key_label`: its entity
+  type, or `KEY|…` when unclassified); without a parent snapshot an unclassified foreign key takes
+  the join identifier its referenced column's name says (`_reference_label`), else `KEY|…`. The
+  contract's G2 B2 paragraph is amended. `test_copula_job_on_a_table_with_a_declared_foreign_key`
+  asserted the old `KEY|…` label for a parent named `employee_id`; it now asserts `EMPLOYEE_ID`
+  (the label a discovered parent gets). New test:
+  `test_an_unclassified_foreign_key_joins_its_classified_parent_under_one_seed` (join count =
+  child rows, no real key). Residual (CHANGELOG): a parent discovered through another connection or
+  reviewed differently later can still key the sides apart.
+- **Synthetic B3: stopword surnames.** `names.SURNAME_STOPWORDS` (the STOPWORDS that are surnames
+  in the persona pools: `date` en_IN; `le`, `best`, `branch`, `holder` en_US/en_CA; `sales` es/pt)
+  join a name run in a surname position — right after a title, or right after a name word of the
+  run — unless a capitalised non-name word follows (`Branch Office`, `Date Of Birth` stay
+  headings). After a name word the surname extends only a run a cue *before* it opened (title,
+  lead-in, narration); with a cue after the name (contact, possessive) it is cut off again, so
+  `Main Branch (…@…)` is not a name. Tests: `tests/test_names.py` (spans, headings, L1 synthesize
+  and obfuscate with all five surnames: 0 kept), `tests/connectors/test_stopword_surnames.py` (L2
+  synthesize and obfuscate of a memo column: 0 aligned survivors; 120/120 on `45be8ac`).
+- **l1-docs: a sampled e-mail as a sample key.** Two layers. `profile_from_sample` names a field
+  `field_N` in the profile, the spec and the rows when its key holds one of the sample's swept values
+  (`_alias_value_keys`; e1f3a3a's rule stands for every other key, `cust_id` and a key that is an
+  e-mail of nobody in the sample keep their names), so `/schema/generator-spec` and
+  `/schema/synthesize` never return it; and `verify_against_sample` also sweeps each leaf's joined key
+  path (`_key_paths`), so a value spelt over nesting levels is refused (422 `leakage`) however it got
+  there. Behaviour change: a sample whose key is a sampled name or phone now answers 200 with the
+  key aliased instead of 422 `leakage`. `test_leak_guard_blocks_the_call` used such a key ("status"
+  next to a sampled name "Status") to reach the prompt guard; it now asserts the alias and drives the
+  guard through a prompt that holds the value. Tests: `tests/test_api_schema.py` (dotted,
+  undotted-planted and name keys, JSON and CSV, generator-spec; a three-level key path).
+- **privacy-ops B1: T3 blocked under strict egress on typical KYC data (the "Known residual" of
+  Task 8B above).** `egress.residual_values` no longer scans a system message equal to one of
+  `fixed_system_prompts()` (the labelling, rewrite and spec instructions); any other system text is
+  scanned in full, patterns included (stricter than before for an ad-hoc system message:
+  `test_instructions_that_look_like_values_do_not_block` now uses the real labelling prompt and pins
+  the ad-hoc case as blocked). A protected value written only in `x`/`X`/`9` and punctuation is not
+  looked for (it is indistinguishable from the shapes DPS sends), and L2's labelling hints round
+  `null_rate`/`distinct_ratio` to two decimals (a third decimal made bare three-digit words).
+  `test_a_prompt_the_egress_verifier_stops_is_never_sent_and_is_counted` relied on the fixed-prompt
+  false positive; it now disables the registry to keep testing the fail-closed path. Tests:
+  `tests/test_llm_egress_t3_collisions.py` (L1 PASSPORT/AADHAAR/PRIVATE/ACCOUNT, L3 selected
+  Passport/Private, the registry, value shapes), and
+  `test_t3_reaches_the_provider_on_every_seeded_bank_table` (10/10 tables; 5 blocked on `45be8ac`).
+  Residual (CHANGELOG): a sampled value equal to a word of the call data itself (a field or table
+  name, a number in a declared type) still skips the call, fail closed.
+- **deploy-demo B2: the deck.** Rebuilt by `tools/build_deck.py --strict` from the post-fix
+  rehearsal (see the FINAL fix report for the run); the Keynote PDF review stays with the owner.
