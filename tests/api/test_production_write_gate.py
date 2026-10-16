@@ -29,7 +29,15 @@ pytestmark = pytest.mark.db
 FULL = {"X-API-KEY": "dps_full", "X-DPS-Tenant": "t1"}
 JOBS = {"X-API-KEY": "dps_jobs", "X-DPS-Tenant": "t1"}
 PURPOSE = {"ticket": "CHG-48213", "legal_basis": "legitimate interest"}
-#: engine, params, secret ref, object reference, source object, a copy's object
+#: engine, params, secret ref, object reference, source object, a copy's object; the UAT
+#: target holds another, non-production credential (``UAT_REFS``)
+#: A non-production credential per engine (validation only, never opened): a connection holding
+#: the production connection's own credential is production too (D3 bound to the credentials)
+UAT_REFS = {
+    "postgres": "dps/src/test-pg",
+    "oracle": "dps/tgt/oracle-crm-masked",
+    "mongo": "dps/tgt/mongo-crm-uat",
+}
 ENGINES = [
     pytest.param(
         "postgres",
@@ -204,14 +212,14 @@ def test_every_write_into_a_production_connection_needs_admin(
         )
     # no refused run left a job behind
     assert c.get("/api/v1/jobs?kind=run", headers=FULL).json()["items"] == before
-    # the same jobs key may still write a non-production target
+    # the same jobs key may still write a non-production target (its own, non-production login)
     uat = _create(
         c,
         JOBS,
         name=f"{engine}-uat",
         engine=engine,
         params=params,
-        secret_ref=ref,
+        secret_ref=UAT_REFS[engine],
         roles=["target"],
     )
     ok = c.post(
@@ -236,6 +244,17 @@ def test_retrying_a_production_write_needs_admin_again(
     write: str,
 ) -> None:
     c, _ = api_client
+    # the jobs key names the credential before it is a production one (afterwards naming it
+    # needs admin, S3 review F-01); reading it stays a jobs right
+    reader = _create(
+        c,
+        JOBS,
+        name=f"{engine}-src",
+        engine=engine,
+        params=params,
+        secret_ref=ref,
+        roles=["source"],
+    )
     prod = _create(
         c,
         FULL,
@@ -249,15 +268,7 @@ def test_retrying_a_production_write_needs_admin_again(
     if write == "in_place":
         src, target = prod, {"write_mode": "in_place", "confirm_write": True}
     else:
-        src = _create(
-            c,
-            JOBS,
-            name=f"{engine}-src",
-            engine=engine,
-            params=params,
-            secret_ref=ref,
-            roles=["source"],
-        )
+        src = reader
         target = {"write_mode": "table", "connection_id": prod, "object": copy}
     snap = _accepted(c, db_settings, src, object_ref)
     submitted = c.post("/api/v1/jobs/run", json=_run(src, snap, source, target), headers=FULL)

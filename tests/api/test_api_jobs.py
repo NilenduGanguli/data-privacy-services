@@ -81,12 +81,14 @@ def _run(src: str, snap: str, target: dict[str, Any], **extra: Any) -> dict[str,
 @pytest.fixture
 def seeded(api_client, db_settings) -> dict[str, Any]:  # noqa: ANN001
     """Source, UAT and production connections; accepted snapshots of bank.customers on the
-    source and on the production connection; a proposed snapshot to review."""
+    source and on the production connection; a proposed snapshot to review. The production
+    connection holds its own login: a UAT target holding the production credential would be a
+    production connection too (every write through it needs admin, D3 bound to the credentials)."""
     c, _ = api_client
     src = _connection(c, "bank-src", "dps/src/test-pg", ["source"], JOBS)
     uat = _connection(c, "bank-uat", "dps/src/test-pg-rw", ["target"], JOBS)
     prod = _connection(
-        c, "bank-prod", "dps/src/test-pg-rw", ["source", "target"], FULL, tags=["production"]
+        c, "bank-prod", "dps/src/test-pg-admin", ["source", "target"], FULL, tags=["production"]
     )
     snaps = {
         "src": seed_snapshot(db_settings, "t1", src, "bank.customers"),

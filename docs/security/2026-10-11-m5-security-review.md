@@ -80,6 +80,18 @@ connection's `secret_ref` name stays visible to `jobs` keys (it is a name, not a
 credentials need the password itself; the endpoint alone was not made a production marker (UAT and
 production schemas can share a database).
 
+**At the release merge (2026-10-16).** `main` had meanwhile widened D3 to **every** write mode into
+a `production`-tagged connection (S1-M3 post-merge r1 security B1: a `table` load truncates or
+upserts an existing production table, a `files` export writes production storage). The two rules
+are joined, not one kept: `validate_run` and `check_retry_scope` treat any write — `in_place`,
+`append`, `table` or `files` — through a connection that is tagged `production` **or** holds a
+production credential as a production write (403 `admin_scope_required` without `admin`), so an
+untagged holder of the production login is production for every write mode as well. Tests:
+`tests/api/test_production_resource_gate.py::test_a_retry_of_a_production_write_rechecks_admin`
+(table and files retries through the tagged connection and through an untagged holder), the S1-M3
+gate `tests/api/test_production_write_gate.py`, and the API fixtures, whose production connection
+now holds its own login (a UAT target sharing the production login is production).
+
 **Review round 1 (B2).** The first fix gated only a patch that *switched to* a production
 credential, and SEC-3 accepts the same `secret_ref` restated as "credentials". So a `jobs` key
 re-pointed an untagged connection that already held the production credential (`PATCH {params:
