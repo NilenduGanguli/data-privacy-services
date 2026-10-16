@@ -1573,7 +1573,11 @@ Details: security review §3.25–§3.27, `docs/superpowers/build/M5-DEVIATIONS.
   (OpenShift NetworkPolicy). Without them, or with `stub`, labelling is skipped (behaviour
   unchanged). Prompts carry metadata and value shapes only and pass the leak guard and the egress
   verifier (`DPS_LLM_EGRESS_CHECK=strict` in staging/prod); `progress.metrics.llm` of the job counts
-  the calls. A scanned field's label (page text) goes into the prompt only when the browser-worker
+  the calls. The verifier does not scan DPS's own fixed system prompts (FINAL r1: category codes
+  such as `PASSPORT` matched the type list and blocked T3 on 5 of the 10 seeded demo tables; now
+  10 of 10 reach the provider); a sampled value equal to a word of the call data itself (a field or
+  table name, a number in a declared type such as `varchar(120)`) still skips that call — fail
+  closed, `blocked` counted, `DpsLlmExposureBlocked` warns. A scanned field's label (page text) goes into the prompt only when the browser-worker
   runs NER (built with `WITH_NER=1`, `DPS_NER_ENABLED` not `false`, `ner` in the policy's tiers),
   redacted of every span any detector tier reports — at any score, whatever the policy's
   `detect.min_score` — with its digit/`@` tokens as shapes; without NER, fields are labelled by their
