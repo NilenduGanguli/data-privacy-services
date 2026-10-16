@@ -140,6 +140,10 @@ at fidelity 0.970, 0 exact rows, NNDR 1.50 and 0 real identifiers in 20 000 rows
   reads each leaf's joined key path; T3 labelling under strict egress reaches the provider on
   typical KYC data (DPS's fixed system prompts are not scanned, a value shape is no value, and L2
   hints carry rates at two decimals).
+- *Final verification fixes* (FINAL r2, 2026-10-16): a MongoDB `table` load or named `append` into an
+  existing collection whose sampled documents lack a nested leaf (`kyc` without `taxId`) succeeds;
+  an existing collection's sampled shape is kind-checked per leaf path, so a kept nested leaf of
+  another kind (`kyc.verifiedAt` held as text) is refused `target_invalid` before any write.
 
 ### Known limitations
 

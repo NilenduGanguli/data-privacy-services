@@ -2846,3 +2846,40 @@ defects on `45be8ac`; each fix has a test that fails on `45be8ac` and passes now
   name, a number in a declared type) still skips the call, fail closed.
 - **deploy-demo B2: the deck.** Rebuilt by `tools/build_deck.py --strict` from the post-fix
   rehearsal (see the FINAL fix report for the run); the Keynote PDF review stays with the owner.
+
+## FINAL r2 fix — R2-B1: a MongoDB target's sampled shape is kind-checked per leaf path (2026-10-16, `main`)
+
+The final verification's round 2 (`FINAL-l2-engines-r2.md`) passed every gate and lens except one
+finding, the remainder of r1 B2. A named `append`, or a `table` load (`truncate_insert` or
+`upsert`), into an existing MongoDB collection was refused `target_invalid` when its sampled
+documents showed a field but not that field's first leaf in path order, while a sibling leaf of
+another kind was present: `kyc` without `taxId` (40 % of the demo profiles) gave "$.kyc.taxId: a text
+value cannot go to a timestamp column", 0 rows written (fails closed, no leak). Cause:
+`infer_shape` names every document column by its top-level field and `_check_existing` compared
+`TableShape.column(name)` on both sides, the first leaf of that name, so the source's first leaf met
+whichever leaf the sample showed first, and a wrong-kind sibling leaf was never kind-checked.
+
+- **Fix.** `targets._check_existing` takes the run's plans instead of the planned names. For a
+  sampled target it iterates, for each written top-level field, every source leaf of that field
+  and looks it up at its own path (`column_at(target_shape, col.path, col.name)`: a sibling leaf is
+  another column); a leaf the sample does not show is written as it is, and every leaf it shows is
+  kind-checked, planned or kept **by its own path** (a kept `kyc.verifiedAt` stays kept although
+  `kyc.taxId` is planned). The DDL branch (PostgreSQL, Oracle) is unchanged: it still derives the
+  planned names from the plans and checks by name, missing columns refused. Every leaf `_target_plans`
+  adopts a kind from is now kind-checked first (both use `column_at`).
+- **Behaviour change (stricter, fail closed):** an existing collection whose sampled documents hold
+  a kept nested leaf with an incompatible kind (e.g. `kyc.verifiedAt` as text) is now refused
+  `target_invalid`; before, only each field's first leaf was compared and a kept leaf counted as
+  planned when another leaf of its field was.
+- **Tests (red on `2539ea8`, green now):** `tests/connectors/test_mongo_pipeline.py`
+  `test_a_collection_whose_documents_lack_a_nested_leaf_takes_the_run[append|truncate_insert|upsert]`
+  (a collection whose one document has `kyc` without `taxId`: succeeded, every sensitive leaf
+  present as often as in the source, 0 same-document survivors, `taxId` written as text, pack
+  verified) and `test_a_wrong_kind_leaf_after_the_first_of_its_field_is_refused[…]` (a kept
+  `kyc.verifiedAt` held as text, `taxId` present: `target_invalid` naming `$.kyc.verifiedAt`, the
+  one document untouched); `tests/connectors/test_targets.py`
+  `test_a_sampled_collection_is_kind_checked_per_leaf_path` (offline, through `resolve_target` for
+  `table` and `append`). No existing test's expectation changed.
+- **DDL targets unchanged:** a differential run of `resolve_target` (HEAD vs fixed) on 6 000
+  randomized existing targets per engine gave 0 different outcomes for PostgreSQL and Oracle
+  (report `FINAL-fix-r2.md`).

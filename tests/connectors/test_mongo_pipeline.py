@@ -17,6 +17,7 @@ happens, so both cases are met on every run.
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -457,3 +458,90 @@ async def test_an_incompatible_leaf_the_target_shows_is_still_refused(
     job = await _run(handler_ctx, conn, ObjectRef(name="profiles"), snap.id, target)
     assert job.state == JobState.failed and job.error_code == "target_invalid", job.error
     assert mongo_client[mongo_db]["profiles_bad"].count_documents({}) == 1
+
+
+# -- FINAL r2 l2-engines R2-B1: a sampled collection is kind-checked per leaf path -------------
+#: Every leaf of a document field is called by the field (``$.kyc.taxId`` and
+#: ``$.kyc.verifiedAt`` are both ``kyc``); ``taxId`` is ``kyc``'s first leaf in path order and
+#: absent from 40 % of the demo profiles. The existing documents below hold made-up values only.
+LOADS = ["append", "truncate_insert", "upsert"]
+
+
+def _into(conn: Connection, name: str, load: str) -> dict[str, Any]:
+    """A named, confirmed ``append`` (new ``_id``s) or a ``table`` ``load`` into ``name``."""
+    if load == "append":
+        return {
+            "write_mode": "append",
+            "connection_id": conn.id,
+            "object": {"name": name},
+            "pk_strategy": {"kind": "generate"},
+            "confirm_write": True,
+            "expected_rows": SMALL,
+        }
+    return {
+        "write_mode": "table",
+        "connection_id": conn.id,
+        "object": {"name": name},
+        "table_load": load,
+    }
+
+
+@pytest.mark.parametrize("load", LOADS)
+async def test_a_collection_whose_documents_lack_a_nested_leaf_takes_the_run(
+    handler_ctx: HandlerContext,
+    mongo_client: Any,
+    mongo_db: str,
+    register_mongo: RegisterMongo,
+    load: str,
+) -> None:
+    """The sample shows ``kyc`` without its first leaf ``taxId``: the source's text ``taxId`` is
+    written as it is, not checked against the target's timestamp ``verifiedAt`` (by name it
+    was, and every such run failed ``target_invalid``)."""
+    source, conn, snap = await _small_source(handler_ctx, mongo_client, mongo_db, register_mongo)
+    existing: dict[str, Any] = {
+        "segment": "retail",
+        "kyc": {"verifiedAt": dt.datetime(2024, 5, 1)},
+        "notes": "migrated record",
+    }
+    mongo_client[mongo_db]["profiles_kyc"].insert_one(existing)  # adds its _id
+    target = _into(conn, "profiles_kyc", load)
+    job = await _run(handler_ctx, conn, ObjectRef(name="profiles"), snap.id, target)
+    assert job.state == JobState.succeeded, (job.error_code, job.error)
+    docs = list(mongo_client[mongo_db]["profiles_kyc"].find({}))
+    assert len(docs) == SMALL + (0 if load == "truncate_insert" else 1)
+    written = [d for d in docs if d["_id"] != existing["_id"]]
+    if load == "append":  # new _ids: each document against its own source by the kept balance
+        by_balance = {balance(d): d for d in source}
+        pairs = [(by_balance[balance(d)], d) for d in written if balance(d) in by_balance]
+    else:  # a table load keeps _id
+        by_id = {d["_id"]: d for d in source}
+        pairs = [(by_id[d["_id"]], d) for d in written]
+    assert len(pairs) == SMALL
+    assert_masked(source, written, pairs)
+    not_text = sum(1 for d in written for v in values_at(d, "$.kyc.taxId") if type(v) is not str)
+    assert not_text == 0  # the leaf kept its source kind
+    ev = await get_evidence("t1", job.progress.evidence_id or "")
+    assert ev is not None and ev.pack.verification["passed"], ev and ev.pack.verification
+
+
+@pytest.mark.parametrize("load", LOADS)
+async def test_a_wrong_kind_leaf_after_the_first_of_its_field_is_refused(
+    handler_ctx: HandlerContext,
+    mongo_client: Any,
+    mongo_db: str,
+    register_mongo: RegisterMongo,
+    load: str,
+) -> None:
+    """Every leaf the sample shows is kind-checked, not only its field's first: a kept
+    ``kyc.verifiedAt`` held as text (``taxId`` present) refuses the run before any write — kept
+    by its own path, although ``taxId`` of the same field is planned (fails closed)."""
+    _, conn, snap = await _small_source(handler_ctx, mongo_client, mongo_db, register_mongo)
+    methods = {c.path: c.method.method for c in snap.columns}
+    assert methods["$.kyc.verifiedAt"] == "keep" and methods["$.kyc.taxId"] != "keep", methods
+    existing = {"kyc": {"taxId": "pending", "verifiedAt": "2024-05-01"}}
+    mongo_client[mongo_db]["profiles_kyc"].insert_one(existing)
+    target = _into(conn, "profiles_kyc", load)
+    job = await _run(handler_ctx, conn, ObjectRef(name="profiles"), snap.id, target)
+    assert job.state == JobState.failed and job.error_code == "target_invalid", job.error
+    assert "$.kyc.verifiedAt" in (job.error or ""), job.error
+    assert mongo_client[mongo_db]["profiles_kyc"].count_documents({}) == 1

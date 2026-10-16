@@ -791,6 +791,69 @@ def test_prepare_names_every_column_that_cannot_fit_an_existing_target() -> None
     assert "$.full_name" in err.value.detail and "$.email" in err.value.detail
 
 
+def test_a_sampled_collection_is_kind_checked_per_leaf_path() -> None:
+    """FINAL r2 l2-engines R2-B1: a MongoDB target's shape is a sample, and every leaf of a
+    document field is called by the field (``$.kyc.taxId`` and ``$.kyc.verifiedAt`` are both
+    ``kyc``). Each source leaf meets the target leaf at its own path: a sample without the
+    field's first leaf takes the run (by name, the text ``taxId`` met the timestamp
+    ``verifiedAt``), and a wrong-kind leaf after the first is refused (by name, never checked) —
+    kept or planned by its own path, not by its field."""
+    import datetime as dt
+
+    from dps.engine.batch import ColumnPlan
+    from dps.layers.connectors.mongo_docs import infer_shape
+
+    when = dt.datetime(2024, 5, 1)
+    doc = {"_id": 1, "kyc": {"taxId": "T-1", "verifiedAt": when}, "riskScore": 3}
+    source = infer_shape(ObjectRef(name="profiles"), [doc], row_estimate=1)
+    mdb = make_connection("c_mdb", engine="mongo", roles=["source", "target"], params={})
+    tax_id = ColumnPlan(
+        path="$.kyc.taxId",
+        name="kyc",
+        entity_type="TAX_ID",
+        method=MethodSpec(method="det_token"),
+        text_column=True,
+        reversible=False,
+        kind="text",
+        length=None,
+    )
+    shifted = tax_id.model_copy(
+        update={"path": "$.kyc.verifiedAt", "method": MethodSpec(method="date_shift")}
+    )
+    into = {"connection_id": "c_mdb", "object": {"name": "kyc_copy"}}
+    runs = [
+        spec(write_mode="table", **into),
+        spec(write_mode="append", confirm_write=True, pk_strategy={"kind": "generate"}, **into),
+    ]
+
+    def resolve(run: RunSpec, target_docs: list[dict[str, Any]], plans: list[Any]) -> Any:
+        target = infer_shape(ObjectRef(name="kyc_copy"), target_docs, row_estimate=1)
+        return resolve_target(
+            run,
+            job_id="j_1",
+            source_conn=mdb,
+            target_conn=mdb,
+            source_shape=source,
+            target_shape=target,
+            plans=plans,
+            projection=["_id", "kyc", "riskScore"],
+        )
+
+    for run in runs:
+        for shown in ({"_id": 9, "kyc": {"verifiedAt": when}}, {"_id": 9}, doc):
+            _, out = resolve(run, [shown], [tax_id])  # a leaf the sample does not show
+            assert [(p.path, p.kind) for p in out] == [("$.kyc.taxId", "text")]
+        wrong = {"_id": 9, "kyc": {"taxId": "T-9", "verifiedAt": "2024-05-01"}}
+        with pytest.raises(PrepareFailure) as kept:
+            resolve(run, [wrong], [tax_id])
+        assert kept.value.code == "target_invalid"
+        assert kept.value.detail.startswith("$.kyc.verifiedAt: a timestamp value"), kept.value
+        resolve(run, [wrong], [tax_id, shifted])  # a planned leaf's output is text
+        with pytest.raises(PrepareFailure) as top:  # a top-level field, as before
+            resolve(run, [{"_id": 9, "riskScore": "high"}], [tax_id])
+        assert top.value.detail.startswith("$.riskScore: a int value"), top.value
+
+
 # -- D-A: synthetic tables never carry linkable real identifiers ---------------------------------
 
 

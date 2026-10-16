@@ -33,9 +33,10 @@ table, checked at prepare) or ``offset`` (prepare requires ``min(selected key) +
 text-like columns become ``text`` because a fallback (``det_token`` instead of FPE) is longer than
 the value. Key columns are ``NOT NULL`` with a ``PRIMARY KEY``; no foreign keys, indexes or
 defaults are copied. **Existing targets** must hold every projected column with a compatible
-kind, a key on exactly the key columns (``table`` upserts), and room for the worst-case output of
-``det_token`` / ``hmac_pseudonym`` (``length_overflow``); other methods are measured by the
-preflight.
+kind (a MongoDB collection, whose shape is a sample of its documents: every leaf they show, by
+path; a leaf they do not show is written as it is), a key on exactly the key columns (``table``
+upserts), and room for the worst-case output of ``det_token`` / ``hmac_pseudonym``
+(``length_overflow``); other methods are measured by the preflight.
 """
 
 from __future__ import annotations
@@ -997,30 +998,46 @@ def _check_existing(
     target_shape: TableShape,
     source_shape: TableShape,
     columns: list[str],
-    planned: set[str],
+    plans: list[ColumnPlan],
     *,
     sampled: bool = False,
 ) -> None:
-    """Every written column exists in the target and takes the source kind. A ``sampled``
-    target (a MongoDB collection: its shape comes from at most 500 documents, not DDL) has no
-    missing column — a leaf its documents do not show yet is written as it is — and only the
-    leaves it shows are kind-checked (FINAL r1 l2-engines B2)."""
+    """Every written column exists in the target and takes the source kind (a planned column's
+    output is the engine's: a text column takes any).
+
+    A ``sampled`` target (a MongoDB collection: its shape comes from at most 500 documents, not
+    DDL) is checked per **leaf path**. Every leaf of a document field is called by the field
+    (``$.kyc.taxId`` and ``$.kyc.verifiedAt`` are both ``kyc``), so each source leaf of a written
+    field is looked up at its own path (:func:`column_at`: a sibling leaf is another column). A
+    leaf the documents do not show yet is no missing column — it is written as it is — and every
+    leaf they show is kind-checked, planned or kept by its own path (FINAL r1 l2-engines B2; r2
+    R2-B1: by name, the source's first leaf met whichever leaf the sample showed first, and the
+    leaves after it were never checked)."""
+    if sampled:
+        planned_paths = {p.path for p in plans}
+        for name in dict.fromkeys(columns):
+            for source_col in (c for c in source_shape.columns if c.name == name):
+                target_col = column_at(target_shape, source_col.path, source_col.name)
+                if target_col is not None:
+                    _check_kind(source_col, target_col, source_col.path in planned_paths)
+        return
+    planned = {p.name for p in plans}
     for name in columns:
         try:
             target_col = target_shape.column(name)
         except KeyError:
-            if sampled:
-                continue
             raise PrepareFailure(
                 "target_invalid", f"the target has no column {source_shape.column(name).path}"
             ) from None
-        source_col = source_shape.column(name)
-        if not _compatible(source_col.kind, target_col.kind, name in planned):
-            raise PrepareFailure(
-                "target_invalid",
-                f"{source_col.path}: a {source_col.kind} value cannot go to a "
-                f"{target_col.kind} column",
-            )
+        _check_kind(source_shape.column(name), target_col, name in planned)
+
+
+def _check_kind(source_col: ColumnInfo, target_col: ColumnInfo, planned: bool) -> None:
+    if not _compatible(source_col.kind, target_col.kind, planned):
+        raise PrepareFailure(
+            "target_invalid",
+            f"{source_col.path}: a {source_col.kind} value cannot go to a {target_col.kind} column",
+        )
 
 
 def _target_plans(
@@ -1154,7 +1171,7 @@ def resolve_target(
             )
             return resolved, _unbounded_plans(plans, source_shape)
         sampled = conn.engine == "mongo"
-        _check_existing(target_shape, source_shape, projection, planned, sampled=sampled)
+        _check_existing(target_shape, source_shape, projection, plans, sampled=sampled)
         # every collection is keyed on its unique ``_id``, whatever its documents show
         target_key = ["_id"] if sampled else target_shape.key
         if not target_key or set(target_key) != set(source_shape.key):
@@ -1184,7 +1201,7 @@ def resolve_target(
         write_columns = [n for n in projection if not (generated and n in source_shape.key)]
         checked = write_columns
     sampled = conn.engine == "mongo"
-    _check_existing(target_shape, source_shape, checked, planned, sampled=sampled)
+    _check_existing(target_shape, source_shape, checked, plans, sampled=sampled)
     out = _target_plans(plans, target_shape, sampled=sampled)
     _check_lengths(out, source_shape)
     resolved = ResolvedTarget(
