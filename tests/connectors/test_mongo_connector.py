@@ -6,6 +6,8 @@ DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m mongo tests/connectors/test_mongo_conne
 
 from __future__ import annotations
 
+import json
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -27,7 +29,14 @@ from dps.layers.connectors.base import (  # noqa: E402
     encode_key,
     key_tuple,
 )
-from dps.layers.connectors.mongo import MongoConnector, connector_error, mongo_code  # noqa: E402
+from dps.layers.connectors.mongo import (  # noqa: E402
+    ALL_DOCUMENTS,
+    NATURAL_ORDER,
+    MongoConnector,
+    connector_error,
+    mongo_code,
+    sample_pipeline,
+)
 from dps.layers.connectors.partitions import plan_partitions  # noqa: E402
 from dps.layers.connectors.selection import SelectionError  # noqa: E402
 from tests.connectors.mongo_fixtures import connector, profile  # noqa: E402
@@ -276,6 +285,58 @@ async def test_sample_spec_is_deterministic(
     assert other != first
     kept = await c.key_at_offset(shape, sel, {}, 5)
     assert kept == (first[5],)
+
+
+def _explain(client: Any, db: str, pipeline: list[dict[str, Any]], **extra: Any) -> str:
+    """The server's query plan of an aggregation of ``profiles``, as text (stage names, no values)."""
+    command = {"aggregate": "profiles", "pipeline": pipeline, "cursor": {}, **extra}
+    return json.dumps(client[db].command("explain", command, verbosity="queryPlanner"), default=str)
+
+
+async def test_describe_and_sample_survive_a_collection_of_deleted_records(
+    c: MongoConnector, mongo_client: Any, mongo_db: str
+) -> None:
+    """Review S6b r1 B1: a collection that is mostly deleted records — a ``table`` target emptied
+    and refilled by every run — fails the server's pseudo-random cursor (``$sample`` first, N < 5 %
+    of > 100 documents) with 28799 every time: its random descent lands among the deleted records
+    and walks to the same live document. ``describe`` (the target check of every run's prepare) and
+    the samples retry, then sample without that cursor."""
+    coll = mongo_client[mongo_db]["profiles"]
+    blob = os.urandom(8704).hex()  # 17 KB: about one deleted document per leaf page
+    for start in range(0, 3000, 500):
+        coll.insert_many([{"_id": f"gone-{i}", "blob": blob} for i in range(start, start + 500)])
+    coll.insert_many([{"_id": i, "customerId": f"CUST-{10_000_000 + i}"} for i in range(12_000)])
+    coll.delete_many({"blob": {"$exists": True}})
+    plain = sample_pipeline({}, 500)
+    with pytest.raises(pymongo.errors.OperationFailure) as err:  # the server's state, reproduced
+        for _ in range(3):
+            list(coll.aggregate(plain))
+    assert err.value.code == 28799
+    assert "$sampleFromRandomCursor" in _explain(mongo_client, mongo_db, plain)
+    scan = sample_pipeline({}, 500, random_cursor=False)
+    plan = _explain(mongo_client, mongo_db, scan, hint=NATURAL_ORDER)
+    assert "$sampleFromRandomCursor" not in plan and "COLLSCAN" in plan
+
+    mongo_client[mongo_db].command("profile", 2)
+    try:
+        shape = await c.describe(PROFILES)
+        docs = await c.sample(shape, Selection(), {}, 500)
+        keys = await c.sample_keys(shape, Selection(), {}, 500)
+    finally:
+        mongo_client[mongo_db].command("profile", 0)
+    assert {col.path for col in shape.columns} == {"$._id", "$.customerId"}
+    assert shape.key == ["_id"] and shape.row_estimate == 12_000
+    assert len(docs) == len({d["_id"] for d in docs}) == 500
+    assert all(isinstance(d["_id"], int) for d in docs)  # live documents only
+    assert len(keys) == len(set(keys)) == 500 and keys == sorted(keys)
+    fallbacks = [
+        p["command"]
+        for p in _profiled(mongo_client, mongo_db, "dps:test:j_test")
+        if p["command"].get("aggregate") == "profiles"
+        and p["command"]["pipeline"][0] == ALL_DOCUMENTS
+    ]
+    assert len(fallbacks) == 3  # describe, sample, sample_keys: each through the scan
+    assert all(f.get("hint") == {"$natural": 1} and f.get("maxTimeMS") for f in fallbacks)
 
 
 async def test_reads_use_majority_and_carry_a_comment(

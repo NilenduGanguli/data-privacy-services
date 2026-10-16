@@ -462,7 +462,9 @@ services:
   # (storage_state.json, copied read-only from the repo's committed demo literal), which is why the
   # `scanner` profile runs this one-shot too. It also removes the pre-scoping top-level `dps`
   # folder of an older volume (a top-level folder that is not the caller's tenant is refused as
-  # another tenant's). Demo literals; nothing else is committed. `$$` is compose's escape for a
+  # another tenant's). M5 (Task 26) copies the same tree to the ten-minute demo's tenant
+  # `retail-banking-apac` (tools/demo_seed.py), whose connections and scans use the same refs.
+  # Demo literals; nothing else is committed. `$$` is compose's escape for a
   # literal `$` (else $d, $1 … would be interpolated from the host environment).
   demo-secrets:
     image: data-privacy-services:${DPS_IMAGE_TAG:-local}
@@ -490,6 +492,7 @@ services:
         m tgt/mongo-crm-uat crm_uat;
         mkdir -p "$$d/ui/demo-onboarding";
         cp /seed/ui/demo-onboarding/storage_state.json "$$d/ui/demo-onboarding/storage_state.json";
+        for t in retail-banking-apac; do rm -rf "/var/run/secrets/dps/$$t/dps"; mkdir -p "/var/run/secrets/dps/$$t"; cp -R "$$d" "/var/run/secrets/dps/$$t/dps"; done;
         chmod -R a+rX /var/run/secrets/dps
     volumes:
       - dps-secrets:/var/run/secrets/dps

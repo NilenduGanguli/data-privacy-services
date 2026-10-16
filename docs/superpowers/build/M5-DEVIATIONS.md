@@ -2075,3 +2075,335 @@ Finish-stage work (programme plan §2.6 F2, orchestration stream S4), built on `
     `mypy dps`).
 - **Contract:** unchanged (the plan lists no contract change for Task 24; HANDOFF §2, §3, §6 and §8
   carry the build and run facts).
+
+## Task 26B — The showcase deck (finish stage S6a, worktree `dps-wt-fdemo`, branch `fdemo`)
+
+Finish-stage work (programme plan §2.6 F3). S6a builds the deck tool, its test and the `deck` extra
+without a real rehearsal; S6b (after merging `fimg`'s Task 24 and `m4`) writes `tools/e2e_demo.py`
+with `reports/e2e-demo-report.json`, runs the rehearsal, builds and commits
+`docs/demo/dps-showcase.pptx` and does the Keynote QA.
+
+- **No `.pptx` committed here.** A deck built from fixtures would show fixture numbers as if they were
+  measured; the plan's file `docs/demo/dps-showcase.pptx` arrives with S6b's rehearsal.
+- **Input contract fixed here** (e2e_demo.py does not exist yet; it lives in the `build_deck.py`
+  docstring): report schema `dps.e2e-demo.v1` — top level `generated_at`, `dps_version`, `commit`,
+  `tenant`, `total_seconds`, `steps[]` of `{id, title, status, seconds, facts}` (status `PASS`, `FAIL`,
+  `ERROR`, `NOT RUN` or `SKIP`; every scripted step S1–S11 is listed, a skipped one as `SKIP`, the
+  ones after a failure as `NOT RUN`; S12 when `--console` ran — see the S6a review r1 fix below).
+  Facts the deck reads mirror the API's own key paths so S6b can copy them: S1 `raw_pii_sent_to_llm`; S2 `findings`,
+  `entity_types[]`, `reveal_identical`, `raw_pii_sent_to_llm`; S4 `ocr_pages`, `findings`,
+  `extractable_chars`, `originals_left`; S6 `jobs[]` of `{engine, counts.rows_written,
+  counts.partitions, timings.rows_per_s, verification.passed}` (evidence pack keys); S7 `members[].engine`,
+  `pairs[].{left,right,checked,matched,consistent}`, `sampled`, `all_members_matched`, `passed`
+  (consistency-check result keys); S8 `counts.rows_written`, `fidelity.score`,
+  `privacy.exact_row_matches`, `privacy.nndr.{ratio,target,measured}`,
+  `privacy.membership_inference.{run,auc,target}`, `utility.{run,ratio,metric}` (synthetic pack keys);
+  S9 `scan.{pages,fields,personas,submissions,non_get_allowed}` (scan evidence keys),
+  `received.{non_get,form_get,logout_hits,admin_hits,get}` (how far the demo site's own `/__received`
+  counters moved across the scan) and `sends_blocked` (changed at the `fimg` merge from a bare
+  `posts_received`; see "fimg merged into fdemo" below); S10 `packs_listed`, `audit_rows`, `pdf_ok`; S11 `posture.{passed,total,enforced}`
+  and optionally `posture.env` (`GET /admin/posture`'s own keys), `rotated_key_status`,
+  `retention_state`. Screenshots: `reports/demo-screens/<page>-light.png` for
+  `playground`, `job`, `scan-parallel`, `evidence` (S12's walk writes `<page>-<theme>.png`). Only a
+  step with status `PASS` contributes figures.
+- **Speaker notes** come from the `#### Slide N` blocks of `docs/demo/DEMO-SCRIPT.md` (the plan: "taken
+  from the matching DEMO-SCRIPT beat"); a missing block falls back to built-in notes and is listed as a
+  missing input.
+- **Fonts.** A PPTX run cannot name a fallback font, so every run names `Helvetica Neue` and the theme
+  font scheme (what anything un-styled inherits) names `Arial`; the template's per-script theme fonts
+  are removed, so no other face is named anywhere in the package. The theme colours are the Vault tokens.
+- **Keynote safety beyond the plan:** no `p:graphicFrame` at all (the D1–D14 status table on slide 12
+  is pills and text boxes, not a table part); every shape drops its `p:style` (no inherited shadow,
+  outline or white text); solid fills; the template's stale thumbnail is dropped; the same inputs give a
+  byte-identical file (fixed zip timestamps, document dates from the report) so a rebuild without new
+  inputs makes no diff.
+- **Figures.** Nothing is derived (no sums, averages or list counts), so every number on a slide is an
+  input value as formatted; titles avoid free-standing digits ("Layer 2" became "Databases: …"); labels
+  glued to letters (S8, L2, D4) are names, not figures. The plan's test checks slides 7–11; a second
+  test checks slides 5–11 with a complete report.
+- **Missing inputs** render named slate placeholders (`placeholder:<key>`), are listed on stderr, and
+  `--strict` exits 1 without writing (an existing deck stays); an unreadable or wrong-schema report exits
+  2. Only name-shaped strings from the report are ever printed (entity types, allow-listed engines,
+  states and metrics, a tenant slug, a git sha, a semver).
+- **Bench bars:** the newest file per configuration (engine, mode, write mode, workers, parallelism), at
+  most eight; the host line appears only when every file reports the same CPU count.
+- **Tests:** `tests/test_deck.py` has 12 tests (the plan says `1 passed`): the plan's fixture test plus
+  slide 9 without MIA/utility, a complete report, no inputs and `--strict`, a failed step, string
+  filtering, malformed facts, a wrong-schema report, notes from the script, the notes parser, the
+  notes fallback, the CLI.
+- **Keynote QA not done here:** three `osascript` exports of a fixture preview timed out on `open`
+  (AppleEvent -1712); Keynote 14.4 received the file (it stamped its quarantine attribute) but showed
+  no document or window to AppleScript — most likely a modal dialog that needs a person. Visual QA used
+  LibreOffice headless renders of all twelve slides (complete inputs and no inputs). The Keynote PDF
+  review stays with S6b and the owner.
+- Contract §1 (extras sentence) and HANDOFF §1 (extras of the `dps` package) name the `deck` extra.
+
+## Task 26 — Presenter script draft (finish stage S6a, worktree `dps-wt-fdemo`)
+
+Finish-stage work. `docs/demo/DEMO-SCRIPT.md` is drafted from the plan's outline and spec §9; S6b
+finalises it after the rehearsal together with `tools/demo_seed.py`, `tools/e2e_demo.py` and
+`tests/console/test_console_pages.py`.
+
+- Labels are the console's as built (main plus the `m4` scanner pages): the Playground heading is "Try
+  the engine", the Data sources page heading is "Jobs" (the sidebar reads "Data sources & jobs"),
+  documents use "Load demo KYC scan" and "Download redacted PDF", the parallel view toggles "Filled with:
+  Synthetic persona / Obfuscated tokens" and shows "No submissions · POST interception on". For S6b's
+  console test: Task 26 expects the headings "Playground" and "Data sources & jobs", which the pages do
+  not render as their `h1`.
+- Each beat carries `#### Slide N` blocks (the deck's notes); the timeline table and the "Slides and
+  beats" line map slides to beats (Task 26B's one line). Slides 1–4 are an optional opening before the
+  clock; Policies has no slide.
+- The script quotes no figure: beats point at the number on screen or on the slide built from the
+  rehearsal. Commands and flags (`--skip-oracle`, `--reset-jobs`, `--console`) are the plan's; S6b
+  confirms them against the tools it writes.
+
+## S6a review r1 fix — B1: slide 1 claims an end-to-end run only for a complete rehearsal; B2: the posture count in its context (Tasks 26B, 26)
+
+- **B1.** `_slide_title` printed "the scripted demo ran end to end in m:ss" whenever `generated_at`
+  and `total_seconds` existed, so a rehearsal that failed at S5 (S6–S11 `NOT RUN`) still claimed an
+  end-to-end run, timed to its failure. Now the sentence needs a complete rehearsal
+  (`Report.incomplete()` is `None`): every scripted step S1–S11 listed and every listed step `PASS` or
+  `SKIP`; skipped steps are named ("… in 7:12 (S3 skipped)."). Otherwise slide 1 shows
+  `placeholder:rehearsal` — "a complete rehearsal (first failure: S5)", else an entry without a step
+  id, else "S11 not run", else "no step S4 in the report" — listed as missing, so `--strict` refuses
+  the build. Only step ids shaped `S<n>` and known statuses are printed (anything else is
+  "unknown"); a status that is not a string no longer crashes `_step` (it was a set lookup).
+  Contract addition for S6b's `e2e_demo.py`: list every scripted step, a skipped one as `SKIP`
+  (never left out).
+- **B2.** `GET /admin/posture` evaluates its eleven checks as if in production in every environment
+  and enforces them only in staging and prod (`enforced`), so the local demo stack fails the
+  production-only checks by design (as the M5 verifications measured: bootstrap key, stub LLM,
+  literal KEK, http egress, verify-warn allowed); the demo seed needs the bootstrap key, so the
+  stack can never show every check passing.
+  - Deck: the S11 contract adds `posture.enforced` (required: without it, or not a boolean, the
+    count is a placeholder listed as missing) and `posture.env` (optional; printed only when it
+    agrees with `enforced`: `local`/`dev` when not enforced, `staging`/`prod` when enforced). The
+    value is emerald when every check passed, **amber** when a check failed where it is not enforced
+    and rose only for an enforced failure; the caption says where it is enforced ("local stack,
+    evaluated as if production; staging and production refuse to boot when a check enforced at boot
+    fails" / "enforced on this production stack: it refuses to boot when …"). The posture card grew
+    to 1.4 in and the LLM card shrank to 1.15 in (its caption is one line), so the column still ends
+    above the footer.
+  - Wording: "refuse to boot when a posture check fails" (slide 11's lede, the built-in notes) and the
+    reviewer's suggested "refuse to boot unless all pass" both overclaim — `keys_rotated` and
+    `migrations_verified` are not enforced at boot (`dps/posture.py` `CHECKS`) — so the deck and the
+    script use the console's own rule (`PostureList`): staging and production refuse to boot when a
+    check marked "enforced at boot" fails.
+  - `docs/demo/DEMO-SCRIPT.md`: the timeline's proof and the Reports and Admin beat's say-line, proof
+    and slide 11 notes no longer promise every check passing; they say the local stack only reports
+    the checks and fails the production-only ones by design, quote no count, and state the boot rule
+    as above. The Overview beat names the **Posture score** card (the Overview has no checklist; the
+    checks are on the Admin page).
+- **Non-blocking review items taken:** N1 (slide 8's summary reads "Found in every system of the
+  group", true for any member count — `all_members_matched` is the intersection of every member; the
+  script says a `--skip-oracle` rehearsal cannot rebuild the deck under `--strict`, so keep the last
+  full rehearsal's deck), N5 (bench caption "on one host with N CPUs"; slide 7 notes "one machine":
+  the bench JSON records CPUs and the machine type only), N6 (D14 as spec §12 words it: payload size,
+  rows per job, concurrent jobs, docs per day), N7 (slide 1's m:ss is now tested against
+  `total_seconds`), N9 (MIA caption "a coin toss scores about half": the proxy's AUC is not
+  symmetrised), N10 (`python-pptx>=1.0,<2`: the tool uses package internals; contract §1 too), N13
+  (slide 1 notes name the bench runs as the other measured source).
+- **Not taken (owner / S6b):** N2 (strict by default for the committed deck path — S6b decides when it
+  commits the deck), N3 (`reports/` ignore rule — S6b, with the rehearsal outputs), N4 (Keynote PDF
+  review), N8 (chip-row height limit; the KYC sample's types fit), N11 (no action), N12 (the release
+  venv installs every extra).
+- Tests: `tests/test_deck.py` 12 → 30 — slide 1 states the measured time (431.6 s → 7:12) and
+  `--strict` builds; no claim and a placeholder for `FAIL` then `NOT RUN`, `ERROR`, an unknown
+  status, `null`, a list, and a lone `NOT RUN` (each also refused by `--strict`); skipped steps named;
+  a scripted step missing or an entry without a step id; six posture contexts (value, colour,
+  caption); `enforced` absent, a string or a number. `FULL_FACTS` gains S3 and S5 (a complete
+  S1–S11 report) and the local stack's posture shape (`enforced: false`, `env: local`). On the code
+  before this fix 17 of the 18 new cases fail (the list status with `TypeError: unhashable type`);
+  the 12 earlier tests and the positive control (slide 1's measured time) pass on both
+  (`~/.cache/dps-build/reports/s6a-fix-r1/`).
+
+## fimg merged into fdemo (2026-10-15) — Task 24 and the scanner under the demo tools (Tasks 26, 26B)
+
+Finish-stage work on lane `fdemo`: `git merge --no-ff fimg` (`fimg` `3f8af02`: Task 24 with S4b, and
+M4 as merged on `main` `5959a75` with the integrate fixes up to `8ea220a`), so S6b's demo tools
+(`tools/demo_seed.py`, `tools/e2e_demo.py`) can build on `tools/demo_client.py`, the `full` stack
+with the browser-worker and the demo site, the smoke's scanner block and the console's scanner pages.
+
+- **Conflicts, both sides kept.** HANDOFF §1, the `dps` package row: one row naming `fimg`'s
+  `scanner` extra and this lane's `deck` extra. This log: `fimg`'s Task 24 section first, then this
+  lane's Task 26B, Task 26 and S6a fix sections. Auto-merged and checked: `pyproject.toml` (both
+  extras) and contract §1's extras sentence (both).
+- **The deck's S9 contract follows the D4 proof that came in.** The S6a contract read
+  `posts_received`, a key the demo site does not have: `/__received` counts `non_get`, `form_get`,
+  `logout_hits`, `admin_hits` and, since S4b, `get` (pages and files served). A bare zero also proves
+  nothing when the counters read are not those of the site the browser-worker scanned, which is why
+  S4b gave the smoke's D4 check two positive controls. S9 now carries the smoke's own figures:
+  `scan.{pages,fields,personas,submissions,non_get_allowed}` (the pack's scan block),
+  `received.{non_get,form_get,logout_hits,admin_hits,get}` (each counter after the scan less before
+  it) and `sends_blocked` (the pack's `scan.blocked_requests` less GET and HEAD, the smoke's
+  `_sends_blocked`). Slide 10's card reads "Non-GET requests received by the site" and shows the
+  count only when both controls hold (`received.get >= max(1, scan.pages)`, `sends_blocked >= 1`),
+  with the served GETs and the blocked sends in its caption; otherwise it is the placeholder
+  `S9 D4 positive controls`, listed as missing, so `--strict` refuses the deck. The count is emerald
+  only when no counter moved and `scan.non_get_allowed` is 0, rose otherwise. **For S6b:**
+  `e2e_demo.py` passes S9 only on the smoke's rule (the same four counters, `non_get_allowed` 0 and
+  both controls) and records these facts; `/__received` is read from the host at
+  `DPS_TEST_DEMO_SITE`, the scan reaches the site in-network at `http://demo-site:8410`.
+- **The presenter script** (`docs/demo/DEMO-SCRIPT.md`): every console label it names was checked
+  again in the merged console source (Playground, Policies, Data sources, Reports, Admin, the top
+  bar and the scanner pages: "UI scanner", "Start URL", "Synthesize persona fill", "Start crawl",
+  "Pages with forms", "Parallel view", "Filled with", "Synthetic persona", "Obfuscated tokens",
+  "Export inventory", "No submissions · POST interception on"); all are present. The status line says
+  so; the 7:00 timeline proof, the beat's **Proof** and slide 10's notes now speak of non-GET requests
+  and forms sent by GET, received 0 while the site served the scan, as the slide does. The scanner
+  beat's first step follows the New scan page's defaults (`frontend/src/lib/scans.ts`
+  `DEFAULT_CONFIG`): the demo URL and the stored session `dps/ui/demo-onboarding` are already filled
+  in, and Personas (default 20) is set to 3, the plan's S9 count.
+- **S6a review N3 closed by Task 24:** `.gitignore` ignores `/reports/` (the e2e reports, demo
+  screenshots and flow report) and `var/` (demo keys and the group file).
+- **Tests:** `tests/test_deck.py` 30 → 42: the complete report's slide 10 shows the emerald 0 with
+  its controls and builds under `--strict`; seven cases without proof are placeholders that
+  `--strict` refuses (no GET served, fewer GETs than pages, no send blocked, the old
+  `posts_received` shape, a counter that is not a number, `non_get_allowed` not a number,
+  `sends_blocked` absent); four moved counts are rose (`non_get` 2, `form_get` 1, `admin_hits` 1,
+  `non_get_allowed` 1). On the code before the change 20 of the 42 failed (the new cases and every
+  test that builds from the complete fixture report).
+
+## Task 26 — The ten-minute demo: seed, automated run, console check, deck (finish stage S6b, lane `fdemo`, 2026-10-15)
+
+Finish-stage work (programme plan §2.6 F3) on lane `fdemo` after the `fimg` merge (Task 24, the
+scanner in the `full` stack). Rehearsal on this lane's `--profile full` stack: `tools/demo_seed.py`,
+then `tools/e2e_demo.py --console` at `37ec781`: S1–S12 all PASS, the whole run 3:25 (the API path
+S1–S11 3:12); `docs/demo/dps-showcase.pptx` built `--strict` from that report, its screenshots and
+the bench files (no placeholder).
+
+- **The demo tenant needs its own secret refs.** Refs are tenant-scoped (SEC-2, SEC-5), so the
+  plan's connections and the scan's stored session cannot resolve for `retail-banking-apac` from
+  the `default/` folder. The compose `demo-secrets` one-shot now copies the whole demo tree
+  (`default/dps/…`, incl. `dps/ui/demo-onboarding`) to `retail-banking-apac/dps/…`; a test runs the
+  one-shot's script and resolves every demo connection's ref and the session for the demo tenant.
+  A running stack takes it with `docker compose --profile full up -d demo-secrets`.
+- **Connections as built.** Step 5's single `crm-oracle` (read as `dps_ro`, write as `crm_masked`)
+  and `profiles-mongo` (source + target) cannot exist: one connection has one credential, `DPS_RO`
+  cannot write and `CRM_MASKED` cannot read `CRM`, and a MongoDB connection names one database. The
+  seed makes seven, one per role, with the compose demo refs: `bank-pg` / `bank-uat`, `crm-oracle` /
+  `crm-masked`, `profiles-mongo` / `profiles-uat`, `exports-minio`. Sources are tagged `production`.
+- **`--rows` defaults to 20 000** (plan: 2 000): the compose `seed-sources` one-shot loads 20 000
+  customers with seed 7 and `seed_sources.py` refuses other parameters on a seeded schema (exit 3).
+  `--reseed` (beyond the plan) reloads (`--reset`) a source seeded with other parameters — the test
+  suite leaves 200 rows in Oracle and MongoDB; without it the seed stops with that remedy.
+- **Keys.** `demo-console` has every scope (`*`) for the demo tenant (the plan's "(tenant, `*`)");
+  keys last 90 days. A key in the file that no longer authenticates (401) is replaced and the other
+  active keys of its name are disabled (nobody holds them any more). The job group's file holds
+  `group_id`, `name`, `tenant`, `key_material` and `synthesis_seed`; a group whose file is lost
+  cannot be used again (DPS keeps no key), so a new `crm-uat-refresh-<n>` is made.
+- **Policies.** The recognizer's "deny `EMP-000000`" is the console's allow list (the matched texts
+  it never reports, as the Policies fixture and mockup 05's live test treat the seeded id); the
+  declared field keeps the mockup's path `LOANS.APPLICANTS.EMPLOYER_NAME`. v2 is published once
+  (`CHG-48213`); a rerun reuses it.
+- **`--reset-jobs`.** Retention's floor is one day, so it removes only demo jobs older than a day;
+  the seed also cancels the tenant's unfinished jobs. A retention job belongs to the system tenant,
+  which no tenant's `/jobs/{id}` reads (404, and `_system` is refused as reserved): the seed and S11
+  wait for the job's `retention.run` audit row instead (`outcome` `ok` / `dry_run`).
+- **e2e_demo as built.**
+  - The demo runs as the `demo-console` key with `X-DPS-Tenant: retail-banking-apac`; only S11's
+    retention run uses `--admin-key` (it sweeps every tenant, so it needs a key for every tenant).
+  - S2 uses the console's own KYC sample (`frontend/src/lib/samples.json`, as the Playground) and
+    checks the synthetic record against the values the detector found (non-sensitive fields such as
+    `risk_score` are kept by design).
+  - S4 uses the console's committed synthetic scan `demo/documents/kyc-scanned.pdf` ("Load demo KYC
+    scan") instead of rendering one; its checks are the plan's (OCR pages, `%PDF`, 0 extractable
+    characters, 0 originals in the OCR re-read).
+  - S5 discovers under `@retail-kyc`. **Product gap found:** a run without `policy` resolves its
+    snapshot's policy *name* as a preset, so a snapshot discovered under a tenant policy fails
+    every run with `policy_invalid`; the demo's runs name `@retail-kyc` again (the API resolves it
+    to the same stored version). Left for the owner (not fixed here: L2 + Task 15, outside the demo).
+  - S6 runs with `partition_rows` 5 000 (four partitions per job, two at a time) into
+    `bank_uat.customers_demo`, `crm_uat.profiles_demo` and `CRM_MASKED.CUSTOMERS_DEMO`; partitions
+    report `done`. Besides the plan's checks every pack must carry the group's key id.
+  - S8 writes `bank_uat.customers_synthetic` (plan: schema `synth_demo`, which the demo source does
+    not have; `dps_writer` owns `bank_uat`), with the inline policy `synthetic-realistic` plus
+    `synthesize.utility_label` `$.segment`, so the pack reports utility and the MIA proxy (slide 9);
+    `privacy.nndr.measured` is a count (≥ 1), not a flag.
+  - S9 passes only on the smoke's D4 rule with both positive controls (as the `fimg` merge asked):
+    no counter moved, `non_get_allowed` 0, `get` moved ≥ pages visited, ≥ 1 send blocked; facts
+    `scan.*`, `received.*`, `sends_blocked`. It also checks the persona CSV export holds none of
+    the demo site's values.
+  - S10 also scans the report, audit and PDF bodies for the S2 record, the SSN and the demo site's
+    values (0 required).
+  - S12's pages are recognised by their own heading as built (`main h1`; the evidence page by its
+    eyebrow): "Protection posture", "Try the engine", "Policies", "Jobs", the job title (with `→`),
+    "Scan …", "Evidence and audit", "evidence pack", "Admin" — the sidebar names every section, so
+    matching any text would pass on any page. The key goes to `sessionStorage['dps.apiKey']`
+    (the console's default, O5), the tenant and theme to `localStorage`. The Playground screenshot
+    runs **Obfuscate** (slide 5 speaks of tokens and the key card) and masks the card's data-key
+    text with an ink box: no screenshot or deck carries key material.
+  - The JSON report lists every scripted step (a skipped one `SKIP`, the steps after a failure
+    `NOT RUN`) and S12 only with `--console`; the Markdown's last line is the whole run's wall time,
+    and its verdict line gives the API path (S1–S11) separately.
+- **`tests/console/test_console_pages.py`** opens the demo tenant's newest succeeded run, scan (its
+  first page with both filled screens) and evidence pack, read through the API, so it does not
+  depend on a report file; it also fails on any request to another origin.
+- **Deck.** Keynote 14.4 could not be driven headless here: `open` through AppleScript returned no
+  document or timed out (AppleEvent -1712) and `open -a Keynote` opened nothing, with or without a
+  restart of Keynote — as in S6a, most likely a dialog that needs a person (osascript has no
+  assistive access to look). Visual QA instead: LibreOffice headless → PDF → page images, all
+  twelve read (no overflow, every bar and diagram drawn, fonts as named). `tests/test_deck.py`
+  gains a test of the committed deck itself (twelve slides, notes equal the script's Slide blocks,
+  no placeholder, no chart part or graphic frame, only Helvetica Neue and Arial, no CRITICAL entity,
+  under 20 MB) — S6a's N2: a deck that is not a complete `--strict` build cannot be committed. The
+  Keynote PDF review stays with the owner.
+- **Slide 1** shows "v0.2.0": the version the stack reports (`api-core`); rebuild after Task 28
+  sets 1.0.0 (rehearse, then `build_deck.py --strict`).
+- Tests: `tests/test_demo_seed.py` 10 (idempotent second run, key replacement and retirement, a
+  lost group file, skip flags, a failed and a reseeded source, reset, an unreachable stack, the
+  demo tenant's refs resolving), `tests/test_e2e_demo.py` 22 (the D4 rule and its controls, the
+  driver, the report contract read by `tools/build_deck.py`, the Markdown's last line, helpers, the
+  page list, a missing seed); on mutated code (the D4 controls dropped, the driver not stopping)
+  5 fail. `tests/console/test_console_pages.py` 9 on the stack; `tests/test_deck.py` 42 → 43.
+
+### S6b review round 1 fixes (lane `fdemo`, 2026-10-16)
+
+- **B1 — MongoDB `$sample` (product, `dps/layers/connectors/mongo.py`).** The server's pseudo-random
+  cursor (`$sample` first, N < 5 % of a collection of > 100 documents) fails with 28799 on a
+  collection that is mostly deleted records: a `table` target emptied by `truncate_insert`
+  (`delete_many`) and refilled by every run. Its random descent lands among the deleted records and
+  walks to the same live document, so a `$sample` of 500 fails every time while 200 and 2 000 (≥ 5 %,
+  no random cursor) pass. `describe` (each run's target check at prepare, the consistency check) and
+  the samples now try the random cursor twice, then sample through `sample_pipeline(…,
+  random_cursor=False)`: a leading `$match {_id: {$exists: true}}` (an empty `$match` is optimised
+  away and the random cursor comes back) with the hint `{$natural: 1}` (a collection scan, not an
+  `_id`-index fetch of every document), under the same `maxTimeMS` and comment. Logged value-free
+  (`mongo_sample_retry` with the driver code, `mongo_sample_scan`). Measured on this lane's MongoDB
+  7.0.40 with `explain`: the plain pipeline plans `$sampleFromRandomCursor`, the fallback a
+  `COLLSCAN` and `$sample`. Tests: `tests/connectors/test_mongo_sample.py` (offline, a fake
+  collection raising 28799 from the aggregate or a getMore: one retry, the fallback, no retry for
+  another code, a failing fallback stays a value-free `source_error`, `describe` through the
+  fallback) and the `mongo` integration test
+  `test_describe_and_sample_survive_a_collection_of_deleted_records` (3 000 × 17 KB documents
+  inserted and deleted next to 12 000 live ones reproduces 28799; `describe`, `sample(500)` and
+  `sample_keys(500)` succeed and the profiler shows each one's scan), which fails on the old code
+  with `source_error: mongo:28799`.
+- **B2 — S2's synthetic probes.** `detected_values(record, findings)` probes every string leaf of
+  every top-level field a finding points into (the nested `card.pan` and `card.expiry`), never a
+  `str()` of a dict; the haystack is the synthetic record's leaves and its JSON without ASCII
+  escapes. Tests: the probe set, a passing synthetic record (0 of 9), and an echoed card number,
+  expiry or e-mail fails S2.
+- **B3 — S7 joins this run's jobs.** S5 records each accepted snapshot's customer-id path
+  (`customer_id_path`: the `CUSTOMER_ID` column the server would join — not `keep`, not free text;
+  key, anchor, shortest path). S7 posts explicit `pairs`, one per S6 job (`consistency_pairs`: the
+  last submitted, Oracle on a full run, first as the anchor) and fails unless the result's member
+  job ids are exactly the S6 job ids; the plan's "customer id path per job". The members' paths are
+  in the report. A `--skip-oracle` rehearsal after a full one, and an older run of the group, no
+  longer change what S7 checks.
+- **N1 — the driver.** Any other exception of a step body (Playwright's `TimeoutError` in S12) is an
+  `ERROR` with its class name only, so the run still writes its reports instead of leaving the
+  previous ones for `build_deck.py --strict`.
+- **Rehearsals after the fixes (this lane's `full` stack, images rebuilt from `b0bea88`, no
+  `down -v`).** The target `crm_uat.profiles_demo` had lost the reviewer's failing state when the
+  stack was stopped (MongoDB's shutdown checkpoint rebuilt the tree: `$sample` 500 passed 5/5).
+  One server-side rewrite of the same 20 000 documents (`delete_many`, then `$merge` back — what a
+  `truncate_insert` run does) put it back: `$sample` 500 failed 5/5 with 28799. Then, in a row:
+  `e2e_demo.py` PASS 12/12 (S12 not requested) in 2:49; `--skip-oracle --skip-scanner` PASS in 1:14
+  (S7 joined the run's two jobs, 1/1 pair); `--console` PASS 12/12 in 3:17. Each run left the target
+  failing the plain `$sample` 500 again (5/5, 28799), and the app and worker logged 3, 4 and 3
+  `mongo_sample_scan` (the prepare `describe`, the post-write sample, the consistency check's
+  `describe`, in the second run also its anchor sample) and no failed sample call; every pack's
+  `verification.post_sample` is a result, not an error. The deck is rebuilt `--strict` from the
+  `--console` run (footer: commit `b0bea88`, rehearsal 2026-10-15 21:29 UTC); a second build is
+  byte-identical.
