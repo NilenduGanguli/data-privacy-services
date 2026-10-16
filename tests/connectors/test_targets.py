@@ -336,7 +336,7 @@ def test_files_synthesize_group_and_tabular_rules(
     )
     km = generate_key_material("key")
     seed = generate_synthesis_seed()
-    group = (km.kid, seed_fingerprint(seed.seed))
+    group = (km.kid, seed_fingerprint(seed.seed), km.kcv)  # F-13: the key check value too
     with_key = {"key_material": km.model_dump(mode="json")}
     _check(
         spec(**UAT_TABLE, group_id="grp_1", consistency=with_key), settings=settings, group=group
@@ -347,6 +347,18 @@ def test_files_synthesize_group_and_tabular_rules(
         spec(**UAT_TABLE, group_id="grp_1", consistency=other_key),
         spec(**UAT_TABLE, group_id="grp_1", consistency={**with_key, "field_scoped": True}),
         spec(**UAT_TABLE, group_id="grp_1", mode="synthesize"),
+        # F-13: the group's kid with another DEK
+        spec(
+            **UAT_TABLE,
+            group_id="grp_1",
+            consistency={
+                "key_material": {
+                    **with_key["key_material"],
+                    "dek": other_key["key_material"]["dek"],
+                    "kcv": None,
+                }
+            },
+        ),
     ):
         assert _code(run, settings, group=group) == ("group_key_mismatch", 409)
     synth_seed = {"synthesis_seed": seed.model_dump(mode="json")}

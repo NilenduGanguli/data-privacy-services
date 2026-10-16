@@ -13,6 +13,15 @@ installed before the first page exists.
 ``--force-webrtc-ip-handling-policy=disable_non_proxied_udp`` keep every connection on TCP through
 the scope proxy (no UDP around it). A scan context is closed with ``close_scan_context``, never
 with ``context.close()`` alone after closing pages with ``page.close()``.
+
+S5 (security review): the browser-worker's Chromium is launched with :func:`launch_args` —
+``LAUNCH_ARGS`` plus ``--host-resolver-rules`` (:data:`RESOLVER_RULES`) that resolve nothing but
+the scope proxy's own address (``MAP * ~NOTFOUND, EXCLUDE 127.0.0.1``; ``MAP *`` covers IP
+literals too, so a connection that bypassed the proxy would reach no name and no address). Every
+lookup of a scan is the scope proxy's, which checks each address it dials (``guard._dial_hop``).
+The plan named the scan's registered hosts for the exclusions; with every connection on the proxy
+the browser needs to resolve none of them, and ``MAP *`` without the proxy's address would fail
+every connection (``ERR_PROXY_CONNECTION_FAILED``, measured).
 """
 
 from __future__ import annotations
@@ -27,7 +36,8 @@ from playwright.async_api import Error as PlaywrightError
 from dps import __version__
 from dps.config import Settings
 from dps.layers.scanner.guard import ScanGuard
-from dps.layers.scanner.proxy import ProxySettings
+from dps.layers.scanner.proxy import PROXY_HOST, ProxySettings
+from dps.netguard import chromium_resolver_rules
 
 LAUNCH_ARGS = (
     "--disable-dev-shm-usage",
@@ -41,6 +51,14 @@ LAUNCH_ARGS = (
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--dns-prefetch-disable",
 )
+#: S5: the scan browser resolves no name itself — only the scope proxy's address
+RESOLVER_RULES = chromium_resolver_rules([PROXY_HOST])
+
+
+def launch_args() -> list[str]:
+    """The browser-worker's Chromium flags: ``LAUNCH_ARGS`` and the resolver rules (S5)."""
+    return [*LAUNCH_ARGS, f"--host-resolver-rules={RESOLVER_RULES}"]
+
 
 _playwright: Playwright | None = None
 _browser: Browser | None = None
@@ -66,7 +84,7 @@ async def get_browser(settings: Settings) -> Browser:
             if _playwright is None:
                 _playwright = await async_playwright().start()
             _browser = await _playwright.chromium.launch(
-                headless=settings.browser_headless, args=list(LAUNCH_ARGS)
+                headless=settings.browser_headless, args=launch_args()
             )
         return _browser
 

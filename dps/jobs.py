@@ -21,6 +21,7 @@ import os
 import random
 import socket
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -359,6 +360,7 @@ async def create_job(
     created_by: str | None = None,
     idempotency_key: str | None = None,
     idempotency_fp: str | None = None,
+    idempotency_alternates: Sequence[str] = (),
     priority: int = 100,
     job_id: str | None = None,
 ) -> Job:
@@ -371,10 +373,16 @@ async def create_job(
     tenant (a transaction-scoped advisory lock taken before the count), so concurrent submissions
     cannot all pass the cap on the same count; a replay that waited behind the lock finds the
     original there. ``job_id`` lets a caller that seals with the id in the AAD mint it first.
+    ``idempotency_alternates``: the request's fingerprints under a previous KEK (F-21).
     Raises :class:`QueueFull`, :class:`IdempotencyKeyReused`.
     """
     if idempotency_key is not None:
-        existing = await find_by_idempotency(tenant_id, idempotency_key, fingerprint=idempotency_fp)
+        existing = await find_by_idempotency(
+            tenant_id,
+            idempotency_key,
+            fingerprint=idempotency_fp,
+            alternates=idempotency_alternates,
+        )
         if existing is not None:
             return existing
     settings = db.active_settings()
@@ -394,7 +402,11 @@ async def create_job(
                     idempotency_key,
                 )
                 if winner is not None:
-                    if not _same_request(winner["idempotency_fp"], idempotency_fp):
+                    stored = winner["idempotency_fp"]
+                    if not _same_request(stored, idempotency_fp) and not any(
+                        stored is not None and _same_request(stored, alt)
+                        for alt in idempotency_alternates
+                    ):
                         raise IdempotencyKeyReused()
                     job_id = winner["id"]
                     raise _Replayed()
@@ -467,9 +479,16 @@ async def get_job(tenant_id: str, job_id: str) -> Job | None:
 
 
 async def find_by_idempotency(
-    tenant_id: str, key: str, *, fingerprint: str | None = None
+    tenant_id: str,
+    key: str,
+    *,
+    fingerprint: str | None = None,
+    alternates: Sequence[str] = (),
 ) -> Job | None:
     """The tenant's job created with idempotency key ``key``, or None.
+
+    ``alternates`` are the same request's fingerprints under a previous KEK (F-21): a job admitted
+    before a KEK rotation is still recognised as a replay.
 
     Raises:
         IdempotencyKeyReused: ``fingerprint`` is given and the job was admitted with another
@@ -484,7 +503,10 @@ async def find_by_idempotency(
     if row is None:
         return None
     data = dict(row)
-    if not _same_request(data.pop("idempotency_fp"), fingerprint):
+    stored = data.pop("idempotency_fp")
+    if not _same_request(stored, fingerprint) and not any(
+        stored is not None and _same_request(stored, alt) for alt in alternates
+    ):
         raise IdempotencyKeyReused()
     return _row_job(data)
 
@@ -1346,6 +1368,33 @@ async def reap(*, backoff_base: float, backoff_cap: float) -> ReapResult:
                 await _lock_job(conn, job_id)
                 await _maybe_finalize(conn, job_id)
     return result
+
+
+async def discard_unannounced(tenant_id: str, job_id: str) -> bool:
+    """Remove a job whose creation answer never reached the caller (S3 review F-14).
+
+    A run job's DPS-generated key is returned once; if the answer fails after the row was
+    committed (a strict audit sink refusing the creation event), nobody holds the key. A job that
+    no worker has claimed yet is deleted — its sealed key and its ``Idempotency-Key`` go with it, so
+    a retry starts a fresh job and gets a key. A job a worker already claimed is canceled instead
+    (the cancel-finalize purges the key). Returns True when the row was deleted.
+    """
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn:
+        tag = await conn.execute(
+            f"DELETE FROM {s}.dps_job WHERE tenant_id = $1 AND id = $2 AND state = 'queued' "
+            "AND locked_by IS NULL AND attempts = 0 AND NOT EXISTS (SELECT 1 FROM "
+            f"{s}.dps_job_partition p WHERE p.job_id = $2)",
+            tenant_id,
+            job_id,
+        )
+    if db.rowcount(tag) > 0:
+        return True
+    try:
+        await cancel(tenant_id, job_id)
+    except JobStateError:
+        pass  # already terminal or finalizing: its key is purged at the terminal state
+    return False
 
 
 async def cancel(tenant_id: str, job_id: str) -> Job | None:

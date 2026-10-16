@@ -22,8 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -41,7 +40,11 @@ from dps.auth import (
     coded_http_exception_handler,
 )
 from dps.config import Settings, get_settings
+from dps.engine.call_scope import call_scope
+from dps.engine.detect.pattern_process import configure_pattern_processes
+from dps.engine.detect.regex_guard import DEFAULT_CPU_SECONDS
 from dps.engine.service import PrivacyEngine
+from dps.layers.api import validation
 from dps.layers.api.common import TRACE_HEADER, CodedHTTPException
 from dps.layers.api.idempotency import IDEMPOTENCY_HEADER, REPLAY_HEADER, IdempotencyCache
 from dps.layers.api.ndjson import NDJSON, STREAM_ROUTES
@@ -80,13 +83,19 @@ BROWSER_PROBE_SECONDS = 15
 #: ``max_document_mb``; the documents router re-checks the file itself while reading it.
 DOCUMENT_MULTIPART_OVERHEAD = 1 << 20
 DOCUMENTS_PREFIX = "/api/v1/documents/"
+#: Every API route lives under this prefix (S11: never cached).
+API_PREFIX = "/api/"
 #: Seconds between reconnect attempts while the metadata database is down at boot.
 DB_RETRY_SECONDS = 10.0
 ASSET_CACHE = "public, max-age=31536000, immutable"
 
 
 class _SecurityHeaders:
-    """Adds nosniff / DENY / no-referrer (and HSTS outside local) to every response."""
+    """Adds nosniff / DENY / no-referrer (and HSTS outside local) to every response, and
+    ``Cache-Control: no-store`` + ``Pragma: no-cache`` to every ``/api/`` response that does not
+    set its own caching (security review S11): several answers carry key material (a DEK, a
+    synthesis seed, a one-time API key), revealed originals or tenant data, and the API key
+    travels in ``X-API-KEY``, which shared caches do not treat as authorization."""
 
     def __init__(self, app: ASGIApp, *, hsts: bool) -> None:
         self.app, self.hsts = app, hsts
@@ -95,6 +104,7 @@ class _SecurityHeaders:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        api = str(scope.get("path", "")).startswith(API_PREFIX)
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -104,6 +114,10 @@ class _SecurityHeaders:
                 headers.setdefault("Referrer-Policy", "no-referrer")
                 if self.hsts:
                     headers.setdefault("Strict-Transport-Security", HSTS)
+                if api:
+                    headers.setdefault("Cache-Control", "no-store")
+                    if "no-store" in headers["Cache-Control"]:
+                        headers.setdefault("Pragma", "no-cache")
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
@@ -187,6 +201,24 @@ class _ReplayHeader:
         await self.app(scope, receive, send_with_flag)
 
 
+class _CallScope:
+    """Binds a fresh engine call scope for every HTTP request (S3 review round 1 B1/B3,
+    :mod:`dps.engine.call_scope`): the custom entity tiers its policies declare and the CPU budget
+    of its policy patterns belong to that request alone — every route, present or added later.
+    The budget is capped at ``DPS_PATTERN_CPU_SECONDS`` (review round 2, R2-B2)."""
+
+    def __init__(self, app: ASGIApp, *, pattern_cpu_seconds: float = DEFAULT_CPU_SECONDS) -> None:
+        self.app = app
+        self.pattern_cpu_seconds = pattern_cpu_seconds
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        with call_scope(pattern_ceiling=self.pattern_cpu_seconds):
+            await self.app(scope, receive, send)
+
+
 class _ValueFreeErrors:
     """Turns any exception that escapes the app into a value-free 500.
 
@@ -218,16 +250,6 @@ class _ValueFreeErrors:
             if not started:
                 response = JSONResponse({"detail": "internal error"}, status_code=500)
                 await response(scope, receive, send)
-
-
-async def _validation_error(_: Request, exc: Exception) -> JSONResponse:
-    """422 listing each error's type, location and rule — never the input or its context."""
-    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
-    detail = [
-        {"type": e.get("type", ""), "loc": list(e.get("loc", ())), "msg": e.get("msg", "")}
-        for e in errors
-    ]
-    return JSONResponse({"detail": detail}, status_code=422)
 
 
 async def _refresh_ocr(ocr: OcrClient, settings: Settings) -> None:
@@ -410,7 +432,9 @@ class _JobPlatform:
         problems = await db.assert_rls_posture(settings)
         for problem in problems:
             logger.warning("rls_posture_problem", reason=problem)
-        if problems and settings.is_production:
+        # a policy that opens tenant rows to the runtime role is refused everywhere (F-06)
+        cross_tenant = [p for p in problems if db.CROSS_TENANT_PROBLEM in p]
+        if cross_tenant or (problems and settings.is_production):
             raise PostureError("rls posture refused: " + "; ".join(problems))
         kek = self.app.state.kek is not None
         ready = migrations == "verified"
@@ -522,6 +546,7 @@ def create_app(
     settings = settings or get_settings()
     configure_logging(settings.log_level, json_output=settings.env != "local")
     assert_production_posture(settings)
+    configure_pattern_processes(settings.pattern_processes)  # S3 review round 2 (R2-B1)
     static_store = StaticKeyStore.from_settings(settings)
     db_store = _db_key_store(settings)
     key_store: KeyStore = static_store
@@ -649,11 +674,12 @@ def create_app(
     # CodedHTTPException, dps.auth's CodedAuthHTTPException — answers {"detail", "code"}; a plain
     # one keeps M0's {"detail"}. M2's DpsHttpError adds **extra (install_error_handlers).
     app.add_exception_handler(StarletteHTTPException, coded_http_exception_handler)
-    app.add_exception_handler(RequestValidationError, _validation_error)
+    validation.install(app)  # S1: 422s list loc/msg/type and never quote the input
     app.state.db_state = "unconfigured"
     app.state.kek = None
 
     # add_middleware prepends: the last one added is the outermost.
+    app.add_middleware(_CallScope, pattern_cpu_seconds=settings.pattern_cpu_seconds)
     app.add_middleware(_ReplayHeader)
     app.add_middleware(_ValueFreeErrors)
     app.add_middleware(

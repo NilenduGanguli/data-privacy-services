@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import re
 import shutil
@@ -55,6 +56,38 @@ class _FileSecretSource(PydanticBaseSettingsSource):
         return result
 
 
+_PROFILE_ENTRY = re.compile(r"[A-Z][A-Z0-9_]{0,63}(:[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?")
+_PROFILE_TENANT = re.compile(r"\*|[a-z0-9][a-z0-9_-]{0,62}")
+
+
+def _parse_tokenizer_profiles(raw: str) -> dict[str, frozenset[str]]:
+    """``DPS_TOKENIZER_PROFILES`` as ``{tenant or "*": {"ENTITY:profile" | "ENTITY"}}``.
+
+    Raises:
+        ValueError: not a JSON object of tenant ids to lists of ``ENTITY[:profile]`` entries (the
+            message names the rule, never an entry).
+    """
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("DPS_TOKENIZER_PROFILES is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError("DPS_TOKENIZER_PROFILES must be a JSON object of tenant ids to lists")
+    out: dict[str, frozenset[str]] = {}
+    for tenant, entries in data.items():
+        if not isinstance(tenant, str) or not _PROFILE_TENANT.fullmatch(tenant):
+            raise ValueError("DPS_TOKENIZER_PROFILES keys must be tenant ids or *")
+        if not isinstance(entries, list) or not all(
+            isinstance(e, str) and _PROFILE_ENTRY.fullmatch(e) for e in entries
+        ):
+            raise ValueError(
+                "DPS_TOKENIZER_PROFILES values must be lists of ENTITY or ENTITY:profile "
+                "(profile [A-Za-z0-9][A-Za-z0-9_.-]{0,63})"
+            )
+        out[tenant] = frozenset(entries)
+    return out
+
+
 class Settings(BaseSettings):
     """All runtime configuration. Field names map to ``DPS_<UPPER_NAME>``."""
 
@@ -96,8 +129,12 @@ class Settings(BaseSettings):
 
     # --- auth (static key store in M0; a DB-backed store arrives with jobs in M2) ---
     auth_enabled: bool = True
-    api_keys: str = ""  # JSON list of {name, key | key_sha256, tenant_ids, scopes}
-    bootstrap_api_key: str = ""  # one wildcard key for local demos; refused in production
+    api_keys: str = Field(
+        default="", repr=False
+    )  # JSON list of {name, key | key_sha256, tenant_ids, scopes}
+    bootstrap_api_key: str = Field(
+        default="", repr=False
+    )  # one wildcard key for local demos; refused in production
 
     # --- limits ---
     max_payload_mb: int = 8
@@ -106,6 +143,11 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_rps: float = 50.0
     rate_limit_burst: int = 100
+    # --- policy patterns (S3 review F-02, rounds 1-2): the most CPU one API request (or one NDJSON
+    # item) may spend on custom recognizer patterns and deny lists, and the longest any single run
+    # may take (L2 jobs included); and how many matcher processes run the long runs ---
+    pattern_cpu_seconds: float = Field(default=5.0, gt=0, le=600)
+    pattern_processes: int = Field(default=2, ge=1, le=64)
 
     # --- engine ---
     default_policy: str = "gdpr-pseudonymise"
@@ -122,8 +164,10 @@ class Settings(BaseSettings):
     llm_text_rewrite: bool = False
     stellar_base_url: str = ""
     coin_url: str = ""
-    coin_client_id: str = ""  # base64-encoded, decoded at use (org convention)
-    coin_client_secret: str = ""
+    coin_client_id: str = Field(
+        default="", repr=False
+    )  # base64-encoded, decoded at use (org convention)
+    coin_client_secret: str = Field(default="", repr=False)
     coin_scope: str = ""
     coin_token_ttl_seconds: int = 840
     ssl_cert_file: str = ""  # CA bundle for Stellar calls (and the COIN mint without coin_ca_file)
@@ -144,7 +188,9 @@ class Settings(BaseSettings):
     # the image's default) — see ``ocr_engine``.
     ocr_provider: str = ""
     azure_vision_endpoint: str = ""  # http://azure-ocr-mock:5000 locally; the org gateway in prod
-    azure_vision_key: str = ""  # DPS_AZURE_VISION_KEY_FILE in prod; Ocp-Apim-Subscription-Key
+    azure_vision_key: str = Field(
+        default="", repr=False
+    )  # DPS_AZURE_VISION_KEY_FILE in prod; Ocp-Apim-Subscription-Key
     ocr_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     ocr_poll_interval_seconds: float = Field(default=0.5, gt=0, le=10)
     max_document_mb: int = Field(default=20, ge=1, le=512)
@@ -186,11 +232,11 @@ class Settings(BaseSettings):
     pg_database: str = "dps"
     pg_schema: str = "dps"
     pg_user: str = "dps_app"
-    pg_password: str = ""
+    pg_password: str = Field(default="", repr=False)
     pg_worker_user: str = ""  # falls back to pg_user
-    pg_worker_password: str = ""
+    pg_worker_password: str = Field(default="", repr=False)
     pg_migration_user: str = ""  # falls back to pg_user
-    pg_migration_password: str = ""
+    pg_migration_password: str = Field(default="", repr=False)
     pg_pool_min: int = 2
     pg_pool_max: int = 16
     pg_ssl_root_cert: str = ""
@@ -198,8 +244,8 @@ class Settings(BaseSettings):
     migrations_mode: str = "auto"  # auto | verify | off
 
     # --- job sealing (base64 of 32 bytes; production reads it from DPS_JOB_KEK_FILE) ---
-    job_kek: str = ""
-    job_kek_previous: str = ""  # M5 rotation
+    job_kek: str = Field(default="", repr=False)
+    job_kek_previous: str = Field(default="", repr=False)  # M5 rotation
 
     # --- queue ---
     job_lease_seconds: int = 300
@@ -252,8 +298,8 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = ""
     s3_region: str = "us-east-1"
     s3_bucket: str = "dps-artefacts"
-    s3_access_key_id: str = ""
-    s3_secret_access_key: str = ""
+    s3_access_key_id: str = Field(default="", repr=False)
+    s3_secret_access_key: str = Field(default="", repr=False)
     s3_force_path_style: bool = True
     export_root: str = "./var/exports"
     image_digest: str = ""
@@ -300,6 +346,10 @@ class Settings(BaseSettings):
     tokenizer_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
     tokenizer_batch: int = 500
     tokenizer_retries: int = Field(default=2, ge=0, le=10)
+    #: S3 review F-11: which entity types and data elements (profiles) each tenant may tokenize —
+    #: JSON ``{"<tenant>|*": ["ENTITY:profile", "ENTITY", …]}`` (``ENTITY`` alone = no profile).
+    #: ``""`` = unrestricted (local/dev); staging/prod with a tokenizer must set it (posture).
+    tokenizer_profiles: str = ""
     # --- M5: keys, reports, posture ---
     key_cache_seconds: int = 30
     key_max_ttl_days: int = Field(default=365, ge=1)
@@ -418,6 +468,29 @@ class Settings(BaseSettings):
         if any(e not in TABULAR_ENGINES for e in engines):
             raise ValueError("synth_tabular_engine accepts copula and mostly only")
         return ",".join(dict.fromkeys(engines))
+
+    @field_validator("tokenizer_profiles")
+    @classmethod
+    def _tokenizer_profiles(cls, v: str) -> str:
+        if v.strip():
+            _parse_tokenizer_profiles(v)  # raises a value-free ValueError
+        return v
+
+    def tokenizer_profile_allowed(
+        self, tenant: str | None, entity: str, profile: str | None
+    ) -> bool:
+        """F-11: may ``tenant`` tokenize ``entity`` under ``profile``? Always, when
+        ``tokenizer_profiles`` is unset; else the pair must be listed for the tenant or ``*``."""
+        if not self.tokenizer_profiles.strip():
+            return True
+        allowed = _parse_tokenizer_profiles(self.tokenizer_profiles)
+        wanted = entity if profile is None else f"{entity}:{profile}"
+        return wanted in allowed.get(tenant or "", frozenset()) | allowed.get("*", frozenset())
+
+    @property
+    def tokenizer_profiles_restricted(self) -> bool:
+        """True when an allow-list is configured (profiles are then admin-chosen labels)."""
+        return bool(self.tokenizer_profiles.strip())
 
     @field_validator("tokenizer_provider")
     @classmethod

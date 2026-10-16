@@ -29,6 +29,11 @@ event loop keeps serving. Response lines (``?`` = by mode)::
 Request errors (envelope, limits, policy, key material) are answered with a coded HTTP error
 before anything is streamed. One audit event per stream (counts summed). Error details name a
 line or item number and a rule, never the content of a line.
+
+**Policy patterns** (S3 review round 2, R2-B2): each item has its own CPU budget for custom
+recognizer patterns and deny lists (:meth:`~dps.engine.detect.regex_guard.PatternBudget.item`):
+what the item earns plus the stream's small base, at most ``DPS_PATTERN_CPU_SECONDS`` — never what
+earlier items earned. An item past it ends the stream with ``custom_pattern_too_slow``.
 """
 
 from __future__ import annotations
@@ -53,6 +58,7 @@ from starlette.types import Scope
 
 from dps.auth import require_scope
 from dps.config import Settings
+from dps.engine.detect.regex_guard import PatternBudget, budget_scope, call_budget
 from dps.engine.findings import Finding
 from dps.engine.policy import Policy
 from dps.engine.service import (
@@ -66,7 +72,12 @@ from dps.engine.service import (
     TransformResponse,
     VerificationFailed,
 )
-from dps.engine.synth.surrogates import generate_synthesis_seed, seed_from_caller
+from dps.engine.synth.surrogates import (
+    SynthesisSeed,
+    generate_synthesis_seed,
+    seed_from_caller,
+    wrap_synthesis_seed,
+)
 from dps.engine.transform.crypto import (
     KeyMaterial,
     generate_key_material,
@@ -306,6 +317,7 @@ def resolve_stream_material(
             raise EngineError(f"invalid key material: {exc}") from None
         material = {"key_material": key.model_dump(mode="json")}
     else:
+        engine._wrap_pem(options)  # F-20: an unusable wrap_key fails before any work
         try:
             seed = (
                 seed_from_caller(consistency.synthesis_seed)
@@ -461,8 +473,33 @@ def _engine_runner(
     """Each item through the engine operation of ``mode``, in order, stopping at a failure.
 
     ``labels`` (T3, one labelling call per stream) give each item its ``extra_findings``;
-    ``on_detokenize`` (reveal, SEC-4) audits each detokenization batch.
+    ``on_detokenize`` (reveal, SEC-4) audits each detokenization batch. Each item runs under its
+    own policy-pattern budget (module docstring), drawn from the stream's.
     """
+    stream_budget = (call_budget() or PatternBudget()).for_stream()
+
+    def run_item(
+        item: Any, loop: asyncio.AbstractEventLoop | None
+    ) -> DetectResponse | TransformResponse | RevealResponse:
+        extra: Sequence[Finding] = ()
+        if labels is not None and mode != "reveal":
+            extra = engine.apply_labels(Payload(data=item), policy_ref, options, labels)
+        if mode == "detect":
+            return engine.detect(Payload(data=item), policy_ref, options, extra_findings=extra)
+        if mode == "obfuscate":
+            return engine.obfuscate(Payload(data=item), policy_ref, options, extra_findings=extra)
+        if mode == "synthesize":
+            assert loop is not None
+            return loop.run_until_complete(
+                engine.synthesize(Payload(data=item), policy_ref, options, extra_findings=extra)
+            )
+        assert key_material is not None
+        return engine.reveal(
+            Payload(data=item["result"]),
+            key_material,
+            item.get("reveal_hints") or [],
+            on_detokenize=on_detokenize,
+        )
 
     def run_chunk(
         offset: int, everything: Sequence[Any], size: int
@@ -475,33 +512,8 @@ def _engine_runner(
             for n, item in enumerate(items):
                 index = offset + n
                 try:
-                    result: DetectResponse | TransformResponse | RevealResponse
-                    extra: Sequence[Finding] = ()
-                    if labels is not None and mode != "reveal":
-                        extra = engine.apply_labels(Payload(data=item), policy_ref, options, labels)
-                    if mode == "detect":
-                        result = engine.detect(
-                            Payload(data=item), policy_ref, options, extra_findings=extra
-                        )
-                    elif mode == "obfuscate":
-                        result = engine.obfuscate(
-                            Payload(data=item), policy_ref, options, extra_findings=extra
-                        )
-                    elif mode == "synthesize":
-                        assert loop is not None
-                        result = loop.run_until_complete(
-                            engine.synthesize(
-                                Payload(data=item), policy_ref, options, extra_findings=extra
-                            )
-                        )
-                    else:
-                        assert key_material is not None
-                        result = engine.reveal(
-                            Payload(data=item["result"]),
-                            key_material,
-                            item.get("reveal_hints") or [],
-                            on_detokenize=on_detokenize,
-                        )
+                    with budget_scope(stream_budget.item()):  # R2-B2: the item's own budget
+                        result = run_item(item, loop)
                 except Exception as exc:  # noqa: BLE001 - every item failure ends the stream
                     return lines, totals, _failure(index, exc)
                 totals.add(result)
@@ -567,6 +579,14 @@ def _header(
         scope = envelope.options.consistency.scope or policy.consistency.scope
         if scope != "request":
             header["synthesis_seed"] = consistency.synthesis_seed
+            pem = engine._wrap_pem(envelope.options)
+            if pem is not None and consistency.synthesis_seed is not None:
+                try:  # F-20: a seed is key material: wrapped like the obfuscate key
+                    header["synthesis_seed"] = wrap_synthesis_seed(
+                        SynthesisSeed.model_validate(consistency.synthesis_seed), pem
+                    ).model_dump(mode="json")
+                except ValueError as exc:
+                    raise EngineError(f"wrap_key: {exc}") from None
     return header
 
 

@@ -239,3 +239,30 @@ def test_no_synthetic_review_keeps_mains_post_write_verdict() -> None:
     clean = _verification(True, "passed", False)
     apply_synthetic_review(clean, [])
     assert (clean["passed"], clean["status"], clean["review_required"]) == (True, "passed", False)
+
+
+# -- S3 review round 2 (R2-B1): a post-write sample that could not run fails closed -------------
+
+
+@pytest.mark.parametrize("code", ["custom_pattern_too_slow", "target_unavailable"])
+def test_a_post_write_sample_that_could_not_run_needs_review(code: str) -> None:
+    """A refused policy pattern (or an unreachable target) left the post-write sample without a
+    verdict: like the identifier check, that fails closed — ``review_required``, never "passed"."""
+    post = {"error": code}
+    assert verification_outcome(0, False, post) == (False, "review_required", True)
+    assert verification_outcome(3, False, post) == (False, "failed", True)
+    assert verification_outcome(0, False, post, outcome="failed") == (False, "incomplete", True)
+    inputs = evidence_inputs(mode="obfuscate")
+    passed, status, review = verification_outcome(0, False, post)
+    inputs.verification = {
+        **inputs.verification,
+        "passed": passed,
+        "status": status,
+        "review_required": review,
+        "post_sample": post,
+    }
+    pack = build_pack(inputs)
+    page = render_html(pack, sha=pack_sha256(pack))
+    assert "verified ·" not in page
+    assert "post-write sample did not run" in page and code in page
+    assert "found personal data in" not in page

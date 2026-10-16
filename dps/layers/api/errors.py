@@ -59,6 +59,7 @@ def _connector_status(code: str) -> int:
         "no_key",
         "connection_invalid",
         "tls_required",  # M5: TLS-only egress refuses a clear-text connection
+        "host_forbidden",  # F-08: an SSRF target (link-local/metadata, loopback outside local …)
     ):
         return 422
     if code.startswith("selection_"):

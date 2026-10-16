@@ -12,6 +12,11 @@ traps), `docs/technical/api-m4.md` (API as built) and the M4 rows of §1, §4, �
 into `m4` ahead of the M4 integration (§16); **`m4` is merged into `main` on 2026-10-15 (§17)** — the
 `v0.5.0-m4` tag follows the verification on main.
 
+**Finish stream `fsec` (security review, 2026-10-15): `m4` merged into `fsec`** — the review's fixes
+now hold on the scanner's paths too (§17); the scanner's own S5 wiring (SSRF guard at accept, on the
+browser-worker and on every hop) and Task 8B (opt-in T3 labelling in discovery and the scanner)
+followed on `fsec` (§17.1).
+
 **Integrated on `main` (2026-10-12): M1 (v0.2.0, branch `m1`) and M2 (`v0.1.0-m2`, branch `m2`)**
 — merged with `--no-ff`; the gates of the integrated tree are recorded in §11, and the fixes of the
 integrated verification round 1 (raw PII kept as "not personal"; account numbers and customer ids
@@ -260,8 +265,15 @@ body is 422 `idempotency_key_reused` on the job routes, as on Layer 1 (contract 
 picks it up when the `migrate` one-shot runs again (`docker compose up -d` recreates it). M3 adds
 `020_job_group_last_check.sql`: `dps_job_group.last_check` / `last_check_at` hold the latest result of
 `POST /api/v1/job-groups/{id}/consistency-check` (counts and codes only; returned by `GET /job-groups`
-and `GET /job-groups/{id}`); a stack on an older schema needs the `migrate` one-shot again. Against the compose database:
+and `GET /job-groups/{id}`); a stack on an older schema needs the `migrate` one-shot again. The security
+review adds `046_job_group_kcv.sql` (`dps_job_group.kcv`, the group key's public key check value: a group
+run must carry the group's DEK, not only its kid; F-13) — run the `migrate` one-shot again. Against the compose database:
 `DPS_PG_HOST=127.0.0.1 DPS_PG_PORT=${DPS_DB_PORT:-5441} DPS_PG_PASSWORD=dps_app DPS_PG_MIGRATION_USER=dps_owner DPS_PG_MIGRATION_PASSWORD=dps_owner python -m dps.migrate`.
+**Run migrations as their own owner (S3 security review F-06).** `DPS_PG_MIGRATION_USER` falls back
+to the API login when unset; migrations run that way give the API login the M5 `owner_directory`
+policies (`USING (true)`), which read every tenant's jobs, connections and policies. The app's RLS
+posture check names each such policy and refuses to boot **in every environment** (other posture
+problems stay fatal in staging/prod only). Always set `DPS_PG_MIGRATION_USER` (compose: `dps_owner`).
 **M2 compose environment** (`x-dps-env`, shared by app, migrate and worker): `DPS_PG_HOST=dps-db`, logins
 `dps_app` / `dps_worker_login` / `dps_owner` (local passwords = role name), `DPS_MIGRATIONS_MODE=verify`
 (`auto` for `migrate`), `DPS_JOB_KEK` = a local demo literal unless the shell sets one, `DPS_SECRET_DIR=/var/run/secrets/dps`,
@@ -342,6 +354,7 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_VERTEX_PROJECT` / `DPS_VERTEX_LOCATION` | — / `global` | laptop path; needs the `vertex` extra and ADC |
 | `DPS_MAX_PAYLOAD_MB` / `DPS_MAX_TEXT_CHARS` / `DPS_MAX_ITEMS` | 8 / 1,000,000 / 10,000 | 413 beyond (JSON-route body bytes by header or while streaming, `payload_too_large`; text characters, documents' canonical text included; JSON leaf values) |
 | `DPS_RATE_LIMIT_ENABLED` / `_RPS` / `_BURST` | `true` / 50 / 100 | token bucket per API key, per process; 429 + `Retry-After` |
+| `DPS_PATTERN_CPU_SECONDS` / `DPS_PATTERN_PROCESSES` | 5 / 2 | (S3 review F-02, round 2) policy patterns — custom recognizers and deny lists: the most CPU one API request, or one NDJSON item, may spend on them in total, and the longest any single run may take (L2 jobs included); past it 422 `custom_pattern_too_slow`. Matcher processes per server process for runs that outgrow the 5 ms in-thread slice (single-threaded children, about 17 MB each, started on first use): long pattern runs never use more CPUs than this, and wait for a free one when all are busy |
 | `DPS_AUDIT_ENABLED` | `true` | `false` only locally; refused in staging/prod |
 | `DPS_OCR_PROVIDER` | `""` (the image: `auto`) | M1 documents — `""`/`off`: no OCR; `azure`: Read v3.2 (the compose mock, the org gateway, Azure) when endpoint and key are set, else none; `tesseract`: the local CLI (`/readyz` `ocr: tesseract_missing` without the binary); `auto` (the image's `ENV`): azure when endpoint and key are set, else tesseract when `DPS_TESSERACT_CMD` is on `PATH`, else none. Staging/prod: azure (also via `auto`) needs a key and an `https` endpoint; `auto` that resolves to none is refused; Tesseract is allowed (local, no egress) |
 | `DPS_TESSERACT_CMD` / `DPS_TESSERACT_LANGS` / `DPS_TESSERACT_TIMEOUT_SECONDS` | `tesseract` / `eng` / 60 | local OCR: the binary (name on `PATH` or a path), its languages (`eng`, `eng+spa`, …; the image ships `eng` only) and one page's time limit (the process group is killed beyond it: `ocr_timeout`). Page image on stdin, TSV on stdout; Tesseract's stderr is never read (it can echo recognised text). `DPS_OCR_MAX_CONCURRENCY` bounds parallel runs. `/readyz` `ocr.engine` is `tesseract-<major.minor>` |
@@ -417,6 +430,7 @@ the posture rules that tighten them in staging/prod arrive with M5's posture tas
 | `DPS_TOKENIZER_PROVIDER` | `""` | `external_tokenize` adapter: `""` (off) or `http` |
 | `DPS_TOKENIZER_URL` / `DPS_TOKENIZER_TOKEN` (`_FILE`) / `DPS_TOKENIZER_CA_FILE` | — | the bank tokenization service (http(s) with a host; the error never echoes the URL), its bearer token (prefer `DPS_TOKENIZER_TOKEN_FILE`) and CA bundle |
 | `DPS_TOKENIZER_TIMEOUT_SECONDS` / `_BATCH` / `_RETRIES` | 10 / 500 / 2 | |
+| `DPS_TOKENIZER_PROFILES` | `""` | (S3 review F-11) which entity types and data elements each tenant may tokenize: JSON `{"<tenant>\|*": ["SSN:dps-ssn", "CARD_PAN:dps-pan", "ENTITY"…]}` (`ENTITY` alone = no profile). Anything else is refused before the service is called (403 `tokenizer_profile_not_allowed`; a job fails with that code). `""` = unrestricted — staging/prod with a tokenizer refuse to boot without it. Give DPS **its own data elements** (profiles whose tokens never equal the tokens bank systems store), so a DPS caller can never build a codebook of the bank's tokens |
 | `DPS_KEY_CACHE_SECONDS` / `DPS_KEY_MAX_TTL_DAYS` / `DPS_KEY_ROTATION_MAX_AGE_DAYS` / `DPS_KEY_ROTATION_MAX_GRACE_HOURS` | 30 / 365 / 90 / 168 | DB-backed API keys |
 | `DPS_REPORT_PDF_ENABLED` / `DPS_ROLLUP_RETENTION_DAYS` | `true` / 400 | PDFs: `GET /api/v1/evidence/{id}/pdf` (rendered once with reportlab's built-in Helvetica, stored as an `evidence_pdf` artefact, streamed afterwards) and `format=pdf` on `/reports/api-rollups/{day}`; `false` → 404 `pdf_disabled`. Report roll-up and daily usage rows older than the retention days are deleted by the retention job |
 | `DPS_EGRESS_TLS_REQUIRED` / `DPS_CORS_ORIGINS` | `false` / `*` | posture: `true` and explicit origins in staging/prod; origins are a comma list, `""` = same-origin only |
@@ -576,7 +590,8 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   is refused (use `<NAME>_FILE`); with `DPS_PG_HOST` the KEK must be set; `DPS_EGRESS_TLS_REQUIRED=true`,
   every egress URL (`DPS_STELLAR_BASE_URL`, `DPS_COIN_URL`, `DPS_AZURE_VISION_ENDPOINT`,
   `DPS_S3_ENDPOINT_URL`, `DPS_TOKENIZER_URL`) `https` and, when any is set, `DPS_SSL_CERT_FILE` (the
-  organisation CA bundle); `DPS_TOKENIZER_TOKEN_FILE` with `DPS_TOKENIZER_PROVIDER=http`;
+  organisation CA bundle); `DPS_TOKENIZER_TOKEN_FILE` and `DPS_TOKENIZER_PROFILES` (F-11) with
+  `DPS_TOKENIZER_PROVIDER=http`;
   `DPS_CORS_ORIGINS` without `*`; and **strict verification at boot**: `DPS_VERIFY_WARN_ALLOWED=false`,
   `DPS_LLM_EGRESS_CHECK=strict`, every shipped preset and `DPS_DEFAULT_POLICY` with
   `verify.leakage_check: strict`. At request time a policy (inline, preset override or stored) with
@@ -603,8 +618,10 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   `dps_connection.secret_enc` per tenant); confirm the printed JSON line has `"unreadable": 0` (exit
   code 3 otherwise — those rows are unchanged; exit 2 = no KEK or no database); remove
   `DPS_JOB_KEK_PREVIOUS_FILE` and roll again. Keep the previous KEK as long as callers may reveal
-  `external_tokenize` tokens bound under it (§8). Until `dps.rekey` has run, jobs sealed under the
-  old KEK cannot be opened by workers that hold only the new one — run it right after the first roll.
+  `external_tokenize` tokens bound under it (§8). While `DPS_JOB_KEK_PREVIOUS(_FILE)` is mounted, the
+  app and workers open blobs sealed under the old KEK too (job keys and specs, inline connection
+  credentials) and an `Idempotency-Key` admitted under it still replays (S3 review F-21) — but a pod
+  that holds only the new KEK cannot, so run `dps.rekey` before removing the previous one.
 - **COIN token mint TLS** (SEC-1): verified by default (`DPS_COIN_CA_FILE` → `DPS_SSL_CERT_FILE` →
   default store). **VDI exception:** the org's intercepting proxy re-signs the COIN endpoint with a
   certificate no bundle we hold verifies, so on the VDI set `DPS_COIN_TLS_INSECURE=true` and, in
@@ -622,6 +639,41 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   Idempotency-Key` (keys travel in headers, not cookies).
 - Error bodies never quote the request: 422s list `{type, loc, msg}` only, unexpected errors are a
   500 `internal error` with only the exception class logged.
+- **Policy patterns are bounded per call, on their own CPU** (S3 review F-02/S3, rounds 1 and 2).
+  Custom-recognizer patterns and deny lists run on the `regex` package (a core dependency since
+  round 1; `VERSION0` = the `re` syntax plus a matching timeout), never on `re`. A run starts in the
+  calling thread holding the GIL for at most 5 ms; a run that needs longer continues in a matcher
+  process (`dps/engine/detect/pattern_process.py`: `DPS_PATTERN_PROCESSES` single-threaded children
+  of `pattern_child.py`, `python -I`, empty environment, started on first use, replaced if they die
+  — the run is then refused). Each run is charged its own CPU, so a legitimate scan is never refused
+  because other requests are busy (round 2, R2-B1: the `regex` timeout counts the whole process's
+  CPU). Every call — an HTTP request (`dps.app._CallScope`), each NDJSON item, a worker handler task
+  (`Consumer._guard`) — gets 10 ms plus 20 µs per pattern run and 0.5 µs per character per pattern
+  scanned (`regex_guard.BUDGET_*`; real patterns cost 0.002–0.1 µs per character); an API request
+  and each NDJSON item at most `DPS_PATTERN_CPU_SECONDS` (5 s) in total; an NDJSON item only what
+  it earned plus the stream's 10 ms base; no single run, L2 included, longer than
+  `DPS_PATTERN_CPU_SECONDS`. Past it the call is refused: 422 `custom_pattern_too_slow` (engine
+  routes, NDJSON items, documents, the recognizer test); an L2 job or partition — and a scan (the
+  crawl stops; §17) — fails with that code and is not retried; a post-write sample that could not run (that code, or a target error) makes
+  the verification `review_required`. Measured (round 2): a stacked pattern on 2 KB is refused
+  after about 11 ms; a 1000-pattern policy is refused at the 5 s ceiling from about 10 KB of text
+  (round 1 let 1 MB run 1001 CPU-seconds); the linear twin of that policy answers in about 4 s on
+  1 MB. Deny lists are matched as a trie (`custom.deny_list_pattern`, exact flat-alternation
+  results), about 0.03 µs per character for 1000 names. The static filter (`check_pattern`: no
+  nested repeats, backreferences, bounds over 1000, patterns over 512 characters; since round 2 no
+  unescaped `{` that is not a repeat count and no unescaped `[` inside a set — `regex` would read a
+  fuzzy match or a POSIX class there) still refuses the classic shapes when a policy is validated. Declared-field globs are matched without a regex
+  (`custom.PathGlob`, linear). A bank recognizer that is quadratic on long tokens (`\w+@\w+` on a
+  base64 blob) can be refused on large inputs — rewrite it with bounded repeats. `regex` differs from
+  `re` in a few Unicode details (`\s` and the ASCII separators `\x1c`–`\x1f`; combining marks in
+  `\w`): security review §5.
+- **Custom entity tiers are per call** (S3 review F-10, round 1 B3): the tiers a policy declares
+  (`sensitivity` on a custom recognizer or declared field) live in the request's or job handler's
+  own registry (`dps.engine.call_scope`), never in a process-wide one, so no tenant can fill a
+  registry other tenants need, and a request that names a custom type without a tier reads the
+  MEDIUM default whatever another request declared. Any new entry point that runs the engine must
+  run inside an HTTP request or a `Consumer` handler task (both bind the scope) — the M4 merge's
+  `POST /scans` and browser-worker handlers do.
 
 ## 7. Secrets (names only)
 
@@ -666,9 +718,15 @@ as another tenant's. Inline credentials (dev only) are sealed with `DPS_JOB_KEK`
 
 Who may change a connection (security fix SEC-3): **any** `PATCH` or `DELETE` of a connection that
 is or becomes tagged `production` (a rename, roles, tags, a credential rotation) needs the `admin`
-scope (403 `admin_scope_required`). On a connection that holds credentials (a sealed secret or a
-`secret_ref`), changing a param that decides where the credentials are sent needs the credentials
-again in the same request (new `credentials`, or the `secret_ref` restated) or `admin`; otherwise 403
+scope (403 `admin_scope_required`). **Production credentials** (S3 review F-01, completed in round
+1 B2): a `secret_ref` that a `production`-tagged connection holds is a production credential —
+naming it in another connection (create or patch) needs `admin`, a connection that already holds it
+(an admin made it, or a `jobs` key made it before the production connection was tagged) is changed
+or deleted like the tagged one (**any** `PATCH`, any `DELETE`: `admin`), and an `in_place`/`append`
+run or retry through any holder needs `admin` (`dps.connections.production_refs`). On a
+connection that holds credentials (a sealed secret or a `secret_ref`), changing a param that
+decides where the credentials are sent needs the credentials again in the same request (new
+`credentials`, or the `secret_ref` restated) or `admin`; otherwise 403
 `connection_endpoint_change_requires_credentials` and nothing changes. The list is one engine-keyed
 table, `dps.connections.ENDPOINT_PARAMS`: postgres `host port database dbname options.sslmode
 options.sslrootcert_ref`; oracle `host port service_name sid dsn` (+ TLS options); mongo `uri host
@@ -678,7 +736,9 @@ port replica_set database options.replicaSet options.directConnection options.tl
 `connection.update` audit event names the changed fields (`counts["field.params.host"]`, …), never a
 value. `POST /connections/{id}/test` takes no param overrides, so it always tests the stored
 endpoint. Residual: a `jobs` key may still *create* a connection that names any of its own tenant's
-`secret_ref`s with an endpoint of its choice; restrict the key or mount fewer refs per tenant.
+**non-production** `secret_ref`s with an endpoint of its choice (production credentials need
+`admin` wherever they are named, changed or deleted); restrict the key or mount fewer refs per
+tenant.
 
 Who may write a production connection (D3; widened 2026-10-14, S1-M3 post-merge r1 security B1):
 **every** run that writes a `production`-tagged connection needs the `admin` scope — `in_place`
@@ -841,7 +901,11 @@ cannot restart an admin's failed production run.
     each external hint carries a `bind` tag keyed by the caller's DEK and a server key derived from
     `DPS_JOB_KEK`; an unbound or mismatched tag is refused (403 `external_token_not_bound`) before
     any call, and every batch is audited first (`action: external.detokenize`, entity type and
-    count). Consequences: `external_tokenize` needs `DPS_JOB_KEK` on the app (else 400, plan
+    count). **F-11 (tokenization oracle):** tokenization uses the same credentials, so it is limited
+    to the entity types and profiles `DPS_TOKENIZER_PROFILES` lists for the tenant (refused with 403
+    `tokenizer_profile_not_allowed` before any call), and every Layer 1 tokenization batch is audited
+    first too (`action: external.tokenize`, entity type, count and the profile label). Synthesize mode
+    never tokenizes (F-12). Consequences: `external_tokenize` needs `DPS_JOB_KEK` on the app (else 400, plan
     reason `|external:unbound`); after a KEK rotation keep `DPS_JOB_KEK_PREVIOUS` for as long as
     callers may reveal external tokens bound under the old KEK — once it is dropped those tokens
     can no longer be revealed through DPS (the bank's own detokenize path still works).
@@ -1671,3 +1735,62 @@ whole suite and the browser gate (+8/+2/+1/+1 each) and the foreign run, never d
 rebuilt browser-worker image, run with `--network none` over the S2 r3 verifier's select pages, reads
 none of their made-up values in any capture (94 PNGs OCR'd, every control readable). Report:
 `~/.cache/dps-build/reports/S1-merge-m4.md`.
+
+## 18. `m4` merged into finish stream `fsec` (2026-10-15)
+
+`git merge --no-ff m4` on branch `fsec` (merge commit `c1d8c36`): the UI scanner comes to the
+security-review stream for its own review and Task 8B. Three conflicts, both sides kept (contract,
+`dps/layers/connectors/discovery.py`, `dps/posture.py`). What changes for a build, a deploy or a demo
+(details: security review §3.24, `docs/superpowers/build/M5-DEVIATIONS.md` "M4 merged into `fsec`"):
+
+- **Images:** both images (`data-privacy-services`, `data-privacy-services-browser`) carry the merged
+  code; the browser image installs the core dependency `regex` (policy patterns) through
+  `pyproject.toml` like the app image — rebuild both.
+- **Browser-worker:** sizes its pattern matcher processes from `DPS_PATTERN_PROCESSES` (default 2;
+  single-threaded children started on first use) like the app and the worker. A scan whose policy
+  pattern runs past `DPS_PATTERN_CPU_SECONDS` ends `failed` with `custom_pattern_too_slow` at once (no
+  retry; key purged; a failed evidence pack names the code).
+- **Posture:** `DPS_TOKENIZER_PROFILES` is required (with the tokenizer enabled, staging/prod) for
+  the app and the worker only; the browser-worker never tokenizes and boots without it.
+- **Data at rest:** a scan's policy body (inline, or an `@name` reference resolved at accept) is
+  sealed with the job KEK in `dps_job.spec_enc`; `dps_job.spec.policy` holds its value-free label
+  `{sealed, name, version, sha256}` (`dps.rekey` re-seals `spec_enc` of every job kind). Scans accepted
+  before this change keep their body in `spec` and still run.
+- **API:** `POST /scans` honours `Idempotency-Key` across a KEK rotation and removes a scan whose
+  creation audit a strict sink refused (503 `audit_unavailable`); uncoded scan-spec refusals are the
+  app's scrubbed 422 (`{"detail": [{loc, msg, type}], "code": "invalid_request"}`); the scan CSVs guard
+  `+`/`-` cells like the L2 export; `dps_scan_fields_total` labels custom entity types `custom`.
+- **Lane `fsec` stack:** `docker compose --profile full up -d` from `dps-wt-fsec` (ports in its `.env`:
+  app 8416, dps-db 5483, source-pg 5484, MinIO 9070/9071, Oracle 1526, Mongo 27022, OCR 5066, demo
+  site 8426, tokenizer mock 8436); gates of the merged tree: report
+  `~/.cache/dps-build/reports/FSEC-merge-m4.md`.
+
+### 18.1 S5 wiring and Task 8B on `fsec` (2026-10-15) — what changes for a build, a deploy or a demo
+
+Details: security review §3.25–§3.27, `docs/superpowers/build/M5-DEVIATIONS.md` (Task 8B, Task 17 S5).
+
+- **Images:** both images carry the change — rebuild both.
+- **`POST /scans` resolves the start host** (the SSRF guard, S5): the **app** pod must resolve the
+  tenant's registered UAT hosts (a name that does not resolve from the app answers 422
+  `host_forbidden`), and a host that is — or resolves to — a link-local/cloud-metadata, multicast,
+  unspecified or reserved address, a numeric host encoding, or loopback outside `DPS_ENV=local`, is
+  refused (RFC 1918 stays allowed). The browser-worker checks the start URL again before a scan runs.
+- **Browser-worker:** Chromium is launched with `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE
+  127.0.0.1` — it resolves no name itself; the scan's scope proxy (in the browser-worker process)
+  resolves every hop's host through the pod's DNS and dials only addresses that pass the same rule
+  (a refused hop is counted `blocked` / `host_forbidden` in the scan's request log). In compose,
+  `demo-site` resolves to the network's private address (allowed); `localhost`/`127.0.0.1` targets
+  work only with `DPS_ENV=local`.
+- **T3 labelling (opt-in per policy, `detect.tiers` lists `llm_label`):** discover jobs (the
+  **worker**) and scans (the **browser-worker**) now call the LLM gateway when such a policy is used
+  and a real provider is configured — the browser-worker then needs the same LLM settings and
+  secrets as the app (`DPS_LLM_PROVIDER`, Stellar/COIN or Vertex) and egress to the LLM endpoint
+  (OpenShift NetworkPolicy). Without them, or with `stub`, labelling is skipped (behaviour
+  unchanged). Prompts carry metadata and value shapes only and pass the leak guard and the egress
+  verifier (`DPS_LLM_EGRESS_CHECK=strict` in staging/prod); `progress.metrics.llm` of the job counts
+  the calls. A scanned field's label (page text) goes into the prompt only when the browser-worker
+  runs NER (built with `WITH_NER=1`, `DPS_NER_ENABLED` not `false`, `ner` in the policy's tiers),
+  redacted of every span any detector tier reports — at any score, whatever the policy's
+  `detect.min_score` — with its digit/`@` tokens as shapes; without NER, fields are labelled by their
+  name, type, placeholder shape and hints (security review §3.26).
+

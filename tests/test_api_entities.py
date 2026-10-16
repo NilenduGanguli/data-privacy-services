@@ -112,8 +112,10 @@ def test_too_many_patterns_and_value_free_errors(client: TestClient) -> None:
 
 
 def test_entities_never_list_custom_types_any_tenant_registered() -> None:
-    """B3: the taxonomy registry is process-wide (M0), so custom types are not listed until M2
-    stores policies per tenant; before the fix tenant ``wealth`` saw ``retail``'s type."""
+    """B3: the taxonomy registry was process-wide (M0), so custom types are not listed until M2
+    stores policies per tenant; before the fix tenant ``wealth`` saw ``retail``'s type. Since S3
+    review round 1 a request's custom tiers stay in that request; the process-global registry
+    (code outside a request, the second registration below) is still never listed."""
     keys = [
         {"name": "a", "key": "dps_a", "tenant_ids": ["retail"], "scopes": ["detect"]},
         {"name": "b", "key": "dps_b", "tenant_ids": ["wealth"], "scopes": ["detect"]},
@@ -141,7 +143,10 @@ def test_entities_never_list_custom_types_any_tenant_registered() -> None:
         json={"data": {"t": "FAL-1234"}, "policy": policy},
     )
     assert r.status_code == 200
-    assert entity_info("M1_FALCON_PROJECT_ID").sensitivity == Sensitivity.HIGH  # registered
+    found = [f for f in r.json()["findings"] if f["entity_type"] == "M1_FALCON_PROJECT_ID"]
+    assert found and found[0]["sensitivity"] == "HIGH"  # registered for that request
+    # S3 review round 1 B3: a request's custom tiers are its own, never process-wide
+    assert entity_info("M1_FALCON_PROJECT_ID").sensitivity == Sensitivity.MEDIUM
     PolicyCustomDetector(
         [
             RecognizerSpec(

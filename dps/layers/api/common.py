@@ -40,6 +40,7 @@ from dps.audit import AuditEvent, AuditUnavailable
 from dps.auth import coded_http_exception_handler as coded_http_exception_handler  # one handler
 from dps.engine.policy import preset_names
 from dps.engine.service import EngineError, Payload, TokenizationUnavailable, VerificationFailed
+from dps.engine.transform.external import TOKENIZE_AUDIT
 from dps.errors import IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_REUSED_DETAIL, CodedError
 from dps.observability import (
     CURRENT_TENANT,
@@ -265,6 +266,44 @@ def detokenize_auditor(request: Request) -> Callable[[str, str | None, int], Non
     return write
 
 
+def tokenize_auditor(request: Request) -> Callable[[str, str | None, int], None]:
+    """F-11: the engine hook that audits each tokenization batch of an obfuscation.
+
+    One value-free event per batch — tenant, API key id, entity type, token count and, when an
+    allow-list is configured (the profile is then an admin-chosen label), the profile — action
+    ``external.tokenize``, outcome ``requested``, written **before** the bank service is called.
+    A strict sink that refuses it stops the request (503 ``audit_unavailable``, nothing sent).
+    Call it inside the request's event loop.
+    """
+    loop = asyncio.get_running_loop()
+    restricted = request.app.state.settings.tokenizer_profiles_restricted
+
+    def write(entity_type: str, profile: str | None, count: int) -> None:
+        principal = getattr(request.state, "principal", None)
+        counts = {"tokens": count}
+        if restricted and profile is not None:
+            counts[f"profile:{profile}"] = count
+        event = AuditEvent(
+            trace_id=getattr(request.state, "trace_id", None) or "-",
+            route=route_template(request),
+            tenant_id=getattr(request.state, "tenant_id", "default"),
+            key_id=principal.key_id if principal is not None else "anonymous",
+            mode="obfuscate",
+            policy="-",
+            action="external.tokenize",
+            outcome="requested",
+            methods_used={"external_tokenize": count},
+            findings_by_type={entity_type: count},
+            counts=counts,
+        )
+        try:
+            _on_loop(loop, request.app.state.audit.write, event)
+        except AuditUnavailable:
+            raise CodedError("audit_unavailable", "audit unavailable", status=503) from None
+
+    return write
+
+
 def _on_loop(
     loop: asyncio.AbstractEventLoop, fn: Callable[[AuditEvent], None], event: AuditEvent
 ) -> None:
@@ -303,6 +342,10 @@ def begin_call(request: Request) -> str:
     # and land in its audit event. Worker threads the engine runs on copy this context.
     CURRENT_TENANT.set(str(getattr(request.state, "tenant_id", "") or "") or None)
     LLM_STATS.set(LlmStats())
+    try:  # F-11: tokenization batches of this call are audited before the service is called
+        TOKENIZE_AUDIT.set(tokenize_auditor(request))
+    except RuntimeError:  # no running loop (not an async route): nothing to audit through
+        TOKENIZE_AUDIT.set(None)
     return tid
 
 

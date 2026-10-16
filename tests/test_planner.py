@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from dps.engine.findings import Finding, Locator
 from dps.engine.planner import build_plan, explain_plan
@@ -105,30 +106,27 @@ def test_span_findings_explain_their_span_and_entries_keep_finding_order() -> No
     )  # the finding's value hash stays out of the plan rows
 
 
-def test_synthesize_fallbacks_and_reversibility_follow_the_registry() -> None:
+def test_synthesize_overrides_are_key_less_and_beat_keep_non_sensitive() -> None:
+    # M5 security review F-12: a keyed method (here FPE) is no longer a synthesize override —
+    # synthetic output must have no path back to the original — so the policy is refused
+    with pytest.raises(ValidationError, match="key-less"):
+        Policy.model_validate(
+            {"synthesize": {"overrides": {"SSN": {"method": "fpe_digits", "keep_suffix": 4}}}}
+        )
     policy = Policy.model_validate(
         {
             "synthesize": {
                 "default": {"method": "surrogate"},
-                "overrides": {
-                    "SSN": {"method": "fpe_digits", "keep_suffix": 4},
-                    "AGE": {"method": "redact"},
-                },
+                "overrides": {"AGE": {"method": "redact"}},
             }
         }
     )
     plan = build_plan([*FINDINGS, _f("AGE", "$.age")], policy, "synthesize", fpe_enabled=False)
     by = {e.finding.entity_type: e for e in plan.entries}
-    assert (
-        by["SSN"].method == "det_token" and by["SSN"].reason == "policy:SSN|fallback:fpe_disabled"
-    )
-    assert (
-        by["SSN"].reversible is True
-        and by["AGE"].method == "redact"
-        and by["AGE"].reversible is False
-    )
+    assert by["SSN"].method == "surrogate" and by["SSN"].reversible is False
+    assert by["AGE"].method == "redact" and by["AGE"].reversible is False
     assert by["AGE"].reason == "policy:AGE"  # an explicit override beats keep_non_sensitive
-    assert plan.mode == "synthesize" and plan.reversible_count == 1
+    assert plan.mode == "synthesize" and plan.reversible_count == 0
 
 
 def test_empty_findings_give_an_empty_low_plan() -> None:

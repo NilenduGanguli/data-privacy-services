@@ -15,13 +15,14 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from dps.config import Settings
 from dps.engine.detect.custom import custom_detector_from
 from dps.engine.detect.ensemble import Detector, DetectorConfig
 from dps.engine.detect.llm_label import (
     LLM_LABEL_TIER,
+    SCORE_CAP,
     LabelVerdict,
     gateway_usable,
     label,
@@ -38,11 +39,18 @@ from dps.engine.synth.llm_text import synthesize_text
 from dps.engine.synth.surrogates import (
     SurrogateEngine,
     SynthesisSeed,
+    WrappedSeed,
     generate_synthesis_seed,
     seed_bytes,
     seed_from_caller,
+    wrap_synthesis_seed,
 )
-from dps.engine.taxonomy import Sensitivity, entity_info, record_sensitivity
+from dps.engine.taxonomy import (
+    Sensitivity,
+    entity_info,
+    metric_entity_label,
+    record_sensitivity,
+)
 from dps.engine.transform import fpe
 from dps.engine.transform.apply import (
     ApplyOptions,
@@ -59,6 +67,7 @@ from dps.engine.transform.crypto import (
     wrap_key_material,
 )
 from dps.engine.transform.external import (
+    TOKENIZE_AUDIT,
     ExternalServiceError,
     ExternalTokenizer,
     binding_keys,
@@ -74,9 +83,9 @@ from dps.engine.verify import (
     label_only_entities,
     verify_output,
 )
-from dps.errors import CodedError
+from dps.errors import CodedError, safe_errors_text
 from dps.llm.gateway import LlmGateway
-from dps.observability import FINDINGS, TRANSFORMS, VERIFY_FAIL, get_logger
+from dps.observability import CURRENT_TENANT, FINDINGS, TRANSFORMS, VERIFY_FAIL, get_logger
 
 logger = get_logger(__name__)
 
@@ -159,7 +168,8 @@ class TransformResponse(BaseModel):
     plan: list[dict[str, Any]]
     key_material: KeyMaterial | None = None
     reveal_hints: list[RevealHint] = Field(default_factory=list)
-    synthesis_seed: SynthesisSeed | None = None
+    #: clear, or wrapped with ``options.wrap_key`` (F-20: a seed is key material)
+    synthesis_seed: SynthesisSeed | WrappedSeed | None = None
     # Where each replacement landed (``options.return_segments``); ``None`` unless asked.
     segments: list[OutputSegment] | None = None
     report: Report
@@ -173,8 +183,9 @@ class RevealResponse(BaseModel):
     report: Report
 
 
-#: T3 never outranks a checksum: a label's score is capped here (spec §5.3).
-T3_SCORE_CAP = 0.85
+#: T3 never outranks a checksum: a label's score is capped here (spec §5.3); the cap lives with
+#: the T3 module, which L2 discovery and L3 classification share (M5 Task 8B).
+T3_SCORE_CAP = SCORE_CAP
 
 
 class Leftovers(list[Finding]):
@@ -256,6 +267,8 @@ class PrivacyEngine:
         """
         try:
             policy = resolve_policy(ref, default_name=self.settings.default_policy)
+        except ValidationError as exc:  # S1: the rule, never a quoted value
+            raise EngineError(f"invalid policy: {safe_errors_text(exc.errors())}") from None
         except (KeyError, ValueError) as exc:
             raise EngineError(f"invalid policy: {exc}") from None
         if policy.verify.leakage_check == "warn" and not self.settings.verify_warn_allowed:
@@ -288,6 +301,10 @@ class PrivacyEngine:
             custom = custom_detector_from(
                 policy.detect.custom_recognizers, policy.detect.declared_fields
             )
+        except ValidationError as exc:  # S1: the rule, never a quoted value
+            raise EngineError(
+                f"invalid custom recognizers: {safe_errors_text(exc.errors())}"
+            ) from None
         except ValueError as exc:
             raise EngineError(f"invalid custom recognizers: {exc}") from None
         return Detector(config, ner=self.ner, custom=custom)
@@ -304,7 +321,7 @@ class PrivacyEngine:
             sensitivity = record_sensitivity(f.entity_type for f in findings)
         for f in findings:
             for d in f.detectors:
-                FINDINGS.labels(f.entity_type, d.split(":")[0]).inc()
+                FINDINGS.labels(metric_entity_label(f.entity_type), d.split(":")[0]).inc()
         return findings, sensitivity
 
     # -- T3: LLM metadata labelling (opt-in, value-free; spec §5.3) ---------------------------
@@ -463,7 +480,13 @@ class PrivacyEngine:
             locale=locale,
             tokenizer=self.tokenizer,
             binding_keys=self.token_binding,
+            tokenize_allowed=self._tokenize_allowed,  # F-11: the tenant's allow-list
+            on_tokenize=TOKENIZE_AUDIT.get(),  # F-11: one audit event per batch (Layer 1)
         )
+
+    def _tokenize_allowed(self, entity_type: str, profile: str | None) -> bool:
+        """F-11: the request's (or job's) tenant may tokenize ``entity_type`` under ``profile``."""
+        return self.settings.tokenizer_profile_allowed(CURRENT_TENANT.get(), entity_type, profile)
 
     @staticmethod
     def _ner_state(detector: Detector) -> NerState:
@@ -672,6 +695,7 @@ class PrivacyEngine:
         """
         t0 = time.perf_counter()
         policy = self.policy(policy_ref)
+        wrap_pem = self._wrap_pem(options)  # F-20: an unusable wrap_key fails before any work
         locale = self._locale(policy, options)
         detector = self._detector(policy, locale)
         findings, _ = self._detect(payload, detector, extra_findings)
@@ -748,11 +772,17 @@ class PrivacyEngine:
             duration_ms=(time.perf_counter() - t0) * 1000,
         )
         report.llm.update(llm)
+        seed_out: SynthesisSeed | WrappedSeed | None = seed if scope != "request" else None
+        if seed_out is not None and wrap_pem is not None:
+            try:  # F-20: the seed keys the D-A pseudonyms; it gets the DEK's wire protection
+                seed_out = wrap_synthesis_seed(seed, wrap_pem)
+            except ValueError as exc:
+                raise EngineError(f"wrap_key: {exc}") from None
         return TransformResponse(
             result=output,
             findings=findings,
             plan=explain_plan(plan),
-            synthesis_seed=seed if scope != "request" else None,
+            synthesis_seed=seed_out,
             segments=segments if options.return_segments else None,
             report=report,
         )

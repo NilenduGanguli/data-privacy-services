@@ -1107,3 +1107,451 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
 - Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
   `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
   semantics are documented in HANDOFF §5 and contract §8.3.
+
+## Task 0 — Preflight: the M0–M4 contract surface (finish stage, `fsec`)
+
+Finish-stage work (worktree `dps-wt-fsec`, branch `fsec`; programme plan §2.6 F1), run on the merged
+code (M0–M3 + M5), so the test describes what is built:
+- `tests/test_contract_surface.py`: `validate_run` **moved** — it lives in
+  `dps.layers.connectors.targets` (M2 as built), so `SURFACE` lists it there instead of under
+  `dps.jobs_models`; nothing was dropped. The route walk uses `fastapi.routing.iter_route_contexts`:
+  FastAPI 0.143 keeps included routers as nested `_IncludedRouter` entries, so the plan's
+  `app.routes` sees only the top-level routes (S3 auth-tenancy finder, 2026-10-14).
+- M4 is not merged into this branch yet: `dps.layers.scanner.scan_job` and `/api/v1/scans` are in
+  `M4_SURFACE` / `M4_ROUTES`, asserted by a **strict `xfail`** test. When the M4 merge brings them,
+  that test passes, the strict marker fails the run, and the merge moves the names into
+  `SURFACE` / `ROUTES` (the names are never dropped).
+- A missing `PARAMS` target is reported as missing (the plan skipped it silently).
+
+## Task 17 — Security review pass: fixes and the guard tests (finish stage, `fsec`)
+
+Finish-stage work (worktree `dps-wt-fsec`). The review ran as five lens finders plus an adversarial
+refutation panel before this task; `docs/security/2026-10-11-m5-security-review.md` lists S1–S13,
+every confirmed finding (F-01…F-22) and the refuted candidates. Differences from the plan text:
+- **S1:** the scrubbing core lives in `dps/errors.py` (`safe_error_items`, `safe_errors_text`,
+  framework-free so the engine and the policy store use it too); `dps/layers/api/validation.py`
+  renders it. Beyond dropping `input`/`ctx`/`url`, a message that would quote the input is replaced
+  (`union_tag_invalid`, `uuid_*`, `url_*`, or any message containing the scalar input — finder F5
+  showed `union_tag_invalid` echoing an SSN), and a `loc` part that is not a field name, path or index
+  is `<key>`. The value-quoting validators (`custom.py` entity names and recognizer names,
+  `policy.py` method names, `jsonpath.py` paths) now name the rule only; M0's
+  `tests/test_api.py`, `tests/test_policy.py` and M5's `tests/test_policy_store.py` asserted the method
+  name was echoed and now assert it is not (the validators still refuse). The plan's 422 test is in
+  `test_validation_errors.py` with the finders' echo cases.
+- **S3:** one rule beyond the plan: an alternation with an empty branch inside a repeat bounded above
+  3 is refused (the parser factors `(a|aa)+` into `a(|a)`). Stacked `*` in declared-field globs
+  collapse to one (a refuted finder candidate, kept as hardening).
+- **S4:** the plan's corpus expected `name = 'x' --` to be refused; M2 strips comments by design (the
+  statement is rendered from the parse tree), so the test asserts no comment reaches the compiled
+  statement instead.
+- **S5:** `check_scan_url`, `chromium_resolver_rules`, `forbidden_ip_reason`, `check_resolved_host`
+  are implemented and tested; the `POST /scans` and crawler wiring waits for the M4 merge (no scanner
+  on this branch) and is a blocking item of it. Python 3.12 prints an IPv4-mapped address as
+  `::ffff:169.254.169.254` (the plan expected `::ffff:a9fe:a9fe`); `normalize_host` now also accepts
+  a bare IP literal (IPv6 included). NAT64 (`64:ff9b::/96`) and 6to4 addresses are unwrapped too.
+- **S6:** the route walk uses `fastapi.routing.iter_route_contexts` (FastAPI 0.143 nests included
+  routers; the plan's `app.routes` walk would check two routes). The marker is the scope tuple.
+- **S11:** `Pragma: no-cache` too, and only when the route did not set its own `Cache-Control`.
+- **S13:** the static scan covers 28 M5 modules (log calls allow-listed, no exception text, no
+  prints outside the operator CLIs); `DOMAIN_ERRORS` lets `tabular.py` turn its own value-free
+  `CopulaError`/`ConstraintError`/`TabularUnavailable` into a job detail. `rekey` logs `counts={…}`
+  (an allow-listed field) and refuses a configuration with `RekeyConfigError` (its `reason` is
+  printed, never an arbitrary exception text). Finder F1 (Presidio at DEBUG) is fixed here:
+  `configure_logging` keeps the stdlib root logger at WARNING or above whatever `DPS_LOG_LEVEL` is
+  (structlog keeps the configured level) and caps the Presidio and spaCy loggers.
+- **S7:** `test_cross_tenant.py` stores the evidence pack through its own connection (the app's pools
+  belong to the test client's loop).
+
+## Security review fixes F-01…F-22 (finish stage, `fsec`)
+
+Each confirmed finding of the review (`docs/security/2026-10-11-m5-security-review.md` §3) is fixed
+test-first in its own commit; S-items folded into Task 17 are listed there.
+- **F-01 (D3 clone bypass):** the production designation follows the credential (`secret_ref`), not
+  only the row's tag — create/patch refuse a production credential without `admin`, `validate_run`
+  takes `production_refs` (defaulted, additive), and the retry route re-checks `admin` for
+  `in_place`/`append` (`targets.check_retry_scope`; the retry gap was noted by the crypto finder).
+  `tests/test_egress_tls.py`'s production connection uses its own credential (`test-pg-admin`), since
+  the jobs key's later TLS connection named the same `secret_ref`. The endpoint is not a marker.
+- **F-06 (RLS posture):** `evaluate_rls_posture(…, runtime_policies=())` (defaulted, additive) and a
+  catalogue query in `assert_rls_posture`; `_JobPlatform._connect` refuses a `CROSS_TENANT_PROBLEM` in
+  every environment. Not done: refusing `pg_migration_login == pg_user` statically — a deployment may
+  migrate with a login that is not the runtime one only by name; the catalogue check is what matters.
+- **F-07 (CSV export):** the finder's fix prefixed every text cell starting with `+`/`-`; that would
+  mangle exported phone numbers (`+44 …`), so `+`/`-` followed only by digits, spaces, dots, dashes
+  and parentheses stays unprefixed (Excel reads that as arithmetic at worst — no function call).
+- **F-08 (connection SSRF):** at accept a name that does not resolve is allowed (the API pod may not
+  resolve a database the workers reach; the driver cannot dial it either) — the scanner guard refuses
+  it instead (`strict_dns`). Hosts with underscores (`source_pg`) are tolerated for databases. A
+  `host_forbidden` at use is re-raised by the connection test (not reported as `connection_failed`).
+- **F-04 (NER DOB):** the targeted rule (NER yields to an overlapping typed hit of a higher tier)
+  instead of ranking every overlap by tier first: a global tier-first ranking would also reorder
+  pattern-vs-pattern overlaps (CARD_PAN vs AADHAAR etc.) the M0/M1 suites settle deliberately.
+- **F-10 (custom names):** custom tiers stay process-global (the planner, discovery and the batch
+  transformer read `entity_info`); per-request tiers would touch every engine path at the finish
+  stage. Bounded instead: only tiers above MEDIUM are stored, at most 5000 names, refusal past the cap.
+- **F-12 (synthesize methods):** refused at policy validation (not only at plan time) so every entry
+  point fails before detection runs; `KEYLESS_METHODS` moved to `dps/engine/policy.py` (re-exported by
+  `batch` and `planner`). `tests/test_planner.py::test_synthesize_fallbacks_and_reversibility_follow_the_registry`
+  became `test_synthesize_overrides_are_key_less_and_beat_keep_non_sensitive`.
+- **F-11 (tokenization oracle):** the allow-list is a deployment setting keyed by tenant (not a
+  `dps_tenant` column): it must work for Layer 1 without a metadata database. The Layer 1 audit hook
+  is bound by `begin_call` through a context variable (`external.TOKENIZE_AUDIT`), so every route
+  (JSON, NDJSON, documents) is covered without new engine call parameters. `tests/test_posture_m5.py`'s
+  production settings gained an allow-list.
+- **F-19 (profile-keyed caches):** `ApplyOptions.external_cache`, `TransformContext.external` and
+  `external_reveal_cache` changed key type to `methods.ExternalKey` (a three-tuple); callers outside
+  the engine (`tools/reveal_rows.py`) pass the cache through unchanged.
+- **F-13 (kcv binding):** `targets.GroupKeys` became `(kid, seed fingerprint, kcv | None)`;
+  migration `046_job_group_kcv.sql` (M5 range). `tests/db/test_groups.py` lists the new column.
+- **F-14 (once-only key):** compensation after commit (delete the unclaimed job or the group, else
+  cancel) rather than auditing inside the committing transaction — the audit sink is a batched
+  background writer, so its refusal is only known when `write` is called. The group create route no
+  longer uses `deps.audited` (it needs the group id to roll back).
+- **F-18 (policy in job rows):** sealed in the existing `spec_enc` blob (`SealedSelection.policy`)
+  instead of a new column: the blob is already per job, AAD-bound and re-sealed by `dps.rekey`.
+- **F-20 (seed wrap):** `TransformResponse.synthesis_seed` is `SynthesisSeed | WrappedSeed | None`;
+  `GroupRequest` forbids extra fields (a misspelt `wrap_key` is 422, not ignored). `/schema/synthesize`
+  is left as is (its seed keys schema generation only, no pseudonym of a real key).
+- **F-21 (KEK ring):** the previous KEK is a process registry filled by `load_kek` (keyed by the
+  current KEK) rather than a ring threaded through `HandlerContext`, the app state and every opener's
+  signature; `open_sealed(…, fallback=False)` keeps `dps.rekey` strict. The M4 scans route (merging
+  later) should pass `idempotency_alternates` like the job routes.
+- **F-22 (bind tag):** dual verification by an explicit version field (`reverse_params.bind_v`)
+  rather than trying both encodings. `bind_v` is caller-supplied, so a v2 hint *can* be presented
+  as v1; that is harmless because the entity-type rule leaves only the documented `None`/`""` v1
+  ambiguity (review round 1 N7). The entity-type rule applies to `external_tokenize` hints only (M0
+  envelope tests use other names for other methods).
+
+## Security review round 1 fixes B1–B3 (finish stage, `fsec`)
+
+The independent review of the fixes above (`~/.cache/dps-build/reports/S3-review-r1.md`) found three
+blocking defects; each is fixed test-first (`docs/security/2026-10-11-m5-security-review.md` §3.1,
+§3.2, §3.10). Differences from the first round and from the plans:
+- **B1 (F-02/S3, ReDoS):** the static filter alone was not a bound. Policy patterns and deny lists
+  now run on the **`regex` package** (new core dependency in `pyproject.toml`, `VERSION0`) with a
+  matching timeout under a per-call CPU budget (`regex_guard.PatternBudget`: 1 s + 50 µs per pattern
+  run + 1 µs per character per pattern, CPU time of the calling thread; the matcher releases the
+  GIL). Refusal is a `CodedError` (`custom_pattern_too_slow`, 422) mapped by `run_engine`, NDJSON and
+  the recognizer test; the L2 prepare, partition and discover handlers fail the job/partition with
+  it (no retry) and the finalize `_best_effort` steps record it. `check_pattern` stays as the first
+  filter and also refuses a pattern the `regex` module cannot compile. Declared-field globs:
+  `path_glob` now returns a `PathGlob` (no regex; `fullmatch(path) -> bool`, `match_parts`), which
+  replaces the first round's "adjacent `*` collapse"; `tests/security/test_regex_guard.py::
+  test_stacked_glob_stars_collapse` (asserted the compiled regex's text) became
+  `test_stacked_glob_stars_mean_one_star`. The timing tests run in a child process with a hard
+  limit, so a regression fails instead of hanging the suite.
+- **B2 (F-01):** a connection that already holds a production credential is changed or deleted
+  only with `admin` (`update_connection`, `delete_connection` load `production_refs`); the `PATCH`
+  route checks it before the TLS and SSRF checks of an endpoint change, as for a tagged connection.
+- **B3 (F-10):** supersedes "custom tiers stay process-global". Custom tiers live in a per-call
+  registry (`taxonomy.CustomEntities` in a context variable) bound by a new pure-ASGI middleware
+  (`dps.app._CallScope`, every HTTP route) and by `Consumer._guard` (every handler task), through
+  `dps.engine.call_scope` — `entity_info` and `register_entity` consult it transparently, so no
+  engine path changed signature. `custom.CustomTiers` registers a policy's tiers in each call that
+  uses a detector or a `BatchTransformer` built in another call (the worker's `RuntimeCache` shares
+  a job's transformer between partition handler tasks). The process-global `TAXONOMY` remains for
+  code outside a request or a job. Semantics change: a tier no longer leaks from one call into
+  another (a request naming a custom type without a tier reads MEDIUM). `tests/test_api_entities.py::
+  test_entities_never_list_custom_types_any_tenant_registered` asserted the process-wide
+  registration as its precondition; it now asserts the request's finding tier and that nothing
+  reached the process registry.
+- **Docs:** the review document's §4 "refuted" glob candidate is corrected (it was real), the
+  residual "length caps bound the work" is replaced by the budget arithmetic, and the non-blocking
+  wording items N2 (F-11 codebook residual), N3 (F-14 claim window) and N7 (above) are recorded.
+  Open from that review: N1 (Oracle `https_proxy` in a DSN), N4 (L2 `ApplyOptions` without
+  `tokenize_allowed`, not exploitable today), N5 (option keys echoed), N6 (the header test's name),
+  N8 (T8B, the D4 sweep lens, the SEC-2..5 record: F1 stream items outside this round).
+
+## Security review round 2 fixes R2-B1, R2-B2 (finish stage, `fsec`)
+
+The independent re-review of round 1 (`~/.cache/dps-build/reports/S3-review-r2.md`) found the
+round-1 pattern budget wrong in two ways; both are fixed test-first in `c371d2f`
+(`docs/security/2026-10-11-m5-security-review.md` §3.2, §5). Differences from round 1 and the plans:
+- **R2-B1 (the clock):** round 1 said the budget was "CPU time of the calling thread; the matcher
+  releases the GIL". It was not: the `regex` timeout counts the **process** CPU, and with
+  `concurrent=True` any thread running Python starved the matcher, so legitimate scans were refused
+  under ordinary load. Now `PatternBudget.run` runs a pattern in the calling thread **holding the
+  GIL** for at most `SLICE_SECONDS` (5 ms), and continues a longer run in a **matcher process**
+  (new `dps/engine/detect/pattern_process.py` — a pool of `DPS_PATTERN_PROCESSES` children of the
+  new standalone `pattern_child.py`, started on first use with `python -I` and an empty
+  environment), where the `regex` timeout is that run's own CPU; a pattern whose last such run
+  predicts it would outgrow the slice again starts there directly. `run` now returns **spans**
+  (`list[tuple[int, int]]`), not `regex.Match` objects (the matcher process sends spans back);
+  `PolicyCustomDetector.scan` reads `text[start:end]`. A matcher that dies or hangs is replaced and
+  its run refused (`PatternTooSlow`, fail closed). New settings in `dps/config.py`:
+  `pattern_cpu_seconds` (5.0) and `pattern_processes` (2); `create_app` and the worker's `main`
+  size the pool.
+- **R2-B2 (the allowance):** `BUDGET_BASE_SECONDS` 1.0 → 0.01, `BUDGET_PER_CALL_SECONDS` (50 µs) →
+  `BUDGET_PER_RUN_SECONDS` (20 µs), `BUDGET_PER_CHAR_SECONDS` 1 µs → 0.5 µs. `PatternBudget` gains
+  `ceiling` (an API request's total: `call_scope(pattern_ceiling=…)`, set by `_CallScope` from
+  `DPS_PATTERN_CPU_SECONDS`), `run_cap` (every run, L2 included: `bind_call_scope(pattern_run_cap=…)`
+  in `Consumer._guard`), and `for_stream()` / `item()` / `budget_scope()`: the NDJSON runner gives
+  every item its own budget drawn from the stream's, so an item spends only its own earnings plus
+  the stream's base. Deny lists are compiled by `custom.compile_deny_list` as a trie of exact
+  character classes (`deny_list_pattern`, case-sensitive classes taken from the matcher's own
+  case-insensitive comparison, cached per term set) instead of one flat case-insensitive
+  alternation — same spans (differential test), a flat cost per character.
+- **Post-write sample:** `jobs_run.verification_outcome` treats a post-write sample that returned
+  `{"error": code}` (a refused pattern, a target error) as `review_required` (fail closed, like the
+  identifier check); the evidence page says the sample did not run instead of "found personal data".
+- **Tests:** new `tests/security/test_pattern_budget_load.py` (4 of 5 fail on round 1's code) and
+  `tests/security/test_pattern_matcher.py`; `test_regex_guard.py` follows the renamed constant and
+  the spans API (and gains the request ceiling); `test_custom_entity_bounds.py`'s bare `Consumer`
+  gets its `settings` (the guard reads the run cap); `test_no_values_in_logs_m5.py` scans the two
+  new modules; `test_post_sample_review.py` gains the fail-closed case.
+- **N-r2-1 (non-blocking, partly fixed):** `check_pattern` also refuses the two constructs the
+  `regex` module reads differently from `re` — an unescaped `{` that is not a repeat count (a
+  fuzzy-match constraint there) and an unescaped `[` inside a set (a POSIX class there); the
+  `\s`/`\x1c`–`\x1f` and combining-mark differences are documented (§5), not changed.
+- **Trie bound:** a deny list whose trie would need more than 4x its characters of construction
+  work (only lists made of the Turkish i's, whose case matches overlap without being equal, can)
+  is matched by the flat alternation instead — never an unbounded build outside any budget.
+- Still open from the round-2 review: N-r2-2 (the matcher's per-run cost on short texts, about
+  2 µs: to measure on the 1M-row benchmark), N-r2-3 (production status is per tenant: recorded in
+  §5).
+
+## M4 merged into `fsec` — the security review's fixes on the scanner's paths (finish stage, `fsec`)
+
+Not a plan task: the merge that brings the UI scanner (`m4`, which already contains main as of
+`144cc65`) into `fsec` for its security review and Task 8B — `git merge --no-ff m4` (`c1d8c36`), three
+conflicts, both sides kept: the contract (M4's migration row with `dps_scan_event` beside the M5
+row with `046_job_group_kcv.sql`; M4's scan-spec paragraph beside the S5 paragraph),
+`discovery.py` (both import sets) and `posture.py` (F-11's allow-list rule gated by `serves`, like
+M4's tokenizer-token rule: the browser-worker never tokenizes). Then this stream's work was made to
+hold on what came in (security review §3.24; each item with a test that fails before it):
+
+- **F-02:** `RunOutcome.error_code` (new field); `ScanRunner.run` catches `PatternTooSlow`, clears
+  the frontier, saves the request counts and skips the redacted blocked-request events (no pattern
+  may run again: the call's allowance is spent); `scan_job` finalizes such a crawl as `failed`
+  (also a refusal that escapes `run`), and `finalize_scan` records `{"code":
+  "custom_pattern_too_slow", "where": "crawl"}` — no retry. `browser_worker.amain` calls
+  `configure_pattern_processes(settings.pattern_processes)` after the posture check.
+- **F-07:** `inventory._guard_cell` (both scan CSVs) uses the L2 export's `_SIGNED_DATA` rule; a lone
+  sign stays guarded (M4's choice).
+- **F-10:** `crawler.count_field_metrics` labels custom entity types `custom` on
+  `dps_scan_fields_total`.
+- **F-14 / F-21 (`POST /scans`):** a refused `scan.create` audit removes the scan
+  (`jobs.discard_unannounced`) before the 503; idempotency fingerprints under the previous KEK are
+  compared (`request_fingerprint_alternates`, `create_job(idempotency_alternates=…)`).
+- **F-18:** `redact_scan_spec` stores `policy_label(body)` for a policy body; `POST /scans` seals the
+  body in `spec_enc` (`dps.layers.scanner.seal_scan_policy`, `SealedSelection`, AAD
+  `dps_job.spec:<id>`); `dps.layers.scanner.stored_policy` reopens it for `open_runtime`,
+  `_policy_name` and the finalize without a runtime (`secret_unavailable` when it cannot be
+  opened). M4's `test_scans_api.py::test_policy_references_resolve_at_accept_and_pin_the_version`
+  reads the tuned body from `spec_enc` now, and `test_scan_policy_refs._claimed` seals it as the API
+  does.
+- **S1 (held):** M4's uncoded model refusals are the app's scrubbed 422 since the merge (`code:
+  invalid_request` added); `test_uncoded_model_refusals_stay_field_lists`, the contract and
+  `docs/technical/api-m4.md` say so.
+- **Task 0:** `tests/test_contract_surface.py` moves `M4_SURFACE`/`M4_ROUTES` into `SURFACE`/`ROUTES`
+  (more M4 names: the browser-worker entry points, the scan handlers, `ScanSpec`, `ScanRunner`,
+  `classify_field`, every scans route) and drops the strict `xfail` that waited for this merge.
+- **S7:** `tests/security/test_cross_tenant.py` walks a scan's routes too (control holds).
+- Not done here (the next step on `fsec`): Task 8B and the S5 wiring.
+- Commits: `c1d8c36` (merge), `cf4f66f` (Task 0), `dae4665` (the scanner twins), `9bf03d1` (S7,
+  posture test); report `~/.cache/dps-build/reports/FSEC-merge-m4.md`.
+
+## Task 8B — T3 metadata labelling in L2 discovery and L3 classification (finish stage, `fsec`)
+
+Finish-stage work (worktree `dps-wt-fsec`, branch `fsec`; programme plan §2.6 F1), on the merged code
+(M0–M5, M4 merged into `fsec`), after cherry-picking `fllm`'s egress fix `0fd76d0` (`5c27637` here:
+before it the verifier blocked every labelling prompt under `strict`, because `USERNAME` in the
+type list has a SWIFT BIC's shape). Every test goes through the real `LlmGateway.complete()` (the
+egress verifier, `strict`) and fakes only the provider seam (`_stellar`). Differences from the plan:
+
+- **L2 entry point:** `discovery.label_leftover_columns(columns, shape, rows, *, policy, engine,
+  settings) -> (columns, calls | None)`, called by `discover_job` right after `classify_columns`
+  (its signature unchanged) and before the snapshot is built, so the content hash covers the
+  labels. `None`: the policy does not list `llm_label` (no `progress.metrics.llm` is written); `0`:
+  asked for, no call made (stub or unconfigured gateway, no leftover column, a prompt the leak
+  guard or the egress verifier stopped).
+- **L2 leftovers** also exclude row locators, binary data and ObjectIds (`docpaths.forced_keep`),
+  besides keys. A document leaf is sent under its leaf name (`$.contacts[*].value` → `value`), not
+  the top-level field name `ColumnInfo.name` holds. Shapes are cut to 24 characters (discovery's
+  shapes end in `…` past 24; `FieldMeta` refuses longer ones).
+- **Several calls for wide tables:** a table with more leftover columns than
+  `DPS_LLM_LABEL_MAX_FIELDS` is labelled in calls of at most that many columns (one call would
+  skip the rest); still per column, never per row. L3 keeps one call per page, as planned.
+- **The policy's bar:** a verdict whose capped confidence (0.85) is below the policy's
+  `detect.min_score` changes nothing, in both layers — as Layer 1 does (`_t3_findings`). The cap
+  moved to `llm_label.SCORE_CAP`; `service.T3_SCORE_CAP` is kept as its alias.
+- **What a label changes (L2):** `entity_type`, `confidence`, `sensitivity` (taxonomy), detector
+  `llm_label`, and the methods `suggest_methods` gives that entity with the sampled values (length
+  rules included): `suggested`/`method`, `synthesize_suggested`/`synthesize_method`, `type_note`.
+  The anchor is set only when no column is one yet (`_with_anchor`, the rule `classify_columns`
+  uses): a label never moves an anchor.
+- **L3 entry points** in `classify.py` (`classify_field` unchanged): `leftover_field_meta`,
+  `page_protected`, `label_leftover_fields(...) -> (classes, LabelOutcome | None)`. The crawler
+  labels right after `classify_fields`, before fill plans, risk flags, metrics and screenshots, so
+  all of them follow the labels. The obfuscated capture re-extracts the page in a fresh tab; the
+  labels carry over to the same field there (`ScanRunner._with_labels`: same key and signature),
+  so a value pre-filled into a field only T3 recognised is masked in that capture too.
+- **A value-free L3 prompt** beyond the plan's list: the `type` attribute only when it is a known
+  input type (else `text`), `autocomplete` only as a dictionary token or `on`/`off` (both are
+  page-chosen text); the label as the inventory stores it (detector-redacted) — not value-free
+  enough: superseded by the S3b review r1 fix (B1, below: the label only when NER runs, never the
+  placeholder fallback, value tokens as shapes); a field with no name, id, label or placeholder is
+  not sent.
+- **`protected` (L3):** the plan's "pre-filled values and rendered texts" would protect every
+  label rendered on the page (a `<label>` is a text node), so every call would be refused. As
+  built (`page_protected`): what the fields hold or show (pre-filled and hidden values, a selected
+  option that has a value), the detectors' findings in rendered text (spans; whole texts under a
+  label hint), and every token of rendered or option text holding a digit or an `@`. A
+  placeholder option (`Choose…`, empty value) is not a value: protecting it blocked the call on
+  three demo pages (the egress verifier found "choose" in the fixed instructions).
+- **Figures:** `llm_label.job_llm_metrics(calls)` → `{"calls", "raw_values", "blocked"}` (calls
+  from the labelling outcomes; `raw_values`/`blocked` from the handler task's `LLM_STATS`). A
+  discover job writes it with each object's progress and at the end; a scan keeps it in
+  `RunOutcome.llm` (persisted in the finalize plan, so a retried finalize has it), writes it with
+  each page's progress (`DbScanSink.progress`, key `llm`) and at finalize.
+- **Tests:** `tests/test_llm_label_l2_l3.py` (13: the plan's five, plus the value-free meta, the leak
+  guard, chunking, a prompt the verifier stops, the placeholder option, page-chosen attributes),
+  `tests/scanner/test_crawler_llm_label.py` (2 crawls of the demo site with the D4 counters, and
+  the capture carry-over), `tests/connectors/test_discover_job_llm_label.py` (`discover_job` on a
+  real source table: the label in the stored snapshot, `progress.metrics.llm`) and
+  `tests/scanner/test_scan_llm_metrics.py` (a scan's figures with each page, at finalize and after
+  a retried finalize). The paused attempt's test file was kept and extended (`TextFacts` has had a
+  required `label_hint` since M4). Live on the lane's `scanner` stack (security review §3.27): a
+  scan with the tier against a fake Stellar labelled 2 fields, `calls 2, blocked 0`, D4 counters
+  +0, the prompts the model received free of demo values.
+- Commits: `5c27637` (the egress fix cherry-picked), `2e41975` (Task 8B), `ee31fa4` (job-level
+  tests); report `~/.cache/dps-build/reports/S3b-impl.md`.
+- **Known residual, not changed here (owner of `fllm`):** the egress verifier looks for protected
+  originals in the system message too (`0fd76d0` kept it; `tests/test_llm_egress.py` pins it). A
+  protected value that happens to occur inside the fixed instructions — normalised, as a
+  substring: "Personal", "Choose", first names such as "Seth", "Devi", "Abel" (≈0.4–0.7 % of
+  Faker first and last names, ≈5 % of generic words, measured) — blocks that labelling call under
+  `strict`: fail closed (no label, `blocked` counted), never a value sent. A table or page with
+  such a value gets no T3 labels. Measured on the lane's seeded demo `bank` tables (11 tables, 48
+  leftover columns, 500 sampled rows each): the calls of **5 of the 11 tables** were stopped, each
+  by a match inside the fixed instructions (one table also had one in its call data) (probe `~/.cache/dps-build/reports/S3b-impl/probes/
+  l2_t3_demo_tables.py`, `l2_t3_blocked_why.py`; counts only). Direction: exempt the registered
+  constant system prompts from the protected scan (they cannot carry call data; tests already pin
+  them as constants) — the module's leak guard still checks every protected value against the call
+  data first.
+
+## Task 17 S5 — the scanner's SSRF guard, wired (finish stage, `fsec`)
+
+The functions landed with Task 17 before M4 was on the branch; the wiring follows the M4 merge
+(security review §3.25). Differences from the plan:
+
+- **`POST /scans`** runs `netguard.check_scan_url` (in a thread: it resolves the host) after the
+  policy reference resolves and before `validate_scan`; a `NetGuardError` is a 422 with the
+  guard's code and value-free detail, audited as a refused `scan.create`. The model still answers
+  a non-http(s) or userinfo URL first, with `url_invalid`.
+- **The browser-worker checks again** (`scanner.check_start_url`, after the existing-evidence
+  branch, before any browser starts): a host that resolves elsewhere now than at accept (DNS
+  rebinding), or a scan queued before the check existed, fails with the guard's code, key purged,
+  no retry.
+- **Every hop, at crawl time** (beyond the plan: since D-C every connection of a scan context
+  goes through the scope proxy, which — not Chromium — resolves names): the proxy dials an allowed
+  hop only through `ScanGuard._dial_hop`, which resolves the host once
+  (`netguard.resolve_addresses`, on the event loop) and lets it through only when every address
+  passes `forbidden_ip_reason`; the proxy then connects to those addresses itself, so a second
+  lookup cannot answer differently. A refusal is a 403 counted `blocked` / `host_forbidden`
+  (resource type `unrouted`); a name that does not resolve stays a 502. `ScanGuard` gained
+  `allow_loopback` (default `True`; the crawler passes `env == "local"`) and `resolve` (tests).
+- **Chromium flag:** `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`
+  (`browser.RESOLVER_RULES = chromium_resolver_rules([PROXY_HOST])`, `browser.launch_args()`,
+  used by `get_browser`). The plan's rule (the registered hosts excluded) fails every scan: `MAP *`
+  matches IP literals too, so the proxy at 127.0.0.1 becomes unreachable
+  (`ERR_PROXY_CONNECTION_FAILED`, measured); and with every connection on the proxy, the browser
+  needs to resolve none of the registered hosts. One browser per process stays (no per-scan
+  launch). The `chromium` test fixture keeps `LAUNCH_ARGS`: its positive controls use unproxied
+  contexts; `tests/scanner/test_scan_ssrf_browser.py` launches with `launch_args()`.
+- **`forbidden_ip_reason` decides loopback first:** `::1` lies in the reserved `::/8`, so
+  `localhost` (127.0.0.1 and ::1) was refused even in `env=local` — by `check_scan_url`, and for a
+  `::1` connection host (F-08) too.
+- **Tests:** `tests/security/test_scan_ssrf.py` (the proxy: dials the checked address; metadata
+  plain, IPv4-mapped, among other addresses and NAT64-wrapped, on both proxy paths; loopback
+  outside local; an unresolvable name is a 502; the real resolver; the launch flag; `POST /scans`
+  (`db`)), `tests/scanner/test_scan_ssrf_browser.py` (the production launch reaches nothing
+  unproxied, a registered name through the proxy, a metadata answer refused; the browser-worker's
+  re-check (`db`)), `tests/security/test_netguard.py` (+ loopback on both IP versions, `localhost`
+  in local only). Every new test fails on the code before the change (checked on an export of the
+  previous commit). M4's `test_hosts_registered_on_the_admin_page_decide_what_a_tenant_may_scan`
+  registered a made-up name that does not resolve; it now resolves it through a test resolver
+  (the guard refuses an unresolvable registered host, as the plan's `check_scan_url` does).
+- **D4 re-check** (security review §3.27): the browser proofs, a T3 crawl, and live on the lane's
+  rebuilt `scanner` stack the smoke test's scanner block (34/34; `non_get`, `form_get`,
+  `logout_hits`, `admin_hits` +0, `non_get_allowed` 0) and a T3 scan (+0); container logs free of
+  demo values.
+- Commit: `90ed7df`; report `~/.cache/dps-build/reports/S3b-impl.md`.
+
+## S3b review r1 fix — B1: the L3 labelling prompt's label is value-free whatever its source (finish stage, `fsec`)
+
+Review `~/.cache/dps-build/reports/S3b-review-r1.md`, B1 (P1). As built in Task 8B the L3 prompt
+carried `redact_text(label)`, and `page_protected` protects digit/`@` tokens of rendered text
+only: a label from an `aria-label`, a `title`, the `placeholder` fallback or a hidden
+`aria-labelledby` target reached the model with any record value no detector names (the
+reviewer's probe: 4 of 4 made-up values sent, `blocked 0`); the same number in a rendered
+`<label for>` blocked the page's whole call through the leak guard.
+
+- **`classify.prompt_label(facts, detector)`** (used by `leftover_field_meta`): no label from the
+  `placeholder` fallback (its shape is sent already); no label unless the detector runs NER
+  (`classify.ner_runs`: an NER adapter, `ner` in the policy's tiers, its model loaded — read
+  after the label was analysed, so a model that failed to load counts as off); else the label
+  detector-redacted, then every whitespace token still holding a digit or an `@` replaced by its
+  `value_shape` (uncut), with only digit-free redaction tags (`<PERSON_NAME>`) kept inside such a
+  token — a page's own `<A1234567>` is shaped.
+- **Why NER is required, not only for attribute-sourced labels** (the review allowed either, or a
+  residual): per-record controls carry their record in a `<label>` wrap, a `<label for>` or an
+  `aria-labelledby` cell as often as in an `aria-label`, and only NER finds a bare name. The cost:
+  in the default images (no NER) T3 labels L3 fields by name, type, placeholder shape and hints
+  only. Residual (security review §5): a name NER misses.
+- **Not changed** (review's non-blocking N1–N7): `metrics.llm.blocked` still counts egress-verifier
+  blocks only; numeric hints can still collide with protected digit tokens (N2); the
+  `ipaddress` interpreter difference, the Azure WireServer address and `ScanGuard`'s default
+  stay for the owner.
+- **Tests** (all red on the previous commit's `classify.py`, green now):
+  `tests/test_llm_label_l2_l3.py` — `test_l3_labels_are_value_free_whatever_their_source`
+  (attribute-only and with a rendered `<label for>`), `test_l3_labels_are_sent_only_when_ner_runs`
+  (NER off, NER whose model failed to load), `test_a_label_value_token_keeps_its_redaction_tags`;
+  `tests/scanner/test_crawler_llm_label.py::test_record_values_in_labels_never_reach_the_model`
+  (real Chromium and `ScanRunner`, NER off/on × attribute-only / with a rendered label). Updated:
+  `test_scanner_labels_a_leftover_field` runs with NER (its label is sent), and the leak-guard
+  test now plants a name NER does not know in a label, shown as another field's value (a number
+  can no longer reach a label). `tests/scanner/helpers.FakeNer` is the T2 stand-in (no spaCy
+  model in the lanes).
+- Report `~/.cache/dps-build/reports/S3b-fix-r1.md`.
+
+## S3b review r2 fix — R2-B1: the L3 prompt's label is redacted whatever the policy's `min_score` (finish stage, `fsec`)
+
+Review `~/.cache/dps-build/reports/S3b-review-r2.md`, R2-B1 (P1). The r1 fix redacted the label
+with the scanner's detector, which drops every finding below the policy's `detect.min_score`
+(`Detector.detect`). T2 scores a person's name 0.85 (Presidio's spaCy default; `FakeNer` the
+same) and `DetectConfig.min_score` accepts 0–1, so a valid custom policy above 0.85 (with the
+`ner` and `llm_label` tiers, on a `WITH_NER` image) sent every name NER found in every label —
+`ner_runs` stayed true. The reviewer's Chromium probe (a nominees table, per-row checkboxes
+labelled by the neighbouring name cell, `nearest_text`) found 2 of 2 names in the provider's
+messages at 0.9, with `progress.metrics.llm = {calls 1, raw_values 0, blocked 0}`. Shipped
+presets use 0.5–0.6.
+
+- **`classify.prompt_label`** redacts the label with `_recall_first(detector)`: a copy of the
+  detector (same tiers, NER adapter, locale and custom recognizers) at
+  `classify.PROMPT_LABEL_MIN_SCORE = 0.0` — every span any tier reports, at any score. The
+  caller's detector is not changed; the policy's threshold still governs what a job transforms,
+  the scan's findings, `page_protected` and the labels the inventory stores.
+- **Why 0, not the review's suggested floor of 0.4** (the NER adapter's `score_threshold`, below
+  which Presidio reports nothing): `resolve_overlaps` lets a typed hit of a higher sensitivity
+  tier win over an overlapping NER hit, and typed hits can score below 0.4 (`NHS_NUMBER` and
+  `SWIFT_BIC` 0.3 with context; custom recognizers from 0). Filtering such a winner at 0.4 would
+  drop the name's redaction with it. Lowering the threshold only adds findings (a whole-value
+  finding replaces the whole label), so the prompt's label is never less redacted than before;
+  over-redaction costs label detail only.
+- **Not changed:** `page_protected` and the inventory's stored labels still follow the policy's
+  `min_score` (storage, outside P1 — the review's note on stored attribute labels stands for the
+  owner); r1's N1–N7 and r2's N8–N9 stay open.
+- **Tests** (every case above 0.85 red on `3d257a3`, all green now):
+  `tests/test_llm_label_l2_l3.py` —
+  `test_l3_label_names_are_redacted_whatever_the_policy_min_score` (0.86, 0.9, 1.0; real
+  `complete()` under `strict`, provider faked at `_stellar`: the name never reaches the provider,
+  the label is sent, one call, `{calls 1, raw_values 0, blocked 0}`) and
+  `test_prompt_label_is_redacted_recall_first` (0, 0.6, 0.86, 0.9, 1.0; a `nearest_text` label
+  that is only a name and a `title` label; the caller's detector keeps its threshold);
+  `tests/scanner/test_crawler_llm_label.py::
+  test_names_in_labels_never_reach_the_model_whatever_the_policy_min_score` (real Chromium and
+  `ScanRunner`, the nominees table at 0.6 and 0.9: both labels sent as `<PERSON_NAME>`, 0 name
+  parts sent, one call, no write).
+- Security review §3.26 states the threshold behaviour; HANDOFF §17.1 updated.
+- Report `~/.cache/dps-build/reports/S3b-fix-r2.md`.

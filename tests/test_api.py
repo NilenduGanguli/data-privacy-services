@@ -152,7 +152,9 @@ def test_synthesize_presets_plan_validate(client) -> None:  # noqa: ANN001
         json={"policy": {"treat": {"SSN": {"method": "teleport"}}}},
         headers=RO,
     )
-    assert bad.status_code == 400 and "teleport" in bad.json()["detail"]
+    # S1 (M5 Task 17): the rule is named, the submitted value is not echoed
+    assert bad.status_code == 400 and "unknown method" in bad.json()["detail"]
+    assert "teleport" not in bad.json()["detail"]
     good = c.post(
         "/api/v1/policies/validate",
         json={"policy": {"preset": "pci-dss", "output": {"token_style": "envelope"}}},

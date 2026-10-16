@@ -18,6 +18,7 @@ audited ``rejected``), and ``GET /jobs`` lists no scan for a key without it (S2 
 
 from __future__ import annotations
 
+import contextlib
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Request, Response
@@ -26,7 +27,7 @@ from pydantic import BaseModel, ConfigDict
 from dps import jobs
 from dps.auth import require_scope
 from dps.config import Settings
-from dps.connections import get_connection
+from dps.connections import get_connection, production_refs
 from dps.jobs import Job, JobKind, JobState
 from dps.jobs_models import ConsistencySpec, DiscoverSpec, RunSpec, SpecError
 from dps.layers.api.deps import (
@@ -39,6 +40,7 @@ from dps.layers.api.deps import (
     principal_of,
     rejected,
     request_fingerprint,
+    request_fingerprint_alternates,
     require_db,
     tenant_of,
 )
@@ -108,7 +110,12 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
         body.policy = await resolve(request, body.policy)  # M5: @name[:vN] at accept time
         tenant, key = tenant_of(request), idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
-        earlier = await jobs.find_by_idempotency(tenant, key, fingerprint=fp) if key else None
+        alternates = await request_fingerprint_alternates(request) if key else []
+        earlier = (
+            await jobs.find_by_idempotency(tenant, key, fingerprint=fp, alternates=alternates)
+            if key
+            else None
+        )
         if earlier is None:
             job = await submit_discover(
                 body,
@@ -118,6 +125,7 @@ async def discover(body: DiscoverSpec, request: Request, response: Response) -> 
                 kek=kek_of(request),
                 idempotency_key=key,
                 idempotency_fp=fp,
+                idempotency_alternates=alternates,
             )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "job.create", exc) from None
@@ -155,8 +163,11 @@ async def run(body: RunSpec, request: Request, response: Response) -> dict[str, 
         key = idempotency_key(request)
         fp = await request_fingerprint(request) if key else None
         earlier = None
+        alternates = await request_fingerprint_alternates(request) if key else []
         if key:  # a key reused with another request is refused before any validation (as on L1)
-            earlier = await jobs.find_by_idempotency(tenant_of(request), key, fingerprint=fp)
+            earlier = await jobs.find_by_idempotency(
+                tenant_of(request), key, fingerprint=fp, alternates=alternates
+            )
         # M5: an @name[:vN] reference becomes the stored body before validation, so the job
         # records exactly the version it ran
         body.policy = await resolve(request, body.policy)
@@ -173,10 +184,21 @@ async def run(body: RunSpec, request: Request, response: Response) -> dict[str, 
             kek=kek_of(request),
             idempotency_key=key,
             idempotency_fp=fp,
+            idempotency_alternates=alternates,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "job.create", exc) from None
-    audit_action(request, action="job.create", status=200 if sub.replay else 202, job_id=sub.job.id)
+    try:
+        audit_action(
+            request, action="job.create", status=200 if sub.replay else 202, job_id=sub.job.id
+        )
+    except DpsHttpError as exc:
+        # F-14: the key is returned once; a job whose answer fails is never left holding it
+        if not sub.replay:
+            await jobs.discard_unannounced(tenant_of(request), sub.job.id)
+        with contextlib.suppress(DpsHttpError):  # best effort: the sink may still be full
+            rejected(request, "job.create", exc, job_id=sub.job.id)
+        raise
     if sub.replay:
         return _replayed(response, sub.job)
     out: dict[str, Any] = {"job": _job(sub.job)}
@@ -292,11 +314,17 @@ async def retry(
     async def run_retry() -> dict[str, Any]:
         tenant = tenant_of(request)
         job = await _owned(request, job_id)
-        # D3: a retry writes again — into a production-tagged connection it needs admin, as the
-        # run did at submission (the job's target connection, else its source)
+        # D3: a retry writes again — into a production connection (tagged, or holding a
+        # production credential) it needs admin, as the run did at submission (the job's target
+        # connection, else its source)
         written_id = job.target_connection_id or job.connection_id
         written = await get_connection(tenant, written_id) if written_id else None
-        check_retry_scope(job, written, principal=principal_of(request))
+        check_retry_scope(
+            job,
+            written,
+            principal=principal_of(request),
+            production_refs=await production_refs(tenant),
+        )
         sealed: bytes | None = None
         consistency = body.consistency if body is not None else None
         if consistency is not None and (consistency.key_material or consistency.synthesis_seed):

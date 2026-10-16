@@ -203,7 +203,9 @@ def _m5_problems(
     The KEK rule applies wherever a worker runs (``pg_host`` set, contract §10); the audit and
     embedded-worker rules are M2's (:func:`_m2_problems`), for the same reason. ``serves=False``
     (the browser-worker) skips the rules of components that role does not run: the tokenizer
-    token and the CORS origins.
+    token, the tokenizer allow-list (F-11: a scan's obfuscate fill never calls the tokenizer — its
+    ``apply_plan`` gets no adapter, ``ApplyOptions.tokenizer`` is ``None``, so ``external_tokenize``
+    fails closed) and the CORS origins.
     """
     problems = [
         f"{name} must be provided as {name}_FILE (a mounted secret), not a literal "
@@ -219,6 +221,15 @@ def _m5_problems(
     problems += _egress_problems(settings)
     if serves and settings.tokenizer_provider == "http" and not settings.tokenizer_token:
         problems.append("DPS_TOKENIZER_TOKEN_FILE must be set when the tokenizer is enabled")
+    if (
+        serves
+        and settings.tokenizer_provider == "http"
+        and not settings.tokenizer_profiles_restricted
+    ):
+        problems.append(  # F-11: otherwise any obfuscate key is a tokenization oracle
+            "DPS_TOKENIZER_PROFILES must list the entity types and profiles each tenant may "
+            "tokenize when the tokenizer is enabled"
+        )
     if serves and "*" in settings.cors_origin_list:
         problems.append(
             "DPS_CORS_ORIGINS must list origins explicitly (or be empty for same-origin only)"

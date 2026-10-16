@@ -40,6 +40,14 @@ JOB_BLOBS = (("key_enc", "dps_job.key"), ("spec_enc", "dps_job.spec"))
 CONNECTION_AAD = "dps_connection.secret"
 
 
+class RekeyConfigError(ValueError):
+    """``python -m dps.rekey`` cannot run with this configuration (value-free reason)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass
 class RekeyCounts:
     """What one run found and did (counts only)."""
@@ -56,14 +64,14 @@ def _reseal(
     """The blob re-sealed with ``current`` when only a previous KEK opens it, else ``None``."""
     counts.rows += 1
     try:
-        open_sealed(current, blob, aad=aad)
+        open_sealed(current, blob, aad=aad, fallback=False)
         counts.already_current += 1
         return None
     except SealError:
         pass
     for old in previous:
         try:
-            plain = open_sealed(old, blob, aad=aad)
+            plain = open_sealed(old, blob, aad=aad, fallback=False)
         except SealError:
             continue
         return seal(current, plain, aad=aad)
@@ -79,7 +87,7 @@ async def rekey(settings: Settings, *, dry_run: bool = False) -> RekeyCounts:
     """
     ring = kek_ring(settings)
     if not settings.job_kek or not ring:
-        raise ValueError("DPS_JOB_KEK (DPS_JOB_KEK_FILE) must be set")
+        raise RekeyConfigError("DPS_JOB_KEK (DPS_JOB_KEK_FILE) must be set")
     current, previous = ring[0], ring[1:]
     counts = RekeyCounts()
     s = db.schema_ident(settings)
@@ -140,7 +148,7 @@ async def rekey(settings: Settings, *, dry_run: bool = False) -> RekeyCounts:
                     counts.resealed += 1
                 else:
                     counts.already_current += 1
-    logger.info("rekey_done", dry_run=dry_run, **asdict(counts))
+    logger.info("rekey_done", counts={**asdict(counts), "dry_run": int(dry_run)})
     return counts
 
 
@@ -157,8 +165,8 @@ async def amain(argv: Sequence[str] | None = None, *, settings: Settings | None 
     await db.init_worker_pool(settings)
     try:
         counts = await rekey(settings, dry_run=args.dry_run)
-    except ValueError as exc:
-        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+    except RekeyConfigError as exc:  # a configuration message (names settings, never values)
+        print(json.dumps({"error": exc.reason}), file=sys.stderr)
         return EXIT_CONFIG
     finally:
         await db.close_pools()

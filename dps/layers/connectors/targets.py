@@ -7,8 +7,8 @@ helpers are what ``prepare`` turns into the stored, value-free :class:`RunPlan`.
 **Validation order** (each rule raises :class:`~dps.jobs_models.SpecError` with a value-free
 detail): ``kek_unconfigured`` · ``engine_unavailable`` · ``snapshot_not_accepted`` ·
 ``connection_role`` · ``confirm_write_required`` (``in_place``/``append``) ·
-``admin_scope_required`` (any write mode into a ``production``-tagged connection; a retry checks
-it again, :func:`check_retry_scope`) ·
+``admin_scope_required`` (any write mode into a production connection — tagged ``production`` or
+holding a production credential; a retry checks it again, :func:`check_retry_scope`) ·
 ``in_place_invalid`` · ``pk_transform_in_place`` · ``pk_strategy_required`` ·
 ``pk_strategy_invalid`` (token key not reversible, synthesize token, same-table token/prefix or a
 key that is not one integer column, an offset on a non-integer key or a prefix on a non-text key)
@@ -49,11 +49,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dps.auth import Principal
 from dps.config import Settings
-from dps.connections import Connection
+from dps.connections import Connection, holds_production_credentials
 from dps.engine.batch import KEYLESS_METHODS, ColumnPlan, PseudonymColumn
 from dps.engine.policy import MethodSpec, resolve_policy
 from dps.engine.synth.keys import INT_DIGITS, INT_LIMITS, LINK_ENTITIES, MIN_PSEUDONYM_LIMIT
 from dps.engine.taxonomy import Sensitivity, entity_info
+from dps.engine.transform.crypto import kcv_matches, key_material_from_caller
 from dps.engine.transform.methods import METHODS
 from dps.jobs import Job, JobKind
 from dps.jobs_models import ClassificationSnapshot, ColumnClassification, RunSpec, SpecError
@@ -82,7 +83,8 @@ TYPE_RE = re.compile(r'^[a-z][a-z0-9 _(),\[\]".]*$')
 ORACLE_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9 _(),]*$")
 _CREATED_TYPE_RE = {"postgres": TYPE_RE, "oracle": ORACLE_TYPE_RE}
 #: ``(kid, seed_fingerprint)`` of a job group.
-GroupKeys = tuple[str, str]
+#: A job group's public identifiers: ``(kid, seed fingerprint, key check value or None)``.
+GroupKeys = tuple[str, str, str | None]
 FREE_TEXT_METHOD = "det_token"
 #: Source kinds whose planned output is created as ``text``.
 _TEXT_OUTPUT_KINDS = frozenset({"text", "char", "lob_text", "json", "other"})
@@ -433,11 +435,18 @@ def _written_connection(
     return target_conn
 
 
-def check_retry_scope(job: Job, written: Connection | None, *, principal: Principal) -> None:
+def check_retry_scope(
+    job: Job,
+    written: Connection | None,
+    *,
+    principal: Principal,
+    production_refs: frozenset[str],
+) -> None:
     """A retry restarts a run job's writes: when the connection it writes (``written``: the job's
-    target connection, else its source) is tagged ``production``, the retry needs ``admin``
-    again, whatever the write mode — the same gate :func:`validate_run` applied at submission
-    (S1-M3 r1 security B1).
+    target connection, else its source) is a production connection — tagged ``production`` or
+    holding a production credential (``production_refs``) — the retry needs ``admin`` again,
+    whatever the write mode: the same gate :func:`validate_run` applied at submission (S1-M3 r1
+    security B1; D3 bound to the credentials, S3 security review).
 
     Raises:
         SpecError: ``admin_scope_required`` (403).
@@ -446,14 +455,14 @@ def check_retry_scope(job: Job, written: Connection | None, *, principal: Princi
     if (
         job.kind == JobKind.run
         and written is not None
-        and written.production
+        and holds_production_credentials(written, production_refs)
         and not principal.has_scope("admin")
     ):
         raise _fail(
             "admin_scope_required",
             403,
-            f"retrying {mode or 'a run'} that writes a production-tagged connection needs the "
-            "admin scope",
+            f"retrying {mode or 'a run'} that writes a production connection (its tag or "
+            "credentials) needs the admin scope",
         )
 
 
@@ -462,7 +471,7 @@ def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
         return
     if group is None:
         raise _fail("group_not_found", 404, "job group not found")
-    kid, fingerprint = group
+    kid, fingerprint, kcv = group
     consistency = spec.consistency
     mismatch = _fail(
         "group_key_mismatch", 409, "the run must carry the job group's key material and seed"
@@ -473,6 +482,8 @@ def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
         km = consistency.key_material
         if not isinstance(km, dict) or km.get("kid") != kid:
             raise mismatch
+        if kcv is not None and not dek_matches(km, kcv):  # F-13: the DEK, not only the kid
+            raise mismatch
     else:
         seed = consistency.synthesis_seed
         text = seed.get("seed") if isinstance(seed, dict) else None
@@ -482,6 +493,16 @@ def _check_group(spec: RunSpec, group: GroupKeys | None) -> None:
             matches = False
         if not matches:
             raise mismatch
+
+
+def dek_matches(material: dict[str, Any], kcv: str) -> bool:
+    """F-13: caller key material whose DEK matches the stored key check value (constant time);
+    material that does not parse never matches."""
+    try:
+        km = key_material_from_caller(material)
+        return kcv_matches(km, kcv)
+    except (ValueError, KeyError):
+        return False
 
 
 def _check_append(spec: RunSpec, snapshot: ClassificationSnapshot) -> None:
@@ -641,10 +662,14 @@ def validate_run(
     kek: bytes | None = None,
     group: GroupKeys | None = None,
     child_snapshot: ClassificationSnapshot | None = None,
+    production_refs: frozenset[str] = frozenset(),
 ) -> None:
     """Refuse a run DPS must not start (module docstring for the order and codes).
 
     ``child_snapshot`` is the accepted snapshot a linked generation names (M5 Task 7B).
+    ``production_refs``: the tenant's production credentials (``dps.connections.production_refs``);
+    any write through a connection holding one needs ``admin`` like a production-tagged
+    connection (D3 bound to the credentials, S3 security review).
 
     Raises:
         SpecError: the first rule the spec breaks, with its code and HTTP status.
@@ -680,14 +705,21 @@ def validate_run(
         raise _fail("connection_role", 422, "the written connection lacks the target role")
     if mode in _DATABASE_WRITES and not target.confirm_write:
         raise _fail("confirm_write_required", 422, f"{mode} writes need confirm_write: true")
-    # D3 (S1-M3 r1 security B1): every write into a production-tagged connection needs admin —
-    # a table load truncates or upserts an existing table or collection, a files target writes
-    # production storage — not only in_place/append (which also need confirm_write)
-    if written is not None and written.production and not principal.has_scope("admin"):
+    # D3 (S1-M3 r1 security B1): every write into a production connection needs admin — a table
+    # load truncates or upserts an existing table or collection, a files target writes production
+    # storage — not only in_place/append (which also need confirm_write). A production connection
+    # is tagged ``production`` or holds a production credential (D3 bound to the credentials, S3
+    # security review): an untagged clone of a production login is production too.
+    if (
+        written is not None
+        and holds_production_credentials(written, production_refs)
+        and not principal.has_scope("admin")
+    ):
         raise _fail(
             "admin_scope_required",
             403,
-            f"{mode} writes to a production-tagged connection need the admin scope",
+            f"{mode} writes to a production connection (its tag or credentials) need the admin "
+            "scope",
         )
     keys = _key_columns(snapshot)
     if spec.mode == "synthesize":

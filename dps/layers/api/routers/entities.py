@@ -1,15 +1,16 @@
 """GET /api/v1/entities and POST /api/v1/policies/test-recognizer (console Policies page).
 
-``GET /entities`` lists the built-in taxonomy only. M0's registry of custom types is process-wide:
-any tenant's inline policy registers its recognizers' types, names, ``custom:<recognizer>``
-descriptions and tiers there, so listing it would show one tenant's policy metadata to every other
-tenant. Custom types come back once M2 stores policies per tenant (the console already knows the
-custom types of the policy it is editing).
+``GET /entities`` lists the built-in taxonomy only. Custom types were registered process-wide in
+M0, so listing them would have shown one tenant's policy metadata to every other tenant; since the
+S3 review (round 1 B3) a request's custom tiers stay in that request (``dps.engine.call_scope``),
+and the process-global registry only holds what code outside a request registered — still never
+listed. The console already knows the custom types of the policy it is editing.
 
 The recognizer test answers with offsets only: the sample text is neither stored nor echoed, and
-nothing is registered (a recognizer's ``sensitivity`` is dropped before the detector is built, so a
-test cannot change the process-wide taxonomy). Python's ``re`` has no timeout, so the route bounds
-the text (20 000 characters), each pattern (500 characters) and the number of patterns (50).
+nothing is registered (a recognizer's ``sensitivity`` is dropped before the detector is built). The
+route bounds the text (20 000 characters), each pattern (500 characters) and the number of
+patterns (50), and the patterns run under the request's CPU budget like every policy pattern
+(S3 review round 1 B1): one that runs past it answers 422 ``custom_pattern_too_slow``.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dps.auth import require_scope
 from dps.engine.detect.custom import PolicyCustomDetector, RecognizerSpec
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.taxonomy import TAXONOMY, Family, entity_info, is_builtin_entity
 from dps.layers.api.common import CodedHTTPException
 from dps.layers.documents.models import validation_message
@@ -116,6 +118,10 @@ def test_recognizer(body: RecognizerTestRequest) -> RecognizerTestOut:
         )
     detector = PolicyCustomDetector([spec.model_copy(update={"sensitivity": None})], [])
     base = {p.name: p.score for p in spec.patterns}
+    try:
+        hits = detector.scan(body.text, None)
+    except PatternTooSlow as exc:  # S3 review round 1 B1: refused, never a pinned CPU
+        raise CodedHTTPException(exc.status, exc.code, exc.detail) from None
     matches = [
         RecognizerMatch(
             start=h.start,
@@ -126,7 +132,7 @@ def test_recognizer(body: RecognizerTestRequest) -> RecognizerTestOut:
             context=h.evidence.startswith("custom-pattern:")
             and h.score > base.get(h.evidence.removeprefix("custom-pattern:"), h.score),
         )
-        for h in sorted(detector.scan(body.text, None), key=lambda h: (h.start, h.end))
+        for h in sorted(hits, key=lambda h: (h.start, h.end))
     ]
     document = {"recognizers": [spec.model_dump(mode="json", exclude_defaults=True)]}
     return RecognizerTestOut(

@@ -27,6 +27,7 @@ M5_FILES = [
     "043_policies.sql",
     "044_llm_exposure.sql",
     "045_policy_directory.sql",
+    "046_job_group_kcv.sql",  # S3 security review F-13
 ]
 
 

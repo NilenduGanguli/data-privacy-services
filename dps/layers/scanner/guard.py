@@ -22,6 +22,14 @@ request of every page, popup and iframe of that context:
   for plain HTTP (and plaintext inside a tunnel: a ``ws://`` socket) it also applies the method
   rule and the fill-value rule. A hop it refuses is counted with resource type ``unrouted`` and
   page ``None``.
+* **Addresses, on every hop** (S5, security review). The proxy dials an allowed hop only through
+  ``_dial_hop``: the host is resolved once (``netguard.resolve_addresses``) and every address it
+  resolves to must pass ``netguard.forbidden_ip_reason`` — no link-local or cloud metadata
+  address, multicast, unspecified or reserved address (IPv4-mapped, NAT64 and 6to4 IPv6
+  unwrapped), and no loopback unless ``allow_loopback`` (``env=local``) — and the proxy connects
+  to those addresses itself, so a registered name that resolves (or is rebound) to the metadata
+  endpoint is never reached. A refusal is counted with reason ``host_forbidden``. Chromium
+  resolves no name itself (``browser.RESOLVER_RULES``): every lookup of a scan happens here.
 * **Scope paths, on every hop.** The scan's deny list holds for every request of the scan (any
   resource type, any frame), and its allow list for every navigation (main frame and sub-frames):
   ``path_verdict`` (``CrawlScope.request_path_verdict``) is applied by the route handler and, for
@@ -133,7 +141,7 @@ import asyncio
 import contextlib
 import re
 from collections import Counter
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
@@ -152,6 +160,7 @@ from playwright.async_api import Error as PlaywrightError
 from dps.engine.verify import normalise
 from dps.layers.scanner.models import RequestCount
 from dps.layers.scanner.proxy import ProxySettings, ScopeProxy
+from dps.netguard import forbidden_ip_reason, is_ip, resolve_addresses
 from dps.observability import SCAN_REQUESTS
 
 ALLOWED_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
@@ -171,6 +180,8 @@ KNOWN_METHODS: frozenset[str] = frozenset(
 MAX_BLOCKED_KEPT = 2000  # blocked requests kept in memory for the navigation log
 #: resource type of a hop only the scope proxy saw (a redirect hop or a request no route saw)
 UNROUTED = "unrouted"
+#: (host, port) -> every address the host resolves to (``netguard.resolve_addresses``)
+Resolve = Callable[[str, int], Awaitable[list[str]]]
 CLOSE_NAVIGATION_TIMEOUT_MS = 5000  # ``ScanGuard.close``: the about:blank navigation
 _MAX_DECODES = 4
 _PLAIN_LABEL = re.compile(r"^[a-z](?:[a-z-]{0,61}[a-z])?$")
@@ -454,7 +465,8 @@ class Decision:
 
     ``reason``: ``ok`` | ``scheme`` | ``method`` | ``host`` | ``filled_navigation`` |
     ``filled_value`` | ``filled_request`` | ``closing`` | ``guard_error``; at the scope proxy also
-    ``service_worker`` and ``speculative``; for a use of a locked API (no request exists)
+    ``service_worker``, ``speculative`` and ``host_forbidden`` (an allowed host that resolves to
+    a forbidden address, S5); for a use of a locked API (no request exists)
     ``api_removed``; for the scope's path rail ``deny`` (any request) and ``not_allowed`` (a
     navigation). An *allowed* row with reason ``deny`` / ``not_allowed`` records an HTTPS redirect
     hop that reached such a path (it could not be refused, see the module docstring).
@@ -596,12 +608,18 @@ class ScanGuard:
         *,
         host_allowed: Callable[[str], bool],
         path_verdict: Callable[[str], str] | None = None,
+        allow_loopback: bool = True,
+        resolve: Resolve | None = None,
     ) -> None:
         """``host_allowed(host)``: the scope's host rule. ``path_verdict(url)``: the scope's path
         rail (``ok`` | ``deny`` | ``not_allowed``; ``CrawlScope.request_path_verdict``), ``None``
-        for none (guard unit tests)."""
+        for none (guard unit tests). ``allow_loopback``: the address rule lets loopback through
+        (``env=local`` only; the crawler passes it). ``resolve``: the host lookup of the address
+        rule (``netguard.resolve_addresses``; tests inject a fake)."""
         self._host_allowed = host_allowed
         self._path_verdict = path_verdict
+        self._allow_loopback = allow_loopback
+        self._resolve: Resolve = resolve or resolve_addresses
         self._filled: set[Page] = set()
         self._needles: set[str] = set()
         self._page_no: dict[Page, int | None] = {}
@@ -611,7 +629,7 @@ class ScanGuard:
         self._closes_in_flight = 0
         self._context: BrowserContext | None = None
         self._locked_at_birth = False
-        self._proxy = ScopeProxy(self._check_hop)
+        self._proxy = ScopeProxy(self._check_hop, dial=self._dial_hop)
         self.blocked_total = 0
         self.websockets_closed = 0
         self.pages_left_open = 0
@@ -1001,6 +1019,36 @@ class ScanGuard:
             stored = stored_host(host, allowed=allowed)
             self._record(decision, None, stored_method(method), UNROUTED, stored, url)
         return decision.allow
+
+    async def _dial_hop(self, method: str, url: str, host: str, port: int) -> list[str] | None:
+        """The scope proxy's question before it dials an allowed hop (S5): every address ``host``
+        resolves to, when each passes the address rule; ``None`` — counted ``host_forbidden`` —
+        when any is link-local or a cloud metadata address, multicast, unspecified, reserved or
+        (unless ``allow_loopback``) loopback. A name that does not resolve raises ``OSError``
+        (the proxy's 502: a failed dial, not a refusal)."""
+        try:
+            addresses = [host] if is_ip(host) else await self._resolve(host, port)
+        except UnicodeError:  # not a name a resolver can encode (IDNA): it resolves to nothing
+            raise OSError("the host does not resolve") from None
+        if not addresses:
+            raise OSError("the host has no address")
+        for address in addresses:
+            try:
+                reason = forbidden_ip_reason(address, allow_loopback=self._allow_loopback)
+            except ValueError:
+                reason = "non-routable address"
+            if reason is not None:
+                stored = stored_host(host, allowed=self._host_allowed(host))
+                self._record(
+                    Decision(False, "host_forbidden"),
+                    None,
+                    stored_method(method),
+                    UNROUTED,
+                    stored,
+                    url,
+                )
+                return None
+        return addresses
 
     async def _handle(self, route: Route) -> None:
         request = route.request

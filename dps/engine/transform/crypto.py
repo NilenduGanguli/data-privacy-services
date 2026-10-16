@@ -23,6 +23,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
 import re
 import secrets
 from datetime import UTC, datetime
@@ -218,20 +219,41 @@ def binding_key_from_kek(kek: bytes) -> bytes:
     return hkdf.derive(kek)
 
 
+#: The current version of the external-token bind tag (S3 review F-22). Version 1 is still
+#: verified for hints issued before it.
+BINDING_TAG_VERSION = 2
+
+
 def external_binding_tag(
-    binding_key: bytes, km: KeyMaterial, entity_type: str, profile: str | None, token: str
+    binding_key: bytes,
+    km: KeyMaterial,
+    entity_type: str,
+    profile: str | None,
+    token: str,
+    *,
+    version: int = BINDING_TAG_VERSION,
 ) -> str:
     """The ``bind`` tag of an external token: proof that DPS produced ``token`` under ``km``.
 
-    ``HMAC(HMAC(binding_key, subkey(km, "external_tokenize|<entity>|<profile>")), token)``,
-    base32, 26 characters. The caller holds its DEK, so a tag under the DEK alone could be
-    computed by anyone holding it; the server-held ``binding_key`` makes the tag unforgeable
-    outside DPS, and the DEK subkey ties it to this caller key, entity type and profile.
+    ``HMAC(HMAC(binding_key, subkey(km, <info>)), token)``, base32, 26 characters. The caller
+    holds its DEK, so a tag under the DEK alone could be computed by anyone holding it; the
+    server-held ``binding_key`` makes the tag unforgeable outside DPS, and the DEK subkey ties it to
+    this caller key, entity type and profile. ``<info>`` is, for version 2,
+    ``external_tokenize.v2|`` + the JSON array ``[entity_type, profile]`` — injective, so a tag
+    binds exactly one (entity type, profile) and ``None`` differs from ``""`` (F-22); version 1
+    (``external_tokenize|<entity>|<profile or ''>``) is kept to verify older hints.
 
     Raises:
-        KeyError: the material is wrapped-only. ValueError: the DEK is malformed.
+        KeyError: the material is wrapped-only. ValueError: the DEK is malformed or the version
+            unknown.
     """
-    sub = subkey(km, f"external_tokenize|{entity_type}|{profile or ''}")
+    if version == 2:
+        info = "external_tokenize.v2|" + json.dumps([entity_type, profile], separators=(",", ":"))
+    elif version == 1:
+        info = f"external_tokenize|{entity_type}|{profile or ''}"
+    else:
+        raise ValueError("unknown bind tag version")
+    sub = subkey(km, info)
     mac_key = hmac.new(binding_key, sub, hashlib.sha256).digest()
     return b32(hmac_bytes(mac_key, token))[:BINDING_TAG_CHARS]
 
@@ -249,8 +271,10 @@ def _oaep() -> padding.OAEP:
     )
 
 
-def wrap_key_material(km: KeyMaterial, public_key_pem: str) -> KeyMaterial:
-    """Return a copy whose DEK is RSA-OAEP-256 wrapped with the caller's public key.
+def rsa_oaep_wrap(secret: bytes, public_key_pem: str) -> tuple[str, dict[str, str]]:
+    """``secret`` RSA-OAEP-256-encrypted for the caller's public key: ``(base64 ciphertext,
+    {"type": "rsa-oaep-256", "fingerprint": sha256(SubjectPublicKeyInfo)})``. Used for DEKs and,
+    since S3 review F-20, synthesis seeds.
 
     Raises:
         ValueError: the PEM is unreadable, not RSA, or shorter than :data:`MIN_RSA_BITS`.
@@ -266,20 +290,38 @@ def wrap_key_material(km: KeyMaterial, public_key_pem: str) -> KeyMaterial:
     spki = public.public_bytes(
         serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    wrapped = public.encrypt(dek_bytes(km), _oaep())
+    wrapped = public.encrypt(secret, _oaep())
+    return base64.b64encode(wrapped).decode("ascii"), {
+        "type": "rsa-oaep-256",
+        "fingerprint": hashlib.sha256(spki).hexdigest(),
+    }
+
+
+def wrap_key_material(km: KeyMaterial, public_key_pem: str) -> KeyMaterial:
+    """Return a copy whose DEK is RSA-OAEP-256 wrapped with the caller's public key.
+
+    Raises:
+        ValueError: the PEM is unreadable, not RSA, or shorter than :data:`MIN_RSA_BITS`.
+    """
+    wrapped, wrap = rsa_oaep_wrap(dek_bytes(km), public_key_pem)
     return km.model_copy(
         update={
             "dek": None,
             "kcv": km.kcv or key_check_value(km),  # lets the holder check the unwrapped DEK
-            "wrapped_dek": base64.b64encode(wrapped).decode("ascii"),
-            "wrap": {"type": "rsa-oaep-256", "fingerprint": hashlib.sha256(spki).hexdigest()},
+            "wrapped_dek": wrapped,
+            "wrap": wrap,
         }
     )
 
 
-def unwrap_dek(wrapped_dek_b64: str, private_key_pem: str, password: bytes | None = None) -> bytes:
-    """Client-side helper (and test oracle): recover the DEK with the matching private key."""
+def rsa_oaep_unwrap(wrapped_b64: str, private_key_pem: str, password: bytes | None = None) -> bytes:
+    """Client-side helper (and test oracle): open what :func:`rsa_oaep_wrap` wrapped."""
     private = serialization.load_pem_private_key(private_key_pem.encode("utf-8"), password=password)
     if not isinstance(private, rsa.RSAPrivateKey):
         raise ValueError("unwrap requires an RSA private key")
-    return private.decrypt(base64.b64decode(wrapped_dek_b64), _oaep())
+    return private.decrypt(base64.b64decode(wrapped_b64), _oaep())
+
+
+def unwrap_dek(wrapped_dek_b64: str, private_key_pem: str, password: bytes | None = None) -> bytes:
+    """Client-side helper (and test oracle): recover the DEK with the matching private key."""
+    return rsa_oaep_unwrap(wrapped_dek_b64, private_key_pem, password)

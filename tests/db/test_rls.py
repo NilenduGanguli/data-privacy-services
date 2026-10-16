@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import os
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import asyncpg
 import pytest
@@ -238,3 +241,71 @@ async def test_posture_names_each_tampered_fact(fresh_db) -> None:  # noqa: ANN0
     assert "dps_snapshot: row level security is not FORCE-enabled" in joined
     assert "dps_artefact: unexpected policies ['open_door']" in joined
     assert month in joined and "dps_worker" in joined
+
+
+async def test_migrating_as_the_runtime_role_is_refused_in_every_environment(
+    pg_admin_dsn: str,
+) -> None:
+    """S3 review F-06: with ``DPS_PG_MIGRATION_USER`` unset the migrations run as the API login,
+    whose ``owner_directory`` policies (``USING (true)``) then read every tenant's jobs,
+    connections and policies. The posture names it and the app refuses to boot — locally too."""
+    from fastapi.testclient import TestClient
+
+    from dps.app import create_app
+    from dps.config import Settings
+    from dps.posture import PostureError
+    from tests.fixtures.db import drop_database
+
+    role, name = f"dps_single_{os.getpid()}", f"dps_single_{os.getpid()}"
+    admin = await asyncpg.connect(pg_admin_dsn)
+    try:
+        await admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        await admin.execute(f"DROP ROLE IF EXISTS {role}")
+        await admin.execute(
+            f"CREATE ROLE {role} LOGIN PASSWORD '{role}' NOSUPERUSER NOBYPASSRLS NOCREATEROLE"
+        )
+        await admin.execute(f"GRANT dps_app_rw TO {role}")
+        await admin.execute(f'CREATE DATABASE "{name}" OWNER {role}')
+        await admin.execute(f'GRANT CONNECT ON DATABASE "{name}" TO dps_app_rw, dps_worker')
+    finally:
+        await admin.close()
+    parsed = urlparse(pg_admin_dsn)
+    s = Settings(
+        _env_file=None,
+        env="local",
+        llm_provider="stub",
+        auth_enabled=False,
+        pg_host=parsed.hostname or "127.0.0.1",
+        pg_port=parsed.port or 5432,
+        pg_database=name,
+        pg_user=role,
+        pg_password=role,
+        pg_worker_user="dps_worker_login",
+        pg_worker_password="dps_worker_login",
+        migrations_mode="auto",
+        job_kek=base64.b64encode(bytes(range(32))).decode(),
+    )
+    assert s.pg_migration_login[0] == role  # the silent fallback
+    try:
+        conn = await db.open_migration_connection(s)
+        try:
+            await db.run_migrations(s, connection=conn)
+        finally:
+            await conn.close()
+        await db.init_pool(s)
+        try:
+            joined = "; ".join(await db.assert_rls_posture(s))
+        finally:
+            await db.close_pools()
+        for table in ("dps_job", "dps_connection", "dps_policy"):
+            assert f"{table}: policy owner_directory {db.CROSS_TENANT_PROBLEM}" in joined
+        with pytest.raises(PostureError), TestClient(create_app(s)):
+            pass  # env=local: refused anyway
+    finally:
+        await db.close_pools()
+        await drop_database(pg_admin_dsn, name)
+        admin = await asyncpg.connect(pg_admin_dsn)
+        try:
+            await admin.execute(f"DROP ROLE IF EXISTS {role}")
+        finally:
+            await admin.close()

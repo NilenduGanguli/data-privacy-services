@@ -191,3 +191,107 @@ async def test_egress_decisions_log_no_values(
     assert "llm_egress_blocked" in blob and "llm_egress_raw_values_sent" in blob
     for value in (secret, "jane.doe@example.com", "jane.doe", "Zebulon"):
         assert value not in blob
+
+
+# -- the real prompts through the real egress check ------------------------------------------------
+# The T3 and rewrite tests script ``complete`` itself, above the verifier; these go through it.
+
+
+def _label_prompt(data: dict[str, Any]) -> list[dict[str, str]]:
+    from dps.engine.detect.ensemble import Detector, DetectorConfig
+    from dps.engine.detect.llm_label import leftover_fields, prompt_fields, render_prompt
+
+    detector = Detector(DetectorConfig(locale="en_IN"))
+    values = {f"$.{k}": [v] for k, v in data.items()}
+    sent, _ = prompt_fields(leftover_fields(values), detector)
+    return render_prompt(sent)
+
+
+def _spec_prompt(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    from dps.engine.detect.ensemble import Detector, DetectorConfig
+    from dps.engine.synth.schema_profile import profile_from_sample, render_prompt
+
+    detector = Detector(DetectorConfig(locale="en_IN"))
+    return render_prompt(profile_from_sample(rows, detector, name="customers").profile)
+
+
+def _rewrite_prompt(templated: str) -> list[dict[str, str]]:
+    from dps.engine.synth.llm_text import REWRITE_SYSTEM
+
+    return [{"role": "system", "content": REWRITE_SYSTEM}, {"role": "user", "content": templated}]
+
+
+_ROWS = [
+    {"cust_id": 1001, "segment": "retail", "balance": 48250.5, "opened": "2019-04-11"},
+    {"cust_id": 1002, "segment": "premier", "balance": 812300.0, "opened": "2016-09-02"},
+]
+
+
+def test_system_prompts_carry_no_call_data() -> None:
+    """The verifier's pattern scan skips system messages: each must be a fixed constant."""
+    assert _label_prompt({"a": "x1"})[0] == _label_prompt({"beneficiary_nm": "QX-7Z"})[0]
+    assert _spec_prompt(_ROWS)[0] == _spec_prompt([{"z": "q"}, {"z": "r"}])[0]
+    assert _rewrite_prompt("{PERSON_NAME_1}")[0] == _rewrite_prompt("hi {DATE_1}")[0]
+
+
+def test_instructions_that_look_like_values_do_not_block() -> None:
+    # the labelling prompt's type list holds USERNAME: a SWIFT BIC's shape (country NA)
+    system = [{"role": "system", "content": "Entity types: SWIFT_BIC, USERNAME, VOTER_ID"}]
+    assert residual_values([*system, {"role": "user", "content": "{PERSON_NAME_1}"}]) == 0
+    # the same token in call data still counts, and protected values count in any message
+    assert residual_values([*system, {"role": "user", "content": "bic USERNAME"}]) == 1
+    assert residual_values(system, protected=["USERNAME"]) == 1
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        _label_prompt({"beneficiary_nm": "Kavya R", "risk_band": "medium", "ref_x7": "rel-mgr"}),
+        _spec_prompt(_ROWS),
+        _rewrite_prompt("Customer {PERSON_NAME_1} (email {EMAIL_1}) called on {DATE_1}."),
+    ],
+    ids=["label", "genspec", "rewrite"],
+)
+def test_the_real_prompts_pass_the_verifier(messages: list[dict[str, str]]) -> None:
+    assert residual_values(messages) == 0
+
+
+async def test_t3_labels_through_the_real_complete() -> None:
+    """T3 end to end through ``complete`` (strict): the verifier must let a value-free prompt out."""
+    import json
+
+    from dps.engine.service import Payload, PrivacyEngine, RequestOptions
+    from dps.llm.gateway import LlmResult
+
+    settings = Settings(
+        _env_file=None,
+        env="local",
+        llm_provider="stellar",
+        stellar_base_url="https://stellar.test",
+        coin_url="https://coin.test",
+        llm_egress_check="strict",
+        fpe_enabled=False,
+        ner_enabled=False,
+    )
+    sent: list[list[dict[str, str]]] = []
+
+    class ProviderSeam(LlmGateway):
+        async def _stellar(self, messages, temperature, max_tokens):  # noqa: ANN001, ANN202
+            sent.append(messages)
+            reply = [
+                {"ref": "$.acct.beneficiary_nm", "entity_type": "PERSON_NAME", "confidence": 0.9}
+            ]
+            return LlmResult(text=json.dumps(reply), provider="stellar", model="test")
+
+    engine = PrivacyEngine(settings, gateway=ProviderSeam(settings))
+    policy = {
+        "preset": "gdpr-pseudonymise",
+        "detect": {"tiers": ["structural", "patterns", "llm_label"]},
+    }
+    data = {"acct": {"beneficiary_nm": "Kavya Raghunathan", "risk_band": "medium"}}
+    found = await engine.label_leftovers(Payload(data=data), policy, RequestOptions())
+    assert len(sent) == 1 and found.llm_calls == 1
+    assert [(f.locator.path, f.entity_type) for f in found] == [
+        ("$.acct.beneficiary_nm", "PERSON_NAME")
+    ]
+    assert "Kavya" not in json.dumps(sent) and "medium" not in sent[0][1]["content"]

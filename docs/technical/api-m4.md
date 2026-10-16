@@ -21,8 +21,8 @@ tenant ids; `_…` is refused with 403 `tenant_reserved`), `X-Request-ID`.
   `created_by`, and a disabled database key is refused at once on this replica.
 - Errors are `{"detail": str, "code": str}`; `detail` never quotes the request (no URL, query,
   label, storage state, key or value). 422 validation errors of the request model list
-  `{type, loc, msg}` only (the scan spec refuses unknown keys at every level, so a `submit` field
-  anywhere is a 422 too).
+  `{loc, msg, type}` only, with `code: "invalid_request"` (the M5 security review's S1 handler; the
+  scan spec refuses unknown keys at every level, so a `submit` field anywhere is a 422 too).
 - Ids: scans are jobs of kind `scan` with the prefix `s_` (`s_` + 26-character Crockford ULID);
   artefacts `art_…`, evidence `ev_…`.
 - Audit (`dps_audit_log`, value-free): `scan.create` (accepted, replayed and refused), `scan.cancel`,
@@ -74,7 +74,7 @@ There is **no route** that submits a form, writes to a scanned site, or returns 
 | `capture.screenshots` | `true` | |
 | `capture.har` | `false` | `true` → 422 `har_not_supported` (a HAR holds response bodies) |
 | `consistency` | `{scope: "key"}` | M2's `ConsistencySpec`: `key_material` / `synthesis_seed` to reuse the caller's (same tokens and personas as an earlier scan), `wrap_key: {type: "rsa-oaep-256", public_key_pem}` to receive the key RSA-wrapped |
-| `policy` | `DPS_DEFAULT_POLICY` | a preset name, an inline policy (method per entity type, detector threshold) or — M5, contract §5.5 — `@<name>` / `@<name>:v<N>`: the tenant's published version, resolved at accept, so the stored spec (`spec.policy`, with `name` and `version`) is exactly what the browser-worker runs and the evidence's `policy.version` names it |
+| `policy` | `DPS_DEFAULT_POLICY` | a preset name, an inline policy (method per entity type, detector threshold) or — M5, contract §5.5 — `@<name>` / `@<name>:v<N>`: the tenant's published version, resolved at accept, so the stored job is exactly what the browser-worker runs and the evidence's `policy.version` names it. A body (inline or resolved) is sealed with the job KEK in `spec_enc`; `spec.policy` keeps its value-free label `{sealed: true, name, version, sha256}` (deny/allow-list terms are often the sensitive terms themselves — M5 security review F-18) |
 | `purpose` | — | `{ticket, legal_basis}` recorded in the evidence pack |
 
 ```http
@@ -148,8 +148,8 @@ audited (`scan.create`, `rejected`). Most `url`/`scope`/`auth`/`fill` rules are 
 `ScanSpec` model before `validate_scan` runs; `POST /scans` maps those refusals by the refused
 field's location (`url` → `url_invalid`, `scope.*` → `scope_invalid`, `auth.*` → `auth_invalid`,
 `fill.*` → `fill_invalid`; with several refused sections, the first in that order), so the caller
-gets the same code either way. A refusal with no code stays FastAPI's 422 with `{type, loc, msg}`
-only (no input echoed): an unknown key at any level (decision D4, even inside `scope`/`auth`/`fill`),
+gets the same code either way. A refusal with no code of its own stays the field-list 422,
+`{"detail": [{loc, msg, type}], "code": "invalid_request"}` (no input echoed): an unknown key at any level (decision D4, even inside `scope`/`auth`/`fill`),
 a refused `mode`, `parallel_view`, `capture`, `consistency`, `policy` or `purpose` field, a body that
 is not a JSON object, or a body that mixes one of those with a coded refusal. The plan's `db_unconfigured` is
 `db_unavailable` as built (the M2 name), and its `consistency_invalid` is split into
@@ -166,6 +166,13 @@ Refused by the browser-worker when it opens the scan (the job ends `failed` with
 | `policy_invalid` | the policy no longer resolves |
 | `verify_warn_disallowed` | the stored policy relaxes the leakage check and this deployment no longer allows it (M5) |
 | `host_not_registered` | the host was unregistered after the scan was accepted (checked again at run time and on every request) |
+
+A crawl that a policy pattern stops — the pattern ran past its CPU budget, `DPS_PATTERN_CPU_SECONDS`
+per run (M5 security review F-02) — ends the scan `failed` with `error_code`
+`custom_pattern_too_slow` at once (deterministic: never retried); the pages it recorded, the request
+counts and a failed evidence pack naming the code are kept, and the key is purged. A `POST /scans`
+whose `scan.create` audit a strict sink refuses (503 `audit_unavailable`) leaves no scan behind (F-14),
+and an `Idempotency-Key` replay admitted before a KEK rotation is still a replay (F-21).
 
 ## Job lifecycle of a scan
 

@@ -77,6 +77,17 @@ class TokenNotBound(MethodError):
         )
 
 
+#: An ``external_tokenize`` cache key: ``(entity type, profile, value or token)``. The profile is
+#: part of the key (S3 review F-19): one entity type under two profiles (two data elements) gets
+#: two different tokens, and a column must never be written with another profile's token.
+ExternalKey = tuple[str, str | None, str]
+
+
+def external_key(entity_type: str, profile: object, text: str) -> ExternalKey:
+    """The cache key of ``text`` (a value, or a token when revealing) under its profile."""
+    return (entity_type, str(profile) if profile is not None else None, text)
+
+
 @dataclass
 class TransformContext:
     """Everything a method needs besides the value: type, location, params, key, anchor."""
@@ -94,9 +105,9 @@ class TransformContext:
     cipher_factory: CipherFactory | None = None
     #: M5 ``external_tokenize``: ``(entity_type, value) → token`` (or token → value when
     #: revealing), filled by ``apply``'s (de)tokenize pre-pass; ``None`` = no adapter configured
-    external: Mapping[tuple[str, str], str] | None = None
+    external: Mapping[ExternalKey, str] | None = field(default=None, repr=False)
     #: SEC-4: the server-held key binding external tokens to ``key`` (``None`` = no KEK)
-    binding: bytes | None = None
+    binding: bytes | None = field(default=None, repr=False)  # S2: never in a repr
 
     def subkey(self, method: str, length: int = crypto.SUBKEY_BYTES) -> bytes:
         """The HKDF subkey for ``method`` and this entity type (and path when field-scoped)."""
@@ -604,16 +615,23 @@ def _external(value: str, ctx: TransformContext) -> Outcome:
     per value), with its SEC-4 ``bind`` tag when the output is revealable (obfuscate mode)."""
     if ctx.external is None:
         raise MethodError("external_tokenize: no tokenization adapter is configured")
-    token = ctx.external.get((ctx.entity_type, value))
+    token = ctx.external.get(external_key(ctx.entity_type, ctx.params.get("profile"), value))
     if token is None:
         raise MethodError("external_tokenize: value was not part of the tokenization batch")
     reverse_params: dict[str, Any] = {}
     if ctx.mode == "obfuscate":
         reverse_params["bind"] = external_tag(ctx, token)
+        reverse_params["bind_v"] = crypto.BINDING_TAG_VERSION  # F-22: injective v2 tags
     return Outcome(token, "external_tokenize", True, None, reverse_params)
 
 
-def external_tag(ctx: TransformContext, token: str, binding: bytes | None = None) -> str:
+def external_tag(
+    ctx: TransformContext,
+    token: str,
+    binding: bytes | None = None,
+    *,
+    version: int = crypto.BINDING_TAG_VERSION,
+) -> str:
     """The ``bind`` tag of ``token`` under ``ctx.key`` and ``binding`` (default: the context's
     current binding key); see :func:`~dps.engine.transform.crypto.external_binding_tag`."""
     binding = binding if binding is not None else ctx.binding
@@ -632,15 +650,17 @@ def external_tag(ctx: TransformContext, token: str, binding: bytes | None = None
             ctx.entity_type,
             str(profile) if profile is not None else None,
             token,
+            version=version,
         )
     except (KeyError, ValueError):
         raise MethodError("key material dek is malformed") from None
 
 
 def _external_reverse(token: str, ctx: TransformContext, _rp: dict[str, Any]) -> str:
-    if ctx.external is None or (ctx.entity_type, token) not in ctx.external:
+    cache_key = external_key(ctx.entity_type, ctx.params.get("profile"), token)
+    if ctx.external is None or cache_key not in ctx.external:
         raise MethodError("external_tokenize: token could not be detokenized")
-    return ctx.external[(ctx.entity_type, token)]
+    return ctx.external[cache_key]
 
 
 # --- registry ----------------------------------------------------------------------------------

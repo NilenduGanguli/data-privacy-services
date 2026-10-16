@@ -43,6 +43,8 @@ from fastapi.responses import JSONResponse
 from dps import __version__, db, jobs
 from dps.audit import AuditSink, DbAuditSink
 from dps.config import Settings, get_settings
+from dps.engine.call_scope import bind_call_scope
+from dps.engine.detect.pattern_process import configure_pattern_processes
 from dps.engine.service import PrivacyEngine
 from dps.jobs import ClaimedJob, ClaimedPartition, JobInternal, JobKind, JobPhase
 from dps.observability import (
@@ -217,10 +219,14 @@ class Consumer:
         M5 (spec P1): the handler's task binds its job's tenant (``CURRENT_TENANT``) and a fresh
         ``LlmStats``, so LLM calls it makes count for that tenant (a task copies the context at
         creation: the binding is per task). Handlers that call the LLM copy the stats into
-        ``progress.metrics.llm`` (:func:`dps.observability.LlmStats.counts`).
+        ``progress.metrics.llm`` (:func:`dps.observability.LlmStats.counts`). S3 review round 1:
+        it also binds a fresh engine call scope (:mod:`dps.engine.call_scope`) — the job's custom
+        entity tiers and the CPU budget of its policy patterns are its own (round 2: no single
+        pattern run takes more than ``DPS_PATTERN_CPU_SECONDS``).
         """
         CURRENT_TENANT.set(tenant_id)
         LLM_STATS.set(LlmStats())
+        bind_call_scope(pattern_run_cap=self.settings.pattern_cpu_seconds)
         try:
             if predecessor is not None and not predecessor.done():
                 await asyncio.wait({predecessor})
@@ -580,6 +586,7 @@ def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, json_output=settings.env != "local")
     assert_production_posture(settings)
+    configure_pattern_processes(settings.pattern_processes)  # S3 review round 2 (R2-B1)
     if not db.db_configured(settings):
         raise SystemExit("DPS_PG_HOST is not set: the worker needs the metadata database")
     if load_kek(settings) is None:

@@ -76,7 +76,7 @@ class MethodSpec(BaseModel):
     @classmethod
     def _known(cls, value: str) -> str:
         if value not in METHOD_NAMES:
-            raise ValueError(f"unknown method {value!r}; known: {', '.join(METHOD_NAMES)}")
+            raise ValueError(f"unknown method; known: {', '.join(METHOD_NAMES)}")
         return value
 
 
@@ -99,8 +99,9 @@ class DetectConfig(BaseModel):
     model_config = _MODEL_CONFIG
     tiers: list[str] = Field(default_factory=lambda: ["structural", "patterns", "ner"])
     min_score: float = Field(default=0.6, ge=0.0, le=1.0)
-    custom_recognizers: list[RecognizerSpec] = Field(default_factory=list)
-    declared_fields: list[DeclaredField] = Field(default_factory=list)
+    #: bounded (S3 review F-10): each one runs on every value, and custom names reach the registry
+    custom_recognizers: list[RecognizerSpec] = Field(default_factory=list, max_length=50)
+    declared_fields: list[DeclaredField] = Field(default_factory=list, max_length=500)
 
 
 JsonScalar = str | int | float | bool | None
@@ -163,9 +164,28 @@ class TabularConstraint(BaseModel):
         return self
 
 
+#: Methods that need no key material and no outside service: the only ones synthesize mode runs
+#: (synthetic output must have no path back to the original — decision D-A; S3 review F-12:
+#: ``external_tokenize`` returned the bank's real token of the value as "synthetic" data).
+KEYLESS_METHODS = frozenset(
+    {
+        "surrogate",
+        "keep",
+        "null",
+        "redact",
+        "bucket",
+        "generalize",
+        "mask_partial",
+        "dictionary",
+        "noise",
+    }
+)
+
+
 class SynthesizeConfig(BaseModel):
     """Methods for synthesize mode: a default plus per-entity overrides; tabular constraints and
-    the quasi-identifiers the privacy metric counts (M5)."""
+    the quasi-identifiers the privacy metric counts (M5). Every method is key-less
+    (:data:`KEYLESS_METHODS`)."""
 
     model_config = _MODEL_CONFIG
     default: MethodSpec = Field(default_factory=lambda: MethodSpec(method="surrogate"))
@@ -175,6 +195,15 @@ class SynthesizeConfig(BaseModel):
     constraints: list[TabularConstraint] = Field(default_factory=list)
     quasi_identifiers: list[ColumnPath] = Field(default_factory=list)  # "$.NAME" for the QI metric
     utility_label: ColumnPath | None = None  # "$.NAME": train-on-synthetic/test-on-real label (M5)
+
+    @model_validator(mode="after")
+    def _key_less(self) -> SynthesizeConfig:
+        methods = [self.default.method, *(m.method for m in self.overrides.values())]
+        if any(m not in KEYLESS_METHODS for m in methods):
+            raise ValueError(
+                "synthesize methods must be key-less: " + ", ".join(sorted(KEYLESS_METHODS))
+            )
+        return self
 
 
 class ConsistencyConfig(BaseModel):

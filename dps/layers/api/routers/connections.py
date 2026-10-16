@@ -1,8 +1,9 @@
 """``/api/v1/connections`` (contract §9, scope ``jobs``; the ``production`` tag needs ``admin``).
 
-SEC-3: updating or deleting a production-tagged connection needs ``admin``; moving a connection
-that holds credentials to another endpoint needs its credentials in the same request or ``admin``
-(:mod:`dps.connections`). The update's audit event names the changed fields
+SEC-3: updating or deleting a production-tagged connection needs ``admin`` — and so does updating
+or deleting a connection that holds a production credential (review round 1 B2); moving a
+connection that holds credentials to another endpoint needs its credentials in the same request or
+``admin`` (:mod:`dps.connections`). The update's audit event names the changed fields
 (``counts["field.<name>"]``), never a value. The test route takes no param overrides.
 
 Credentials never appear in a response (``has_secret`` only); a connection test stores its
@@ -13,6 +14,7 @@ DPS will page with (``runs_as``) and the number of bound parameters.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -27,12 +29,14 @@ from dps.connections import (
     create_connection,
     delete_connection,
     get_connection,
+    holds_production_credentials,
     list_connections,
     load_credentials,
+    production_refs,
     record_test,
     update_connection,
 )
-from dps.jobs_models import ConnectionSpec, Selection
+from dps.jobs_models import ConnectionSpec, InlineCredentials, Selection
 from dps.layers.api.deps import (
     audit_action,
     audited,
@@ -64,7 +68,7 @@ from dps.layers.connectors.selection import (
     selection_checks,
     validate_selection,
 )
-from dps.netguard import require_tls_connection
+from dps.netguard import check_connection_endpoint, require_tls_connection
 from dps.ratelimit import enforce_rate_limit
 from dps.secrets import SecretUnavailable
 
@@ -126,6 +130,19 @@ async def _open(request: Request, conn: Connection, action: str) -> Connector:
     return await open_connector(conn, _settings(request), action=action, kek=kek_of(request))
 
 
+async def _check_endpoint(
+    spec: ConnectionSpec | Connection, request: Request, creds: InlineCredentials | None
+) -> None:
+    """F-08: refuse an endpoint that is (or resolves to) a forbidden address before it is stored
+    (``host_forbidden`` 422). DNS runs off the event loop."""
+    secret = (
+        {k: v.get_secret_value() for k, v in creds.extra.items() if k in ("uri", "dsn")}
+        if creds is not None
+        else None
+    )
+    await asyncio.to_thread(check_connection_endpoint, spec, _settings(request), secret=secret)
+
+
 def _dump(conn: Connection) -> dict[str, Any]:
     return conn.model_dump(mode="json")
 
@@ -139,12 +156,14 @@ async def create(body: ConnectionSpec, request: Request) -> dict[str, Any]:
         if PRODUCTION in body.tags:
             _require_admin_for_production(request)
         require_tls_connection(body, _settings(request))  # M5: TLS-only egress (422)
+        await _check_endpoint(body, request, body.credentials)  # F-08: no SSRF target (422)
         conn = await create_connection(
             tenant,
             body,
             settings=_settings(request),
             kek=kek_of(request),
             created_by=principal_of(request).key_id,
+            admin=principal_of(request).has_scope("admin"),
         )
         return _dump(conn)
 
@@ -175,8 +194,8 @@ async def get(connection_id: str, request: Request) -> dict[str, Any]:
 @router.patch("/connections/{connection_id}", dependencies=_JOBS)
 async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> dict[str, Any]:
     """Update name, params, secret, roles or tags. Any change of a connection that is or becomes
-    production-tagged needs admin; an endpoint change of a connection holding credentials needs
-    them again (``credentials`` / ``secret_ref``) or admin."""
+    production-tagged, or that holds a production credential, needs admin; an endpoint change of a
+    connection holding credentials needs them again (``credentials`` / ``secret_ref``) or admin."""
     fields: dict[str, int] = {}
 
     async def run() -> dict[str, Any]:
@@ -186,9 +205,17 @@ async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> 
         if body.params is not None:  # M5: the changed endpoint must use TLS too (422)
             if current.production or (body.tags is not None and PRODUCTION in body.tags):
                 _require_admin_for_production(request)  # authorisation answers before TLS
-            require_tls_connection(
-                current.model_copy(update={"params": body.params}), _settings(request)
-            )
+            admin = principal_of(request).has_scope("admin")
+            if not admin and holds_production_credentials(current, await production_refs(tenant)):
+                raise DpsHttpError(  # review r1 B2: before TLS, like the tagged connection
+                    403,
+                    "admin_scope_required",
+                    "this connection holds a production credential: changing or deleting it "
+                    "needs the admin scope",
+                )
+            moved = current.model_copy(update={"params": body.params})
+            require_tls_connection(moved, _settings(request))
+            await _check_endpoint(moved, request, body.credentials)  # F-08 (422)
         updated = await update_connection(
             tenant,
             connection_id,
@@ -212,7 +239,7 @@ async def patch(connection_id: str, body: ConnectionPatch, request: Request) -> 
 @router.delete("/connections/{connection_id}", status_code=204, dependencies=_JOBS)
 async def delete(connection_id: str, request: Request) -> Response:
     """Delete a connection (409 ``connection_in_use`` while a live job uses it; a
-    production-tagged one needs admin)."""
+    production-tagged one, or one holding a production credential, needs admin)."""
 
     async def run() -> None:
         admin = principal_of(request).has_scope("admin")
@@ -253,7 +280,7 @@ async def _test(request: Request, conn: Connection, body: ConnectionTestRequest)
     try:
         connector = await open_connector(conn, settings, action="test", kek=kek, credentials=creds)
     except ConnectorError as exc:
-        if exc.code == "engine_unavailable":
+        if exc.code in ("engine_unavailable", "host_forbidden"):  # F-08: a refusal, not a test
             raise
         return _failed(conn.engine, "connect", "connection_failed")
     try:

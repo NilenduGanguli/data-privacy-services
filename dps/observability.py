@@ -172,7 +172,18 @@ _THIRD_PARTY_LEVELS = (
     # n = '…'") at WARNING, and parser.check_errors logs str(error) — which quotes the SQL — at
     # ERROR, so a refused selection's literal would reach stderr: silenced entirely.
     ("sqlglot", logging.CRITICAL),
+    # Presidio's context enhancer logs the words around every hit ("Context list is: …") at
+    # DEBUG; spaCy's pipelines can echo text too (S3 secrets-logs F1). The root logger is held at
+    # WARNING as well (configure_logging), so a library missing from this list stays quiet.
+    ("presidio-analyzer", logging.WARNING),
+    ("presidio_analyzer", logging.WARNING),
+    ("presidio-anonymizer", logging.WARNING),
+    ("presidio_anonymizer", logging.WARNING),
+    ("spacy", logging.WARNING),
 )
+#: The root logger's floor: stdlib loggers belong to libraries (DPS logs through structlog), so
+#: ``DPS_LOG_LEVEL=DEBUG`` never turns on a library's debug output, which may quote values.
+ROOT_LEVEL_FLOOR = logging.WARNING
 
 
 #: Event names are snake_case identifiers (``verification_failed``, ``llm.call``). Anything else —
@@ -201,9 +212,16 @@ def _drop_value_fields(_logger: Any, _method: str, event_dict: EventDict) -> Eve
 
 
 def configure_logging(level: str = "INFO", *, json_output: bool = True) -> None:
-    """Configure structlog (JSON to stdout in containers, console locally) and stdlib logging."""
+    """Configure structlog (JSON to stdout in containers, console locally) and stdlib logging.
+
+    ``level`` applies to DPS's own (structlog) events. Stdlib logging carries only third-party
+    libraries, whose debug output can quote request text (Presidio, drivers): the root logger
+    never goes below :data:`ROOT_LEVEL_FLOOR` and :data:`_THIRD_PARTY_LEVELS` caps the known ones.
+    """
     numeric = logging.getLevelNamesMapping().get(level.upper(), logging.INFO)
-    logging.basicConfig(level=numeric, stream=sys.stderr, format="%(message)s")
+    stdlib_level = max(numeric, ROOT_LEVEL_FLOOR)  # libraries only; structlog keeps ``numeric``
+    logging.basicConfig(level=stdlib_level, stream=sys.stderr, format="%(message)s")
+    logging.getLogger().setLevel(stdlib_level)  # also when a handler was already installed
     renderer: Any = (
         structlog.processors.JSONRenderer() if json_output else structlog.dev.ConsoleRenderer()
     )

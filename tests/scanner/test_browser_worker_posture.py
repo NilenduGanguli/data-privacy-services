@@ -71,8 +71,16 @@ def test_the_browser_worker_needs_no_api_ocr_or_tokenizer_secret(mounted: None) 
     assert posture_problems(settings, role=ROLE) == []
     assert_production_posture(settings, role=ROLE)
     app = " ".join(posture_problems(settings))  # the app's own rules are unchanged
-    for name in ("DPS_API_KEYS", "DPS_AZURE_VISION_KEY", "DPS_TOKENIZER_TOKEN_FILE"):
+    # F-11 (security review): the tokenizer allow-list is the app's and the worker's rule; a scan
+    # never calls the tokenizer (its fill has no adapter, so external_tokenize fails closed)
+    for name in (
+        "DPS_API_KEYS",
+        "DPS_AZURE_VISION_KEY",
+        "DPS_TOKENIZER_TOKEN_FILE",
+        "DPS_TOKENIZER_PROFILES",
+    ):
         assert name in app
+    assert "DPS_TOKENIZER_PROFILES" in " ".join(posture_problems(settings, role="worker"))
     assert posture_problems(_prod(cors_origins="*"), role=ROLE) == []
     assert "DPS_CORS_ORIGINS" in " ".join(posture_problems(_prod(cors_origins="*")))
 

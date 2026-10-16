@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 import asyncpg
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from dps import db
 from dps.config import Settings
@@ -31,6 +31,7 @@ from dps.engine.policy import (
     preset_summaries,
     resolve_policy,
 )
+from dps.errors import safe_errors_text
 
 __all__ = [
     "REF",
@@ -196,8 +197,12 @@ def _validated(body: Mapping[str, Any], *, name: str, version: int) -> Policy:
         )
     except KeyError as exc:  # an unknown preset: the message names a preset, never data
         raise PolicyStoreError(400, "invalid_policy", f"invalid policy: {exc.args[0]}") from None
-    except ValueError as exc:  # pydantic: fields and rules (hide_input_in_errors), never values
-        raise PolicyStoreError(400, "invalid_policy", f"invalid policy: {exc}") from None
+    except ValidationError as exc:  # S1: fields and rules, a quoting message replaced
+        raise PolicyStoreError(
+            400, "invalid_policy", f"invalid policy: {safe_errors_text(exc.errors())}"
+        ) from None
+    except ValueError:  # resolve_policy's own refusals (value-free; never quoted here)
+        raise PolicyStoreError(400, "invalid_policy", "invalid policy") from None
 
 
 # --- database -------------------------------------------------------------------------------

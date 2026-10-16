@@ -143,3 +143,9 @@ class RunOutcome:
     #: clicks whose own handler ran a route the scope refuses in the same document (a hash route or
     #: pushState set by an ``href="#"`` link's onclick): no request existed for the guard to refuse
     scope_routes_reached: int = 0
+    #: a deterministic refusal that ended the crawl early — ``custom_pattern_too_slow``: a policy
+    #: pattern ran past its CPU budget (S3 security review F-02); the scan fails with it, no retry
+    error_code: str | None = None
+    #: T3 metadata labelling (M5 Task 8B): ``None`` when the scan's policy does not list
+    #: ``llm_label``; else ``{"calls", "raw_values", "blocked"}`` (``progress.metrics.llm``)
+    llm: dict[str, int] | None = None

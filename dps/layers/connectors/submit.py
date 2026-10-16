@@ -16,6 +16,7 @@ passed" is the server's verdict rather than a copy of its rules (M2 verify r2, i
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -23,15 +24,19 @@ from pydantic import BaseModel, ConfigDict
 
 from dps.auth import Principal
 from dps.config import Settings
-from dps.connections import Connection, get_connection
+from dps.connections import Connection, get_connection, production_refs
 from dps.engine.synth.surrogates import (
     SynthesisSeed,
+    WrappedSeed,
     generate_synthesis_seed,
     seed_from_caller,
+    wrap_synthesis_seed,
 )
 from dps.engine.transform.crypto import (
     KeyMaterial,
     generate_key_material,
+    kcv_matches,
+    key_check_value,
     key_material_from_caller,
     wrap_key_material,
 )
@@ -86,9 +91,13 @@ def _bind(sel: Selection, engine: Engine, shape: Any) -> Selection:
     return bound
 
 
-def _sealed_selection(sel: Selection) -> SealedSelection:
+def _sealed_selection(sel: Selection, policy: object = None) -> SealedSelection:
     return SealedSelection(
-        where=sel.where, query=sel.query, params=sel.params, mongo_filter=sel.mongo_filter
+        where=sel.where,
+        query=sel.query,
+        params=sel.params,
+        mongo_filter=sel.mongo_filter,
+        policy=policy if isinstance(policy, dict) else None,  # F-18: sealed, never in spec
     )
 
 
@@ -108,6 +117,7 @@ async def submit_discover(
     kek: bytes | None,
     idempotency_key: str | None = None,
     idempotency_fp: str | None = None,
+    idempotency_alternates: Sequence[str] = (),
 ) -> Job:
     """Queue a discover job: bind and validate the selection, seal it, store the template.
 
@@ -124,10 +134,12 @@ async def submit_discover(
     selection = _bind(spec.selection, engine, None)
     job_id = new_id(PREFIX_JOB)
     sealed: bytes | None = None
-    if _has_selection(selection):
+    if _has_selection(selection) or isinstance(spec.policy, dict):
         if kek is None:
             raise SpecError("kek_unconfigured", 503, "DPS_JOB_KEK is not configured")
-        sealed = seal_json(kek, _sealed_selection(selection), aad=f"dps_job.spec:{job_id}")
+        sealed = seal_json(
+            kek, _sealed_selection(selection, spec.policy), aad=f"dps_job.spec:{job_id}"
+        )
     stored = spec.model_copy(update={"selection": selection})
     return await create_job(
         tenant_id=tenant_id,
@@ -140,6 +152,7 @@ async def submit_discover(
         created_by=principal.key_id,
         idempotency_key=idempotency_key,
         idempotency_fp=idempotency_fp,
+        idempotency_alternates=idempotency_alternates,
         job_id=job_id,
     )
 
@@ -180,6 +193,21 @@ def _wrap(km: KeyMaterial, wrap_key: dict[str, str]) -> KeyMaterial:
         ) from None
 
 
+def _wrap_seed(seed: SynthesisSeed, wrap_key: dict[str, str]) -> WrappedSeed:
+    """F-20: the generated seed wrapped like the DEK (``wrap_key_invalid`` 422 otherwise)."""
+    pem = wrap_key.get("public_key_pem")
+    if wrap_key.get("type", "rsa-oaep-256") != "rsa-oaep-256" or not pem:
+        raise SpecError(
+            "wrap_key_invalid", 422, "wrap_key must be rsa-oaep-256 with a public_key_pem"
+        )
+    try:
+        return wrap_synthesis_seed(seed, pem)
+    except ValueError:
+        raise SpecError(
+            "wrap_key_invalid", 422, "wrap_key must carry a readable RSA public key"
+        ) from None
+
+
 @dataclass
 class _ValidRun:
     """What validation resolved for a run (memory only; the key is never logged)."""
@@ -190,6 +218,7 @@ class _ValidRun:
     km: KeyMaterial | None
     seed: SynthesisSeed | None
     returned_key: KeyMaterial | None
+    returned_seed: SynthesisSeed | WrappedSeed | None
 
 
 async def _validate_run(
@@ -222,18 +251,22 @@ async def _validate_run(
         snapshot=snapshot,
         settings=settings,
         kek=kek,
-        group=(group.kid, group.seed_fingerprint) if group else None,
+        group=(group.kid, group.seed_fingerprint, group.kcv) if group else None,
         child_snapshot=child_snapshot,
+        production_refs=await production_refs(tenant_id),
     )
     engine = cast(Engine, source.engine)
     selection = _bind(spec.source.selection, engine, snapshot.shape if snapshot else None)
     km, seed = _material(spec)
     wrap = spec.consistency.wrap_key
     returned_key: KeyMaterial | None = None
+    returned_seed: SynthesisSeed | WrappedSeed | None = None
     if km is not None and spec.consistency.key_material is None:
         # validated before the job exists, so a bad wrap key never leaves a queued job behind
         returned_key = _wrap(km, wrap) if wrap else km
-    return _ValidRun(source, target, selection, km, seed, returned_key)
+    if seed is not None and spec.consistency.synthesis_seed is None:
+        returned_seed = _wrap_seed(seed, wrap) if wrap else seed  # F-20: a seed is a key
+    return _ValidRun(source, target, selection, km, seed, returned_key, returned_seed)
 
 
 async def check_run(
@@ -262,6 +295,7 @@ async def submit_run(
     kek: bytes | None,
     idempotency_key: str | None = None,
     idempotency_fp: str | None = None,
+    idempotency_alternates: Sequence[str] = (),
 ) -> RunSubmission:
     """Validate, seal and queue a run job (module docstring).
 
@@ -276,6 +310,7 @@ async def submit_run(
     assert kek is not None  # _validate_run refuses a missing KEK
     source, target, selection = valid.source, valid.target, valid.selection
     km, seed, returned_key = valid.km, valid.seed, valid.returned_key
+    returned_seed = valid.returned_seed
     engine = cast(Engine, source.engine)
     job_id = new_id(PREFIX_JOB)
     secret = JobSecret(
@@ -283,12 +318,16 @@ async def submit_run(
         synthesis_seed=seed.model_dump(mode="json") if seed else None,
     )
     sealed_secret = seal_json(kek, secret, aad=f"dps_job.key:{job_id}")
-    sealed_selection = seal_json(kek, _sealed_selection(selection), aad=f"dps_job.spec:{job_id}")
+    sealed_selection = seal_json(
+        kek, _sealed_selection(selection, spec.policy), aad=f"dps_job.spec:{job_id}"
+    )
     stored = spec.model_copy(
         update={"source": spec.source.model_copy(update={"selection": selection})}
     )
     redacted = redact_spec(stored, engine=engine)
     redacted["consistency"]["kid"] = km.kid if km else None
+    # F-13: the public key check value binds the job's DEK to its kid (retry compares it)
+    redacted["consistency"]["kcv"] = key_check_value(km) if km else None
     redacted["consistency"]["seed_fingerprint"] = seed_fingerprint(seed.seed) if seed else None
     redacted["consistency"]["caller_seed"] = spec.consistency.synthesis_seed is not None
     job = await create_job(
@@ -309,14 +348,13 @@ async def submit_run(
         created_by=principal.key_id,
         idempotency_key=idempotency_key,
         idempotency_fp=idempotency_fp,
+        idempotency_alternates=idempotency_alternates,
         job_id=job_id,
     )
     replay = job.id != job_id
     key_out = returned_key.model_dump(mode="json") if returned_key and not replay else None
     seed_out = (
-        seed.model_dump(mode="json")
-        if seed is not None and not replay and spec.consistency.synthesis_seed is None
-        else None
+        returned_seed.model_dump(mode="json") if returned_seed is not None and not replay else None
     )
     return RunSubmission(job=job, key_material=key_out, synthesis_seed=seed_out, replay=replay)
 
@@ -334,6 +372,9 @@ async def seal_retry_secret(job: Job, consistency: ConsistencySpec, *, kek: byte
                 raise SpecError("key_material_required", 409, "the retry needs the job's key")
             km = key_material_from_caller(consistency.key_material)
             if km.kid != job.kid:
+                raise SpecError("key_material_mismatch", 409, "the key is not the job's key")
+            stored = (job.spec.get("consistency") or {}).get("kcv")
+            if isinstance(stored, str) and not kcv_matches(km, stored):  # F-13: the DEK too
                 raise SpecError("key_material_mismatch", 409, "the key is not the job's key")
             secret = JobSecret(key_material=km.model_dump(mode="json"))
         else:

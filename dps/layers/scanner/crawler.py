@@ -2,7 +2,9 @@
 the request guard and its scope proxy installed before the first page exists. Every page is
 processed in fresh tabs:
 
-1. visit → extract → classify → risk flags → original and annotated screenshots (masked);
+1. visit → extract → classify (and, when the policy opts in, T3 metadata labelling of the fields
+   left unclassified: one value-free LLM call per page, M5 Task 8B) → risk flags → original and
+   annotated screenshots (masked);
 2. parallel view: fill with the display persona (synthesize) and with tokens of it (obfuscate),
    each in a fresh tab armed before the first value is set and closed after its screenshot;
 3. an obfuscated capture when the page renders personal data or arrived pre-filled;
@@ -34,6 +36,7 @@ import re
 import secrets
 import time
 from collections import Counter, deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -44,8 +47,11 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from dps.config import Settings
+from dps.engine.detect.llm_label import LLM_LABEL_TIER, gateway_usable, job_llm_metrics
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.service import PrivacyEngine
 from dps.engine.synth.surrogates import seed_bytes
+from dps.engine.taxonomy import metric_entity_label
 from dps.layers.scanner.browser import close_scan_context, new_scan_context
 from dps.layers.scanner.capture import (
     capture_screen,
@@ -59,6 +65,8 @@ from dps.layers.scanner.classify import (
     classify_fields,
     classify_rendered,
     draws_placeholder,
+    label_leftover_fields,
+    page_protected,
     redact_text,
     sensitive_prefilled,
     value_classifier,
@@ -166,6 +174,15 @@ def _signature(f: FieldFacts) -> tuple[Any, ...]:
     return (f.tag, f.input_type, f.name, f.id, f.label)
 
 
+def count_field_metrics(classes: Iterable[FieldClassification]) -> None:
+    """``dps_scan_fields_total`` for every personal field of a page; a custom entity type (a
+    policy's own name) is labelled ``custom``, so caller-chosen names never reach the anonymous
+    ``/metrics`` (S3 security review F-10, as ``dps_findings_total`` does)."""
+    for c in classes:
+        if c.entity_type:
+            SCAN_FIELDS.labels(metric_entity_label(c.entity_type)).inc()
+
+
 def _same_page(a: str, b: str) -> bool:
     """Whether two canonical URLs name the same document (path, query and hash route)."""
     pa, pb = urlsplit(a), urlsplit(b)
@@ -212,6 +229,9 @@ class ScanRunner:
             persona_no=self.display,
         )
         self.outcome = RunOutcome()
+        #: T3 metadata labelling is asked for (M5 Task 8B); the calls it made so far
+        self._t3 = LLM_LABEL_TIER in runtime.policy.detect.tiers
+        self._label_calls = 0
         self.frontier: deque[Target] = deque()
         self.guard: ScanGuard | None = None
         self.context: BrowserContext | None = None
@@ -283,6 +303,7 @@ class ScanRunner:
         self.guard = ScanGuard(
             host_allowed=self.rt.scope.network_host_allowed,
             path_verdict=self.rt.scope.request_path_verdict,
+            allow_loopback=self.s.env == "local",  # S5: the address rule of every hop
         )
         self.context = await new_scan_context(
             self.browser,
@@ -318,10 +339,21 @@ class ScanRunner:
             for target in self.frontier:
                 self._mark_budget(target)
             self.frontier.clear()
+        except PatternTooSlow as exc:
+            # S3 security review F-02: a policy pattern ran past its CPU budget. That is
+            # deterministic (each run is charged its own CPU), so the crawl stops and the scan
+            # fails with the code — nothing is skipped silently. Nothing below may run a pattern
+            # again (the call's allowance is spent): what was recorded is kept, the request counts
+            # are saved, blocked requests get no redacted navigation-log entry.
+            self.outcome.error_code = exc.code
+            self.frontier.clear()
         finally:
             await close_scan_context(self.context, self.guard)  # never context.close() alone
             self.outcome.websockets_closed = self.guard.websockets_closed
-        self._blocked_events(self.guard.drain_blocked())
+            self.outcome.llm = self._llm_figures()
+        blocked = self.guard.drain_blocked()
+        if self.outcome.error_code is None:
+            self._blocked_events(blocked)
         counts = self.guard.drain_counts()
         if self._pending or self._events or counts:
             await self.sink.save_batch(
@@ -558,6 +590,59 @@ class ScanRunner:
             snap.fields, detector=self.detector, min_score=self.rt.policy.detect.min_score
         )
 
+    def _llm_figures(self) -> dict[str, int] | None:
+        """``progress.metrics.llm`` of this scan (``None`` when T3 was not asked for)."""
+        return job_llm_metrics(self._label_calls) if self._t3 else None
+
+    async def _labelled(
+        self,
+        snap: PageSnapshot,
+        classes: dict[str, FieldClassification],
+        rendered: list[RenderedFinding],
+    ) -> dict[str, FieldClassification]:
+        """T3 metadata labelling of the fields the classifiers left without an entity (M5 Task
+        8B): one value-free call per page when the policy opts in and a real LLM provider is
+        configured; the page's own values (:func:`~dps.layers.scanner.classify.page_protected`)
+        stay in this process and are checked against the prompt before it leaves."""
+        if not self._t3 or not gateway_usable(self.engine.gateway):
+            return classes
+        labelled, outcome = await label_leftover_fields(
+            snap.fields,
+            classes,
+            gateway=self.engine.gateway,
+            settings=self.s,
+            policy=self.rt.policy,
+            detector=self.detector,
+            protected=page_protected(snap, detector=self.detector, rendered=rendered),
+        )
+        if outcome is not None:
+            self._label_calls += outcome.llm_calls
+        return labelled
+
+    @staticmethod
+    def _with_labels(
+        classes: dict[str, FieldClassification],
+        snap: PageSnapshot,
+        base: PageSnapshot,
+        labelled: dict[str, FieldClassification],
+    ) -> dict[str, FieldClassification]:
+        """``classes`` of a re-extracted tab with the page's T3 labels carried over to the fields
+        that are the same field as in the first visit (same key and signature), so every capture
+        of the page masks what the inventory says is personal."""
+        expected = {f.key: _signature(f) for f in base.fields}
+        out = dict(classes)
+        for f in snap.fields:
+            label = labelled.get(f.key)
+            current = out.get(f.key)
+            if (
+                label is not None
+                and LLM_LABEL_TIER in label.detectors
+                and (current is None or current.entity_type is None)
+                and expected.get(f.key) == _signature(f)
+            ):
+                out[f.key] = label
+        return out
+
     async def _pipeline(
         self, t: Target, page: Page, response: Response | None, record: PageRecord
     ) -> list[FieldRecord]:
@@ -587,9 +672,9 @@ class ScanRunner:
             return []
         scope = self.rt.spec.scope
         snap, frames = await self._extract(page)
-        classes = self._classify(snap)
-        plans = {f.key: plan_field(f, classes[f.key]) for f in snap.fields}
         rendered = classify_rendered(snap.texts, detector=self.detector)
+        classes = await self._labelled(snap, self._classify(snap), rendered)
+        plans = {f.key: plan_field(f, classes[f.key]) for f in snap.fields}
         prefilled = sensitive_prefilled(snap.fields, classes, self.detector)
         external = [
             u
@@ -623,9 +708,7 @@ class ScanRunner:
         ]
         record.rendered_findings = dict(Counter(r.entity_type for r in rendered))
         record.risk_flags = flags
-        for c in classes.values():
-            if c.entity_type:
-                SCAN_FIELDS.labels(c.entity_type).inc()
+        count_field_metrics(classes.values())
         if self.rt.spec.capture.screenshots:
             await self._original(t, page, frames, snap, rendered, prefilled, record)
         await self._close(page)
@@ -639,7 +722,7 @@ class ScanRunner:
         # a personal select that draws only its placeholder is masked, but is no value the page
         # arrived with: it alone needs no obfuscated capture (S2 captures-privacy r3 B1)
         if rendered or any(not draws_placeholder(f) for f, _ in prefilled):
-            await self._capture(t, record)
+            await self._capture(t, record, snap, classes)
         else:
             record.capture_status = "not_needed"
         if t.depth < self.rt.max_depth:
@@ -836,8 +919,16 @@ class ScanRunner:
             draw_overlays(png, boxes, variant=mode), t.page_no, f"filled_{mode}"
         )
 
-    async def _capture(self, t: Target, record: PageRecord) -> None:
-        """The obfuscated capture of a page that renders personal data or arrived pre-filled."""
+    async def _capture(
+        self,
+        t: Target,
+        record: PageRecord,
+        base: PageSnapshot,
+        labelled: dict[str, FieldClassification],
+    ) -> None:
+        """The obfuscated capture of a page that renders personal data or arrived pre-filled
+        (``base``/``labelled``: the first visit's snapshot and classifications, whose T3 labels
+        carry over)."""
         try:
             page, _ = await self._open(t)
         except _NavFailed as exc:
@@ -846,7 +937,7 @@ class ScanRunner:
             return
         try:
             snap, frames = await self._extract(page)
-            classes = self._classify(snap)
+            classes = self._with_labels(self._classify(snap), snap, base, labelled)
             result = await obfuscated_capture(
                 page,
                 frames,
@@ -1032,12 +1123,14 @@ class ScanRunner:
             fields=len(fields),
             blocked=self._guard.blocked_total,
         )
-        ok = await self.sink.progress(
-            {
-                "pages": self.outcome.pages_visited,
-                "fields": self.outcome.fields,
-                "blocked_requests": self._guard.blocked_total,
-            }
-        )
+        progress: dict[str, Any] = {
+            "pages": self.outcome.pages_visited,
+            "fields": self.outcome.fields,
+            "blocked_requests": self._guard.blocked_total,
+        }
+        llm = self._llm_figures()
+        if llm is not None:
+            progress["llm"] = llm
+        ok = await self.sink.progress(progress)
         if not ok:
             raise LeaseLost("lease_lost")

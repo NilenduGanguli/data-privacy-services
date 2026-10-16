@@ -78,6 +78,7 @@ from dps.engine.batch import (
     row_anchor,
 )
 from dps.engine.detect.ensemble import Detector
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.policy import Policy
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_bytes, seed_from_caller
@@ -92,6 +93,7 @@ from dps.jobs_models import (
     SealedSelection,
     Selection,
     SpecError,
+    is_policy_label,
 )
 from dps.layers.connectors import docpaths
 from dps.layers.connectors.base import (
@@ -239,15 +241,18 @@ def _spec(ctx: HandlerContext, job: JobInternal) -> RunSpec:
     except ValidationError:
         raise PrepareFailure("spec_invalid", "the stored run spec is not valid") from None
     if job.spec_enc is None:
-        if _has_selection(spec.source.selection):
+        if _has_selection(spec.source.selection) or is_policy_label(spec.policy):
             raise SecretUnavailable()
         sealed = SealedSelection()
     else:
         sealed = open_json(ctx.kek, job.spec_enc, SealedSelection, aad=f"dps_job.spec:{job.id}")
-    selection = spec.source.selection.model_copy(update=sealed.model_dump())
-    return spec.model_copy(
-        update={"source": spec.source.model_copy(update={"selection": selection})}
-    )
+    selection = spec.source.selection.model_copy(update=sealed.model_dump(exclude={"policy"}))
+    update: dict[str, Any] = {"source": spec.source.model_copy(update={"selection": selection})}
+    if sealed.policy is not None:  # F-18: the policy body was sealed, the row holds its label
+        update["policy"] = sealed.policy
+    elif is_policy_label(spec.policy):
+        raise SecretUnavailable()
+    return spec.model_copy(update=update)
 
 
 async def _connections(job: JobInternal, spec: RunSpec) -> tuple[Connection, Connection | None]:
@@ -428,6 +433,8 @@ async def prepare(ctx: HandlerContext, job: ClaimedJob) -> None:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
     except IncompatibleMethod as exc:
         await _fail_to_finalize(ctx, job, exc.code, str(exc))
+    except PatternTooSlow as exc:  # S3 review r1 B1: deterministic, a retry would refuse again
+        await _fail_to_finalize(ctx, job, exc.code, exc.detail)
     except CONSTRAINT_ERRORS as exc:
         await _fail_to_finalize(ctx, job, "incompatible_method", str(exc))
     except LeakageError as exc:
@@ -1276,6 +1283,8 @@ async def run_partition(ctx: HandlerContext, job: JobInternal, part: ClaimedPart
         await _fail_partition(ctx, part, "leakage", str(exc))
     except IncompatibleMethod as exc:
         await _fail_partition(ctx, part, exc.code, str(exc))
+    except PatternTooSlow as exc:  # S3 review r1 B1: deterministic, a retry would refuse again
+        await _fail_partition(ctx, part, exc.code, exc.detail)
     except PkCollision as exc:
         await _fail_partition(ctx, part, exc.code, str(exc))
     except CONSTRAINT_ERRORS as exc:
@@ -1715,9 +1724,12 @@ def verification_outcome(
     ``incomplete`` when the job ended ``failed`` or ``canceled`` without a hit (its sweep saw only
     what was written before it stopped, often nothing: a run refused at prepare is never "passed
     · 0 leaks"); ``review_required`` when the post-write sample found personal data in a column the
-    snapshot called not personal; else ``passed``. Only ``passed`` passes.
+    snapshot called not personal — or could not run at all (S3 review round 2: a refused policy
+    pattern, an unreachable target; ``{"error": code}``), which fails closed like the identifier
+    check; else ``passed``. Only ``passed`` passes.
     """
-    review = int((post_sample or {}).get("kept_column_hits") or 0) > 0
+    post = post_sample or {}
+    review = int(post.get("kept_column_hits") or 0) > 0 or bool(post.get("error"))
     if hits or leakage:
         return False, "failed", review
     if outcome not in ("succeeded", "dry_run"):
@@ -2254,7 +2266,7 @@ async def _best_effort(step: Awaitable[dict[str, Any]]) -> dict[str, Any]:
     code}`` in the evidence instead of blocking the pack (and the key purge) behind retries."""
     try:
         return await step
-    except (ConnectorError, StorageError, ConnectionStoreError) as exc:
+    except (ConnectorError, StorageError, ConnectionStoreError, PatternTooSlow) as exc:
         return {"error": exc.code}
     except (SecretUnavailable, SealError):
         return {"error": "secret_unavailable"}

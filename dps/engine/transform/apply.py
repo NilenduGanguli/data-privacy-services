@@ -28,10 +28,10 @@ import json
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dps.engine.findings import Plan, PlanEntry
 from dps.engine.jsonpath import flatten, get_path, set_path
@@ -40,16 +40,19 @@ from dps.engine.transform import crypto
 from dps.engine.transform.crypto import KeyMaterial
 from dps.engine.transform.methods import (
     CipherFactory,
+    ExternalKey,
     MethodError,
     SurrogateProvider,
     TokenNotBound,
     TransformContext,
     declare_record,
+    external_key,
     external_tag,
     reverse_method,
     run_method,
 )
 from dps.engine.transform.tokens import ENVELOPE_RE, make_envelope, parse_envelopes
+from dps.errors import CodedError
 
 if TYPE_CHECKING:  # the adapter module imports settings and httpx; apply needs only the protocol
     from dps.engine.transform.external import ExternalTokenizer
@@ -66,6 +69,9 @@ _INT = re.compile(r"-?[0-9]+")
 _FLOAT = re.compile(r"-?[0-9]+\.[0-9]+")
 
 OriginalType = Literal["str", "int", "float"]
+
+
+_ENTITY_TYPE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
 
 class RevealHint(BaseModel):
@@ -92,6 +98,15 @@ class RevealHint(BaseModel):
     kid: str | None = None
     kcv: str | None = None
     field_scoped: bool = False
+
+    @model_validator(mode="after")
+    def _external_entity_type(self) -> RevealHint:
+        # F-22: an external token's entity type is an identifier — a hint cannot claim "ACCT|p"
+        # to re-split what a v1 bind tag binds, and the detokenize audit names a real type. The
+        # message never quotes the value.
+        if self.method == "external_tokenize" and not _ENTITY_TYPE.fullmatch(self.entity_type):
+            raise ValueError("entity types must match ^[A-Z][A-Z0-9_]{0,63}$")
+        return self
 
 
 class OutputSegment(BaseModel):
@@ -136,12 +151,17 @@ class ApplyOptions:
     #: M5 ``external_tokenize``: the bank tokenization adapter (``None`` = not configured) and
     #: tokens the caller already fetched for this batch (``(entity_type, value) → token``).
     tokenizer: ExternalTokenizer | None = None
-    external_cache: dict[tuple[str, str], str] | None = None
+    external_cache: dict[ExternalKey, str] | None = field(default=None, repr=False)
     #: SEC-4: the server-held binding keys (current first; :func:`~dps.engine.transform.
     #: external.binding_keys`) and the audit hook called once per detokenization batch,
     #: ``(entity_type, profile, count)``, **before** the service is called (it may raise).
-    binding_keys: tuple[bytes, ...] = ()
+    binding_keys: tuple[bytes, ...] = field(default=(), repr=False)  # S2: never in a repr
     on_detokenize: Callable[[str, str | None, int], None] | None = None
+    #: F-11: may this batch be tokenized — ``(entity_type, profile) -> bool`` (``None`` = no
+    #: allow-list) — and the audit hook called once per tokenization batch, ``(entity_type,
+    #: profile, count)``, **before** the service is called (it may raise).
+    tokenize_allowed: Callable[[str, str | None], bool] | None = None
+    on_tokenize: Callable[[str, str | None, int], None] | None = None
 
 
 def anchor_for(document: Any, plan: Plan) -> str:
@@ -173,7 +193,7 @@ def _ctx(
     options: ApplyOptions,
     anchor: str,
     mode: str,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> TransformContext:
     return TransformContext(
         entity_type=entry.finding.entity_type,
@@ -247,7 +267,7 @@ def _record_originals(document: Any, plan: Plan) -> list[tuple[str, str]]:
 
 def _tokenize_prepass(
     plan: Plan, document: Any, options: ApplyOptions
-) -> dict[tuple[str, str], str] | None:
+) -> dict[ExternalKey, str] | None:
     """One tokenization call per (entity type, profile) for the values the batch cache lacks;
     ``None`` when no adapter is configured (``external_tokenize`` then fails closed)."""
     if options.tokenizer is None:
@@ -263,14 +283,25 @@ def _tokenize_prepass(
         except MethodError:
             continue  # the transform loop reports a plan that does not fit
         value = current if loc.whole else current[loc.start or 0 : loc.end]
-        if (entry.finding.entity_type, value) not in cache:
-            profile = entry.params.get("profile")
+        profile = entry.params.get("profile")
+        if external_key(entry.finding.entity_type, profile, value) not in cache:  # F-19
             key = (entry.finding.entity_type, str(profile) if profile is not None else None)
             groups.setdefault(key, set()).add(value)
+    for entity, profile in groups:  # every batch is checked before the first call (F-11)
+        if options.tokenize_allowed is not None and not options.tokenize_allowed(entity, profile):
+            raise CodedError(
+                "tokenizer_profile_not_allowed",
+                "external_tokenize: this entity type and profile are not allowed for the tenant",
+                status=403,
+            )
     for (entity, profile), values in groups.items():
         ordered = sorted(values)
+        if options.on_tokenize is not None:
+            options.on_tokenize(entity, profile, len(ordered))
         tokens = options.tokenizer.tokenize(entity, ordered, profile=profile)
-        cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
+        cache.update(
+            {external_key(entity, profile, v): t for v, t in zip(ordered, tokens, strict=True)}
+        )
     return cache
 
 
@@ -280,16 +311,21 @@ def _is_bound(h: RevealHint, token: str, options: ApplyOptions) -> bool:
     tag = h.reverse_params.get("bind")
     if not isinstance(tag, str) or not tag.isascii():
         return False
+    version = h.reverse_params.get("bind_v", 1)  # F-22: hints issued before v2 carry no version
+    if version not in (1, 2) or isinstance(version, bool):
+        return False
     ctx = _reveal_ctx(h, options)
     return any(
-        hmac.compare_digest(external_tag(ctx, token, binding).encode(), tag.encode())
+        hmac.compare_digest(
+            external_tag(ctx, token, binding, version=version).encode(), tag.encode()
+        )
         for binding in options.binding_keys
     )
 
 
 def _detokenize_prepass(
     output: Any, hints: list[RevealHint], options: ApplyOptions
-) -> dict[tuple[str, str], str] | None:
+) -> dict[ExternalKey, str] | None:
     """One detokenization call per (entity type, profile) for the hints' external tokens.
 
     Every external hint's ``bind`` tag is checked first (SEC-4): one token that DPS did not
@@ -316,13 +352,15 @@ def _detokenize_prepass(
         groups.setdefault(key, set()).add(token)
     if options.tokenizer is None:
         return None
-    cache: dict[tuple[str, str], str] = {}
+    cache: dict[ExternalKey, str] = {}
     for (entity, profile), tokens in groups.items():
         ordered = sorted(tokens)
         if options.on_detokenize is not None:
             options.on_detokenize(entity, profile, len(ordered))
         values = options.tokenizer.detokenize(entity, ordered, profile=profile)
-        cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
+        cache.update(
+            {external_key(entity, profile, t): v for t, v in zip(ordered, values, strict=True)}
+        )
     return cache
 
 
@@ -488,7 +526,7 @@ def apply_plan(
 def _reveal_ctx(
     hint: RevealHint,
     options: ApplyOptions,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> TransformContext:
     return TransformContext(
         entity_type=hint.entity_type,

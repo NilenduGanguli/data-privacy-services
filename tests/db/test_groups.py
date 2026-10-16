@@ -51,7 +51,9 @@ async def test_create_get_and_list_groups(migrated_db: Settings) -> None:
         "closed_at",
         "last_check",  # M3 migration 020: counts and codes of the latest consistency check
         "last_check_at",
+        "kcv",  # S3 review F-13 (046): public, binds the DEK to the kid; never the key
     }
+    assert group.kcv == key.kcv
     assert row["last_check"] is None and row["last_check_at"] is None
     stored = json.dumps({k: str(v) for k, v in row.items()})
     assert key.dek not in stored and seed.seed not in stored

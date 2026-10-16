@@ -87,7 +87,8 @@ async def test_invalid_draft_is_refused_with_field_names_only(migrated_db: Setti
     with pytest.raises(PolicyStoreError) as err:
         await save_draft("t1", NAME, body, actor="editor")
     assert err.value.status == 400 and err.value.code == "invalid_policy"
-    assert "teleport" in err.value.detail
+    assert "treat.SSN.method" in err.value.detail and "unknown method" in err.value.detail
+    assert "teleport" not in err.value.detail  # S1: the field and rule, never the value
     assert (await get_policy("t1", NAME)).draft is False
 
 

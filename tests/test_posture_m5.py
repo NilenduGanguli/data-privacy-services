@@ -45,6 +45,7 @@ def _prod(**kw: Any) -> Settings:
         ssl_cert_file="/etc/ssl/org-ca.pem",
         tokenizer_provider="http",
         tokenizer_url="https://tokenizer.bank.example",
+        tokenizer_profiles='{"*": ["SSN:dps-ssn"]}',  # F-11: the allow-list a tokenizer needs
         migrations_mode="verify",
         inline_secrets_allowed=False,
         rls_enabled=True,

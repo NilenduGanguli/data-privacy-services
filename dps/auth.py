@@ -309,6 +309,7 @@ def require_scope(scope: str) -> Callable[[Request], Principal]:
     def dependency(request: Request) -> Principal:
         return _authorize(request, (scope,))
 
+    dependency.__dps_scope__ = (scope,)  # type: ignore[attr-defined]  # S6 route walk
     return dependency
 
 
@@ -322,6 +323,7 @@ def require_any_scope(*scopes: str) -> Callable[[Request], Principal]:
     def dependency(request: Request) -> Principal:
         return _authorize(request, tuple(scopes))
 
+    dependency.__dps_scope__ = tuple(scopes)  # type: ignore[attr-defined]  # S6 route walk
     return dependency
 
 

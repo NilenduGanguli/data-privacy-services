@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from dps.engine.detect.custom import CustomTiers
 from dps.engine.findings import (
     Finding,
     Locator,
@@ -82,11 +83,12 @@ from dps.engine.findings import (
 )
 from dps.engine.jsonpath import child_path, flatten, get_path, parse_path
 from dps.engine.planner import build_plan
+from dps.engine.policy import KEYLESS_METHODS as POLICY_KEYLESS_METHODS
 from dps.engine.policy import MethodSpec, Policy
 from dps.engine.service import PrivacyEngine
 from dps.engine.synth.keys import KeyPseudonyms, PseudonymError
 from dps.engine.synth.surrogates import SynthesisSeed, seed_bytes
-from dps.engine.taxonomy import entity_info, record_sensitivity
+from dps.engine.taxonomy import entity_info, metric_entity_label, record_sensitivity
 from dps.engine.transform.apply import (
     ApplyOptions,
     RevealHint,
@@ -95,7 +97,14 @@ from dps.engine.transform.apply import (
     reveal,
 )
 from dps.engine.transform.crypto import KeyMaterial, key_check_value
-from dps.engine.transform.methods import ISO_DATE, ISO_DATETIME, METHODS, MethodError
+from dps.engine.transform.methods import (
+    ISO_DATE,
+    ISO_DATETIME,
+    METHODS,
+    ExternalKey,
+    MethodError,
+    external_key,
+)
 from dps.engine.verify import NAME_ENTITY, Verification, name_parts, normalise
 from dps.layers.connectors.base import (
     ColumnInfo,
@@ -107,26 +116,20 @@ from dps.layers.connectors.base import (
     to_engine_text,
 )
 from dps.layers.connectors.docpaths import expand_wildcards, generalise, top_level
-from dps.observability import FINDINGS, TABULAR_RESAMPLES, TRANSFORMS, VERIFY_FAIL
+from dps.observability import (
+    CURRENT_TENANT,
+    FINDINGS,
+    TABULAR_RESAMPLES,
+    TRANSFORMS,
+    VERIFY_FAIL,
+)
 
 if TYPE_CHECKING:  # the constraints module needs the [tabular] extra; M2 jobs run without it
     from dps.engine.synth.constraints import ConstraintSet
     from dps.engine.transform.external import ExternalTokenizer
 
-#: Methods that need no key material (usable in synthesize mode).
-KEYLESS_METHODS = frozenset(
-    {
-        "surrogate",
-        "keep",
-        "null",
-        "redact",
-        "bucket",
-        "generalize",
-        "mask_partial",
-        "dictionary",
-        "noise",
-    }
-)
+#: Methods that need no key material (usable in synthesize mode): the policy's set (F-12).
+KEYLESS_METHODS = POLICY_KEYLESS_METHODS
 #: Row country code → surrogate locale (``policy.locale.by_country_field``).
 LOCALE_BY_COUNTRY = {
     "US": "en_US",
@@ -364,6 +367,20 @@ class IncompatibleMethod(Exception):
     def __init__(self, path: str, code: str) -> None:
         super().__init__(f"{code}: the method output for {path} does not fit the target column")
         self.path, self.code = path, code
+
+
+class TokenizerProfileRefused(IncompatibleMethod):
+    """F-11: the job's tenant may not tokenize this column's entity type under its profile
+    (``DPS_TOKENIZER_PROFILES``); raised before the service is called (``tokenizer_profile_not_allowed``,
+    not retried)."""
+
+    def __init__(self, path: str) -> None:
+        Exception.__init__(
+            self,
+            "tokenizer_profile_not_allowed: external_tokenize is not allowed for this entity type "
+            "and profile on this tenant",
+        )
+        self.path, self.code = path, "tokenizer_profile_not_allowed"
 
 
 def row_anchor(row: Row, shape: TableShape, anchor: tuple[str, str] | None) -> str:
@@ -662,6 +679,11 @@ class BatchTransformer:
         self.whole = [c for c in columns if not c.text_column]
         self.text = [c for c in columns if c.text_column]
         self.detector = engine.detector(policy, locale) if self.text else None
+        #: S3 review round 1 B3: the policy's custom tiers are registered in every call that
+        #: transforms a batch (a worker reuses this transformer across partition handler tasks)
+        self._custom_tiers = CustomTiers(
+            policy.detect.custom_recognizers, policy.detect.declared_fields
+        )
         self.out_cols = {c.name: c.output_column() for c in columns if top_level(c.output_column())}
         self.leaf_restore = leaf_restore
         self.pseudonyms = list(pseudonyms)
@@ -850,6 +872,7 @@ class BatchTransformer:
             IncompatibleMethod: a method's output does not fit its column.
             MethodError: a method prerequisite is missing (value-free message).
         """
+        self._custom_tiers.ensure()
         surrogates = (
             self.engine.surrogate_engine(self.seed, self.locale) if self.seed is not None else None
         )
@@ -988,7 +1011,7 @@ class BatchTransformer:
         for method, count in methods.items():
             TRANSFORMS.labels(self.mode, method).inc(count)
         for (entity, detector), count in findings_seen.items():
-            FINDINGS.labels(entity, detector).inc(count)
+            FINDINGS.labels(metric_entity_label(entity), detector).inc(count)
         verification = Verification(passed=not hits, checked=checked, hits=hits[:_MAX_HITS])
         if hits:
             VERIFY_FAIL.labels(self.mode).inc()
@@ -1043,7 +1066,7 @@ class BatchTransformer:
                 hits.append({"path": p.path, "entity_type": p.entity_type, "rule": "fixed_point"})
         return checked
 
-    def _pretokenize(self, rows: list[Row]) -> dict[tuple[str, str], str] | None:
+    def _pretokenize(self, rows: list[Row]) -> dict[ExternalKey, str] | None:
         """M5 ``external_tokenize``: one call per entity type and profile for the batch's whole
         values (spans in free text still go through ``apply``'s per-row pre-pass).
 
@@ -1062,11 +1085,20 @@ class BatchTransformer:
                 # every value the plan addresses (M3: a document path can match several leaves)
                 for _unit, text in self._values(row, col):
                     groups.setdefault(key, set()).add(text)
-        cache: dict[tuple[str, str], str] = {}
+        tenant = CURRENT_TENANT.get()  # bound by the worker for the job's tenant
+        for col in columns:  # F-11: every column is checked before the first call
+            profile = col.method.params.get("profile")
+            if not self.engine.settings.tokenizer_profile_allowed(
+                tenant, col.entity_type, str(profile) if profile is not None else None
+            ):
+                raise TokenizerProfileRefused(col.path)
+        cache: dict[ExternalKey, str] = {}
         for (entity, profile), values in groups.items():
             ordered = sorted(values)
             tokens = tokenizer.tokenize(entity, ordered, profile=profile)
-            cache.update({(entity, v): t for v, t in zip(ordered, tokens, strict=True)})
+            cache.update(
+                {external_key(entity, profile, v): t for v, t in zip(ordered, tokens, strict=True)}
+            )
         return cache
 
     def _key_int(self, row: Row) -> int | None:
@@ -1219,8 +1251,9 @@ def external_reveal_cache(
     reveal_map: list[dict[str, Any]],
     shape: TableShape,
     tokenizer: ExternalTokenizer,
-) -> dict[tuple[str, str], str]:
-    """L2 reveal of ``external_tokenize`` columns: ``(entity type, token) → value`` for ``rows``.
+) -> dict[ExternalKey, str]:
+    """L2 reveal of ``external_tokenize`` columns: ``(entity type, profile, token) → value`` for
+    ``rows`` (the profile is part of the key, F-19).
 
     Runs where :func:`reveal_row` runs — on the key holder's side (``tools/reveal_rows.py``),
     with the **key holder's own** tokenization-service client: DPS's credentials never detokenize
@@ -1240,7 +1273,7 @@ def external_reveal_cache(
             token = to_engine_text(row.get(column.name), column)
             if token:
                 groups.setdefault(group, set()).add(token)
-    cache: dict[tuple[str, str], str] = {}
+    cache: dict[ExternalKey, str] = {}
     for (entity, profile), tokens in groups.items():
         ordered = sorted(tokens)
         values = tokenizer.detokenize(entity, ordered, profile=profile)
@@ -1249,7 +1282,9 @@ def external_reveal_cache(
                 f"external_tokenize ({entity}): a detokenized value does not tokenize back to its "
                 "token; nothing was revealed"
             )
-        cache.update({(entity, t): v for t, v in zip(ordered, values, strict=True)})
+        cache.update(
+            {external_key(entity, profile, t): v for t, v in zip(ordered, values, strict=True)}
+        )
     return cache
 
 
@@ -1262,7 +1297,7 @@ def _reveal_value(
     options: ApplyOptions,
     raw_anchor: str,
     field_scoped: bool,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> Any:
     token = to_engine_text(value, column)
     if not token:
@@ -1273,7 +1308,8 @@ def _reveal_value(
                 f"the external_tokenize column {column.path} needs the bank tokenization service "
                 "(pass --tokenizer-url and the key holder's --tokenizer-token-file)"
             )
-        plain = external.get((str(entry["entity_type"]), token))
+        profile = (entry.get("params") or {}).get("profile")
+        plain = external.get(external_key(str(entry["entity_type"]), profile, token))
         if plain is None:
             raise MethodError(f"the value at {column.path} could not be detokenized")
         return from_engine_text(plain, column)
@@ -1315,7 +1351,7 @@ def reveal_row(
     policy: Policy,
     anchor: tuple[str, str] | None,
     kid: str | None = None,
-    external: Mapping[tuple[str, str], str] | None = None,
+    external: Mapping[ExternalKey, str] | None = None,
 ) -> Row:
     """Reveal one L2 output row with the caller's key and an evidence pack's ``reveal_map``.
 

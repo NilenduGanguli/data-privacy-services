@@ -12,20 +12,22 @@ module level (the crawler and the browser are imported inside :func:`scan_job`).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
-from dps import db, jobs
+from dps import db, jobs, netguard
 from dps.audit import AuditEvent
+from dps.engine.detect.regex_guard import PatternTooSlow
 from dps.engine.service import EngineError
 from dps.engine.synth.surrogates import seed_from_caller
 from dps.engine.transform.crypto import key_material_from_caller
 from dps.errors import CodedError
 from dps.ids import PREFIX_EVIDENCE, new_id
 from dps.jobs import ClaimedJob, JobPhase, JobState
-from dps.jobs_models import JobProgress, JobSecret, ScanSpec
+from dps.jobs_models import JobProgress, JobSecret, ScanSpec, SealedSelection, is_policy_label
 from dps.layers.connectors.evidence import pack_sha256, render_html
 from dps.layers.scanner.inventory import build_export, build_scan_evidence
 from dps.layers.scanner.personas_fill import persona_values
@@ -39,7 +41,14 @@ from dps.layers.scanner.runtime import (
 from dps.layers.scanner.store import ScanStore, StoredEvidence
 from dps.layers.scanner.urls import CrawlScope, Origin, UrlError, canonical
 from dps.observability import get_logger
-from dps.secrets import SealError, SecretUnavailable, open_sealed, resolve_secret_ref
+from dps.secrets import (
+    SealError,
+    SecretUnavailable,
+    open_json,
+    open_sealed,
+    resolve_secret_ref,
+    seal_json,
+)
 
 if TYPE_CHECKING:
     from dps.layers.scanner.models import FieldRecord, PageRecord, RequestCount, ScanEvent
@@ -53,10 +62,12 @@ __all__ = [
     "ScanRuntime",
     "ScanSetupError",
     "ScanSink",
+    "check_start_url",
     "finalize_scan",
     "open_runtime",
     "scan_finalize_job",
     "scan_job",
+    "seal_scan_policy",
 ]
 
 logger = get_logger(__name__)
@@ -90,6 +101,38 @@ def _storage_state(tenant_id: str, ref: str, ctx: HandlerContext) -> dict[str, A
     return state
 
 
+def seal_scan_policy(kek: bytes, job_id: str, policy: object) -> bytes | None:
+    """``spec_enc`` of a scan whose policy is a body — inline, or an ``@name`` reference resolved
+    at accept — sealed with the job KEK (AAD ``dps_job.spec:<id>``, the run jobs' blob): deny and
+    allow-list terms are often the sensitive terms themselves, so ``dps_job.spec`` keeps only the
+    value-free label :func:`~dps.layers.scanner.models.redact_scan_spec` writes (S3 security
+    review F-18). ``None`` for a policy name (nothing to seal)."""
+    if not isinstance(policy, dict):
+        return None
+    return seal_json(kek, SealedSelection(policy=policy), aad=f"dps_job.spec:{job_id}")
+
+
+def stored_policy(ctx: HandlerContext, job: ClaimedJob) -> str | dict[str, Any] | None:
+    """The scan's policy as ``POST /scans`` accepted it: a name (or nothing: the default), or the
+    body sealed in ``spec_enc`` when the stored spec holds its label (F-18).
+
+    Raises :class:`ScanSetupError` ``secret_unavailable`` when a label's sealed body cannot be
+    opened (no ``spec_enc``, another KEK, a tampered blob).
+    """
+    policy = (job.spec or {}).get("policy")
+    if not is_policy_label(policy):
+        return policy if isinstance(policy, str | dict) else None
+    if job.spec_enc is None:
+        raise ScanSetupError("secret_unavailable")
+    try:
+        sealed = open_json(ctx.kek, job.spec_enc, SealedSelection, aad=f"dps_job.spec:{job.id}")
+    except SealError:
+        raise ScanSetupError("secret_unavailable") from None
+    if sealed.policy is None:
+        raise ScanSetupError("secret_unavailable")
+    return sealed.policy
+
+
 async def open_runtime(ctx: HandlerContext, job: ClaimedJob, store: ScanStore) -> ScanRuntime:
     """The :class:`ScanRuntime` of a claimed scan job, from its sealed secret and value-free spec.
 
@@ -110,6 +153,7 @@ async def open_runtime(ctx: HandlerContext, job: ClaimedJob, store: ScanStore) -
     data = json.loads(json.dumps(job.spec))
     data.pop("url_origin", None)
     data["url"] = secret.scan_start_url
+    data["policy"] = stored_policy(ctx, job)  # F-18: a sealed body comes back from spec_enc
     ref = (data.get("auth") or {}).get("storage_state_ref")
     data["auth"] = {"storage_state_ref": ref} if ref else {}
     for added in _ADDED_CONSISTENCY:
@@ -213,17 +257,25 @@ class DbScanSink:
         )
 
     async def progress(self, progress: dict[str, Any]) -> bool:
-        """A fenced progress write; ``False`` = the lease is gone (canceled or reaped)."""
+        """A fenced progress write; ``False`` = the lease is gone (canceled or reaped). ``llm``
+        (M5 Task 8B, when T3 labelling was asked for) becomes ``progress.metrics.llm``."""
+        llm = progress.get("llm")
+        written = JobProgress(
+            pages=int(progress.get("pages", 0)),
+            fields=int(progress.get("fields", 0)),
+            blocked_requests=int(progress.get("blocked_requests", 0)),
+            metrics={"llm": dict(llm)} if isinstance(llm, dict) else {},
+        ).model_dump(
+            mode="json",
+            include={"pages", "fields", "blocked_requests"}
+            | ({"metrics"} if isinstance(llm, dict) else set()),
+        )
         return await jobs.advance_job(
             self.ctx.worker_id,
             self.job.id,
             phase=JobPhase.scan,
             state=JobState.running,
-            progress=JobProgress(
-                pages=int(progress.get("pages", 0)),
-                fields=int(progress.get("fields", 0)),
-                blocked_requests=int(progress.get("blocked_requests", 0)),
-            ).model_dump(mode="json", include={"pages", "fields", "blocked_requests"}),
+            progress=written,
         )
 
     async def audit_navigation(self, *, page_no: int, outcome: str) -> None:
@@ -244,9 +296,30 @@ class DbScanSink:
         )
 
 
+async def check_start_url(ctx: HandlerContext, runtime: ScanRuntime) -> None:
+    """S5 (security review): the start URL passes ``netguard.check_scan_url`` again on the
+    browser-worker, before any browser starts — its host may resolve elsewhere now than when the
+    scan was accepted (DNS rebinding), and a scan queued before the check existed is covered too.
+
+    Raises :class:`ScanSetupError` with the guard's code (``host_forbidden``,
+    ``host_not_registered``).
+    """
+    try:
+        await asyncio.to_thread(
+            netguard.check_scan_url,
+            runtime.start_url,
+            registered_hosts=sorted(runtime.scope.registered_hosts),
+            settings=ctx.settings,
+            resolver=netguard.default_resolver,
+        )
+    except netguard.NetGuardError as exc:
+        raise ScanSetupError(exc.code) from None
+
+
 async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
-    """Phase ``scan``: open the runtime, crawl, finalize (``succeeded``). A setup error fails the
-    job with its code and purges the key; a lost lease returns (the new owner finalizes)."""
+    """Phase ``scan``: open the runtime, check the start URL again (S5), crawl, finalize
+    (``succeeded``). A setup error fails the job with its code and purges the key; a lost lease
+    returns (the new owner finalizes)."""
     from dps.layers.scanner.browser import get_browser
     from dps.layers.scanner.crawler import ScanRunner
 
@@ -274,6 +347,21 @@ async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
         logger.info("scan_evidence_exists", job_id=job.id)
         await finalize_scan(ctx, job, runtime, store=store, outcome=None, result="succeeded")
         return
+    try:
+        await check_start_url(ctx, runtime)
+    except ScanSetupError as exc:
+        logger.info("scan_setup_failed", job_id=job.id, error_code=exc.code)
+        await jobs.advance_job(
+            ctx.worker_id,
+            job.id,
+            phase=JobPhase.scan,
+            state=JobState.failed,
+            progress={"outcome": "failed"},
+            error_code=exc.code,
+            error=exc.code,
+            purge_secret=True,
+        )
+        return
     async with db.acquire_queue(job.tenant_id) as conn:  # a reaped-and-retried attempt starts clean
         await store.reset_scan(conn, job.id)
     await ctx.artefacts.delete_for_job(job.tenant_id, job.id)
@@ -289,7 +377,12 @@ async def scan_job(ctx: HandlerContext, job: ClaimedJob) -> None:
     except LeaseLost:
         logger.info("scan_lease_lost", job_id=job.id)  # canceled or reaped: the new owner finalizes
         return
-    await finalize_scan(ctx, job, runtime, store=store, outcome=outcome, result="succeeded")
+    except PatternTooSlow as exc:  # S3 review F-02: deterministic, a retry would refuse again
+        outcome = RunOutcome(error_code=exc.code)
+    if outcome.error_code is not None:
+        logger.info("scan_refused", job_id=job.id, error_code=outcome.error_code)
+    result: Literal["succeeded", "failed"] = "failed" if outcome.error_code else "succeeded"
+    await finalize_scan(ctx, job, runtime, store=store, outcome=outcome, result=result)
 
 
 async def scan_finalize_job(ctx: HandlerContext, job: ClaimedJob) -> None:
@@ -378,6 +471,9 @@ async def finalize_scan(
     if counts["non_get_allowed"]:
         result = "failed"
         errors.append({"code": "submission_detected", "where": "guard"})
+    if outcome is not None and outcome.error_code:  # the crawl ended on a refusal (F-02)
+        result = "failed"
+        errors.append({"code": outcome.error_code, "where": "crawl"})
     if stored is not None:
         evidence_id, policy_name = stored.id, None
         if stored.outcome in ("succeeded", "failed", "canceled"):
@@ -403,15 +499,18 @@ async def finalize_scan(
         evidence_id, policy_name, stored = written
         if stored is not None and stored.outcome in ("succeeded", "failed", "canceled"):
             result = stored.outcome  # type: ignore[assignment]
+    llm = outcome.llm if outcome is not None and isinstance(outcome.llm, dict) else None
     progress = JobProgress(
         outcome=result,
         pages=int(counts["pages_visited"]),
         fields=int(counts["fields"]),
         blocked_requests=sum((counts["blocked"] or {}).values()),
         evidence_id=evidence_id,
+        metrics={"llm": dict(llm)} if llm is not None else {},  # M5 Task 8B (T3 labelling)
     ).model_dump(
         mode="json",
-        include={"outcome", "stage", "pages", "fields", "blocked_requests", "evidence_id"},
+        include={"outcome", "stage", "pages", "fields", "blocked_requests", "evidence_id"}
+        | ({"metrics"} if llm is not None else set()),
     )
     code = errors[0]["code"] if errors and result == "failed" else None
     if not await jobs.advance_job(
@@ -449,8 +548,8 @@ def _policy_name(ctx: HandlerContext, job: ClaimedJob, runtime: ScanRuntime | No
     if runtime is not None:
         return runtime.policy.name
     try:
-        return ctx.engine.policy((job.spec or {}).get("policy")).name
-    except (EngineError, CodedError):
+        return ctx.engine.policy(stored_policy(ctx, job)).name
+    except (EngineError, CodedError, ScanSetupError):
         return ""
 
 
@@ -515,9 +614,9 @@ async def _write_pack(
     policy: dict[str, str] | None = None
     if runtime is None:
         try:
-            p = ctx.engine.policy((job.spec or {}).get("policy"))
+            p = ctx.engine.policy(stored_policy(ctx, job))
             policy = {"name": p.name, "hash": p.config_hash(), "version": str(p.version)}
-        except (EngineError, CodedError):
+        except (EngineError, CodedError, ScanSetupError):
             policy = None
     evidence_id = new_id(PREFIX_EVIDENCE)
     pack = build_scan_evidence(

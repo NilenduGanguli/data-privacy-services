@@ -37,7 +37,7 @@ from dps.engine.synth.personas import SUPPORTED_LOCALES
 from dps.engine.synth.surrogates import SynthesisSeed
 from dps.engine.transform.crypto import KeyMaterial
 from dps.jobs import Job
-from dps.jobs_models import ScanSpec
+from dps.jobs_models import ScanSpec, policy_label
 from dps.layers.scanner.urls import (
     Origin,
     UrlError,
@@ -699,10 +699,15 @@ def redact_scan_spec(v: ValidatedScan, url_redacted: str) -> dict[str, Any]:
     ``consistency`` loses ``key_material``, ``synthesis_seed`` and ``wrap_key``; it keeps flags only
     (``key_wrapped``, and ``wrapped`` as M2's ``redact_spec`` names it: the returned key is
     wrapped; ``caller_key`` / ``caller_seed``: the caller supplied them). The raw start URL
-    travels sealed in ``JobSecret.scan_start_url``.
+    travels sealed in ``JobSecret.scan_start_url``. A policy body (inline, or an ``@name``
+    reference resolved at accept) becomes its value-free label (name, version, sha256): the body
+    travels sealed in ``spec_enc`` (``dps.layers.scanner.seal_scan_policy``, S3 security review
+    F-18).
     """
     data = v.spec.model_dump(mode="json")
     data["url"] = url_redacted
+    if isinstance(data.get("policy"), dict):
+        data["policy"] = policy_label(data["policy"])
     data["url_origin"] = v.origin.text()
     data["scope"]["max_pages"] = v.max_pages
     data["scope"]["max_depth"] = v.max_depth

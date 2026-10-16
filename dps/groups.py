@@ -1,7 +1,8 @@
 """Job groups (contract §6.1): one key and one seed shared by the runs of a group.
 
 ``create_group`` generates a ``KeyMaterial`` and a ``SynthesisSeed`` and returns both **once**;
-the ``dps_job_group`` row keeps only the key id and the seed fingerprint (``sha256(seed)[:16]``),
+the ``dps_job_group`` row keeps only the key id, the key check value (public, F-13) and the seed
+fingerprint (``sha256(seed)[:16]``),
 so DPS never stores a group key. Every run naming the group must carry matching material
 (``validate_run`` → ``group_key_mismatch``). Rows live under the tenant GUC.
 """
@@ -19,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from dps import db
 from dps.connections import touch_tenant
 from dps.engine.synth.surrogates import SynthesisSeed, generate_synthesis_seed
-from dps.engine.transform.crypto import KeyMaterial, generate_key_material
+from dps.engine.transform.crypto import KeyMaterial, generate_key_material, key_check_value
 from dps.ids import PREFIX_GROUP, new_id
 from dps.jobs import decode_cursor, encode_cursor
 from dps.jobs_models import SpecError
@@ -28,7 +29,7 @@ from dps.secrets import seed_fingerprint
 #: Group names follow the connection-name rule (lower-case words joined by hyphens).
 GROUP_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 _COLS = (
-    "id, tenant_id, name, kid, seed_fingerprint, created_by, created_at, closed_at, "
+    "id, tenant_id, name, kid, seed_fingerprint, kcv, created_by, created_at, closed_at, "
     "last_check, last_check_at"
 )
 _MIN_LIMIT, _MAX_LIMIT = 1, 200
@@ -43,6 +44,9 @@ class JobGroup(BaseModel):
     name: str
     kid: str
     seed_fingerprint: str
+    #: the key check value (public; binds the DEK to the kid, F-13, migration 046); ``None`` for
+    #: groups created before it — they keep the kid-only rule
+    kcv: str | None = None
     created_by: str | None = None
     created_at: datetime
     closed_at: datetime | None = None
@@ -74,12 +78,14 @@ async def create_group(
             await touch_tenant(tenant_id, conn=conn)
             row = await conn.fetchrow(
                 f"INSERT INTO {db.schema_ident()}.dps_job_group (id, tenant_id, name, kid, "
-                f"seed_fingerprint, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING {_COLS}",
+                f"seed_fingerprint, kcv, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) "
+                f"RETURNING {_COLS}",
                 group_id,
                 tenant_id,
                 name,
                 key.kid,
                 seed_fingerprint(seed.seed),
+                key.kcv or key_check_value(key),
                 created_by,
             )
     except asyncpg.UniqueViolationError:
@@ -87,6 +93,21 @@ async def create_group(
     if row is None:  # RLS hides a row we just inserted only if the GUC binding is broken
         raise RuntimeError("created job group is not visible to its tenant")
     return _row(row), key, seed
+
+
+async def discard_group(tenant_id: str, group_id: str) -> bool:
+    """Delete a group whose creation answer never reached the caller (S3 review F-14): its key and
+    seed were returned nowhere else, so the row would only name a key nobody holds. Only a group no
+    job references is deleted."""
+    s = db.schema_ident()
+    async with db.acquire(tenant_id) as conn:
+        tag = await conn.execute(
+            f"DELETE FROM {s}.dps_job_group g WHERE g.tenant_id = $1 AND g.id = $2 "
+            f"AND NOT EXISTS (SELECT 1 FROM {s}.dps_job j WHERE j.group_id = $2)",
+            tenant_id,
+            group_id,
+        )
+    return db.rowcount(tag) > 0
 
 
 async def get_group(tenant_id: str, group_id: str) -> JobGroup | None:

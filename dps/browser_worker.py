@@ -21,6 +21,7 @@ from dps import __version__
 from dps.audit import DbAuditSink
 from dps.config import Settings, get_settings
 from dps.db import close_pools, db_configured, init_pool, init_worker_pool
+from dps.engine.detect.pattern_process import configure_pattern_processes
 from dps.jobs import JobKind, JobPhase
 from dps.layers.scanner import scan_finalize_job, scan_job
 from dps.layers.scanner.browser import close_browser, get_browser
@@ -97,6 +98,9 @@ async def amain(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     configure_logging(settings.log_level, json_output=settings.env != "local")
     assert_production_posture(settings, role=BROWSER_WORKER)  # M4 + M5 rules of this role
+    # scans run policy patterns too: long runs go to at most DPS_PATTERN_PROCESSES matcher
+    # processes, as in the app and the worker (S3 security review round 2, R2-B1)
+    configure_pattern_processes(settings.pattern_processes)
     if not db_configured(settings):
         raise SystemExit("browser-worker needs the metadata database (DPS_PG_HOST)")
     if load_kek(settings) is None:

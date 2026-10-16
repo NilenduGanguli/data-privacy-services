@@ -1,15 +1,22 @@
 """``/api/v1/scans`` (contract §9, scope ``scan``): the UI scanner's routes.
 
-``POST /scans`` validates the spec against the tenant's registered hosts, seals the start URL, the
-key material, the synthesis seed and any inline storage state into ``key_enc`` and queues a
-``scan`` job; the key and the seed are in that answer **only** (``Cache-Control: no-store``), and
-an idempotent replay returns neither. Every read is value-free (redacted URLs, counts, codes) or
+``POST /scans`` runs the SSRF guard on the start URL (``netguard.check_scan_url``: numeric host
+encodings, link-local/metadata, multicast, reserved and — outside ``env=local`` — loopback
+addresses, also after DNS; S5, security review), validates the spec against the tenant's
+registered hosts, seals the start URL, the
+key material, the synthesis seed and any inline storage state into ``key_enc`` (and a policy body
+into ``spec_enc``: the stored spec keeps its label, S3 security review F-18) and queues a ``scan``
+job; the key and the seed are in that answer **only** (``Cache-Control: no-store``; an answer that
+fails after the row was written removes the scan, F-14), and an idempotent replay returns neither
+(also across a KEK rotation, F-21). Every read is value-free (redacted URLs, counts, codes) or
 synthetic (persona values and tokens of them). There is no route that submits a form, writes to a
 scanned site, or returns stored key material (decision D4, the contract §9 closing rule).
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -19,7 +26,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 
-from dps import db, jobs
+from dps import db, jobs, netguard
 from dps.auth import require_scope
 from dps.config import Settings
 from dps.engine.service import EngineError, PrivacyEngine
@@ -44,12 +51,14 @@ from dps.layers.api.deps import (
     principal_of,
     rejected,
     request_fingerprint,
+    request_fingerprint_alternates,
     require_db,
     tenant_of,
 )
 from dps.layers.api.errors import DpsHttpError
 from dps.layers.api.idempotency import REPLAY_HEADER
 from dps.layers.api.policy_refs import resolve as resolve_policy_ref
+from dps.layers.scanner import seal_scan_policy
 from dps.layers.scanner.classify import value_classifier
 from dps.layers.scanner.inventory import (
     inventory_csv,
@@ -208,8 +217,12 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
         tenant = tenant_of(request)
         key_header = idempotency_key(request)
         fp = await request_fingerprint(request) if key_header else None
+        # F-21 (S3 security review): a scan admitted before a KEK rotation is still a replay
+        alternates = await request_fingerprint_alternates(request) if key_header else []
         earlier = (
-            await jobs.find_by_idempotency(tenant, key_header, fingerprint=fp)
+            await jobs.find_by_idempotency(
+                tenant, key_header, fingerprint=fp, alternates=alternates
+            )
             if key_header
             else None
         )
@@ -226,10 +239,19 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
         # M5 (contract §5.5): an @name[:vN] reference becomes the tenant's published body now, so
         # the stored spec — which the browser-worker runs and the evidence names — pins the version
         body.policy = await resolve_policy_ref(request, body.policy)
-        try:
-            validated = validate_scan(
-                body, settings=settings, hosts=await _hosts(request, tenant), tenant_id=tenant
+        hosts = await _hosts(request, tenant)
+        try:  # S5: the SSRF guard (DNS included, off the event loop) before any job exists
+            await asyncio.to_thread(
+                netguard.check_scan_url,
+                body.url,
+                registered_hosts=sorted(hosts),
+                settings=settings,
+                resolver=netguard.default_resolver,
             )
+        except netguard.NetGuardError as exc:
+            raise DpsHttpError(422, exc.code, exc.detail) from None
+        try:
+            validated = validate_scan(body, settings=settings, hosts=hosts, tenant_id=tenant)
         except ScanSpecError as exc:
             raise DpsHttpError(exc.status, exc.code, f"the scan was refused: {exc.code}") from None
         try:
@@ -252,19 +274,31 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
             tenant_id=tenant,
             kind=JobKind.scan,
             phase=JobPhase.scan,
+            # F-18: a policy body is sealed in spec_enc; the stored spec keeps its label only
             spec=redact_scan_spec(validated, redact_url(validated.start_url, classify)),
             mode=body.mode,
             sealed_secret=sealed,
+            sealed_selection=seal_scan_policy(kek, job_id, body.policy),
             kid=key.kid,
             purpose=body.purpose.model_dump() if body.purpose else None,
             created_by=principal_of(request).key_id,
             idempotency_key=key_header,
             idempotency_fp=fp,
+            idempotency_alternates=alternates,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a value-free {"detail", "code"}
         raise rejected(request, "scan.create", exc) from None
     replay = job.id != job_id
-    audit_action(request, action="scan.create", status=200 if replay else 202, job_id=job.id)
+    try:
+        audit_action(request, action="scan.create", status=200 if replay else 202, job_id=job.id)
+    except DpsHttpError as exc:
+        # F-14 (S3 security review): the key and the seed are returned once; a scan whose answer
+        # fails (a strict audit sink refusing the creation event) never keeps them
+        if not replay:
+            await jobs.discard_unannounced(tenant, job.id)
+        with contextlib.suppress(DpsHttpError):  # best effort: the sink may still be full
+            rejected(request, "scan.create", exc, job_id=job.id)
+        raise
     if replay:  # a concurrent replay that waited behind the admission lock
         response.status_code = 200
         response.headers[REPLAY_HEADER] = "true"

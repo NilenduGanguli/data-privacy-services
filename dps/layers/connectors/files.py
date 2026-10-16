@@ -35,6 +35,7 @@ import gzip
 import io
 import json
 import math
+import re
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Mapping
@@ -121,6 +122,24 @@ def _plain(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_plain(v) for v in value]
     return _text_value(value)
+
+
+#: CSV cells a spreadsheet would run as a formula (S3 review F-07; S9's guard for the bulk export).
+_FORMULA_START = ("=", "@", "\t", "\r")
+#: ``+``/``-`` followed only by a number or phone shape is data, not a formula worth guarding.
+_SIGNED_DATA = re.compile(r"[+-][0-9 ().\-]*")
+
+
+def _csv_cell(value: Any) -> str:
+    """A CSV cell: text a spreadsheet would evaluate gets a leading apostrophe (``=``, ``@``,
+    TAB, CR, or ``+``/``-`` followed by more than a number or phone shape). Numbers, dates,
+    booleans and bytes are rendered by :func:`_text_value` in forms no spreadsheet evaluates."""
+    text = _text_value(value)
+    if not isinstance(value, str) or not text:
+        return text
+    if text.startswith(_FORMULA_START) or (text[0] in "+-" and not _SIGNED_DATA.fullmatch(text)):
+        return "'" + text
+    return text
 
 
 def _json_value(value: Any) -> Any:
@@ -243,7 +262,7 @@ class _Spool:
             }
             self._writer.write_table(pa.Table.from_pydict(columns, schema=self.schema))
         elif self.spec.format == "csv":
-            self._writer.writerows([[_text_value(r.get(n)) for n in self.names] for r in rows])
+            self._writer.writerows([[_csv_cell(r.get(n)) for n in self.names] for r in rows])
         else:
             for r in rows:
                 doc = {n: _json_value(r.get(n)) for n in self.names}

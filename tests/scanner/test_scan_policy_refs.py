@@ -24,7 +24,7 @@ from dps.engine.transform.crypto import generate_key_material
 from dps.ids import new_id
 from dps.jobs import ClaimedJob, JobKind, JobPhase, JobState
 from dps.jobs_models import JobSecret, ScanSpec
-from dps.layers.scanner import ScanSetupError, _policy_name, open_runtime
+from dps.layers.scanner import ScanSetupError, _policy_name, open_runtime, seal_scan_policy
 from dps.layers.scanner.models import redact_scan_spec, validate_scan
 from dps.secrets import seal
 
@@ -41,7 +41,8 @@ def _relaxed(name: str = "relaxed-kyc", version: int = 2) -> dict[str, Any]:
 
 
 def _claimed(settings: Settings, policy: dict[str, Any]) -> ClaimedJob:
-    """A claimed scan job as ``POST /scans`` stores it (sealed key, seed and start URL)."""
+    """A claimed scan job as ``POST /scans`` stores it (sealed key, seed and start URL; the policy
+    body sealed in ``spec_enc`` and its label in the spec, S3 security review F-18)."""
     spec = ScanSpec.model_validate({"url": URL, "policy": policy})
     validated = validate_scan(spec, settings=settings, hosts=HOSTS, tenant_id="t1")
     job_id = new_id("s")
@@ -64,6 +65,7 @@ def _claimed(settings: Settings, policy: dict[str, Any]) -> ClaimedJob:
         attempts=1,
         max_attempts=3,
         key_enc=seal(KEK, secret.model_dump_json().encode("utf-8"), aad=f"dps_job.key:{job_id}"),
+        spec_enc=seal_scan_policy(KEK, job_id, spec.policy),
         lease_expires_at=now,
     )
 
