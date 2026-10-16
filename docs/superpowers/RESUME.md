@@ -4,7 +4,7 @@
 > programme exactly where it stopped, without the original chat. It complements, and points into, the
 > binding documents listed in §2. **Do not trust the snapshot in §4 blindly — run §3 first.**
 
-**Last updated:** 2026-10-15 10:00 IST (M4 merged into main). **Active orchestration: workflow `wf_c6c9b6f6-603` "dps-finish-fast"** (script copy: `docs/superpowers/build/orchestration/dps-finish-fast.workflow.js`); the earlier `wf_c77f2c08-9ae` "dps-to-v1" and `wf_4dc1989c-3ce` were stopped at 16:45.
+**Last updated:** 2026-10-16 (release merge: every finish branch merged into main, version 1.0.0 committed; the tag waits for the final verification). **Active orchestration: workflow `wf_c6c9b6f6-603` "dps-finish-fast"** (script copy: `docs/superpowers/build/orchestration/dps-finish-fast.workflow.js`); the earlier `wf_c77f2c08-9ae` "dps-to-v1" and `wf_4dc1989c-3ce` were stopped at 16:45.
 **Goal:** tag `v1.0.0` on `main` with every Definition-of-Done gate green (M0–M5 shipped).
 
 ---
@@ -15,7 +15,11 @@
   (detect → plan → transform → verify → report), three entry points (L1 stateless API + documents, L2 database
   connectors PostgreSQL/Oracle/MongoDB, L3 UI scanner), a React "Privacy Console", hard rules: no LLM ever sees a raw
   value; keys are returned to the caller and never stored; the scanner never submits anything.
-- **Merged since the snapshot below:** M5 is merged into main (`8378da7`) with integration fixes.
+- **Merged since the snapshot below:** M5 is merged into main (`8378da7`) with integration fixes;
+  M4 (`5959a75`) and its post-merge fixes; on 2026-10-16 the finish branches `fsec`, `fsecc`, `fimg`,
+  `fos`, `fdemo`, `fdocs` and `fllm` (with `fpersona`, `fspec`, `fidcheck`) and the release commit
+  `chore(release): v1.0.0` (HANDOFF §14.9, report `~/.cache/dps-build/reports/release.md`). Next: the
+  final verification of the Definition of Done on the clean `full` stack, then `git tag -a v1.0.0`.
 - **Done and tagged on main:** `v0.1.0-m0` (engine, L1 API, Playground), `v0.2.0-m1` (documents, true PDF redaction,
   schema synthesis), `v0.3.0-m2` (metadata DB, job queue, PG connector, four write modes, evidence, wizard), plus
   verified hardening (SEC-2, SEC-3 and four fixes).

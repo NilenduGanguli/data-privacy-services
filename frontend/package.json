@@ -1,7 +1,7 @@
 {
   "name": "dps-privacy-console",
   "private": true,
-  "version": "0.2.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Data Privacy Services — Privacy Console (Vite + React SPA served by FastAPI from frontend/dist).",
   "scripts": {

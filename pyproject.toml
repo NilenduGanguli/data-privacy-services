@@ -1,6 +1,6 @@
 [project]
 name = "data-privacy-services"
-version = "0.2.0"
+version = "1.0.0"
 description = "Data Privacy Services: obfuscation and synthetic data for JSON, text, documents, databases and UIs."
 requires-python = ">=3.12"
 readme = "README.md"

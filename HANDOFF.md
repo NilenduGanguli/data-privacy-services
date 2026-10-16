@@ -1,6 +1,15 @@
 # HANDOFF — data-privacy-services (DPS)
 
-Last verified: — (filled by the release, M5 Task 28: date, commit and the summary line of every gate in §12)
+Last verified: 2026-10-16, the release merge on `main` (`0541dc9` and the fixes `90f1312`, `f8850d4`,
+`dea7b84`, then `chore(release): v1.0.0`): `ruff format --check` 511 files formatted, `ruff check` clean,
+`mypy dps` no issues in 155 files, `python tools/settings_table.py --check` current (186 settings);
+`pytest -q` against the running `full` stack 4 577 passed, 127 skipped, 9 failed — 8 of them merge
+defects fixed test first and re-run green (`tests/deploy` 62 passed, T3 labelling 36 passed), the 9th
+the demo-site counter check against a demo-site container started before `fimg`'s `server.mjs`
+change (re-run on the rebuilt stack), `tests/api` 55 passed, the tesseract-dependent scanner captures and crawler 147 passed
+(OCR through the app image's tesseract); console `npm run typecheck` clean, 46 node + 418 Vitest
+tests passed, `npm run build`. The Definition of Done gates of §12 run in the final verification on
+the clean `full` stack (report `~/.cache/dps-build/reports/release.md`).
 
 Build and deploy facts only, kept current (the Wega rule): update this file in the same change as
 anything that alters an image, a port, a setting, an extra, a probe, a label or a deploy step. What
@@ -733,6 +742,9 @@ guide with the steps and the parameter table. As built (record, proofs and the r
   `DPS_PG_HOST` that is not `dps-db`'s externalName, literal secrets in a ConfigMap and any role
   whose settings fail `Settings` or the posture guard; `--fail-on-warn` is the release gate. Every
   JSON6902 `replace` is preceded by a `test` of the committed value.
+- `DPS_TOKENIZER_PROFILES` is committed as `{}` (fails closed: no tenant may tokenize) and passes
+  the posture guard; the release lists each tenant's `ENTITY:profile` entries (README parameter
+  table); dev leaves it empty for the mock.
 - Platform prerequisites: user-workload monitoring; ConfigMap `dps-ca-bundle` (`pg-root.pem`,
   `org-ca.pem`); the RWX PVC `dps-exports`; the secrets of §5; network paths for every peer;
   connector `secret_ref` folders from `dps-connector-refs` (or a CSI/Vault mount) at `DPS_SECRET_DIR`.
@@ -2004,3 +2016,31 @@ sampled source values per personal column.
 policy (`@name`) fails every run with `policy_invalid` unless the run names `@name` again (open
 product gap, reported to the owner). (4) Keynote 14.4 does not open a deck through AppleScript
 without a person (AppleEvent -1712): review the Keynote PDF export by hand.
+
+### 14.9 The release merge (2026-10-16)
+
+`git merge --no-ff` of the finish branches into `main`, in this order: `fsec` (`edb4480`), `fsecc`
+(`976a904`), `fimg` (`cdd2145`), `fos` (`d81855e`), `fdemo` (`2dabe95`), `fdocs` (`3a3c28d`) and
+`fllm` (`0541dc9`, which carries `fpersona`, `fspec` and `fidcheck`). Conflicts kept both sides:
+the deviation logs and the contract kept every entry; this file took `fdocs`'s final frame (§1–§13)
+with the facts of the other streams filled in and their records kept here (§14.1–§14.8); code
+conflicts joined both changes (`crawler.py`: the placeholder rule of `main` with the security
+review's capture signature; `surrogates.py`/`methods.py`: the S2 repr guard with the name hint of
+`fpersona`; `jobs_run.py`: a finalize step answers `PatternTooSlow` and `SelectionError` with its
+code). One rule was joined rather than picked: `main` required `admin` for every write mode into a
+`production`-tagged connection, the security review for `in_place`/`append` through any connection
+holding a production credential — every write through a connection that is tagged **or** holds a
+production credential now needs `admin` (§5; contract §5.1 and §5.3 amended; the API fixtures'
+production connection holds its own login). Two more merge defects were fixed test-first after
+`pytest -q` on the merged tree: the committed OpenShift ConfigMap now carries
+`DPS_TOKENIZER_PROFILES={}` (the security review's posture rule needs it with the tokenizer on; it
+fails closed until the release lists each tenant's profiles, §7), and a select's drawn placeholder
+("Choose…") is no protected value of a page any more (it blocked every T3 labelling call of a page
+with an untouched select under the strict egress verifier).
+
+What changes for a build, a deploy or a demo: rebuild both images (every stream changed `dps/`);
+migrations are 001–010, 020, 030–031 and 040–046 (`046_job_group_kcv.sql` from the security review:
+run the `migrate` one-shot or Job); the settings `DPS_PATTERN_CPU_SECONDS`, `DPS_PATTERN_PROCESSES`,
+`DPS_TOKENIZER_PROFILES` (required with the `http` tokenizer in staging/prod) and the M4 scanner
+settings are in §3.2; the version is 1.0.0 (`pyproject.toml`, `dps/__init__.py`, the console
+package). Report: `~/.cache/dps-build/reports/release.md`.

@@ -2727,3 +2727,44 @@ not the preset's body (1440 and 390 px, no horizontal scroll); a save of `gdpr-p
 in flight when the user switches goes to `gdpr-pseudonymise` with its own body and its late answer
 leaves `pci-dss` on screen; a publish dialog open during a back navigation closes and stays closed.
 0 console errors in every probe.
+
+## Task 28 — the release merge and v1.0.0 (2026-10-16, `main`)
+
+The finish branches merged into `main` with `git merge --no-ff` in the order `fsec`, `fsecc`,
+`fimg`, `fos`, `fdemo`, `fdocs`, `fllm` (HANDOFF §14.9 for the commits and the conflicts). Where
+the merged code differs from the plans:
+
+- **The production-write rule is the join of two rules, not either one.** `main` (S1-M3 post-merge
+  r1 security B1) required `admin` for every write mode into a `production`-tagged connection;
+  `fsec` (F-01, review round 1 B2) required it for `in_place`/`append` through any connection that
+  is tagged or holds a production credential. `validate_run` and `check_retry_scope` now apply
+  `holds_production_credentials` to every write mode of a run (403 `admin_scope_required`), so an
+  untagged holder of the production login is production for `table` and `files` too. Three API
+  fixtures modelled a UAT target that held the production connection's own login (the production
+  connection was made after it, with the same `secret_ref`); their production connection now holds
+  a login of its own (`dps/src/test-pg-admin` in `tests/api/test_api_jobs.py`), the S1-M3 gate's UAT
+  target a non-production ref and its retry case names the credential before the tag (F-01 refuses
+  naming it afterwards without `admin`). `fsec`'s retry test asserted that table/files retries
+  through the tagged connection keep the jobs scope; it now asserts the joined rule. Contract §5.1
+  and §5.3 and security review §3.1 record the amendment.
+- **Two more merge defects, fixed test-first after `pytest -q` on the merged tree** (9 failures,
+  4 577 passed): (1) the security review's F-11 posture rule met the `fos` manifests — the committed
+  prod render failed the app's and the worker's posture guard; the base ConfigMap now carries
+  `DPS_TOKENIZER_PROFILES={}` (fails closed: no tenant may tokenize; passes the guard), the release
+  example lists each tenant's `ENTITY:profile` entries, dev leaves it empty for the mock
+  (`f8850d4`, `test_tokenization_is_refused_until_the_release_lists_each_tenants_profiles`); (2) the
+  M4 post-merge `shown_texts` reads what a select draws, its placeholder included, so the security
+  review's `page_protected` protected "Choose…" and the strict egress verifier blocked every T3
+  call of a page with an untouched select (it found "choose" in the fixed instructions);
+  `page_protected` now protects every string a field shows less the placeholder phrase of an
+  empty-valued option it lists — a real value behind an empty value and every option of a listbox
+  stay protected (`dea7b84`, `test_a_drawn_placeholder_is_no_protected_value_but_a_drawn_value_is`).
+  The ninth failure, `test_received_counts_the_pages_and_files_it_served`, ran against the stack's
+  demo-site container started before `fimg`'s `server.mjs` change (a stale container, not code).
+- **HANDOFF** takes `fdocs`'s final frame (§1–§13, the generated settings table with the 21 settings
+  the other streams added documented in `tools/settings_table.py`) with the facts of M4, the
+  security review, Task 24, Task 25, Task 26 and `fllm` filled in where `fdocs` had left
+  placeholders, and keeps `main`'s merge records as §14.1–§14.8.
+- **Version 1.0.0** in `pyproject.toml`, `dps/__init__.py`, `frontend/package.json` and its lock
+  (`npm version 1.0.0 --no-git-tag-version`); `CHANGELOG.md` dated, with the finish stage and the
+  live-Vertex fixes; no tag (the final verification runs the Definition of Done first).

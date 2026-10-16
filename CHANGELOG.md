@@ -4,10 +4,7 @@ All notable changes to Data Privacy Services (DPS). Build and deploy facts live 
 API in `docs/technical/api-m0.md` … `api-m5.md`, the design in
 `docs/specs/2026-10-11-data-privacy-services-design.md`.
 
-<!-- release (M5 Task 28): set the date, fill the M5 finish-stage sentence from the merged
-security review, images, OpenShift and demo, and drop known limitations those merges closed. -->
-
-## v1.0.0 — unreleased
+## v1.0.0 — 2026-10-16
 
 **M0 — Privacy Engine, Layer 1 API and Playground (`v0.1.0-m0`).** One engine for every entry
 point: detect (structural key names, a pattern catalogue with checksum validation for national ids,
@@ -72,7 +69,14 @@ with an inventory, an export and masked captures that fail closed — and never 
 every request is aborted before a page closes (D-C). Exit evidence (lane verification on branch
 `m4`): 2 363 unit and 232 integration tests, the smoke test 45/45, a demo scan of 21 pages with 0
 requests other than GET received by the demo site, OCR of the masked captures finding 0 source
-values. <!-- release: confirm after the M4 merge and its post-merge verification on main. -->
+values. Merged into `main` on 2026-10-15 (`5959a75`); its post-merge verification fixed, test
+first, the select masking (a select is masked by what it draws: an empty value or label, an option
+past the first 300, a customizable select, a value that only starts like a placeholder, a listbox
+with nothing selected — OCR of the masked and obfuscated captures and of every stored crawler
+screen reads 0 made-up values), a canceled run's counts (the pack, job progress, Reports and the
+daily usage count every batch its target holds; a ledgered load's ledger is cross-checked before it
+is cleared) and three console defects (a job whose connection was deleted, the Jobs list beyond its
+newest 200, long names in the evidence summary at 390 px).
 
 **M5 — hardening and showcase (ships as `v1.0.0`).** Tabular synthesis for L2 synthesize jobs: a
 Gaussian copula with constraints (ranges, positivity, uniqueness, dependent fields), exact-row
@@ -90,9 +94,40 @@ secrets from files only, TLS-only egress, KEK rotation (`dps.rekey`) and a runti
 a per-tenant LLM exposure counter with an egress verifier; the console's Overview, Reports & audit,
 Evidence pack synthetic section, Admin and versioned Policies pages. Exit evidence: lane
 verification passed in round 3; on `main` the post-merge verification passed with copula targets
-at fidelity 0.970, 0 exact rows, NNDR 1.50 and 0 real identifiers in 20 000 rows. The finish stage
-adds the security review, the images and compose `full`, the OpenShift manifests, the ten-minute
-demo with its deck, and this documentation. <!-- release: fill from the merged finish streams. -->
+at fidelity 0.970, 0 exact rows, NNDR 1.50 and 0 real identifiers in 20 000 rows.
+
+**Finish stage (merged for the release on 2026-10-16).**
+
+- *Security review* (`docs/security/2026-10-11-m5-security-review.md`, every finding with its fix
+  and guard test): production credentials are bound to their connection (F-01) and, joined at the
+  release merge with the post-merge rule on `main`, **every** write into a production connection —
+  tagged, or holding a production credential — needs `admin`, at submission and at retry; policy
+  patterns run on `regex` within a per-call CPU budget in matcher processes of their own, never on
+  the event loop, handed out in arrival order (F-02, rounds 1–3); CSV formula guards (F-07);
+  custom-entity tiers per call (F-10); tokenization profiles per tenant (F-11); the job group's key
+  check value (F-13, migration 046); the KEK rotation window (F-21); the scanner's SSRF guard at
+  accept, in the browser-worker and on every hop (S5); `Cache-Control: no-store` on every `/api/`
+  answer (S11); opt-in T3 metadata labelling in discovery and the scanner (Task 8B), whose prompt
+  label is redacted recall-first whatever the policy's `min_score`.
+- *Images and the local stack* (Task 24): arbitrary-UID, read-only-root app and browser images
+  (amd64 and arm64), compose `full` with the tokenizer mock, the smoke test's M5 block,
+  `tools/flow_report.py` and `tools/demo_client.py`; the scanner proven in the `full` stack under an
+  arbitrary UID (D4 counters +0 with positive controls).
+- *OpenShift* (Task 25): kustomize base, components (network policies, monitoring with the LLM
+  exposure alerts) and `dev`/`prod` overlays with release placeholders; a `wait-for-schema` init
+  container per Deployment, a daily audit-maintenance CronJob and `tools/openshift_check.py` as the
+  release gate.
+- *Demo* (Task 26): `tools/demo_seed.py`, `tools/e2e_demo.py --console` (12/12 steps in 2:57, three
+  rehearsals in a row), `docs/demo/DEMO-SCRIPT.md` and the showcase deck built from the rehearsal.
+- *Documentation* (Task 27): `HANDOFF.md` in its final shape with the generated settings table,
+  `README.md`, `docs/technical/api-m5.md`, this changelog, and console polish fixes.
+- *Fixes from a live Vertex run* (`fllm`): the T3 egress verifier no longer blocks every T3 call;
+  one persona per person — first, middle and last-name columns (SAP name keys and plural surnames
+  included) agree with the person's e-mail in L1 records and L2 rows; schema synthesis keeps the
+  caller's field names and a sampled identifier is matched as a whole token (a comma joins digits
+  only before a group of two or three; full-width forms read as ASCII), so realistic samples no
+  longer fail as leakage while real copies are still refused; the D-A identifier check reads every
+  row on every engine and each column as the object spells it.
 
 ### Known limitations
 
@@ -100,6 +135,9 @@ Privacy and synthesis (owner decisions recorded by the verifications):
 
 - Synthetic names and RFC 2606 e-mails come from finite pools: a synthetic value can equal a real
   customer's value on an unrelated row (about 870 names per 20 000-row run on the demo seed).
+- Name-part keys are read broadly: `PRI_LST_NAME`, `MID_NAME` and `<noun>_NAME_FIRST/LAST/FAMILY`
+  columns are person names (a price-list name becomes a person name), and SAP's `NAME_LAST2` (a
+  name at birth) is read as a second person.
 - Surrogate synthesize (`options.tabular: none`) copies non-personal columns verbatim (timestamps,
   amounts), so a synthetic row can be linked back to its source row through them; the copula path
   breaks that link (0 exact non-key rows).
@@ -121,7 +159,18 @@ Platform and operations:
 
 - A metadata database lost after the app started is not re-probed: routes that need it answer 500
   `internal_error` (not 503 `db_unavailable`) and `/readyz` keeps its startup value until the
-  database returns or the pod restarts.
+  database returns or the pod restarts. Likewise the app verifies the schema once at boot (the
+  OpenShift `wait-for-schema` init containers cover a release's start order; contract §2.1 wants it
+  to keep re-verifying or exit).
+- An Oracle primary key created `ENABLE NOVALIDATE` over duplicate keys is used as a paging key:
+  such a table can be read short at page boundaries while the pack says `whole_table` (found by the
+  S8 identifier-check review; written rows are not affected).
+- The browser image has no init process of its own: compose adds one (`init: true`); on OpenShift
+  the scanner's Python is PID 1 (no orphans observed).
+- A deny list's trie build costs up to about 2.3 times the round-1 flat compile for characters a
+  process has not seen yet (charged to the call and bounded by `DPS_PATTERN_CPU_SECONDS`).
+- In the live Vertex run the LLM free-text rewrite fell back to the deterministic text in both runs
+  (fail closed by design); how often it applies is a product question.
 - MongoDB connector input errors (`object_invalid`, `database_required`, `path_unsupported`) map to
   502 like any other connector code (contract §9), not 422.
 - One worker process is bound by one Python interpreter; scale with replicas. The identifier check
