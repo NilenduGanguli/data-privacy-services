@@ -1,0 +1,21 @@
+# Voluntary disruptions (node drains) take one pod of a role at a time. maxUnavailable rather than
+# minAvailable: with one replica (dev) a minAvailable of 1 would block every drain.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dps-app
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: app}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: app}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dps-worker
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: worker}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: worker}

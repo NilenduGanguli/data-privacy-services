@@ -1,0 +1,47 @@
+# dps-migrate-0: applies the metadata DDL as dps_owner (contract §2.1), the only workload that
+# mounts the owner login. `-0` is the committed placeholder: the release overlay renames the Job per
+# release (dps-migrate-<release>), because a Job's pod template is immutable and each release must
+# leave its own completed Job behind (the Wega rule). The app and the workers only verify the schema.
+# Its pod is copied into the CronJob dps-migrate-maintain (audit partitions, daily): change both.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dps-migrate-0
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: migrate}
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: migrate}
+    spec:
+      serviceAccountName: dps-migrate
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: data-privacy-services
+          args: ["python", "-m", "dps.migrate"]
+          envFrom: [{configMapRef: {name: dps}}]
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: DPS_MIGRATIONS_MODE, value: auto}
+            - {name: DPS_PG_MIGRATION_PASSWORD_FILE, value: /var/run/secrets/dps/pg-owner/password}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: ca, mountPath: /etc/dps/ca, readOnly: true}
+            - {name: pg-owner, mountPath: /var/run/secrets/dps/pg-owner, readOnly: true}
+      volumes:
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+        - {name: ca, configMap: {name: dps-ca-bundle}}
+        - {name: pg-owner, secret: {secretName: dps-pg-owner, defaultMode: 288}}

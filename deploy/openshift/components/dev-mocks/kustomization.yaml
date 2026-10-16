@@ -1,0 +1,20 @@
+# dev only: the two mocks a dev namespace needs in place of bank services — the vaultless
+# tokenization mock (DPS_TOKENIZER_URL) and the Azure Read v3.2 OCR mock (DPS_AZURE_VISION_ENDPOINT).
+# No Oracle, MongoDB, MinIO or source PostgreSQL: those are bank systems, registered as connections.
+# server.py is a copy of docker/tokenizer-mock/server.py (kustomize loads files only from inside a
+# kustomization root); tests/deploy/test_openshift.py keeps the two byte-identical.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - tokenizer-mock.yaml
+  - azure-ocr-mock.yaml
+  - networkpolicies.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: dps-tokenizer-mock-server
+    files: [server.py]
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: data-privacy-services

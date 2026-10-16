@@ -1,0 +1,57 @@
+# The bank tokenization mock (M5 Task 8) in the app image: `python /mock/server.py`, the server
+# file from the dps-tokenizer-mock-server ConfigMap. Its bearer token and key come from the secret
+# dps-tokenizer-mock (keys token, key); the dev dps-tokenizer secret carries the same token.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dps-tokenizer-mock
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: tokenizer-mock}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: tokenizer-mock}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: tokenizer-mock}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: tokenizer-mock
+          image: data-privacy-services
+          args: ["python", "/mock/server.py", "--port", "8420"]
+          ports: [{name: http, containerPort: 8420, protocol: TCP}]
+          env:
+            - {name: HOME, value: /tmp}
+            - name: MOCK_TOKENIZER_TOKEN
+              valueFrom: {secretKeyRef: {name: dps-tokenizer-mock, key: token}}
+            - name: MOCK_TOKENIZER_KEY
+              valueFrom: {secretKeyRef: {name: dps-tokenizer-mock, key: key}}
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 6}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: server, mountPath: /mock, readOnly: true}
+      volumes:
+        - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
+        - {name: server, configMap: {name: dps-tokenizer-mock-server}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dps-tokenizer-mock
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: tokenizer-mock}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: tokenizer-mock}
+  ports: [{name: http, port: 8420, targetPort: http, protocol: TCP}]

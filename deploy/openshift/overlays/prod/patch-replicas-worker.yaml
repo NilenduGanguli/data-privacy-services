@@ -1,0 +1,2 @@
+# prod keeps the base's two workers; the test fails the render if the base changes them.
+- {op: test, path: /spec/replicas, value: 2}

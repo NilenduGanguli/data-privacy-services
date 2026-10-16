@@ -1,0 +1,11 @@
+# Default-deny plus one allow per path a role uses. Peers outside the cluster are TEST-NET-1
+# placeholders (192.0.2.0/24) that the release overlay replaces, one JSON6902 test+replace per peer
+# (deploy/openshift/README.md lists every one; release-example shows each patch).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - networkpolicies.yaml
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: data-privacy-services

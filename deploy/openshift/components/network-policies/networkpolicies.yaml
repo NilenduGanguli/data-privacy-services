@@ -1,0 +1,151 @@
+# Network policy for every DPS pod. Everything is denied; each allow names the roles that use it.
+# External peers are placeholders in TEST-NET-1 (192.0.2.0/24): the release overlay sets each one
+# (README parameter table). Rule order inside a policy is part of the contract with the release
+# patches (they test each peer before replacing it), so append new rules at the end.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Cluster DNS (OpenShift's dns-default answers on 5353 behind the 53 service port).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+        - {protocol: UDP, port: 5353}
+        - {protocol: TCP, port: 5353}
+---
+# The console and API through the OpenShift router (both namespace labels OpenShift uses for it).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-ingress-from-router
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: app}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {network.openshift.io/policy-group: ingress}}
+        - namespaceSelector: {matchLabels: {policy-group.network.openshift.io/ingress: ""}}
+      ports:
+        - {protocol: TCP, port: 8400}
+---
+# User-workload monitoring scrapes /metrics (PodMonitor in components/monitoring).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metrics-from-monitoring
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, worker, browser-worker]}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: openshift-user-workload-monitoring}
+      ports:
+        - {protocol: TCP, port: 8400}
+        - {protocol: TCP, port: 9400}
+        - {protocol: TCP, port: 9401}
+---
+# The platform PostgreSQL (metadata DB, dps-db / DPS_PG_HOST): every role, the migrate Job included.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-dps-db
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, worker, browser-worker, migrate]}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ipBlock: {cidr: 192.0.2.10/32}}]
+      ports: [{protocol: TCP, port: 5432}]
+---
+# The engine's TLS gateways, one rule per endpoint: Stellar (LLM), COIN (its OAuth2 token mint),
+# the OCR gateway and the bank tokenization service. App and worker only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-gateways
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, worker]}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ipBlock: {cidr: 192.0.2.1/32}}]    # DPS_STELLAR_BASE_URL
+      ports: [{protocol: TCP, port: 443}]
+    - to: [{ipBlock: {cidr: 192.0.2.2/32}}]    # DPS_COIN_URL
+      ports: [{protocol: TCP, port: 443}]
+    - to: [{ipBlock: {cidr: 192.0.2.3/32}}]    # DPS_AZURE_VISION_ENDPOINT
+      ports: [{protocol: TCP, port: 443}]
+    - to: [{ipBlock: {cidr: 192.0.2.4/32}}]    # DPS_TOKENIZER_URL
+      ports: [{protocol: TCP, port: 443}]
+---
+# The artefact store (DPS_S3_ENDPOINT_URL): evidence, reports and scan captures. The browser worker
+# stores its captures there too.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-object-store
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, worker, browser-worker]}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ipBlock: {cidr: 192.0.2.5/32}}]
+      ports: [{protocol: TCP, port: 443}]
+---
+# Registered source and target databases (Oracle 1521/2484 TCPS, PostgreSQL 5432, MongoDB 27017).
+# The worker reads and writes them; the app opens a connection to test and browse it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-source-databases
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, worker]}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ipBlock: {cidr: 192.0.2.32/27}}]
+      ports:
+        - {protocol: TCP, port: 1521}
+        - {protocol: TCP, port: 2484}
+        - {protocol: TCP, port: 5432}
+        - {protocol: TCP, port: 27017}
+---
+# The registered UAT hosts the scanner may load (D4: it never submits; its scope proxy also refuses
+# any other host on every hop). Browser worker only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-scan-targets
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: browser-worker}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ipBlock: {cidr: 192.0.2.64/27}}]
+      ports: [{protocol: TCP, port: 443}]

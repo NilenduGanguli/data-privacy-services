@@ -1,0 +1,66 @@
+# dps-migrate-maintain: keeps the audit log writable. dps_audit_log (migration 007) has one RANGE
+# partition per UTC month and no DEFAULT partition, and only the owner login creates partitions:
+# `python -m dps.migrate` makes this month and the next three, `--maintain` does the same and also
+# drops the months older than DPS_AUDIT_RETENTION_MONTHS (13). The migrate Job runs once per release,
+# so without this schedule every audit write fails about four months after the last release.
+# Daily, so a failed run still has three months of partitions in hand (alert DpsAuditMaintenanceStale
+# after three days without a success). `--maintain` first runs the same apply as the Job, under the
+# same advisory lock, so it changes nothing once the release's Job has run. The pod is the migrate
+# Job's (a test keeps them equal but for the argument): the owner login and the CA bundle only,
+# component=migrate (DNS and egress-dps-db). A CronJob's template is mutable, so a release keeps
+# this name.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dps-migrate-maintain
+  labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: migrate}
+spec:
+  schedule: "17 3 * * *"
+  timeZone: Etc/UTC
+  # one run at a time; a schedule missed by under an hour (controller restart) still starts
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: migrate}
+    spec:
+      backoffLimit: 3
+      # with Forbid a hung run (e.g. waiting on the migration lock) would block every later one
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels: {app.kubernetes.io/name: data-privacy-services, app.kubernetes.io/component: migrate}
+        spec:
+          serviceAccountName: dps-migrate
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: migrate
+              image: data-privacy-services
+              args: ["python", "-m", "dps.migrate", "--maintain"]
+              envFrom: [{configMapRef: {name: dps}}]
+              env:
+                - {name: HOME, value: /tmp}
+                - {name: DPS_MIGRATIONS_MODE, value: auto}
+                - {name: DPS_PG_MIGRATION_PASSWORD_FILE, value: /var/run/secrets/dps/pg-owner/password}
+              resources:
+                requests: {cpu: 100m, memory: 256Mi}
+                limits: {cpu: 500m, memory: 512Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: tmp, mountPath: /tmp}
+                - {name: ca, mountPath: /etc/dps/ca, readOnly: true}
+                - {name: pg-owner, mountPath: /var/run/secrets/dps/pg-owner, readOnly: true}
+          volumes:
+            - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+            - {name: ca, configMap: {name: dps-ca-bundle}}
+            - {name: pg-owner, secret: {secretName: dps-pg-owner, defaultMode: 288}}

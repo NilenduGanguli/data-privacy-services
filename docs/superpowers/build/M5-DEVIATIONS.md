@@ -1080,6 +1080,199 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
   `in_source` equals the source-vs-target count and the pack needs review), `tests/test_surrogates.py` (PAN now
   `0000`, invalid by design).
 
+## Task 25 — OpenShift manifests: kustomize base, components, dev and prod overlays (finish stage)
+
+Finish-stage work (programme plan §2.6, F2 deploy), built in worktree `dps-wt-fos` (branch `fos`,
+from main `64c46e3`, M3 merged, M4 not yet). The plan's layout and test list as written, except:
+
+- `DPS_PG_HOST`: the plan says `dps-db`; as built it is the platform host itself (placeholder
+  `postgres.example.invalid`, equal to `dps-db`'s externalName — a test keeps them equal).
+  `dps/db.py` `_ssl_context` verifies the server certificate with `check_hostname=True` whenever
+  `DPS_PG_SSL_ROOT_CERT` is set (a production posture requirement), against the host dialled; a
+  platform certificate does not name `dps-db`, so dialling the ExternalName alias would fail every
+  connection. The `dps-db` Service stays (contract) as the in-namespace alias.
+- ConfigMap `dps`: adds `DPS_VERIFY_WARN_ALLOWED=false` and `DPS_LLM_EGRESS_CHECK=strict` (Task 16's
+  boot rules — the plan's own posture test failed without the first) and `DPS_IMAGE_DIGEST` (a
+  zero-digest placeholder; the worker stamps it into every evidence pack). Drops
+  `DPS_SCAN_STORE_UNMASKED_ORIGINALS`: an M4 setting main's `Settings` does not have yet (default
+  false; M4's posture rule enforces it) — the new test that every `DPS_*` name is a real setting
+  would refuse it until the M4 merge.
+- App args keep the Dockerfile's `--no-access-log` (uvicorn's access log bypasses the structlog
+  allow-list) next to the plan's `--proxy-headers`.
+- Worker: mounts `dps-api-keys` (the plan: not needed for jobs). `dps.worker.main` runs
+  `assert_production_posture`, which requires `DPS_API_KEYS(_FILE)`; the probe shows the prod worker
+  without it (and the KEK) failing three posture rules. COIN, OCR and tokenizer stay (the engine).
+  It also holds the **app login** (`dps-pg-app`, `DPS_PG_PASSWORD_FILE`; the plan: the worker login
+  instead of the app's): `dps/worker.py::_amain` opens `db.init_pool` (the API pool) before
+  `db.init_worker_pool`, and M4's `browser_worker.amain` does the same. Found by the runtime proof (the
+  worker exited with `password authentication failed for user "dps_app"`); the test
+  `test_every_role_has_the_logins_its_process_opens` reads both start-up functions and requires a
+  login file for each pool they open. Each login has its own mount (`pg-app`, `pg-worker`,
+  `pg-owner`). `dps_worker_login` is already a member of `dps_app_rw`, so this grants nothing new.
+  Both workers get `terminationGracePeriodSeconds: 60` (drain of `DPS_JOB_DRAIN_TIMEOUT_SECONDS=30` plus
+  margin; the plan's "follow the app" gave the browser worker 30); the worker's `/tmp` is 4Gi
+  (`files` targets spool a partition there before the upload).
+- Browser worker: boots through the same posture guard (M4 `dps/browser_worker.py`), so it mounts
+  `dps-api-keys` and the KEK. It has no LLM/OCR/tokenizer mounts (plan), which with the shared
+  ConfigMap fails the guard (azure OCR needs a key, the http tokenizer a token — probe recorded), so
+  its env switches them off: `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`,
+  `DPS_LLM_PROVIDER=""` (the M4 scanner calls none of them). It keeps S3 (captures are artefacts) and
+  the connector refs (storage states).
+- The exports PVC is also mounted by the app: `POST /connections/{id}/test` of a `pvc` target puts and
+  deletes a probe object under `DPS_EXPORT_ROOT` in the app process (`registry.test_store`). The
+  README asks for ReadWriteMany.
+- Network policies: `egress-source-databases` selects the app and the worker (plan: worker only) — the
+  app opens connectors to `test` and `browse` (`routers/connections.py`); the object store has its own
+  `egress-object-store` for the app and both workers (the browser worker stores captures through the
+  ArtefactService), so `egress-gateways` is app + worker with one rule per endpoint (Stellar `.1`,
+  COIN `.2`, OCR `.3`, tokenizer `.4`) that a release patch tests and replaces one by one;
+  `egress-dps-db` also selects the migrate Job; the router policy also accepts OpenShift's newer
+  `policy-group.network.openshift.io/ingress` label; the dev-mocks component adds
+  `dev-mocks-ingress` / `egress-dev-mocks` (default-deny would cut the mocks off).
+- Selectors (Deployments, Services, PDBs) use `app.kubernetes.io/name` + `component` (plan: component
+  only). Every pod sets `enableServiceLinks: false` (Services named `dps-*` would inject `DPS_*`
+  variables that `Settings` reads) and `HOME=/tmp` (no passwd entry for the arbitrary UID; independent
+  of Task 24's image `ENV`).
+- PDB `dps-app`: `maxUnavailable: 1` (plan `minAvailable: 1`: with dev's one replica that blocks
+  every node drain; with prod's three it keeps two up instead of one).
+- Secret volumes: `defaultMode: 288` (decimal 0440; kustomize renders `0440` as 288 anyway); no
+  `optional: true` on `dps-api-keys` and `dps-tokenizer`, whose `*_FILE` variables are always set — a
+  missing secret would otherwise surface as a `Settings` file error at boot instead of a pod event
+  (`dps-connector-refs` stays optional: it is a directory, not a `_FILE`).
+- Monitoring: the PodMonitor sets `podTargetLabels: [app.kubernetes.io/component]` (the plan's
+  `DpsWorkersAbsent` selects `app_kubernetes_io_component`, which exists only with it);
+  `DpsNoDbKeysLoaded` selects the app (the gauge reads 0 in every worker process and would fire
+  forever); `DpsVerificationFailures`, `DpsExactRowResamplesHigh` and `DpsTokenizerFailing` sum across
+  pods (one alert, not one per pod), the last with `for: 5m`.
+- prod replicas: three JSON6902 files `patch-replicas-{app,worker,browser-worker}.yaml` (the worker's a
+  `test` only) instead of one `patch-replicas.yaml` (a JSON6902 patch cannot carry a value per target).
+- Route: `haproxy.router.openshift.io/timeout: 300s` (document routes run synchronously; the router's
+  default is 30 s).
+- Added for the Wega lessons (not in the plan): `tools/openshift_check.py` — placeholders and example
+  values warn; hardening, the owner secret, default-deny, mocks in prod, literal secrets and each
+  DPS role's `Settings` + production posture (a clean subprocess with dummy secret files) deny;
+  `--fail-on-warn` is the release gate — and `deploy/openshift/release-example/`, a release overlay
+  with every parameter set (documentation values that themselves warn as `example-value`), whose
+  clean result proves the parameter list complete.
+- Tests (`tests/deploy/test_openshift.py`): 37 (plan 13) — the plan's nine (the posture test runs per
+  role) plus Settings for every workload, every `DPS_*` name a setting, the DB host, secrets per role,
+  the logins each process opens,
+  the dev mocks, network policies per role, monitoring, placeholders only warn, the release example,
+  a leftover placeholder, exit codes, the deny rules, the JSON6902 guard and the role modules (the
+  `dps.browser_worker` part skips until the M4 merge).
+- Runtime proof (no cluster): every role's rendered prod pod spec under Docker with the pod's
+  security settings (UID 1000680000:0 + fsGroup, read-only root, caps dropped, no-new-privileges,
+  tmpfs `/tmp`), files-only secrets (root:fsGroup 0440) and verify-full TLS to a scratch PostgreSQL
+  whose certificate names `dps-db`: migrate applied 17 migrations; worker, app and browser worker
+  (Chromium 140, `m4` image) ready; the app's posture report 11/11 enforced; another alias for the
+  same server fails `SSLCertVerificationError`; log scan 0 hits (API key, KEK, request e-mail).
+  Side finding: `python -m dps.migrate --verify` authenticates with the app login, so it cannot run
+  in the migrate Job's pod (the Job runs the apply mode, which uses the owner login).
+- Verification: `kubeconform -strict` needs the OpenShift Route schema (not in its default catalog):
+  the run used `melmorabity/openshift-json-schemas` `v4.14-standalone-strict` for Route and the datree
+  CRD catalog for PodMonitor/PrometheusRule (dev 32/32, prod 25/25, release example 25/25 valid);
+  `promtool check rules` (local `prom/prometheus` image): 7 rules, SUCCESS. No cluster apply.
+- HANDOFF: the plan's "§7 (OpenShift)" is a new §15 (§7 is "Secrets" in the file as built; it gains
+  the OpenShift secret names) and a §1 row; contract §1 row and §11.1 line.
+- For the merge stage: the module test activates when M4 brings `dps.browser_worker`; M4's posture
+  additions are checked automatically by the browser-worker posture test; Task 24's images must make
+  `/app` readable by group 0 (the manifests already set `HOME=/tmp`). Security note for F1: `/health`,
+  `/readyz` and `/metrics` answer without a key on port 8400 and are therefore reachable through the
+  Route (README §6 says so).
+
+## S5 review r1 fix — audit partitions between releases (B1), one image digest per container (B2)
+
+Finish stage, branch `fos`, review `S5-review-r1.md` (2 blocking findings), fixed test-first.
+
+- **B1:** nothing on OpenShift ran `python -m dps.migrate --maintain`, and `dps_audit_log` has no
+  DEFAULT partition, so every audit write would fail about four months after the last release. Added
+  the base CronJob `dps-migrate-maintain`: `["python", "-m", "dps.migrate", "--maintain"]` daily at
+  03:17 `Etc/UTC` (the partitions are UTC months), `concurrencyPolicy: Forbid`,
+  `startingDeadlineSeconds: 3600`, history 3/3, and on the Job template `backoffLimit: 3` and
+  `activeDeadlineSeconds: 1800` (with Forbid a hung run would otherwise block every later one). Its
+  pod is the migrate Job's — SA `dps-migrate`, only `dps-pg-owner` and `dps-ca-bundle`, the same
+  security context, resources and `component: migrate` labels (DNS + `egress-dps-db`); a test keeps
+  the two pod templates equal except for the argument. `--maintain` first reruns `run_migrations`
+  (a no-op under the same advisory lock), which is as built (`dps/migrate.py`), not changed here.
+  Checker: `owner-secret` accepts `CronJob/dps-migrate-maintain` (exact name) besides
+  `Job/dps-migrate-*`, and `probes` exempts CronJob as well as Job. Added (reviewer's optional item)
+  alert `DpsAuditMaintenanceStale` (warning): kube-state-metrics' `kube_cronjob_status_last_successful_time`
+  older than 3 days, or `kube_cronjob_created` older than 3 days with no success — rules in a user
+  namespace may read platform metrics for that namespace; checked with `promtool test rules`.
+- **B2:** `DPS_IMAGE_DIGEST` was one ConfigMap value, so the browser worker (its own image; its M4
+  scan evidence packs read `settings.image_digest`) stamped the app's digest, and a release that
+  bumped the images but not the literal shipped stale provenance through `--fail-on-warn`. The
+  browser worker now has its own `DPS_IMAGE_DIGEST` env entry (zero placeholder; env overrides
+  `envFrom`). `release-example` derives both values with kustomize `replacements` from the images'
+  `@sha256:` part (source option `delimiter: "@"`, `index: 1`; kustomize runs replacements after
+  `images` in the same kustomization; a tag-only image fails the render) instead of a literal, and
+  uses a distinct browser digest (`2…2`, an example value like `1…1`). New deny rule
+  `image-digest-setting`: a DPS container's effective value must be a literal equal to its own image's
+  digest; unset denies, the zero placeholder only warns (`placeholder-digest`), an image without a
+  digest is left to `image-digest`.
+- Non-blocking items fixed because they were cheap and in the same files: N1 `AWS_CA_BUNDLE`
+  (= `org-ca.pem`) in the ConfigMap (boto3 ignores `SSL_CERT_FILE`/`DPS_SSL_CERT_FILE`; the code-side
+  `verify=` stays for F1/F2); N2 the release overlay's `resources` must be a relative path (README,
+  example header); N3 README §3: the worker exits with `MigrationDrift` and restarts until the
+  migrate Job completes; N4 `literal-secret` also matches `dps.posture.SECRET_ENV` names
+  (`SECRET_SETTINGS`, a test keeps it a superset); N5 deny rule `db-host` (`DPS_PG_HOST` must be
+  `dps-db`'s externalName); N6 host regexes end at any non-host character (lists); N12 README pull
+  secret for an external registry. Carried: N7 (`--proxy-headers` without `--forwarded-allow-ips`, an
+  F1 decision), N8 (M4 merge follow-ups), N9 (spread, opt-in PVC, preStop), N10, N11 (flaky
+  `test_one_audit_event_per_stream`, F4).
+- Tests: 16 new (52 deploy tests). Proofs: kubeconform `-strict` with the Kubernetes 1.27 and 1.29
+  schemas and the OpenShift 4.14/4.16 strict catalogs (a `timeZonee` typo is refused, so the CronJob is
+  really validated); the CronJob's rendered prod pod spec under the arbitrary-UID, read-only Docker
+  emulation against a TLS PostgreSQL 16, with the clock moved (HANDOFF §20).
+
+## S5 review r2 fix — the release's schema before the pods (B1); N1, N2, N4–N6
+
+Finish stage, branch `fos`, review `S5-review-r2.md` (1 blocking finding), fixed test-first.
+
+- **B1:** compose orders `migrate` → app/worker (`service_completed_successfully`); the manifests had
+  no such order and README §3 applies the Job with the Deployments. The app verifies the schema
+  once at boot (`dps/app.py` `_JobPlatform._connect` sets `db_state=down` on pending migrations and
+  starts no retry), so an app pod that won the race kept every `require_db` route at 503 while it
+  stayed Ready, until restarted (the review's proof; reproduced here in containers). Each of
+  `dps-app`, `dps-worker` and `dps-browser-worker` now has the init container `wait-for-schema`:
+  the pod's image, `args` (not `command`: the app image's entrypoint stays)
+  `sh -c "trap 'exit 143' TERM INT; until python -m dps.migrate --verify; do sleep 5 & wait $!; done"`,
+  `envFrom` the `dps` ConfigMap, env `HOME=/tmp` and `DPS_PG_PASSWORD_FILE` (`--verify` opens the
+  API pool, i.e. the app login, which all three pods mount) — the browser worker's also its own
+  `DPS_IMAGE_DIGEST`, derived like its container's by the release example's `replacements` —,
+  mounts `tmp`, `ca`, `pg-app`, the main container's security context, requests 50m/64Mi and
+  limits 500m/256Mi. Differences from the review's text: the `trap` and `sleep 5 & wait $!` (a
+  shell as PID 1 ignores SIGTERM, so a deleted waiting pod hung for its grace period: measured 20 s
+  to SIGKILL without, under 1 s with); the review's wording otherwise as given.
+- Checker: deny rule `schema-wait` — a Deployment (any non-Job workload) whose DPS container reads
+  the `dps` ConfigMap needs an init container whose command line contains
+  `python -m dps.migrate --verify`, in the DPS container's image, reading the ConfigMap (a plain
+  `--verify` without the loop also passes: the kubelet retries a failed init container).
+  `configuration_findings` now builds `Settings` for every DPS container, init containers included
+  (`settings_problems(..., container=...)`); the posture guard still runs only on the Deployments'
+  DPS containers. `image-digest-setting` already covered init containers.
+- Docs: README §1 "Start order", §3 steps 5–6 (the pods wait in `Init:0/1`; the app does not
+  recover by itself, so step 6 checks component `jobs` on every app replica — the review's
+  fallback, kept as a check), the rollback note (an older image waits for good once a migration is
+  applied: fix forward), §4 digest row, §5 rules, §6 `Init:0/1`; HANDOFF §1/§15; contract §11.1.
+- Non-blocking items fixed (same files): **N1** `DpsAuditMaintenanceStale`'s second branch read
+  `kube_cronjob_created`, which OpenShift's kube-state-metrics drops: now a failed run
+  (`kube_job_status_failed{job_name=~"dps-migrate-maintain-.*"} > 0`) with no success ever (promtool:
+  six cases); a CronJob never scheduled at all stays uncovered (README says how to check). **N2**
+  `literal-secret` checks every key of every ConfigMap and the libraries' credentials
+  (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `PGPASSWORD`), in env entries
+  too. **N4** closed by B1 (the browser worker waits). **N5** README §2: the namespaces carry no
+  NetworkPolicy of their own. **N6** README §4 names `DPS_AUDIT_RETENTION_MONTHS`.
+- Carried: N3 (`DPS_IMAGE_DIGEST` of the app-image containers comes from the shared ConfigMap, so
+  a rollback to an older ReplicaSet stamps the newer digest — a per-container env entry derived by
+  `replacements` would fix it; now also relevant to the app-image waits), N7–N11 as in r1, and for
+  main (F1/F4) the app's single verify at boot (contract §2.1: verify mode should keep re-verifying,
+  or exit).
+- Tests: 5 new (8 cases) and 8 changed; 60 deploy tests pass, 1 skips (`dps.browser_worker`). Proofs: kubeconform `-strict` with the OpenShift
+  4.14/4.16/4.19 strict catalogs and the Kubernetes 1.27/1.29 schemas (0 skipped; an unknown field
+  in an init container is refused); the release race in containers, with and without the wait
+  (HANDOFF §20); promtool tests of the alert.
+
 ## Deferred to final stage
 
 - Task 1: append the M5 variables to `.env.example` (blocked by permissions in this lane).
@@ -1106,7 +1299,8 @@ other real ids (~n²/|space| per column; at bank scale most outputs would be iss
   container itself runs once an `m5` image exists (Task 24 smoke).
 - Task 16B → Task 25 (WP-F2, review G4 N6): the `DpsRawPiiSentToLlm` / `DpsLlmExposureBlocked`
   `PrometheusRule` manifest belongs to the OpenShift manifests of Task 25; the alert names and
-  semantics are documented in HANDOFF §5 and contract §8.3.
+  semantics are documented in HANDOFF §5 and contract §8.3. **Closed by Task 25** (finish stage,
+  `deploy/openshift/components/monitoring/prometheusrule.yaml`).
 
 ## Task 0 — Preflight: the M0–M4 contract surface (finish stage, `fsec`)
 

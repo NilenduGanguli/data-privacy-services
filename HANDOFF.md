@@ -86,6 +86,7 @@ deploy facts — image, ports, env, extras, probes, labels.
 | `tools/demo_client.py` | module | M5 Task 24: `DpsClient(base_url, api_key, *, tenant=None, timeout=60.0)` with `get/post/patch/delete/raw/download/wait_job/as_tenant` (paths under `/api/v1` unless they name `/api/…` or an ops route) and `load_keys(path)` (the demo key file, refused when other users can read or write it); errors (`DemoError`: `status`, `code`) carry the method, the route template and the status only — shared by the flow report and the demo tools |
 | `tools/flow_report.py` | script | M5 Task 24: calls every route of contract §9 once against a running stack (`EXPECT`: method, route template, expected status) and writes `reports/flow-report.md` (git-ignored): route templates, statuses, durations, response key names and error codes — never a value, an id or a key; exit 1 when a status or a relied-on outcome (job succeeded, connection test ok, consistency passed) differs; scanner calls wait for a freshly started app's `browser` readiness and skip without a browser worker — `--require-scanner` (the `full` gate) fails instead (§18) |
 | `tools/seed_sources.py` | script | seeds the 10-table demo `bank` schema (surrogate-engine values, no real PII) and the `bank_restore` copy; idempotent (M2). M3: `--target oracle\|mongo\|all` seeds the Oracle CRM tables (`tools/seed_oracle.py`) and `crm.profiles` (`tools/seed_mongo.py`) from the one customer space of `tools/seed_model.py` — the same customer id carries the same person in all three engines |
+| `deploy/openshift` | kustomize manifests | M5 Task 25: base (app, worker, browser-worker — each after its `wait-for-schema` init container —, migrate Job, audit-maintenance CronJob, `dps-db` ExternalName, Route), components (network policies, monitoring, dev mocks), `dev`/`prod` overlays with placeholders, a worked release example; `tools/openshift_check.py` is the release gate (§15) |
 | `tools/bench_connector.py`, `tools/demo_m2.py`, `tools/reveal_rows.py` | scripts | measured rows/s per write mode (results in `docs/technical/bench/`; M3: `--engine oracle\|mongo`, §13); the 10-table demo (group key and seed kept in `var/demo/`, git-ignored); local reveal of output rows with the caller's key (checks the evidence's key id; no network, except for `external_tokenize` columns: the key holder's own bank-tokenizer client, `--tokenizer-url` / `--tokenizer-token-file`) |
 
 ## 2. Build
@@ -779,7 +780,10 @@ the scan closed with `secret_unavailable` otherwise); refs follow `dps/ui/<name>
 (the local demo session is `dps/ui/demo-onboarding`, a committed demo literal for the demo site
 only). The browser-worker needs `DPS_JOB_KEK` (it opens the scan's sealed key, seed, start URL and
 any inline dev storage state, and purges them at the end). Nothing else. `DPS_BOOTSTRAP_API_KEY` is a local demo literal and must never be
-set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds.
+set outside a laptop. DPS never stores customer data, reveal keys or synthesis seeds. On OpenShift
+these are the Secrets `dps-pg-app`, `dps-pg-worker`, `dps-pg-owner`, `dps-job-kek`, `dps-api-keys`,
+`dps-coin`, `dps-tokenizer`, `dps-ocr`, `dps-s3` and `dps-connector-refs` (which role mounts which,
+and their keys: §20 and `deploy/openshift/README.md` §2).
 
 Connection credentials (M2, `dps/connections.py`): a connection's `secret_ref` names a directory
 **under the caller's tenant folder**, `DPS_SECRET_DIR/<tenant_id>/<ref>/` (the tenant comes from the
@@ -2164,3 +2168,139 @@ recreates its container and drops its logs: save `docker compose logs` first whe
 evidence. (3) The demo site's `get` counts every GET it serves, from any client: the check needs at
 least `pages_visited` of them, so stray GETs cannot make another site's counters pass, but a browser
 tab left on the site inflates `pages served`.
+
+## 20. OpenShift (M5 Task 25, finish stage, branch `fos`)
+
+Manifests in `deploy/openshift` (Wega layout; full guide and parameter table in
+`deploy/openshift/README.md`): `base/` (Deployments `dps-app`, `dps-worker`, `dps-browser-worker`,
+each with the init container `wait-for-schema`; Job `dps-migrate-0`; CronJob `dps-migrate-maintain` (audit partitions, daily); Services `dps-app`
+and `dps-db` — an ExternalName to the platform PostgreSQL;
+Route `dps-app` with edge TLS, HTTP redirected, router timeout 300 s; PDBs `maxUnavailable: 1`;
+four ServiceAccounts without tokens; ConfigMap `dps` from `configmap-dps.env`), components
+`network-policies` (default-deny + one allow per path), `monitoring` (PodMonitor + PrometheusRule
+with the seven alerts of §5 plus `DpsAuditMaintenanceStale`, `DpsRawPiiSentToLlm` critical),
+`dev-mocks` (tokenizer mock running a
+byte-identical copy of `docker/tokenizer-mock/server.py`, Azure OCR mock), overlays `dev`
+(namespace `dps-dev`, one replica each, mocks, stub LLM, TLS egress off) and `prod` (`dps-prod`,
+app 3, worker 2, browser-worker 1, no mocks), and `release-example/`.
+
+- **Pod security (`restricted-v2`):** no `runAsUser` (the namespace's arbitrary UID), `runAsNonRoot`,
+  `RuntimeDefault` seccomp, read-only root, no privilege escalation, `drop: [ALL]`, no SA token, no
+  service links (Services named `dps-*` would inject `DPS_*` variables), `/tmp` an `emptyDir`,
+  `HOME=/tmp` in the pod env (so the manifests do not depend on the image's `HOME`), secret files
+  mode `0440` read through the SCC-assigned `fsGroup`, images pinned by digest.
+- **Secrets are files only** (`DPS_*_FILE`, the M5 posture rule). The app and both workers pass the
+  production posture guard at boot, so each mounts `dps-api-keys` and `dps-job-kek`; both workers
+  open the API pool and the worker pool at start, so they hold both logins (`dps-pg-app`,
+  `dps-pg-worker`; the runtime proof below failed without the first); only the migrate Job and the
+  CronJob `dps-migrate-maintain` mount `dps-pg-owner`. The
+  browser worker runs with `DPS_LLM_PROVIDER=""`, `DPS_OCR_PROVIDER=off`, `DPS_TOKENIZER_PROVIDER=""`
+  and mounts none of their secrets.
+- **Start order (S5 review r2, B1):** compose starts app and workers only after its `migrate`
+  one-shot completed; Kubernetes has no such order and a release applies the Job and the
+  Deployments together. The app verifies the schema once, at boot (`dps/app.py`
+  `_JobPlatform._connect`: pending migrations set `db_state=down` and nothing retries), so an app
+  pod that started before the release's Job committed kept every `require_db` route at 503
+  `db_unavailable` — jobs, connections, groups, snapshots, artefacts, evidence, reports, admin, the
+  policy store and `@name` policy references — while staying Ready (`/readyz` needs only
+  `api-core`), until restarted; the workers exited on `MigrationDrift` and crash-looped. Each of the
+  three Deployments now starts with the init container `wait-for-schema`: its own image,
+  `["sh", "-c", "trap 'exit 143' TERM INT; until python -m dps.migrate --verify; do sleep 5 & wait $!; done"]`
+  (args, so the app image's entrypoint stays; the trap ends the wait at once on SIGTERM — a shell as
+  PID 1 ignores it otherwise and a deleted waiting pod hangs for its grace period), env = the `dps`
+  ConfigMap + `HOME=/tmp` + `DPS_PG_PASSWORD_FILE` (+ the browser worker's own `DPS_IMAGE_DIGEST`),
+  mounts `tmp`, `ca`, `pg-app` only, the pod's security context, 50m/64Mi requests and
+  500m/256Mi limits (one verify: 0.9 s, 34 MiB peak). `tools/openshift_check.py` denies a DPS
+  Deployment without such a wait in its DPS container's image (`schema-wait`) and builds the
+  wait's `Settings` too. A release that applied a migration cannot be rolled back by image (fix
+  forward): older pods would wait for good (`applied but no longer shipped`). Follow-up for main
+  (F1/F4): the app should keep re-verifying until verified, or exit, as contract §2.1 says.
+- **Metadata DB host:** `DPS_PG_HOST` is the platform host itself (equal to `dps-db`'s
+  externalName): verify-full TLS (`DPS_PG_SSL_ROOT_CERT`, `dps/db.py`) checks the certificate against
+  the name dialled, which a platform certificate does not issue for `dps-db`.
+- **Audit-log partitions (S5 review r1, B1):** `dps_audit_log` has one RANGE partition per UTC month
+  and no DEFAULT partition, and only the owner login creates them (`dps.migrate`: this month + 3;
+  `--maintain`: the same, plus dropping months older than `DPS_AUDIT_RETENTION_MONTHS`). The migrate
+  Job runs once per release, so the CronJob `dps-migrate-maintain` runs `python -m dps.migrate
+  --maintain` daily at 03:17 UTC (`concurrencyPolicy: Forbid`, `activeDeadlineSeconds: 1800`,
+  `startingDeadlineSeconds: 3600`, 3 Jobs of history) in the migrate Job's pod (a test keeps the two
+  pod templates equal but for the argument). Without it every audit write fails about four months
+  after a release (`audit_flush_failed` only; no metric). Alert `DpsAuditMaintenanceStale` (warning)
+  reads kube-state-metrics: no success for 3 days, or a failed run (`kube_job_status_failed` of a
+  `dps-migrate-maintain-*` Job) and never a success (S5 review r2, N1: not `kube_cronjob_created`,
+  which OpenShift's kube-state-metrics drops; a CronJob never scheduled at all is not seen).
+- **Image digest per container (S5 review r1, B2):** evidence packs carry `DPS_IMAGE_DIGEST` (job
+  packs from the worker; scan packs from the browser worker after M4), so the ConfigMap holds the app
+  image's digest and the browser worker sets its own in its env (env overrides `envFrom`). The release
+  overlay derives both from `images:` with `replacements` (kustomize runs them after `images` in the
+  same kustomization; `release-example` shows the block; the browser worker's `wait-for-schema`
+  runs the browser image and carries the same entry); `tools/openshift_check.py` denies
+  (`image-digest-setting`) a DPS container whose value is unset, not a literal, or not its own image's
+  digest (the zero placeholder only warns), and (`db-host`) a `DPS_PG_HOST` that is not `dps-db`'s
+  externalName. The ConfigMap also sets `AWS_CA_BUNDLE` to `org-ca.pem` (boto3 reads neither
+  `SSL_CERT_FILE` nor `DPS_SSL_CERT_FILE`). `literal-secret` covers every key of every ConfigMap
+  (not only `DPS_*`) and the libraries' credentials `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_SESSION_TOKEN`, `PGPASSWORD` (S5 review r2, N2).
+- **Placeholders → release overlay:** zero digests (images and `DPS_IMAGE_DIGEST`), `.invalid` hosts
+  (DB, S3, Stellar, COIN, OCR gateway, tokenizer, Route), TEST-NET-1 NetworkPolicy peers (one per
+  endpoint: DB `192.0.2.10/32`, gateways `.1`–`.4`, object store `.5`, source databases
+  `192.0.2.32/27`, scan targets `192.0.2.64/27`) and the Job name `dps-migrate-0` (renamed per
+  release). `python tools/openshift_check.py <dir>` warns on each and denies hardening violations and
+  — with `dps` importable — any role whose settings fail `Settings` or (staging/prod) the posture
+  guard; `--fail-on-warn` is the release gate. Every JSON6902 `replace` is preceded by a `test` of the
+  committed value (tests enforce it).
+- **Platform prerequisites:** user-workload monitoring; ConfigMap `dps-ca-bundle` (`pg-root.pem`,
+  `org-ca.pem`); RWX PVC `dps-exports` (the worker writes `pvc` targets, the app's connection test
+  probes it); the secrets above; network paths for every peer. Connector `secret_ref` folders come
+  from `dps-connector-refs` with an `items` layout (or a CSI/Vault mount) at `DPS_SECRET_DIR`.
+- **Verified 2026-10-14 (`fos`):** `pytest -m deploy tests/deploy/test_openshift.py` 36 passed, 1
+  skipped (`dps.browser_worker` arrives with the M4 merge); `kustomize build` (v5.8.1) of dev, prod
+  and the release example; `kubeconform -strict` (Kubernetes 1.29 schemas, the OpenShift 4.14 Route
+  schema, the datree CRD catalog for PodMonitor/PrometheusRule): dev 32/32, prod 25/25, release
+  example 25/25 valid; `promtool check rules` on the PrometheusRule: 7 rules, SUCCESS. After the S5
+  review r1 fix: 52 passed, 1 skipped; `kubeconform -strict` dev 33/33, prod 26/26, release example
+  26/26 with the Kubernetes 1.27 and 1.29 schemas and with the OpenShift 4.14 and 4.16 strict
+  catalogs (the CronJob included); kustomize 5.8.1 and `kubectl kustomize` 5.7.1 render identically;
+  `promtool check rules` 8 rules SUCCESS and `promtool test rules` (stale, recent, never succeeded,
+  just created, daily successes) SUCCESS. After the S5 review r2 fix: 60 passed, 1 skipped (full
+  unit suite 2198 passed, 488 skipped); `kubeconform -strict` dev 33/33, prod 26/26, release example
+  26/26 with the OpenShift 4.14, 4.16 and 4.19 strict catalogs and the Kubernetes 1.27 and 1.29
+  schemas, 0 skipped (an unknown field in an init container is refused); kustomize and
+  `kubectl kustomize` still identical; `promtool test rules` on the new alert expression: a failed
+  run that never succeeded fires after `for: 1h` with OpenShift's series (no `*_created`), a
+  CronJob not yet run is silent, a 4-day-old success fires, a 1-day-old one is silent, an old
+  failed Job in the history followed by successes is silent, a run still retrying is silent.
+- **Runtime proof (no cluster available):** each role's rendered prod pod spec run with Docker —
+  the ConfigMap + container env (`DPS_ENV=prod`), every secret a `root:<fsGroup>` 0440 file at its
+  mount path, UID 1000680000 with group 0 and the fsGroup, `--read-only`, `--cap-drop ALL`,
+  no-new-privileges, `/tmp` (and `/dev/shm`) tmpfs — against a scratch PostgreSQL with TLS whose
+  certificate names only `dps-db` (image `data-privacy-services:fimg`, browser image from the `m4`
+  lane): the migrate Job applied all 17 migrations; the worker `/readyz` 200 (db, migrations, kek,
+  queue); the app `/readyz` 200 (db, jobs, keys `db+static`), detect 200 with the static key, 401
+  without, `/api/v1/openapi.json` 404, `GET /admin/posture` **11/11 passed, enforced**; the browser
+  worker ready with Chromium 140; the exports volume writable through the fsGroup, the root
+  read-only (EROFS); dialling the same server as `dps-db-other` fails `SSLCertVerificationError`
+  (why `DPS_PG_HOST` is the certificate's name); 0 hits of the API key, the KEK or the request's
+  e-mail in any container log. The first worker run failed — `password authentication failed for
+  user dps_app` — because the worker opens the API pool too: fixed (both workers hold both logins).
+  The CronJob's rendered prod pod spec (same emulation, owner secret only) applied the 17 migrations
+  on an empty database and ensured partitions `2026_10`…`2027_01`; an audit insert dated 2027-02-01
+  then failed (`no partition of relation "dps_audit_log" found for row`, the B1 failure); a rerun the
+  same day applied 0 and dropped 0; the same command with the clock at 2026-11-14 created `2027_02`
+  (the insert then succeeded), and at 2027-12-02 created `2027_12`…`2028_03` and dropped `2026_10`
+  (retention 13 months); 0 DSN/password/traceback lines in its output.
+  S5 review r2 (B1), the same emulation with each container's cpu/memory limits, this tree's prod
+  render: an "old release" Job (this tree's migrations without 045) applied 16; **without the wait**
+  (control) the app container then started with `jobs: migrations pending or drifted` and
+  `GET /api/v1/jobs` 503 `db_unavailable`, the release Job applied 045, and 25 s later the same app
+  still answered 503 (the review's race, reproduced in containers). **With the wait**, same steps:
+  the app's and the worker's `wait-for-schema` kept checking (4 checks each in 20 s, every one
+  naming `045_policy_directory.sql: pending`), exited 0 one to four seconds after the release Job
+  applied 045, and the containers started after them were ready at once — app `/readyz` 200 with
+  `jobs: ready` and `GET /api/v1/jobs` 200, worker `/readyz` 200 (db, migrations, kek, queue). One
+  verify under the wait's limits (0.5 CPU, 256 MiB): 0.9 s, 34 MiB peak. Browser image (`m4`, 19
+  migrations): its wait looped on an empty schema; `docker stop` (SIGTERM) ended a waiting one in
+  under a second (exit 143); its own migrations applied 19 and the wait exited 0 five seconds later;
+  the browser worker then ready (`api-core`, `browser`). 0 hits of the KEK, the API key, a DSN or a
+  traceback in the 13 container logs.
+  Not done: a live cluster apply.
