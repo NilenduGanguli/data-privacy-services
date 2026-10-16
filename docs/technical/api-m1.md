@@ -172,10 +172,13 @@ policy's custom tiers belong to the request (or job) that uses it (S3 review rou
 score, evidence, context}], count, yaml}`. `recognizer` is a custom-recognizer spec (Presidio
 fields `name`, `supported_entity`, `patterns[{name, regex, score}]`, `context`, `deny_list`,
 plus the DPS extension `allow_list`: exact values that never match). Limits: text 20,000
-characters, 50 patterns of ≤ 500 characters (422 `invalid_recognizer`, also for a regex that does
-not compile or that the static ReDoS filter refuses). The text is neither stored nor echoed;
+characters, 50 patterns of ≤ 500 characters, deny-list terms of ≤ 256 characters (S3 review round
+3; every policy's recognizers too) (422 `invalid_recognizer`, also for a regex that does not
+compile or that the static ReDoS filter refuses). The text is neither stored nor echoed;
 nothing is registered. Patterns run under the request's CPU budget like every policy pattern
-(below): one that runs past it answers 422 `custom_pattern_too_slow`.
+(below): one that runs past it answers 422 `custom_pattern_too_slow`, and one that finds every
+matcher process busy for 30 s answers 503 `pattern_matcher_busy` (S3c review round 1, N2; it
+answered 500 without a code before).
 
 ## Error codes
 
@@ -200,7 +203,8 @@ nothing is registered. Patterns run under the request's CPU budget like every po
 | `ddl_too_large` · `sample_too_large` · `too_many_rows` | 413 | schema limits (above) |
 | `invalid_seed` · `invalid_rows` · `unique_exhausted` | 422 | a bad `seed`, `rows < 1`, or a `unique` field that ran out of values |
 | `invalid_recognizer` | 422 | the recognizer test (above) |
-| `custom_pattern_too_slow` | 422 | a policy pattern (custom recognizer or deny list) ran past the call's CPU budget — 10 ms plus 20 µs per pattern run plus 0.5 µs per character per pattern scanned, at most `DPS_PATTERN_CPU_SECONDS` (5 s) per request and per NDJSON item, each run charged its own CPU so other requests never cause it (S3 review rounds 1–2): every engine route, NDJSON item (each item has its own budget), document and the recognizer test; an L2 job (or partition) fails with this code, without retries, and a post-write sample that could not run makes the verification `review_required` |
+| `custom_pattern_too_slow` | 422 | a policy pattern (custom recognizer or deny list) ran past the call's CPU budget — 10 ms plus 20 µs per pattern run plus 0.5 µs per character per pattern scanned, at most `DPS_PATTERN_CPU_SECONDS` (5 s) per request and per NDJSON item, each run charged its own CPU so other requests never cause it (S3 review rounds 1–2): every engine route, NDJSON item (each item has its own budget), document and the recognizer test; an L2 job (or partition) fails with this code, without retries, and a post-write sample that could not run makes the verification `review_required`. A deny list's build (its trie's text and compile) counts toward the same budget: a call whose budget is spent builds no further list (S3 review round 3) |
+| `pattern_matcher_busy` | 503 | every matcher process for policy-pattern runs that outgrow the 5 ms in-thread slice (`DPS_PATTERN_PROCESSES` per server process) stayed busy for 30 s (waiting runs are served in arrival order); retryable, value-free — the call did nothing wrong (S3 review round 3: every wait is bounded). An NDJSON item ends its stream with it |
 | `ndjson_invalid` | 400 / 422 | an NDJSON envelope or line that is not valid (400), or nesting deeper than 100 (422) |
 | `ndjson_too_large` | 413 | more than `DPS_NDJSON_MAX_ITEMS` items |
 | `idempotency_key_invalid` | 422 | the header does not match `[A-Za-z0-9_.:-]{1,128}` |

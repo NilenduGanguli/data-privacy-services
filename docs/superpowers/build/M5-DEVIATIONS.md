@@ -1555,3 +1555,113 @@ presets use 0.5–0.6.
   parts sent, one call, no write).
 - Security review §3.26 states the threshold behaviour; HANDOFF §17.1 updated.
 - Report `~/.cache/dps-build/reports/S3b-fix-r2.md`.
+
+## Security review round 3 fixes R3-B1, R3-B2 (finish stage, `fsecc`)
+
+Branch `fsecc`, cut from `fsec` at `fee0041` so this runs beside the S3b review; both merge into
+main at release. Review: `~/.cache/dps-build/reports/S3-review-r3.md`. Tests written first from the
+reviewer's probes, failing on `fee0041` (`tests/security/test_event_loop_freeze.py`; the red run is
+in the report).
+
+- **R3-B1 — engine work off the event loop on every route.** `PrivacyEngine.synthesize` now runs
+  the policy, the detector build, detection, the plan, the transform and the verification on
+  worker threads (`asyncio.to_thread`, which copies the call scope) and awaits only the LLM rewrite
+  on the loop; `synthesize_text` runs its templating, leak guard, `screen` and rewrite checks on
+  threads too. New `PrivacyEngine.synthesize_data` (synchronous, JSON only) is what an NDJSON
+  chunk's thread calls — the per-chunk private event loop is gone. `label_leftovers` /
+  `label_templates` resolve the policy and build the detector inside their thread (they built it
+  on the loop when T3 was on); `_label_groups` computes the value shapes on a thread. Beyond the
+  review's list, the same F-02 class (a policy pins the loop) was closed where validating a policy
+  ran on the loop — validation compiles every pattern, about 1 s for 1000 distinct 480-character
+  patterns: the NDJSON stream's preparation (three validations), `POST /scans` (validation and the
+  detector that classifies the start URL — the scanner's route, touched because the new guard would
+  otherwise refuse scans with custom recognizers), `POST /policies/validate`, the policy store's
+  `save_draft` / `publish`, and job-run validation (`submit._validate_run` runs
+  `targets.validate_run`, which resolves the run's policy, on a thread). `GET /health` is now `async` (answered on the loop, never waiting for a
+  worker thread the engine routes may all hold).
+- **The guard.** `call_scope(serving=True)` (the app's `_CallScope`) records the thread of the
+  loop serving the request; `PatternBudget.run` and `custom.build_deny_list` call
+  `regex_guard.ensure_off_serving_loop`, which raises `PatternOnEventLoop` (a `RuntimeError`:
+  value-free 500 via `map_engine_error`, `internal_error` on an NDJSON line; logged
+  `pattern_on_event_loop`). Thread identity, not "any running loop": an NDJSON thread, the worker
+  and the browser-worker keep running patterns on their own loops' threads as before (the worker's
+  detector builds on its loop are unchanged and now cost about 1.2 times round-1's compile).
+- **Bounded waits.** `MatcherPool.run(..., wait=ACQUIRE_TIMEOUT_SECONDS)` (30 s) uses
+  `Condition.wait_for` with a timeout and raises `MatcherBusy`; `PatternBudget.run` maps it to the new
+  `PatternMatcherBusy` (503 `pattern_matcher_busy`, retryable; in an L2 job the generic handler
+  retries the partition). R2-B1 holds: the round-2 load tests and probes give no refusal.
+- **R3-B2 — the trie build.** `deny_list_pattern` writes an edge as one plain character under
+  `IGNORECASE` wherever the edge's set of text characters is exactly that character's case matches
+  (`custom._edge`), and a case-sensitive `(?-i:[…])` class only where the matcher's relation is not
+  an equivalence (the Turkish i's); a node with one term left writes that ending as text; below
+  `_TRIE_DEPTH` the endings are a plain alternation. `compile_deny_list` compiles the trie with
+  `IGNORECASE` (round 2: without; so the trie and the flat fallback no longer differ by flags —
+  `flat_deny_list_pattern` is new and the round-2 tests that told them apart by flags compare the
+  pattern text instead; the deep-endings test counts `_alternation` calls instead of looking for
+  `(?i:`). Exactness: the round-2 differential test and the reviewer's wide-alphabet differential
+  (now a test, 600 cases) pass. Cost: 1.0–1.3 times the round-1 flat compile for 1000 random-letter
+  terms of 20–256 characters (1.6 times at 8; the test bounds it at 1.6 times plus 5 ms). Name-like
+  lists are not cheaper, as this entry first said: the S3c reviewer measured 1.28 times for "First
+  Last N" names, 1.89 times for Turkish names, 1.18 for e-mail addresses, 1.01 for CJK terms and
+  0.93 for account ids (corrected in S3c round 1, N1; about 1.2 times is for the owner to accept —
+  every build is charged and bounded by the ceiling either way). End to end, the reviewer's 2.7 MB request costs 4.85 CPU-s uncapped
+  (round 1: 4.25, round 2: 40.0) and is now refused at the 5 s ceiling, since builds count toward it
+  — a deliberate change from round 1, which answered it 200 (the reviewer accepts 200 or 422 within
+  about the ceiling).
+- **Builds charged.** `PolicyCustomDetector.__init__` builds each list through
+  `custom.build_deny_list(terms, budget)`: guard, refuse if `budget.left <= 0`
+  (`custom_pattern_too_slow`), build, `PatternBudget.charge_build(thread CPU)` — credits and
+  charges `used`, so a build counts toward the ceiling (and `spent`) but never toward the run
+  allowance. A first cut charged a build's overrun past an allowance per term character to the run
+  allowance; in the full suite (a large heap) two tests' legitimate scans were refused: a
+  generation-2 garbage collection lands in the build's thread time (measured with 3 M live
+  containers: one pass made a 0.027 s build take 0.25 s), so the ceiling is the build's only bound
+  (a build
+  is linear in the list; the validation limits cap a policy at 50 lists of 1000 terms of ≤ 256
+  characters). The matcher
+  child now reports its compile CPU (`ANSWER` is `<BddQ`: status, cpu, compile_cpu, count; the
+  `RLIMIT_CPU` backstop is set before the compile too) and `PatternBudget.run` charges it with
+  `charge_build`; the child sets `RLIMIT_CORE` to 0 (review N-r3-3).
+- **Term cap.** `RecognizerSpec.deny_list` entries are at most `MAX_DENY_TERM` = 256 characters
+  (value-free validation error), so one list's build stays bounded; a stored policy with a longer
+  term now fails validation (none expected before v1.0.0). `allow_list` is unchanged (exact set
+  membership, no pattern).
+- **Not done (non-blocking review items):** N-r3-1 (verbose-mode comment bypass of the `{`
+  refusal), N-r3-2 (no per-tenant fairness for matcher waits; only the bound), N-r3-4 (calibration
+  on target hardware), N-r3-5 (process-wide caches keyed by caller content) — recorded in the
+  security review §5.
+- Report `~/.cache/dps-build/reports/S3c-impl.md`.
+
+## S3c review round 1 fix R1-B1 — matchers handed out in arrival order (finish stage, `fsecc`)
+
+Review: `~/.cache/dps-build/reports/S3c-review-r1.md` (R1-B1 blocking; N1 docs).
+
+- **R1-B1.** `MatcherPool` no longer waits on a `threading.Condition`: `notify()` woke a waiter,
+  but the caller that had just released the matcher still held the GIL and, issuing its next run at
+  once (a `_HEAVY`-routed pattern goes straight to the pool, no slice in between), retook the idle
+  matcher first. With four callers on two matchers (the worker's and the pool's defaults), two
+  callers ran over a thousand scans and the other two were refused (`PatternMatcherBusy`) when the
+  round-3 bound passed. The pool now keeps a FIFO of waiters (`_Waiter`: an `Event`, a `granted`
+  flag and the matcher handed over). `_release` hands the matcher straight to the oldest waiter and
+  returns it to `_idle` only when nobody waits; `_acquire` queues behind existing waiters even when
+  a matcher is idle (by construction none is while callers wait); a slot freed by a replaced
+  matcher, a failed start or a larger `resize` goes to the oldest waiter, which starts a child. A
+  waiter whose bound passes re-checks under the lock: handed something meanwhile, it takes it;
+  otherwise it leaves the queue and raises `MatcherBusy`. A waiter interrupted by an exception
+  passes on what it was handed (`_abandon`). New read-only `MatcherPool.waiting` (queued callers).
+  `MatcherPool.run`'s signature and the 30 s bound are unchanged; per-tenant fairness (N-r3-2)
+  stays open.
+- **Tests (written first, failing on `1532ef9`):** `test_event_loop_freeze.py::
+  test_callers_sharing_the_matchers_all_progress_without_refusals` (4 callers, 2 matcher
+  processes, back-to-back `_HEAVY`-routed deny-list scans through `PatternBudget.run` for 4 s under
+  a 1 s bound; before: runs `[46, 47, 0, 0]`, refusals `[0, 0, 4, 4]`), and process-free checks of
+  the hand-out order (`test_a_released_matcher_goes_to_the_oldest_waiter`), of a caller that gives
+  up leaving the queue, and of freed and added slots going to the oldest waiter.
+- **N1 (docs).** The build-cost parity claims are corrected in the security review (§1 S3 row,
+  §3.2 round 3), this log's round-3 entry and `custom.py`'s module docstring: about 1.2 times the
+  round-1 compile, at most about 1.9 times measured (Turkish names); the test bounds the
+  random-letter build at 1.6 times plus 5 ms. The browser-worker observation is noted in §3.2.
+- **N2 (taken in passing).** `/policies/test-recognizer` caught only `PatternTooSlow`, so a busy
+  pool answered 500 without a code; it now maps `PatternMatcherBusy` to 503 `pattern_matcher_busy`
+  like the engine routes (`test_the_recognizer_test_route_answers_a_busy_pool_with_the_retryable_code`,
+  failing first). N3-N6 stay open (security review §5 and the F1/owner list).

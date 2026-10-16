@@ -354,7 +354,7 @@ A literal `DPS_<NAME>` wins over `DPS_<NAME>_FILE`; both win over a `.env` in th
 | `DPS_VERTEX_PROJECT` / `DPS_VERTEX_LOCATION` | — / `global` | laptop path; needs the `vertex` extra and ADC |
 | `DPS_MAX_PAYLOAD_MB` / `DPS_MAX_TEXT_CHARS` / `DPS_MAX_ITEMS` | 8 / 1,000,000 / 10,000 | 413 beyond (JSON-route body bytes by header or while streaming, `payload_too_large`; text characters, documents' canonical text included; JSON leaf values) |
 | `DPS_RATE_LIMIT_ENABLED` / `_RPS` / `_BURST` | `true` / 50 / 100 | token bucket per API key, per process; 429 + `Retry-After` |
-| `DPS_PATTERN_CPU_SECONDS` / `DPS_PATTERN_PROCESSES` | 5 / 2 | (S3 review F-02, round 2) policy patterns — custom recognizers and deny lists: the most CPU one API request, or one NDJSON item, may spend on them in total, and the longest any single run may take (L2 jobs included); past it 422 `custom_pattern_too_slow`. Matcher processes per server process for runs that outgrow the 5 ms in-thread slice (single-threaded children, about 17 MB each, started on first use): long pattern runs never use more CPUs than this, and wait for a free one when all are busy |
+| `DPS_PATTERN_CPU_SECONDS` / `DPS_PATTERN_PROCESSES` | 5 / 2 | (S3 review F-02, round 2) policy patterns — custom recognizers and deny lists: the most CPU one API request, or one NDJSON item, may spend on them in total, and the longest any single run may take (L2 jobs included); past it 422 `custom_pattern_too_slow`. Matcher processes per server process for runs that outgrow the 5 ms in-thread slice (single-threaded children, about 17 MB each, started on first use): long pattern runs never use more CPUs than this, and wait for a free one when all are busy — at most 30 s, then 503 `pattern_matcher_busy` (S3 review round 3). Deny-list builds count toward the same per-request CPU (round 3) |
 | `DPS_AUDIT_ENABLED` | `true` | `false` only locally; refused in staging/prod |
 | `DPS_OCR_PROVIDER` | `""` (the image: `auto`) | M1 documents — `""`/`off`: no OCR; `azure`: Read v3.2 (the compose mock, the org gateway, Azure) when endpoint and key are set, else none; `tesseract`: the local CLI (`/readyz` `ocr: tesseract_missing` without the binary); `auto` (the image's `ENV`): azure when endpoint and key are set, else tesseract when `DPS_TESSERACT_CMD` is on `PATH`, else none. Staging/prod: azure (also via `auto`) needs a key and an `https` endpoint; `auto` that resolves to none is refused; Tesseract is allowed (local, no egress) |
 | `DPS_TESSERACT_CMD` / `DPS_TESSERACT_LANGS` / `DPS_TESSERACT_TIMEOUT_SECONDS` | `tesseract` / `eng` / 60 | local OCR: the binary (name on `PATH` or a path), its languages (`eng`, `eng+spa`, …; the image ships `eng` only) and one page's time limit (the process group is killed beyond it: `ocr_timeout`). Page image on stdin, TSV on stdout; Tesseract's stderr is never read (it can echo recognised text). `DPS_OCR_MAX_CONCURRENCY` bounds parallel runs. `/readyz` `ocr.engine` is `tesseract-<major.minor>` |
@@ -659,7 +659,19 @@ the host tests read its counters) and `DPS_SMOKE_SCAN_TIMEOUT` (300 s).
   after about 11 ms; a 1000-pattern policy is refused at the 5 s ceiling from about 10 KB of text
   (round 1 let 1 MB run 1001 CPU-seconds); the linear twin of that policy answers in about 4 s on
   1 MB. Deny lists are matched as a trie (`custom.deny_list_pattern`, exact flat-alternation
-  results), about 0.03 µs per character for 1000 names. The static filter (`check_pattern`: no
+  results), about 0.03 µs per character for 1000 names. Round 3 (S3 review R3-B1/R3-B2, finish
+  stage): **no policy pattern runs, and no deny list is built, on the event loop serving a
+  request** — `synthesize` (JSON and documents), T3 labelling, NDJSON preparation, scan creation and
+  policy validation run their CPU work on worker threads (`PrivacyEngine.synthesize_data` is the
+  synchronous synthesize for callers already off the loop), the app's call scope records the
+  loop's thread and a run or build there is refused as a server defect (`PatternOnEventLoop`, a
+  value-free 500, log `pattern_on_event_loop`), and `/health` is answered on the loop itself; a
+  run waits at most 30 s for a matcher process, waiting runs served in arrival order (503
+  `pattern_matcher_busy`; S3c review round 1, R1-B1); a deny list's build costs about 1.2 times the
+  round-1 flat compile, at most about 1.9 times measured (plain characters under `IGNORECASE`, explicit classes only
+  for the Turkish i's) and is charged to the call (`custom.build_deny_list`: counts toward the
+  ceiling, no further list once the budget is spent), as is a matcher process's compile; deny-list
+  terms are at most 256 characters. The static filter (`check_pattern`: no
   nested repeats, backreferences, bounds over 1000, patterns over 512 characters; since round 2 no
   unescaped `{` that is not a repeat count and no unescaped `[` inside a set — `regex` would read a
   fuzzy match or a POSIX class there) still refuses the classic shapes when a policy is validated. Declared-field globs are matched without a regex

@@ -16,10 +16,15 @@ sees none of them, and the fill step puts a kept value back afterwards.
 
 When the template is filled as it stands (no rewrite), ``info["segments"]`` records where each
 replacement landed in the output (:func:`placeholder_segments`); a rewritten text has none.
+
+:func:`synthesize_text` runs its CPU steps — templating, the fill, the leak guard, the ``screen``
+(which runs the request's detector, policy patterns included) and the checks of a rewrite — on
+worker threads and awaits only the model on the event loop (S3 review round 3, R3-B1).
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -317,9 +322,15 @@ async def synthesize_text(
     Raises:
         MethodError: the plan names a method that cannot run in synthesize mode.
     """
-    ph = to_placeholders(text, findings)
-    fill = _resolve(ph, surrogates, locale, anchor, plan)
-    deterministic = _substitute(ph.text, fill.replacements)
+
+    def template() -> tuple[PlaceholderText, _Fill, str, list[OutputSegment]]:
+        ph = to_placeholders(text, findings)
+        fill = _resolve(ph, surrogates, locale, anchor, plan)
+        filled = _substitute(ph.text, fill.replacements)
+        segments = placeholder_segments(text, ph, filled, fill.replacements, fill.label_methods)
+        return ph, fill, filled, segments
+
+    ph, fill, deterministic, segments = await asyncio.to_thread(template)
     info: dict[str, Any] = {
         "llm_calls": 0,
         "llm_used": False,
@@ -327,18 +338,24 @@ async def synthesize_text(
         "placeholders": len(ph.mapping),
         "methods_used": dict(fill.methods),
         "notes": dict(fill.notes),
-        "segments": placeholder_segments(
-            text, ph, deterministic, fill.replacements, fill.label_methods
-        ),
+        "segments": segments,
     }
     if not (llm_rewrite and gateway is not None and ph.mapping and gateway.available()):
         return deterministic, info
-    originals = [original for _, original in collect_originals(findings, text=text)]
-    try:
-        assert_placeholder_safe(ph.text, originals)
-    except LeakToModelError:
+
+    def guarded() -> list[str] | None:
+        originals = [original for _, original in collect_originals(findings, text=text)]
+        try:
+            assert_placeholder_safe(ph.text, originals)
+        except LeakToModelError:
+            return None
+        return originals
+
+    safe = await asyncio.to_thread(guarded)
+    if safe is None:
         info["fallback"] = "leak_guard"  # never sent; the verifier rules on the deterministic text
         return deterministic, info
+    originals = safe
     info["llm_calls"] = 1
     try:
         rewritten = await rewrite_placeholders(ph.text, gateway, protected=originals)
@@ -352,12 +369,18 @@ async def synthesize_text(
     except (LlmCallError, LlmUnavailable) as exc:
         info["fallback"] = type(exc).__name__
         return deterministic, info
-    if screen is not None and screen(rewritten) > screen(ph.text):
-        info["fallback"] = "llm_introduced_entities"
-        return deterministic, info
-    output = _substitute(rewritten, fill.replacements)
-    if _brings_back(originals, deterministic, output, names=_names(ph)):
-        info["fallback"] = "verification"
+
+    def judged() -> tuple[str | None, str]:
+        if screen is not None and screen(rewritten) > screen(ph.text):
+            return "llm_introduced_entities", deterministic
+        filled = _substitute(rewritten, fill.replacements)
+        if _brings_back(originals, deterministic, filled, names=_names(ph)):
+            return "verification", deterministic
+        return None, filled
+
+    fallback, output = await asyncio.to_thread(judged)
+    if fallback is not None:
+        info["fallback"] = fallback
         return deterministic, info
     info["llm_used"] = True
     info["segments"] = []  # the rewrite moved the text around: no positions rather than wrong ones

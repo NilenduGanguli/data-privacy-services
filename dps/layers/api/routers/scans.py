@@ -254,8 +254,8 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
             validated = validate_scan(body, settings=settings, hosts=hosts, tenant_id=tenant)
         except ScanSpecError as exc:
             raise DpsHttpError(exc.status, exc.code, f"the scan was refused: {exc.code}") from None
-        try:
-            policy = engine.policy(body.policy)
+        try:  # S3 review round 3: validating compiles the policy's patterns, off the event loop
+            policy = await asyncio.to_thread(engine.policy, body.policy)
         except EngineError:
             raise DpsHttpError(422, "policy_invalid", "the policy does not resolve") from None
         key, seed = _material(body)
@@ -268,14 +268,20 @@ async def create_scan(body: ScanSpec, request: Request, response: Response) -> d
             scan_start_url=validated.start_url,
         )
         sealed = seal(kek, secret.model_dump_json().encode("utf-8"), aad=f"dps_job.key:{job_id}")
-        classify = value_classifier(engine.detector(policy, body.fill.locale))
+
+        def redacted_spec() -> dict[str, Any]:
+            classify = value_classifier(engine.detector(policy, body.fill.locale))
+            return redact_scan_spec(validated, redact_url(validated.start_url, classify))
+
+        # R3-B1: the detector (deny-list builds) and its policy patterns run off the event loop
+        spec = await asyncio.to_thread(redacted_spec)
         job = await jobs.create_job(
             job_id=job_id,
             tenant_id=tenant,
             kind=JobKind.scan,
             phase=JobPhase.scan,
             # F-18: a policy body is sealed in spec_enc; the stored spec keeps its label only
-            spec=redact_scan_spec(validated, redact_url(validated.start_url, classify)),
+            spec=spec,
             mode=body.mode,
             sealed_secret=sealed,
             sealed_selection=seal_scan_policy(kek, job_id, body.policy),

@@ -25,12 +25,13 @@ from contextlib import contextmanager
 import pytest
 import regex
 
-from dps.engine.detect import pattern_process, regex_guard
+from dps.engine.detect import custom, pattern_process, regex_guard
 from dps.engine.detect.custom import (
     PolicyCustomDetector,
     RecognizerSpec,
     compile_deny_list,
     deny_list_pattern,
+    flat_deny_list_pattern,
 )
 from dps.engine.detect.pattern_process import POOL, MatcherFailed, MatcherPool
 from dps.engine.detect.regex_guard import (
@@ -245,14 +246,23 @@ def test_deny_lists_match_exactly_like_the_flat_alternation() -> None:
     assert checked == 400 and hits > 400
 
 
-def test_deep_deny_lists_fall_back_to_flat_endings() -> None:
+def test_deep_deny_lists_fall_back_to_flat_endings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Terms that share a prefix longer than the trie's depth keep matching exactly."""
     terms = ["x" * n for n in range(1, 130)] + ["y" * 60 + "z", "Y" * 60]
     text = " ".join(["x" * 129, "x" * 77, "y" * 60, "y" * 60 + "Z", "x" * 131])
     want = [m.span() for m in _flat_deny(terms).finditer(text)]
     got = [m.span() for m in compile_deny_list(terms).finditer(text)]
     assert got == want and len(want) == 4
-    assert "(?i:" in deny_list_pattern(terms)  # the endings below the trie's depth, flat
+    flat_endings: list[int] = []
+    real = custom._alternation
+
+    def listing(rest: list[str]) -> str:
+        flat_endings.append(len(rest))
+        return real(rest)
+
+    monkeypatch.setattr(custom, "_alternation", listing)
+    deny_list_pattern(terms)
+    assert flat_endings  # the endings below the trie's depth are listed flat
 
 
 def test_a_deny_list_costs_the_same_per_character_whatever_its_length() -> None:
@@ -271,7 +281,7 @@ def test_a_deny_list_costs_the_same_per_character_whatever_its_length() -> None:
     words = "the customer called about the loan account and the branch said it closed".split()
     text = " ".join(rnd.choice(words) for _ in range(60_000))
     costs: dict[str, float] = {}
-    assert not compile_deny_list(names).flags & regex.IGNORECASE  # the trie, not the fallback
+    assert compile_deny_list(names).pattern == deny_list_pattern(names)  # the trie, not the flat
     for label, compiled in (("trie", compile_deny_list(names)), ("flat", _flat_deny(names))):
         started = time.thread_time()
         list(compiled.finditer(text))
@@ -330,9 +340,9 @@ def test_a_deny_list_of_turkish_i_variants_cannot_blow_up_the_trie() -> None:
     started = time.perf_counter()
     compiled = compile_deny_list(terms)
     assert time.perf_counter() - started < 5.0
-    assert compiled.flags & regex.IGNORECASE  # the flat form: the trie passed its bound
+    assert compiled.pattern == flat_deny_list_pattern(terms)  # the trie passed its bound
     turkish = ["Işık Yıldız", "İsmail Iğdır", "Ilgaz İnci", *terms[:3]][:3]
-    assert not compile_deny_list(turkish).flags & regex.IGNORECASE  # a few such names: a trie
+    assert compile_deny_list(turkish).pattern == deny_list_pattern(turkish)  # a trie
     text = " ".join([terms[0], terms[5].upper(), "".join(reversed(terms[7])), terms[9]])
     want = [m.span() for m in _flat_deny(terms).finditer(text)]
     assert [m.span() for m in compiled.finditer(text)] == want and want

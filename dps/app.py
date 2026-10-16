@@ -205,7 +205,8 @@ class _CallScope:
     """Binds a fresh engine call scope for every HTTP request (S3 review round 1 B1/B3,
     :mod:`dps.engine.call_scope`): the custom entity tiers its policies declare and the CPU budget
     of its policy patterns belong to that request alone — every route, present or added later.
-    The budget is capped at ``DPS_PATTERN_CPU_SECONDS`` (review round 2, R2-B2)."""
+    The budget is capped at ``DPS_PATTERN_CPU_SECONDS`` (review round 2, R2-B2), and the event
+    loop's own thread never runs a policy pattern or builds a deny list (review round 3, R3-B1)."""
 
     def __init__(self, app: ASGIApp, *, pattern_cpu_seconds: float = DEFAULT_CPU_SECONDS) -> None:
         self.app = app
@@ -215,7 +216,7 @@ class _CallScope:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        with call_scope(pattern_ceiling=self.pattern_cpu_seconds):
+        with call_scope(pattern_ceiling=self.pattern_cpu_seconds, serving=True):
             await self.app(scope, receive, send)
 
 

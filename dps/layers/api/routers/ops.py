@@ -11,8 +11,9 @@ router = APIRouter()
 
 
 @router.get("/health", include_in_schema=False)
-def health() -> dict[str, str]:
-    """Liveness: the process answers."""
+async def health() -> dict[str, str]:
+    """Liveness: the process answers — on the event loop itself, so it never waits for a worker
+    thread the engine routes may all be holding (S3 review round 3)."""
     return {"status": "ok"}
 
 

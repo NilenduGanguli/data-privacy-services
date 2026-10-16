@@ -1,7 +1,11 @@
 """``PrivacyEngine`` — the façade the Layer 1 routers (and later the job workers) call.
 
 Request flow: resolve policy → detect → plan → transform → verify → report. Obfuscation is CPU
-work and synchronous; synthesis is async because the optional LLM rewrite is.
+work and synchronous; synthesis is async because the optional LLM rewrite is. The async operations
+(``synthesize``, T3 labelling) run every CPU step — resolving the policy, building the detector
+(deny lists), detection, the transform and the verification — on worker threads and await only the
+LLM on the event loop, so a policy pattern can never freeze the server (S3 review round 3, R3-B1);
+:meth:`PrivacyEngine.synthesize_data` is the synchronous form for callers already off the loop.
 
 Every error a caller can cause is an :class:`EngineError` whose message names the rule, never a
 value, a key or a seed; the request models hide their input in validation errors for the same
@@ -13,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -225,6 +230,22 @@ def _label_calls(extra_findings: Sequence[Finding]) -> int:
     return int(getattr(extra_findings, "llm_calls", 0))
 
 
+@dataclass(slots=True)
+class _Synthesis:
+    """What ``synthesize`` resolved before transforming (built on a worker thread)."""
+
+    policy: Policy
+    wrap_pem: str | None
+    locale: str
+    detector: Detector
+    findings: list[Finding]
+    plan: Plan
+    scope: str | None
+    seed: SynthesisSeed
+    surrogates: SurrogateEngine
+    anchor: str
+
+
 class PrivacyEngine:
     """Stateless engine: one instance per process, safe to share across requests."""
 
@@ -372,8 +393,9 @@ class PrivacyEngine:
 
     async def _label_groups(self, groups: LeafGroups) -> tuple[dict[str, LabelVerdict], int]:
         values = {template: [value for _, value in leaves] for template, leaves in groups.items()}
+        fields = await asyncio.to_thread(leftover_fields, values)  # value shapes: CPU, off the loop
         outcome = await label(
-            leftover_fields(values),
+            fields,
             gateway=self.gateway,
             settings=self.settings,
             protected=[str(v) for vs in values.values() for v in vs],
@@ -396,15 +418,23 @@ class PrivacyEngine:
         """
         if payload.data is None or not gateway_usable(self.gateway):
             return Leftovers()  # before resolving the policy: the common, LLM-free case
-        policy = self.policy(policy_ref)
-        if not self._t3_enabled(policy):
+        data = payload.data
+
+        def collect() -> tuple[Policy, LeafGroups] | None:
+            policy = self.policy(policy_ref)
+            if not self._t3_enabled(policy):
+                return None
+            detector = self._detector(policy, self._locale(policy, options))
+            return policy, self._leftover_groups(data, detector)
+
+        # R3-B1: the policy, the detector (deny-list builds) and detection off the event loop
+        found = await asyncio.to_thread(collect)
+        if found is None or not found[1]:
             return Leftovers()
-        detector = self._detector(policy, self._locale(policy, options))
-        groups = await asyncio.to_thread(self._leftover_groups, payload.data, detector)
-        if not groups:
-            return Leftovers()
+        policy, groups = found
         verdicts, calls = await self._label_groups(groups)
-        return Leftovers(self._t3_findings(groups, verdicts, policy), llm_calls=calls)
+        findings = await asyncio.to_thread(self._t3_findings, groups, verdicts, policy)
+        return Leftovers(findings, llm_calls=calls)
 
     async def label_templates(
         self,
@@ -416,18 +446,19 @@ class PrivacyEngine:
         stream's first chunk); :meth:`apply_labels` then applies the verdicts per document."""
         if not documents or not gateway_usable(self.gateway):
             return LeftoverLabels()
-        policy = self.policy(policy_ref)
-        if not self._t3_enabled(policy):
-            return LeftoverLabels()
-        detector = self._detector(policy, self._locale(policy, options))
 
-        def collect() -> LeafGroups:
+        def collect() -> LeafGroups | None:
+            policy = self.policy(policy_ref)
+            if not self._t3_enabled(policy):
+                return None
+            detector = self._detector(policy, self._locale(policy, options))
             merged: LeafGroups = {}
             for document in documents:
                 for template, leaves in self._leftover_groups(document, detector).items():
                     merged.setdefault(template, []).extend(leaves)
             return merged
 
+        # R3-B1: the policy, the detector (deny-list builds) and detection off the event loop
         groups = await asyncio.to_thread(collect)
         if not groups:
             return LeftoverLabels()
@@ -677,23 +708,14 @@ class PrivacyEngine:
             raise EngineError("wrap_key: public_key_pem is required")
         return pem
 
-    async def synthesize(
+    def _synthesis(
         self,
         payload: Payload,
         policy_ref: str | dict[str, Any] | None,
         options: RequestOptions,
-        *,
-        extra_findings: Sequence[Finding] = (),
-    ) -> TransformResponse:
-        """Synthetic surrogates (and, for text, an optional placeholder-only LLM rewrite).
-
-        The synthesis seed is returned unless the consistency scope is ``request``.
-
-        Raises:
-            VerificationFailed: an original survived and the policy's leakage check is strict.
-            EngineError: bad policy or seed, or a method that cannot run without a key.
-        """
-        t0 = time.perf_counter()
+        extra_findings: Sequence[Finding],
+    ) -> _Synthesis:
+        """Policy, detection, plan and seed of a synthesis (CPU work: a worker thread's)."""
         policy = self.policy(policy_ref)
         wrap_pem = self._wrap_pem(options)  # F-20: an unusable wrap_key fails before any work
         locale = self._locale(policy, options)
@@ -710,81 +732,168 @@ class PrivacyEngine:
             surrogates = SurrogateEngine(seed_bytes(seed), default_locale=locale)
         except ValueError as exc:
             raise EngineError(f"invalid synthesis seed: {exc}") from None
-        llm_rewrite = (
-            options.llm_rewrite
-            if options.llm_rewrite is not None
-            else policy.synthesize.llm_rewrite_text
+        anchor = anchor_for(payload.text, plan) if payload.text is not None else ""
+        return _Synthesis(
+            policy, wrap_pem, locale, detector, findings, plan, scope, seed, surrogates, anchor
         )
-        llm_rewrite = llm_rewrite and self.settings.llm_text_rewrite
-        llm: dict[str, Any] = {"used": False, "fallback": None}
-        llm_calls = _label_calls(extra_findings)
-        output: Any
-        methods_used: dict[str, int]
-        notes: dict[str, int]
-        segments: list[OutputSegment]
-        if payload.text is not None:
-            try:
-                output, info = await synthesize_text(
-                    payload.text,
-                    findings,
-                    surrogates=surrogates,
-                    locale=locale,
-                    anchor=anchor_for(payload.text, plan),
-                    gateway=self.gateway,
-                    llm_rewrite=llm_rewrite,
-                    plan=plan,
-                    screen=lambda text: len(detector.detect(text=text).findings),
-                )
-            except MethodError as exc:
-                raise EngineError(str(exc)) from None
-            segments = info.pop("segments", [])  # replacement text: never logged with ``info``
-            llm_calls += int(info["llm_calls"])
-            llm = {"used": bool(info["llm_used"]), "fallback": info["fallback"]}
-            methods_used = dict(info["methods_used"])
-            notes = dict(info["notes"])
-            if info["fallback"]:
-                notes[f"llm:{info['fallback']}"] = 1
-        else:
-            try:
-                applied = apply_plan(
-                    plan=plan,
-                    options=self._apply_options(policy, None, surrogates, options, locale),
-                    data=payload.data,
-                )
-            except MethodError as exc:
-                raise EngineError(str(exc)) from None
-            output, methods_used, notes = applied.output, applied.methods_used, applied.notes
-            segments = applied.segments
+
+    def _synthesis_response(
+        self,
+        state: _Synthesis,
+        payload: Payload,
+        options: RequestOptions,
+        output: Any,
+        methods_used: dict[str, int],
+        notes: dict[str, int],
+        segments: list[OutputSegment],
+        *,
+        llm: dict[str, Any],
+        llm_calls: int,
+        started: float,
+    ) -> TransformResponse:
+        """Verification, report and seed of a synthesis (CPU work: a worker thread's)."""
         for method, count in methods_used.items():
             TRANSFORMS.labels("synthesize", method).inc(count)
-        verification = self._verify(findings, payload, output, plan, policy, "synthesize", detector)
+        verification = self._verify(
+            state.findings, payload, output, state.plan, state.policy, "synthesize", state.detector
+        )
         report = build_report(
             mode="synthesize",
-            policy_name=policy.name,
-            policy_hash=policy.config_hash(),
-            findings=findings,
-            plan=plan,
+            policy_name=state.policy.name,
+            policy_hash=state.policy.config_hash(),
+            findings=state.findings,
+            plan=state.plan,
             methods_used=methods_used,
             notes=notes,
             reversible_values=0,
             verification=verification,
             llm_calls=llm_calls,
-            duration_ms=(time.perf_counter() - t0) * 1000,
+            duration_ms=(time.perf_counter() - started) * 1000,
         )
         report.llm.update(llm)
-        seed_out: SynthesisSeed | WrappedSeed | None = seed if scope != "request" else None
-        if seed_out is not None and wrap_pem is not None:
+        seed_out: SynthesisSeed | WrappedSeed | None = (
+            state.seed if state.scope != "request" else None
+        )
+        if seed_out is not None and state.wrap_pem is not None:
             try:  # F-20: the seed keys the D-A pseudonyms; it gets the DEK's wire protection
-                seed_out = wrap_synthesis_seed(seed, wrap_pem)
+                seed_out = wrap_synthesis_seed(state.seed, state.wrap_pem)
             except ValueError as exc:
                 raise EngineError(f"wrap_key: {exc}") from None
         return TransformResponse(
             result=output,
-            findings=findings,
-            plan=explain_plan(plan),
+            findings=state.findings,
+            plan=explain_plan(state.plan),
             synthesis_seed=seed_out,
             segments=segments if options.return_segments else None,
             report=report,
+        )
+
+    def synthesize_data(
+        self,
+        payload: Payload,
+        policy_ref: str | dict[str, Any] | None,
+        options: RequestOptions,
+        *,
+        extra_findings: Sequence[Finding] = (),
+    ) -> TransformResponse:
+        """:meth:`synthesize` for a JSON document (``payload.data``: no LLM step), synchronously
+        — for callers already off the event loop (an NDJSON chunk's worker thread).
+
+        Raises:
+            VerificationFailed: an original survived and the policy's leakage check is strict.
+            EngineError: bad policy or seed, or a method that cannot run without a key.
+            TypeError: ``payload`` is a text (use :meth:`synthesize`).
+        """
+        if payload.data is None:
+            raise TypeError("synthesize_data takes a JSON document")
+        started = time.perf_counter()
+        state = self._synthesis(payload, policy_ref, options, extra_findings)
+        try:
+            applied = apply_plan(
+                plan=state.plan,
+                options=self._apply_options(
+                    state.policy, None, state.surrogates, options, state.locale
+                ),
+                data=payload.data,
+            )
+        except MethodError as exc:
+            raise EngineError(str(exc)) from None
+        return self._synthesis_response(
+            state,
+            payload,
+            options,
+            applied.output,
+            applied.methods_used,
+            applied.notes,
+            applied.segments,
+            llm={"used": False, "fallback": None},
+            llm_calls=_label_calls(extra_findings),
+            started=started,
+        )
+
+    async def synthesize(
+        self,
+        payload: Payload,
+        policy_ref: str | dict[str, Any] | None,
+        options: RequestOptions,
+        *,
+        extra_findings: Sequence[Finding] = (),
+    ) -> TransformResponse:
+        """Synthetic surrogates (and, for text, an optional placeholder-only LLM rewrite).
+
+        The synthesis seed is returned unless the consistency scope is ``request``. Every CPU step
+        runs on a worker thread; only the LLM rewrite is awaited on the event loop (R3-B1).
+
+        Raises:
+            VerificationFailed: an original survived and the policy's leakage check is strict.
+            EngineError: bad policy or seed, or a method that cannot run without a key.
+        """
+        if payload.text is None:  # a JSON document: no LLM step, one hop off the loop
+            return await asyncio.to_thread(
+                self.synthesize_data, payload, policy_ref, options, extra_findings=extra_findings
+            )
+        text = payload.text
+        started = time.perf_counter()
+        state = await asyncio.to_thread(
+            self._synthesis, payload, policy_ref, options, extra_findings
+        )
+        llm_rewrite = (
+            options.llm_rewrite
+            if options.llm_rewrite is not None
+            else state.policy.synthesize.llm_rewrite_text
+        )
+        llm_rewrite = llm_rewrite and self.settings.llm_text_rewrite
+        detector = state.detector
+        try:
+            output, info = await synthesize_text(
+                text,
+                state.findings,
+                surrogates=state.surrogates,
+                locale=state.locale,
+                anchor=state.anchor,
+                gateway=self.gateway,
+                llm_rewrite=llm_rewrite,
+                plan=state.plan,
+                screen=lambda candidate: len(detector.detect(text=candidate).findings),
+            )
+        except MethodError as exc:
+            raise EngineError(str(exc)) from None
+        segments = info.pop("segments", [])  # replacement text: never logged with ``info``
+        notes = dict(info["notes"])
+        if info["fallback"]:
+            notes[f"llm:{info['fallback']}"] = 1
+        return await asyncio.to_thread(
+            self._synthesis_response,
+            state,
+            payload,
+            options,
+            output,
+            dict(info["methods_used"]),
+            notes,
+            segments,
+            llm={"used": bool(info["llm_used"]), "fallback": info["fallback"]},
+            llm_calls=_label_calls(extra_findings) + int(info["llm_calls"]),
+            started=started,
         )
 
     def reveal(

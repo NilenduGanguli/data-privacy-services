@@ -13,6 +13,7 @@ status, a stable code and a detail that names fields, methods and rules — neve
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Mapping
 from datetime import datetime
@@ -372,7 +373,9 @@ async def save_draft(
     Raises:
         PolicyStoreError: 404 ``policy_not_found``; 400 ``invalid_policy`` (nothing written).
     """
-    draft = _validated(body, name=name, version=1).model_dump(mode="json")
+    # S3 review round 3: validating compiles the policy's patterns — CPU work, off the event loop
+    validated = await asyncio.to_thread(_validated, body, name=name, version=1)
+    draft = validated.model_dump(mode="json")
     async with db.acquire(tenant_id) as conn:
         status = await conn.execute(
             f"UPDATE {_s()}.dps_policy SET draft = $3, draft_by = $4, draft_updated_at = now(), "
@@ -447,7 +450,9 @@ async def publish(
                     name,
                 )
             )
-            policy = _validated(dict(row["draft"]), name=name, version=version)
+            policy = await asyncio.to_thread(
+                _validated, dict(row["draft"]), name=name, version=version
+            )
             if policy.verify.leakage_check == "warn" and not settings.verify_warn_allowed:
                 raise PolicyStoreError(
                     422,
