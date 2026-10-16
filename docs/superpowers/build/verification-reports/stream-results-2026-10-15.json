@@ -1,0 +1,107 @@
+{
+ "S1-M3 gates r3": {
+  "verdict": "FAIL",
+  "blocking": [
+   {
+    "file": "tests/connectors/test_synthesize_copula.py",
+    "problem": "B1. The M2 gate (-m \"db or pg_source or s3\") went red on its first run: 1 failed, 365 passed. test_surrogate_job_on_the_seeded_demo_customers found 1 synthetic national_id equal to a demo-source one (counts only; tax_id 0). This is the known seeded-demo D-A flake (S2 gates r1 B1). Main's demo seed (tools/seed_model.py, model 1) gives all 11 989 Aadhaar-shaped demo ids a leading 1. That is the exact never-issued range unissued.twelve_digits draws NATIONAL_ID surrogates from (10^10 values), so each seeded-demo test fails in about 1.4 % of runs; S2 fix r1 simulated 17 of 1 200 runs, all Aadhaar. The fix (demo model 2) is only on m4, in a3cd667. Not an M3 regression: d2fdc3f changes no seed or surrogate code. Two rerun sessions of the two seeded-demo tests passed. The product's backstop still flags such a hit as review_required (test_a_real_identifier_in_the_target_needs_review passed).",
+    "fix": "Change test data only, and keep _assert_no_real_identifier and the (in_source, issuable) assertions as they are. Option 1: port demo model 2 from m4 commit a3cd667 to main, byte-identical: tools/seed_model.py, seed_sources.py, seed_oracle.py, seed_mongo.py and tests/test_seed_model.py, tests/test_seed_sources.py, tests/connectors/test_seed_sources_pg.py, tests/e2e/test_seed_shared_ids.py. These files are currently identical on main and on m4@a0e8d26, so the port applies cleanly and the later m4 merge stays clean. Add a HANDOFF/deviation note, reload main's demo sources (the model-2 marker reloads without --reset), then rerun the whole suite and the M2 gate. Option 2: take the fix with the M4 merge and rerun those two gates on main afterwards."
+   }
+  ]
+ },
+ "S1-M3 lens engines r3": {
+  "verdict": "FAIL",
+  "blocking": [
+   {
+    "file": "dps/layers/connectors/identifier_check.py",
+    "problem": "On Oracle and MongoDB, the D-A post-write identifier check reads only the first 5 000 rows (CHECK_BATCH) of the target and of the source, yet reports scope whole_table. A real identifier in any later row is never flagged, and the pack says passed with review_required false. Cause: key_floor (:218), _tally_target (:240) and the source loop of check_identifiers (:290) call rows.clear() on the page the connector yielded. oracle.py read_partition (:814-818) and mongo.py read_partition (:650-655) then test len() of that same, now empty, list and stop paging. PostgreSQL yields a fresh list (postgres.py:673) and is unaffected. Evidence: (1) 20 000-row synthesize packs: Oracle NATIONAL_ID and KYC DOC_NUMBER checked 5 000, MongoDB $.accounts[*].iban checked 5 000; the PostgreSQL control national_id checked 20 000. Round 2's packs show the same 5 000s. (2) Demo sources used as their own target: checked/in_source 5 000/5 000 against 19 998 expected; with pages copied, 20 000/19 998. (3) Scratch data, one shared ACCOUNT_NUMBER at target key 15 000 and source key 18 000: as built in_source 0 and review_columns [] on both engines; with pages copied, in_source 1 and review flagged. An append also gets a wrong key_floor. The unit test fake yields fresh lists, so it cannot catch this. Repros: ~/.cache/dps-build/reports/S1-M3-engines-r3/repro_idcheck_paging.py and repro_idcheck_missed_hit.py.",
+    "fix": "Make paging independent of what the consumer does with a page. In oracle.py and mongo.py read_partition, compute the page length and the next after-key before yield, or yield a copy as postgres does. In identifier_check.py, stop clearing pages the connector owns. Add tests: (a) a conformance rule for all three engines that read_partition with a consumer clearing each page still returns every row; (b) check_identifiers on Oracle and on MongoDB with more rows than one page (or CHECK_BATCH patched small) and one shared value past page 1 gives in_source 1 and review; (c) key_floor is correct on a multi-page Oracle table; make the fake in tests/test_identifier_check.py alias its pages. Re-run a 20 000-row Oracle and MongoDB synthesize: checked must equal each column's non-null count. Note the fix in HANDOFF and M3-DEVIATIONS."
+   }
+  ]
+ },
+ "S1-M3 lens security r2": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S1-M3 lens privacy-console r2": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S2 gates r3": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S2 lens console r3": {
+  "verdict": "FAIL",
+  "blocking": [
+   {
+    "file": "frontend/src/lib/reports.ts (failedSweepText, lines 89-92); frontend/src/components/EvidenceTable.tsx (packLine, line 27); frontend/src/pages/EvidencePack.tsx (post-write sample row, line 223)",
+    "problem": "The console says a stopped run wrote nothing when it wrote rows. This was already on main (M5 Reports 5d984b5, M2 evidence page 132dca9); it is not caused by M4 or the merge. It shows only now because gates-r3 smoke 2 left this stack's first leakage-failed run with committed batches. The run is j_01M4YPD09E5MX92DEKJS9MC8TA: PG bank.customers into bank_uat.customers_smoke, copy to a table with truncate + insert. Its job API has rows_written 9,000 of 20,000 (p0 rows_written 9000, error leakage), and the evidence list API has rows_written 9000. The pack itself says 'wrote 9,000 rows ... truncated before loading', 'Last batch committed' and 'Row counts 9,000 read \u00b7 9,000 written'. The job page says 'Rows protected 9,000' and 'the batch was not written'. Contract \u00a70 rule 2 and \u00a76.4 make the batch the unit that fails closed. Yet three surfaces say nothing was written: (1) Reports \u203a Failed sweeps: 'The partitions were discarded before writing; nothing reached the target.', then 'Review the columns named above' although no column is named (the pack error's where 'partition 0' is used as a column path). (2) The Reports evidence row: 'SMOKE-0001 \u00b7 table \u00b7 stopped, nothing written', for every failed pack regardless of summary.rows_written; its chip also reads 'not verified \u00b7 job failed' while the pack's seal reads 'verification failed closed'. (3) Evidence pack \u203a Verification: 'Post-write sample \u00b7 not run \u00b7 No written rows to sample' next to '9,000 written'; the same text appears on both canceled runs (8,000 and 14,000 rows written). An operator reading Reports is told the target is untouched, but it was truncated and now holds 9,000 rows. No privacy loss: every committed batch passed its sweep. Evidence: ~/.cache/dps-build/reports/S2-console-r3/mock/B1-r3-stopped-run-wording.png, plus logs/truth-probe.json, leak-job.json, evidence-summaries.json and leak-row.json.",
+    "fix": "Frontend only; on main during the m4 merge, test-first. (a) failedSweepText for a job leakage failure: word it by batch, e.g. 'The leakage sweep found a source value in a batch of partition N. That batch was not written (fail closed); rows committed before it stay in the target. Open the job to see what was written.' Drop 'nothing reached the target', and say 'Review the columns named above' only when paths name columns (not 'partition N'). (b) EvidenceTable packLine: for a failed or canceled pack with summary.rows_written > 0, show e.g. 'stopped \u00b7 9,000 rows written before it'; keep 'stopped, nothing written' only for 0/null. Optionally, verificationChip maps a failed pack with verification_status 'failed' to 'failed closed', the pack's own seal. (c) EvidencePack post-write row: when rows were written but the job did not succeed, say 'not run: the job ended <outcome> before the post-write sample; the N written rows were not re-read'; keep 'No written rows to sample' for 0 rows. Add Vitest cases that fail on the current text: failedSweepText with paths ['partition 0'], a failed and a canceled pack with rows_written > 0 in EvidenceTable, and EvidencePack. Re-check with S2-console-r3/truth_probe.py and leak_row.py."
+   }
+  ]
+ },
+ "S2 lens captures-privacy r3": {
+  "verdict": "FAIL",
+  "blocking": [
+   {
+    "file": "dps/layers/scanner/classify.py",
+    "problem": "B1a (one finding with three shapes, all the round 2 B3 class: what a closed select draws is not what is read). shown_text (classify.py:376) keeps only selected options with a non-empty value. So a select whose selected option has value=\"\" or a blank value draws its text or label unread. sensitive_prefilled skips it, even when the select is labelled 'Account number' and classified ACCOUNT_NUMBER, and the census skips select subtrees (dom.py:420). OCR of the made-up value reads 2 (one readable copy) in the masked capture and both obfuscated captures (direct and in the deployed image), and in the crawler's stored original and annotated screens and its obfuscated masked_capture (r3c_sel_empty_value_acct, both modes). Cases: r3_sel_empty_value, r3_sel_ws_value, r3_sel_empty_value_label, r3b_sel_empty_value_acct, r3c_sel_empty_value_acct. Evidence: evidence/B1a_*.png.",
+    "fix": "Base shown_text and sensitive_prefilled on what the select draws, whatever its value: the real-option rule belongs to the fill (personas_fill._usable), and masking a drawn placeholder is harmless. Write failing-first OCR, crawler and classification tests using the hostile/site pages (made-up values). Update api-m4.md:315."
+   },
+   {
+    "file": "dps/layers/scanner/dom.py",
+    "problem": "B1b. EXTRACT_JS (dom.py:225) reads only the first 300 options (Array.from(el.options).slice(0, 300)) and does not mark the page truncated. When the selected option is past index 299, the drawn value is never read: shown_text returns '' and the select is not masked, even when it is classified personal by its label. r3b_sel_over300_acct ('Account number', 400 options, selected index 350) reads the account (2) in masked and both obfuscated captures (direct and deployed image), and in the stored original, annotated and masked_capture (r3c_*, both modes). The control, the same page with index 299 selected, reads 0. Also r3_sel_over300, r3_sel_over300_email and r3b_sel_over300_name ('Beneficiary name', autocomplete=name). Evidence: evidence/B1b_*.png.",
+    "fix": "Always extract every selected option, for example Array.from(el.selectedOptions) in addition to the capped list, or set truncated (no capture) when a select has more options than the cap. Add OCR and crawler tests with the index-299 control."
+   },
+   {
+    "file": "dps/layers/scanner/models.py",
+    "problem": "B1c. Customizable select (select, ::picker(select) {appearance: base-select}; on by default in the scanner's Chromium 140). The closed select draws its <button>: a <selectedcontent> clone of the selected option's content, or author text. It does not draw the label attribute that OptionFacts.drawn returns (models.py:89). EXTRACT_JS SKIP_TEXT skips select, option and button (dom.py:84) and CENSUS_JS skips select subtrees (dom.py:420), so that text is never read. r3_sel_base_label, r3_sel_base_button and r3b_sel_base_acct read the made-up PAN or account (2) in masked and both obfuscated captures, direct and in the deployed image. In the crawler they read 2 in the stored original, annotated, both filled screens and masked_capture (r3c_sel_base_acct). Evidence: evidence/B1c_*.png.",
+    "fix": "When getComputedStyle(select).appearance is 'base-select', or the select has a button/selectedcontent child, take the rendered text of its button as the shown value and let the census descend into it. Otherwise, failing closed, box the whole select whenever it draws text. Add OCR and crawler tests."
+   }
+  ]
+ },
+ "S2 lens adaptations r2": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S2 lens d4-network r1": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S2 lens regression r1": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S3 review r3": {
+  "verdict": "FAIL",
+  "blocking": [
+   {
+    "problem": "R3-B1 (HIGH): the F-02 attack still freezes the whole server through /synthesize and /documents/synthesize. PrivacyEngine.synthesize (dps/engine/service.py:678-699) builds the detector and runs _detect synchronously inside the coroutine, so custom patterns and deny lists run on the event loop. transform.py:101 has no run_in_threadpool, and documents/__init__.py:398 has no to_thread. Since round 2, a run that leaves the 5 ms slice blocks the loop twice: first in MatcherPool._acquire (a Condition.wait with no timeout, queued behind other requests' runs), then in _Matcher._read for up to the 5 s ceiling. Measured on a real uvicorn server: /detect attack -> /health 0.00 s; /synthesize with the same body -> /health blocked 4.99 s; 6 /detect attacks then 1 /synthesize -> /health blocked 19.5 s; one client sending /synthesize back to back -> 26 of 29 one-second health checks failed. Round-1 code: 27/28 failed, so neither round fixed it. The regex_guard and pattern_process docstrings and review doc \u00a73.2 claim the event loop stays free. No test covers synthesize.",
+    "file": "dps/layers/api/routers/transform.py",
+    "fix": "Run synthesize's synchronous engine work off the loop, as detect and obfuscate do: either asyncio.to_thread for the detector build, _detect and the transform inside PrivacyEngine.synthesize, or run the coroutine in the threadpool. Do the same in DocumentPipeline.run line 398 and for the detector builds in label_leftovers/label_templates. Make PatternBudget.run/MatcherPool.run refuse (fail closed, value-free) when the current thread runs an event loop. Add E2E tests: /health answers in under ~0.5 s during a /synthesize and a documents-synthesize stage-2 run (including when the pool is busy), and back-to-back synthesize attacks do not starve health checks. Correct the docstrings and \u00a73.2."
+   },
+   {
+    "problem": "R3-B2 (MEDIUM, regression from round 2): building a deny-list trie (custom.compile_deny_list / deny_list_pattern) is outside every budget. It writes one character class per cased term character and compiles without IGNORECASE in regex's pure-Python parser, holding the GIL. The lru_cache(128) only helps repeated lists. The stage-2 child compiles the pattern again, also uncharged: its clock and RLIMIT start after compile. Measured: one /detect with 50 inline lists x 1000 random 50-char terms (2.70 MB body) costs 34.2 CPU-s (round-1 code: 3.4 s). The 7.2 MB variant costs 42.0 s (round 1: 9.2 s). Profile: 100% in compile_deny_list (2.47M regex parse_set calls). On /synthesize the build freezes the event loop: 0.59 s per new list. Review doc \u00a73.2 ('compiled per term set once') and \u00a75 ('never more than DPS_PATTERN_CPU_SECONDS', 'plus 5 ms GIL slices') are wrong, as is M5-DEVIATIONS ('never an unbounded build outside any budget').",
+    "file": "dps/engine/detect/custom.py",
+    "fix": "Bound and charge the build: charge each list's build thread-CPU to the call budget/ceiling and check left before building the next list. Cap the total deny-list characters per policy and the term length. Emit cheaper patterns (scoped (?i:) runs for plain-fold characters, explicit classes only for irregular ones such as the Turkish i's). Charge or limit the child's compile. Add a test with the 2.7 MB policy: it answers (200 or 422) within about the ceiling. Correct \u00a73.2, \u00a75, HANDOFF \u00a76 and M5-DEVIATIONS."
+   }
+  ]
+ },
+ "S4 review r2": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S5 review r3": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S6a review r2": {
+  "verdict": "PASS",
+  "blocking": []
+ },
+ "S7 review r2": {
+  "verdict": "PASS",
+  "blocking": []
+ }
+}

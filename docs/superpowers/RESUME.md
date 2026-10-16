@@ -4,7 +4,7 @@
 > programme exactly where it stopped, without the original chat. It complements, and points into, the
 > binding documents listed in §2. **Do not trust the snapshot in §4 blindly — run §3 first.**
 
-**Last updated:** 2026-10-16 (release merge: every finish branch merged into main, version 1.0.0 committed; the tag waits for the final verification). **Active orchestration: workflow `wf_c6c9b6f6-603` "dps-finish-fast"** (script copy: `docs/superpowers/build/orchestration/dps-finish-fast.workflow.js`); the earlier `wf_c77f2c08-9ae` "dps-to-v1" and `wf_4dc1989c-3ce` were stopped at 16:45.
+**Last updated:** 2026-10-16 12:30 IST — every finish branch is merged into main and `chore(release): v1.0.0` is committed; the **final verification panel is in round 2** (round 1 FAIL → fix round `c7ad14f`, `d033dd3`); the tag follows only a PASS. **Active orchestration: workflow run `wf_0a2553bb-d6e` "dps-finish-v1"** (task `wymybx4fy`; script copy `docs/superpowers/build/orchestration/dps-finish-v1.workflow.js`). Older runs, all stopped: `wf_c6c9b6f6-603` "dps-finish-fast" (paused by the owner 2026-10-15 11:13), `wf_c77f2c08-9ae` "dps-to-v1", `wf_4dc1989c-3ce`.
 **Goal:** tag `v1.0.0` on `main` with every Definition-of-Done gate green (M0–M5 shipped).
 
 ---
@@ -107,6 +107,56 @@ Interpretation rules:
 
 ## 4. Snapshot (re-check with §3)
 
+### 4.000 Status 2026-10-16 12:30 IST — final verification of v1.0.0 (newest; supersedes 4.00 and 4.0)
+
+**Timeline since 2026-10-15.** 10:00 the owner asked for a live LLM test with a Vertex staging key → the live run
+(`docs/superpowers/build/live-llm/`) found that T3 never reached the model (egress verifier) and four deterministic
+defects (persona collapse, first/last-name columns, sample specs, sample-synthesis 422s, a 5 000-row identifier check)
+→ fixed on `fllm` with feeder branches `fpersona`, `fspec`, `fidcheck`. 11:13 owner paused everything; 17:40 resumed as
+the continuation workflow `dps-finish-v1` (the paused run's BASE STATE was stale); 18:00 paused for a laptop restart;
+19:41 relaunched; 22:05 restructured for urgency (S6b demo starts after S4b implement, S3c in parallel on `fsecc`,
+2 review rounds + a fix after the last, S1-M4 one round + fix with no `v0.5.0-m4` tag, FINAL 2 rounds). Overnight every
+stream finished; 08:xx the release merged `fsec, fsecc, fimg, fos, fdemo, fdocs, fllm` and committed
+`chore(release): v1.0.0` (`45be8ac`).
+
+**FINAL panel round 1 (gates + 8 lenses, ~09:13–10:25): FAIL**, 11 findings = 7 defects, all fixed test-first in
+`c7ad14f` / `d033dd3` (report `docs/superpowers/build/verification-reports/FINAL-fix-r1.md`):
+an inline or `@name` policy L2 run died in finalize after writing every row (broke demo S6 and the copula pack's
+utility block); MongoDB existing targets checked as DDL against a 500-document sample; an unclassified FK did not join
+its classified parent; stopword surnames (Date, Le, Best, Branch, Holder) survived in free text; a sampled e-mail used
+as a key came back from `schema/synthesize` with verification passed; T3 still blocked when a value equalled a type
+name of the fixed system prompt; the deck was the 15 October build. Passed in r1: l3-scanner, security, console.
+The fix round's own run: unit 3 778, M2 430, M3 186, browser 228, slow 6 passed; e2e demo S1–S12 PASS in 3:01.
+
+**FINAL round 2 (~12:08–12:40): FAIL with ONE finding** — gates PASS; lenses l1-docs, synthetic, privacy-ops, deploy-demo
+PASS (l3-scanner, security, console passed in r1). The open finding (`FINAL-l2-engines-r2.md`, R2-B1, the remainder of r1 B2):
+a MongoDB named append or `table` load (truncate_insert/upsert) into an existing collection is refused `target_invalid`
+when the sampled documents show a field but lack its first nested leaf in path order while a sibling leaf of another
+kind is present (e.g. `kyc` without `taxId`: "$.kyc.taxId: a text value cannot go to a timestamp column"); fails closed
+(no write, no leak). Root cause: `infer_shape` names document columns by top-level field (`mongo_docs.py:143`) and
+`targets._check_existing` compares `TableShape.column(name)` (first leaf of that name, `base.py:147`). Fix: kind-check per
+leaf path with `column_at(target_shape, col.path, col.name)` for sampled targets; red-first tests on real MongoDB (append and
+table truncate_insert/upsert into a collection whose document has `kyc` without `taxId` succeed with 0 survivors; a wrong-kind
+nested non-first leaf is still refused). **Next:** that fix + re-check of the l2-engines lens (and the gates touched), then
+the tag step of `dps-finish-v1.workflow.js` (deck + HANDOFF record, `v1.0.0`, image tags, RESUME final, push, cleanup).
+
+**Not tagged on purpose:** `v0.4.0-m3` (M3 panel ended r3 FAIL; its blockers were fixed later) and `v0.5.0-m4`
+(skipped for urgency; M4 is verified by the FINAL panel).
+
+**Open owner decisions** (documented, not blocking): N1 — scanner fill values can leave the page in Cookie/Referer
+headers when page script puts them there (GET to in-scope hosts, synthetic/obfuscated values only; recommendation:
+strip both after fill); NER in the default image (recommendation: build with `WITH_NER=1`; without it uncued names in
+free text are not detected); the optional `[vertex]` extra in the image for live-Gemini demos.
+
+**Known limitations recorded in CHANGELOG** (from FINAL fix r1): an FK parent discovered through another connection
+can still key the sides apart; T3 skips the call (fails closed) when a sampled value equals a word of the call's own
+field/table names.
+
+**Where the evidence is:** every report (implement, review, lens, fix, merge, release) is copied to
+`docs/superpowers/build/verification-reports/` (index `README.md`); probes and screenshots stay in
+`~/.cache/dps-build/reports/<report>/`.
+
+
 ### 4.00 Orchestration since 2026-10-14 17:00 IST — "dps-finish-fast" (owner: finish fast, max effort, max parallelism)
 
 Docker Desktop raised to **16 CPUs / 36 GiB** (backup of the old settings: `~/.cache/dps-build/docker-settings-store.backup.json`).
@@ -170,11 +220,19 @@ release + final verification 3–8 h.
 ## 5. How to continue
 
 ### 5.1 If the orchestrating chat is still alive
-The workflow `wf_c77f2c08-9ae` runs everything to `v1.0.0` by itself (with automatic retries). Just wait; ask it for status.
-Same session only: `Workflow({scriptPath: "<script path printed at launch>", resumeFromRunId: "wf_c77f2c08-9ae"})`
-replays finished agents from cache after an interruption.
+The workflow run `wf_0a2553bb-d6e` ("dps-finish-v1") runs the rest to `v1.0.0` by itself (with automatic retries).
+Same session only: `Workflow({scriptPath: "/Users/neelu/.cache/dps-build/orchestration/dps-finish-v1.workflow.js",
+resumeFromRunId: "wf_0a2553bb-d6e"})`. **Resume caches by invocation-order prefix**: the first new or unfinished
+`agent()` call invoked makes every later call run live, so never add a new call that starts before the finished ones
+(see §10). After a laptop restart: `open -a Docker`, poll `docker info`, then relaunch.
 
 ### 5.2 New chat or new account (the old run is gone)
+**If only the FINAL panel / tag is left (the state on 2026-10-16):** read `FINAL-*-r*.md` and `FINAL-fix-r*.md` in
+`~/.cache/dps-build/reports` (or the copies in `docs/superpowers/build/verification-reports/`); fix what the last round
+left open, test-first; re-run the gates (DoD 1-7 on `docker compose --profile full`) and the failing lenses (their
+prompts are in `docs/superpowers/build/orchestration/dps-finish-v1.workflow.js`, `FINAL_LENSES`); on PASS run the tag
+step from the same script. The older steps below apply only to unfinished lanes.
+
 Workflow runs cannot be resumed across sessions. When the old chat ends, its running agents end too.
 1. **Make sure nothing is still running:** `tools/dev/resume_status.sh` — no files modified in the last 10 minutes and
    no other Claude session working in these paths. If something is active, wait or ask the owner.
@@ -308,6 +366,19 @@ changes need credentials — main `34f4aa3`; SEC-4 external-token binding — `m
 at the M4 merge.
 
 **Lessons and traps.**
+- **Fake an LLM at the provider seam** (`LlmGateway._stellar` / `_vertex`), never by overriding `complete()`: the
+  egress verifier lives in `complete()`, and tests above it hid that strict egress blocked every T3 call. Run the live
+  check (`docs/superpowers/build/live-llm/`) after any change to prompts or the verifier.
+- **A fresh worktree without `.env.lane` runs pytest against main's default ports**: an agent's baseline run once hit
+  main's live stack during a panel. Create the lane files first, or point every `DPS_*_PORT` at closed port 1.
+- **Workflow resume is prefix-based**: a new call invoked early (e.g. a parallel stream added at the top) re-runs every
+  finished call invoked after it. Hand finished results to the streams instead, or start new work last.
+- **Panels that cap rounds can end FAIL** with real blockers no later step owns (the M3 identifier check, the S3 r3
+  findings): read the last round's blocking list and assign each item explicitly before moving on.
+- **The default image has no NER**: detection of uncued names in free text needs `WITH_NER=1` (Presidio +
+  `en_core_web_sm`); several defects (sample specs, persona collapse) only showed with NER on.
+- **A laptop restart stops Docker and wipes the session scratchpad**: keep durable artefacts in `~/.cache/dps-build`
+  (reports, `orchestration/`, `vertex_live/`).
 - A "verified / 0 leaks" label must be backed by a source-vs-target comparison (stage A found raw PII in a "verified"
   UAT copy: discovery auto-kept mixed-type and unnamed PII columns; fixed on main `89a9e98`).
 - Always use `./lane.sh`; two runs without `.env.lane` once hit main's stack.
@@ -320,7 +391,7 @@ at the M4 merge.
   warn-placeholder + `--fail-on-warn` release overlays; Oracle Free needs uid 54321.
 - Decks: Keynote drops native chart parts and lacks Cambria Bold — draw charts as shapes, QA via Keynote PDF export.
 
-**Owner preferences.** Plain language; every commit authored `NilenduGanguli <nilendu.ganguli@gmail.com>` with **no
+**Owner preferences.** Wants it finished fast (urgency 2026-10-16) but every claim proven; pause on request (stop the workflow, the autopush loop, record state). Plain language; every commit authored `NilenduGanguli <nilendu.ganguli@gmail.com>` with **no
 `Co-Authored-By` or any trailer** (check for a local `.git/config` override before the first commit); conventional
 commits; explicit-pathspec commits; ask before pushing or any outward-facing action; raise decisions explicitly.
 

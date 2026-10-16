@@ -1,7 +1,3 @@
-// ORCHESTRATION SCRIPT AS RUN from 2026-10-14 ~16:55 IST (workflow run wf_c6c9b6f6-603, "dps-finish-fast"), replacing
-// dps-to-v1 (stopped) for maximum parallelism at max effort. See docs/superpowers/RESUME.md §5 to relaunch from a new
-// session (trim streams that are finished). Script body unmodified.
-//
 export const meta = {
   name: 'dps-finish-fast',
   description: 'Maximum-parallel finish to v1.0.0: M3 verify on main, M4 pre-merge + merge, security/images/OpenShift/demo/docs streams in parallel from now, panel verifications by lens, release',
