@@ -1078,7 +1078,21 @@ Synthesis:
   key's shape, so it may by chance equal another real key of that shape (nil for UUIDs and long
   mixed keys, not for short digit-only keys); the permutation never maps a value to itself. An
   `append` into a table that already held rows checks only the rows after the table's pre-run
-  integer key (`plan.prepare.identifier_floor`). Tools that need rule-valid PANs (the demo seed,
+  integer key (`plan.prepare.identifier_floor`). **Every row on every engine** (S8-idcheck,
+  2026-10-15; S1-M3 engines r3 B1): the check (and the append's `key_floor`) pages each side
+  itself — each read starts after the last key it read, and a side ends only when a read after that
+  key returns no row — so a connector's own paging can never shorten it (Oracle and MongoDB used to
+  stop after one 5 000-row page while the pack said `whole_table`); the pack says what was read
+  (`rows_read: {target, source}`; `checked` counts the values read). A read that cannot finish (no
+  progress past a key, a row without its key, a key-less MongoDB collection read short of its
+  count, a SQL column the object lacks) is `{"error": "identifier_check_incomplete"}`: every
+  written identifier column is reviewed, no scope is claimed. **Columns as the object spells
+  them** (S8-idcheck fix r1): a check read lists no column selection — SQL reads the shape narrowed
+  to its key and the identifier columns, quoted as the catalogue spells them (quoted mixed-case
+  Oracle columns were never read: `checked` 0, passed); MongoDB projects plain top-level names and
+  reads whole documents for any other. A finalize step the selection validator refuses is
+  `{"error": "selection_…"}` in the pack instead of a finalize retried until the job is dead.
+  Tools that need rule-valid PANs (the demo seed,
   demo documents, the evaluation corpus) draw them themselves (`evaluation.corpus.rule_valid_pan`).
 - Synthetic names come from a finite pool: compare a target with its source row for row, not by
   set (a name can exist in both by chance).

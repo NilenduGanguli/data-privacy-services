@@ -137,15 +137,44 @@ profile, source, fallback, llm: {calls, raw_pii_sent}, trace_id}`. `source` is `
 `fallback` says why a model proposal was asked for but not used: `leak_guard` (the prompt would have
 carried a sampled value, so no call was made), `llm_invalid_spec` (the reply did not validate), or
 the gateway's error class (`LlmUnavailable`, `LlmCallError`). It is `null` when no model was asked
-(`use_llm: false`, or no real provider: the stub always uses the heuristic proposer).
+(`use_llm: false`, or no real provider: the stub always uses the heuristic proposer). The
+heuristic keeps declared bounds exactly (DDL `NUMBER(3)` → `integer{min: 0, max: 999}`,
+`NUMBER(5,2)` → `decimal{max: 999.99}`, a JSON Schema `minimum`/`maximum`) and rounds a sampled
+range to two significant figures; a sampled range that rounding would collapse (IDs 1001..1004)
+spans its orders of magnitude (1000..9999), so the spec never echoes a sampled value.
 
 **`POST /schema/synthesize`** takes exactly one of `spec`, `schema`, `ddl` or `sample`, plus `rows`
 (default 100, ≤ `DPS_SCHEMA_MAX_ROWS`), `seed` (a `synthesis_seed` from an earlier response),
 `format` (`json` | `csv`), `name`, `locale` and `use_llm`. It returns `{rows | csv, spec, spec_hash,
 synthesis_seed, report, trace_id}`. The same spec, seed and row count give the same rows, byte for
 byte (`AGE` and `CARD_EXPIRY` are relative to today, so within a day). With a `sample`, the
-generated rows are swept against the sample's sensitive values and the request fails closed
-(422 `leakage`) on a match.
+executor steers around any generated value that holds one of the sample's sensitive values — a
+drawn value is drawn again, a `sequence` skips it, an `entity` value takes the row's whole persona
+with it (name, e-mail and birth date still agree) — and then the rows are swept against those
+values; the request fails closed (422 `leakage`, no value echoed) on a match, which is then a spec
+literal or a value that could not get away from the sample. The sweep finds an all-digit sample
+value of up to eight digits (an ID, a date) only where it starts and ends at the edge of a run of
+digits or at a break: any character that is neither a letter, a digit nor one of `-` `/` `.` `:`,
+which join digits as in a date, an amount or a range, nor a comma before a group of exactly two
+or three digits (`1,001`, `10,01,002`, a decimal `1001,25`). Whitespace, `_`, `;`, `|`, quotes,
+brackets, `#`, `+` and any other comma (a list) are breaks; full-width forms count as their ASCII
+ones, and a digit of any script as its ASCII digit. So ID `1001` is found in `1001`, `1001.0`,
+`1001.00` (also full-width), `CUST-1001`, `x1001@…`, `1001, 1002`, `1001,1002`, `[1001,1002]`,
+`1001;1002`, `["1001","1002"]` or `TXN_4821_1001`, but not inside `2010-01-04`, `21001.5`,
+`1001-2020`, `1001/1002`, `10,01,002` or `1001,25`; one of nine digits or more (a mobile, a card
+number) anywhere in the digits (`+91 98100 10012`). It does not look for
+gender, nationality, city or card expiry values, which are generated from small fixed lists (a
+generated `Mumbai` is not a copy, and avoiding the sample's cities would show them by their
+absence). A key that names an ID or a reference (`id`, `order_ref`, `invoiceNo`) avoids its own
+sampled values of four characters or more, even when the detector does not type it; such a field
+is steered, not swept, so one whose range holds nothing else keeps them, and is still steered
+around the sample's swept values. `report.sample_redraws` counts the draws steering discarded; the
+rows are a function of
+the spec, the seed, the row count and the sample, so replaying the returned spec and seed without
+the sample gives the same rows except where `sample_redraws` steered — which is also why the seed
+stays secret: with the output, the spec and the seed, a replay shows which generated values
+coincided with the sample. A field whose key itself looks like data (the detector flags it) is
+never categorical, since its values are swept.
 
 A spec (`dps.genspec.v1`) is a reviewable artefact: `fields[]` of `{name, generator, params,
 null_rate, unique, entity_type}` with generators `sequence uuid integer decimal normal lognormal

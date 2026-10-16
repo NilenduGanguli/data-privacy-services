@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from faker.providers.person.en_IN import Provider as IndiaNames
 
 from dps.config import Settings
 from dps.engine.batch import (
@@ -22,6 +23,7 @@ from dps.engine.batch import (
 )
 from dps.engine.policy import MethodSpec, load_preset
 from dps.engine.service import Payload, PrivacyEngine, RequestOptions
+from dps.engine.synth.personas import ascii_fold
 from dps.engine.synth.surrogates import generate_synthesis_seed
 from dps.engine.transform.apply import ApplyOptions, reveal
 from dps.engine.transform.crypto import KeyMaterial, generate_key_material
@@ -595,3 +597,204 @@ def test_real_ff1_int_and_decimal_columns_keep_their_digits_and_reveal() -> None
     )
     assert _reveal_column(REAL_FF1, key, cols[0], out) == [str(i) for i in ids]
     assert _reveal_column(REAL_FF1, key, cols[1], out) == [format(r["amt"], "f") for r in rows]
+
+
+# --- S8: a table's name columns are one person per row, the notes and the e-mail agree -----------
+PEOPLE = TableShape(
+    object=ObjectRef(owner="bank", name="people"),
+    columns=[
+        ColumnInfo(path="$.customer_id", name="customer_id", data_type="bigint", kind="int"),
+        *(
+            ColumnInfo(path=f"$.{n}", name=n, data_type="varchar(60)", kind="text", length=60)
+            for n in ("first_name", "last_name", "email", "nominee_name")
+        ),
+        ColumnInfo(path="$.notes", name="notes", data_type="text", kind="text"),
+    ],
+    key=["customer_id"],
+    key_source="primary_key",
+)
+#: Invented names; every customer is a "Mr." in the notes, whatever the first name.
+GIVEN = ("Arjun", "Kavya", "Rohan", "Meera", "Vikram", "Ishita", "Karan", "Anjali")
+FAMILY = ("Mehta", "Nair", "Kulkarni", "Iyer", "Rao", "Bose", "Malhotra", "Pillai")
+
+
+def _people_rows() -> list[Row]:
+    return [
+        {
+            "customer_id": 20_000_001 + i,
+            "first_name": GIVEN[i % 8],
+            "last_name": FAMILY[(i * 3) % 8],
+            "email": f"{GIVEN[i % 8].lower()}.{FAMILY[(i * 3) % 8].lower()}@example-mail.in",
+            "nominee_name": f"{GIVEN[(i + 3) % 8]} {FAMILY[(i * 3 + 5) % 8]}",
+            "notes": f"KYC call with {GIVEN[i % 8]}; Mr. {FAMILY[(i * 3) % 8]} prefers e-mail.",
+        }
+        for i in range(24)
+    ]
+
+
+def _people_plan(name: str, entity: str, text: bool = False) -> ColumnPlan:
+    return ColumnPlan(
+        path=f"$.{name}",
+        name=name,
+        entity_type=entity,
+        method=MethodSpec(method="surrogate"),
+        text_column=text,
+        reversible=False,
+        kind="text",
+        length=PEOPLE.column(name).length,
+    )
+
+
+def test_synthetic_rows_name_one_person_in_every_column() -> None:
+    rows = _people_rows()
+    result = BatchTransformer(
+        ENGINE,
+        policy=load_preset("synthetic-realistic"),
+        mode="synthesize",
+        columns=[
+            _people_plan("first_name", "PERSON_NAME"),
+            _people_plan("last_name", "PERSON_NAME"),
+            _people_plan("email", "EMAIL"),
+            _people_plan("nominee_name", "PERSON_NAME"),
+            _people_plan("notes", "FREE_TEXT", text=True),
+        ],
+        shape=PEOPLE,
+        key=None,
+        seed=generate_synthesis_seed(),
+        locale="en_IN",
+    ).transform([dict(r) for r in rows])
+    assert result.verification.passed
+    for row, out in zip(rows, result.rows, strict=True):
+        first, last = out["first_name"], out["last_name"]
+        assert out["email"].startswith(f"{ascii_fold(first)}.{ascii_fold(last)}")
+        assert out["notes"] == f"KYC call with {first}; Mr. {last} prefers e-mail."
+        assert first in IndiaNames.first_names_male  # "Mr." in the row's notes
+        assert out["nominee_name"].split(" ")[0] != first
+        originals = {*row["nominee_name"].split(), row["first_name"], row["last_name"]}
+        written = {first, last, *out["nominee_name"].split()}
+        assert not originals & written
+
+
+def _bank_table(name: str, key: str, texts: tuple[str, ...]) -> TableShape:
+    return TableShape(
+        object=ObjectRef(owner="BANK", name=name),
+        columns=[
+            ColumnInfo(path=f"$.{key}", name=key, data_type="number", kind="int"),
+            *(
+                ColumnInfo(path=f"$.{n}", name=n, data_type="varchar2(60)", kind="text", length=60)
+                for n in texts
+            ),
+        ],
+        key=[key],
+        key_source="primary_key",
+    )
+
+
+def _bank_plans(names: tuple[str, ...]) -> list[ColumnPlan]:
+    return [
+        ColumnPlan(
+            path=f"$.{n}",
+            name=n,
+            entity_type="EMAIL" if n.endswith("EMAIL") else "PERSON_NAME",
+            method=MethodSpec(method="surrogate"),
+            text_column=False,
+            reversible=False,
+            kind="text",
+            length=60,
+        )
+        for n in names
+    ]
+
+
+def test_a_nominee_s_split_columns_are_the_same_person_as_their_full_name_elsewhere() -> None:
+    # review r1 B1: a nominee's family-name column before their given-name column (Oracle style)
+    # is the same synthetic person as their full name in another table under the row's anchor
+    customers = ("LAST_NAME", "FIRST_NAME", "EMAIL", "NOMINEE_FAMILY_NAME", "NOMINEE_GIVEN_NAME")
+    accounts = ("CUSTOMER_ID", "HOLDER_NAME", "JOINT_HOLDER_NAME")
+    rows = [
+        {
+            "CUSTOMER_ID": 50_000_001 + i,
+            "LAST_NAME": FAMILY[i % 8].upper(),
+            "FIRST_NAME": GIVEN[(i * 3) % 8].upper(),
+            "EMAIL": f"{GIVEN[(i * 3) % 8].lower()}.{FAMILY[i % 8].lower()}@example-mail.in",
+            "NOMINEE_FAMILY_NAME": FAMILY[(i + 5) % 8],
+            "NOMINEE_GIVEN_NAME": GIVEN[(i * 3 + 1) % 8],
+        }
+        for i in range(24)
+    ]
+    seed = generate_synthesis_seed()
+
+    def run(shape: TableShape, plans: list[ColumnPlan], table: list[Row]) -> list[Row]:
+        result = BatchTransformer(
+            ENGINE,
+            policy=load_preset("synthetic-realistic"),
+            mode="synthesize",
+            columns=plans,
+            shape=shape,
+            key=None,
+            seed=seed,
+            locale="en_IN",
+            anchor=("CUSTOMER_ID", "CUSTOMER_ID"),
+        ).transform(table)
+        assert result.verification.passed
+        return result.rows
+
+    own = run(_bank_table("CUSTOMERS", "CUSTOMER_ID", customers), _bank_plans(customers), rows)
+    joint = run(
+        _bank_table("ACCOUNTS", "ACCOUNT_ID", accounts),
+        _bank_plans(accounts[1:]),
+        [
+            {
+                "ACCOUNT_ID": 70_000_001 + i,
+                "CUSTOMER_ID": r["CUSTOMER_ID"],
+                "HOLDER_NAME": f"{r['FIRST_NAME'].title()} {r['LAST_NAME'].title()}",
+                "JOINT_HOLDER_NAME": f"{r['NOMINEE_GIVEN_NAME']} {r['NOMINEE_FAMILY_NAME']}",
+            }
+            for i, r in enumerate(rows)
+        ],
+    )
+    for o, a in zip(own, joint, strict=True):
+        nominee = f"{o['NOMINEE_GIVEN_NAME']} {o['NOMINEE_FAMILY_NAME']}"
+        assert a["JOINT_HOLDER_NAME"] == nominee
+        assert o["EMAIL"].startswith(
+            f"{ascii_fold(o['FIRST_NAME'])}.{ascii_fold(o['LAST_NAME'])}".lower()
+        )
+        assert a["HOLDER_NAME"].split(" ")[-1] == o["LAST_NAME"].title()
+
+
+@pytest.mark.parametrize("preset", ["synthetic-realistic", "synthetic-strict"])
+def test_sap_name_first_columns_hold_the_row_persona_s_parts(preset: str) -> None:
+    # review r1 B3: SAP's business partner names its columns name-first (BUT000.NAME_FIRST /
+    # NAME_LAST); planned as names (strict discovery, or a reviewer) without a part, the last-name
+    # column got a first name in 99/100 rows and the e-mail agreed in 0/100
+    texts = ("NAME_FIRST", "NAME_MIDDLE", "NAME_LAST", "EMAIL")
+    rows = [
+        {
+            "PARTNER": 70_000_001 + i,
+            "NAME_FIRST": GIVEN[(i * 3) % 8].upper(),
+            "NAME_MIDDLE": GIVEN[(i * 5 + 1) % 8].upper(),
+            "NAME_LAST": FAMILY[i % 8].upper(),
+            "EMAIL": f"{GIVEN[(i * 3) % 8].lower()}.{FAMILY[i % 8].lower()}@example-mail.in",
+        }
+        for i in range(24)
+    ]
+    result = BatchTransformer(
+        ENGINE,
+        policy=load_preset(preset),
+        mode="synthesize",
+        columns=_bank_plans(texts),
+        shape=_bank_table("BUT000", "PARTNER", texts),
+        key=None,
+        seed=generate_synthesis_seed(),
+        locale="en_IN",
+        anchor=("PARTNER", "PARTNER"),
+    ).transform([dict(r) for r in rows])
+    assert result.verification.passed
+    firsts = {n.lower() for n in IndiaNames.first_names}
+    lasts = {n.lower() for n in IndiaNames.last_names}
+    for row, out in zip(rows, result.rows, strict=True):
+        first, last = out["NAME_FIRST"].lower(), out["NAME_LAST"].lower()
+        assert first in firsts and last in lasts, (first, last)
+        assert out["EMAIL"].lower().startswith(f"{ascii_fold(first)}.{ascii_fold(last)}".lower())
+        originals = {row[n].lower() for n in texts[:3]}
+        assert not originals & {out[n].lower() for n in texts[:3]}

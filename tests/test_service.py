@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import string
 import time
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from faker.providers.person.en_IN import Provider as IndiaNames
 
 from dps.config import Settings
 from dps.engine.detect.ensemble import Detector
@@ -19,6 +21,7 @@ from dps.engine.service import (
     RequestOptions,
     VerificationFailed,
 )
+from dps.engine.synth.personas import ascii_fold
 from dps.engine.transform.crypto import unwrap_dek
 from dps.llm.gateway import LlmGateway, LlmResult
 
@@ -513,3 +516,266 @@ async def test_a_leaked_name_part_fails_the_strict_sweep(
     monkeypatch.setattr(SurrogateEngine, "_person_name", lambda *a: "Tanmayi Krishnan")
     with pytest.raises(VerificationFailed):
         await engine.synthesize(payload, "synthetic-realistic", RequestOptions())
+
+
+# a customer and a nominee in one record, and three people in one text (invented names)
+FAMILY_RECORD = {
+    "customer_name": "Arjun Mehta",
+    "customer_email": "arjun.mehta@example.in",
+    "nominee_name": "Priya Nair",
+    "nominee_email": "priya.nair@example.in",
+    "phone": "+91 98765 43210",
+}
+THREE_PEOPLE = "Mr. Arjun Mehta and Mrs. Priya Nair met Dr. Rohan Kulkarni."
+
+
+def _email_local(name: str) -> str:
+    first, last = name.split(" ")
+    return f"{ascii_fold(first)}.{ascii_fold(last)}"
+
+
+@pytest.mark.parametrize("policy", ["synthetic-realistic", "synthetic-strict"])
+async def test_each_person_in_a_json_record_gets_their_own_synthetic_name(
+    engine: PrivacyEngine, policy: str
+) -> None:
+    out = await engine.synthesize(Payload(data=FAMILY_RECORD), policy, RequestOptions())
+    result = out.result
+    assert out.report.verification.passed  # type: ignore[union-attr]
+    customer, nominee = result["customer_name"], result["nominee_name"]
+    assert customer.split(" ")[0] != nominee.split(" ")[0]
+    assert result["customer_email"].startswith(_email_local(customer))
+    assert result["nominee_email"].startswith(_email_local(nominee))
+    for value in FAMILY_RECORD.values():
+        assert value not in str(result)
+
+
+async def test_each_person_in_a_text_gets_their_own_synthetic_name(engine: PrivacyEngine) -> None:
+    out = await engine.synthesize(
+        Payload(text=THREE_PEOPLE), "synthetic-realistic", RequestOptions()
+    )
+    assert out.report.verification.passed  # type: ignore[union-attr]
+    match = re.fullmatch(r"Mr\. (\S+ \S+) and Mrs\. (\S+ \S+) met Dr\. (\S+ \S+)\.", out.result)
+    assert match is not None
+    assert len({name.split(" ")[0] for name in match.groups()}) == 3
+    # the same seed gives the same people, as many times as it is asked
+    seed = out.synthesis_seed.model_dump(mode="json")  # type: ignore[union-attr]
+    options = RequestOptions(consistency={"synthesis_seed": seed})
+    await engine.synthesize(Payload(data=FAMILY_RECORD), "synthetic-realistic", options)
+    again = await engine.synthesize(Payload(text=THREE_PEOPLE), "synthetic-realistic", options)
+    assert again.result == out.result
+
+
+# --- S8: one person's name fields agree with each other and their e-mail; a title gives the
+# gender. Live Vertex run: {"first_name": "Arjun", "last_name": "Mehta", "email": "arjun.mehta@…"}
+# came out Alfred / Michael / alfred.williams… (the surname field got a first name, and the two
+# single words were two people). Invented names only.
+NAME_KEYS = [
+    ("first_name", "last_name", "email"),
+    ("FIRST_NAME", "LAST_NAME", "EMAIL"),
+    ("firstName", "lastName", "email"),
+    ("FIRSTNAME", "LASTNAME", "EMAIL"),
+    ("given_name", "surname", "email"),
+    ("GivenName", "FamilyName", "Email"),
+    ("fname", "lname", "email"),
+    ("forename", "family_name", "email"),
+]
+MALE_FIRST = frozenset(IndiaNames.first_names_male)
+FEMALE_FIRST = frozenset(IndiaNames.first_names_female)
+
+
+@pytest.mark.parametrize("policy", ["synthetic-realistic", "synthetic-strict"])
+@pytest.mark.parametrize("keys", NAME_KEYS, ids=lambda keys: keys[1])
+async def test_a_person_s_name_fields_are_one_person_with_their_e_mail(
+    engine: PrivacyEngine, policy: str, keys: tuple[str, str, str]
+) -> None:
+    given, family, mail = keys
+    record = {given: "Arjun", family: "Mehta", mail: "arjun.mehta@example.in"}
+    for _ in range(5):
+        out = await engine.synthesize(Payload(data=record), policy, RequestOptions())
+        result = out.result
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        first, last = result[given], result[family]
+        assert len(first.split()) == len(last.split()) == 1 and first != last
+        assert result[mail].startswith(f"{ascii_fold(first)}.{ascii_fold(last)}")
+        for value in record.values():
+            assert value not in str(result)
+
+
+async def test_two_people_s_name_fields_stay_two_people(engine: PrivacyEngine) -> None:
+    record = {
+        "first_name": "Arjun",
+        "last_name": "Mehta",
+        "email": "arjun.mehta@example.in",
+        "nominee_first_name": "Priya",
+        "nominee_last_name": "Nair",
+        "nominee_email": "priya.nair@example.in",
+        "nominee_name": "Priya Nair",
+    }
+    for _ in range(5):
+        out = await engine.synthesize(Payload(data=record), "synthetic-realistic", RequestOptions())
+        r = out.result
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        own, nominee = f"{r['first_name']} {r['last_name']}", r["nominee_name"]
+        assert nominee == f"{r['nominee_first_name']} {r['nominee_last_name']}"
+        assert r["first_name"] != r["nominee_first_name"]
+        assert r["email"].startswith(_email_local(own))
+        assert r["nominee_email"].startswith(_email_local(nominee))
+
+
+async def test_a_title_gives_the_synthetic_name_its_gender(engine: PrivacyEngine) -> None:
+    # the title decides, never the name: "Ms. Arjun", "Mr. Priya"
+    text = "Ms. Arjun Mehta called; Mr. Priya Nair replied to Miss Rohan Kulkarni."
+    record = {"notes": "Spoke to Mrs. Arjun Mehta and Shri Priya Nair about the loan."}
+    for _ in range(10):
+        out = await engine.synthesize(Payload(text=text), "synthetic-realistic", RequestOptions())
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        match = re.fullmatch(
+            r"Ms\. (\S+) \S+ called; Mr\. (\S+) \S+ replied to Miss (\S+) \S+\.", out.result
+        )
+        assert match is not None, out.result
+        assert match[1] in FEMALE_FIRST and match[2] in MALE_FIRST and match[3] in FEMALE_FIRST
+        out = await engine.synthesize(Payload(data=record), "synthetic-realistic", RequestOptions())
+        notes = re.fullmatch(
+            r"Spoke to Mrs\. (\S+) \S+ and Shri (\S+) \S+ about the loan\.", out.result["notes"]
+        )
+        assert notes is not None, out.result
+        assert notes[1] in FEMALE_FIRST and notes[2] in MALE_FIRST
+
+
+async def test_a_surname_alone_is_the_surname_of_the_person_it_names(
+    engine: PrivacyEngine,
+) -> None:
+    text = "Dr. Rohan Kulkarni met Mrs. Priya Nair. Dr. Kulkarni will call Mrs. Nair."
+    for _ in range(5):
+        out = await engine.synthesize(Payload(text=text), "synthetic-realistic", RequestOptions())
+        match = re.fullmatch(
+            r"Dr\. (\S+) (\S+) met Mrs\. (\S+) (\S+)\. Dr\. (\S+) will call Mrs\. (\S+)\.",
+            out.result,
+        )
+        assert match is not None, out.result
+        assert (match[5], match[6]) == (match[2], match[4])
+        assert match[3] in FEMALE_FIRST
+    record = {"first_name": "Arjun", "last_name": "Mehta", "notes": "Mr. Mehta prefers e-mail."}
+    out = await engine.synthesize(Payload(data=record), "synthetic-realistic", RequestOptions())
+    assert out.result["notes"] == f"Mr. {out.result['last_name']} prefers e-mail."
+    assert out.result["first_name"] in MALE_FIRST
+
+
+async def test_a_record_s_own_name_fields_own_its_persona(engine: PrivacyEngine) -> None:
+    # "father_name" sorts before "first_name", yet the record's own fields are its persona: an
+    # e-mail that names nobody (and a phone, a birth date) is theirs, not the father's
+    record = {
+        "father_name": "Ramesh Nair",
+        "first_name": "Priya",
+        "last_name": "Mehta",
+        "email": "contact.desk@example.in",
+    }
+    for _ in range(8):
+        out = await engine.synthesize(Payload(data=record), "synthetic-realistic", RequestOptions())
+        r = out.result
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        assert r["email"].startswith(f"{ascii_fold(r['first_name'])}.{ascii_fold(r['last_name'])}")
+        assert r["father_name"].split(" ")[0] != r["first_name"]
+
+
+async def test_a_nominee_is_one_synthetic_person_whatever_their_fields_are_called(
+    engine: PrivacyEngine,
+) -> None:
+    # review r1 B1: under one seed and one record anchor (the e-mail), a nominee's given/family
+    # fields (family sorts first), first/last fields and a full-name field are one synthetic person
+    own = {"first_name": "Arjun", "last_name": "Mehta", "email": "arjun.mehta@example.in"}
+    full = Payload(data={**own, "nominee_name": "Priya Nair"})
+    first = await engine.synthesize(full, "synthetic-realistic", RequestOptions())
+    seed = first.synthesis_seed.model_dump(mode="json")  # type: ignore[union-attr]
+    options = RequestOptions(consistency={"synthesis_seed": seed})
+    want = first.result["nominee_name"]
+    for given, family in (
+        ("nominee_given_name", "nominee_family_name"),
+        ("nominee_first_name", "nominee_last_name"),
+        ("nominee_forename", "nominee_surname"),
+    ):
+        split = Payload(data={**own, given: "Priya", family: "Nair"})
+        out = await engine.synthesize(split, "synthetic-realistic", options)
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        assert f"{out.result[given]} {out.result[family]}" == want, (given, family)
+        assert out.result["first_name"] == first.result["first_name"]
+
+
+NAME_PART_LAYOUTS: list[tuple[dict[str, Any], tuple[str, ...], tuple[str, ...]]] = [
+    ({"surname": "Mehta", "given_names": "Arjun Kumar"}, ("given_names",), ("surname",)),
+    ({"FName": "Arjun", "LName": "Mehta"}, ("FName",), ("LName",)),
+    ({"custFName": "Arjun", "custLName": "Mehta"}, ("custFName",), ("custLName",)),
+    ({"f_name": "Arjun", "l_name": "Mehta"}, ("f_name",), ("l_name",)),
+    ({"foreName": "Arjun", "surName": "Mehta"}, ("foreName",), ("surName",)),
+    ({"name": {"first": "Arjun", "last": "Mehta"}}, ("name", "first"), ("name", "last")),
+    (
+        {"customer": {"name": {"given": "Arjun", "family": "Mehta"}}},
+        ("customer", "name", "given"),
+        ("customer", "name", "family"),
+    ),
+    # review r1 B3: plural surnames, SAP's name-first order and Siebel's short forms
+    ({"first_names": "Arjun Kumar", "last_names": "Mehta"}, ("first_names",), ("last_names",)),
+    ({"first_name": "Arjun", "surnames": "Mehta"}, ("first_name",), ("surnames",)),
+    ({"given_names": "Arjun", "family_names": "Mehta"}, ("given_names",), ("family_names",)),
+    ({"NAME_FIRST": "Arjun", "NAME_LAST": "Mehta"}, ("NAME_FIRST",), ("NAME_LAST",)),
+    (
+        {"NameFirst": "Arjun", "NameMiddle": "Kumar", "NameLast": "Mehta"},
+        ("NameFirst",),
+        ("NameLast",),
+    ),
+    (
+        {"FST_NAME": "Arjun", "MID_NAME": "Kumar", "LAST_NAME": "Mehta"},
+        ("FST_NAME",),
+        ("LAST_NAME",),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("record", "given", "family"), NAME_PART_LAYOUTS, ids=lambda v: "-".join(v)
+)
+async def test_every_name_part_key_is_synthesised_with_ner_off(
+    engine: PrivacyEngine, record: dict[str, Any], given: tuple[str, ...], family: tuple[str, ...]
+) -> None:
+    # review r1 B2: a key that holds a part of a name is detected on its own (the default image
+    # has no NER), so no real name is copied into a synthetic record; the e-mail agrees
+    def at(result: dict[str, Any], keys: tuple[str, ...]) -> str:
+        for key in keys:
+            result = result[key]
+        return str(result)
+
+    record = {**record, "email": "arjun.mehta@example.in"}
+    for _ in range(3):
+        out = await engine.synthesize(Payload(data=record), "synthetic-realistic", RequestOptions())
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        written = json.dumps(out.result)
+        words = {w.lower() for w in re.findall(r"[A-Za-z]+", written)}
+        assert not {"arjun", "mehta", "kumar"} & words, written
+        first, last = at(out.result, given), at(out.result, family)
+        assert out.result["email"].startswith(f"{ascii_fold(first)}.{ascii_fold(last)}"), written
+
+
+@pytest.mark.parametrize("preset", ["synthetic-realistic", "synthetic-strict"])
+@pytest.mark.parametrize(
+    ("first_key", "last_key", "email_key"),
+    [
+        ("NAME_FIRST", "NAME_LAST", "EMAIL"),  # SAP's business partner (BUT000)
+        ("first_names", "last_names", "email"),
+        ("first_name", "surnames", "email"),
+    ],
+)
+async def test_sap_and_plural_name_keys_keep_no_real_name_with_ner_off(
+    engine: PrivacyEngine, preset: str, first_key: str, last_key: str, email_key: str
+) -> None:
+    # review r1 B3: these keys had no part and no detection with NER off, so a synthesize run under
+    # either synthetic preset kept the real names (both of SAP's, the surname of the plural keys)
+    # and verification passed; now they hold the record persona's parts and the e-mail agrees
+    record = {first_key: "Arjun", last_key: "Mehta", email_key: "arjun.mehta@example.in"}
+    for _ in range(3):
+        out = await engine.synthesize(Payload(data=record), preset, RequestOptions())
+        assert out.report.verification.passed  # type: ignore[union-attr]
+        written = json.dumps(out.result)
+        assert not {"arjun", "mehta"} & {w.lower() for w in re.findall(r"[A-Za-z]+", written)}
+        first, last = out.result[first_key], out.result[last_key]
+        assert first in IndiaNames.first_names and last in IndiaNames.last_names, written
+        assert out.result[email_key].startswith(f"{ascii_fold(first)}.{ascii_fold(last)}"), written

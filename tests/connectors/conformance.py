@@ -7,7 +7,8 @@ methods. Every table the suite makes holds synthetic rows only: ``name`` = ``Nam
 ``note`` = ``note-<i>@example.test``.
 
 The suite checks what every connector promises (contract §4.2): describe finds the paging key;
-keyset paging visits every row once in the database's own order (never Python's); sampled
+keyset paging visits every row once in the database's own order (never Python's), whatever the
+consumer does with the page it was handed (S1-M3 engines r3 B1); sampled
 partition ranges cover every key exactly once; bad selections are refused before a query runs; a
 ``table`` reload is idempotent; an ``in_place`` batch whose checkpoint was lost is never applied
 twice (the ledger mark wins); an append offset pre-check counts exactly the clashing keys; and
@@ -38,6 +39,7 @@ from dps.engine.transform.crypto import generate_key_material
 from dps.jobs_models import Selection
 from dps.layers.connectors.base import (
     Connector,
+    ConnectorError,
     KeyRange,
     LedgerMark,
     ObjectRef,
@@ -209,6 +211,35 @@ class ConnectorConformance:
         ):
             rest += [key_tuple(r, shape) for r in rows]
         assert rest == expected[21:]
+
+    @pytest.mark.parametrize("key", ["int", "text", "none"])
+    async def test_paging_does_not_depend_on_what_the_consumer_does_with_a_page(
+        self, env: ConformanceEnv, key: KeyKind
+    ) -> None:
+        """A connector takes a page's length and the bound of the next page before it hands the
+        page on: a consumer that empties the list it was given, or the rows in it, still reads
+        every row once, in the database's order (S1-M3 engines r3 B1: Oracle and MongoDB read
+        the consumer's list again after it resumed them, so the D-A identifier check, which
+        clears every page it has counted, read one page of each table). A key-less table counts
+        too where the engine reads one (Oracle on ``ROWID``, MongoDB in one cursor)."""
+        obj = await env.make_table(f"own_{key}", key=key, rows=53)
+        shape = await env.source.describe(obj)
+        name = _n(env, "name")
+        seen: list[Any] = []
+        try:
+            async for rows in env.source.read_partition(
+                shape, Selection(), {}, KeyRange(), after_key=None, batch=7
+            ):
+                seen += [r[name] for r in rows]
+                for r in rows:
+                    r.clear()
+                rows.clear()
+        except ConnectorError as exc:
+            if key == "none" and exc.code == "no_key":
+                pytest.skip(f"{env.engine}: a key-less table is not read (no_key)")
+            raise
+        expected = [r[name] for r in await env.read_all(obj)]
+        assert seen == expected and len(set(seen)) == 53
 
     async def test_partitions_cover_every_row_exactly_once(self, env: ConformanceEnv) -> None:
         obj = await env.make_table(

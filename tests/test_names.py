@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from dps.engine.detect.ensemble import Detector, DetectorConfig
-from dps.engine.detect.names import scan_names
+from dps.engine.detect.names import scan_names, title_gender
 from dps.engine.detect.patterns import Hit
 
 FOUND = [
@@ -111,3 +111,29 @@ def test_names_in_a_json_notes_field_become_span_findings() -> None:
     assert [(f.entity_type, f.locator.start, f.locator.end) for f in spans] == [
         ("PERSON_NAME", 14, 24)
     ]
+
+
+# --- S8: the gender a title before a name says (the title is read, never the name) ------------
+@pytest.mark.parametrize(
+    ("text", "gender"),
+    [
+        ("Mr. Arjun", "male"),
+        ("MR ARJUN", "male"),
+        ("met Shri Arjun", "male"),
+        ("Sr. Arjun", "male"),
+        ("Mrs. Arjun", "female"),
+        ("Mrs.Arjun", "female"),
+        ("Ms Arjun", "female"),
+        ("Miss Arjun", "female"),
+        ("Smt. Arjun", "female"),
+        ("Sra. Arjun", "female"),
+        ("Dr. Arjun", None),
+        ("Prof. Arjun", None),
+        ("Mx. Arjun", None),
+        ("Hamr. Arjun", None),  # a word ending in a title is no title
+        ("Mrs.\nArjun", None),  # a title on the line before is no title
+        ("Arjun", None),
+    ],
+)
+def test_title_gender_reads_the_title_before_a_name(text: str, gender: str | None) -> None:
+    assert title_gender(text, len(text) - len("Arjun")) == gender

@@ -11,6 +11,7 @@ from datetime import date
 
 import phonenumbers
 import pytest
+from faker.providers.person.en_IN import Provider as IndiaNames
 from stdnum import verhoeff
 
 from dps.engine.detect.checksums import luhn_valid, valid_aba, validate
@@ -27,6 +28,7 @@ from dps.engine.synth.surrogates import (
     seed_bytes,
     seed_from_caller,
 )
+from dps.engine.transform.methods import NameHint
 from dps.engine.verify import name_parts, normalise
 
 SEED = seed_bytes(generate_synthesis_seed())
@@ -748,3 +750,374 @@ def test_ifsc_surrogate_is_rule_shaped() -> None:
     for original in ("HDFC0001234", "SBIN0AB1234", "ABCD0EFGHIJ"):
         fake = eng.surrogate("IFSC", original, "en_IN", "r1")
         assert re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", fake) and fake != original
+
+
+# --- every person a record names gets their own persona --------------------------------------
+# A record (one JSON object, one free text) can name several people: a customer and a nominee,
+# the people a call note mentions. The first name declared keeps the record's persona; each
+# other person gets their own, and the values that name them (an e-mail, a username, an MRZ)
+# follow it. All names here are invented.
+CUSTOMER, NOMINEE = "Arjun Mehta", "Priya Nair"
+FAMILY: list[tuple[str, str]] = [
+    ("PERSON_NAME", CUSTOMER),
+    ("EMAIL", "arjun.mehta@example.in"),
+    ("PERSON_NAME", NOMINEE),
+    ("EMAIL", "priya.nair@example.in"),
+    ("PHONE", "+91 98765 43210"),
+]
+
+
+def _family_engine(
+    seed: bytes = SEED, originals: list[tuple[str, str]] = FAMILY
+) -> SurrogateEngine:
+    eng = SurrogateEngine(seed, default_locale="en_IN")
+    eng.declare_record("r1", originals)
+    return eng
+
+
+def _email_local(name: str) -> str:
+    """A persona's e-mail local part from its full name (``first.last``, folded)."""
+    first, last = name.split(" ")
+    return f"{ascii_fold(first)}.{ascii_fold(last)}"
+
+
+def test_each_person_in_a_record_gets_their_own_name_and_e_mail() -> None:
+    eng = _family_engine()
+    customer = eng.surrogate("PERSON_NAME", CUSTOMER, "en_IN", "r1")
+    nominee = eng.surrogate("PERSON_NAME", NOMINEE, "en_IN", "r1")
+    assert customer.split(" ")[0] != nominee.split(" ")[0] and customer != nominee
+    # the first name declared keeps the record's persona, so its other fields are unchanged
+    assert customer == eng.persona("r1", "en_IN").full_name
+    customer_mail = eng.surrogate("EMAIL", "arjun.mehta@example.in", "en_IN", "r1")
+    nominee_mail = eng.surrogate("EMAIL", "priya.nair@example.in", "en_IN", "r1")
+    assert customer_mail.startswith(_email_local(customer))
+    assert nominee_mail.startswith(_email_local(nominee))
+    # a handle or an initial naming the nominee follows her; a value naming nobody, the customer
+    handle = eng.surrogate("USERNAME", "@priya_n", "en_IN", "r1")
+    assert handle.startswith("@" + _email_local(nominee).replace(".", "_"))
+    assert eng.surrogate("EMAIL", "p.nair@example.in", "en_IN", "r1").startswith(
+        _email_local(nominee)
+    )
+    assert eng.surrogate("EMAIL", "support@example.in", "en_IN", "r1").startswith(
+        _email_local(customer)
+    )
+
+
+def test_three_people_in_one_text_get_three_names() -> None:
+    names = ["Arjun Mehta", "Priya Nair", "Rohan Kulkarni"]
+    for i in range(20):
+        eng = _family_engine(_collision_seed(i), [("PERSON_NAME", n) for n in names])
+        outs = [eng.surrogate("PERSON_NAME", n, "en_IN", "r1") for n in names]
+        assert len({out.split(" ")[0] for out in outs}) == 3, i
+        assert not any(shares_name_part(out, name_parts(names)) for out in outs), i
+
+
+def test_a_person_named_again_keeps_their_surrogate() -> None:
+    eng = _family_engine(
+        originals=[
+            ("PERSON_NAME", CUSTOMER),
+            ("PERSON_NAME", NOMINEE),
+            ("PERSON_NAME", "PRIYA NAIR"),
+            ("PERSON_NAME", "Priya"),
+            ("PERSON_NAME", "Arjun"),
+        ]
+    )
+    customer = eng.surrogate("PERSON_NAME", CUSTOMER, "en_IN", "r1")
+    nominee = eng.surrogate("PERSON_NAME", NOMINEE, "en_IN", "r1")
+    assert nominee.split(" ")[0] != customer.split(" ")[0]
+    assert eng.surrogate("PERSON_NAME", NOMINEE, "en_IN", "r1") == nominee
+    assert eng.surrogate("PERSON_NAME", "PRIYA NAIR", "en_IN", "r1") == nominee.upper()
+    # a first name alone is that person's first name, declared or not
+    assert eng.surrogate("PERSON_NAME", "Priya", "en_IN", "r1") == nominee.split(" ")[0]
+    assert eng.surrogate("PERSON_NAME", "Arjun", "en_IN", "r1") == customer.split(" ")[0]
+
+
+def test_a_mrz_follows_the_person_it_names() -> None:
+    mrz = TD3.replace("KRISHNAN<<ANANYA", "NAIR<<PRIYA<<<<<")
+    eng = _family_engine(originals=[*FAMILY, ("MRZ", mrz)])
+    customer = eng.persona("r1", "en_IN")
+    nominee = eng.surrogate("PERSON_NAME", NOMINEE, "en_IN", "r1")
+    first, last = (ascii_fold(part).upper() for part in nominee.split(" "))
+    out = eng.surrogate("MRZ", mrz, "en_IN", "r1")
+    holder = out.split("\n")[0][5:]
+    assert holder.startswith(f"{last}<<{first}"[:39])
+    assert ascii_fold(customer.first_name).upper() not in holder.split("<")
+    assert "NAIR" not in out and "PRIYA" not in out
+    # an MRZ naming the customer keeps the record's persona
+    own = eng.surrogate("MRZ", TD3.replace("KRISHNAN<<ANANYA", "MEHTA<<ARJUN<<<<"), "en_IN", "r1")
+    surname, given = ascii_fold(customer.last_name).upper(), ascii_fold(customer.first_name).upper()
+    assert own.split("\n")[0][5:].startswith(f"{surname}<<{given}"[:39])
+
+
+def test_people_s_personas_do_not_depend_on_what_was_asked_before() -> None:
+    asks = [
+        ("PERSON_NAME", NOMINEE),
+        ("EMAIL", "priya.nair@example.in"),
+        ("PERSON_NAME", CUSTOMER),
+        ("EMAIL", "arjun.mehta@example.in"),
+        ("PERSON_NAME", "Priya"),
+        ("PHONE", "+91 98765 43210"),
+    ]
+    one = _family_engine()
+    forward = [one.surrogate(entity, original, "en_IN", "r1") for entity, original in asks]
+    two = _family_engine()
+    two.surrogate("PERSON_NAME", "Rohan Kulkarni", "en_IN", "r2")  # unrelated asks first
+    two.surrogate("EMAIL", "x@y.co", "en_US", "r1")
+    two.persona("r1|retry1", "en_IN")
+    backward = [two.surrogate(e, o, "en_IN", "r1") for e, o in reversed(asks)][::-1]
+    assert forward == backward
+    assert forward[0] != forward[2]
+    # a record declared again, after another record, gives the same people
+    three = SurrogateEngine(SEED, default_locale="en_IN")
+    three.declare_record("r2", [("PERSON_NAME", "Rohan Kulkarni")])
+    three.declare_record("r1", FAMILY)
+    assert [three.surrogate(e, o, "en_IN", "r1") for e, o in asks] == forward
+
+
+def test_no_person_s_surrogate_reveals_or_holds_a_declared_value() -> None:
+    # Ananya Krishnan is the name en_IN personas collide with most (see the section above)
+    originals = [*FAMILY, ("PERSON_NAME", NAME), ("EMAIL", "ananya.k@example-mail.in")]
+    declared = [normalise(o) for _, o in originals]
+    parts = name_parts([o for e, o in originals if e == "PERSON_NAME"])
+    for i in range(60):
+        eng = _family_engine(_collision_seed(i), originals)
+        outs = [eng.surrogate(e, o, "en_IN", "r1") for e, o in originals]
+        names = [out for (e, _), out in zip(originals, outs, strict=True) if e == "PERSON_NAME"]
+        assert len({n.split(" ")[0] for n in names}) == len(names), i
+        for out in outs:
+            folded = normalise(out)
+            assert not any(value in folded for value in declared), i
+            assert not any(len(part) >= 4 and part in folded for part in parts), i
+        assert not any(shares_name_part(n, parts) for n in names), i
+
+
+# the nominee's bare persona draws "Radhakrishnan" (80) or "Krishnan" (402) for these seeds
+@pytest.mark.parametrize("i", [80, 402])
+def test_another_person_s_persona_never_shares_a_name_part_with_the_record(i: int) -> None:
+    seed = _collision_seed(i)
+    eng = _family_engine(seed, [("PERSON_NAME", CUSTOMER), ("PERSON_NAME", NAME)])
+    bare = PersonaFactory(seed).for_anchor(eng._people_anchors("r1", "en_IN")[1], "en_IN")
+    assert "krishnan" in ascii_fold(bare.last_name), "seed no longer collides: pick another"
+    name = eng.surrogate("PERSON_NAME", NAME, "en_IN", "r1")
+    mail = eng.surrogate("EMAIL", "ananya.k@example-mail.in", "en_IN", "r1")
+    assert _no_name_part(name) and _no_name_part(mail)
+    assert not shares_name_part(name, name_parts([CUSTOMER, NAME]))
+    assert mail.startswith(_email_local(name))
+    assert name != eng.surrogate("PERSON_NAME", CUSTOMER, "en_IN", "r1")
+
+
+# --- S8: one person's name fields agree; a title gives the person's gender -----------------------
+# A record can hold a person's name split over fields (``first_name``, ``last_name``): the layout
+# (each field's key, never its value: ``NameHint``) says which part each field holds and which
+# fields are one person. Live Vertex run: {"first_name": "Arjun", "last_name": "Mehta", "email":
+# "arjun.mehta@…"} came out Alfred / Michael / alfred.williams… — the surname field got a first name,
+# and the two single words counted as two people. All names here are invented.
+GIVEN, FAMILY_NAME = NameHint(role="first", group="$||"), NameHint(role="last", group="$||")
+MIDDLE = NameHint(role="middle", group="$||")
+NOMINEE_GIVEN = NameHint(role="first", group="$|nominee|")
+NOMINEE_FAMILY = NameHint(role="last", group="$|nominee|")
+#: The service declares a JSON record's values in path order: the e-mail first.
+SPLIT: list[tuple[str, str]] = [
+    ("EMAIL", "arjun.mehta@example.in"),
+    ("PERSON_NAME", "Arjun"),
+    ("PERSON_NAME", "Mehta"),
+]
+SPLIT_HINTS: list[NameHint | None] = [None, GIVEN, FAMILY_NAME]
+MALE_FIRST = frozenset(IndiaNames.first_names_male)
+FEMALE_FIRST = frozenset(IndiaNames.first_names_female)
+
+
+def _split_engine(
+    seed: bytes,
+    originals: list[tuple[str, str]] = SPLIT,
+    hints: list[NameHint | None] = SPLIT_HINTS,
+) -> SurrogateEngine:
+    eng = SurrogateEngine(seed, default_locale="en_IN")
+    eng.declare_record("r1", originals, hints)
+    return eng
+
+
+def test_a_person_s_name_fields_are_one_person_and_agree_with_their_e_mail() -> None:
+    for i in range(40):
+        eng = _split_engine(_collision_seed(i))
+        first = eng.name_surrogate("Arjun", "en_IN", "r1", GIVEN)
+        last = eng.name_surrogate("Mehta", "en_IN", "r1", FAMILY_NAME)
+        mail = eng.surrogate("EMAIL", "arjun.mehta@example.in", "en_IN", "r1")
+        record = eng.persona("r1", "en_IN")  # the one person is the record's own
+        assert (first, last) == (record.first_name, record.last_name), i
+        assert mail.startswith(_email_local(f"{first} {last}")) and first != last, i
+        assert not shares_name_part(f"{first} {last}", name_parts(["Arjun Mehta"])), i
+        # a field's part does not depend on the order the fields were declared in
+        swapped = _split_engine(
+            _collision_seed(i),
+            [SPLIT[0], SPLIT[2], SPLIT[1]],
+            [None, FAMILY_NAME, GIVEN],
+        )
+        assert swapped.name_surrogate("Mehta", "en_IN", "r1", FAMILY_NAME) == last, i
+        assert swapped.name_surrogate("Arjun", "en_IN", "r1", GIVEN) == first, i
+
+
+def test_name_fields_keep_the_value_s_case_and_a_middle_name_is_a_third_name() -> None:
+    originals = [*SPLIT, ("PERSON_NAME", "Kumar")]
+    for i in range(20):
+        eng = _split_engine(_collision_seed(i), originals, [*SPLIT_HINTS, MIDDLE])
+        p = eng.persona("r1", "en_IN")
+        assert eng.name_surrogate("MEHTA", "en_IN", "r1", FAMILY_NAME) == p.last_name.upper()
+        middle = eng.name_surrogate("Kumar", "en_IN", "r1", MIDDLE)
+        assert len(middle.split()) == 1 and middle not in (p.first_name, p.last_name), i
+        assert not shares_name_part(middle, name_parts(["Arjun Kumar Mehta"])), i
+
+
+def test_name_fields_of_two_people_are_two_people() -> None:
+    originals = [
+        ("PERSON_NAME", "Arjun"),
+        ("PERSON_NAME", "Mehta"),
+        ("EMAIL", "arjun.mehta@example.in"),
+        ("PERSON_NAME", "Priya"),
+        ("PERSON_NAME", "Nair"),
+        ("EMAIL", "priya.nair@example.in"),
+    ]
+    hints = [GIVEN, FAMILY_NAME, None, NOMINEE_GIVEN, NOMINEE_FAMILY, None]
+    for i in range(20):
+        eng = _split_engine(_collision_seed(i), originals, hints)
+        first = eng.name_surrogate("Arjun", "en_IN", "r1", GIVEN)
+        last = eng.name_surrogate("Mehta", "en_IN", "r1", FAMILY_NAME)
+        n_first = eng.name_surrogate("Priya", "en_IN", "r1", NOMINEE_GIVEN)
+        n_last = eng.name_surrogate("Nair", "en_IN", "r1", NOMINEE_FAMILY)
+        assert first != n_first and (first, last) != (n_first, n_last), i
+        own = eng.surrogate("EMAIL", "arjun.mehta@example.in", "en_IN", "r1")
+        nominee = eng.surrogate("EMAIL", "priya.nair@example.in", "en_IN", "r1")
+        assert own.startswith(_email_local(f"{first} {last}")), i
+        assert nominee.startswith(_email_local(f"{n_first} {n_last}")), i
+
+
+def test_name_fields_that_match_a_declared_person_are_that_person() -> None:
+    # a full name declared first, the same person's split fields later; then a nominee's full
+    # name first and the customer's fields after it: the fields are whoever they name
+    for i in range(20):
+        eng = _split_engine(
+            _collision_seed(i),
+            [("PERSON_NAME", "Arjun Mehta"), *SPLIT],
+            [None, *SPLIT_HINTS],
+        )
+        full = eng.surrogate("PERSON_NAME", "Arjun Mehta", "en_IN", "r1")
+        first = eng.name_surrogate("Arjun", "en_IN", "r1", GIVEN)
+        last = eng.name_surrogate("Mehta", "en_IN", "r1", FAMILY_NAME)
+        assert full == f"{first} {last}", i
+        eng = _split_engine(
+            _collision_seed(i),
+            [("PERSON_NAME", "Priya Nair"), ("PERSON_NAME", "Arjun Mehta"), *SPLIT],
+            [None, None, *SPLIT_HINTS],
+        )
+        full = eng.surrogate("PERSON_NAME", "Arjun Mehta", "en_IN", "r1")
+        first = eng.name_surrogate("Arjun", "en_IN", "r1", GIVEN)
+        last = eng.name_surrogate("Mehta", "en_IN", "r1", FAMILY_NAME)
+        assert full == f"{first} {last}", i
+        assert full != eng.surrogate("PERSON_NAME", "Priya Nair", "en_IN", "r1"), i
+        mail = eng.surrogate("EMAIL", "arjun.mehta@example.in", "en_IN", "r1")
+        assert mail.startswith(_email_local(full)), i
+
+
+def test_a_word_of_a_name_field_in_free_text_is_that_part_of_the_name() -> None:
+    # the CRM notes repeat the surname alone ("Mr. Mehta called"): it is the person's last name
+    originals = [*SPLIT, ("PERSON_NAME", "Mehta"), ("PERSON_NAME", "Arjun")]
+    for i in range(20):
+        eng = _split_engine(_collision_seed(i), originals, [*SPLIT_HINTS, None, None])
+        p = eng.persona("r1", "en_IN")
+        assert eng.surrogate("PERSON_NAME", "Mehta", "en_IN", "r1") == p.last_name, i
+        assert eng.surrogate("PERSON_NAME", "MEHTA", "en_IN", "r1") == p.last_name.upper(), i
+        assert eng.surrogate("PERSON_NAME", "Arjun", "en_IN", "r1") == p.first_name, i
+
+
+def test_a_title_gives_its_person_s_persona_that_gender() -> None:
+    names = [
+        ("PERSON_NAME", "Priya Nair"),  # under "Mr.": the title decides, never the name
+        ("PERSON_NAME", "Arjun Mehta"),  # under "Mrs."
+        ("PERSON_NAME", "Rohan Kulkarni"),  # under "Dr.": no gender said
+        ("PERSON_NAME", "Nair"),  # "Ms. Nair" later: the first title wins
+        ("GENDER", "F"),
+    ]
+    hints = [
+        NameHint(gender="male"),
+        NameHint(gender="female"),
+        None,
+        NameHint(gender="female"),
+        None,
+    ]
+    for i in range(30):
+        eng = _split_engine(_collision_seed(i), names, hints)
+        his = eng.surrogate("PERSON_NAME", "Priya Nair", "en_IN", "r1")
+        hers = eng.surrogate("PERSON_NAME", "Arjun Mehta", "en_IN", "r1")
+        assert his.split(" ")[0] in MALE_FIRST and hers.split(" ")[0] in FEMALE_FIRST, i
+        assert eng.persona("r1", "en_IN").gender == "male", i
+        assert eng.surrogate("GENDER", "F", "en_IN", "r1") == "M", i  # the record's persona
+        assert eng.surrogate("PERSON_NAME", "Nair", "en_IN", "r1") == his.split(" ")[1], i
+        anchors = eng._people_anchors("r1", "en_IN")
+        assert [eng.persona(a, "en_IN").gender for a in anchors[:2]] == ["male", "female"], i
+
+
+def test_name_hints_keep_surrogates_pure_and_other_records_unchanged() -> None:
+    asks = [
+        ("name", "Mehta", FAMILY_NAME),
+        ("name", "Arjun", GIVEN),
+        ("plain", "arjun.mehta@example.in", "EMAIL"),
+        ("plain", "Mehta", "PERSON_NAME"),
+    ]
+
+    def ask(eng: SurrogateEngine, kind: str, original: str, how: object) -> str:
+        if kind == "name":
+            assert isinstance(how, NameHint)
+            return eng.name_surrogate(original, "en_IN", "r1", how)
+        assert isinstance(how, str)
+        return eng.surrogate(how, original, "en_IN", "r1")
+
+    one = _split_engine(SEED)
+    forward = [ask(one, *a) for a in asks]
+    two = _split_engine(SEED)
+    two.name_surrogate("Priya", "en_IN", "r2", GIVEN)  # unrelated asks first
+    two.persona("r1|retry1", "en_IN")
+    assert [ask(two, *a) for a in reversed(asks)][::-1] == forward
+    # a record whose layout says nothing about its names is unchanged by hints of None
+    plain = SurrogateEngine(SEED, default_locale="en_IN")
+    plain.declare_record("r1", FAMILY)
+    hinted = SurrogateEngine(SEED, default_locale="en_IN")
+    hinted.declare_record("r1", FAMILY, [None] * len(FAMILY))
+    assert [plain.surrogate(e, o, "en_IN", "r1") for e, o in FAMILY] == [
+        hinted.surrogate(e, o, "en_IN", "r1") for e, o in FAMILY
+    ]
+
+
+def test_a_record_s_own_name_fields_are_its_persona_wherever_they_are_declared() -> None:
+    # the top-level first_name/last_name are the record's own person even when another person's
+    # name is declared before them (a father's or a nominee's, by path or column order): the
+    # record's persona, and with it a GENDER field, is theirs
+    originals = [("PERSON_NAME", "Ramesh Nair"), *SPLIT, ("GENDER", "M")]
+    for i in range(20):
+        eng = _split_engine(_collision_seed(i), originals, [None, *SPLIT_HINTS, None])
+        p = eng.persona("r1", "en_IN")
+        assert eng.name_surrogate("Arjun", "en_IN", "r1", GIVEN) == p.first_name, i
+        assert eng.name_surrogate("Mehta", "en_IN", "r1", FAMILY_NAME) == p.last_name, i
+        assert eng.surrogate("GENDER", "M", "en_IN", "r1") == p.gender[0].upper(), i
+        father = eng.surrogate("PERSON_NAME", "Ramesh Nair", "en_IN", "r1")
+        assert father.split(" ")[0] != p.first_name, i
+
+
+def test_a_person_s_split_name_is_the_same_person_in_any_field_order() -> None:
+    # review r1 B1: a group's fields are joined in name order (first, middle, last), not in
+    # declaration order, so a nominee is one synthetic person whatever their fields are called:
+    # family/given keys sort family first (L1 declares in path order, L2 in column order)
+    own: list[tuple[str, str]] = [("PERSON_NAME", "Arjun"), ("PERSON_NAME", "Mehta")]
+    family_first = [("PERSON_NAME", "Nair"), ("PERSON_NAME", "Priya")]
+    for i in range(40):
+        full = _split_engine(
+            _collision_seed(i), [*own, ("PERSON_NAME", "Priya Nair")], [GIVEN, FAMILY_NAME, None]
+        )
+        want = full.surrogate("PERSON_NAME", "Priya Nair", "en_IN", "r1")
+        for pairs, hints in (
+            (family_first, [NOMINEE_FAMILY, NOMINEE_GIVEN]),
+            (family_first[::-1], [NOMINEE_GIVEN, NOMINEE_FAMILY]),
+        ):
+            eng = _split_engine(_collision_seed(i), [*own, *pairs], [GIVEN, FAMILY_NAME, *hints])
+            first = eng.name_surrogate("Priya", "en_IN", "r1", NOMINEE_GIVEN)
+            last = eng.name_surrogate("Nair", "en_IN", "r1", NOMINEE_FAMILY)
+            assert f"{first} {last}" == want, i
