@@ -1,7 +1,9 @@
 // Demo onboarding web app for the DPS UI scanner (M4). Node 22 built-ins only.
 // Every value it renders is synthetic (data.json) and stands in for customer data in tests.
 // GET /__received reports every non-GET request and every GET form submission it ever received,
-// so tests can prove that the scanner never submitted anything.
+// so tests can prove that the scanner never submitted anything — and, as their positive control,
+// how many GETs it served (`get`: pages and files, not /health or the counters themselves), so a
+// proof can show that the counters it read are those of the site the scan visited.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, dirname, sep } from 'node:path';
@@ -15,7 +17,7 @@ const PORT = Number(arg('--port') ?? process.env.DEMO_PORT ?? 8410);
 const HOST = arg('--host') ?? process.env.DEMO_HOST ?? '127.0.0.1';
 const SESSION = 'demo-valid';
 const TYPES = { '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json' };
-const received = { non_get: 0, form_get: 0, logout_hits: 0, admin_hits: 0, by_path: {} };
+const received = { non_get: 0, form_get: 0, logout_hits: 0, admin_hits: 0, get: 0, by_path: {} };
 
 const hasSession = (req) => (req.headers.cookie ?? '').split(/;\s*/).includes(`demo_session=${SESSION}`);
 const send = (res, status, body, type = 'text/html; charset=utf-8', extra = {}) => {
@@ -39,6 +41,7 @@ const server = createServer(async (req, res) => {
   }
   if (path === '/health') return send(res, 200, JSON.stringify({ status: 'ok' }), 'application/json');
   if (path === '/__received') return send(res, 200, JSON.stringify(received), 'application/json');
+  received.get += 1;
   if (path.startsWith('/static/')) {
     const file = normalize(join(HERE, path));
     if (!file.startsWith(STATIC + sep)) return send(res, 404, 'not found', 'text/plain');

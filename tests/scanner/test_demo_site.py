@@ -85,6 +85,21 @@ def test_received_counts_non_get_and_form_get_and_logout(demo_site_url: str) -> 
     assert after["admin_hits"] == before["admin_hits"] + 1
 
 
+def test_received_counts_the_pages_and_files_it_served(demo_site_url: str) -> None:
+    """The positive control of every "nothing was submitted" proof: ``get`` moves when the site
+    serves a page or a file (a scan's visits), so counters that stay still during a scan belong
+    to the site that was scanned (the smoke test requires it to move). Its own ``/health`` and
+    reading the counters do not count, and no GET reaches ``by_path`` (non-GET requests only)."""
+    before = received(demo_site_url)
+    assert httpx.get(f"{demo_site_url}/apply").status_code == 200
+    assert httpx.get(f"{demo_site_url}/static/forms.js").status_code == 200
+    assert httpx.get(f"{demo_site_url}/nope").status_code == 404
+    httpx.get(f"{demo_site_url}/health")
+    after = received(demo_site_url)
+    assert after["get"] == before["get"] + 3
+    assert after["non_get"] == before["non_get"] and after["by_path"] == before["by_path"]
+
+
 def test_a_form_post_is_counted_and_answered_with_a_redirect(demo_site_url: str) -> None:
     before = received(demo_site_url)
     r = httpx.post(f"{demo_site_url}/apply/identity/submit", data={"fullName": "x"})

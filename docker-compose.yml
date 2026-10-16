@@ -3,8 +3,14 @@
 # documents routes use for scanned pages and images (M1); profile `sources` adds the demo source
 # Postgres, MinIO and the demo-secrets / seed-sources one-shots (M2); `full` is all of them. M3
 # adds Oracle Free (profile `oracle`, ${DPS_ORACLE_PORT:-1522}) and the MongoDB replica set (profile
-# `sources`, ${DPS_MONGO_PORT:-27018}); M4 the browser worker.
+# `sources`, ${DPS_MONGO_PORT:-27018}); M4 the browser worker and the demo site (profile `scanner`);
+# M5 the bank tokenizer mock (profile `tokenizer`, ${DPS_TOKENIZER_MOCK_PORT:-8420}).
 #   docker compose --profile oracle --profile sources up -d oracle mongo   # M3 sources alone
+#
+# The whole demo (contract §11: every service, every role of the image; Oracle Free needs ~3 min
+# and 2.7 GB on first start). Poll /readyz until "ready": true — never `up --wait`:
+#   docker compose --profile full up --build -d
+#   python tools/smoke_test.py && python tools/flow_report.py   # all checks; reports/flow-report.md
 #
 #   docker compose up --build -d       # console + API on http://127.0.0.1:${DPS_APP_PORT:-8400}
 #   docker compose --env-file docker/compose.sources.env --profile docs --profile sources up -d --build
@@ -69,6 +75,12 @@ x-dps-env: &dps-env
   DPS_TOKENIZER_PROVIDER: ${DPS_TOKENIZER_PROVIDER:-http}
   DPS_TOKENIZER_URL: ${DPS_TOKENIZER_URL:-http://tokenizer-mock:8420}
   DPS_TOKENIZER_TOKEN: ${DPS_TOKENIZER_TOKEN:-dps-local-tokenizer-token}
+  # M5 (Task 24): the Gaussian-copula engine for synthesize jobs, DB-backed API keys that reach
+  # every replica within 5 s (the local demo mints a key and uses it at once; production keeps
+  # the 30 s default) and evidence / roll-up PDFs. Every role of the app image reads them.
+  DPS_SYNTH_TABULAR_ENGINE: ${DPS_SYNTH_TABULAR_ENGINE:-copula}
+  DPS_KEY_CACHE_SECONDS: ${DPS_KEY_CACHE_SECONDS:-5}
+  DPS_REPORT_PDF_ENABLED: ${DPS_REPORT_PDF_ENABLED:-true}
 
 x-dps-volumes: &dps-volumes
   - dps-artefacts:/app/var/artefacts
@@ -89,6 +101,9 @@ services:
       azure-ocr-mock:
         condition: service_healthy
         required: false            # without --profile docs the app starts and reports ocr "down"
+      tokenizer-mock:
+        condition: service_healthy
+        required: false            # /readyz probes the tokenizer once at startup (M5, full profile)
     volumes: *dps-volumes
     environment:
       <<: *dps-env
@@ -143,6 +158,15 @@ services:
       context: ../mock_azure_ocr
     image: document_intelligence-azure-ocr-mock:${DPS_IMAGE_TAG:-latest}
     profiles: ["docs", "full"]
+    # Hardened like the image roles (M5 Task 24): any non-root UID reads the mock's code and
+    # Tesseract's data; pytesseract writes its image and result files to the /tmp tmpfs only.
+    user: "10001:0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:${DPS_OCR_PORT:-5016}:5000"
     healthcheck:
@@ -261,12 +285,19 @@ services:
 
   # The demo onboarding web app (M4): the scan target of the tests, the smoke test and the demo. It
   # counts every non-GET request and GET-form submission it receives (GET /__received), which is how
-  # D4 (nothing is ever submitted) is proven. Dependency-free Node; no build.
+  # D4 (nothing is ever submitted) is proven, and the GETs it served (`get`, the proof's positive
+  # control: these are the counters of the site that was scanned). Dependency-free Node; no build.
   #   docker compose --profile scanner up -d demo-site     # http://127.0.0.1:${DPS_DEMO_SITE_PORT:-8410}
   demo-site:
     image: node:22-slim
     profiles: ["scanner", "full"]
     command: ["node", "/srv/demo/server.mjs", "--host", "0.0.0.0", "--port", "8410"]
+    # The image's own non-root user; the server only reads its mounted files (M5 Task 24).
+    user: node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./demo/onboarding:/srv/demo:ro
     ports:

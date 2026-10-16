@@ -34,11 +34,16 @@ SCANNER_CHECKS = [
 
 
 class Fake:
-    """A fake DPS app + demo site; ``post_hits`` etc. model what the scan did to the site."""
+    """A fake DPS app + demo site; ``during_scan`` models what the scan did to the site's counters
+    (by default: it served the pages the scan visited, and nothing else moved)."""
 
     def __init__(self) -> None:
-        self.received = {"non_get": 7, "form_get": 2, "logout_hits": 1, "admin_hits": 1}
-        self.during_scan: dict[str, int] = {}
+        self.received = {"non_get": 7, "form_get": 2, "logout_hits": 1, "admin_hits": 1, "get": 40}
+        self.demo_up = True  # False: nothing listens on the demo site's port (no scanner profile)
+        self.during_scan: dict[str, int] = {"get": 58}
+        #: The request guard's counts by method: the pages' autosave posts it stopped, a denied
+        #: link.
+        self.blocked: dict[str, int] = {"POST": 60, "GET": 1}
         self.browser_ok = True
         self.browser_after = 0  # readiness polls answered "unknown" before the worker shows up
         self.ready_polls = 0
@@ -49,7 +54,11 @@ class Fake:
 
     # -- the demo site --------------------------------------------------------------------------
     def demo(self, request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET" and request.url.path == "/__received"
+        assert request.method == "GET" and request.url.path in ("/__received", "/health")
+        if not self.demo_up:
+            raise httpx.ConnectError("refused", request=request)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(200, json=self.received)
 
     # -- the app --------------------------------------------------------------------------------
@@ -77,7 +86,9 @@ class Fake:
             )
         if path == "/api/v1/scans/s_smoke":
             self.polls += 1
-            return httpx.Response(200, json={"scan": {"id": "s_smoke", "state": self.state}, **SUM})
+            summary = {**SUM["summary"], "blocked_requests": self.blocked}
+            body = {"scan": {"id": "s_smoke", "state": self.state}, "summary": summary}
+            return httpx.Response(200, json=body)
         if path == "/api/v1/scans/s_smoke/pages":
             return httpx.Response(200, json={"items": PAGES, "next_cursor": None})
         if path.startswith("/api/v1/artefacts/"):
@@ -104,7 +115,7 @@ SUM: dict[str, Any] = {
         "fields": 63,
         "personal_fields": 51,
         "captures": 3,
-        "blocked_requests": 73,
+        "blocked_requests": {"POST": 60, "GET": 1},  # by method (ScanSummary)
         "non_get_allowed": 0,
         "risk_flags": [
             {"flag": "autocomplete_enabled_sensitive", "code": "A1", "path": "/apply/identity"},
@@ -181,12 +192,61 @@ def test_demo_values_are_the_demo_sites_customer_values() -> None:
 def test_any_submission_or_deny_list_hit_fails_the_smoke(
     fake: Fake, counter: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    fake.during_scan = {counter: 1}
+    fake.during_scan[counter] = 1  # the scan still served its pages: only this counter fails it
     with pytest.raises(SystemExit) as exit_:
         run(fake)
     assert exit_.value.code == 1
     assert names()[-1] == "no submission reached the site"
     assert "FAIL  no submission reached the site" in capsys.readouterr().out
+
+
+def test_the_d4_verdict_names_counts_only(fake: Fake, capsys: pytest.CaptureFixture[str]) -> None:
+    run(fake)
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if "no submission" in ln)
+    # The counters, the pages served during the scan (against the pages it visited) and the sends
+    # the guard stopped (by method).
+    assert "non_get +0" in line and "pages served +58 (21 visited)" in line
+    assert "non-GET blocked 60" in line and "non_get_allowed 0" in line
+
+
+def test_a_scan_whose_pages_never_tried_to_send_proves_nothing(
+    fake: Fake, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D4 is proven by a site that tries to send — the demo pages' autosave posts, beacons and
+    auto-submitting select — and receives nothing: with no non-GET request stopped by the guard,
+    unmoved counters would prove nothing (a scan that filled nothing, a site whose scripts never
+    ran)."""
+    fake.blocked = {"GET": 1}
+    with pytest.raises(SystemExit):
+        run(fake)
+    assert names()[-1] == "no submission reached the site"
+    assert "FAIL  no submission reached the site" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("served", [0, 20, None])
+def test_counters_of_a_site_the_scan_did_not_visit_prove_nothing(
+    fake: Fake, served: int | None
+) -> None:
+    """The positive control of the counters: the site whose ``/__received`` the smoke reads
+    (``DPS_TEST_DEMO_SITE``) must have served the scan's pages — at least one GET per page the
+    scan visited (the demo site sends ``no-store``, so every visit fetches its page) — otherwise
+    its unmoved counters belong to another demo site (another lane's, a stale port) than the one
+    the browser-worker scanned, and a few stray GETs there do not change that (20 < 21 visited).
+    A demo site that does not count what it serves fails the same way."""
+    if served is None:
+        fake.received.pop("get")
+        fake.during_scan = {}
+    else:
+        fake.during_scan = {"get": served}
+    with pytest.raises(SystemExit):
+        run(fake)
+    assert names()[-1] == "no submission reached the site"
+
+
+def test_one_get_per_visited_page_is_enough(fake: Fake) -> None:
+    fake.during_scan = {"get": SUM["summary"]["pages_visited"]}
+    run(fake)
+    assert names() == SCANNER_CHECKS and all(ok for _, ok, _ in smoke_test.results)
 
 
 def test_a_demo_value_in_the_persona_export_fails_the_smoke(
@@ -225,10 +285,87 @@ def test_browser_readiness_is_awaited_on_a_fresh_stack(fake: Fake) -> None:
     assert fake.ready_polls == 3
 
 
-def test_scanner_block_runs_only_when_asked() -> None:
-    assert smoke_test.scanner_wanted("1") is True
-    for setting in (None, "", "0", "yes", "on"):
-        assert smoke_test.scanner_wanted(setting) is False
+def test_the_scanner_block_follows_the_switch_and_the_stack() -> None:
+    """``DPS_SMOKE_SCANNER`` (M5 Task 24 at the M4 merge, like ``DPS_SMOKE_M2``): ``auto``
+    (default) runs the block when the demo site answers — only the ``scanner`` and ``full``
+    profiles run it — so a plain smoke run on ``full`` covers the scanner; ``on`` (M4's ``1``)
+    runs it whatever the stack (a stack without the scanner then fails); ``off`` (``0``) skips it.
+    """
+    probes: list[str] = []
+
+    def up() -> bool:
+        probes.append("up")
+        return True
+
+    def down() -> bool:
+        probes.append("down")
+        return False
+
+    for setting in (None, "", "auto", " AUTO "):
+        assert smoke_test.scanner_wanted(setting, up) == (True, "")
+        run, note = smoke_test.scanner_wanted(setting, down)
+        assert run is False and note.startswith("note:") and "DPS_SMOKE_SCANNER=on" in note
+    probes.clear()
+    for setting in ("1", "on", "ON"):
+        assert smoke_test.scanner_wanted(setting, down) == (True, "")
+    for setting in ("0", "off", "Off"):
+        run, note = smoke_test.scanner_wanted(setting, up)
+        assert run is False and "DPS_SMOKE_SCANNER=off" in note
+    assert probes == []  # on and off never probe the demo site
+    for bad in ("yes", "2", "true"):
+        with pytest.raises(SystemExit):
+            smoke_test.scanner_wanted(bad, up)
+
+
+def _block(fake: Fake, setting: str | None) -> None:
+    app = httpx.Client(base_url="http://app.test", transport=httpx.MockTransport(fake.app))
+    demo = httpx.Client(base_url="http://demo.test", transport=httpx.MockTransport(fake.demo))
+    with app, demo:
+        smoke_test.scanner_block(app, demo, setting, timeout=5.0, interval=0.0, browser_wait=0.0)
+
+
+def test_by_default_the_block_runs_where_the_demo_site_answers(
+    fake: Fake, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _block(fake, None)  # --profile full or scanner: the demo site answers
+    assert names() == SCANNER_CHECKS
+    fake.demo_up = False
+    smoke_test.results.clear()
+    _block(fake, "auto")  # a stack without the scanner profile: a note, no check, no scan
+    assert names() == []
+    assert len(fake.created) == 1
+    assert "note: no demo site answers" in capsys.readouterr().out
+
+
+def test_on_without_a_demo_site_fails_with_a_verdict_not_a_traceback(
+    fake: Fake, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.demo_up = False
+    with pytest.raises(SystemExit) as stop:
+        _block(fake, "on")
+    assert stop.value.code == 1
+    assert names() == ["demo site answers"] and fake.created == []
+    assert "FAIL  demo site answers" in capsys.readouterr().out
+
+
+def test_the_demo_site_probe_reads_its_health_only() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def health(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={"status": "ok"})
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    with httpx.Client(base_url="http://demo.test", transport=httpx.MockTransport(health)) as demo:
+        assert smoke_test.demo_answers(demo) is True
+    assert seen == [("GET", "/health")]
+    with httpx.Client(base_url="http://demo.test", transport=httpx.MockTransport(refused)) as demo:
+        assert smoke_test.demo_answers(demo) is False
+    unwell = httpx.MockTransport(lambda request: httpx.Response(503))
+    with httpx.Client(base_url="http://demo.test", transport=unwell) as demo:
+        assert smoke_test.demo_answers(demo) is False
 
 
 def test_demo_site_address_is_lane_safe() -> None:

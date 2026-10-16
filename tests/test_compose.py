@@ -99,13 +99,18 @@ def test_the_app_keeps_its_m0_hardening() -> None:
 
 
 def _installed_extras(dockerfile: str) -> list[set[str]]:
-    """The extras of every ``uv pip install … -e ".[…]"`` line of the Dockerfile."""
-    return [set(m.split(",")) for m in re.findall(r'-e "\.\[([a-z_,-]+)\]"', dockerfile)]
+    """The extras of every ``uv pip install … -e ".[…]"`` line of the Dockerfile (M5 Task 24's
+    opt-in ``${EXTRAS:+,$EXTRAS}`` suffix aside: it adds nothing when the build arg is empty)."""
+    pattern = r'-e "\.\[([a-z_,-]+)(?:\$\{EXTRAS:\+,\$EXTRAS\})?\]"'
+    return [set(m.split(",")) for m in re.findall(pattern, dockerfile)]
 
 
 def test_the_image_installs_the_docs_extra_and_builds_the_console_on_node_22() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text("utf-8")
-    assert "FROM node:22-slim AS frontend" in dockerfile
+    # M5 Task 24 builds the console on the build host's platform (the dist is platform-free).
+    assert re.search(
+        r"^FROM (--platform=\$BUILDPLATFORM )?node:22-slim AS frontend$", dockerfile, re.M
+    )
     installs = _installed_extras(dockerfile)
     # Both branches of the WITH_NER switch: M1's documents (contract §11.1) and M2's job
     # platform (app, worker and migrate run this one image); [ner] only with WITH_NER=1.
