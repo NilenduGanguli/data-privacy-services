@@ -182,6 +182,7 @@ difference, rule `db-host`).
 | `DPS_COIN_URL` | `https://coin.example.invalid/oauth2/token` | release `configMapGenerator: dps` |
 | `DPS_AZURE_VISION_ENDPOINT` | `https://ocr-gateway.example.invalid` | release `configMapGenerator: dps` (with `DPS_OCR_HEALTH_PATH`, e.g. `/_gw/health` for the azure-gateway-api) |
 | `DPS_TOKENIZER_URL` | `https://tokenizer.example.invalid` | release `configMapGenerator: dps` (or `DPS_TOKENIZER_PROVIDER=` to turn tokenization off) |
+| `DPS_TOKENIZER_PROFILES` | `{}` (fails closed: no tenant may tokenize) | release `configMapGenerator: dps`: a JSON object of tenant ids (or `*`) to the `ENTITY` or `ENTITY:profile` entries each may tokenize, e.g. `{"*": ["SSN:ssn-fpe"]}` — required with the tokenizer on in staging/prod (the posture guard of the app and the worker; S3 review F-11); dev leaves it empty (any pair, the mock) |
 | Route host | `dps.apps.example.invalid` | release patch on Route `dps-app` |
 | metadata DB peer | `192.0.2.10/32` TCP 5432 | NetworkPolicy `egress-dps-db` `/spec/egress/0/to/0` |
 | Stellar LLM gateway peer | `192.0.2.1/32` TCP 443 | NetworkPolicy `egress-gateways` `/spec/egress/0/to/0` |

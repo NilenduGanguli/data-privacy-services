@@ -30,6 +30,7 @@ configMapGenerator:
       - DPS_ENV=dev
       - DPS_LLM_PROVIDER=stub
       - DPS_TOKENIZER_URL=http://dps-tokenizer-mock:8420
+      - DPS_TOKENIZER_PROFILES=
       - DPS_AZURE_VISION_ENDPOINT=http://dps-azure-ocr-mock:5000
       - DPS_EGRESS_TLS_REQUIRED=false
 patches:

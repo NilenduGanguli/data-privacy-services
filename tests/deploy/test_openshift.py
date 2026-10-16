@@ -594,6 +594,29 @@ def test_prod_configuration_passes_the_posture_guard(role: str) -> None:
     assert problems == []
 
 
+def test_tokenization_is_refused_until_the_release_lists_each_tenants_profiles() -> None:
+    """S3 review F-11 met the manifests at the release merge: staging/prod need
+    ``DPS_TOKENIZER_PROFILES`` with the tokenizer on. The committed ConfigMap fails closed (``{}``:
+    no tenant may tokenize anything) and passes the posture guard; the release example lists
+    each tenant's entity types and data elements; dev (the mock, no posture) leaves it open."""
+    from dps.config import Settings
+
+    prod = oc.configmap_data(render("prod"), "dps")
+    assert prod["DPS_TOKENIZER_PROFILES"] == "{}"
+    committed = Settings(_env_file=None, tokenizer_profiles=prod["DPS_TOKENIZER_PROFILES"])  # type: ignore[call-arg]
+    assert committed.tokenizer_profiles_restricted
+    assert not committed.tokenizer_profile_allowed("default", "SSN", None)
+    assert not committed.tokenizer_profile_allowed("default", "SSN", "ssn-fpe")
+    example = oc.configmap_data(render("release-example"), "dps")["DPS_TOKENIZER_PROFILES"]
+    released = Settings(_env_file=None, tokenizer_profiles=example)  # type: ignore[call-arg]
+    assert released.tokenizer_profile_allowed("default", "SSN", "ssn-fpe")
+    assert not released.tokenizer_profile_allowed("default", "SSN", None)
+    dev = oc.configmap_data(render("dev"), "dps")
+    assert dev["DPS_TOKENIZER_PROFILES"] == ""
+    readme = README.read_text("utf-8")
+    assert "DPS_TOKENIZER_PROFILES" in readme
+
+
 def test_the_posture_probe_sees_a_weakened_configuration() -> None:
     docs = render("prod")
     cm = one(docs, "ConfigMap", "dps")

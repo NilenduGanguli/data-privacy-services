@@ -33,6 +33,7 @@ configMapGenerator:
       - DPS_COIN_URL=https://coin.bank.example/oauth2/token
       - DPS_AZURE_VISION_ENDPOINT=https://ocr-gateway.bank.example
       - DPS_TOKENIZER_URL=https://tokenizer.bank.example
+      - 'DPS_TOKENIZER_PROFILES={"*": ["SSN:ssn-fpe", "CARD_PAN:pan-fpe"]}'
 patches:
   - target: {kind: Service, name: dps-db}
     patch: |-
