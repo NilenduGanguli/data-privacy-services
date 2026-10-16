@@ -12,6 +12,7 @@ from collections.abc import Awaitable
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response
+from fastapi import Path as PathParam
 from pydantic import BaseModel, ConfigDict, Field
 
 from dps.auth import require_scope
@@ -180,10 +181,15 @@ async def publish_(
     return await _changed(request, "publish", run(), status=201)
 
 
+#: Version numbers: 1-999999, as the diff's ``to`` — a larger integer overflows the database's
+#: column (it was a 500 before, M5 G4 review N1); outside the range the request is a 422.
+_VERSION_MAX = 999_999
+
+
 @router.get("/{name}/versions/{version}", dependencies=_READ, response_model=None)
 async def version_(
     name: str,
-    version: int,
+    version: Annotated[int, PathParam(ge=1, le=_VERSION_MAX)],
     request: Request,
     format: Literal["json", "yaml"] = "json",  # noqa: A002 - the query parameter's name
 ) -> dict[str, Any] | Response:
@@ -202,7 +208,7 @@ async def version_(
 async def diff(
     name: str,
     request: Request,
-    from_: Annotated[int, Query(alias="from", ge=1)],
+    from_: Annotated[int, Query(alias="from", ge=1, le=_VERSION_MAX)],
     to: Annotated[str, Query(pattern=r"^(draft|[1-9][0-9]{0,5})$")],
 ) -> dict[str, Any]:
     """Leaf changes from version ``from`` to version ``to`` (or ``draft``)."""

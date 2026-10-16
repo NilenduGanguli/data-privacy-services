@@ -148,6 +148,18 @@ def _list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
+#: Entries shown of one list in a single table cell: reportlab cannot split a row across pages, so
+#: a cell taller than a page fails the whole render (M5 G3 review N10). The JSON pack keeps all.
+CELL_ITEMS = 20
+
+
+def _capped(items: Sequence[str], limit: int = CELL_ITEMS) -> str:
+    """``items`` joined with commas, the first ``limit`` only and a count of the rest."""
+    shown = ", ".join(items[:limit])
+    rest = len(items) - limit
+    return f"{shown} … and {rest:,} more (see the JSON pack)" if rest > 0 else shown
+
+
 def _table(header: Sequence[str], rows: Sequence[Sequence[Any]], widths: Sequence[float]) -> Table:
     data = [[_p(h, SMALL) for h in header]] + [[_p(c) for c in row] for row in rows]
     table = Table(data, colWidths=[w * mm for w in widths], repeatRows=1)
@@ -254,8 +266,8 @@ def _configuration(pack: Mapping[str, Any]) -> list[Any]:
     policy, consistency = _sub(pack, "policy"), _sub(pack, "consistency")
     custody = consistency.get("key_custody")
     custody_text = (
-        ", ".join(
-            f"{k} {v}" for k, v in sorted(custody.items()) if not isinstance(v, Mapping | list)
+        _capped(
+            [f"{k} {v}" for k, v in sorted(custody.items()) if not isinstance(v, Mapping | list)]
         )
         if isinstance(custody, Mapping)
         else custody
@@ -366,7 +378,7 @@ def _verification(pack: Mapping[str, Any]) -> list[Any]:
     passed = verification.get("passed")
     fallbacks = verification.get("fallbacks")
     fallback_text = (
-        ", ".join(f"{k} {v}" for k, v in sorted(fallbacks.items())) or "none"
+        _capped([f"{k} {v}" for k, v in sorted(fallbacks.items())]) or "none"
         if isinstance(fallbacks, Mapping)
         else fallbacks
     )
@@ -386,7 +398,7 @@ def _verification(pack: Mapping[str, Any]) -> list[Any]:
         ),
     ]
     if verification.get("review_required"):
-        cols = ", ".join(str(c) for c in _list(verification.get("review_columns")))
+        cols = _capped([str(c) for c in _list(verification.get("review_columns"))])
         rows.append(("Review required", cols or "yes"))
     return _section(5, "Verification", _kv(rows))
 

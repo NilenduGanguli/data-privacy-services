@@ -1,10 +1,14 @@
 """Measure the job platform's throughput (spec §7 "Throughput", §11 M2 exit criterion).
 
-    python tools/bench_connector.py --rows 200000 [--engine postgres|oracle|mongo]
+    python tools/bench_connector.py [--rows N] [--engine postgres|oracle|mongo]
         [--mode obfuscate|synthesize]
         [--write-mode table|in_place|files] [--parallelism 4] [--batch 1000]
-        [--partition-rows 50000] [--base-url http://127.0.0.1:8400] [--api-key …]
+        [--partition-rows N] [--base-url http://127.0.0.1:8400] [--api-key …]
         [--source-dsn postgresql://…/bank] [--label 1-worker] [--out docs/technical/bench]
+
+``--rows`` / ``--partition-rows`` default to 200 000 / 50 000 for PostgreSQL and to the documented
+M3 benchmark, 20 000 / 5 000, for Oracle and MongoDB (whose source is the shared demo customer
+space).
 
 Against the compose stack (profile ``sources``): (1) creates ``bench.customers_bench`` in the source
 (the customers DDL; rows recycle a pool of 5 000 surrogate-engine customers — throughput does not
@@ -79,13 +83,15 @@ M3_ENGINES: dict[str, tuple[str, dict[str, Any], str, dict[str, Any]]] = {
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """The CLI (module docstring)."""
     p = argparse.ArgumentParser(prog="python tools/bench_connector.py")
-    p.add_argument("--rows", type=int, default=200_000)
+    p.add_argument("--rows", type=int, default=None, help="default: 200000 (oracle, mongo: 20000)")
     p.add_argument("--engine", choices=("postgres", "oracle", "mongo"), default="postgres")
     p.add_argument("--mode", choices=("obfuscate", "synthesize"), default="obfuscate")
     p.add_argument("--write-mode", choices=("table", "in_place", "files"), default="table")
     p.add_argument("--parallelism", type=int, default=4)
     p.add_argument("--batch", type=int, default=1000)
-    p.add_argument("--partition-rows", type=int, default=50_000)
+    p.add_argument(
+        "--partition-rows", type=int, default=None, help="default: 50000 (oracle, mongo: 5000)"
+    )
     p.add_argument("--base-url", default=None, help="default: DPS_BASE_URL / DPS_APP_PORT")
     p.add_argument("--api-key", default=None, help="default: DPS_API_KEY / the local demo key")
     p.add_argument("--source-dsn", default=None, help="default: DPS_TEST_SOURCE_PG_DSN")
@@ -93,6 +99,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--timeout", type=float, default=1800.0)
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = p.parse_args(argv)
+    small = args.engine != "postgres"  # the M3 engines read the shared demo customer space
+    if args.rows is None:
+        args.rows = 20_000 if small else 200_000
+    if args.partition_rows is None:
+        args.partition_rows = 5_000 if small else 50_000
     if args.rows < 1 or args.parallelism < 1 or args.batch < 10:
         p.error("--rows ≥ 1, --parallelism ≥ 1 and --batch ≥ 10 are required")
     if args.write_mode == "in_place" and args.mode == "synthesize":

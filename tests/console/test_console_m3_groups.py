@@ -6,8 +6,8 @@ customer space from the Task 15 seed) into ``bank_uat`` / ``crm_uat`` / ``CRM_MA
 the console: the Jobs page's group card (mockup 07: key node, wires, three system cards, **Run
 consistency check** → verdict 3 / 3 and join coverage), the ``.grp`` badges, and the Oracle job's
 detail page (mockup 03: crumb, subtitle, **Open consistency check**, the "Cross-system joins"
-tile). Shots at 1440 / 390 px (dark) and 1440 px (light) into ``docs/superpowers/build/m3-shots/``;
-no seeded value is visible on any page (counts only).
+tile). Shots at 1440 / 390 px (dark) and 1440 px (light) into ``reports/console/m3-shots/``
+(``tests/console/m3_console.py``); no seeded value is visible on any page (counts only).
 """
 
 from __future__ import annotations

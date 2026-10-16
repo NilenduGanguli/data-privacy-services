@@ -576,7 +576,10 @@ def ensure_connections(c: httpx.Client) -> tuple[dict[str, str], int]:
     found: dict[str, str] = {}
     cursor: str | None = None
     while True:
-        page = c.get("/api/v1/connections", params={"limit": 200, "cursor": cursor}, headers=H)
+        params: dict[str, str | int] = {"limit": 200}
+        if cursor:  # httpx sends None as `cursor=`: the first page names no cursor at all
+            params["cursor"] = cursor
+        page = c.get("/api/v1/connections", params=params, headers=H)
         page.raise_for_status()
         body = page.json()
         found.update({item["name"]: item["id"] for item in body["items"]})
@@ -1108,7 +1111,10 @@ def ensure_m3_connections(c: httpx.Client) -> tuple[dict[str, str], int]:
     found: dict[str, str] = {}
     cursor: str | None = None
     while True:
-        page = c.get("/api/v1/connections", params={"limit": 200, "cursor": cursor}, headers=H)
+        params: dict[str, str | int] = {"limit": 200}
+        if cursor:  # httpx sends None as `cursor=`: the first page names no cursor at all
+            params["cursor"] = cursor
+        page = c.get("/api/v1/connections", params=params, headers=H)
         page.raise_for_status()
         body = page.json()
         found.update({item["name"]: item["id"] for item in body["items"]})

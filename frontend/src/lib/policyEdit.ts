@@ -234,7 +234,9 @@ export function simulateFpe(plan: PlanRow[], fpeOn: boolean, body: Body | null):
 /** For each declared path, the first version containing it ("v2") or "draft vN" when only the
  *  draft has it. `bodies` maps version → body (any subset; missing versions are skipped). */
 export function declaredSince(bodies: Record<number, Body>, draft: Body | null, draftVersion: number): Record<string, string> {
-  const out: Record<string, string> = {};
+  // No prototype: a declared path such as `constructor`, `toString` or `__proto__` is an own key
+  // like any other (with `{}` the `in` test below found the inherited name and skipped it).
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const v of Object.keys(bodies).map(Number).sort((a, b) => a - b)) {
     for (const d of (bodies[v]?.detect?.declared_fields ?? []) as DeclaredField[]) if (!(d.path in out)) out[d.path] = `v${v}`;
   }

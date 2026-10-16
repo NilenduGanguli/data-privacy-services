@@ -4,84 +4,71 @@ Data obfuscation and synthetic data generation for the enterprise — one Privac
 points (API, database connectors, UI scanner), two outcomes (reversible obfuscation, synthetic data),
 measurable privacy, and a hard rule that **no LLM ever sees raw PII**.
 
-**Status:** M0, M1 (v0.2.0) and M2 (`v0.1.0-m2`) integrated on `main`; M3 (Oracle, MongoDB,
-cross-system job groups) built on branch `m3`, pending verification and merge. **Layer 1 is complete**: the
-JSON/text API of M0 (`/api/v1/detect`, `/obfuscate`, `/synthesize`, `/reveal`, policy tooling) plus
-**documents** (PDF text layer, scanned pages and images through the Azure Read v3.2 contract or local
-Tesseract, DOCX, TXT, CSV; per-page findings with boxes; a true redacted PDF verified by structure and
-an OCR re-read), **synthesis from a schema, DDL or sample** through a reusable generator spec, the
-entity taxonomy and a recognizer test, NDJSON streaming, `Idempotency-Key`, and a measured detector
-evaluation. **Layer 2 runs on PostgreSQL**: connect a source, discover and review its columns, and run
-partitioned, checkpointed, resumable masking jobs in four write modes (copy to a table, export files,
-in place, append) that end with a hashed evidence pack. The Privacy Console has the Playground (with
-the **Document** tab), **Policies**, and the **Data sources & jobs** pages (jobs list, new-job wizard,
-job detail, evidence pack, reports). **M3 adds Oracle and MongoDB** to the same jobs (thin-mode Oracle
-with keyset or ROWID partitions, MongoDB documents transformed by leaf path) and **job groups**: one
-caller-held key across PostgreSQL, Oracle and MongoDB, with a counts-only consistency check that
-joins the masked targets (3 / 3 consistent in the demo). All offline in compose. **Layer 3, the UI scanner (M4)**: crawl a
-registered web front end in a sandboxed Chromium, inventory and classify every form
-field, flag privacy risks, show each form filled with synthetic personas and with reversible tokens
-side by side, and capture pages that render personal data with that data masked — **never
-submitting anything** (a request guard and a scope proxy block every non-GET request; a counting
-server proves it).
+**Status:** v1.0.0 — M0–M5 shipped. What each milestone delivered and the known limitations:
+[`CHANGELOG.md`](CHANGELOG.md).
+
+- **Layer 1 — API and documents.** `/api/v1/detect`, `/obfuscate`, `/synthesize`, `/reveal` for JSON
+  and text (NDJSON streams, `Idempotency-Key`), documents (PDF text layers, scans and images through
+  OCR, DOCX, TXT, CSV) with a true redacted PDF, synthesis from a schema, DDL or sample, and the bank's
+  own tokenization service through `external_tokenize`.
+- **Layer 2 — database connectors.** PostgreSQL, Oracle and MongoDB: connect, discover and review
+  every column, then run partitioned, resumable jobs in four write modes (copy to a table, export
+  files, in place, append), keep ids consistent across systems with one caller-held key, and
+  synthesize tables with a Gaussian copula whose fidelity and privacy are measured before anything
+  is written. Every run ends with a hashed evidence pack (JSON, HTML, PDF).
+- **Layer 3 — UI scanner.** Crawls a registered UAT site, classifies its fields, fills them with
+  synthetic or obfuscated personas side by side with the original, and never submits anything.
+- **Privacy Console** for all of it, plus Overview, Policies (drafts and immutable versions),
+  Reports & audit and Admin (keys, tenants, posture); keys and seeds go back to the caller and are
+  never stored.
 
 | Read | For |
 |---|---|
-| [`docs/specs/2026-10-11-data-privacy-services-design.md`](docs/specs/2026-10-11-data-privacy-services-design.md) | the design (§12 lists the open decisions) |
-| [`HANDOFF.md`](HANDOFF.md) | build, run, configuration, probes, traps |
-| [`docs/technical/api-m0.md`](docs/technical/api-m0.md) | the Layer 1 API reference (JSON and text) |
-| [`docs/technical/api-m1.md`](docs/technical/api-m1.md) | the M1 additions: documents, schema synthesis, taxonomy, NDJSON, `Idempotency-Key`, OCR providers, T3 labelling |
-| [`docs/technical/api-m2.md`](docs/technical/api-m2.md) | the jobs and PostgreSQL API (routes, error codes, state machine, evidence pack, measured throughput) |
-| [`docs/technical/api-m3.md`](docs/technical/api-m3.md) | Oracle and MongoDB connections, selections per engine, M3 prepare failures, the job-group consistency check |
-| [`docs/technical/api-m4.md`](docs/technical/api-m4.md) | the UI scanner API (routes, error codes, scan lifecycle, export and capture-map formats, evidence `scan` block, the no-submission rules) |
-| [`docs/technical/detector-eval-m1.md`](docs/technical/detector-eval-m1.md) | detector precision and recall per entity type on the synthetic labelled corpus |
-| [`docs/design/mockups/index.html`](docs/design/mockups/index.html) | the console mockups (built so far: Overview, Playground with the Document tab, Policies 05, documents 08, and the jobs pages 07, 03, 06, 10 with the evidence list of 09) |
-| [`docs/superpowers/plans/`](docs/superpowers/plans/) | the milestone plans (M0–M5) and the M1–M5 contract |
+| [`docs/specs/2026-10-11-data-privacy-services-design.md`](docs/specs/2026-10-11-data-privacy-services-design.md) | the design (§12 records the decisions D1–D14) |
+| [`HANDOFF.md`](HANDOFF.md) | build, configuration (every `DPS_*` setting), local stack, secrets, OpenShift, runbooks, probes, traps, gates |
+| [`docs/technical/api-m0.md`](docs/technical/api-m0.md) | Layer 1 API (JSON and text) |
+| [`docs/technical/api-m1.md`](docs/technical/api-m1.md) | documents, schema synthesis, taxonomy, NDJSON, `Idempotency-Key`, OCR, T3 labelling |
+| [`docs/technical/api-m2.md`](docs/technical/api-m2.md) | connections, jobs, snapshots, job groups, evidence, PostgreSQL |
+| [`docs/technical/api-m3.md`](docs/technical/api-m3.md) | Oracle and MongoDB, the cross-system consistency check |
+| [`docs/technical/api-m4.md`](docs/technical/api-m4.md) | the UI scanner: scans, pages, inventory, export |
+| [`docs/technical/api-m5.md`](docs/technical/api-m5.md) | admin, reports, the policy store, tabular synthesis, `external_tokenize` |
+| [`docs/demo/DEMO-SCRIPT.md`](docs/demo/DEMO-SCRIPT.md) | the ten-minute demo, and its deck `docs/demo/dps-showcase.pptx` |
+| [`docs/security/2026-10-11-m5-security-review.md`](docs/security/2026-10-11-m5-security-review.md) | the security review: every finding, fix and test |
+| [`docs/technical/detector-eval-m1.md`](docs/technical/detector-eval-m1.md) | detector precision and recall per entity type |
+| [`docs/design/mockups/index.html`](docs/design/mockups/index.html) | the console mockups |
+| [`docs/superpowers/plans/`](docs/superpowers/plans/) | the milestone plans and the M1–M5 contract |
 
 ## Run it
 
 ```bash
-docker compose --env-file docker/compose.sources.env --profile docs --profile sources up -d --build
-                                     # console + API on http://127.0.0.1:8400 (key: dps_local_dev_key_change_me),
-                                     # worker, metadata DB, OCR mock (5016), demo source (5442), MinIO (9010)
-python tools/smoke_test.py           # 34 checks: Layer 1, documents/OCR/schema, job platform (needs the dev install below for httpx)
-python tools/demo_m2.py              # 10-table UAT copy, in place, append
-docker compose --profile docs --profile sources down
-```
-
-Oracle and MongoDB (M3; Oracle Free needs ~2.7 GB and 1–3 minutes on its first start):
-
-```bash
-docker compose --profile oracle --profile sources up -d --build    # + oracle (1522) and mongo (27018)
+docker compose --env-file docker/compose.sources.env --profile full up --build -d
+                                     # console + API on http://127.0.0.1:8400 (key: dps_local_dev_key_change_me,
+                                     # a local demo literal), worker, metadata DB, OCR mock, demo PostgreSQL,
+                                     # Oracle Free (~2.7 GB, 1-3 min first start), MongoDB, MinIO, tokenizer mock
+curl -fsS 127.0.0.1:8400/readyz      # poll until "ready": true (never `docker compose up --wait`)
 python tools/seed_sources.py --target all --rows 20000 --seed 7   # one customer space in PG, Oracle, MongoDB
-python tools/smoke_test.py --m3      # the checks above + 7 M3 checks: connections, discovery, a job group,
-                                     # three runs under its key, consistency 3/3, evidence, raw PII to LLM = 0
-python tools/bench_connector.py --engine oracle --rows 20000      # rows/s (also --engine mongo)
-docker compose --profile oracle --profile sources down             # resets the Oracle demo (no volume)
+python tools/smoke_test.py --m3      # end-to-end checks; verdicts only, never a value
+python tools/demo_seed.py            # tenant, keys, connections, policies, the demo job group
+python tools/e2e_demo.py --console   # the ten-minute demo end to end, with console screenshots
+docker compose --profile full down   # -v for a clean slate
 ```
 
-Poll `docker compose ps` until `app`, `worker`, `dps-db`, `azure-ocr-mock`, `source-pg` and `minio`
-are healthy and the one-shots (`migrate`, `minio-init`, `demo-secrets`, `seed-sources`) exited 0
-(`up --wait` fails on the one-shots). A stack whose ports and image tag live in `.env` passes it first:
-`docker compose --env-file .env --env-file docker/compose.sources.env …` (see `HANDOFF.md` §3).
-
-Smaller stacks: plain `docker compose up --build -d` runs the app, worker and metadata DB (then
-`DPS_SMOKE_M2=off python tools/smoke_test.py`: the job checks need the `sources` profile's demo source;
-the OCR checks skip without `--profile docs`); `--profile docs` alone adds the OCR mock. Without
-`--profile docs` JSON, text, text PDFs, DOCX and CSV work, while scans, images and redacted PDFs need
-OCR (see `HANDOFF.md` §10). Ports taken? `DPS_APP_PORT=8401 DPS_DB_PORT=5451 DPS_OCR_PORT=5017 docker
-compose …` and `DPS_APP_PORT=8401 python tools/smoke_test.py`.
+Smaller stacks: `docker compose up --build -d` (app, worker, metadata DB) or one profile at a time
+(`docs`, `sources`, `oracle`, `tokenizer`, `scanner`); ports taken by another stack: set
+`DPS_APP_PORT`, `DPS_DB_PORT`, … (every host port is a variable, `HANDOFF.md` §4).
 
 Open the console, paste the key into the header, and try:
 
-- **Playground → Document → Load demo KYC scan → Redact**: OCR reads the synthetic scan, the
-  findings are boxed on each page, the redacted PDF (image-only, re-read with OCR) downloads, and
-  *Reveal text with key* restores the original text from the obfuscated extraction.
-- **Playground → JSON / Text**: Obfuscate → Reveal with key, or Synthesize.
-- **Policies**: the six presets, the treatment per entity type (edit a method to start a session
-  draft), a custom recognizer tested on the engine, and the plan preview.
-- **Data sources & jobs → New job**: connect `bank-pg-ro`, select and count rows, discover and review
-  the columns, choose a write mode, run, then open the job and its evidence pack.
+- **Playground**: a KYC record → findings → Obfuscate → Reveal with the key → Synthetic; the
+  **Document** tab: load the demo scan → Redact → download the redacted PDF.
+- **Policies**: presets and tenant policies, the treatment per entity type, a custom recognizer
+  tested on the engine, the plan preview, versions with their diff.
+- **Data sources & jobs → New job**: an Oracle, MongoDB or PostgreSQL source → discover → review →
+  target and write mode → run; the job page, its evidence pack and the job groups' consistency check.
+- **UI scanner**: scan the demo onboarding site, flip the parallel view between synthetic and
+  obfuscated, export the inventory — "POSTs left: 0".
+- **Reports & audit** and **Admin**: evidence PDFs, the audit trail, keys (shown once), tenants and
+  the posture checks.
 
 ## Scan a web front end (M4)
 
@@ -101,67 +88,69 @@ risk flags, the masked captures, the persona/field exports and the evidence pack
 synthesis seed are shown once. Only registered hosts can be scanned (`DPS_SCAN_REGISTERED_HOSTS`
 locally: `localhost,127.0.0.1,demo-site`), and the demo site's `GET /__received` counts every
 non-GET request and form submission it ever received — it stays the same through any scan.
-Settings, image, ports and traps: `HANDOFF.md` §12; API: `docs/technical/api-m4.md`.
+Settings: `HANDOFF.md` §3 (the generated table); image §2, ports §4, traps §11 and the M4 build record
+§14.2; API: `docs/technical/api-m4.md`.
 
 ## Develop
 
 ```bash
-uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e ".[dev,fpe,docs,db,connectors,scanner,uitest,e2e]"
-python -m playwright install chromium            # once: Chromium 1187 for the scanner and console tests
-ruff check dps tests tools && ruff format --check dps tests tools && mypy dps && pytest -q
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install -e ".[dev,fpe,docs,db,connectors,tabular,scanner,uitest,e2e]"   # + ner, vertex, synth-ml as needed
+python -m playwright install chromium     # once: Chromium 1187 for the scanner and console tests
+ruff format --check dps tests tools && ruff check dps tests tools && mypy dps && pytest -q
+python tools/settings_table.py --check   # HANDOFF's settings table is current
 (cd frontend && npm ci && npm run typecheck && npm test && npm run build)
 DPS_AUTH_ENABLED=false DPS_LLM_PROVIDER=stub uvicorn dps.app:create_app --factory --port 8400
-cd frontend && npm run dev                       # console on :5174, API calls proxied to :${DPS_APP_PORT:-8400}
-python tools/make_demo_docs.py                   # regenerate the committed synthetic demo documents
+cd frontend && npm run dev            # console on :5174, API calls proxied to :${DPS_APP_PORT:-8400}
 ```
 
-`npm test` runs both console suites: `node --test` over `frontend/tests/*.test.ts` (M1; Node >= 22.6)
-and Vitest over `frontend/src/**/*.test.ts` (M2).
-
-Services for the integration tests: `docker compose up -d dps-db` (marker `db`), `docker compose
---profile sources up -d source-pg minio minio-init` (`pg_source`, `s3`) and `docker compose --profile
-docs up -d azure-ocr-mock` (`ocr`), or, without Docker, `tools/scratch_pg.sh start all` (Homebrew
-PostgreSQL 16 on 5441/5442). Markers: `docs` (the `[docs]` extra), `ocr`, `tesseract` (a host
-`tesseract` binary), `db`, `pg_source`, `s3`, `slow` (resume-after-kill, about 90 s), `browser` (the
-console checks and the scanner's browser tests; `python -m playwright install chromium` once — the
-scanner tests use a running demo site at `DPS_TEST_DEMO_SITE`, else start it with the host's `node`
-on `${DPS_DEMO_SITE_PORT:-8410}`), `oracle` (`docker compose --profile oracle up -d oracle`), `mongo`
-(`docker compose --profile sources up -d mongo`). Without a service its tests skip;
-`DPS_TEST_REQUIRE_SERVICES=1` makes them fail instead. The milestone gates with the full stack up:
+Integration tests need their services and skip without them (`DPS_TEST_REQUIRE_SERVICES=1` makes a
+missing service fail): `docker compose up -d dps-db` (marker `db`), `--profile sources` (`pg_source`,
+`s3`, `mongo`), `--profile oracle` (`oracle`), `--profile docs` (`ocr`), `--profile scanner` (`browser`: the
+console checks and the scanner's browser tests, which use the demo site at `DPS_TEST_DEMO_SITE`). The milestone gates against the full stack:
 
 ```bash
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "docs or ocr"
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "db or pg_source or s3"
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle or mongo"
+DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m browser
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m slow tests/connectors/test_resume_after_kill.py
-DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/console/test_console_m2.py
-DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "oracle or mongo"                 # M3 (incl. tests/e2e, the M3 console checks)
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q tests/connectors/test_conformance_*.py -m "pg_source or oracle or mongo"
 DPS_TEST_REQUIRE_SERVICES=1 pytest -q -m "browser or db" tests/scanner tests/test_no_values_in_logs_m4.py   # M4
 ```
 
+Tests and tools take endpoints only from `DPS_TEST_*` variables (defaults follow the compose port
+variables); without Docker, `tools/scratch_pg.sh start all` runs PostgreSQL 16 for the `db` and
+`pg_source` tests. Console checks (Playwright 1.55.0, the `uitest` extra) write screenshots to the
+git-ignored `reports/console/`. `python tools/make_demo_docs.py` regenerates the committed
+synthetic demo documents; `python tools/eval_detectors.py run --corpus tests/eval/corpus …` the
+detector evaluation.
+
 `npm run build` writes `frontend/dist`, which the API process serves at `/` when it exists.
-`python tools/console_check.py` (Playwright 1.55.0, the `uitest` extra) drives the Document tab and
-the Policies page against a running stack and writes screenshots beside the mockups'.
-`demo/documents/` holds synthetic KYC documents in every supported format (text and scanned PDF,
-PNG, DOCX, TXT, CSV); the console's "Load demo KYC scan" serves `frontend/public/demo/kyc-scanned.pdf`.
-Optional extras: `ner` (Presidio + spaCy, higher recall on names and places), `fpe` (FF1
-format-preserving encryption, used only with `DPS_FPE_ENABLED=true`), `docs` (M1 documents:
-pypdf, pdfplumber, pypdfium2, reportlab, python-docx, Pillow), `db` (asyncpg: metadata database and
-PostgreSQL connector), `connectors` (sqlglot, pyarrow, boto3), `scanner` (Playwright 1.55.0 and
-Pillow for the browser-worker; never in the app image), `uitest` / `e2e` (Playwright 1.55.0
-for the M1 and M2 console checks), `vertex` (laptop path to Gemini). Production goes through the
-Stellar gateway — see `HANDOFF.md`.
+`npm test` runs both console suites: `node --test` over `frontend/tests/*.test.ts` (Node >= 22.6) and
+Vitest over `frontend/src/**/*.test.ts`. `demo/documents/` holds synthetic KYC documents in every
+supported format (text and scanned PDF, PNG, DOCX, TXT, CSV); the console's "Load demo KYC scan"
+serves `frontend/public/demo/kyc-scanned.pdf`. Optional extras: `ner` (Presidio + spaCy, higher recall
+on names and places), `fpe` (FF1 format-preserving encryption, used only with `DPS_FPE_ENABLED=true`),
+`docs` (documents: pypdf, pdfplumber, pypdfium2, reportlab, python-docx, Pillow), `db` (asyncpg:
+metadata database and PostgreSQL connector), `connectors` (sqlglot, pyarrow, boto3, Oracle and
+MongoDB drivers), `tabular` (the Gaussian copula), `synth-ml` (the optional MOSTLY AI engine),
+`scanner` (Playwright 1.55.0 and Pillow for the browser-worker; never in the app image), `uitest` /
+`e2e` (Playwright 1.55.0 for the console checks), `vertex` (laptop path to Gemini). Production goes
+through the Stellar gateway — see `HANDOFF.md`.
 
 ## How it works
 
 detect (structural key names + patterns/checksums + optional NER + client declarations) → plan
 (policy → one method per finding, with a reason) → transform (AES-SIV tokens, FF1, keyed date shift,
-surrogates…) → verify (no original value survives in the output) → report (counts, methods,
-fallbacks, verification — never a value). Keys and synthesis seeds are returned to the caller and
-never stored. Synthetic text goes through the LLM as typed placeholders only.
+surrogates, the bank's tokenizer…) → verify (no original value survives in the output) → report
+(counts, methods, fallbacks, verification — never a value). Keys and synthesis seeds are returned to
+the caller and never stored. Synthetic text goes through the LLM as typed placeholders only, checked
+by an egress verifier.
 
-Jobs (M2): connect (read-only transactions, least-privilege checks) → discover (sample, classify
-each column, propose a snapshot) → review (accept or override per column) → run (key-space partitions
-claimed by workers from a Postgres queue, transformed by the same engine, written in committed batches
-with a write ledger and a checkpoint after each, so a killed worker's partition resumes without
-writing a row twice) → evidence (a hashed, printable pack of counts, hashes, methods and key ids).
+Jobs: connect (read-only sessions, least-privilege checks) → discover (sample, classify each column,
+propose a snapshot) → review (accept or override per column) → run (key-space partitions claimed by
+workers from a PostgreSQL queue, transformed by the same engine, written in committed batches with a
+write ledger and a checkpoint after each, so a killed worker's partition resumes without writing a
+row twice) → evidence (a hashed, printable pack of counts, hashes, methods, key ids and, for
+synthetic data, measured fidelity and privacy).

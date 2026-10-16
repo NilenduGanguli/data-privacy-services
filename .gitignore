@@ -35,6 +35,6 @@ docs/superpowers/build/m2-console/
 tests/eval/private/
 # Local runtime data (artefacts, exports; M5 demo keys and group keys under var/demo/)
 var/
-# M5 tool outputs: flow report, e2e demo report and console screenshots (repository root only:
-# the package dps/layers/reports/ stays tracked)
+# Build output of local runs: console screenshots (tools/shots.py), flow report, e2e demo report
+# (repository root only: the package dps/layers/reports/ stays tracked)
 /reports/

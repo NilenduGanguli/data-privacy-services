@@ -4,7 +4,7 @@ Drives the wizard (mockup 06) end to end on the lane's stack (``--profile oracle
 sources`` with the Task 15 seed): Oracle ``CRM.CUSTOMERS`` → ``CRM_MASKED.CUSTOMERS_CONSOLE`` and
 MongoDB ``crm.profiles`` (filtered by a JSON filter) → ``crm_uat.profiles_console``, each to its
 evidence pack. Every page is shot at 1440 and 390 px (dark) and 1440 px (light) beside mockup 06,
-into ``docs/superpowers/build/m3-shots/``. No source value is visible on any page (25 seeded
+into ``reports/console/m3-shots/`` (``tests/console/m3_console.py``). No source value is visible on any page (25 seeded
 customers' names and e-mails read beforehand are absent from the page text — counts only).
 """
 

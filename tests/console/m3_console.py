@@ -2,8 +2,9 @@
 
 Same harness as M2's ``test_console_m2.py``: Playwright 1.55 Chromium against the lane's app
 (``DPS_TEST_APP_URL``, else ``http://127.0.0.1:${DPS_APP_PORT:-8400}``) with the stack's local demo
-key, screenshots into ``docs/superpowers/build/m3-shots/`` (synthetic seed data only; committed by
-Task 21's docs commit). The demo connections are registered through the API when missing — the
+key, screenshots into ``reports/console/m3-shots/`` (git-ignored, so a gate run never rewrites the
+copies Task 21 committed under ``docs/superpowers/build/m3-shots/``; ``DPS_SHOTS_DIR=docs/superpowers/build``
+refreshes those on purpose, ``tools/shots.py``; synthetic seed data only). The demo connections are registered through the API when missing — the
 Oracle and MongoDB ones under the names Task 21's ``smoke --m3`` uses, against the compose
 ``demo-secrets`` refs — so the checks run on a stack that only has ``--profile oracle --profile
 sources`` up and the Task 15 seed. Nothing here prints or asserts on a value: leak checks count.
@@ -21,9 +22,10 @@ import httpx
 import pytest
 
 from tests.services import require_service
+from tools.shots import shots_dir
 
 ROOT = Path(__file__).resolve().parents[2]
-SHOTS = ROOT / "docs" / "superpowers" / "build" / "m3-shots"
+SHOTS = shots_dir("m3-shots")
 MOCKUPS = ROOT / "docs" / "design" / "mockups"
 #: The compose stack's local demo key unless the shell names another (test-only literal).
 KEY = (

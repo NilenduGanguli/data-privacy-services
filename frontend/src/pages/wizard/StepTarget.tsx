@@ -7,7 +7,7 @@ import {
   selectionOf, sourceObject, writtenObject, type WizardDraft,
 } from '../../lib/jobs';
 import type { ClassificationSnapshot, Connection, ConnectionSpec, ConnectionTestResult, WriteMode } from '../../lib/types';
-import { canLeave, targetReady, transactionsMissing, type WizardAction } from './state';
+import { canLeave, offsetProblem, targetReady, transactionsMissing, type WizardAction } from './state';
 
 const BATCHES = [1000, 5000, 20000];
 const STORE_NAME_RE = /^[a-z0-9][a-z0-9-]{1,62}$/;
@@ -102,6 +102,7 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
   const writable = d.connectionRoles.includes('target');
   const sameTable = d.writeMode === 'append' && d.appendTarget === 'same';
   const textKey = keyInfo.some((c) => c && (c.kind === 'text' || c.kind === 'char'));
+  const offsetIssue = offsetProblem(d);
   const rewritten = snapshot ? snapshot.columns.filter((c) => !c.is_key && methodFor(c, d.mode).method !== 'keep').length : undefined;
   const confirmed = isWriteConfirmed(d);
   const written = fqn(writtenObject(d));
@@ -294,6 +295,9 @@ export function StepTarget({ d, dispatch, auth, connections, snapshot, onConnect
               {textKey
                 ? <><label className="lbl" htmlFor="ap-prefix">Key prefix</label><input className="input mono" id="ap-prefix" value={d.pkPrefix} onChange={(e) => set({ pkPrefix: e.target.value, pkOffset: '' })} placeholder="SYN-" spellCheck={false} /></>
                 : <><label className="lbl" htmlFor="ap-offset">Key offset</label><input className="input mono" id="ap-offset" inputMode="numeric" value={d.pkOffset} onChange={(e) => set({ pkOffset: e.target.value, pkPrefix: '' })} placeholder="900000000" /></>}
+              {offsetIssue && ((textKey ? d.pkPrefix : d.pkOffset).trim()
+                ? <div className="err" role="alert" style={{ marginTop: 6 }}>{offsetIssue}</div>
+                : <div className="help">{offsetIssue}</div>)}
             </div>
           )}
           <div className="help">The collision pre-check runs when the job prepares and stops it before any write.</div>

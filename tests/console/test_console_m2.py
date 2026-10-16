@@ -3,8 +3,9 @@
 Drives the compose stack (``DPS_TEST_APP_URL``, else ``http://127.0.0.1:${DPS_APP_PORT:-8400}``)
 in Chromium (Playwright 1.55, the ``e2e`` extra) with the stack's local demo key and the demo
 connections the smoke test creates (``bank-pg-ro``, ``bank-uat``). Every page is shot at 1440 and
-390 px (dark) and at 1440 px (light) beside the matching mockup, into
-``docs/superpowers/build/m2-console/`` (git-ignored); the comparison is recorded in the build report.
+390 px (dark) and at 1440 px (light) beside the matching mockup, into ``reports/console/m2-console/``
+(git-ignored; ``DPS_SHOTS_DIR`` moves it, ``tools/shots.py``); the comparison is recorded in the build
+report.
 No screenshot is taken while the once-only key card is on screen.
 """
 
@@ -24,12 +25,13 @@ import httpx
 import pytest
 
 from tests.fixtures.services import require_service
+from tools.shots import shots_dir
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.pg_source, pytest.mark.slow]
 playwright = pytest.importorskip("playwright.sync_api")
 
 ROOT = Path(__file__).resolve().parents[2]
-SHOTS = ROOT / "docs" / "superpowers" / "build" / "m2-console"
+SHOTS = shots_dir("m2-console")
 MOCKUPS = ROOT / "docs" / "design" / "mockups"
 #: The compose stack's local demo key unless the shell names another (test-only literal).
 KEY = (

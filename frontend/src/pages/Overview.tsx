@@ -115,7 +115,8 @@ function DegradedView({ degraded, ready }: { degraded: Degraded; ready: Readines
         <Kpi hero label="Requests served" value={count(requests)} delta="since process start" />
         <Kpi label="Findings" value={count(findings)} delta="by entity type and detector" />
         <Kpi label="Jobs running" value={s ? s.running : '—'} delta={s ? `of ${s.tenant_max_running} slots · ${plural(s.workers_online, 'worker')} online` : 'no job queue on this deployment'} />
-        <Kpi zero={raw === 0} label="Raw PII sent to LLM" value={count(raw)} delta="placeholders only · must stay 0" />
+        <Kpi zero={raw === 0} alert={raw > 0} label="Raw PII sent to LLM" value={count(raw)}
+          delta={raw === 0 ? 'placeholders only · must stay 0' : 'raw values reached the gateway since process start · must stay 0: investigate'} />
       </div>
       <div className="card">
         <div className="card-head"><div className="card-title">Readiness</div></div>
@@ -172,8 +173,8 @@ export function OverviewView({ tenant, ready, summary, degraded, policyLabel }: 
         <Kpi label="PII findings" value={count(n('findings'))} delta={`API, documents and jobs · ${count(n('entity_types'))} entity types`} />
         <Kpi label="Jobs" value={<>{count(n('jobs_running'))} <span className="faint" style={{ fontSize: 16, fontWeight: 600 }}>running</span></>}
           delta={`${count(n('jobs_completed'))} completed · ${count(n('jobs_failed'))} failed · ${count(awaiting)} awaiting review`} />
-        <Kpi zero={n('raw_pii_sent_to_llm') === 0} label="Raw PII sent to LLM" value={count(n('raw_pii_sent_to_llm'))}
-          delta={`${count(n('llm_calls'))} gateway calls · ${count(n('llm_blocked'))} blocked at egress · this tenant · last ${summary.days} days · placeholders only`} />
+        <Kpi zero={n('raw_pii_sent_to_llm') === 0} alert={n('raw_pii_sent_to_llm') > 0} label="Raw PII sent to LLM" value={count(n('raw_pii_sent_to_llm'))}
+          delta={`${count(n('llm_calls'))} gateway calls · ${count(n('llm_blocked'))} blocked at egress · this tenant · last ${summary.days} days · ${n('raw_pii_sent_to_llm') === 0 ? 'placeholders only' : 'raw values reached the gateway: investigate'}`} />
       </div>
 
       <div className="g-trend">

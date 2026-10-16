@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { DeclaredFields } from '../components/DeclaredFields';
@@ -8,19 +8,22 @@ import { PolicyVersions } from '../components/PolicyVersions';
 import { RecognizerBuilder } from '../components/RecognizerBuilder';
 import { TreatmentMatrix } from '../components/TreatmentMatrix';
 import { useAuth } from '../hooks/useAuth';
-import { api, ApiError, errorText, type Download } from '../lib/api';
+import { api, ApiError, errorText, type Auth, type Download } from '../lib/api';
 import { utcDate } from '../lib/format';
 import { EMPTY_DRAFT, treatmentRows } from '../lib/policyDraft';
 import { addDeclaredField, changedEntities, declaredSince, isTenantPolicy, planPolicy, setTreatment, upsertRecognizer, type Body } from '../lib/policyEdit';
+import { editTarget, Latest, loadPolicyDetail, onScreen, saveEdit } from '../lib/policyLoad';
 import type {
   EntityInfo, PlanOut, PolicyDiff, PolicyDoc, PresetView, RecognizerSpec, RecognizerTestOut, TenantPolicyDetail, TenantPolicyView,
 } from '../lib/types';
 
+/** What the page can do. Every write names the policy it changes: the policy on screen when the
+ *  user acted, never the route's name at the time the request is sent. */
 export interface PolicyActions {
-  saveDraft: (body: Body) => Promise<unknown>;
-  discardDraft: () => Promise<unknown>;
-  publish: (ticket: string, note: string) => Promise<unknown>;
-  adopt: () => Promise<unknown>;
+  saveDraft: (policy: string, body: Body) => Promise<unknown>;
+  discardDraft: (policy: string) => Promise<unknown>;
+  publish: (policy: string, ticket: string, note: string) => Promise<unknown>;
+  adopt: (preset: string) => Promise<unknown>;
   create: (name: string, basePreset: string) => Promise<unknown>;
   select: (v: number | 'draft') => void;
   downloadYaml: (v: number) => Promise<Download>;
@@ -51,15 +54,22 @@ function Facts({ doc }: { doc: PolicyDoc }): JSX.Element {
 
 /** Policies (mockup 05) as a view over the policy store's state. */
 export function PoliciesView(p: PoliciesViewProps): JSX.Element {
-  const { detail, actions } = p;
-  const preset = p.presets.find((x) => x.name === (detail?.base_preset ?? p.name));
-  const body = ((detail?.draft_body ?? detail?.active_body ?? p.presetBody) ?? null) as PolicyDoc | null;
-  const editBase = (detail?.draft_body ?? detail?.active_body ?? null) as Body | null;
+  const { actions } = p;
+  // Only what was loaded for this policy is shown or edited: while the page still holds the answer
+  // of the policy the user just left, nothing of it appears under this name (M1-N, review N4).
+  const { detail, presetBody } = onScreen(p.name, p.detail, p.presetBody);
+  // Nothing to show yet: a tenant policy whose detail has not arrived (or could not be loaded), or
+  // a name the lists do not know (yet). A shipped preset shows its list entry while its body loads.
+  const pending = !detail && !presetBody && (isTenantPolicy(p.name, p.store, p.tenantPolicies) || !p.presets.some((x) => x.name === p.name));
+  const preset = pending ? undefined : p.presets.find((x) => x.name === (detail?.base_preset ?? p.name));
+  const body = ((detail?.draft_body ?? detail?.active_body ?? presetBody) ?? null) as PolicyDoc | null;
   const editable = p.store && !!detail && !p.readOnly;
+  const target = editTarget(detail, editable);
   const active = detail?.active_version ?? preset?.version ?? 1;
   const next = Math.max(active, ...(detail?.versions.map((v) => v.version) ?? [0])) + 1;
-  const changed = useMemo(() => changedEntities(p.draftDiff?.changes ?? []), [p.draftDiff]);
-  const since = useMemo(() => declaredSince(p.versionBodies, (detail?.draft_body ?? null) as Body | null, next), [p.versionBodies, detail, next]);
+  // the draft diff and the version bodies belong to a tenant detail; a preset has neither
+  const changed = useMemo(() => changedEntities(detail ? p.draftDiff?.changes ?? [] : []), [detail, p.draftDiff]);
+  const since = useMemo(() => declaredSince(detail ? p.versionBodies : {}, (detail?.draft_body ?? null) as Body | null, next), [p.versionBodies, detail, next]);
   const publisher = (s: string): string => {
     if (s.startsWith('draft')) return detail?.draft_by ?? '—';
     const v = detail?.versions.find((x) => `v${x.version}` === s);
@@ -78,6 +88,9 @@ export function PoliciesView(p: PoliciesViewProps): JSX.Element {
     setBusy(true); setDlgError(null);
     try { await run(); setDlg(null); setTicket(''); setNote(''); setNewName(''); } catch (e) { setDlgError(errorText(e)); } finally { setBusy(false); }
   }
+  // A dialog belongs to the policy it was opened on: a switch (browser back or forward while it is
+  // open) closes it, so a publish or discard confirmed later never acts on the next policy.
+  useEffect(() => { setDlg(null); setDlgError(null); setTicket(''); setNote(''); }, [p.name]);
   const counts = {
     matrix: body ? treatmentRows(body, EMPTY_DRAFT, p.entities, false).length : 0, declared: body?.detect.declared_fields.length ?? 0,
     recognizers: body?.detect.custom_recognizers.length ?? 0, plan: planRows, versions: (detail?.versions.length ?? 1) + (detail?.draft ? 1 : 0),
@@ -108,42 +121,44 @@ export function PoliciesView(p: PoliciesViewProps): JSX.Element {
         <div className="pol-main">
           <section className="card" data-testid="policy-header">
             <div className="ph-name">{p.name} {preset && <span className={`chip ${preset.mode === 'synthesize' ? 'violet' : 'teal'}`}>{preset.mode} · {modeWord(preset.mode, preset.reversible)}</span>}
-              {detail ? <span className="chip emerald">v{active} active</span> : <span className="chip slate">v{active} · shipped</span>}
+              {detail ? <span className="chip emerald">v{active} active</span> : !pending && <span className="chip slate">v{active} · shipped</span>}
               {detail?.draft && <span className="chip amber">draft v{next} · {detail.draft_changes} {detail.draft_changes === 1 ? 'change' : 'changes'}</span>}</div>
-            <div className="ph-desc">{body?.description ?? preset?.description}{detail?.base_preset && detail.base_preset !== p.name ? <> Based on the shipped preset <b>{detail.base_preset}</b>.</> : null}</div>
-            {hash && <div className="ph-hash">{detail ? 'Active hash' : 'Preset hash'} <span className="mono">sha256:{hash.slice(0, 16)}…{hash.slice(-12)}</span>
-              <button className="btn btn-sm btn-ghost" type="button" onClick={() => { navigator.clipboard?.writeText(hash).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1400); }).catch(() => undefined); }}>{copied ? 'Copied' : 'Copy hash'}</button></div>}
-            {detail ? <div className="ph-pub">Published {utcDate(detail.published_at)} by {detail.published_by ?? 'DPS'} · {detail.jobs} {detail.jobs === 1 ? 'job uses' : 'jobs use'} it</div>
-              : p.store && <div className="ph-pub">Not adopted by this tenant. {!p.readOnly && <button className="btn btn-sm" type="button" onClick={() => void confirm(actions.adopt)}>Adopt for this tenant</button>}</div>}
-            {body && <Facts doc={body} />}
-            <div className="callout" style={{ marginTop: 12 }}>{preset?.mode === 'synthesize'
-              ? <>Synthetic output carries a <b>measured</b> privacy report rather than a claim of anonymity. Generation is one-way.</>
-              : <>Obfuscated output is <b>pseudonymised and still personal data</b> (GDPR Art. 4(5), India's DPDP Act). Only the holder of the key can reverse it; DPS keeps no copy.</>}</div>
+            {pending ? !p.error && <div className="ph-desc" role="status">Loading {p.name}…</div> : <>
+              <div className="ph-desc">{body?.description ?? preset?.description}{detail?.base_preset && detail.base_preset !== p.name ? <> Based on the shipped preset <b>{detail.base_preset}</b>.</> : null}</div>
+              {hash && <div className="ph-hash">{detail ? 'Active hash' : 'Preset hash'} <span className="mono">sha256:{hash.slice(0, 16)}…{hash.slice(-12)}</span>
+                <button className="btn btn-sm btn-ghost" type="button" onClick={() => { navigator.clipboard?.writeText(hash).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1400); }).catch(() => undefined); }}>{copied ? 'Copied' : 'Copy hash'}</button></div>}
+              {detail ? <div className="ph-pub">Published {utcDate(detail.published_at)} by {detail.published_by ?? 'DPS'} · {detail.jobs} {detail.jobs === 1 ? 'job uses' : 'jobs use'} it</div>
+                : p.store && <div className="ph-pub">Not adopted by this tenant. {!p.readOnly && <button className="btn btn-sm" type="button" onClick={() => void confirm(() => actions.adopt(p.name))}>Adopt for this tenant</button>}</div>}
+              {body && <Facts doc={body} />}
+              <div className="callout" style={{ marginTop: 12 }}>{preset?.mode === 'synthesize'
+                ? <>Synthetic output carries a <b>measured</b> privacy report rather than a claim of anonymity. Generation is one-way.</>
+                : <>Obfuscated output is <b>pseudonymised and still personal data</b> (GDPR Art. 4(5), India's DPDP Act). Only the holder of the key can reverse it; DPS keeps no copy.</>}</div>
+            </>}
           </section>
           {body && <TreatmentMatrix body={body} entities={p.entities} changed={changed} readOnly={!editable} fpe={p.fpe}
-            onSet={(entity, spec) => { if (editBase) void actions.saveDraft(setTreatment(editBase, entity, spec)); }} />}
+            onSet={(entity, spec) => saveEdit(actions.saveDraft, target, (b) => setTreatment(b, entity, spec))} />}
         </div>
         <div className="pol-rest">
           {body && <DeclaredFields body={body} entities={p.entities} since={since} publisher={publisher} readOnly={!editable}
-            onDeclare={(f) => { if (editBase) void actions.saveDraft(addDeclaredField(editBase, f)); }} />}
+            onDeclare={(f) => saveEdit(actions.saveDraft, target, (b) => addDeclaredField(b, f))} />}
           <RecognizerBuilder entities={p.entities} readOnly={!editable} testRecognizer={actions.testRecognizer}
-            onAdd={(rec) => { if (editBase) void actions.saveDraft(upsertRecognizer(editBase, rec)); }} />
-          <PlanPreview label={detail?.draft ? `draft v${next}` : `${p.name} v${active}`} body={body as Body | null} fpe={p.fpe} entities={p.entities}
+            onAdd={(rec) => saveEdit(actions.saveDraft, target, (b) => upsertRecognizer(b, rec))} />
+          <PlanPreview label={detail?.draft ? `draft v${next}` : pending ? p.name : `${p.name} v${active}`} body={body as Body | null} fpe={p.fpe} entities={p.entities}
             runPlan={(data) => actions.runPlan(data, (body as Body | null) ?? null)} onRows={setPlanRows} />
           {detail && <PolicyVersions detail={detail} selected={p.selected} diff={p.selectedDiff} now={p.now} onSelect={actions.select} downloadYaml={actions.downloadYaml}
             canPublish={editable} onPublish={() => setDlg('publish')} />}
         </div>
       </div>
 
-      <ConfirmDialog open={dlg === 'publish'} title={`Publish v${next} of ${p.name}`} confirmLabel={`Publish v${next}`} busy={busy} error={dlgError}
+      <ConfirmDialog open={dlg === 'publish' && editable} title={`Publish v${next} of ${p.name}`} confirmLabel={`Publish v${next}`} busy={busy} error={dlgError}
         body={<>The draft becomes immutable version {next} with its own hash. Jobs that follow the latest version use it from their next run; pinned jobs keep their version.</>}
-        onConfirm={() => void confirm(() => actions.publish(ticket, note))} onCancel={() => setDlg(null)}>
+        onConfirm={() => { if (detail) void confirm(() => actions.publish(detail.name, ticket, note)); }} onCancel={() => setDlg(null)}>
         <div className="frow"><label htmlFor="pub-ticket">Change ticket</label><input id="pub-ticket" className="input" value={ticket} onChange={(e) => setTicket(e.target.value)} placeholder="CHG-48213" /></div>
         <div className="frow"><label htmlFor="pub-note">Note</label><input id="pub-note" className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changes for the data owners" /></div>
       </ConfirmDialog>
-      <ConfirmDialog open={dlg === 'discard'} title="Discard the draft" danger confirmLabel="Discard draft" busy={busy} error={dlgError}
+      <ConfirmDialog open={dlg === 'discard' && editable} title="Discard the draft" danger confirmLabel="Discard draft" busy={busy} error={dlgError}
         body={<>The {detail?.draft_changes ?? 0} unpublished {detail?.draft_changes === 1 ? 'change' : 'changes'} of draft v{next} are deleted. Published versions are not affected.</>}
-        onConfirm={() => void confirm(actions.discardDraft)} onCancel={() => setDlg(null)} />
+        onConfirm={() => { if (detail) void confirm(() => actions.discardDraft(detail.name)); }} onCancel={() => setDlg(null)} />
       <ConfirmDialog open={dlg === 'new'} title="New policy from a preset" confirmLabel="Create policy" busy={busy} error={dlgError}
         body="Version 1 is a copy of the preset; edit it as a draft and publish v2." onConfirm={() => void confirm(() => actions.create(newName.trim(), newBase))} onCancel={() => setDlg(null)}>
         <div className="frow"><label htmlFor="np-name">Name</label><input id="np-name" className="input mono" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="retail-kyc" autoComplete="off" spellCheck={false} /></div>
@@ -178,6 +193,8 @@ export function Policies(): JSX.Element {
   const fail = useCallback((e: unknown): void => {
     if (e instanceof ApiError && (e.status === 403 || e.status === 401)) setReadOnly(true); else setError(errorText(e));
   }, []);
+  // A new key (or tenant) starts writable again; its first refused write makes the page read-only.
+  useEffect(() => { setReadOnly(false); }, [auth]);
 
   const loadList = useCallback(async (): Promise<void> => {
     try {
@@ -204,53 +221,70 @@ export function Policies(): JSX.Element {
 
   // a boolean, so a list reload after a save does not reload the detail and reset the selection
   const tenantPolicy = isTenantPolicy(name, store, tenantPolicies);
+  // Only the newest load may update the page: a quick switch between policies drops the late
+  // answer of the policy the user left (lib/policyLoad.ts).
+  const detailLoads = useRef(new Latest());
+  // The policy and key of the last load. A load for another policy (or another key) is a switch,
+  // which clears the page at once; a reload of the same one (after publish, or once an adopted
+  // preset is listed as a tenant policy) keeps it on screen until the answer.
+  const loadedFor = useRef<{ auth: Auth; name: string } | null>(null);
   const loadDetail = useCallback(async (): Promise<void> => {
     if (!name || !listed) return;
-    setError(null);
-    if (tenantPolicy) {
-      try { const d = await api.policies.get(auth, name); setDetail(d); setPresetBody(null); return; } catch (e) {
-        if (!(e instanceof ApiError && e.status === 404)) { setError(errorText(e)); return; }
-      }
-    }
-    setDetail(null);
-    api.policies.validate(auth, name).then(setPresetBody).catch((e: unknown) => setError(errorText(e)));
+    const keep = loadedFor.current?.auth === auth && loadedFor.current.name === name;
+    loadedFor.current = { auth, name };
+    await loadPolicyDetail(name, tenantPolicy, { get: (n) => api.policies.get(auth, n), validate: (n) => api.policies.validate(auth, n) },
+      { detail: setDetail, presetBody: setPresetBody, error: setError }, detailLoads.current.begin(), keep);
   }, [auth, name, listed, tenantPolicy]);
   useEffect(() => { setSelected(null); setVersionBodies({}); void loadDetail(); }, [loadDetail]);
 
+  // The route's own policy only: the detail of the policy the user just left (held until the next
+  // one answers) loads no diff and no versions, and no write reaches it from this page.
+  const own = onScreen(name, detail, presetBody);
+  const shown = own.detail;
   useEffect(() => {
-    if (!detail) { setDraftDiff(null); return; }
-    const active = detail.active_version ?? 1;
-    if (detail.draft) api.policies.diff(auth, detail.name, active, 'draft').then(setDraftDiff).catch(() => setDraftDiff(null)); else setDraftDiff(null);
-    let live = true;
-    Promise.all(detail.versions.slice(0, 20).map((v) => api.policies.version(auth, detail.name, v.version).then((b) => [v.version, b] as const).catch(() => null)))
+    if (!shown) { setDraftDiff(null); return; }
+    const active = shown.active_version ?? 1;
+    let live = true; // false once the policy (or its draft) changed: a late answer is dropped
+    if (shown.draft) api.policies.diff(auth, shown.name, active, 'draft').then((d) => { if (live) setDraftDiff(d); }).catch(() => { if (live) setDraftDiff(null); });
+    else setDraftDiff(null);
+    Promise.all(shown.versions.slice(0, 20).map((v) => api.policies.version(auth, shown.name, v.version).then((b) => [v.version, b] as const).catch(() => null)))
       .then((pairs) => { if (live) setVersionBodies(Object.fromEntries(pairs.filter((x): x is readonly [number, Body] => !!x))); });
     return () => { live = false; };
-  }, [auth, detail]);
+  }, [auth, shown]);
 
-  const sel = selected ?? (detail?.draft ? 'draft' : detail?.active_version ?? null);
+  const sel = selected ?? (shown?.draft ? 'draft' : shown?.active_version ?? null);
   useEffect(() => {
-    if (!detail || sel === null) { setSelectedDiff(null); return; }
+    if (!shown || sel === null) { setSelectedDiff(null); return; }
     if (sel === 'draft') { setSelectedDiff(draftDiff); return; }
     if (sel <= 1) { setSelectedDiff(null); return; }
     setSelectedDiff(null);
-    api.policies.diff(auth, detail.name, sel - 1, sel).then(setSelectedDiff).catch(() => setSelectedDiff(null));
-  }, [auth, detail, sel, draftDiff]);
+    let live = true;
+    api.policies.diff(auth, shown.name, sel - 1, sel).then((d) => { if (live) setSelectedDiff(d); }).catch(() => { if (live) setSelectedDiff(null); });
+    return () => { live = false; };
+  }, [auth, shown, sel, draftDiff]);
 
   const write = async <T,>(p: Promise<T>): Promise<T> => {
     try { const out = await p; setError(null); return out; } catch (e) { fail(e); throw e; }
   };
+  // A write's answer (and its follow-up) applies only while its policy is still the one on the
+  // page: the answer for a policy the user has since left never replaces the one now shown.
+  const stillShown = (policy: string): boolean => loadedFor.current?.auth === auth && loadedFor.current.name === policy;
   const actions: PolicyActions = {
-    saveDraft: async (body) => { const d = await write(api.policies.saveDraft(auth, name, body)); setDetail(d); void loadList(); return d; },
-    discardDraft: async () => { const d = await write(api.policies.discardDraft(auth, name)); setDetail(d); setSelected(null); void loadList(); return d; },
-    publish: async (ticket, note) => { const v = await write(api.policies.publish(auth, name, ticket, note)); setSelected(v.version); await loadDetail(); void loadList(); return v; },
-    adopt: async () => { const d = await write(api.policies.create(auth, name, name)); setDetail(d); void loadList(); return d; },
+    saveDraft: async (policy, body) => { const d = await write(api.policies.saveDraft(auth, policy, body)); if (stillShown(policy)) setDetail(d); void loadList(); return d; },
+    discardDraft: async (policy) => { const d = await write(api.policies.discardDraft(auth, policy)); if (stillShown(policy)) { setDetail(d); setSelected(null); } void loadList(); return d; },
+    publish: async (policy, ticket, note) => {
+      const v = await write(api.policies.publish(auth, policy, ticket, note));
+      if (stillShown(policy)) { setSelected(v.version); await loadDetail(); }
+      void loadList(); return v;
+    },
+    adopt: async (preset) => { const d = await write(api.policies.create(auth, preset, preset)); if (stillShown(preset)) setDetail(d); void loadList(); return d; },
     create: async (newName, base) => { const d = await write(api.policies.create(auth, newName, base)); await loadList(); navigate(`/policies/${encodeURIComponent(d.name)}`); return d; },
     select: setSelected,
     downloadYaml: (v) => api.policies.versionYaml(auth, name, v),
     testRecognizer: (rec, text, signal) => api.policies.testRecognizer(auth, rec, text, signal),
-    runPlan: (data, body) => api.policies.plan(auth, { data, policy: planPolicy(name, body, tenantPolicy), mode: presets.find((x) => x.name === (detail?.base_preset ?? name))?.mode ?? 'obfuscate' }),
+    runPlan: (data, body) => api.policies.plan(auth, { data, policy: planPolicy(name, body, tenantPolicy), mode: presets.find((x) => x.name === (shown?.base_preset ?? name))?.mode ?? 'obfuscate' }),
   };
   if (!name) return <main className="page m5-page policies-page"><div className="skeleton" /></main>;
-  return <PoliciesView name={name} now={new Date()} store={store} presets={presets} tenantPolicies={tenantPolicies} detail={detail} presetBody={presetBody}
+  return <PoliciesView name={name} now={new Date()} store={store} presets={presets} tenantPolicies={tenantPolicies} detail={shown} presetBody={own.presetBody}
     entities={entities} fpe={fpe} readOnly={readOnly} versionBodies={versionBodies} draftDiff={draftDiff} selected={sel} selectedDiff={selectedDiff} error={error} actions={actions} />;
 }
