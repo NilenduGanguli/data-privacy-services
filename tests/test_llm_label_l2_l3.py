@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from dps.config import Settings
+from dps.engine.detect.ensemble import Detector, DetectorConfig
 from dps.engine.detect.llm_label import LLM_LABEL_TIER, job_llm_metrics
 from dps.engine.policy import Policy, load_preset
 from dps.engine.service import PrivacyEngine
@@ -708,3 +709,48 @@ def test_page_chosen_attributes_reach_the_prompt_only_as_known_tokens() -> None:
     assert by_ref["field:1/1"].hints["autocomplete"] == ""
     assert by_ref["field:1/2"].hints["autocomplete"] == "on"
     assert "ananya" not in json.dumps([m.model_dump() for m in metas])
+
+
+def _select(key: str, options: list[tuple[str, str, bool]], **kw: Any) -> Any:
+    """A closed select (or, with ``size``/``multiple``, a listbox) of ``(value, text, selected)``."""
+    return field_facts(
+        key=key,
+        field_no=int(key.split(":")[1]),
+        tag="select",
+        input_type="select-one",
+        options=[
+            OptionFacts(value=v, text=t, label=t, disabled=False, selected=s) for v, t, s in options
+        ],
+        **kw,
+    )
+
+
+def test_a_drawn_placeholder_is_no_protected_value_but_a_drawn_value_is() -> None:
+    """Release merge (S3b Task 8B x S1-M4 r1): ``shown_texts`` now reads what a select draws,
+    its placeholder included, so ``page_protected`` handed the strict egress verifier "Choose…" —
+    the fixed instructions say "choose", and every T3 call of a page with an untouched select was
+    blocked. A placeholder phrase of an empty-valued option is page text; whatever else a select
+    draws (a real value behind an empty value, every option of a listbox) is protected."""
+    placeholder = _select("0:1", [("", "Choose…", True), ("IN", "India", False)], name="residence")
+    behind_empty = _select("0:2", [("", "Pickering Zebulon", True)], name="holder")
+    listbox = _select(
+        "0:3",
+        [("a", "Ottoline Brackwater", False), ("b", "Quorra Pleasence", False)],
+        name="nominees",
+        listbox=True,
+    )
+    snap = PageSnapshot(
+        url="http://127.0.0.1/apply",
+        title="Apply",
+        forms=[],
+        fields=[placeholder, behind_empty, listbox],
+        texts=[],
+        links=[],
+        clickables=[],
+        frames=[],
+    )
+    detector = Detector(DetectorConfig(locale="en_IN"))
+    protected = page_protected(snap, detector=detector)
+    assert "Choose…" not in protected
+    assert "Pickering Zebulon" in protected
+    assert {"Ottoline Brackwater", "Quorra Pleasence"} <= set(protected)

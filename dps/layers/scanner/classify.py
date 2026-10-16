@@ -866,12 +866,25 @@ def leftover_field_meta(
     return out
 
 
+def _shown_values(facts: FieldFacts) -> list[str]:
+    """Everything a field shows that is a value of the page (:func:`shown_texts`: every string a
+    select draws, each option of a listbox), less a drawn placeholder: the label of an
+    empty-valued option it lists that is, whole, a placeholder phrase ("Choose…") is page text,
+    not a value — protecting it would hand the egress verifier a word of its own fixed
+    instructions and block every labelling call of the page (release merge, 2026-10-16)."""
+    placeholders = {
+        o.drawn for o in facts.options if not o.value.strip() and is_placeholder_text(o.drawn)
+    }
+    return [t for t in shown_texts(facts) if t not in placeholders]
+
+
 def page_protected(
     snap: PageSnapshot, *, detector: Detector, rendered: list[RenderedFinding] | None = None
 ) -> list[str]:
     """The page's own values a labelling prompt must never carry (held in worker memory for this
-    page only): what every field holds or shows (a pre-filled or hidden value, the selected
-    option's value and text when it has a value), the personal data the detectors find in rendered
+    page only): what every field holds or shows (a pre-filled or hidden value, every string a select
+    draws — each option of a listbox — less a drawn placeholder, the selected option's value and
+    text when it has a value), the personal data the detectors find in rendered
     text (spans, and whole texts under a label hint), and every token of rendered or option text
     that holds a digit or an ``@``. Words of page text are metadata, not values: a label rendered
     on the page (``Ref code``) or a placeholder option (``Choose…``) is not protected, so the
@@ -881,7 +894,7 @@ def page_protected(
     out: set[str] = set()
     token_sources: list[str] = [t.text for t in snap.texts]
     for f in snap.fields:
-        out.update(v for v in (f.value, shown_text(f)) if v)
+        out.update(v for v in (f.value, *_shown_values(f)) if v)
         for option in f.options:
             # a selected option is a value when it has one (as ``shown_text`` reads it): a
             # placeholder option ("Choose…", value "") is page text, not a value
